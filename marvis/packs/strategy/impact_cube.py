@@ -37,7 +37,9 @@ from marvis.packs.strategy.evaluator import (
 )
 from marvis.packs.strategy.pool import compile_strategy_pool, validate_strategy_pool
 from marvis.packs.strategy.profit import ProfitParams
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 from marvis.packs.strategy.typed_backtest import (
     ApprovalProfitInputs,
     StrategyBacktestResult,
@@ -554,9 +556,13 @@ def build_strategy_impact_cube(
                     "minimum group size"
                 )
 
-    legacy_ref = StrategySampleDesignRef.from_value(
+    legacy_ref = StrategyRiskDevelopmentRef.from_value(
         legacy_development_ref
     ).to_ref_dict()
+    if legacy_ref["partition"] not in {"development", "risk/development"}:
+        raise StrategyError(
+            "ImpactCube development lineage partition is invalid"
+        )
     sample_binding = _pool_sample_binding(current_pool)
     for field in (
         "dataset_id",
@@ -2350,14 +2356,6 @@ def _sample_design_v2_ref(
         raise StrategyError(
             "ImpactCube legacy risk partition counts changed"
         )
-    for partition in partitions:
-        if (
-            result["population_partition_counts"]["risk"][partition]
-            > result["population_partition_counts"]["approval"][partition]
-        ):
-            raise StrategyError(
-                f"ImpactCube risk/{partition} exceeds approval population"
-            )
     if sum(result["partition_counts"].values()) > result[
         "analysis_universe_row_count"
     ]:
@@ -2815,9 +2813,13 @@ def _validate_source_bindings(
         _DEVELOPMENT_LINEAGE_FIELDS,
         "ImpactCube development lineage",
     )
-    legacy = StrategySampleDesignRef.from_value(
+    legacy = StrategyRiskDevelopmentRef.from_value(
         lineage["legacy_development_ref"]
     ).to_ref_dict()
+    if legacy["partition"] not in {"development", "risk/development"}:
+        raise StrategyError(
+            "ImpactCube development lineage partition is invalid"
+        )
     sample = _json_object(
         lineage["sample_binding"],
         "ImpactCube sample binding",

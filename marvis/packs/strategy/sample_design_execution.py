@@ -33,6 +33,7 @@ from marvis.packs.strategy.sample_design_binding import (
 from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
     SAMPLE_DESIGN_ORIGIN_TOOL,
+    load_historical_strategy_sample_design_artifact,
 )
 from marvis.packs.strategy.sample_design_v2_native_tools import (
     SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
@@ -248,6 +249,101 @@ def load_historical_strategy_risk_development_execution_binding(
         loan_amount_col=loan_amount_col,
         overdue_amount_col=overdue_amount_col,
         require_current_workspace=False,
+    )
+
+
+def load_historical_strategy_risk_development_execution_binding_from_ref(
+    runtime,
+    *,
+    task_id: str,
+    sample_design_ref: object,
+) -> StrategyRiskDevelopmentExecutionBinding:
+    """Recover immutable execution semantics from one exact governed reference."""
+
+    reference = StrategyRiskDevelopmentRef.from_value(sample_design_ref)
+    task = _text(task_id, "task_id")
+    record = _artifact_record(
+        runtime,
+        task_id=task,
+        reference=reference,
+    )
+    kind_origin = (record["kind"], record["origin_tool"])
+    if kind_origin == (
+        SAMPLE_DESIGN_ARTIFACT_KIND,
+        SAMPLE_DESIGN_ORIGIN_TOOL,
+    ):
+        if reference.partition != "development":
+            raise StrategyError(
+                "legacy sample_design_ref.partition must be development"
+            )
+        artifact = load_historical_strategy_sample_design_artifact(
+            runtime,
+            task_id=task,
+            artifact_id=reference.artifact_id,
+            expected_artifact_content_hash=reference.artifact_content_hash,
+            expected_sample_design_id=reference.sample_design_id,
+            expected_sample_design_content_hash=(
+                reference.sample_design_content_hash
+            ),
+        )
+        design = artifact.bundle["sample_design"]
+        identity = design["identity"]
+        dataset = identity["dataset_ref"]
+        workspace = identity["workspace_ref"]
+        target = design["target_definition"]
+        optional = design["optional_fields"]
+        return load_historical_strategy_risk_development_execution_binding(
+            runtime,
+            task_id=task,
+            sample_design_ref=reference.to_ref_dict(),
+            dataset_id=dataset["dataset_id"],
+            dataset_content_hash=dataset["content_hash"],
+            workspace_revision=workspace["revision"],
+            workspace_generation=workspace["generation"],
+            semantic_mapping_hash=workspace["semantic_mapping_hash"],
+            target_col=target["column"],
+            drop_nan_labels=target["drop_nan_labels"],
+            month_col=optional["month_field"],
+            weight_col=optional["weight_field"],
+            loan_amount_col=optional["loan_amount_field"],
+            overdue_amount_col=optional["overdue_amount_field"],
+        )
+    if kind_origin != (
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    ):
+        raise StrategyError(
+            "sample_design_ref artifact is not an exact supported "
+            "sample-design kind/origin"
+        )
+    if reference.partition != "risk/development":
+        raise StrategyError(
+            "native sample_design_ref.partition must be risk/development"
+        )
+    authenticated = authenticate_native_strategy_sample_design_v2_bundle_record(
+        runtime,
+        task_id=task,
+        record=record,
+    )
+    source = authenticated.source_provenance
+    optional = authenticated.bundle["sample_design"]["sample_semantics"][
+        "field_bindings"
+    ]
+    return load_historical_strategy_risk_development_execution_binding(
+        runtime,
+        task_id=task,
+        sample_design_ref=reference.to_ref_dict(),
+        dataset_id=source["dataset_id"],
+        dataset_content_hash=source["dataset_content_hash"],
+        workspace_revision=source["workspace_revision"],
+        workspace_generation=source["workspace_generation"],
+        semantic_mapping_hash=source["semantic_mapping_hash"],
+        target_col=source["target_col"],
+        drop_nan_labels=source["drop_nan_labels"],
+        month_col=optional["month_field"],
+        weight_col=optional["weight_field"],
+        loan_amount_col=optional["loan_amount_field"],
+        overdue_amount_col=optional["overdue_amount_field"],
     )
 
 
@@ -867,6 +963,7 @@ __all__ = [
     "StrategyRiskDevelopmentRef",
     "bind_strategy_risk_development_frame",
     "load_historical_strategy_risk_development_execution_binding",
+    "load_historical_strategy_risk_development_execution_binding_from_ref",
     "load_strategy_risk_development_execution_binding",
     "require_historical_strategy_risk_development_execution_binding_on_connection",
     "require_strategy_risk_development_execution_binding_on_connection",

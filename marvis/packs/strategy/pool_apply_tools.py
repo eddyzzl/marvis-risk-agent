@@ -49,6 +49,9 @@ from marvis.packs.strategy.pool_tools import (
     load_current_strategy_candidate_pool_artifact,
     require_strategy_pool_development_execution_binding_on_connection,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    StrategySampleDesignV2NativeArtifactBinding,
+)
 from marvis.repositories.task_artifacts import stable_task_artifact_id
 
 
@@ -416,7 +419,20 @@ def _resolve_requirements(
             requirements=(),
             field_bindings=(),
         )
-    if development.sample_design_v2 is None:
+    requirement_sample = development.sample_design_v2
+    if requirement_sample is None:
+        generic_sample = development.sample_design
+        native_sample = getattr(generic_sample, "_native", None)
+        if (
+            generic_sample.source_mode == "native_active_dataset"
+            and generic_sample.reference.partition == "risk/development"
+            and isinstance(
+                native_sample,
+                StrategySampleDesignV2NativeArtifactBinding,
+            )
+        ):
+            requirement_sample = native_sample
+    if requirement_sample is None:
         raise StrategyError(
             "Strategy Pool model-score requirements require SampleDesign V2"
         )
@@ -424,7 +440,7 @@ def _resolve_requirements(
         runtime,
         task_id=task_id,
         compiled_design=development.pool.compiled_design,
-        sample_design=development.sample_design_v2,
+        sample_design=requirement_sample,
     )
     if (
         resolved.requirements != compiled
@@ -1377,8 +1393,14 @@ def _source(value: object) -> dict[str, Any]:
             "sample_design_ref.partition",
         ),
     }
-    if normalized_ref["partition"] != "development":
-        raise StrategyError("sample_design_ref.partition must be development")
+    if normalized_ref["partition"] not in {
+        "development",
+        "risk/development",
+    }:
+        raise StrategyError(
+            "sample_design_ref.partition must be development or "
+            "risk/development"
+        )
     return {
         "pool_id": _required_text(source["pool_id"], "source.pool_id"),
         "revision": _positive_int(source["revision"], "source.revision"),

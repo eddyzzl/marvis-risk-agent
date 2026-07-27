@@ -57,18 +57,29 @@ from marvis.packs.strategy.interactive_tree_revision import (
     canonical_interactive_tree_revision_json,
     validate_interactive_tree_revision,
 )
-from marvis.packs.strategy.sample_design_binding import (
-    StrategySampleDesignExecutionBinding,
-    StrategySampleDesignRef,
-    bind_strategy_development_frame,
-    load_strategy_sample_design_execution_binding,
-    require_strategy_sample_design_execution_binding_on_connection,
-    revalidate_strategy_sample_design_execution_binding,
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+    StrategyRiskDevelopmentRef,
+    bind_strategy_risk_development_frame,
+    load_strategy_risk_development_execution_binding,
+    require_strategy_risk_development_execution_binding_on_connection,
+    revalidate_strategy_risk_development_execution_binding,
 )
 from marvis.packs.strategy.sample_design_tools import (
     load_strategy_sample_design_artifact,
 )
-from marvis.repositories.task_artifacts import stable_task_artifact_id
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    authenticate_native_strategy_sample_design_v2_bundle_record,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
+from marvis.repositories.task_artifacts import (
+    TaskArtifactDataError,
+    TaskArtifactNotFoundError,
+    stable_task_artifact_id,
+)
 
 
 TOOL_SCHEMA_VERSION = "strategy.revise-interactive-tree-tool.v1"
@@ -168,7 +179,7 @@ class _ResolvedRevisionSource:
 @dataclass(frozen=True)
 class _ReplayBinding:
     data_binding: Any
-    sample_design: StrategySampleDesignExecutionBinding
+    sample_design: StrategyRiskDevelopmentExecutionBinding
     evidence: dict[str, Any]
 
 
@@ -792,6 +803,85 @@ def _build_revision(
         raise StrategyError("interactive-tree revision edit is invalid") from exc
 
 
+def _interactive_tree_sample_design_contract(
+    runtime,
+    *,
+    task_id: str,
+    reference: StrategyRiskDevelopmentRef,
+) -> dict[str, Any]:
+    """Recover immutable replay controls from either supported sample source."""
+
+    if reference.partition == "development":
+        artifact = load_strategy_sample_design_artifact(
+            runtime,
+            task_id=task_id,
+            artifact_id=reference.artifact_id,
+            expected_artifact_content_hash=reference.artifact_content_hash,
+            expected_sample_design_id=reference.sample_design_id,
+            expected_sample_design_content_hash=(
+                reference.sample_design_content_hash
+            ),
+        )
+        design = artifact.bundle["sample_design"]
+        optional = design["optional_fields"]
+        return {
+            "drop_nan_labels": design["target_definition"][
+                "drop_nan_labels"
+            ],
+            "month_field": optional["month_field"],
+            "weight_field": optional["weight_field"],
+            "loan_amount_field": optional["loan_amount_field"],
+            "overdue_amount_field": optional["overdue_amount_field"],
+        }
+    if reference.partition != "risk/development":
+        raise StrategyError(
+            "interactive-tree sample-design partition must be development "
+            "or risk/development"
+        )
+    try:
+        record = runtime.task_artifacts.get_for_task(
+            task_id,
+            reference.artifact_id,
+        )
+    except (TaskArtifactDataError, TaskArtifactNotFoundError) as exc:
+        raise StrategyError(str(exc)) from exc
+    if (
+        not isinstance(record, Mapping)
+        or record.get("task_id") != task_id
+        or record.get("id") != reference.artifact_id
+        or record.get("content_hash") != reference.artifact_content_hash
+        or record.get("kind") != SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        or record.get("origin_tool") != SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    ):
+        raise StrategyError(
+            "native interactive-tree sample-design artifact binding changed"
+        )
+    authenticated = authenticate_native_strategy_sample_design_v2_bundle_record(
+        runtime,
+        task_id=task_id,
+        record=record,
+    )
+    design = authenticated.bundle["sample_design"]
+    if (
+        design["sample_design_id"] != reference.sample_design_id
+        or not hmac.compare_digest(
+            design["content_hash"],
+            reference.sample_design_content_hash,
+        )
+    ):
+        raise StrategyError(
+            "native interactive-tree sample-design reference changed"
+        )
+    fields = design["sample_semantics"]["field_bindings"]
+    return {
+        "drop_nan_labels": design["target_selector"]["drop_missing"],
+        "month_field": fields["month_field"],
+        "weight_field": fields["weight_field"],
+        "loan_amount_field": fields["loan_amount_field"],
+        "overdue_amount_field": fields["overdue_amount_field"],
+    }
+
+
 def _replay_revision(
     runtime,
     *,
@@ -802,20 +892,14 @@ def _replay_revision(
     asset = source.asset
     identity = asset["identity"]
     training = asset["tree_result"]["training"]
-    sample_ref = StrategySampleDesignRef.from_value(
+    sample_ref = StrategyRiskDevelopmentRef.from_value(
         sample_design_ref_from_automatic_tree_source_refs(asset["source_refs"])
     )
-    sample_artifact = load_strategy_sample_design_artifact(
+    sample_contract = _interactive_tree_sample_design_contract(
         runtime,
         task_id=task_id,
-        artifact_id=sample_ref.artifact_id,
-        expected_artifact_content_hash=sample_ref.artifact_content_hash,
-        expected_sample_design_id=sample_ref.sample_design_id,
-        expected_sample_design_content_hash=sample_ref.sample_design_content_hash,
+        reference=sample_ref,
     )
-    design = sample_artifact.bundle["sample_design"]
-    target_definition = design["target_definition"]
-    optional = design["optional_fields"]
     weight_col = (
         None
         if training["sample_weight"]["status"] == "not_applicable"
@@ -827,7 +911,7 @@ def _replay_revision(
         "overdue_amount_field": training["overdue_amount_col"],
     }
     for field, expected in expected_optional.items():
-        if optional[field] != expected:
+        if sample_contract[field] != expected:
             raise StrategyError(
                 f"interactive-tree sample-design {field} changed from the base tree"
             )
@@ -847,7 +931,7 @@ def _replay_revision(
         raise StrategyError(
             "interactive-tree dataset registry metadata changed from the base tree"
         )
-    sample_design = load_strategy_sample_design_execution_binding(
+    sample_design = load_strategy_risk_development_execution_binding(
         runtime,
         task_id=task_id,
         sample_design_ref=sample_ref.to_ref_dict(),
@@ -857,8 +941,8 @@ def _replay_revision(
         workspace_generation=identity["workspace_generation"],
         semantic_mapping_hash=identity["semantic_mapping_hash"],
         target_col=training["target_col"],
-        drop_nan_labels=target_definition["drop_nan_labels"],
-        month_col=optional["month_field"],
+        drop_nan_labels=sample_contract["drop_nan_labels"],
+        month_col=sample_contract["month_field"],
         weight_col=weight_col,
         loan_amount_col=training["loan_amount_col"],
         overdue_amount_col=training["overdue_amount_col"],
@@ -869,18 +953,24 @@ def _replay_revision(
         weight_col,
         training["loan_amount_col"],
         training["overdue_amount_col"],
-        sample_design.split_column,
+        *sample_design.partition_columns,
     ):
         if column is not None and column not in projected:
             projected.append(column)
     frame = runtime.backend.read_frame(data_binding.path, columns=projected)
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_design)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_design,
+    )
     if not hmac.compare_digest(
         sha256_file(data_binding.path),
         data_binding.content_hash,
     ):
         raise StrategyError("interactive-tree source dataset bytes changed")
-    frame = bind_strategy_development_frame(frame, binding=sample_design)
+    frame = bind_strategy_risk_development_frame(
+        frame,
+        binding=sample_design,
+    )
     labeled, dropped = resolve_labeled_frame(
         frame,
         training["target_col"],
@@ -971,7 +1061,7 @@ def _replay_revision(
             assigned_leaf_ids[int(index)] = fragment["leaf_id"]
     evidence_body = {
         "schema_version": "strategy.interactive-tree-replay.v1",
-        "partition": "development",
+        "partition": sample_design.reference.partition,
         "source_row_count": len(labeled),
         "frontier_count": len(masks),
         "exactly_once": True,
@@ -1077,7 +1167,7 @@ def _persist_revision(
                     task_id=task_id,
                     binding=replay.data_binding,
                 )
-                require_strategy_sample_design_execution_binding_on_connection(
+                require_strategy_risk_development_execution_binding_on_connection(
                     conn,
                     replay.sample_design,
                 )
@@ -1262,7 +1352,13 @@ def _require_revision_provenance_scalars(
         raise StrategyError(
             "interactive-tree revision provenance parent_revision_id is invalid"
         )
-    StrategySampleDesignRef.from_value(provenance["sample_design_ref"])
+    sample_ref = StrategyRiskDevelopmentRef.from_value(
+        provenance["sample_design_ref"]
+    )
+    if sample_ref.partition not in {"development", "risk/development"}:
+        raise StrategyError(
+            "interactive-tree revision provenance sample-design partition changed"
+        )
 
 
 def _verify_registered_revision(

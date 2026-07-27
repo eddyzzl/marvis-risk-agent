@@ -27,7 +27,9 @@ from marvis.packs.strategy.pool_impact import (
     build_strategy_pool_impact_assessment,
     validate_strategy_pool_impact_assessment,
 )
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 
 
 STRATEGY_POOL_VALIDATION_SCHEMA_VERSION = "strategy.pool-validation-evidence.v1"
@@ -233,9 +235,10 @@ def build_strategy_pool_validation_evidence(
         raise StrategyError(
             "Strategy Pool validation dataset belongs to another task"
         )
-    legacy_ref = StrategySampleDesignRef.from_value(
+    development_ref = _risk_development_ref(
         legacy_development_ref
-    ).to_ref_dict()
+    )
+    compatibility_ref = _legacy_impact_compatibility_ref(development_ref)
     sample_binding = _pool_sample_binding(
         current_pool,
         task_id=current_pool["task_id"],
@@ -273,7 +276,7 @@ def build_strategy_pool_validation_evidence(
         pool=current_pool,
         frame=frame,
         sample_binding=sample_binding,
-        sample_design_ref=legacy_ref,
+        sample_design_ref=compatibility_ref,
         target_col=target["column"],
         target_bad_value=target["bad_value"],
         month_col=fields["month_col"],
@@ -288,7 +291,8 @@ def build_strategy_pool_validation_evidence(
 
     waterfall = _validation_waterfall(
         legacy["waterfall"],
-        legacy_development_ref=legacy_ref,
+        legacy_development_ref=compatibility_ref,
+        development_ref=development_ref,
     )
     body = {
         "schema_version": STRATEGY_POOL_VALIDATION_SCHEMA_VERSION,
@@ -299,7 +303,7 @@ def build_strategy_pool_validation_evidence(
             "sample_design_v2": sample_v2,
             "dataset": dataset,
             "development_lineage": {
-                "legacy_development_ref": legacy_ref,
+                "legacy_development_ref": development_ref,
                 "sample_binding": sample_binding,
             },
             "target": target,
@@ -436,10 +440,13 @@ def validate_strategy_pool_validation_evidence(
         obj["waterfall"],
         legacy_development_ref=development["legacy_development_ref"],
     )
+    compatibility_ref = _legacy_impact_compatibility_ref(
+        development["legacy_development_ref"]
+    )
     legacy_assessment = _legacy_assessment(
         identity=identity,
         sample_binding=development["sample_binding"],
-        legacy_development_ref=development["legacy_development_ref"],
+        legacy_development_ref=compatibility_ref,
         target=target,
         fields=fields,
         population=obj["population_metrics"],
@@ -634,11 +641,35 @@ def _development_lineage(value: object) -> dict[str, Any]:
         "development_lineage",
     )
     return {
-        "legacy_development_ref": StrategySampleDesignRef.from_value(
+        "legacy_development_ref": _risk_development_ref(
             obj["legacy_development_ref"]
-        ).to_ref_dict(),
+        ),
         "sample_binding": _sample_binding(obj["sample_binding"]),
     }
+
+
+def _risk_development_ref(value: object) -> dict[str, str]:
+    reference = StrategyRiskDevelopmentRef.from_value(value)
+    if reference.partition not in {"development", "risk/development"}:
+        raise StrategyError(
+            "Strategy Pool validation development partition is invalid"
+        )
+    return reference.to_ref_dict()
+
+
+def _legacy_impact_compatibility_ref(
+    value: Mapping[str, Any],
+) -> dict[str, str]:
+    """Project a generic development ref into the legacy impact kernel.
+
+    The Pool impact kernel still validates the historical ``development``
+    spelling.  Validation evidence retains the exact generic source ref; only
+    this in-memory deterministic calculation receives the compatibility
+    projection.
+    """
+
+    reference = _risk_development_ref(value)
+    return {**reference, "partition": "development"}
 
 
 def _target_binding(value: object) -> dict[str, Any]:
@@ -715,6 +746,7 @@ def _validation_waterfall(
     value: object,
     *,
     legacy_development_ref: Mapping[str, Any],
+    development_ref: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise StrategyError("legacy Pool impact waterfall must be a list")
@@ -745,7 +777,7 @@ def _validation_waterfall(
             }
         )
         output[-1]["source_ref"]["development_lineage_ref"] = dict(
-            legacy_development_ref
+            development_ref
         )
     return output
 
@@ -788,7 +820,7 @@ def _legacy_waterfall(
             }
         )
         output[-1]["source_ref"]["sample_design_ref"] = dict(
-            legacy_development_ref
+            _legacy_impact_compatibility_ref(legacy_development_ref)
         )
     return output
 

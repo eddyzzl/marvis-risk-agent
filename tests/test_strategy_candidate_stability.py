@@ -155,6 +155,11 @@ def test_builds_canonical_monthly_stability_against_full_development() -> None:
     second = _build()
 
     assert first == second
+    assert first["stability_id"] == "candidate-stability-e70fc831907e714f4722fc5a"
+    assert (
+        first["content_hash"]
+        == "e457d2bf9c98803aff3c1ea2f0731e5be17366d9c99485e71f67577a44003a9b"
+    )
     assert first["schema_version"] == CANDIDATE_STABILITY_SCHEMA_VERSION
     assert first["basis"] == "asset_rule_hit"
     assert first["lifecycle"] == {
@@ -238,6 +243,17 @@ def test_pool_entry_basis_accepts_exact_pool_lineage() -> None:
 
     assert artifact["basis"] == "pool_entry_incremental_first_match"
     assert artifact["source_ref"] == _pool_source()
+
+
+def test_native_risk_development_reference_is_preserved_exactly() -> None:
+    sample_ref = {
+        **_sample_ref(),
+        "partition": "risk/development",
+    }
+
+    artifact = _build(sample_design_ref=sample_ref)
+
+    assert artifact["sample_design_ref"] == sample_ref
 
 
 def test_missing_labels_only_reduce_label_metrics() -> None:
@@ -381,5 +397,8 @@ def test_sample_reference_must_bind_development_partition() -> None:
     sample_ref = _sample_ref()
     sample_ref["partition"] = "validation"
 
-    with pytest.raises(CandidateStabilityError, match="must be development"):
+    with pytest.raises(
+        CandidateStabilityError,
+        match="must be development or risk/development",
+    ):
         _build(sample_design_ref=sample_ref)

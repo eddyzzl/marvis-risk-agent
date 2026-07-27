@@ -1592,20 +1592,6 @@ def test_sample_bound_tool_manifests_use_one_exact_reference_schema(tmp_path):
         "additionalProperties": False,
     }
     by_name = {tool.name: tool for tool in manifest.tools}
-    required_input_tools = {
-        "measure_pool_impact",
-        "design_strategy_candidate",
-        "tradeoff_view",
-        "design_cutoff_bands",
-        "compare_strategies",
-        "mine_rules",
-        "evaluate_rule_set",
-    }
-    for name in required_input_tools:
-        schema = by_name[name].input_schema
-        assert "sample_design_ref" in schema["required"], name
-        assert schema["properties"]["sample_design_ref"] == exact_ref, name
-
     risk_development_ref = {
         **exact_ref,
         "properties": {
@@ -1616,6 +1602,24 @@ def test_sample_bound_tool_manifests_use_one_exact_reference_schema(tmp_path):
             },
         },
     }
+    risk_development_tools = {
+        "measure_pool_impact",
+        "design_strategy_candidate",
+        "tradeoff_view",
+        "design_cutoff_bands",
+        "compare_strategies",
+        "mine_rules",
+        "evaluate_rule_set",
+        "limit_pricing_matrix",
+    }
+    for name in risk_development_tools:
+        schema = by_name[name].input_schema
+        assert "sample_design_ref" in schema["required"], name
+        assert (
+            schema["properties"]["sample_design_ref"]
+            == risk_development_ref
+        ), name
+
     univariate_schema = by_name["analyze_univariate_candidates"].input_schema
     assert "sample_design_ref" in univariate_schema["required"]
     assert (
@@ -1646,26 +1650,37 @@ def test_sample_bound_tool_manifests_use_one_exact_reference_schema(tmp_path):
     # but every V2 Workflow requires the slot and its runtime shape is still exact.
     backtest_schema = by_name["backtest_strategy"].input_schema
     assert "sample_design_ref" not in backtest_schema["required"]
-    assert backtest_schema["properties"]["sample_design_ref"] == exact_ref
+    assert (
+        backtest_schema["properties"]["sample_design_ref"]
+        == risk_development_ref
+    )
 
-    for name in {
-        "design_strategy_candidate",
-        "tradeoff_view",
-        "design_cutoff_bands",
-        "compare_strategies",
-        "mine_rules",
-        "evaluate_rule_set",
-        "limit_pricing_matrix",
-        "build_voting_candidate",
-    }:
+    risk_development_output_tools = (
+        risk_development_tools - {"measure_pool_impact"}
+    ) | {"build_voting_candidate"}
+    for name in risk_development_output_tools:
         schema = by_name[name].output_schema
         assert "sample_design_ref" in schema["required"], name
         output_ref = schema["properties"]["sample_design_ref"]
         if "$ref" in output_ref:
             assert output_ref == {"$ref": "#/$defs/sample_design_ref"}
-            assert schema["$defs"]["sample_design_ref"] == exact_ref
+            assert (
+                schema["$defs"]["sample_design_ref"]
+                == risk_development_ref
+            )
         else:
-            assert output_ref == exact_ref, name
+            assert output_ref == risk_development_ref, name
+
+    voting_from_search = by_name[
+        "build_voting_candidate_from_search"
+    ].output_schema
+    assert (
+        voting_from_search["$defs"]["sample_design_ref"]
+        == risk_development_ref
+    )
+    assert "sample_design_ref" in voting_from_search["$defs"][
+        "voting_candidate"
+    ]["required"]
 
 
 def test_build_strategy_tool_accepts_and_persists_canonical_dsl(tmp_path):

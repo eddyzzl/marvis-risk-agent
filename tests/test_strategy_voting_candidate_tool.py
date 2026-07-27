@@ -4,6 +4,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -20,6 +21,7 @@ from marvis.domain import TaskCreate
 from marvis.packs.strategy import pool_tools
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy import voting_candidate as voting_candidate_domain
+from marvis.packs.strategy import voting_candidate_tools
 from marvis.packs.strategy.automatic_tree_leaf_fragment import (
     AUTOMATIC_TREE_ASSET_ARTIFACT_KIND,
 )
@@ -69,6 +71,23 @@ def _action(action_type: str, reason: str | None = None) -> dict:
         }[action_type],
         "reason_code": reason,
         "stop": True,
+    }
+
+
+def _governed_model_score_requirement() -> dict:
+    vector_id = "0123456789abcdef" + "3" * 48
+    return {
+        "rule_id": "governed-model-score-rule",
+        "fragment_id": "governed-model-score-fragment",
+        "requirement": {
+            "type": "model_score_vector.v1",
+            "virtual_field": "__marvis_model_pd_0123456789abcdef",
+            "score_product": "raw_native_uncalibrated_bad_probability",
+            "score_evidence_artifact_id": "1" * 64,
+            "score_evidence_artifact_content_hash": "2" * 64,
+            "score_vector_artifact_id": vector_id,
+            "score_vector_artifact_content_hash": "4" * 64,
+        },
     }
 
 
@@ -263,6 +282,392 @@ def _setup(tmp_path: Path) -> dict:
         "frame": frame,
         "sample_design_ref": sample_design_ref,
     }
+
+
+def _setup_native(tmp_path: Path) -> dict:
+    from tests.test_strategy_univariate_tool import (
+        _inputs as univariate_inputs,
+        _materialize_native_sample_design_ref,
+        _runtime as univariate_runtime,
+        _tool_context,
+    )
+
+    (
+        settings,
+        _runner,
+        _registry,
+        task,
+        _other_task,
+        dataset,
+        workspace,
+        mapping,
+        _legacy_sample_design_ref,
+    ) = univariate_runtime(
+        tmp_path,
+        target_bad_value=0,
+        with_split=True,
+    )
+    ctx = _tool_context(settings, task)
+    runtime = strategy_tools._runtime(ctx)
+    sample_design_ref = _materialize_native_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=0,
+    )
+    analyzed = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            **univariate_inputs(
+                dataset,
+                workspace,
+                mapping,
+                sample_design_ref,
+            ),
+            "features": [],
+            "methods": ["manual"],
+            "manual_breakpoints": {"score": [225, 275]},
+        },
+        ctx,
+    )
+    report = next(
+        artifact
+        for artifact in analyzed["artifacts"]
+        if artifact["kind"] == "strategy_candidate_json"
+    )
+    method = analyzed["candidate_evidence"]["analysis"]["features"][0]["methods"][0]
+    regular_bins = [
+        item for item in method["bins"] if item["kind"] == "numeric_interval"
+    ]
+
+    pool = None
+    for index in (0, 2):
+        candidate = strategy_tools.tool_refine_univariate_candidate(
+            {
+                "source_artifact_id": report["artifact_id"],
+                "expected_artifact_content_hash": report["content_hash"],
+                "expected_candidate_id": analyzed["candidate_id"],
+                "expected_evidence_hash": analyzed["evidence_hash"],
+                "feature": "score",
+                "method": "manual",
+                "merge_groups": [],
+                "selection": {"source_bin_ids": [regular_bins[index]["id"]]},
+            },
+            ctx,
+        )
+        artifact = candidate["artifacts"][0]
+        added = run_add_candidate_to_pool(
+            {
+                "source_artifact_id": artifact["artifact_id"],
+                "expected_artifact_content_hash": artifact["content_hash"],
+                "expected_asset_id": candidate["asset_id"],
+                "expected_asset_hash": candidate["asset_hash"],
+                "strategy_type": "approval",
+                "default_action": _action("approval"),
+                "action": _action("reject", f"NATIVE_RISK_{index}"),
+                "expected_pool_revision": 0 if pool is None else pool["revision"],
+                "expected_pool_snapshot_hash": (
+                    ABSENT_POOL_SNAPSHOT_HASH
+                    if pool is None
+                    else pool["snapshot_hash"]
+                ),
+            },
+            ctx,
+            runtime,
+        )
+        pool = added["pool"]
+    assert pool is not None
+    return {
+        "settings": settings,
+        "task": task,
+        "ctx": ctx,
+        "runtime": runtime,
+        "dataset": dataset,
+        "workspace": workspace,
+        "mapping": mapping,
+        "pool": pool,
+        "sample_design_ref": sample_design_ref,
+        "inputs": {
+            "strategy_type": "approval",
+            "expected_pool_revision": pool["revision"],
+            "expected_pool_snapshot_hash": pool["snapshot_hash"],
+            "selected_entry_ids": [
+                entry["entry_id"] for entry in pool["entries"]
+            ],
+            "n": 1,
+        },
+    }
+
+
+def test_native_voting_candidate_uses_exact_risk_development_and_bad_zero(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_native(tmp_path)
+
+    output = run_build_voting_candidate(
+        fixture["inputs"],
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    assert output["sample_design_ref"] == fixture["sample_design_ref"]
+    assert output["sample_design_ref"]["partition"] == "risk/development"
+    assert output["effect"]["population_count"] == 3
+    assert output["effect"]["labeled_count"] == 3
+    assert output["effect"]["matched_count"] == 2
+    assert output["effect"]["matched_bad_count"] == 2
+    assert output["effect"]["matched_bad_rate"] == 1.0
+    assert output["effect"]["unmatched_bad_count"] == 0
+    record = fixture["runtime"].task_artifacts.get_for_task(
+        fixture["task"].id,
+        output["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    assert record["provenance"]["sample_design_ref"] == fixture["sample_design_ref"]
+
+
+def test_native_voting_requirement_resolution_receives_exact_physical_v2_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup_native(tmp_path)
+    pool = pool_tools.load_current_strategy_candidate_pool_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        strategy_type="approval",
+        expected_pool_revision=fixture["pool"]["revision"],
+        expected_pool_snapshot_hash=fixture["pool"]["snapshot_hash"],
+    )
+    development = pool_tools.bind_strategy_pool_development_execution(
+        fixture["runtime"],
+        pool,
+    )
+    sample = voting_candidate_tools._sample_from_pool_development(
+        fixture["runtime"],
+        development,
+    )
+    resolved = SimpleNamespace(virtual_fields=())
+    captured = {}
+
+    monkeypatch.setattr(
+        voting_candidate_tools,
+        "project_pool_entry_requirements",
+        lambda _entries: (_governed_model_score_requirement(),),
+    )
+
+    def resolve_requirements(
+        runtime,
+        *,
+        task_id,
+        compiled_design,
+        sample_design,
+    ):
+        captured.update(
+            runtime=runtime,
+            task_id=task_id,
+            compiled_design=compiled_design,
+            sample_design=sample_design,
+        )
+        return resolved
+
+    monkeypatch.setattr(
+        voting_candidate_tools,
+        "resolve_pool_requirements",
+        resolve_requirements,
+    )
+    monkeypatch.setattr(
+        voting_candidate_tools,
+        "hydrate_requirement_fields",
+        lambda frame, *, resolved: frame,
+    )
+
+    frame, actual_resolved = voting_candidate_tools._read_exact_sample_frame(
+        fixture["runtime"],
+        sample=sample,
+        entries=fixture["pool"]["entries"],
+    )
+
+    physical = captured["sample_design"]
+    assert actual_resolved is resolved
+    assert captured["task_id"] == fixture["task"].id
+    assert captured["compiled_design"]["requirements"] == [
+        _governed_model_score_requirement()
+    ]
+    assert physical.bundle_artifact_id == fixture["sample_design_ref"][
+        "artifact_id"
+    ]
+    assert physical.bundle_artifact_content_hash == fixture[
+        "sample_design_ref"
+    ]["artifact_content_hash"]
+    assert physical.bundle["sample_design"]["sample_design_id"] == fixture[
+        "sample_design_ref"
+    ]["sample_design_id"]
+    assert physical.bundle["sample_design"]["content_hash"] == fixture[
+        "sample_design_ref"
+    ]["sample_design_content_hash"]
+    assert physical.membership["header"]["counts"]["approval"]["development"] == 5
+    assert physical.membership["header"]["counts"]["risk"]["development"] == 3
+    assert frame["bad"].tolist() == [1, 0, 1]
+
+
+def test_native_voting_candidate_accepts_cross_cell_pool_lineage(
+    tmp_path: Path,
+) -> None:
+    from tests.test_strategy_cross_matrix_cell_selection_tool import _fixture
+
+    fixture = _fixture(tmp_path, native=True)
+    pool = None
+    for index in (0, 1):
+        selected = strategy_tools.tool_materialize_cross_matrix_cell_selection(
+            {
+                **fixture.inputs,
+                "cell_ids": [fixture.populated[index]["cell_id"]],
+            },
+            fixture.ctx,
+        )
+        artifact = selected["artifacts"][0]
+        added = run_add_candidate_to_pool(
+            {
+                "source_artifact_id": artifact["artifact_id"],
+                "expected_artifact_content_hash": artifact["content_hash"],
+                "expected_asset_id": selected["source_asset_id"],
+                "expected_asset_hash": selected["source_asset_hash"],
+                "strategy_type": "approval",
+                "default_action": _action("approval"),
+                "action": _action("reject", f"NATIVE_CROSS_{index}"),
+                "expected_pool_revision": 0 if pool is None else pool["revision"],
+                "expected_pool_snapshot_hash": (
+                    ABSENT_POOL_SNAPSHOT_HASH
+                    if pool is None
+                    else pool["snapshot_hash"]
+                ),
+            },
+            fixture.ctx,
+            fixture.runtime,
+        )
+        pool = added["pool"]
+    assert pool is not None
+
+    output = run_build_voting_candidate(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": pool["revision"],
+            "expected_pool_snapshot_hash": pool["snapshot_hash"],
+            "selected_entry_ids": [
+                entry["entry_id"] for entry in pool["entries"]
+            ],
+            "n": 1,
+        },
+        fixture.ctx,
+        fixture.runtime,
+    )
+
+    assert output["sample_design_ref"] == fixture.sample_design_ref
+    assert output["sample_design_ref"]["partition"] == "risk/development"
+    assert output["k"] == 2
+    assert output["effect"]["population_count"] == 6
+    [descriptor] = output["artifacts"]
+    admitted = run_add_candidate_to_pool(
+        {
+            "source_artifact_id": descriptor["artifact_id"],
+            "expected_artifact_content_hash": descriptor["content_hash"],
+            "expected_asset_id": output["asset_id"],
+            "expected_asset_hash": output["asset_hash"],
+            "strategy_type": "approval",
+            "default_action": _action("approval"),
+            "action": _action("review", "NATIVE_CROSS_VOTING"),
+            "expected_pool_revision": pool["revision"],
+            "expected_pool_snapshot_hash": pool["snapshot_hash"],
+            "placement_mode": "before_selected_members",
+        },
+        fixture.ctx,
+        fixture.runtime,
+    )
+    assert admitted["entries"][0]["source"]["asset_type"] == "voting_n_of_k"
+
+
+def test_native_voting_writer_lock_rolls_back_sample_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup_native(tmp_path)
+    original_require = (
+        pool_tools.require_strategy_pool_development_execution_binding_on_connection
+    )
+
+    def delete_then_require(conn, binding):
+        conn.execute(
+            "DELETE FROM task_artifacts WHERE task_id = ? AND id = ?",
+            (
+                binding.task_id,
+                binding.sample_design.reference.artifact_id,
+            ),
+        )
+        return original_require(conn, binding)
+
+    monkeypatch.setattr(
+        pool_tools,
+        "require_strategy_pool_development_execution_binding_on_connection",
+        delete_then_require,
+    )
+
+    with pytest.raises(StrategyError, match="artifact"):
+        run_build_voting_candidate(
+            fixture["inputs"],
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+
+    assert (
+        fixture["runtime"].task_artifacts.get_for_task(
+            fixture["task"].id,
+            fixture["sample_design_ref"]["artifact_id"],
+        )
+        is not None
+    )
+    assert all(
+        record["kind"] != VOTING_CANDIDATE_ARTIFACT_KIND
+        for record in fixture["runtime"].task_artifacts.list_for_task(
+            fixture["task"].id
+        )
+    )
+    output_dir = (
+        Path(fixture["settings"].tasks_dir)
+        / fixture["task"].id
+        / "strategy_voting_candidates"
+    )
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_explicit_voting_rejects_workspace_head_advance(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    DataWorkspaceRepository(fx["settings"].db_path).save(
+        fx["task"].id,
+        DataWorkspaceDraft(
+            active_dataset_id=fx["dataset"].id,
+            active_dataset_content_hash=fx["dataset"].content_hash,
+            page="fields",
+            semantic_mapping=fx["mapping"],
+        ),
+        expected_revision=fx["workspace"].revision,
+    )
+
+    with pytest.raises(StrategyError, match="workspace|DataWorkspace|binding"):
+        run_build_voting_candidate(
+            fx["inputs"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert all(
+        record["kind"] != VOTING_CANDIDATE_ARTIFACT_KIND
+        for record in fx["runtime"].task_artifacts.list_for_task(
+            fx["task"].id
+        )
+    )
 
 
 def test_build_voting_candidate_replays_pool_measures_and_persists_exactly(

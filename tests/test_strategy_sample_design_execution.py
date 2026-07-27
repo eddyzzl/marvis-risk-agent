@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import sqlite3
 
@@ -14,13 +15,14 @@ from marvis.data.workspace import (
     DataWorkspaceDraft,
     data_semantic_mapping_hash,
 )
-from marvis.db import DatasetRepository, TaskRepository, init_db
+from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_execution import (
     bind_strategy_risk_development_frame,
     load_historical_strategy_risk_development_execution_binding,
+    load_historical_strategy_risk_development_execution_binding_from_ref,
     load_strategy_risk_development_execution_binding,
     require_historical_strategy_risk_development_execution_binding_on_connection,
     require_strategy_risk_development_execution_binding_on_connection,
@@ -266,6 +268,7 @@ def _parallel_native_setup(tmp_path: Path) -> dict:
     }
     return {
         "settings": settings,
+        "ctx": ctx,
         "task": task,
         "dataset": dataset,
         "workspace": workspace,
@@ -374,6 +377,410 @@ def test_native_execution_selects_persisted_risk_development_in_source_order(
     ).to_ref_dict() == fx["sample_ref"]
 
 
+def test_shared_strategy_development_loader_uses_native_risk_population(
+    tmp_path: Path,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+
+    frame, evidence, source_path, binding = (
+        strategy_tools._strategy_development_frame_with_evidence(
+            fx["runtime"],
+            fx["dataset"].id,
+            task_id=fx["task"].id,
+            target_col="bad",
+            sample_design_ref=fx["sample_ref"],
+            drop_nan_labels=True,
+            columns=["row_id", "bad"],
+        )
+    )
+
+    assert frame["row_id"].tolist() == ["risk-only", "both"]
+    assert frame["bad"].tolist() == [1, 0]
+    assert binding.source_mode == "native_active_dataset"
+    assert binding.to_ref_dict() == fx["sample_ref"]
+    assert evidence["sample_design_ref"] == fx["sample_ref"]
+    assert evidence["sample_design_partition"] == "risk/development"
+    assert source_path.is_file()
+
+
+def test_native_rule_mining_rejects_governed_population_columns(
+    tmp_path: Path,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+
+    with pytest.raises(StrategyError, match="governed columns.*risk_flag"):
+        strategy_tools.tool_mine_rules(
+            {
+                "dataset_id": fx["dataset"].id,
+                "target_col": "bad",
+                "sample_design_ref": fx["sample_ref"],
+                "feature_cols": ["risk_flag"],
+                "min_lift": 0,
+                "drop_nan_labels": True,
+            },
+            fx["ctx"],
+        )
+
+
+def test_native_tradeoff_uses_risk_population_and_bad_zero(
+    tmp_path: Path,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+
+    result = strategy_tools.tool_tradeoff_view(
+        {
+            "dataset_id": fx["dataset"].id,
+            "score_col": "feature",
+            "target_col": "bad",
+            "sample_design_ref": fx["sample_ref"],
+            "cutoffs": [15],
+            "score_direction": "higher_is_better",
+            "drop_nan_labels": True,
+        },
+        fx["ctx"],
+    )
+
+    assert result["sample_design_ref"] == fx["sample_ref"]
+    assert len(result["points"]) == 1
+    assert result["points"][0]["approval_rate"] == pytest.approx(1.0)
+    assert result["points"][0]["bad_rate"] == pytest.approx(0.5)
+
+
+def test_native_backtest_persists_exact_risk_population_and_bad_zero(
+    tmp_path: Path,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+    strategy = strategy_tools.tool_build_strategy(
+        {
+            "strategy_type": "approval",
+            "rules": [
+                {
+                    "condition": "feature < 25",
+                    "decision": "reject",
+                }
+            ],
+            "score_col": "feature",
+            "default_decision": "approve",
+        },
+        fx["ctx"],
+    )
+
+    result = strategy_tools.tool_backtest_strategy(
+        {
+            "dataset_id": fx["dataset"].id,
+            "strategy_id": strategy["strategy_id"],
+            "target_col": "bad",
+            "sample_design_ref": fx["sample_ref"],
+            "drop_nan_labels": True,
+        },
+        fx["ctx"],
+    )
+
+    assert result["population_count"] == 2
+    assert result["labeled_count"] == 2
+    assert result["metrics"]["overall_bad_rate"] == pytest.approx(0.5)
+    assert result["normalized_input"]["sample_design_ref"] == fx["sample_ref"]
+    persisted = fx["runtime"].strategies.get_backtest(result["backtest_id"])
+    assert persisted is not None
+    assert persisted.population_count == 2
+    assert persisted.normalized_input["sample_design_ref"] == fx["sample_ref"]
+
+
+def test_native_adoption_preserves_exact_sample_design_evidence(
+    tmp_path: Path,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+    strategy = strategy_tools.tool_build_strategy(
+        {
+            "strategy_type": "approval",
+            "rules": [
+                {
+                    "condition": "feature < 25",
+                    "decision": "reject",
+                }
+            ],
+            "score_col": "feature",
+            "default_decision": "approve",
+        },
+        fx["ctx"],
+    )
+    backtest = strategy_tools.tool_backtest_strategy(
+        {
+            "dataset_id": fx["dataset"].id,
+            "strategy_id": strategy["strategy_id"],
+            "target_col": "bad",
+            "sample_design_ref": fx["sample_ref"],
+            "drop_nan_labels": True,
+        },
+        fx["ctx"],
+    )
+
+    adopted = strategy_tools.tool_adopt_strategy(
+        {
+            "strategy_id": strategy["strategy_id"],
+            "backtest_id": backtest["backtest_id"],
+            "adoption_reason": "committee approved the governed native sample",
+        },
+        fx["ctx"],
+    )
+
+    assert adopted["adoption_evidence"]["sample_design_ref"] == fx["sample_ref"]
+    artifacts = fx["runtime"].strategies.list_strategy_artifacts(
+        strategy["strategy_id"]
+    )
+    assert artifacts
+    assert all(
+        row["provenance"]["evidence"]["sample_design_ref"] == fx["sample_ref"]
+        for row in artifacts
+    )
+    monitoring_path = next(
+        Path(row["path"])
+        for row in artifacts
+        if row["kind"] == "monitoring_plan_json"
+    )
+    monitoring_plan = json.loads(monitoring_path.read_text(encoding="utf-8"))
+    assert (
+        monitoring_plan["expectation_baseline"]["sample_design_ref"]
+        == fx["sample_ref"]
+    )
+    adoption_audits = PluginRepository(fx["settings"].db_path).list_audit(
+        kind="strategy.adopt"
+    )
+    assert adoption_audits[0]["detail"]["adoption_evidence"][
+        "sample_design_ref"
+    ] == fx["sample_ref"]
+
+
+def test_native_adoption_revalidates_sample_design_under_writer_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+    strategy = strategy_tools.tool_build_strategy(
+        {
+            "strategy_type": "approval",
+            "rules": [
+                {
+                    "condition": "feature < 25",
+                    "decision": "reject",
+                }
+            ],
+            "score_col": "feature",
+            "default_decision": "approve",
+        },
+        fx["ctx"],
+    )
+    backtest = strategy_tools.tool_backtest_strategy(
+        {
+            "dataset_id": fx["dataset"].id,
+            "strategy_id": strategy["strategy_id"],
+            "target_col": "bad",
+            "sample_design_ref": fx["sample_ref"],
+            "drop_nan_labels": True,
+        },
+        fx["ctx"],
+    )
+    original_evidence = strategy_tools._strategy_adoption_evidence
+
+    def drift_membership_after_evidence(*args, **kwargs):
+        result = original_evidence(*args, **kwargs)
+        membership_path = Path(fx["membership"]["path"])
+        membership = decode_sample_membership(membership_path.read_bytes())
+        membership["masks"]["risk/development"] = membership["masks"][
+            "approval/development"
+        ].copy()
+        membership_path.write_bytes(
+            encode_sample_membership(
+                task_id=membership["header"]["task_id"],
+                dataset_id=membership["header"]["dataset_ref"]["dataset_id"],
+                dataset_content_hash=membership["header"]["dataset_ref"][
+                    "content_hash"
+                ],
+                masks=membership["masks"],
+            )
+        )
+        return result
+
+    monkeypatch.setattr(
+        strategy_tools,
+        "_strategy_adoption_evidence",
+        drift_membership_after_evidence,
+    )
+
+    with pytest.raises(StrategyError, match="artifact"):
+        strategy_tools.tool_adopt_strategy(
+            {
+                "strategy_id": strategy["strategy_id"],
+                "backtest_id": backtest["backtest_id"],
+                "adoption_reason": "committee approved the governed native sample",
+            },
+            fx["ctx"],
+        )
+
+    assert (
+        fx["runtime"].strategies.get_strategy_meta(strategy["strategy_id"])[
+            "status"
+        ]
+        == "draft"
+    )
+    assert (
+        fx["runtime"].strategies.list_strategy_artifacts(
+            strategy["strategy_id"]
+        )
+        == []
+    )
+    assert PluginRepository(fx["settings"].db_path).list_audit(
+        kind="strategy.adopt"
+    ) == []
+
+
+def test_native_challenger_evidence_replays_after_workspace_head_moves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+    champion = strategy_tools.tool_build_strategy(
+        {
+            "strategy_type": "approval",
+            "rules": [
+                {"condition": "feature < 25", "decision": "reject"}
+            ],
+            "score_col": "feature",
+            "default_decision": "approve",
+        },
+        fx["ctx"],
+    )
+    challenger = strategy_tools.tool_build_strategy(
+        {
+            "strategy_type": "approval",
+            "rules": [
+                {"condition": "feature < 35", "decision": "reject"}
+            ],
+            "score_col": "feature",
+            "default_decision": "approve",
+        },
+        fx["ctx"],
+    )
+    backtest = strategy_tools.tool_backtest_strategy(
+        {
+            "dataset_id": fx["dataset"].id,
+            "strategy_id": challenger["strategy_id"],
+            "baseline_strategy_id": champion["strategy_id"],
+            "target_col": "bad",
+            "sample_design_ref": fx["sample_ref"],
+            "drop_nan_labels": True,
+        },
+        fx["ctx"],
+    )
+    replacement_path = tmp_path / "replacement-head.parquet"
+    fx["frame"].iloc[:3].to_parquet(replacement_path, index=False)
+    replacement = fx["runtime"].registry.register_existing(
+        replacement_path,
+        task_id=fx["task"].id,
+        role="derived",
+    )
+    DataWorkspaceRepository(fx["settings"].db_path).save(
+        fx["task"].id,
+        DataWorkspaceDraft(
+            active_dataset_id=replacement.id,
+            active_dataset_content_hash=replacement.content_hash,
+            semantic_mapping=DataSemanticMapping(),
+        ),
+        expected_revision=fx["workspace"].revision,
+    )
+
+    evidence = strategy_tools._trusted_challenger_report_evidence(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        strategy=fx["runtime"].strategies.get_strategy(
+            challenger["strategy_id"]
+        ),
+        champion=fx["runtime"].strategies.get_strategy(
+            champion["strategy_id"]
+        ),
+        challenger_backtest_carrier={
+            "backtest_id": backtest["backtest_id"]
+        },
+    )
+
+    assert evidence["provenance"]["sample_design_ref"] == fx["sample_ref"]
+    assert evidence["challenger_backtest"]["approval_rate"] == pytest.approx(
+        0.0
+    )
+    assert evidence["champion_backtest"]["approval_rate"] == pytest.approx(
+        0.5
+    )
+    assert evidence["compare"]["deltas"]["approval_rate"] == pytest.approx(
+        -0.5
+    )
+
+    original_persist = strategy_tools._persist_verified_strategy_markdown
+
+    def drift_membership_before_writer_lock(*args, **kwargs):
+        membership_path = Path(fx["membership"]["path"])
+        membership = decode_sample_membership(membership_path.read_bytes())
+        membership["masks"]["risk/development"] = membership["masks"][
+            "approval/development"
+        ].copy()
+        membership_path.write_bytes(
+            encode_sample_membership(
+                task_id=membership["header"]["task_id"],
+                dataset_id=membership["header"]["dataset_ref"]["dataset_id"],
+                dataset_content_hash=membership["header"]["dataset_ref"][
+                    "content_hash"
+                ],
+                masks=membership["masks"],
+            )
+        )
+        return original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(
+        strategy_tools,
+        "_persist_verified_strategy_markdown",
+        drift_membership_before_writer_lock,
+    )
+    with pytest.raises(StrategyError, match="artifact"):
+        strategy_tools.tool_render_challenger_report(
+            {
+                "strategy_id": challenger["strategy_id"],
+                "champion_strategy_id": champion["strategy_id"],
+                "challenger_backtest": {
+                    "backtest_id": backtest["backtest_id"]
+                },
+            },
+            fx["ctx"],
+        )
+    assert (
+        fx["runtime"].strategies.list_strategy_artifacts(
+            challenger["strategy_id"]
+        )
+        == []
+    )
+
+
+def test_native_rule_evaluation_rejects_governed_population_conditions(
+    tmp_path: Path,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+
+    with pytest.raises(StrategyError, match="governed columns.*risk_flag"):
+        strategy_tools.tool_evaluate_rule_set(
+            {
+                "dataset_id": fx["dataset"].id,
+                "target_col": "bad",
+                "sample_design_ref": fx["sample_ref"],
+                "drop_nan_labels": True,
+                "rules": [
+                    {
+                        "rule_id": "population-leak",
+                        "condition": "risk_flag == 1",
+                    }
+                ],
+            },
+            fx["ctx"],
+        )
+
+
 def test_historical_native_execution_replays_after_workspace_switch(
     tmp_path: Path,
 ) -> None:
@@ -411,6 +818,28 @@ def test_historical_native_execution_replays_after_workspace_switch(
         fx["runtime"],
         binding,
     ).to_ref_dict() == fx["sample_ref"]
+
+
+def test_historical_native_execution_can_be_recovered_from_exact_ref(
+    tmp_path: Path,
+) -> None:
+    fx = _parallel_native_setup(tmp_path)
+
+    binding = (
+        load_historical_strategy_risk_development_execution_binding_from_ref(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            sample_design_ref=fx["sample_ref"],
+        )
+    )
+    selected = bind_strategy_risk_development_frame(
+        fx["frame"],
+        binding=binding,
+    )
+
+    assert binding.to_ref_dict() == fx["sample_ref"]
+    assert selected["row_id"].tolist() == ["risk-only", "both"]
+    assert selected["bad"].tolist() == [1, 0]
 
 
 def test_native_execution_current_and_historical_writer_lock_revalidation(

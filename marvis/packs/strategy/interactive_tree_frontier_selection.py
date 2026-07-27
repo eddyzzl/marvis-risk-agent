@@ -39,7 +39,9 @@ from marvis.packs.strategy.interactive_tree_revision import (
     canonical_interactive_tree_revision_json,
     validate_interactive_tree_revision,
 )
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 
 
 INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION = (
@@ -927,9 +929,16 @@ def _normalize_revision_provenance(value: object) -> dict[str, Any]:
             "revision provenance source_tree_id has an invalid format"
         )
     try:
-        sample_ref = StrategySampleDesignRef.from_value(
+        sample_ref = StrategyRiskDevelopmentRef.from_value(
             value["sample_design_ref"]
         ).to_ref_dict()
+        if sample_ref["partition"] not in {
+            "development",
+            "risk/development",
+        }:
+            raise StrategyError(
+                "revision provenance sample_design_ref partition is invalid"
+            )
     except StrategyError as exc:
         raise InteractiveTreeFrontierSelectionError(
             "revision provenance sample_design_ref is invalid"

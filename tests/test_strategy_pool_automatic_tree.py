@@ -41,6 +41,9 @@ from marvis.packs.strategy.automatic_tree_leaf_tools import (
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+)
 from marvis.plugins.contracts import ToolContext
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.strategy_pool import (
@@ -49,6 +52,12 @@ from marvis.repositories.strategy_pool import (
 )
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
+from tests.test_strategy_automatic_tree_tool import (
+    _inputs as _native_tree_inputs,
+    _materialize_native_sample_design_ref as _native_tree_sample_ref,
+    _runtime as _native_tree_runtime,
+    _tool_context as _native_tree_context,
+)
 
 
 def _action(action_type: str, *, reason: str | None = None) -> dict:
@@ -293,6 +302,91 @@ def test_automatic_tree_leaf_materialize_add_compile_full_chain(tmp_path: Path) 
     [compiled_rule] = compiled["strategy_spec"]["rules"]
     assert compiled_rule["condition"] == tree_leaf["condition"]
     assert compiled_rule["action"] == pool_action
+
+
+def test_native_automatic_tree_leaf_materializes_current_pool_development(
+    tmp_path: Path,
+) -> None:
+    (
+        settings,
+        _runner,
+        _registry,
+        task,
+        _other,
+        dataset,
+        workspace,
+        mapping,
+    ) = _native_tree_runtime(
+        tmp_path,
+        target_bad_value=0,
+        with_split=True,
+    )
+    ctx = _native_tree_context(settings, task)
+    runtime = strategy_tools._runtime(ctx)
+    native_ref = _native_tree_sample_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=0,
+    )
+    tree = strategy_tools.tool_build_automatic_tree_candidate(
+        _native_tree_inputs(dataset, workspace, mapping, native_ref),
+        ctx,
+    )
+    source = next(
+        artifact
+        for artifact in tree["artifacts"]
+        if artifact["kind"] == AUTOMATIC_TREE_ASSET_ARTIFACT_KIND
+    )
+    selected = strategy_tools.tool_materialize_automatic_tree_leaf_fragment(
+        {
+            "source_artifact_id": source["artifact_id"],
+            "expected_artifact_content_hash": source["content_hash"],
+            "expected_asset_id": tree["summary"]["asset_id"],
+            "expected_asset_hash": tree["summary"]["asset_hash"],
+            "expected_tree_result_hash": tree["summary"]["tree_result_hash"],
+            "leaf_id": tree["leaf_index"][0]["leaf_id"],
+        },
+        ctx,
+    )
+    added = strategy_tools.tool_add_candidate_to_pool(
+        _add_inputs(
+            selected,
+            revision=0,
+            snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        ctx,
+    )
+    compiled = strategy_tools.tool_compile_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": added["revision"],
+            "expected_pool_snapshot_hash": added["snapshot_hash"],
+        },
+        ctx,
+    )
+    current = pool_tools.load_current_strategy_candidate_pool_artifact(
+        runtime,
+        task_id=task.id,
+        strategy_type="approval",
+        expected_pool_revision=added["revision"],
+        expected_pool_snapshot_hash=added["snapshot_hash"],
+    )
+    development = pool_tools.bind_strategy_pool_development_execution(
+        runtime,
+        current,
+    )
+
+    assert compiled["strategy_spec"]["rules"]
+    assert isinstance(
+        development.sample_design,
+        StrategyRiskDevelopmentExecutionBinding,
+    )
+    assert development.sample_design.source_mode == "native_active_dataset"
+    assert development.sample_design.to_ref_dict() == native_ref
+    assert development.sample_design.reference.partition == "risk/development"
 
 
 def test_automatic_tree_pool_impact_uses_exact_governed_sample_design(

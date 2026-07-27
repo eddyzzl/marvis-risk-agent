@@ -26,6 +26,9 @@ from tests.test_strategy_candidate_stability_tools import (
     _pool_add_inputs,
     _setup,
 )
+from tests.test_strategy_voting_candidate_tool import (
+    _governed_model_score_requirement,
+)
 
 
 def _search_fixture(tmp_path: Path) -> dict:
@@ -63,6 +66,243 @@ def _search_fixture(tmp_path: Path) -> dict:
         "max_combinations": 100,
     }
     return {**fixture, "pool": pool, "controls": controls}
+
+
+def test_native_search_and_selection_preserve_exact_risk_development_lineage(
+    tmp_path: Path,
+) -> None:
+    from tests.test_strategy_voting_candidate_tool import _setup_native
+
+    fixture = _setup_native(tmp_path)
+    controls = {
+        "strategy_type": "approval",
+        "member_count": 2,
+        "n": 1,
+        "objective": {
+            "metric": "bad_capture_rate",
+            "direction": "maximize",
+        },
+        "constraints": [],
+        "include_rule_ids": [],
+        "exclude_rule_ids": [],
+        "max_combinations": 10,
+    }
+    inputs = resolve_voting_candidate_search_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_controls=controls,
+    )
+
+    searched = run_search_voting_candidates(
+        inputs,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    assert searched["search_result"]["population"]["row_count"] == 3
+    assert searched["search_result"]["population"]["bad_count"] == 2
+    [combination] = searched["search_result"]["combinations"]
+    assert combination["metrics"]["hit_count"] == 2
+    assert combination["metrics"]["bad_count"] == 2
+    record = TaskArtifactRepository(fixture["settings"].db_path).get_for_task(
+        fixture["task"].id,
+        searched["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    assert record["provenance"]["sample_design_ref"] == fixture["sample_design_ref"]
+    assert record["provenance"]["target_binding"] == {
+        "column": "bad",
+        "raw_bad_value": 0,
+        "normalized_bad_value": 1,
+        "drop_nan_labels": False,
+        "nan_labels_dropped": 0,
+        "labeled_count": 3,
+        "sample_partition": "risk/development",
+    }
+
+    built = search_tools.run_build_voting_candidate_from_search(
+        {
+            "search_id": searched["search_id"],
+            "combo_id": combination["combo_id"],
+            "strategy_type": "approval",
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    assert built["source_search_selection"]["combo_id"] == combination["combo_id"]
+    assert built["voting_candidate"]["sample_design_ref"] == fixture[
+        "sample_design_ref"
+    ]
+    assert built["voting_candidate"]["effect"]["matched_bad_count"] == 2
+
+
+def test_native_search_and_build_requirements_share_exact_physical_v2_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_strategy_voting_candidate_tool import _setup_native
+
+    fixture = _setup_native(tmp_path)
+    pool = load_current_strategy_candidate_pool_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        strategy_type="approval",
+        expected_pool_revision=fixture["pool"]["revision"],
+        expected_pool_snapshot_hash=fixture["pool"]["snapshot_hash"],
+    )
+    development = bind_strategy_pool_development_execution(
+        fixture["runtime"],
+        pool,
+    )
+    requirement = _governed_model_score_requirement()
+    current = object()
+    historical = object()
+    captured = {}
+
+    def resolve_current(
+        runtime,
+        *,
+        task_id,
+        compiled_design,
+        sample_design,
+    ):
+        captured["current"] = (
+            runtime,
+            task_id,
+            compiled_design,
+            sample_design,
+        )
+        return current
+
+    def resolve_historical(
+        runtime,
+        *,
+        task_id,
+        compiled_design,
+        sample_design,
+    ):
+        captured["historical"] = (
+            runtime,
+            task_id,
+            compiled_design,
+            sample_design,
+        )
+        return historical
+
+    monkeypatch.setattr(
+        search_tools,
+        "resolve_pool_requirements",
+        resolve_current,
+    )
+    monkeypatch.setattr(
+        search_tools,
+        "resolve_historical_pool_requirements",
+        resolve_historical,
+    )
+
+    assert search_tools._resolve_requirements(
+        fixture["runtime"],
+        development=development,
+        requirements=(requirement,),
+    ) is current
+    assert search_tools._resolve_historical_requirements(
+        fixture["runtime"],
+        development=development,
+        requirements=(requirement,),
+    ) is historical
+
+    current_sample = captured["current"][3]
+    historical_sample = captured["historical"][3]
+    for physical in (current_sample, historical_sample):
+        assert physical.bundle_artifact_id == fixture["sample_design_ref"][
+            "artifact_id"
+        ]
+        assert physical.bundle_artifact_content_hash == fixture[
+            "sample_design_ref"
+        ]["artifact_content_hash"]
+        assert physical.bundle["sample_design"]["content_hash"] == fixture[
+            "sample_design_ref"
+        ]["sample_design_content_hash"]
+        assert physical.membership["header"]["counts"]["approval"][
+            "development"
+        ] == 5
+        assert physical.membership["header"]["counts"]["risk"][
+            "development"
+        ] == 3
+
+
+def test_native_search_writer_lock_rolls_back_sample_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_strategy_voting_candidate_tool import _setup_native
+
+    fixture = _setup_native(tmp_path)
+    controls = {
+        "strategy_type": "approval",
+        "member_count": 2,
+        "n": 1,
+        "objective": {
+            "metric": "bad_capture_rate",
+            "direction": "maximize",
+        },
+        "constraints": [],
+        "include_rule_ids": [],
+        "exclude_rule_ids": [],
+        "max_combinations": 10,
+    }
+    inputs = resolve_voting_candidate_search_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_controls=controls,
+    )
+    original_require = (
+        search_tools.require_strategy_pool_development_execution_binding_on_connection
+    )
+
+    def delete_then_require(conn, binding):
+        conn.execute(
+            "DELETE FROM task_artifacts WHERE task_id = ? AND id = ?",
+            (
+                binding.task_id,
+                binding.sample_design.reference.artifact_id,
+            ),
+        )
+        return original_require(conn, binding)
+
+    monkeypatch.setattr(
+        search_tools,
+        "require_strategy_pool_development_execution_binding_on_connection",
+        delete_then_require,
+    )
+
+    with pytest.raises(StrategyError, match="artifact"):
+        run_search_voting_candidates(
+            inputs,
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+
+    assert (
+        fixture["runtime"].task_artifacts.get_for_task(
+            fixture["task"].id,
+            fixture["sample_design_ref"]["artifact_id"],
+        )
+        is not None
+    )
+    assert all(
+        record["kind"] != VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND
+        for record in fixture["runtime"].task_artifacts.list_for_task(
+            fixture["task"].id
+        )
+    )
+    output_dir = (
+        Path(fixture["settings"].tasks_dir)
+        / fixture["task"].id
+        / "strategy_voting_candidate_searches"
+    )
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
 
 
 def test_search_recovers_current_pool_and_persists_only_aggregate_evidence(

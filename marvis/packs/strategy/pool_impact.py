@@ -1593,8 +1593,11 @@ def _sample_design_ref(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if _SAMPLE_DESIGN_ID_RE.fullmatch(sample_design_id) is None:
         raise StrategyError("sample design sample_design_id is invalid")
-    if value["partition"] != "development":
-        raise StrategyError("sample design partition must be development")
+    partition = value["partition"]
+    if partition not in {"development", "risk/development"}:
+        raise StrategyError(
+            "sample design partition must be development or risk/development"
+        )
     return {
         "artifact_id": _hash(value["artifact_id"], "sample design artifact_id"),
         "artifact_content_hash": _hash(
@@ -1606,7 +1609,7 @@ def _sample_design_ref(value: Mapping[str, Any]) -> dict[str, Any]:
             value["sample_design_content_hash"],
             "sample design sample_design_content_hash",
         ),
-        "partition": "development",
+        "partition": partition,
     }
 
 

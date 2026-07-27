@@ -40,6 +40,20 @@ def _prepared_pool(tmp_path: Path) -> tuple[dict, dict]:
     return fixture, added
 
 
+def _prepared_native_pool(tmp_path: Path) -> tuple[dict, dict]:
+    fixture = _setup(tmp_path, native_sample=True)
+    added = run_add_candidate_to_pool(
+        _add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    return fixture, added
+
+
 def _inputs(added: dict, *, output_prefix: str | None = None) -> dict:
     value = {
         "strategy_type": "approval",
@@ -157,6 +171,77 @@ def test_apply_current_pool_creates_one_non_active_governed_dataset(
     evidence = json.loads(Path(record["path"]).read_text("utf-8"))
     assert evidence["run_id"] == result["run_id"]
     assert evidence["result"] == result["result"]
+
+
+def test_apply_native_current_pool_preserves_exact_source_universe_and_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture, added = _prepared_native_pool(tmp_path)
+    runtime = fixture["runtime"]
+    source_dataset = fixture["dataset"]
+    writer_locks = []
+    original_writer_lock = (
+        pool_apply_tools.require_strategy_pool_development_execution_binding_on_connection
+    )
+
+    def track_writer_lock(conn, binding):
+        writer_locks.append(binding)
+        return original_writer_lock(conn, binding)
+
+    monkeypatch.setattr(
+        pool_apply_tools,
+        "require_strategy_pool_development_execution_binding_on_connection",
+        track_writer_lock,
+    )
+    source = runtime.backend.read_frame(
+        runtime.registry.resolve_verified_path(source_dataset.id)
+    ).reset_index(drop=True)
+
+    result = run_apply_strategy_pool(
+        _inputs(added),
+        fixture["ctx"],
+        runtime,
+    )
+
+    assert validate_apply_strategy_pool_tool_output(result) == result
+    manifest = load_manifest(
+        Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+        builtin=True,
+    )
+    tool = next(item for item in manifest.tools if item.name == "apply_strategy_pool")
+    validate_against_schema(
+        result,
+        tool.output_schema,
+        label="native Strategy Pool apply output",
+    )
+    assert result["source"]["sample_design_ref"] == fixture["sample_design_ref"]
+    assert result["source"]["row_count"] == len(source)
+    derived = runtime.backend.read_frame(
+        runtime.registry.resolve_verified_path(result["result"]["dataset_id"])
+    )
+    pd.testing.assert_frame_equal(
+        derived.loc[:, source.columns],
+        source,
+        check_dtype=True,
+        check_exact=True,
+    )
+    assert result["requirements"]["virtual_fields"] == []
+    assert sum(result["action_counts"].values()) == len(source)
+    record = runtime.task_artifacts.get_for_task(
+        fixture["task"].id,
+        result["evidence"]["artifact_id"],
+    )
+    assert record is not None
+    assert record["provenance"]["input_identity"]["sample_design_ref"] == fixture[
+        "sample_design_ref"
+    ]
+    assert writer_locks
+    assert all(
+        binding.sample_design.source_mode == "native_active_dataset"
+        and binding.sample_design.to_ref_dict() == fixture["sample_design_ref"]
+        for binding in writer_locks
+    )
 
 
 def test_apply_current_pool_exact_retry_is_side_effect_free(

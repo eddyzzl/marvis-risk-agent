@@ -1355,6 +1355,230 @@
                 ></p>
                 <div class="candidate-lab-layout">
                   <div class="candidate-lab-launchers" aria-label="候选分析启动器">
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>双人群样本设计</strong><small>审批人群与风险表现人群、分区和成熟度</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_sample_design_v2">
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>坏样本值 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="sample_target_bad_value">
+                              <option value="1">1 表示坏样本</option>
+                              <option value="0">0 表示坏样本</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>双人群关系 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="sample_relationship">
+                              <option value="nested_same_cohort">风险人群包含在审批人群内</option>
+                              <option value="parallel_time_cohorts">审批与风险人群为并行时间队列</option>
+                            </select>
+                          </label>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span><input type="checkbox" checked data-candidate-lab-field="sample_drop_nan_labels"> 风险分析时剔除目标缺失行</span>
+                        </label>
+                        <fieldset class="candidate-lab-methods">
+                          <legend>审批人群筛选（全部留空表示分析全集）</legend>
+                          <div class="candidate-lab-form-grid">
+                            <label class="candidate-lab-field"><span>字段</span><input autocomplete="off" data-candidate-lab-field="approval_population_column"></label>
+                            <label class="candidate-lab-field">
+                              <span>运算符</span>
+                              <select data-candidate-lab-field="approval_population_operator">
+                                <option value="">不筛选</option>
+                                <option value="eq">等于</option><option value="ne">不等于</option>
+                                <option value="gt">大于</option><option value="gte">大于等于</option>
+                                <option value="lt">小于</option><option value="lte">小于等于</option>
+                                <option value="is_null">为空</option><option value="is_not_null">不为空</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field"><span>显式类型值</span><input autocomplete="off" data-candidate-lab-field="approval_population_value" placeholder="text:APP 或 number:30"></label>
+                          </div>
+                        </fieldset>
+                        <fieldset class="candidate-lab-methods">
+                          <legend>风险表现人群筛选（全部留空表示分析全集）</legend>
+                          <div class="candidate-lab-form-grid">
+                            <label class="candidate-lab-field"><span>字段</span><input autocomplete="off" data-candidate-lab-field="risk_population_column"></label>
+                            <label class="candidate-lab-field">
+                              <span>运算符</span>
+                              <select data-candidate-lab-field="risk_population_operator">
+                                <option value="">不筛选</option>
+                                <option value="eq">等于</option><option value="ne">不等于</option>
+                                <option value="gt">大于</option><option value="gte">大于等于</option>
+                                <option value="lt">小于</option><option value="lte">小于等于</option>
+                                <option value="is_null">为空</option><option value="is_not_null">不为空</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field"><span>显式类型值</span><input autocomplete="off" data-candidate-lab-field="risk_population_value" placeholder="text:LOAN 或 number:1"></label>
+                          </div>
+                        </fieldset>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>样本时间字段 <b aria-hidden="true">*</b></span>
+                          <input autocomplete="off" data-candidate-lab-field="sample_time_field" placeholder="例如 apply_date">
+                        </label>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field"><span>开发集开始</span><input type="date" data-candidate-lab-field="sample_development_start"></label>
+                          <label class="candidate-lab-field"><span>开发集结束</span><input type="date" data-candidate-lab-field="sample_development_end"></label>
+                          <label class="candidate-lab-field"><span>验证集开始</span><input type="date" data-candidate-lab-field="sample_validation_start"></label>
+                          <label class="candidate-lab-field"><span>验证集结束</span><input type="date" data-candidate-lab-field="sample_validation_end"></label>
+                          <label class="candidate-lab-field"><span>OOT 开始</span><input type="date" data-candidate-lab-field="sample_oot_start"></label>
+                          <label class="candidate-lab-field"><span>OOT 结束</span><input type="date" data-candidate-lab-field="sample_oot_end"></label>
+                        </div>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>成熟度</span>
+                            <select data-candidate-lab-field="sample_maturity_status">
+                              <option value="confirmed_matured">已确认成熟</option>
+                              <option value="not_matured">尚未成熟</option>
+                              <option value="unknown" selected>未知</option>
+                              <option value="unavailable">暂不可提供</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field"><span>表现期天数</span><input type="number" min="1" step="1" data-candidate-lab-field="sample_maturity_days"></label>
+                          <label class="candidate-lab-field"><span>成熟截止日</span><input type="date" data-candidate-lab-field="sample_maturity_cutoff"></label>
+                          <label class="candidate-lab-field"><span>成熟度说明</span><input autocomplete="off" value="暂未确认成熟度" data-candidate-lab-field="sample_maturity_reason"></label>
+                          <label class="candidate-lab-field">
+                            <span>表现窗口</span>
+                            <select data-candidate-lab-field="sample_performance_status">
+                              <option value="provided">已提供</option>
+                              <option value="unavailable" selected>暂不可提供</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field"><span>表现窗口天数</span><input type="number" min="1" step="1" data-candidate-lab-field="sample_performance_days"></label>
+                          <label class="candidate-lab-field">
+                            <span>观察窗口</span>
+                            <select data-candidate-lab-field="sample_observation_status">
+                              <option value="provided">已提供</option>
+                              <option value="unavailable" selected>暂不可提供</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field"><span>观察开始</span><input type="date" data-candidate-lab-field="sample_observation_start"></label>
+                          <label class="candidate-lab-field"><span>观察结束</span><input type="date" data-candidate-lab-field="sample_observation_end"></label>
+                        </div>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field"><span>主体字段</span><input autocomplete="off" data-candidate-lab-field="sample_entity_field"></label>
+                          <label class="candidate-lab-field"><span>分组字段</span><input autocomplete="off" data-candidate-lab-field="sample_group_field"></label>
+                          <label class="candidate-lab-field"><span>月份字段</span><input autocomplete="off" data-candidate-lab-field="sample_month_field"></label>
+                          <label class="candidate-lab-field"><span>权重字段</span><input autocomplete="off" data-candidate-lab-field="sample_weight_field"></label>
+                          <label class="candidate-lab-field"><span>放款金额字段</span><input autocomplete="off" data-candidate-lab-field="sample_loan_amount_field"></label>
+                          <label class="candidate-lab-field"><span>逾期金额字段</span><input autocomplete="off" data-candidate-lab-field="sample_overdue_amount_field"></label>
+                          <label class="candidate-lab-field">
+                            <span>历史分状态</span>
+                            <select data-candidate-lab-field="sample_historical_score_status">
+                              <option value="unavailable">暂不可提供</option>
+                              <option value="available">可用</option>
+                              <option value="not_applicable">不适用</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field"><span>历史分字段</span><input autocomplete="off" data-candidate-lab-field="sample_historical_score_column"></label>
+                          <label class="candidate-lab-field">
+                            <span>历史分风险方向</span>
+                            <select data-candidate-lab-field="sample_historical_score_direction">
+                              <option value="">未提供</option>
+                              <option value="higher_is_riskier">越高风险越高</option>
+                              <option value="lower_is_riskier">越低风险越高</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field"><span>历史分说明</span><input autocomplete="off" value="暂未提供历史分" data-candidate-lab-field="sample_historical_score_reason"></label>
+                        </div>
+                        <p class="candidate-lab-boundary-note">
+                          如果暂时没有某项信息，可在对话里告诉 Agent 暂缺；平台不会编造字段、分区或成熟度。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">创建双人群样本设计</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>Pool 影响测算</strong><small>approval / reject 逐月通过率与风险影响</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_impact">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_impact_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>比较方式</span>
+                            <select data-candidate-lab-field="pool_impact_comparison_mode">
+                              <option value="absolute">绝对效果</option>
+                              <option value="vs_baseline">与历史策略比较</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field"><span>基线策略 ID</span><input autocomplete="off" data-candidate-lab-field="pool_impact_baseline_strategy_id" placeholder="仅与历史策略比较时填写"></label>
+                          <label class="candidate-lab-field"><span>月份列</span><input autocomplete="off" data-candidate-lab-field="pool_impact_month_col"></label>
+                          <label class="candidate-lab-field"><span>放款金额列</span><input autocomplete="off" data-candidate-lab-field="pool_impact_loan_amount_col"></label>
+                          <label class="candidate-lab-field"><span>逾期金额列</span><input autocomplete="off" data-candidate-lab-field="pool_impact_overdue_amount_col"></label>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span><input type="checkbox" data-candidate-lab-field="pool_impact_drop_nan_labels"> 明确授权剔除目标缺失行</span>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-impact-help>当前任务尚无可测算的 approval / reject Pool。</p>
+                        <p class="candidate-lab-boundary-note">只生成只读影响证据，不修改 Pool，不采纳或部署策略。</p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">测算 Pool 影响</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>统一 ImpactCube</strong><small>五类策略、三类分区和可选业务维度</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_impact_cube">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="impact_cube_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <fieldset class="candidate-lab-methods">
+                          <legend>分区（留空使用全部非空可用分区）</legend>
+                          <label><input type="checkbox" value="development" data-candidate-lab-field="impact_cube_partitions">开发集</label>
+                          <label><input type="checkbox" value="validation" data-candidate-lab-field="impact_cube_partitions">验证集</label>
+                          <label><input type="checkbox" value="oot" data-candidate-lab-field="impact_cube_partitions">OOT</label>
+                        </fieldset>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field"><span>月份维度</span><input autocomplete="off" data-candidate-lab-field="impact_cube_month_col"></label>
+                          <label class="candidate-lab-field"><span>分组维度</span><input autocomplete="off" data-candidate-lab-field="impact_cube_group_col"></label>
+                          <label class="candidate-lab-field"><span>分群维度</span><input autocomplete="off" data-candidate-lab-field="impact_cube_segment_col"></label>
+                          <label class="candidate-lab-field"><span>当前策略 ID</span><input autocomplete="off" data-candidate-lab-field="impact_cube_current_strategy_id" placeholder="可选；用于新旧策略对比"></label>
+                        </div>
+                        <p class="candidate-lab-field-help" data-candidate-lab-impact-cube-help>当前任务尚无可测算的非空 Strategy Pool。</p>
+                        <p class="candidate-lab-boundary-note">样本、目标、Pool revision 与指标由平台绑定和确定性计算；不会写回策略。</p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">生成 ImpactCube</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>形成策略报告</strong><small>结构化证据生成 JSON、Markdown、Excel 和 Word</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_report_bundle_v2">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>报告标题</span>
+                          <input maxlength="200" value="策略迭代评审报告" data-candidate-lab-field="strategy_report_title">
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>报告状态</span>
+                          <select data-candidate-lab-field="strategy_report_status">
+                            <option value="partial">信息待补充</option>
+                            <option value="draft">草稿</option>
+                            <option value="final">最终版</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-boundary-note">
+                          Agent 会使用当前受认证证据；缺失信息会在对话里询问，暂时没有的内容保持为空，不会编造。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">形成四格式报告</button>
+                      </form>
+                    </details>
+
                     <details class="candidate-lab-launcher" open>
                       <summary>
                         <span><strong>单变量候选</strong><small>分箱与候选效果分析</small></span>

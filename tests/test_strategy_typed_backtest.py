@@ -104,6 +104,14 @@ def _sample_design_ref() -> dict[str, str]:
     }
 
 
+def _native_sample_design_ref() -> dict[str, str]:
+    return {
+        **_sample_design_ref(),
+        "sample_design_id": "native-strategy-sample",
+        "partition": "risk/development",
+    }
+
+
 def test_approval_backtest_keeps_population_and_labeled_denominators_separate() -> None:
     frame = pd.DataFrame(
         {
@@ -206,6 +214,27 @@ def test_backtest_normalizes_explicit_reverse_bad_label_without_changing_metrics
 
     restored = StrategyBacktestResult.from_dict(second.to_dict())
     assert restored.to_dict() == second.to_dict()
+
+
+def test_backtest_preserves_native_risk_development_reference_on_reload() -> None:
+    result = run_typed_backtest(
+        pd.DataFrame(
+            {
+                "score": [800, 600],
+                "target": [1, 0],
+            }
+        ),
+        _decision_spec("reject"),
+        target_col="target",
+        target_bad_value=0,
+        sample_design_ref=_native_sample_design_ref(),
+    )
+
+    assert (
+        result.normalized_input["sample_design_ref"]
+        == _native_sample_design_ref()
+    )
+    assert StrategyBacktestResult.from_dict(result.to_dict()) == result
 
 
 @pytest.mark.parametrize("bad_value", [True, False, -1, 2, 1.0, 1.5, "1"])

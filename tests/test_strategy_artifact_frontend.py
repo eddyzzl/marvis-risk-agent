@@ -126,6 +126,34 @@ def test_done_strategy_plan_lazily_loads_escaped_artifacts_once_per_plan():
               download_url: "/api/tasks/task-A/task-artifacts/task-analysis-1/download?expected_content_hash={"a" * 64}",
             }},
             ...[
+              ["report-json-old", "report.json", "strategy_report_bundle_json", "{"9" * 64}"],
+              ["report-md-old", "report.md", "strategy_report_markdown", "{"a" * 64}"],
+              ["report-xlsx-old", "report.xlsx", "strategy_report_xlsx", "{"b" * 64}"],
+              ["report-docx-old", "report.docx", "strategy_report_docx", "{"c" * 64}"],
+            ].map(([id, filename, kind, contentHash]) => ({{
+              id,
+              filename,
+              kind,
+              origin_tool: "strategy.build_report_bundle_v2",
+              created_at: "2026-07-23T08:01:30Z",
+              available: true,
+              download_url: `/api/tasks/task-A/task-artifacts/${{id}}/download?expected_content_hash=${{contentHash}}`,
+            }})),
+            ...[
+              ["report-json", "report.json", "strategy_report_bundle_json", "{"d" * 64}"],
+              ["report-md", "report.md", "strategy_report_markdown", "{"e" * 64}"],
+              ["report-xlsx", "report.xlsx", "strategy_report_xlsx", "{"f" * 64}"],
+              ["report-docx", "report.docx", "strategy_report_docx", "{"0" * 64}"],
+            ].map(([id, filename, kind, contentHash]) => ({{
+              id,
+              filename,
+              kind,
+              origin_tool: "strategy.build_report_bundle_v2",
+              created_at: "2026-07-23T08:02:30Z",
+              available: true,
+              download_url: `/api/tasks/task-A/task-artifacts/${{id}}/download?expected_content_hash=${{contentHash}}`,
+            }})),
+            ...[
               ["delivery-python-old", "strategy.py", "strategy_delivery_python", "{"5" * 64}"],
               ["delivery-sql-old", "strategy.sql", "strategy_delivery_sql", "{"6" * 64}"],
               ["delivery-json-old", "strategy.json", "strategy_delivery_json", "{"7" * 64}"],
@@ -218,6 +246,18 @@ def test_done_strategy_plan_lazily_loads_escaped_artifacts_once_per_plan():
     )
     assert "task-artifacts/task-duplicate/download" not in payload["firstHtml"]
     assert "任务分析" in payload["firstHtml"]
+    assert "策略报告" in payload["firstHtml"]
+    assert "同一最新修订" in payload["firstHtml"]
+    for label in ("JSON", "Markdown", "Excel", "Word"):
+        assert label in payload["firstHtml"]
+    for artifact_id in (
+        "report-json",
+        "report-md",
+        "report-xlsx",
+        "report-docx",
+    ):
+        assert f"task-artifacts/{artifact_id}/download" in payload["firstHtml"]
+        assert f"task-artifacts/{artifact_id}-old/download" not in payload["firstHtml"]
     assert "Python" in payload["firstHtml"]
     assert "DuckDB SQL" in payload["firstHtml"]
     assert "Strategy JSON" in payload["firstHtml"]

@@ -60,12 +60,15 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     require_resolved_pool_requirements_on_connection,
     resolve_pool_requirements,
 )
-from marvis.packs.strategy.sample_design_binding import (
-    StrategySampleDesignExecutionBinding,
-    bind_strategy_development_frame,
-    load_strategy_sample_design_execution_binding,
-    require_strategy_sample_design_execution_binding_on_connection,
-    revalidate_strategy_sample_design_execution_binding,
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+    bind_strategy_risk_development_frame,
+    load_strategy_risk_development_execution_binding,
+    require_strategy_risk_development_execution_binding_on_connection,
+    revalidate_strategy_risk_development_execution_binding,
+)
+from marvis.packs.strategy.voting_candidate_tools import (
+    resolve_pool_requirement_sample_design_v2,
 )
 from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
@@ -162,7 +165,7 @@ class _ExecutionBinding:
     pool_development: StrategyPoolDevelopmentExecutionBinding | None
     resolved_requirements: ResolvedPoolRequirements | None
     entry: dict[str, Any] | None
-    sample_design: StrategySampleDesignExecutionBinding
+    sample_design: StrategyRiskDevelopmentExecutionBinding
     identity: dict[str, Any]
     source_ref: dict[str, Any]
     condition: dict[str, Any] | None
@@ -683,16 +686,16 @@ def _load_execution_binding(
         sample = pool_development.sample_design
         requirements = project_pool_entry_requirements(pool.pool["entries"])
         if requirements:
-            if pool_development.sample_design_v2 is None:
-                raise StrategyError(
-                    "candidate stability score requirements require one exact "
-                    "StrategySampleDesign V2"
-                )
+            physical_sample = resolve_pool_requirement_sample_design_v2(
+                runtime,
+                development=pool_development,
+                require_current=True,
+            )
             resolved_requirements = resolve_pool_requirements(
                 _modeling_runtime(runtime),
                 task_id=task_id,
                 compiled_design={"requirements": list(requirements)},
-                sample_design=pool_development.sample_design_v2,
+                sample_design=physical_sample,
             )
     if not sample.month_col:
         raise StrategyError(
@@ -769,7 +772,7 @@ def _load_sample_design_binding(
     *,
     task_id: str,
     candidate: VerifiedUnivariateCandidateLineageBinding,
-) -> StrategySampleDesignExecutionBinding:
+) -> StrategyRiskDevelopmentExecutionBinding:
     evidence = candidate.evidence
     generation = evidence["generation"]["parameters"]
     identity = evidence["identity"]
@@ -777,7 +780,7 @@ def _load_sample_design_binding(
     drop_nan_labels = generation.get("drop_nan_labels")
     if not isinstance(drop_nan_labels, bool):
         raise StrategyError("candidate drop_nan_labels binding is invalid")
-    return load_strategy_sample_design_execution_binding(
+    return load_strategy_risk_development_execution_binding(
         runtime,
         task_id=task_id,
         sample_design_ref=generation.get("sample_design_ref"),
@@ -836,7 +839,7 @@ def _read_development_frame(runtime, *, binding: _ExecutionBinding) -> pd.DataFr
             frame,
             resolved=binding.resolved_requirements,
         )
-    return bind_strategy_development_frame(
+    return bind_strategy_risk_development_frame(
         frame,
         binding=binding.sample_design,
     )
@@ -865,7 +868,7 @@ def _evaluate_hit_mask(
 def _revalidate_before_registration(runtime, *, binding: _ExecutionBinding) -> None:
     _require_dataset_bytes(binding.dataset)
     if (
-        revalidate_strategy_sample_design_execution_binding(
+        revalidate_strategy_risk_development_execution_binding(
             runtime,
             binding.sample_design,
         )
@@ -951,7 +954,7 @@ def _persist_artifact(
                         conn,
                         binding.candidate,
                     )
-                    require_strategy_sample_design_execution_binding_on_connection(
+                    require_strategy_risk_development_execution_binding_on_connection(
                         conn,
                         binding.sample_design,
                     )

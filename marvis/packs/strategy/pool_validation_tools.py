@@ -29,6 +29,7 @@ from marvis.packs.strategy.pool_tools import (
     bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
     require_strategy_candidate_pool_artifact_binding_on_connection,
+    require_strategy_pool_development_execution_binding_on_connection,
 )
 from marvis.packs.strategy.pool_requirement_resolver import (
     ResolvedPoolRequirements,
@@ -46,11 +47,16 @@ from marvis.packs.strategy.pool_validation import (
     canonical_strategy_pool_validation_json,
     validate_strategy_pool_validation_evidence,
 )
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    StrategySampleDesignV2NativeArtifactBinding,
+)
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
     load_any_strategy_sample_design_v2_artifacts,
-    require_strategy_sample_design_v2_artifact_binding_on_connection,
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection,
     resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.repositories.task_artifacts import (
@@ -58,6 +64,12 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
     stable_task_artifact_id,
+)
+
+
+_StrategySampleDesignV2Binding = (
+    StrategySampleDesignV2ArtifactBinding
+    | StrategySampleDesignV2NativeArtifactBinding
 )
 
 
@@ -356,7 +368,7 @@ def load_latest_strategy_pool_validation_artifacts(
     *,
     task_id: str,
     candidate_pool: StrategyCandidatePoolArtifactBinding,
-    sample_design: StrategySampleDesignV2ArtifactBinding,
+    sample_design: _StrategySampleDesignV2Binding,
 ) -> tuple[StrategyPoolValidationArtifactBinding, ...]:
     """Select at most one latest compatible validation/OOT artifact.
 
@@ -372,7 +384,10 @@ def load_latest_strategy_pool_validation_artifacts(
         not isinstance(candidate_pool, StrategyCandidatePoolArtifactBinding)
         or not isinstance(
             sample_design,
-            StrategySampleDesignV2ArtifactBinding,
+            (
+                StrategySampleDesignV2ArtifactBinding,
+                StrategySampleDesignV2NativeArtifactBinding,
+            ),
         )
         or candidate_pool.task_id != normalized_task
         or sample_design.task_id != normalized_task
@@ -391,7 +406,7 @@ def load_latest_strategy_pool_validation_artifacts(
                 conn,
                 candidate_pool,
             )
-            require_strategy_sample_design_v2_artifact_binding_on_connection(
+            require_any_strategy_sample_design_v2_artifact_binding_on_connection(
                 conn,
                 sample_design,
             )
@@ -499,7 +514,7 @@ def load_latest_strategy_pool_validation_artifacts(
                 conn,
                 candidate_pool,
             )
-            require_strategy_sample_design_v2_artifact_binding_on_connection(
+            require_any_strategy_sample_design_v2_artifact_binding_on_connection(
                 conn,
                 sample_design,
             )
@@ -520,7 +535,7 @@ def select_latest_strategy_pool_validation_refs(
     *,
     task_id: str,
     candidate_pool: StrategyCandidatePoolArtifactBinding,
-    sample_design: StrategySampleDesignV2ArtifactBinding,
+    sample_design: _StrategySampleDesignV2Binding,
 ) -> tuple[dict[str, Any], ...]:
     """Select immutable platform-owned refs for a report plan/turn."""
 
@@ -541,7 +556,7 @@ def load_strategy_pool_validation_artifacts(
     task_id: str,
     refs: object,
     candidate_pool: StrategyCandidatePoolArtifactBinding,
-    sample_design: StrategySampleDesignV2ArtifactBinding,
+    sample_design: _StrategySampleDesignV2Binding,
 ) -> tuple[StrategyPoolValidationArtifactBinding, ...]:
     """Load only exact Pool validation refs frozen by the platform plan.
 
@@ -556,7 +571,10 @@ def load_strategy_pool_validation_artifacts(
         not isinstance(candidate_pool, StrategyCandidatePoolArtifactBinding)
         or not isinstance(
             sample_design,
-            StrategySampleDesignV2ArtifactBinding,
+            (
+                StrategySampleDesignV2ArtifactBinding,
+                StrategySampleDesignV2NativeArtifactBinding,
+            ),
         )
         or candidate_pool.task_id != normalized_task
         or sample_design.task_id != normalized_task
@@ -575,7 +593,7 @@ def load_strategy_pool_validation_artifacts(
                 conn,
                 candidate_pool,
             )
-            require_strategy_sample_design_v2_artifact_binding_on_connection(
+            require_any_strategy_sample_design_v2_artifact_binding_on_connection(
                 conn,
                 sample_design,
             )
@@ -665,7 +683,7 @@ def load_strategy_pool_validation_artifacts(
                 conn,
                 candidate_pool,
             )
-            require_strategy_sample_design_v2_artifact_binding_on_connection(
+            require_any_strategy_sample_design_v2_artifact_binding_on_connection(
                 conn,
                 sample_design,
             )
@@ -897,11 +915,6 @@ def run_measure_strategy_pool_validation(inputs, ctx, runtime) -> dict[str, Any]
             task_id=task_id,
             request=request,
         )
-        resolve_strategy_sample_design_v2_source_mode(
-            sample.bundle["sample_design"],
-            capability="legacy_development",
-            consumer="strategy_pool_validation",
-        )
         development = bind_strategy_pool_development_execution(runtime, pool)
         resolved_requirements = resolve_pool_requirements(
             runtime,
@@ -922,6 +935,7 @@ def run_measure_strategy_pool_validation(inputs, ctx, runtime) -> dict[str, Any]
         _require_bindings_under_lock(
             runtime,
             pool=pool,
+            development=development,
             sample=sample,
             resolved_requirements=resolved_requirements,
         )
@@ -971,6 +985,7 @@ def run_measure_strategy_pool_validation(inputs, ctx, runtime) -> dict[str, Any]
             task_id=task_id,
             request=request,
             pool=pool,
+            development=development,
             sample=sample,
             resolved_requirements=resolved_requirements,
             evidence=evidence,
@@ -1320,7 +1335,7 @@ def _provenance_matches_current_sources(
     provenance: Mapping[str, Any],
     *,
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
 ) -> bool:
     return (
         provenance["pool_ref"] == _current_pool_provenance_ref(pool)
@@ -1387,7 +1402,7 @@ def _current_pool_provenance_ref(
 
 
 def _current_sample_design_provenance_ref(
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
 ) -> dict[str, Any]:
     design = sample.bundle["sample_design"]
     return {
@@ -1409,7 +1424,7 @@ def _require_pool_validation_compatibility(
     evidence: Mapping[str, Any],
     *,
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
 ) -> None:
     identity = evidence["identity"]
     compiled = pool.compiled_design
@@ -1451,7 +1466,7 @@ def _require_pool_validation_compatibility(
         or sources["target"] != expected_target
         or sources["fields"] != expected_fields
         or sources["development_lineage"]["legacy_development_ref"]
-        != design["compatibility"]["legacy_development_ref"]
+        != _sample_risk_development_ref(sample).to_ref_dict()
     ):
         raise StrategyError(
             "Strategy Pool validation evidence is not compatible with the "
@@ -1638,7 +1653,7 @@ def _load_sample_design_binding(
     *,
     task_id: str,
     request: Mapping[str, Any],
-) -> StrategySampleDesignV2ArtifactBinding:
+) -> _StrategySampleDesignV2Binding:
     ref = request["sample_design_ref"]
     return load_any_strategy_sample_design_v2_artifacts(
         runtime,
@@ -1659,11 +1674,42 @@ def _load_sample_design_binding(
     )
 
 
+def _sample_risk_development_ref(
+    sample: _StrategySampleDesignV2Binding,
+) -> StrategyRiskDevelopmentRef:
+    design = sample.bundle["sample_design"]
+    source_mode = resolve_strategy_sample_design_v2_source_mode(
+        design,
+        capability="physical_v2",
+        consumer="strategy_pool_validation",
+    )
+    if source_mode == "legacy_anchored":
+        reference = StrategyRiskDevelopmentRef.from_value(
+            design["compatibility"]["legacy_development_ref"]
+        )
+        if reference.partition != "development":
+            raise StrategyError(
+                "legacy StrategySampleDesign V2 development partition changed"
+            )
+        return reference
+    if source_mode == "native_active_dataset":
+        return StrategyRiskDevelopmentRef.from_value(
+            {
+                "artifact_id": sample.bundle_artifact_id,
+                "artifact_content_hash": sample.bundle_artifact_content_hash,
+                "sample_design_id": design["sample_design_id"],
+                "sample_design_content_hash": design["content_hash"],
+                "partition": "risk/development",
+            }
+        )
+    raise StrategyError("StrategySampleDesign V2 source mode is unsupported")
+
+
 def _require_independent_sample_contract(
     *,
     pool: StrategyCandidatePoolArtifactBinding,
     development: StrategyPoolDevelopmentExecutionBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
     partition: str,
 ) -> dict[str, Any]:
     design = sample.bundle["sample_design"]
@@ -1691,31 +1737,24 @@ def _require_independent_sample_contract(
     if partition_count == 0:
         raise StrategyError(f"Strategy Pool {partition} partition is empty")
 
-    legacy_ref = StrategySampleDesignRef.from_value(
-        design["compatibility"]["legacy_development_ref"]
-    )
-    if legacy_ref != sample.source_binding.legacy.reference:
-        raise StrategyError(
-            "StrategySampleDesign V2 legacy development mapping changed"
-        )
+    development_ref = _sample_risk_development_ref(sample)
     _require_pool_development_contract(
         pool=pool,
         development=development,
         sample=sample,
-        legacy_ref=legacy_ref,
+        development_ref=development_ref,
         target_col=target["column"],
     )
     if (
-        sample.source_binding.legacy.target_col != target["column"]
-        or sample.source_binding.legacy.target_bad_value
-        != target["bad_value"]
+        sample.source_binding.target_col != target["column"]
+        or sample.source_binding.target_bad_value != target["bad_value"]
     ):
         raise StrategyError(
-            "StrategySampleDesign V2 target polarity changed from legacy lineage"
+            "StrategySampleDesign V2 target polarity changed from source lineage"
         )
     fields = design["sample_semantics"]["field_bindings"]
     return {
-        "legacy_development_ref": legacy_ref.to_ref_dict(),
+        "legacy_development_ref": development_ref.to_ref_dict(),
         "target_col": target["column"],
         "target_bad_value": target["bad_value"],
         "month_col": fields["month_field"],
@@ -1728,14 +1767,14 @@ def _require_pool_development_contract(
     *,
     pool: StrategyCandidatePoolArtifactBinding,
     development: StrategyPoolDevelopmentExecutionBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
-    legacy_ref: StrategySampleDesignRef,
+    sample: _StrategySampleDesignV2Binding,
+    development_ref: StrategyRiskDevelopmentRef,
     target_col: str,
 ) -> None:
     if (
         development.pool is not pool
         or development.task_id != pool.task_id
-        or development.sample_design.reference != legacy_ref
+        or development.sample_design.reference != development_ref
         or development.target_col != target_col
     ):
         raise StrategyError(
@@ -1761,16 +1800,18 @@ def _require_pool_development_contract(
             "StrategySampleDesign V2"
         )
     bound_v2 = development.sample_design_v2
-    if bound_v2 is not None and _sample_design_v2_identity(
-        bound_v2
-    ) != _sample_design_v2_identity(sample):
+    if (
+        bound_v2 is not None
+        and _sample_design_v2_identity(bound_v2)
+        != _sample_design_v2_identity(sample)
+    ):
         raise StrategyError(
             "Strategy Pool development SampleDesign V2 binding changed"
         )
 
 
 def _sample_design_v2_identity(
-    binding: StrategySampleDesignV2ArtifactBinding,
+    binding: _StrategySampleDesignV2Binding,
 ) -> tuple[str, ...]:
     return (
         binding.task_id,
@@ -1788,7 +1829,8 @@ def _require_bindings_under_lock(
     runtime,
     *,
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    development: StrategyPoolDevelopmentExecutionBinding,
+    sample: _StrategySampleDesignV2Binding,
     resolved_requirements: ResolvedPoolRequirements,
 ) -> None:
     with runtime.task_artifacts.transaction() as conn:
@@ -1797,7 +1839,11 @@ def _require_bindings_under_lock(
             conn,
             pool,
         )
-        require_strategy_sample_design_v2_artifact_binding_on_connection(
+        require_strategy_pool_development_execution_binding_on_connection(
+            conn,
+            development,
+        )
+        require_any_strategy_sample_design_v2_artifact_binding_on_connection(
             conn,
             sample,
         )
@@ -1812,11 +1858,16 @@ def _require_bindings_on_connection(
     conn,
     *,
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    development: StrategyPoolDevelopmentExecutionBinding,
+    sample: _StrategySampleDesignV2Binding,
     resolved_requirements: ResolvedPoolRequirements,
 ) -> None:
     require_strategy_candidate_pool_artifact_binding_on_connection(conn, pool)
-    require_strategy_sample_design_v2_artifact_binding_on_connection(
+    require_strategy_pool_development_execution_binding_on_connection(
+        conn,
+        development,
+    )
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection(
         conn,
         sample,
     )
@@ -1830,7 +1881,7 @@ def _read_selected_partition(
     runtime,
     *,
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
     partition: str,
     target_col: str,
     month_col: str | None,
@@ -2045,7 +2096,7 @@ def _expression_fields(value: object) -> set[str]:
 
 
 def _sample_design_evidence_ref(
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
     *,
     partition: str,
 ) -> dict[str, Any]:
@@ -2074,7 +2125,7 @@ def _sample_design_evidence_ref(
 
 
 def _dataset_evidence_binding(
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
 ) -> dict[str, Any]:
     source = sample.source_binding
     return {
@@ -2097,7 +2148,8 @@ def _persist_evidence(
     task_id: str,
     request: Mapping[str, Any],
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    development: StrategyPoolDevelopmentExecutionBinding,
+    sample: _StrategySampleDesignV2Binding,
     resolved_requirements: ResolvedPoolRequirements,
     evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -2161,6 +2213,7 @@ def _persist_evidence(
                 _require_bindings_on_connection(
                     conn,
                     pool=pool,
+                    development=development,
                     sample=sample,
                     resolved_requirements=resolved_requirements,
                 )
@@ -2235,6 +2288,7 @@ def _persist_evidence(
                 _require_bindings_on_connection(
                     conn,
                     pool=pool,
+                    development=development,
                     sample=sample,
                     resolved_requirements=resolved_requirements,
                 )
@@ -2250,6 +2304,7 @@ def _persist_evidence(
                 _require_bindings_on_connection(
                     conn,
                     pool=pool,
+                    development=development,
                     sample=sample,
                     resolved_requirements=resolved_requirements,
                 )

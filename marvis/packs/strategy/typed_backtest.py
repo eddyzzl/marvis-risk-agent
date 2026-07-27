@@ -24,7 +24,9 @@ from marvis.packs.strategy.economics import (
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.evaluator import evaluate_strategy_frame
 from marvis.packs.strategy.profit import ProfitParams
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 
 
 STRATEGY_BACKTEST_SCHEMA_VERSION = "strategy.backtest.v2"
@@ -373,7 +375,7 @@ def _validate_normalized_input(result: StrategyBacktestResult) -> None:
     ):
         raise StrategyError("normalized_input.target_encoding is unsupported")
     if "sample_design_ref" in normalized:
-        StrategySampleDesignRef.from_value(normalized["sample_design_ref"])
+        _strategy_development_ref(normalized["sample_design_ref"])
     expected_literals = {
         "missing_label_policy": "exclude_from_label_metrics",
         "population_rate_denominator": "population_count",
@@ -1624,7 +1626,7 @@ def run_typed_backtest(
     }
     if sample_design_ref is not None:
         normalized_input["sample_design_ref"] = (
-            StrategySampleDesignRef.from_value(sample_design_ref).to_ref_dict()
+            _strategy_development_ref(sample_design_ref).to_ref_dict()
         )
     return StrategyBacktestResult(
         strategy_id=resolved_strategy_id,
@@ -1639,6 +1641,16 @@ def run_typed_backtest(
         warnings=tuple(warnings),
         normalized_input=normalized_input,
     )
+
+
+def _strategy_development_ref(value: object) -> StrategyRiskDevelopmentRef:
+    reference = StrategyRiskDevelopmentRef.from_value(value)
+    if reference.partition not in {"development", "risk/development"}:
+        raise StrategyError(
+            "sample_design_ref.partition must be development or "
+            "risk/development for strategy backtesting"
+        )
+    return reference
 
 
 def _assert_count(value: object, *, name: str) -> None:

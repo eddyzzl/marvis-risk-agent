@@ -130,6 +130,13 @@ from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
 )
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+    StrategyRiskDevelopmentRef,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    StrategySampleDesignV2NativeArtifactBinding,
+)
 from marvis.packs.strategy.scorecard_candidate import (
     build_scorecard_cutoff_selection,
     canonical_scorecard_band_asset_json,
@@ -315,7 +322,10 @@ def _sample_binding(
     *,
     maturity_status: str = "confirmed_matured",
     native_source: bool = False,
-) -> StrategySampleDesignV2ArtifactBinding:
+) -> (
+    StrategySampleDesignV2ArtifactBinding
+    | StrategySampleDesignV2NativeArtifactBinding
+):
     membership = _decoded_membership()
     approval, risk, target, historical = _sample_components(
         membership,
@@ -371,7 +381,12 @@ def _sample_binding(
         **design_kwargs,
     )
     canonical = canonical_strategy_sample_design_v2_bundle_json(bundle)
-    return StrategySampleDesignV2ArtifactBinding(
+    binding_type = (
+        StrategySampleDesignV2NativeArtifactBinding
+        if native_source
+        else StrategySampleDesignV2ArtifactBinding
+    )
+    return binding_type(
         task_id="task-v2",
         membership_artifact_id=_hash("membership-artifact-id"),
         membership_path=tmp_path / "membership.bin",
@@ -1264,7 +1279,10 @@ def _bindings(
 
 def _voting_search_binding(
     tmp_path: Path,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: (
+        StrategySampleDesignV2ArtifactBinding
+        | StrategySampleDesignV2NativeArtifactBinding
+    ),
     pool: StrategyCandidatePoolArtifactBinding,
 ) -> VotingCandidateSearchArtifactBinding:
     design = sample.bundle["sample_design"]
@@ -1272,7 +1290,19 @@ def _voting_search_binding(
     workspace = design["identity"]["workspace_ref"]
     semantics = design["sample_semantics"]
     target = design["target_selector"]
-    legacy_ref = design["compatibility"]["legacy_development_ref"]
+    compatibility = design["compatibility"]
+    native_source = compatibility.get("source_mode") == "native_active_dataset"
+    development_ref = (
+        {
+            "artifact_id": sample.bundle_artifact_id,
+            "artifact_content_hash": sample.bundle_artifact_content_hash,
+            "sample_design_id": design["sample_design_id"],
+            "sample_design_content_hash": design["content_hash"],
+            "partition": "risk/development",
+        }
+        if native_source
+        else compatibility["legacy_development_ref"]
+    )
     risk_population = next(
         item for item in sample.bundle["populations"] if item["role"] == "risk"
     )
@@ -1325,10 +1355,41 @@ def _voting_search_binding(
     assert result["evaluated"] == 20
     assert all(not item["eligible"] for item in result["combinations"])
 
-    reference = StrategySampleDesignRef.from_value(legacy_ref)
-    legacy_sample = StrategySampleDesignExecutionBinding(
-        reference=reference,
-        artifact=SimpleNamespace(),
+    legacy_sample = None
+    if not native_source:
+        legacy_reference = StrategySampleDesignRef.from_value(
+            development_ref
+        )
+        legacy_sample = StrategySampleDesignExecutionBinding(
+            reference=legacy_reference,
+            artifact=SimpleNamespace(),
+            task_id=sample.task_id,
+            dataset_id=dataset["dataset_id"],
+            dataset_content_hash=dataset["content_hash"],
+            workspace_revision=workspace["revision"],
+            workspace_generation=workspace["generation"],
+            semantic_mapping_hash=workspace["semantic_mapping_hash"],
+            target_col=target["column"],
+            target_bad_value=target["bad_value"],
+            drop_nan_labels=target["drop_missing"],
+            split_column=semantics["split_definition"]["column"],
+            development_values=tuple(
+                semantics["split_definition"]["development_values"]
+            ),
+            development_population_count=development_count,
+            active_population_count=risk_population["total_count"],
+            month_col=semantics["field_bindings"]["month_field"],
+            weight_col=semantics["field_bindings"]["weight_field"],
+            loan_amount_col=semantics["field_bindings"]["loan_amount_field"],
+            overdue_amount_col=semantics["field_bindings"][
+                "overdue_amount_field"
+            ],
+        )
+    execution_sample = StrategyRiskDevelopmentExecutionBinding(
+        reference=StrategyRiskDevelopmentRef.from_value(development_ref),
+        source_mode=(
+            "native_active_dataset" if native_source else "legacy_anchored"
+        ),
         task_id=sample.task_id,
         dataset_id=dataset["dataset_id"],
         dataset_content_hash=dataset["content_hash"],
@@ -1338,18 +1399,32 @@ def _voting_search_binding(
         target_col=target["column"],
         target_bad_value=target["bad_value"],
         drop_nan_labels=target["drop_missing"],
-        split_column=semantics["split_definition"]["column"],
-        development_values=tuple(
-            semantics["split_definition"]["development_values"]
+        split_column=(
+            None
+            if native_source
+            else semantics["split_definition"]["column"]
         ),
+        partition_columns=(
+            ("sample_split",)
+            if native_source
+            else (semantics["split_definition"]["column"],)
+        ),
+        population_filter_columns=(),
+        excluded_feature_columns=("target", "sample_split"),
         development_population_count=development_count,
-        active_population_count=risk_population["total_count"],
+        active_population_count=(
+            sample.membership["header"]["row_count"]
+            if native_source
+            else risk_population["total_count"]
+        ),
         month_col=semantics["field_bindings"]["month_field"],
         weight_col=semantics["field_bindings"]["weight_field"],
         loan_amount_col=semantics["field_bindings"]["loan_amount_field"],
         overdue_amount_col=semantics["field_bindings"][
             "overdue_amount_field"
         ],
+        _legacy=legacy_sample,
+        _native=(SimpleNamespace() if native_source else None),
     )
     development_dataset = StrategyPoolDevelopmentDatasetBinding(
         task_id=sample.task_id,
@@ -1379,8 +1454,8 @@ def _voting_search_binding(
         task_id=sample.task_id,
         pool=pool,
         dataset=development_dataset,
-        sample_design=legacy_sample,
-        sample_design_v2=sample,
+        sample_design=execution_sample,
+        sample_design_v2=(None if native_source else sample),
         evidence_identity=evidence_identity,
         target_col=target["column"],
         month_col=semantics["field_bindings"]["month_field"],
@@ -1409,24 +1484,24 @@ def _voting_search_binding(
             "dataset_registry_metadata_hash": (
                 development_dataset.registry_metadata_hash
             ),
-            "workspace_revision": legacy_sample.workspace_revision,
-            "workspace_generation": legacy_sample.workspace_generation,
-            "semantic_mapping_hash": legacy_sample.semantic_mapping_hash,
+            "workspace_revision": execution_sample.workspace_revision,
+            "workspace_generation": execution_sample.workspace_generation,
+            "semantic_mapping_hash": execution_sample.semantic_mapping_hash,
         },
-        "sample_design_ref": legacy_sample.to_ref_dict(),
+        "sample_design_ref": execution_sample.to_ref_dict(),
         "sample_context_hash": evidence_identity["sample_context_hash"],
         "target_binding": {
-            "column": legacy_sample.target_col,
-            "raw_bad_value": legacy_sample.target_bad_value,
+            "column": execution_sample.target_col,
+            "raw_bad_value": execution_sample.target_bad_value,
             "normalized_bad_value": 1,
-            "drop_nan_labels": legacy_sample.drop_nan_labels,
+            "drop_nan_labels": execution_sample.drop_nan_labels,
             "nan_labels_dropped": 0,
             "labeled_count": development_count,
-            "sample_partition": "development",
+            "sample_partition": execution_sample.reference.partition,
         },
         "observation_bindings": {
-            "weight_col": legacy_sample.weight_col,
-            "amount_col": legacy_sample.loan_amount_col,
+            "weight_col": execution_sample.weight_col,
+            "amount_col": execution_sample.loan_amount_col,
         },
         "requirement_bindings": None,
         "excluded_unsupported_rule_ids": [],
@@ -1621,9 +1696,15 @@ def _pool_binding_for_strategy_type(
 
 
 def _sample_with_dataset_source(
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: (
+        StrategySampleDesignV2ArtifactBinding
+        | StrategySampleDesignV2NativeArtifactBinding
+    ),
     tmp_path: Path,
-) -> StrategySampleDesignV2ArtifactBinding:
+) -> (
+    StrategySampleDesignV2ArtifactBinding
+    | StrategySampleDesignV2NativeArtifactBinding
+):
     identity = sample.bundle["sample_design"]["identity"]
     dataset = identity["dataset_ref"]
     workspace = identity["workspace_ref"]
@@ -1644,7 +1725,10 @@ def _sample_with_dataset_source(
 
 def _pool_validation_binding(
     tmp_path: Path,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: (
+        StrategySampleDesignV2ArtifactBinding
+        | StrategySampleDesignV2NativeArtifactBinding
+    ),
     pool: StrategyCandidatePoolArtifactBinding,
     *,
     partition: str,
@@ -1705,6 +1789,18 @@ def _pool_validation_binding(
         "partition_count": count,
         "analysis_universe_row_count": header["row_count"],
     }
+    compatibility = design["compatibility"]
+    development_ref = (
+        {
+            "artifact_id": sample.bundle_artifact_id,
+            "artifact_content_hash": sample.bundle_artifact_content_hash,
+            "sample_design_id": design["sample_design_id"],
+            "sample_design_content_hash": design["content_hash"],
+            "partition": "risk/development",
+        }
+        if compatibility.get("source_mode") == "native_active_dataset"
+        else compatibility["legacy_development_ref"]
+    )
     evidence = build_strategy_pool_validation_evidence(
         pool=pool.pool,
         frame=frame,
@@ -1714,9 +1810,7 @@ def _pool_validation_binding(
         },
         sample_design_v2_ref=sample_ref,
         dataset_binding=dataset_binding,
-        legacy_development_ref=design["compatibility"][
-            "legacy_development_ref"
-        ],
+        legacy_development_ref=development_ref,
         partition=partition,
         population="risk",
         comparison_mode="absolute",
@@ -2376,25 +2470,22 @@ def test_adapter_is_deterministic_bundle_ready_and_uses_exact_source_identities(
     ]
 
 
-def test_full_report_native_sample_fails_closed_at_legacy_evidence_boundary(
+def test_full_report_native_sample_rejects_legacy_pool_impact_identity(
     tmp_path: Path,
 ) -> None:
     project, _legacy_sample, pool, impact = _bindings(tmp_path)
     native_sample = _sample_binding(tmp_path, native_source=True)
 
-    with pytest.raises(StrategyError) as raised:
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="pool-impact.*risk/development sample",
+    ):
         build_strategy_report_bundle_source_inputs(
             project_context=project,
             sample_design=native_sample,
             candidate_pool=pool,
             pool_impact=impact,
         )
-
-    assert (
-        getattr(raised.value, "code", None)
-        == "strategy_sample_design_v2_native_source_unsupported"
-    )
-    assert getattr(raised.value, "consumer", None) == "strategy_report_bundle"
 
 
 def test_adapter_requires_typed_authenticated_pool_validation_bindings(
@@ -2486,6 +2577,46 @@ def test_adapter_projects_independent_pool_validation_as_oot_stage_and_conclusio
     )
     assert bundle["effect_stages"] == ["backtested", "oot_validated"]
     assert bundle["strategy_id"] is None
+
+
+def test_pool_validation_report_adapter_accepts_native_exact_development_ref(
+    tmp_path: Path,
+) -> None:
+    native_sample = _sample_with_dataset_source(
+        _sample_binding(tmp_path, native_source=True),
+        tmp_path,
+    )
+    pool = _pool_binding_for_strategy_type(
+        tmp_path,
+        native_sample,
+        "approval",
+    )
+    validation = _pool_validation_binding(
+        tmp_path,
+        native_sample,
+        pool,
+        partition="validation",
+    )
+    sample = report_adapters._authenticated_sample_design(native_sample)
+    current_pool, compiled = report_adapters._authenticated_candidate_pool(
+        pool
+    )
+
+    authenticated = report_adapters._authenticated_pool_validations(
+        (validation,),
+        sample_binding=native_sample,
+        sample=sample,
+        pool_binding=pool,
+        pool=current_pool,
+        compiled_design=compiled,
+    )
+
+    assert authenticated == ((validation, validation.evidence),)
+    development_ref = validation.evidence["source_bindings"][
+        "development_lineage"
+    ]["legacy_development_ref"]
+    assert development_ref["artifact_id"] == native_sample.bundle_artifact_id
+    assert development_ref["partition"] == "risk/development"
 
 
 def test_adapter_validation_only_uses_umbrella_stage_without_claiming_oot_partition(
@@ -2798,6 +2929,40 @@ def test_adapter_projects_voting_search_only_as_twenty_row_development_evidence(
     for forbidden in ("winner", "champion", "selected", "冠军", "最佳"):
         assert forbidden not in markdown.lower()
         assert forbidden not in docx_text.lower()
+
+
+def test_voting_search_report_adapter_accepts_native_generic_development(
+    tmp_path: Path,
+) -> None:
+    _project_binding_value, _legacy_sample, pool, _impact = _bindings(
+        tmp_path,
+        candidate_count=7,
+    )
+    native_sample = _sample_binding(tmp_path, native_source=True)
+    search = _voting_search_binding(tmp_path, native_sample, pool)
+    sample = report_adapters._authenticated_sample_design(native_sample)
+    current_pool, compiled = report_adapters._authenticated_candidate_pool(
+        pool
+    )
+
+    result = report_adapters._authenticated_voting_candidate_search(
+        search,
+        sample_binding=native_sample,
+        sample=sample,
+        pool_binding=pool,
+        pool=current_pool,
+        compiled_design=compiled,
+    )
+
+    execution = search.pool_development.sample_design
+    assert result == search.result
+    assert isinstance(execution, StrategyRiskDevelopmentExecutionBinding)
+    assert execution.source_mode == "native_active_dataset"
+    assert execution.reference.partition == "risk/development"
+    assert (
+        search.artifact_provenance["sample_design_ref"]
+        == execution.to_ref_dict()
+    )
 
 
 def test_adapter_rejects_voting_search_sample_context_drift(

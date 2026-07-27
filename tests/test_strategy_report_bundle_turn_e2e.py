@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -28,6 +29,11 @@ from marvis.agent.turn_handlers import (
     _strategy_report_requested_pool_type,
 )
 from marvis.app import create_app
+from marvis.db import TaskRepository
+from marvis.packs.strategy.candidate_stability_tools import (
+    resolve_candidate_monthly_stability_inputs,
+    run_measure_candidate_monthly_stability,
+)
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.impact_cube_tools import (
     run_measure_strategy_impact_cube,
@@ -35,10 +41,29 @@ from marvis.packs.strategy.impact_cube_tools import (
 from marvis.packs.strategy.model_evidence_tools import (
     MODEL_EVIDENCE_V2_ARTIFACT_KIND,
 )
+from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
+from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
+from marvis.packs.strategy.pool_stability_tools import (
+    run_measure_strategy_pool_stability,
+)
+from marvis.packs.strategy.pool_validation_tools import (
+    run_measure_strategy_pool_validation,
+)
+from marvis.packs.strategy.project_context_tools import (
+    run_materialize_project_context,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
 from marvis.packs.strategy.report_bundle_tools import (
     run_build_strategy_report_bundle_v2,
     validate_build_strategy_report_bundle_v2_tool_output,
 )
+from marvis.packs.strategy.sample_membership import decode_sample_membership
 from marvis.plugins.manifest import ToolRef
 from marvis.repositories.strategy_reports import StrategyReportRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
@@ -47,6 +72,10 @@ from test_strategy_report_bundle_tools import (
     _run,
     _setup,
     _setup_impact_cube_report,
+)
+from test_strategy_candidate_stability_tools import (
+    _pool_add_inputs as _candidate_stability_pool_add_inputs,
+    _setup as _candidate_stability_setup,
 )
 from test_strategy_request_turn import (
     _FakeLLM as _StoredStrategyLLM,
@@ -87,6 +116,169 @@ def _draft(
 
 def _runtime(fixture: dict) -> SimpleNamespace:
     return SimpleNamespace(settings=fixture["settings"])
+
+
+def _setup_native_parallel_report(tmp_path: Path) -> dict:
+    fixture = _candidate_stability_setup(
+        tmp_path,
+        native_sample=True,
+        target_bad_value=0,
+    )
+    pool_output = run_add_candidate_to_pool(
+        _candidate_stability_pool_add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    records = TaskArtifactRepository(
+        fixture["settings"].db_path
+    ).list_for_task(fixture["task"].id)
+    membership_record = next(
+        record
+        for record in records
+        if record["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+        and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    bundle_record = next(
+        record
+        for record in records
+        if record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    bundle = json.loads(Path(bundle_record["path"]).read_text("utf-8"))
+    design = bundle["sample_design"]
+    sample_design_ref = {
+        "membership_artifact_id": membership_record["id"],
+        "expected_membership_artifact_content_hash": membership_record[
+            "content_hash"
+        ],
+        "bundle_artifact_id": bundle_record["id"],
+        "expected_bundle_artifact_content_hash": bundle_record["content_hash"],
+        "expected_bundle_id": bundle["bundle_id"],
+        "expected_sample_design_id": design["sample_design_id"],
+        "expected_sample_design_content_hash": design["content_hash"],
+    }
+    pool_artifact = pool_output["artifacts"][0]
+    pool_ref = {
+        "artifact_id": pool_artifact["artifact_id"],
+        "expected_artifact_content_hash": pool_artifact["content_hash"],
+        "expected_pool_id": pool_output["pool_id"],
+        "expected_revision": pool_output["revision"],
+        "expected_revision_id": pool_output["pool"]["revision_id"],
+        "expected_snapshot_hash": pool_output["snapshot_hash"],
+    }
+    impact = run_measure_strategy_impact_cube(
+        {
+            "strategy_type": "approval",
+            "pool_ref": pool_ref,
+            "sample_design_ref": sample_design_ref,
+            "partitions": ["development", "validation", "oot"],
+            "population": "risk",
+            "dimension_bindings": {
+                "month_col": "month",
+                "group_col": None,
+                "segment_col": None,
+            },
+            "current_strategy_ref": None,
+            "economics_inputs": None,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    validations = {
+        partition: run_measure_strategy_pool_validation(
+            {
+                "strategy_type": "approval",
+                "pool_ref": pool_ref,
+                "sample_design_ref": sample_design_ref,
+                "partition": partition,
+                "population": "risk",
+                "comparison_mode": "absolute",
+            },
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+        for partition in ("validation", "oot")
+    }
+    [entry] = pool_output["entries"]
+    candidate_stability = run_measure_candidate_monthly_stability(
+        resolve_candidate_monthly_stability_inputs(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            user_pointer={
+                "source_kind": "pool_entry",
+                "strategy_type": "approval",
+                "entry_id": entry["entry_id"],
+            },
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    impact_ref = {
+        "artifact_id": impact["artifact"]["artifact_id"],
+        "expected_artifact_content_hash": impact["artifact"]["content_hash"],
+        "expected_cube_id": impact["cube_id"],
+        "expected_cube_content_hash": impact["content_hash"],
+    }
+    pool_stability = run_measure_strategy_pool_stability(
+        impact_ref,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    pool_stability_ref = {
+        "artifact_id": pool_stability["artifact"]["artifact_id"],
+        "expected_artifact_content_hash": pool_stability["artifact"][
+            "content_hash"
+        ],
+        "expected_stability_id": pool_stability["stability_id"],
+        "expected_stability_content_hash": pool_stability["content_hash"],
+    }
+    message = TaskRepository(fixture["settings"].db_path).add_agent_message(
+        fixture["task"].id,
+        role="user",
+        stage="chat",
+        content="生成原生平行双样本准入策略七步报告。",
+    )
+    run_materialize_project_context(
+        {
+            "expected_revision": 0,
+            "expected_revision_id": None,
+            "expected_state_hash": None,
+            "user_message_ref": {
+                "message_id": message["id"],
+                "content_hash": hashlib.sha256(
+                    message["content"].encode("utf-8")
+                ).hexdigest(),
+            },
+            "as_of": "2026-07-27",
+            "scope": "原生平行双样本准入策略",
+            "business_context": {"project.goal": "验证七步报告原生主链"},
+            "explicit_unavailable": ["historical_strategy_reviews"],
+            "external_report_filenames": [],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    membership = decode_sample_membership(
+        Path(membership_record["path"]).read_bytes()
+    )
+    return {
+        **fixture,
+        "bundle": bundle,
+        "membership": membership,
+        "sample_design_ref": sample_design_ref,
+        "pool_output": pool_output,
+        "pool_ref": pool_ref,
+        "impact": impact,
+        "impact_ref": impact_ref,
+        "pool_stability": pool_stability,
+        "pool_stability_ref": pool_stability_ref,
+        "validations": validations,
+        "candidate_stability": candidate_stability,
+    }
 
 
 class _ArtifactRepositoryStub:
@@ -709,6 +901,62 @@ def test_report_turn_clarifies_for_missing_context_sample_pool_or_impact(
     assert missing_impact.value.code == (
         "strategy_report_bundle_v2_pool_impact_required"
     )
+
+
+def test_report_turn_corrupt_latest_native_sample_never_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kind = SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+    newest = {
+        "kind": kind,
+        "origin_tool": SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+        "id": "1" * 64,
+        "content_hash": "2" * 64,
+        "provenance": {
+            "membership_artifact_id": "3" * 64,
+            "membership_artifact_content_hash": "4" * 64,
+            "bundle_id": "strategy-sample-design-bundle-" + "5" * 24,
+            "sample_design_id": "strategy-sample-design-" + "6" * 24,
+            "sample_design_content_hash": "7" * 64,
+        },
+    }
+    older = {
+        "kind": kind,
+        "origin_tool": turn_handlers.SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        "id": "8" * 64,
+        "content_hash": "9" * 64,
+        "provenance": {
+            "membership_artifact_id": "a" * 64,
+            "membership_artifact_content_hash": "b" * 64,
+            "bundle_id": "strategy-sample-design-bundle-" + "c" * 24,
+            "sample_design_id": "strategy-sample-design-" + "d" * 24,
+            "sample_design_content_hash": "e" * 64,
+        },
+    }
+    calls: list[str] = []
+
+    def reject_latest(*_args, **kwargs):
+        calls.append(kwargs["bundle_artifact_id"])
+        raise StrategyError("native membership bytes changed")
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_any_strategy_sample_design_v2_artifacts",
+        reject_latest,
+    )
+
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
+        _strategy_report_latest_sample_binding(
+            _window_runtime(
+                newest,
+                older,
+                totals={kind: 2},
+            ),
+            task_id="task-native-report",
+        )
+
+    assert raised.value.code == "strategy_report_bundle_v2_sample_invalid"
+    assert calls == [newest["id"]]
 
 
 def test_report_turn_authenticates_newest_pool_impact_before_binding_match(
@@ -1588,6 +1836,107 @@ def test_report_command_autostarts_with_exact_impact_cube(
     output = client.app.state.plan_repo.load_step_output(step.id)
     validate_build_strategy_report_bundle_v2_tool_output(output)
     assert output["bundle"]["strategy_type"] == "approval"
+    assert len(llm.calls) == 1
+
+
+def test_native_parallel_bad_zero_report_turn_publishes_exact_seven_step_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup_native_parallel_report(tmp_path)
+    masks = fixture["membership"]["masks"]
+    approval = (
+        masks["approval/development"]
+        | masks["approval/validation"]
+        | masks["approval/oot"]
+    )
+    risk = (
+        masks["risk/development"]
+        | masks["risk/validation"]
+        | masks["risk/oot"]
+    )
+    assert not (approval & risk).any()
+    assert fixture["bundle"]["sample_design"]["relationship"] == (
+        "parallel_time_cohorts"
+    )
+    assert fixture["bundle"]["sample_design"]["target_selector"]["bad_value"] == 0
+    assert fixture["impact"]["cube"]["source_bindings"]["target"]["bad_value"] == 0
+    assert {
+        output["evidence"]["source_bindings"]["target"]["bad_value"]
+        for output in fixture["validations"].values()
+    } == {0}
+    client = TestClient(create_app(fixture["settings"].workspace))
+    llm = _ReportLLM()
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{fixture['task'].id}/agent/messages",
+        json={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(
+        f"/api/tasks/{fixture['task'].id}/plans"
+    ).json()["plans"]
+    assert len(plans) == 1, response.json()
+    [plan] = plans
+    assert plan["template_id"] == "strategy_report_bundle_v2"
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    [step] = stored.steps
+    assert step.inputs["sample_design_ref"] == fixture["sample_design_ref"]
+    assert step.inputs["impact_cube_ref"] == fixture["impact_ref"]
+    assert {
+        item["partition"] for item in step.inputs["pool_validation_refs"]
+    } == {"validation", "oot"}
+    candidate_artifact = fixture["candidate_stability"]["artifacts"][0]
+    assert step.inputs["candidate_stability_ref"] == {
+        "artifact_id": candidate_artifact["artifact_id"],
+        "expected_artifact_content_hash": candidate_artifact["content_hash"],
+        "expected_stability_id": fixture["candidate_stability"]["stability_id"],
+        "expected_stability_content_hash": fixture["candidate_stability"][
+            "content_hash"
+        ],
+    }
+    assert step.inputs["pool_stability_ref"] == fixture["pool_stability_ref"]
+
+    output = client.app.state.plan_repo.load_step_output(step.id)
+    validate_build_strategy_report_bundle_v2_tool_output(output)
+    bundle = output["bundle"]
+    assert [section["key"] for section in bundle["sections"]] == [
+        "current_project",
+        "historical_versions",
+        "sample_design",
+        "univariate_and_models",
+        "candidate_combinations",
+        "impact_assessment",
+        "final_document",
+    ]
+    sample_summary = {
+        item["field_id"]: item["field"]["value"]
+        for item in bundle["sections"][2]["summary_fields"]
+    }
+    counts = fixture["membership"]["header"]["counts"]
+    assert sample_summary["sample_relationship"] == "parallel_time_cohorts"
+    assert sample_summary["analysis_universe_count"] == counts[
+        "analysis_universe"
+    ]
+    assert sample_summary["approval_population_count"] == counts["approval"][
+        "total"
+    ]
+    assert sample_summary["risk_population_count"] == counts["risk"]["total"]
+    source_kinds = {
+        ref["kind"] for ref in bundle["strategy_artifact_refs"]
+    }
+    assert {
+        "strategy_impact",
+        "strategy_validation",
+        "backtest",
+    } <= source_kinds
+    assert bundle["strategy_id"] is None
     assert len(llm.calls) == 1
 
 

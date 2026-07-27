@@ -241,6 +241,49 @@ def test_builds_canonical_cross_partition_pool_stability() -> None:
     ).hexdigest() == first["content_hash"]
 
 
+def test_pool_stability_accepts_parallel_risk_population_larger_than_approval(
+) -> None:
+    frame = _frame()
+    cube = build_strategy_impact_cube(
+        pool=_pool("approval"),
+        approval_partition_frames={
+            "development": frame.iloc[:2].reset_index(drop=True),
+            "validation": frame.iloc[3:5].reset_index(drop=True),
+        },
+        partition_frames={
+            "development": frame.iloc[:3].reset_index(drop=True),
+            "validation": frame.iloc[3:].reset_index(drop=True),
+        },
+        pool_artifact_ref=_pool_artifact_ref(),
+        sample_design_v2_ref=_sample_design_v2_ref(
+            approval_counts={"development": 2, "validation": 2},
+            risk_counts={"development": 3, "validation": 3},
+        ),
+        dataset_binding=_dataset_binding(),
+        legacy_development_ref=_legacy_ref(),
+        target_col="bad",
+        target_bad_value=1,
+        month_col=None,
+        group_col=None,
+        segment_col=None,
+        current_strategy_spec=None,
+        current_strategy_ref=None,
+        economics_bindings=None,
+    )
+
+    stability = build_strategy_pool_stability(
+        impact_cube=cube,
+        impact_cube_ref=_impact_cube_ref(cube),
+    )
+
+    assert stability["source_bindings"]["sample_design_v2"][
+        "population_partition_counts"
+    ] == {
+        "approval": {"development": 2, "validation": 2},
+        "risk": {"development": 3, "validation": 3},
+    }
+
+
 @pytest.mark.parametrize(
     "strategy_type",
     ["approval", "reject", "limit", "pricing", "segmentation"],

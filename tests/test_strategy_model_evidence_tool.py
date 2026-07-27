@@ -2,20 +2,25 @@ from __future__ import annotations
 
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 from pathlib import Path
 import sqlite3
-import sys
 import threading
 
 import pytest
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.output.strategy_candidate_report import (
+    canonical_strategy_candidate_report_json,
+)
 from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy.candidate_evidence import build_candidate_evidence
 import marvis.packs.strategy.model_evidence_tools as model_evidence_tools
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.model_evidence_tools import (
     MODEL_EVIDENCE_V2_ARTIFACT_KIND,
     MODEL_EVIDENCE_V2_TOOL_SCHEMA_VERSION,
+    derive_strategy_model_evidence_candidate_execution_ref,
     load_strategy_model_evidence_v2_artifact,
     run_materialize_model_evidence_v2,
     validate_materialize_model_evidence_v2_tool_output,
@@ -30,12 +35,8 @@ from marvis.packs.strategy.sample_design_v2_native_tools import (
     run_materialize_sample_design_v2_native,
 )
 from marvis.packs.strategy.sample_design_tools import run_materialize_sample_design
-from marvis.db import PluginRepository, TaskRepository
+from marvis.db import TaskRepository
 from marvis.domain import TaskCreate
-from marvis.plugins.loader import load_builtin_packs
-from marvis.plugins.manifest import ToolRef
-from marvis.plugins.registry import PluginRegistry, ToolRegistry
-from marvis.plugins.runner import ToolRunner
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.repositories.task_artifacts import TaskArtifactDataError
 
@@ -122,6 +123,93 @@ def _fixture(tmp_path: Path, *, not_matured: bool = False) -> dict:
         ],
     }
     return {**fx, "sample_v2": sample_v2, "candidate": candidate, "inputs": inputs}
+
+
+def _native_fixture(tmp_path: Path, *, target_bad_value: int = 0) -> dict:
+    fx = _setup_native(tmp_path, target_bad_value=target_bad_value)
+    native = run_materialize_sample_design_v2_native(
+        fx["request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    repository = TaskArtifactRepository(fx["settings"].db_path)
+    records = repository.list_for_task(fx["task"].id)
+    membership = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+    )
+    bundle = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+    )
+    sample_design_ref = {
+        "artifact_id": bundle["id"],
+        "artifact_content_hash": bundle["content_hash"],
+        "sample_design_id": native["sample_design_id"],
+        "sample_design_content_hash": native["sample_design_content_hash"],
+        "partition": "risk/development",
+    }
+    candidate = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            "dataset_id": fx["dataset"].id,
+            "expected_content_hash": fx["dataset"].content_hash,
+            "workspace_revision": fx["workspace"].revision,
+            "analysis_generation": fx["workspace"].analysis_generation,
+            "semantic_mapping_hash": fx["request"]["semantic_mapping_hash"],
+            "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
+            "drop_nan_labels": True,
+            "features": ["legacy_score", "channel"],
+            "methods": ["equal_width"],
+            "bin_count": 3,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+        },
+        fx["ctx"],
+    )
+    source = next(
+        item
+        for item in candidate["artifacts"]
+        if item["kind"] == "strategy_candidate_json"
+    )
+    inputs = {
+        "sample_design_ref": {
+            "membership_artifact_id": membership["id"],
+            "expected_membership_artifact_content_hash": membership[
+                "content_hash"
+            ],
+            "bundle_artifact_id": bundle["id"],
+            "expected_bundle_artifact_content_hash": bundle["content_hash"],
+            "expected_bundle_id": native["bundle_id"],
+            "expected_sample_design_id": native["sample_design_id"],
+            "expected_sample_design_content_hash": native[
+                "sample_design_content_hash"
+            ],
+        },
+        "univariate_sources": [
+            {
+                "artifact_id": source["artifact_id"],
+                "expected_artifact_content_hash": source["content_hash"],
+                "expected_candidate_id": candidate["candidate_id"],
+                "expected_evidence_hash": candidate["evidence_hash"],
+            }
+        ],
+    }
+    binding = model_evidence_tools._load_sample_design(
+        fx["runtime"],
+        fx["task"].id,
+        inputs,
+    )
+    return {
+        **fx,
+        "sample_v2": native,
+        "sample_design_ref": sample_design_ref,
+        "sample_binding": binding,
+        "candidate": candidate,
+        "inputs": inputs,
+    }
 
 
 def _registered_model_evidence(fx: dict) -> dict:
@@ -246,6 +334,9 @@ def test_materialize_model_evidence_is_univariate_only_idempotent_and_loadable(
         sample_design_ref=fx["inputs"]["sample_design_ref"],
     )
     assert loaded.bundle == first["bundle"]
+    assert derive_strategy_model_evidence_candidate_execution_ref(
+        loaded.sample_design_binding
+    ) == fx["request"]["legacy_sample_design_ref"]
     assert len(
         [
             item
@@ -422,144 +513,215 @@ def test_model_evidence_requires_the_exact_v2_legacy_compatibility_ref(
         run_materialize_model_evidence_v2(inputs, fx["ctx"], fx["runtime"])
 
 
-def test_model_evidence_native_sample_fails_closed_before_artifact_write(
+def test_model_evidence_native_sample_materializes_exact_risk_development(
     tmp_path: Path,
 ) -> None:
-    fx = _setup_native(tmp_path)
-    native = run_materialize_sample_design_v2_native(
-        fx["request"],
+    fx = _native_fixture(tmp_path, target_bad_value=0)
+
+    output = run_materialize_model_evidence_v2(
+        fx["inputs"],
         fx["ctx"],
         fx["runtime"],
     )
-    repository = TaskArtifactRepository(fx["settings"].db_path)
-    records = repository.list_for_task(fx["task"].id)
-    membership = next(
-        item
-        for item in records
-        if item["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
-    )
-    bundle = next(
-        item
-        for item in records
-        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
-    )
-    inputs = {
-        "sample_design_ref": {
-            "membership_artifact_id": membership["id"],
-            "expected_membership_artifact_content_hash": membership[
-                "content_hash"
-            ],
-            "bundle_artifact_id": bundle["id"],
-            "expected_bundle_artifact_content_hash": bundle["content_hash"],
-            "expected_bundle_id": native["bundle_id"],
-            "expected_sample_design_id": native["sample_design_id"],
-            "expected_sample_design_content_hash": native[
-                "sample_design_content_hash"
-            ],
-        },
-        "univariate_sources": [
-            {
-                "artifact_id": "1" * 64,
-                "expected_artifact_content_hash": "2" * 64,
-                "expected_candidate_id": "candidate-native-blocked",
-                "expected_evidence_hash": "3" * 64,
-            }
-        ],
-    }
-    records_before = repository.list_for_task(fx["task"].id)
 
-    with pytest.raises(StrategyError) as raised:
-        run_materialize_model_evidence_v2(
-            inputs,
-            fx["ctx"],
-            fx["runtime"],
+    assert (
+        derive_strategy_model_evidence_candidate_execution_ref(
+            fx["sample_binding"]
         )
-
-    assert (
-        getattr(raised.value, "code", None)
-        == "strategy_sample_design_v2_native_source_unsupported"
+        == fx["sample_design_ref"]
     )
-    assert getattr(raised.value, "consumer", None) == "strategy_model_evidence"
-    assert repository.list_for_task(fx["task"].id) == records_before
+    assert {
+        (item["sample_ref"]["population"], item["sample_ref"]["partition"])
+        for item in output["bundle"]["univariate_evidence"]
+    } == {("risk", "development")}
+    assert all(
+        item["analysis_ref"]["population"] == "risk"
+        and item["analysis_ref"]["partition"] == "development"
+        for item in output["bundle"]["univariate_evidence"]
+    )
+    assert all(
+        sum(
+            observation["value"]
+            for observation in evidence["observations"]
+            if observation["metric_key"] == "bin_bad_count"
+            and observation["status"] == "present"
+        )
+        == 1
+        for evidence in output["bundle"]["univariate_evidence"]
+    )
+    assert fx["candidate"]["candidate_evidence"]["analysis"][
+        "target_definition"
+    ] == {"good": 0, "bad": 1}
+
+    record = _registered_model_evidence(fx)
+    loaded = load_strategy_model_evidence_v2_artifact(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        artifact_id=record["id"],
+        expected_artifact_content_hash=output["artifact"]["content_hash"],
+        expected_bundle_id=output["bundle_id"],
+        expected_bundle_content_hash=output["bundle_content_hash"],
+        sample_design_ref=fx["inputs"]["sample_design_ref"],
+    )
+    assert loaded.bundle == output["bundle"]
+    assert (
+        derive_strategy_model_evidence_candidate_execution_ref(
+            loaded.sample_design_binding
+        )
+        == fx["sample_design_ref"]
+    )
 
 
-@pytest.mark.slow
-def test_model_evidence_native_blocker_survives_real_tool_runner_subprocess(
+def test_model_evidence_native_candidate_must_match_exact_bundle_identity(
     tmp_path: Path,
 ) -> None:
-    fx = _setup_native(tmp_path)
-    native = run_materialize_sample_design_v2_native(
-        fx["request"],
+    fx = _native_fixture(tmp_path)
+    alternate_request = deepcopy(fx["request"])
+    alternate_request["relationship"] = "parallel_time_cohorts"
+    alternate_request["approval_population"]["exclusion"] = {
+        "op": "eq",
+        "left": {"column": "customer_id"},
+        "right": {"literal": "a"},
+    }
+    alternate = run_materialize_sample_design_v2_native(
+        alternate_request,
         fx["ctx"],
         fx["runtime"],
     )
-    records = TaskArtifactRepository(
-        fx["settings"].db_path
-    ).list_for_task(fx["task"].id)
-    membership = next(
-        item
-        for item in records
-        if item["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+    records = TaskArtifactRepository(fx["settings"].db_path).list_for_task(
+        fx["task"].id
     )
-    bundle = next(
+    alternate_bundle = next(
         item
         for item in records
         if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and item["path"].endswith(f"{alternate['bundle_id']}.json")
     )
-    plugin_repository = PluginRepository(fx["settings"].db_path)
-    plugin_registry = PluginRegistry(plugin_repository)
-    load_builtin_packs(
-        plugin_registry,
-        Path(__file__).parents[1] / "marvis" / "packs",
-    )
-    runner = ToolRunner(
-        ToolRegistry(plugin_registry),
-        plugin_repository,
-        python_executable=sys.executable,
-        datasets_root=fx["settings"].datasets_dir,
-        workspace=fx["settings"].workspace,
-    )
-
-    result = runner.invoke(
-        ToolRef("strategy", "materialize_model_evidence_v2"),
-        {
-            "sample_design_ref": {
-                "membership_artifact_id": membership["id"],
-                "expected_membership_artifact_content_hash": membership[
-                    "content_hash"
-                ],
-                "bundle_artifact_id": bundle["id"],
-                "expected_bundle_artifact_content_hash": bundle[
-                    "content_hash"
-                ],
-                "expected_bundle_id": native["bundle_id"],
-                "expected_sample_design_id": native["sample_design_id"],
-                "expected_sample_design_content_hash": native[
-                    "sample_design_content_hash"
-                ],
-            },
-            "univariate_sources": [
-                {
-                    "artifact_id": "1" * 64,
-                    "expected_artifact_content_hash": "2" * 64,
-                    "expected_candidate_id": "candidate-" + "3" * 32,
-                    "expected_evidence_hash": "4" * 64,
-                }
-            ],
-        },
-        task_id=fx["task"].id,
-    )
-
-    assert result.ok is False
-    assert (
-        result.error_kind
-        == "strategy_sample_design_v2_native_source_unsupported"
-    )
-    assert result.error_detail == {
-        "kind": "strategy_sample_design_v2_native_source_unsupported",
-        "consumer": "strategy_model_evidence",
-        "source_mode": "native_active_dataset",
+    alternate_ref = {
+        "artifact_id": alternate_bundle["id"],
+        "artifact_content_hash": alternate_bundle["content_hash"],
+        "sample_design_id": alternate["sample_design_id"],
+        "sample_design_content_hash": alternate["sample_design_content_hash"],
+        "partition": "risk/development",
     }
+    candidate = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            "dataset_id": fx["dataset"].id,
+            "expected_content_hash": fx["dataset"].content_hash,
+            "workspace_revision": fx["workspace"].revision,
+            "analysis_generation": fx["workspace"].analysis_generation,
+            "semantic_mapping_hash": fx["request"]["semantic_mapping_hash"],
+            "target_col": "bad",
+            "sample_design_ref": alternate_ref,
+            "drop_nan_labels": True,
+            "features": ["legacy_score"],
+            "methods": ["equal_width"],
+            "bin_count": 3,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+        },
+        fx["ctx"],
+    )
+    source = next(
+        item
+        for item in candidate["artifacts"]
+        if item["kind"] == "strategy_candidate_json"
+    )
+    inputs = deepcopy(fx["inputs"])
+    inputs["univariate_sources"] = [
+        {
+            "artifact_id": source["artifact_id"],
+            "expected_artifact_content_hash": source["content_hash"],
+            "expected_candidate_id": candidate["candidate_id"],
+            "expected_evidence_hash": candidate["evidence_hash"],
+        }
+    ]
+
+    with pytest.raises(StrategyError, match="sample binding.*SampleDesign V2"):
+        run_materialize_model_evidence_v2(inputs, fx["ctx"], fx["runtime"])
+
+
+def test_model_evidence_native_candidate_rejects_crossed_legacy_source_token(
+    tmp_path: Path,
+) -> None:
+    fx = _native_fixture(tmp_path)
+    source_request = fx["inputs"]["univariate_sources"][0]
+    repository = TaskArtifactRepository(fx["settings"].db_path)
+    original_record = repository.get_for_task(
+        fx["task"].id,
+        source_request["artifact_id"],
+    )
+    assert original_record is not None
+    original = fx["candidate"]["candidate_evidence"]
+    crossed_token = "strategy-sample-design:" + model_evidence_tools._canonical_json(
+        {
+            "kind": "strategy_sample_design",
+            **fx["sample_design_ref"],
+        }
+    )
+    source_refs = [
+        crossed_token
+        if item.startswith("strategy-sample-design:")
+        else item
+        for item in original["source_refs"]
+    ]
+    forged = build_candidate_evidence(
+        task_id=original["identity"]["task_id"],
+        dataset_id=original["identity"]["dataset_id"],
+        dataset_content_hash=original["identity"]["dataset_content_hash"],
+        workspace_revision=original["identity"]["workspace_revision"],
+        workspace_generation=original["identity"]["workspace_generation"],
+        semantic_mapping_hash=original["identity"]["semantic_mapping_hash"],
+        generation_parameters=original["generation"]["parameters"],
+        seed=original["generation"]["seed"],
+        budget=original["generation"]["budget"],
+        truncated=original["generation"]["truncated"],
+        analysis=original["analysis"],
+        metrics=original["metrics"],
+        source_refs=source_refs,
+        red_flags=original["red_flags"],
+        producer_version=original["producer_version"],
+    )
+    raw = canonical_strategy_candidate_report_json(
+        forged,
+        original["analysis"],
+    )
+    content_hash = hashlib.sha256(raw).hexdigest()
+    path = (
+        fx["settings"].tasks_dir
+        / fx["task"].id
+        / "strategy_candidates"
+        / f"{forged['candidate_id']}_{content_hash[:12]}.json"
+    )
+    path.write_bytes(raw)
+    provenance = deepcopy(original_record["provenance"])
+    provenance.update(
+        {
+            "candidate_id": forged["candidate_id"],
+            "evidence_hash": forged["evidence_hash"],
+            "generation_parameters": forged["generation"]["parameters"],
+        }
+    )
+    forged_record = repository.register(
+        task_id=fx["task"].id,
+        kind="strategy_candidate_json",
+        path=str(path),
+        content_hash=content_hash,
+        origin_tool="strategy.analyze_univariate_candidates",
+        provenance=provenance,
+    )
+    inputs = deepcopy(fx["inputs"])
+    inputs["univariate_sources"] = [
+        {
+            "artifact_id": forged_record["id"],
+            "expected_artifact_content_hash": content_hash,
+            "expected_candidate_id": forged["candidate_id"],
+            "expected_evidence_hash": forged["evidence_hash"],
+        }
+    ]
+
+    with pytest.raises(StrategyError, match="source token is invalid"):
+        run_materialize_model_evidence_v2(inputs, fx["ctx"], fx["runtime"])
 
 
 def test_model_evidence_types_immature_outcomes_without_inventing_values(
@@ -792,13 +954,23 @@ def test_model_evidence_rejects_cumulative_source_bytes_before_next_read_or_outp
         "_MAX_CANDIDATE_SOURCE_BYTES_TOTAL",
         sum(source_sizes) - 1,
     )
-    original_read_bytes = Path.read_bytes
+    original_open = model_evidence_tools.os.open
+    original_read = model_evidence_tools.os.read
+    candidate_descriptors: dict[int, Path] = {}
     candidate_reads: list[Path] = []
 
-    def track_candidate_reads(path: Path) -> bytes:
-        if path in source_paths:
-            candidate_reads.append(path)
-        return original_read_bytes(path)
+    def track_candidate_reads(path, flags):
+        candidate_path = Path(path)
+        descriptor = original_open(path, flags)
+        if candidate_path in source_paths:
+            candidate_descriptors[descriptor] = candidate_path
+        return descriptor
+
+    def track_candidate_chunks(descriptor, size):
+        candidate_path = candidate_descriptors.get(descriptor)
+        if candidate_path is not None and candidate_path not in candidate_reads:
+            candidate_reads.append(candidate_path)
+        return original_read(descriptor, size)
 
     translate_called = False
     persist_called = False
@@ -813,7 +985,8 @@ def test_model_evidence_rejects_cumulative_source_bytes_before_next_read_or_outp
         persist_called = True
         raise AssertionError("output persistence must not run after byte exhaustion")
 
-    monkeypatch.setattr(Path, "read_bytes", track_candidate_reads)
+    monkeypatch.setattr(model_evidence_tools.os, "open", track_candidate_reads)
+    monkeypatch.setattr(model_evidence_tools.os, "read", track_candidate_chunks)
     monkeypatch.setattr(model_evidence_tools, "_translate_sources", fail_if_translated)
     monkeypatch.setattr(model_evidence_tools, "_persist_bundle", fail_if_persisted)
 
@@ -925,6 +1098,62 @@ def test_model_evidence_rechecks_source_under_writer_lock(
         run_materialize_model_evidence_v2(
             fx["inputs"], fx["ctx"], fx["runtime"]
         )
+    out_dir = (
+        fx["settings"].tasks_dir / fx["task"].id / "strategy_model_evidence"
+    )
+    assert not list(out_dir.glob("*.json"))
+
+
+def test_model_evidence_rechecks_agent_registry_snapshot_under_writer_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _fixture(tmp_path)
+    repository = TaskArtifactRepository(fx["settings"].db_path)
+    inputs = deepcopy(fx["inputs"])
+    inputs["expected_registry_token"] = (
+        model_evidence_tools.strategy_model_evidence_registry_snapshot_token(
+            repository.list_for_task(fx["task"].id)
+        )
+    )
+    original = model_evidence_tools._persist_bundle
+    published = False
+
+    def publish_then_persist(*args, **kwargs):
+        nonlocal published
+        if not published:
+            path = (
+                fx["settings"].tasks_dir
+                / fx["task"].id
+                / "newer-native-sample-design-v2.json"
+            )
+            raw = b"{}"
+            path.write_bytes(raw)
+            repository.register(
+                task_id=fx["task"].id,
+                kind=SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+                path=str(path),
+                content_hash=hashlib.sha256(raw).hexdigest(),
+                origin_tool="strategy.materialize_sample_design_v2_native",
+                provenance={},
+            )
+            published = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        model_evidence_tools,
+        "_persist_bundle",
+        publish_then_persist,
+    )
+
+    with pytest.raises(StrategyError, match="registry snapshot changed"):
+        run_materialize_model_evidence_v2(
+            inputs,
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert published is True
     out_dir = (
         fx["settings"].tasks_dir / fx["task"].id / "strategy_model_evidence"
     )

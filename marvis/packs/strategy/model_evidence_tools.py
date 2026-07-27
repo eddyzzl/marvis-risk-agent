@@ -27,6 +27,9 @@ from marvis.output.strategy_candidate_report import (
     strategy_candidate_report_from_json,
 )
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
+from marvis.packs.strategy.candidate_fragment import (
+    sample_context_hash_from_candidate_evidence,
+)
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.model_evidence import (
     DEFAULT_PRODUCER_VERSION,
@@ -44,14 +47,22 @@ from marvis.packs.strategy.model_evidence import (
     strategy_model_evidence_bundle_from_json,
     validate_strategy_model_evidence_bundle,
 )
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 from marvis.packs.strategy.sample_design_v2 import (
     validate_strategy_sample_design_v2_bundle,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    StrategySampleDesignV2NativeArtifactBinding,
+)
 from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_ORIGIN_TOOL,
     StrategySampleDesignV2ArtifactBinding,
     load_any_strategy_sample_design_v2_artifacts,
-    require_strategy_sample_design_v2_artifact_binding_on_connection,
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection,
     resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.repositories.task_artifacts import (
@@ -91,7 +102,12 @@ _MAX_TRANSLATION_BINS = (
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
-_INPUT_FIELDS = frozenset({"sample_design_ref", "univariate_sources"})
+_REQUIRED_INPUT_FIELDS = frozenset(
+    {"sample_design_ref", "univariate_sources"}
+)
+_INPUT_FIELDS = _REQUIRED_INPUT_FIELDS | frozenset(
+    {"expected_registry_token"}
+)
 _SAMPLE_DESIGN_INPUT_FIELDS = frozenset(
     {
         "membership_artifact_id",
@@ -194,6 +210,10 @@ _BOUNDARY_ERRORS = (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+_StrategySampleDesignV2Binding = (
+    StrategySampleDesignV2ArtifactBinding
+    | StrategySampleDesignV2NativeArtifactBinding
+)
 
 
 @dataclass(frozen=True)
@@ -280,25 +300,129 @@ class StrategyModelEvidenceV2ArtifactBinding:
     artifact_content_hash: str
     provenance: dict[str, Any]
     bundle: dict[str, Any]
-    sample_design_binding: StrategySampleDesignV2ArtifactBinding
+    sample_design_binding: _StrategySampleDesignV2Binding
     sources: tuple[_CandidateSourceBinding, ...]
     warnings: tuple[str, ...]
     tasks_root: Path
     db_path: Path
 
 
+def derive_strategy_model_evidence_candidate_execution_ref(
+    binding: _StrategySampleDesignV2Binding,
+) -> dict[str, str]:
+    """Derive the sole exact candidate-development ref for an authenticated V2 pair.
+
+    Callers must pass the result of
+    :func:`load_any_strategy_sample_design_v2_artifacts`.  The concrete binding
+    class and the strict compatibility shape jointly select the legacy or
+    native lineage, so Agent orchestration never has to duplicate artifact
+    kind/origin dispatch.
+    """
+
+    if isinstance(binding, StrategySampleDesignV2ArtifactBinding):
+        design = binding.bundle["sample_design"]
+        if (
+            resolve_strategy_sample_design_v2_source_mode(
+                design,
+                capability="physical_v2",
+            )
+            != "legacy_anchored"
+        ):
+            raise StrategyError(
+                "legacy sample-design V2 binding source mode changed"
+            )
+        reference = StrategyRiskDevelopmentRef.from_value(
+            design["compatibility"]["legacy_development_ref"]
+        )
+        if reference.partition != "development":
+            raise StrategyError(
+                "legacy model-evidence candidate partition must be development"
+            )
+        return reference.to_ref_dict()
+
+    if isinstance(binding, StrategySampleDesignV2NativeArtifactBinding):
+        design = binding.bundle["sample_design"]
+        if (
+            resolve_strategy_sample_design_v2_source_mode(
+                design,
+                capability="physical_v2",
+            )
+            != "native_active_dataset"
+        ):
+            raise StrategyError(
+                "native sample-design V2 binding source mode changed"
+            )
+        return StrategyRiskDevelopmentRef.from_value(
+            {
+                "artifact_id": binding.bundle_artifact_id,
+                "artifact_content_hash": binding.bundle_artifact_content_hash,
+                "sample_design_id": design["sample_design_id"],
+                "sample_design_content_hash": design["content_hash"],
+                "partition": "risk/development",
+            }
+        ).to_ref_dict()
+
+    raise StrategyError(
+        "model-evidence sample design must be an authenticated legacy or "
+        "native V2 artifact binding"
+    )
+
+
+def strategy_model_evidence_registry_snapshot_token(
+    artifacts: Sequence[Mapping[str, Any]],
+) -> str:
+    """Hash the ordered registry rows that define current Agent aggregation."""
+
+    relevant: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise StrategyError(
+                "model-evidence V2 registry snapshot must contain objects"
+            )
+        is_sample = (
+            artifact.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+            and artifact.get("origin_tool")
+            in {
+                SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+                SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+            }
+        )
+        is_candidate = (
+            artifact.get("kind") == _SOURCE_ARTIFACT_KIND
+            and artifact.get("origin_tool") == _SOURCE_ORIGIN_TOOL
+        )
+        if is_sample or is_candidate:
+            relevant.append(
+                {
+                    "id": artifact.get("id"),
+                    "kind": artifact.get("kind"),
+                    "content_hash": artifact.get("content_hash"),
+                    "origin_tool": artifact.get("origin_tool"),
+                    "provenance": artifact.get("provenance"),
+                    "created_at": artifact.get("created_at"),
+                }
+            )
+    try:
+        return _sha256(_canonical_json(relevant).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise StrategyError(
+            "model-evidence V2 registry snapshot is not canonical JSON"
+        ) from exc
+
+
 def run_materialize_model_evidence_v2(inputs, ctx, runtime) -> dict[str, Any]:
     """Translate authenticated candidate reports into one immutable V2 bundle."""
 
     try:
-        request = _validate_inputs(inputs)
+        normalized_inputs = _validate_inputs(inputs)
+        expected_registry_token = normalized_inputs.pop(
+            "expected_registry_token",
+            None,
+        )
+        request = normalized_inputs
         task_id = _text(ctx.task_id, "task_id")
         sample_binding = _load_sample_design(runtime, task_id, request)
-        resolve_strategy_sample_design_v2_source_mode(
-            sample_binding.bundle["sample_design"],
-            capability="legacy_development",
-            consumer="strategy_model_evidence",
-        )
+        derive_strategy_model_evidence_candidate_execution_ref(sample_binding)
         sources = _load_candidate_sources(
             runtime,
             task_id=task_id,
@@ -317,6 +441,7 @@ def run_materialize_model_evidence_v2(inputs, ctx, runtime) -> dict[str, Any]:
             sources=sources,
             bundle=bundle,
             warnings=warnings,
+            expected_registry_token=expected_registry_token,
         )
     except StrategyError:
         raise
@@ -611,7 +736,7 @@ def require_strategy_model_evidence_v2_artifact_binding_on_connection(
     if tuple(provenance["translation_warnings"]) != tuple(binding.warnings):
         raise StrategyError("model-evidence V2 binding warnings changed")
 
-    require_strategy_sample_design_v2_artifact_binding_on_connection(
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection(
         conn,
         binding.sample_design_binding,
     )
@@ -690,7 +815,15 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         error=f"univariate_sources exceeds source budget ({_MAX_UNIVARIATE_SOURCES})",
     )
     obj = _json_object(value, "materialize_model_evidence_v2 inputs")
-    _exact_fields(obj, _INPUT_FIELDS, "materialize_model_evidence_v2 inputs")
+    _exact_fields(
+        obj,
+        (
+            _INPUT_FIELDS
+            if "expected_registry_token" in obj
+            else _REQUIRED_INPUT_FIELDS
+        ),
+        "materialize_model_evidence_v2 inputs",
+    )
     sample = _json_object(obj["sample_design_ref"], "sample_design_ref")
     _exact_fields(sample, _SAMPLE_DESIGN_INPUT_FIELDS, "sample_design_ref")
     normalized_sample = {
@@ -750,14 +883,22 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     if len({item["expected_candidate_id"] for item in sources}) != len(sources):
         raise StrategyError("univariate_sources contains duplicate candidate_id values")
     sources.sort(key=lambda item: item["artifact_id"])
-    request = {"sample_design_ref": normalized_sample, "univariate_sources": sources}
+    request = {
+        "sample_design_ref": normalized_sample,
+        "univariate_sources": sources,
+    }
+    if "expected_registry_token" in obj:
+        request["expected_registry_token"] = _hash(
+            obj["expected_registry_token"],
+            "expected_registry_token",
+        )
     _require_json_byte_budget(request, "materialize_model_evidence_v2 inputs")
     return request
 
 
 def _load_sample_design(
     runtime, task_id: str, request: Mapping[str, Any]
-) -> StrategySampleDesignV2ArtifactBinding:
+) -> _StrategySampleDesignV2Binding:
     ref = request["sample_design_ref"]
     return load_any_strategy_sample_design_v2_artifacts(
         runtime,
@@ -783,7 +924,7 @@ def _load_candidate_sources(
     *,
     task_id: str,
     requests: Sequence[Mapping[str, str]],
-    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample_binding: _StrategySampleDesignV2Binding,
 ) -> tuple[_CandidateSourceBinding, ...]:
     result: list[_CandidateSourceBinding] = []
     consumed_bytes = 0
@@ -808,7 +949,7 @@ def _load_candidate_source(
     *,
     task_id: str,
     request: Mapping[str, str],
-    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample_binding: _StrategySampleDesignV2Binding,
     maximum_bytes: int,
 ) -> _CandidateSourceBinding:
     record = runtime.task_artifacts.get_for_task(task_id, request["artifact_id"])
@@ -917,7 +1058,7 @@ def _require_candidate_binding(
     provenance: Mapping[str, Any],
     request: Mapping[str, str],
     task_id: str,
-    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample_binding: _StrategySampleDesignV2Binding,
 ) -> None:
     if (
         evidence["candidate_id"] != request["expected_candidate_id"]
@@ -959,15 +1100,29 @@ def _require_candidate_binding(
             "source candidate dataset/workspace does not match SampleDesign V2"
         )
     try:
-        legacy_ref = StrategySampleDesignRef.from_value(
+        # The candidate fragment seam owns the canonical kind/token pairing.
+        # Calling it here prevents a self-authenticating report from crossing
+        # legacy/native kinds while retaining the same five visible ref fields.
+        sample_context_hash_from_candidate_evidence(evidence)
+        candidate_ref = StrategyRiskDevelopmentRef.from_value(
             parameters.get("sample_design_ref")
         ).to_ref_dict()
     except StrategyError as exc:
-        raise StrategyError("source candidate legacy sample binding is invalid") from exc
-    expected_legacy = design["compatibility"]["legacy_development_ref"]
-    if legacy_ref != expected_legacy or design["compatibility"]["maps_to"] != "risk/development":
         raise StrategyError(
-            "source candidate legacy sample binding does not equal V2 compatibility"
+            "source candidate sample binding or source token is invalid"
+        ) from exc
+    expected_ref = derive_strategy_model_evidence_candidate_execution_ref(
+        sample_binding
+    )
+    if candidate_ref != expected_ref:
+        if isinstance(sample_binding, StrategySampleDesignV2ArtifactBinding):
+            raise StrategyError(
+                "source candidate legacy sample binding does not equal V2 "
+                "compatibility"
+            )
+        raise StrategyError(
+            "source candidate sample binding does not equal SampleDesign V2 "
+            "execution identity"
         )
     analysis = evidence["analysis"]
     _require_candidate_analysis_contract(
@@ -1064,7 +1219,7 @@ def _require_candidate_analysis_contract(
 
 def _translate_sources(
     *,
-    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample_binding: _StrategySampleDesignV2Binding,
     sources: Sequence[_CandidateSourceBinding],
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     evidence_items: list[dict[str, Any]] = []
@@ -1549,15 +1704,68 @@ def _unavailable_observation(
     )
 
 
+def _require_registry_snapshot_on_connection(
+    conn,
+    *,
+    task_id: str,
+    expected_token: str,
+) -> None:
+    """Recheck the Agent discovery snapshot while holding the writer lock."""
+
+    rows = conn.execute(
+        """
+        SELECT id, kind, content_hash, origin_tool, provenance_json, created_at
+          FROM task_artifacts
+         WHERE task_id = ?
+           AND (
+                (kind = ? AND origin_tool IN (?, ?))
+                OR (kind = ? AND origin_tool = ?)
+           )
+         ORDER BY created_at, id
+        """,
+        (
+            task_id,
+            SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+            SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+            SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+            _SOURCE_ARTIFACT_KIND,
+            _SOURCE_ORIGIN_TOOL,
+        ),
+    ).fetchall()
+    artifacts: list[dict[str, Any]] = []
+    try:
+        for row in rows:
+            artifacts.append(
+                {
+                    "id": row["id"],
+                    "kind": row["kind"],
+                    "content_hash": row["content_hash"],
+                    "origin_tool": row["origin_tool"],
+                    "provenance": json.loads(row["provenance_json"]),
+                    "created_at": row["created_at"],
+                }
+            )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise StrategyError(
+            "model-evidence V2 registry snapshot is invalid"
+        ) from exc
+    current = strategy_model_evidence_registry_snapshot_token(artifacts)
+    if not hmac.compare_digest(current, expected_token):
+        raise StrategyError(
+            "model-evidence V2 registry snapshot changed before persistence"
+        )
+
+
 def _persist_bundle(
     runtime,
     *,
     task_id: str,
     request: Mapping[str, Any],
-    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample_binding: _StrategySampleDesignV2Binding,
     sources: Sequence[_CandidateSourceBinding],
     bundle: Mapping[str, Any],
     warnings: Sequence[str],
+    expected_registry_token: str | None = None,
 ) -> dict[str, Any]:
     canonical = canonical_strategy_model_evidence_bundle_json(
         bundle, sample_design_bundle=sample_binding.bundle
@@ -1585,7 +1793,13 @@ def _persist_bundle(
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                require_strategy_sample_design_v2_artifact_binding_on_connection(
+                if expected_registry_token is not None:
+                    _require_registry_snapshot_on_connection(
+                        conn,
+                        task_id=task_id,
+                        expected_token=expected_registry_token,
+                    )
+                require_any_strategy_sample_design_v2_artifact_binding_on_connection(
                     conn, sample_binding
                 )
                 for source in sources:
@@ -1670,7 +1884,7 @@ def _persist_bundle(
 def _artifact_provenance(
     *,
     request: Mapping[str, Any],
-    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample_binding: _StrategySampleDesignV2Binding,
     bundle: Mapping[str, Any],
     artifact_content_hash: str,
     warnings: Sequence[str],
@@ -1695,8 +1909,13 @@ def _artifact_provenance(
             "dataset_registry_metadata_hash"
         ],
         "workspace_ref": dict(design["identity"]["workspace_ref"]),
-        "legacy_sample_design_ref": dict(
-            design["compatibility"]["legacy_development_ref"]
+        # Keep the V1 field name for persisted provenance compatibility.  Its
+        # value now carries the source-agnostic candidate execution ref; legacy
+        # bytes remain exactly unchanged.
+        "legacy_sample_design_ref": (
+            derive_strategy_model_evidence_candidate_execution_ref(
+                sample_binding
+            )
         ),
         "univariate_sources": [dict(item) for item in request["univariate_sources"]],
         "request_hash": _sha256(_canonical_json(request).encode("utf-8")),
@@ -1808,9 +2027,14 @@ def _validate_provenance(value: object) -> dict[str, Any]:
     obj["workspace_ref"] = _json_object(
         obj["workspace_ref"], "provenance.workspace_ref"
     )
-    obj["legacy_sample_design_ref"] = StrategySampleDesignRef.from_value(
+    execution_ref = StrategyRiskDevelopmentRef.from_value(
         obj["legacy_sample_design_ref"]
-    ).to_ref_dict()
+    )
+    if execution_ref.partition not in {"development", "risk/development"}:
+        raise StrategyError(
+            "model-evidence V2 provenance candidate partition is invalid"
+        )
+    obj["legacy_sample_design_ref"] = execution_ref.to_ref_dict()
     obj["translation_warnings"] = _warnings(obj["translation_warnings"])
     return obj
 
@@ -1820,7 +2044,7 @@ def _require_provenance_binding(
     *,
     task_id: str,
     request: Mapping[str, Any],
-    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample_binding: _StrategySampleDesignV2Binding,
     artifact_content_hash: str,
     expected_bundle_id: str,
     expected_bundle_content_hash: str,
@@ -1842,9 +2066,11 @@ def _require_provenance_binding(
             "dataset_registry_metadata_hash"
         ],
         "workspace_ref": design["identity"]["workspace_ref"],
-        "legacy_sample_design_ref": design["compatibility"][
-            "legacy_development_ref"
-        ],
+        "legacy_sample_design_ref": (
+            derive_strategy_model_evidence_candidate_execution_ref(
+                sample_binding
+            )
+        ),
         "univariate_sources": request["univariate_sources"],
     }
     for field, value in expected.items():
@@ -2314,8 +2540,10 @@ __all__ = [
     "MODEL_EVIDENCE_V2_ORIGIN_TOOL",
     "MODEL_EVIDENCE_V2_TOOL_SCHEMA_VERSION",
     "StrategyModelEvidenceV2ArtifactBinding",
+    "derive_strategy_model_evidence_candidate_execution_ref",
     "load_strategy_model_evidence_v2_artifact",
     "require_strategy_model_evidence_v2_artifact_binding_on_connection",
     "run_materialize_model_evidence_v2",
+    "strategy_model_evidence_registry_snapshot_token",
     "validate_materialize_model_evidence_v2_tool_output",
 ]

@@ -39,7 +39,7 @@ from marvis.packs.strategy.pool_tools import (
     StrategyPoolDevelopmentExecutionBinding,
     bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
-    require_strategy_candidate_pool_artifact_binding_on_connection,
+    require_strategy_pool_development_execution_binding_on_connection,
 )
 from marvis.packs.strategy.pool_requirement_resolver import (
     ResolvedPoolRequirements,
@@ -50,11 +50,17 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     resolve_pool_requirements,
     validate_pool_requirement_bindings_provenance,
 )
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+    bind_strategy_risk_development_frame,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    StrategySampleDesignV2NativeArtifactBinding,
+)
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
     load_any_strategy_sample_design_v2_artifacts,
-    require_strategy_sample_design_v2_artifact_binding_on_connection,
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection,
     resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.repositories.strategy import (
@@ -68,6 +74,10 @@ from marvis.repositories.task_artifacts import (
     _stable_artifact_id,
 )
 
+_StrategySampleDesignV2Binding = (
+    StrategySampleDesignV2ArtifactBinding
+    | StrategySampleDesignV2NativeArtifactBinding
+)
 
 IMPACT_CUBE_TOOL_SCHEMA_VERSION = "strategy.measure-impact-cube-tool.v3"
 IMPACT_CUBE_ARTIFACT_KIND = "strategy_impact_cube_json"
@@ -295,7 +305,7 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
         )
         resolve_strategy_sample_design_v2_source_mode(
             sample.bundle["sample_design"],
-            capability="legacy_development",
+            capability="physical_v2",
             consumer="strategy_impact_cube",
         )
         development = bind_strategy_pool_development_execution(runtime, pool)
@@ -305,7 +315,7 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             compiled_design={
                 "requirements": list(
                     project_pool_entry_requirements(pool.pool["entries"])
-                )
+                ),
             },
             sample_design=sample,
         )
@@ -321,10 +331,22 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             strategy_type=request["strategy_type"],
             value=request["current_strategy_ref"],
         )
+        _require_strategy_expression_fields_allowed(
+            development,
+            pool.compiled_design["strategy_spec"],
+            field_name="Strategy Pool",
+        )
+        if current is not None:
+            _require_strategy_expression_fields_allowed(
+                development,
+                current.spec.to_dict(),
+                field_name="current strategy",
+            )
         _require_bindings_under_lock(
             runtime,
             pool=pool,
             sample=sample,
+            development=development,
             current=current,
             task_id=task_id,
             resolved_requirements=resolved_requirements,
@@ -333,6 +355,7 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             runtime,
             pool=pool,
             sample=sample,
+            development=development,
             current=current,
             request=request,
             target_col=semantics["target_col"],
@@ -386,6 +409,7 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             request=request,
             pool=pool,
             sample=sample,
+            development=development,
             current=current,
             resolved_requirements=resolved_requirements,
             cube=cube,
@@ -761,7 +785,7 @@ def _load_sample_design_binding(
     *,
     task_id: str,
     request: Mapping[str, Any],
-) -> StrategySampleDesignV2ArtifactBinding:
+) -> _StrategySampleDesignV2Binding:
     ref = request["sample_design_ref"]
     return load_any_strategy_sample_design_v2_artifacts(
         runtime,
@@ -786,7 +810,7 @@ def _require_sample_contract(
     *,
     pool: StrategyCandidatePoolArtifactBinding,
     development: StrategyPoolDevelopmentExecutionBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
     partitions: Sequence[str],
 ) -> dict[str, Any]:
     design = sample.bundle["sample_design"]
@@ -814,31 +838,29 @@ def _require_sample_contract(
                     f"ImpactCube {role}/{partition} partition is empty"
                 )
 
-    legacy_ref = StrategySampleDesignRef.from_value(
-        design["compatibility"]["legacy_development_ref"]
-    )
-    if legacy_ref != sample.source_binding.legacy.reference:
-        raise StrategyError(
-            "StrategySampleDesign V2 legacy development mapping changed"
-        )
+    development_ref, source_mode = _development_ref_for_sample(sample)
     _require_pool_development_contract(
         pool=pool,
         development=development,
         sample=sample,
-        legacy_ref=legacy_ref,
+        development_ref=development_ref,
+        source_mode=source_mode,
         target_col=target["column"],
+        target_bad_value=target["bad_value"],
     )
     if (
-        sample.source_binding.legacy.target_col != target["column"]
-        or sample.source_binding.legacy.target_bad_value
-        != target["bad_value"]
+        sample.source_binding.target_col != target["column"]
+        or sample.source_binding.target_bad_value != target["bad_value"]
     ):
         raise StrategyError(
-            "StrategySampleDesign V2 target polarity changed from legacy lineage"
+            "StrategySampleDesign V2 target polarity changed from source lineage"
         )
     fields = design["sample_semantics"]["field_bindings"]
     return {
-        "legacy_development_ref": legacy_ref.to_ref_dict(),
+        # Keep the established evidence field name for backward-compatible
+        # legacy bytes.  Its value is now the exact generic development ref,
+        # which may identify either development or risk/development.
+        "legacy_development_ref": development_ref.to_ref_dict(),
         "target_col": target["column"],
         "target_bad_value": target["bad_value"],
         "entity_col": fields["entity_field"],
@@ -847,19 +869,45 @@ def _require_sample_contract(
     }
 
 
+def _development_ref_for_sample(
+    sample,
+) -> tuple[StrategyRiskDevelopmentRef, str]:
+    design = sample.bundle["sample_design"]
+    source_mode = resolve_strategy_sample_design_v2_source_mode(
+        design,
+        capability="physical_v2",
+        consumer="strategy_impact_cube",
+    )
+    if source_mode == "legacy_anchored":
+        value = design["compatibility"]["legacy_development_ref"]
+    else:
+        value = {
+            "artifact_id": sample.bundle_artifact_id,
+            "artifact_content_hash": sample.bundle_artifact_content_hash,
+            "sample_design_id": design["sample_design_id"],
+            "sample_design_content_hash": design["content_hash"],
+            "partition": "risk/development",
+        }
+    return StrategyRiskDevelopmentRef.from_value(value), source_mode
+
+
 def _require_pool_development_contract(
     *,
     pool: StrategyCandidatePoolArtifactBinding,
     development: StrategyPoolDevelopmentExecutionBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
-    legacy_ref: StrategySampleDesignRef,
+    sample: _StrategySampleDesignV2Binding,
+    development_ref: StrategyRiskDevelopmentRef,
+    source_mode: str,
     target_col: str,
+    target_bad_value: int,
 ) -> None:
     if (
         development.pool is not pool
         or development.task_id != pool.task_id
-        or development.sample_design.reference != legacy_ref
+        or development.sample_design.reference != development_ref
+        or development.sample_design.source_mode != source_mode
         or development.target_col != target_col
+        or development.sample_design.target_bad_value != target_bad_value
     ):
         raise StrategyError(
             "Strategy Pool development binding does not match "
@@ -893,7 +941,7 @@ def _require_pool_development_contract(
 
 
 def _sample_design_v2_identity(
-    binding: StrategySampleDesignV2ArtifactBinding,
+    binding: _StrategySampleDesignV2Binding,
 ) -> tuple[str, ...]:
     return (
         binding.task_id,
@@ -955,11 +1003,31 @@ def _load_current_strategy(
     )
 
 
+def _require_strategy_expression_fields_allowed(
+    development: StrategyPoolDevelopmentExecutionBinding,
+    strategy_spec: Mapping[str, Any],
+    *,
+    field_name: str,
+) -> None:
+    disallowed = sorted(
+        _expression_fields(strategy_spec).intersection(
+            development.sample_design.excluded_feature_columns
+        )
+    )
+    if disallowed:
+        raise StrategyError(
+            f"{field_name} cannot use sample-design governed columns "
+            "(target, partition, or population filters): "
+            + ", ".join(disallowed)
+        )
+
+
 def _require_bindings_under_lock(
     runtime,
     *,
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
+    development: StrategyPoolDevelopmentExecutionBinding,
     current: _CurrentStrategyBinding | None,
     task_id: str,
     resolved_requirements: ResolvedPoolRequirements,
@@ -970,6 +1038,7 @@ def _require_bindings_under_lock(
             conn,
             pool=pool,
             sample=sample,
+            development=development,
             current=current,
             task_id=task_id,
             resolved_requirements=resolved_requirements,
@@ -982,13 +1051,21 @@ def _require_bindings_on_connection(
     conn,
     *,
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
+    development: StrategyPoolDevelopmentExecutionBinding,
     current: _CurrentStrategyBinding | None,
     task_id: str,
     resolved_requirements: ResolvedPoolRequirements,
 ) -> None:
-    require_strategy_candidate_pool_artifact_binding_on_connection(conn, pool)
-    require_strategy_sample_design_v2_artifact_binding_on_connection(
+    if development.pool is not pool:
+        raise StrategyError(
+            "Strategy Pool development binding changed before ImpactCube commit"
+        )
+    require_strategy_pool_development_execution_binding_on_connection(
+        conn,
+        development,
+    )
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection(
         conn,
         sample,
     )
@@ -1042,7 +1119,8 @@ def _read_partition_frames(
     runtime,
     *,
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
+    development: StrategyPoolDevelopmentExecutionBinding,
     current: _CurrentStrategyBinding | None,
     request: Mapping[str, Any],
     target_col: str,
@@ -1050,7 +1128,7 @@ def _read_partition_frames(
     overdue_amount_col: str | None,
     resolved_requirements: ResolvedPoolRequirements,
 ) -> dict[str, dict[str, pd.DataFrame]]:
-    path = sample.source_binding.dataset_path
+    path = development.dataset.path
     _require_dataset_path(
         path,
         root=Path(runtime.settings.datasets_dir).absolute(),
@@ -1077,9 +1155,10 @@ def _read_partition_frames(
         for binding in economics.values()
         if binding["kind"] == "column"
     )
+    fields.update(development.sample_design.partition_columns)
     virtual_fields = set(resolved_requirements.virtual_fields)
     physical_fields = fields - virtual_fields
-    unknown = sorted(physical_fields - set(sample.source_binding.columns))
+    unknown = sorted(physical_fields - set(development.dataset.columns))
     if unknown:
         raise StrategyError(
             "ImpactCube dataset is missing columns: " + ", ".join(unknown)
@@ -1087,11 +1166,11 @@ def _read_partition_frames(
     frame = _read_authenticated_parquet_snapshot(
         path,
         root=Path(runtime.settings.datasets_dir).absolute(),
-        expected_content_hash=sample.source_binding.dataset_content_hash,
+        expected_content_hash=development.dataset.content_hash,
         columns=sorted(physical_fields),
     )
     if not isinstance(frame, pd.DataFrame) or len(frame) != (
-        sample.source_binding.row_count
+        development.dataset.row_count
     ):
         raise StrategyError(
             "ImpactCube analysis universe row count changed"
@@ -1136,17 +1215,6 @@ def _read_partition_frames(
                     raise StrategyError(
                         f"ImpactCube {role} partitions overlap"
                     )
-    for partition in _PARTITION_ORDER:
-        if bool(
-            np.any(
-                masks["risk"][partition]
-                & ~masks["approval"][partition]
-            )
-        ):
-            raise StrategyError(
-                f"ImpactCube risk/{partition} is outside approval population"
-            )
-
     result: dict[str, dict[str, pd.DataFrame]] = {
         "approval": {},
         "risk": {},
@@ -1166,6 +1234,18 @@ def _read_partition_frames(
                     "or changed"
                 )
             result[role][partition] = selected
+            if role == "risk" and partition == "development":
+                governed = bind_strategy_risk_development_frame(
+                    frame,
+                    binding=development.sample_design,
+                    normalize_target=False,
+                )
+                if not governed.equals(selected):
+                    raise StrategyError(
+                        "ImpactCube risk/development membership changed "
+                        "from the current Strategy Pool binding"
+                    )
+                result[role][partition] = governed
     _require_dataset_unchanged(sample)
     return result
 
@@ -1300,7 +1380,7 @@ def _expression_fields(value: object) -> set[str]:
 
 
 def _sample_design_evidence_ref(
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
     *,
     partitions: Sequence[str],
 ) -> dict[str, Any]:
@@ -1338,7 +1418,7 @@ def _sample_design_evidence_ref(
 
 
 def _dataset_evidence_binding(
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
 ) -> dict[str, Any]:
     source = sample.source_binding
     return {
@@ -1356,7 +1436,7 @@ def _dataset_evidence_binding(
 
 
 def _require_dataset_unchanged(
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
 ) -> None:
     path = sample.source_binding.dataset_path
     descriptor = -1
@@ -1643,7 +1723,8 @@ def _persist_cube(
     task_id: str,
     request: Mapping[str, Any],
     pool: StrategyCandidatePoolArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: _StrategySampleDesignV2Binding,
+    development: StrategyPoolDevelopmentExecutionBinding,
     current: _CurrentStrategyBinding | None,
     resolved_requirements: ResolvedPoolRequirements,
     cube: Mapping[str, Any],
@@ -1736,6 +1817,7 @@ def _persist_cube(
                     conn,
                     pool=pool,
                     sample=sample,
+                    development=development,
                     current=current,
                     task_id=task_id,
                     resolved_requirements=resolved_requirements,
@@ -1785,6 +1867,7 @@ def _persist_cube(
                     conn,
                     pool=pool,
                     sample=sample,
+                    development=development,
                     current=current,
                     task_id=task_id,
                     resolved_requirements=resolved_requirements,
@@ -1833,6 +1916,7 @@ def _persist_cube(
                     conn,
                     pool=pool,
                     sample=sample,
+                    development=development,
                     current=current,
                     task_id=task_id,
                     resolved_requirements=resolved_requirements,

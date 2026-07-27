@@ -54,11 +54,14 @@ from marvis.packs.strategy.pool_tools import (
     require_strategy_pool_development_execution_binding_on_connection,
     require_strategy_pool_revision_development_execution_binding_on_connection,
 )
-from marvis.packs.strategy.sample_design_binding import (
-    bind_strategy_development_frame,
+from marvis.packs.strategy.sample_design_execution import (
+    bind_strategy_risk_development_frame,
 )
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_TYPE,
+)
+from marvis.packs.strategy.voting_candidate_tools import (
+    resolve_pool_requirement_sample_design_v2,
 )
 from marvis.packs.strategy.voting_candidate_search import (
     MAX_CANDIDATES,
@@ -1116,15 +1119,16 @@ def _resolve_requirements(
 ) -> ResolvedPoolRequirements | None:
     if not requirements:
         return None
-    if development.sample_design_v2 is None:
-        raise StrategyError(
-            "Voting search score requirements require one exact StrategySampleDesign V2"
-        )
+    physical_sample = resolve_pool_requirement_sample_design_v2(
+        runtime,
+        development=development,
+        require_current=True,
+    )
     return resolve_pool_requirements(
         _modeling_runtime(runtime),
         task_id=development.task_id,
         compiled_design={"requirements": list(requirements)},
-        sample_design=development.sample_design_v2,
+        sample_design=physical_sample,
     )
 
 
@@ -1136,15 +1140,16 @@ def _resolve_historical_requirements(
 ) -> ResolvedPoolRequirements | None:
     if not requirements:
         return None
-    if development.sample_design_v2 is None:
-        raise StrategyError(
-            "Voting search score requirements require one exact StrategySampleDesign V2"
-        )
+    physical_sample = resolve_pool_requirement_sample_design_v2(
+        runtime,
+        development=development,
+        require_current=False,
+    )
     return resolve_historical_pool_requirements(
         _modeling_runtime(runtime),
         task_id=development.task_id,
         compiled_design={"requirements": list(requirements)},
-        sample_design=development.sample_design_v2,
+        sample_design=physical_sample,
     )
 
 
@@ -1185,7 +1190,7 @@ def _read_labeled_development_frame(
     frame = frame.reset_index(drop=True)
     if resolved is not None:
         frame = hydrate_requirement_fields(frame, resolved=resolved)
-    development_frame = bind_strategy_development_frame(
+    development_frame = bind_strategy_risk_development_frame(
         frame,
         binding=sample,
     )

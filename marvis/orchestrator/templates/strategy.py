@@ -1287,6 +1287,12 @@ STRATEGY_MODEL_EVIDENCE_V2 = WorkflowTemplate(
             "task_context",
             "Platform-discovered authenticated univariate candidate sources",
         ),
+        SlotSpec(
+            "expected_registry_token",
+            True,
+            "task_context",
+            "CAS token for the complete Agent-discovered evidence registry",
+        ),
     ),
     steps=(
         StepTemplate(
@@ -1295,6 +1301,7 @@ STRATEGY_MODEL_EVIDENCE_V2 = WorkflowTemplate(
             inputs_template={
                 "sample_design_ref": "{slot:sample_design_ref}",
                 "univariate_sources": "{slot:univariate_sources}",
+                "expected_registry_token": "{slot:expected_registry_token}",
             },
             depends_on_titles=(),
             post_checks=(

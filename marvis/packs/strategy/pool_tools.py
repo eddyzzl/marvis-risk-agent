@@ -174,19 +174,24 @@ from marvis.packs.strategy.pool import (
     set_pool_entry_action,
     validate_strategy_pool,
 )
-from marvis.packs.strategy.sample_design_binding import (
-    StrategySampleDesignExecutionBinding,
-    StrategySampleDesignRef,
-    load_historical_strategy_sample_design_execution_binding,
-    load_strategy_sample_design_execution_binding,
-    require_historical_strategy_sample_design_execution_binding_on_connection,
-    require_strategy_sample_design_execution_binding_on_connection,
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+    StrategyRiskDevelopmentRef,
+    load_historical_strategy_risk_development_execution_binding,
+    load_strategy_risk_development_execution_binding,
+    require_historical_strategy_risk_development_execution_binding_on_connection,
+    require_strategy_risk_development_execution_binding_on_connection,
 )
 from marvis.packs.strategy.sample_design_tools import (
     load_historical_strategy_sample_design_artifact,
     load_strategy_sample_design_artifact,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    authenticate_native_strategy_sample_design_v2_bundle_record,
+)
 from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
     StrategySampleDesignV2ArtifactBinding,
     require_historical_strategy_sample_design_v2_artifact_binding_on_connection,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
@@ -497,7 +502,7 @@ class StrategyPoolDevelopmentExecutionBinding:
     task_id: str
     pool: StrategyCandidatePoolArtifactBinding
     dataset: StrategyPoolDevelopmentDatasetBinding
-    sample_design: StrategySampleDesignExecutionBinding
+    sample_design: StrategyRiskDevelopmentExecutionBinding
     sample_design_v2: StrategySampleDesignV2ArtifactBinding | None
     evidence_identity: dict[str, Any]
     target_col: str
@@ -507,7 +512,7 @@ class StrategyPoolDevelopmentExecutionBinding:
 @dataclass(frozen=True)
 class _PoolDevelopmentLineageFacts:
     dataset: StrategyPoolDevelopmentDatasetBinding
-    sample_ref: StrategySampleDesignRef
+    sample_ref: StrategyRiskDevelopmentRef
     sample_design_v2: StrategySampleDesignV2ArtifactBinding | None
     evidence_identity: dict[str, Any]
     target_col: str
@@ -1845,6 +1850,128 @@ def _load_strategy_candidate_pool_revision_artifact(
         raise StrategyError(str(exc)) from exc
 
 
+def _pool_sample_drop_nan_labels(
+    runtime,
+    *,
+    task_id: str,
+    reference: StrategyRiskDevelopmentRef,
+    require_current_pool: bool,
+) -> bool:
+    """Resolve target missing-label semantics from the authenticated source."""
+
+    if reference.partition == "development":
+        artifact_loader = (
+            load_strategy_sample_design_artifact
+            if require_current_pool
+            else load_historical_strategy_sample_design_artifact
+        )
+        artifact = artifact_loader(
+            runtime,
+            task_id=task_id,
+            artifact_id=reference.artifact_id,
+            expected_artifact_content_hash=reference.artifact_content_hash,
+            expected_sample_design_id=reference.sample_design_id,
+            expected_sample_design_content_hash=(
+                reference.sample_design_content_hash
+            ),
+        )
+        design = artifact.bundle["sample_design"]
+        value = design["target_definition"]["drop_nan_labels"]
+    elif reference.partition == "risk/development":
+        try:
+            record = runtime.task_artifacts.get_for_task(
+                task_id,
+                reference.artifact_id,
+            )
+        except (TaskArtifactDataError, TaskArtifactNotFoundError) as exc:
+            raise StrategyError(str(exc)) from exc
+        if (
+            not isinstance(record, Mapping)
+            or record.get("task_id") != task_id
+            or record.get("id") != reference.artifact_id
+            or record.get("content_hash")
+            != reference.artifact_content_hash
+            or record.get("kind")
+            != SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+            or record.get("origin_tool")
+            != SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+        ):
+            raise StrategyError(
+                "native strategy Pool sample-design artifact binding changed"
+            )
+        authenticated = (
+            authenticate_native_strategy_sample_design_v2_bundle_record(
+                runtime,
+                task_id=task_id,
+                record=record,
+            )
+        )
+        design = authenticated.bundle["sample_design"]
+        if (
+            design["sample_design_id"] != reference.sample_design_id
+            or not hmac.compare_digest(
+                design["content_hash"],
+                reference.sample_design_content_hash,
+            )
+        ):
+            raise StrategyError(
+                "native strategy Pool sample-design reference changed"
+            )
+        value = design["target_selector"]["drop_missing"]
+    else:
+        raise StrategyError(
+            "strategy Pool sample-design partition must be development "
+            "or risk/development"
+        )
+    if not isinstance(value, bool):
+        raise StrategyError(
+            "strategy Pool sample-design drop_nan_labels binding is invalid"
+        )
+    return value
+
+
+def _legacy_binding_matches_risk_development(
+    legacy: object,
+    development: StrategyRiskDevelopmentExecutionBinding,
+) -> bool:
+    """Compare a V2 compatibility anchor with the generic public binding."""
+
+    try:
+        legacy_ref = StrategyRiskDevelopmentRef.from_value(
+            legacy.reference.to_ref_dict()
+        )
+        return (
+            development.source_mode == "legacy_anchored"
+            and legacy_ref == development.reference
+            and legacy.task_id == development.task_id
+            and legacy.dataset_id == development.dataset_id
+            and hmac.compare_digest(
+                legacy.dataset_content_hash,
+                development.dataset_content_hash,
+            )
+            and legacy.workspace_revision == development.workspace_revision
+            and legacy.workspace_generation == development.workspace_generation
+            and hmac.compare_digest(
+                legacy.semantic_mapping_hash,
+                development.semantic_mapping_hash,
+            )
+            and legacy.target_col == development.target_col
+            and legacy.target_bad_value == development.target_bad_value
+            and legacy.drop_nan_labels is development.drop_nan_labels
+            and legacy.split_column == development.split_column
+            and legacy.development_population_count
+            == development.development_population_count
+            and legacy.active_population_count
+            == development.active_population_count
+            and legacy.month_col == development.month_col
+            and legacy.weight_col == development.weight_col
+            and legacy.loan_amount_col == development.loan_amount_col
+            and legacy.overdue_amount_col == development.overdue_amount_col
+        )
+    except (AttributeError, TypeError, StrategyError):
+        return False
+
+
 def bind_strategy_pool_development_execution(
     runtime,
     pool_binding: StrategyCandidatePoolArtifactBinding,
@@ -1883,30 +2010,17 @@ def _bind_strategy_pool_development_execution(
         )
     facts = _project_pool_development_lineages(pool_binding)
     reference = facts.sample_ref
-    sample_artifact_loader = (
-        load_strategy_sample_design_artifact
-        if require_current_pool
-        else load_historical_strategy_sample_design_artifact
-    )
-    sample_artifact = sample_artifact_loader(
+    drop_nan_labels = _pool_sample_drop_nan_labels(
         runtime,
         task_id=pool_binding.task_id,
-        artifact_id=reference.artifact_id,
-        expected_artifact_content_hash=reference.artifact_content_hash,
-        expected_sample_design_id=reference.sample_design_id,
-        expected_sample_design_content_hash=reference.sample_design_content_hash,
+        reference=reference,
+        require_current_pool=require_current_pool,
     )
-    design = sample_artifact.bundle["sample_design"]
-    drop_nan_labels = design["target_definition"]["drop_nan_labels"]
-    if not isinstance(drop_nan_labels, bool):
-        raise StrategyError(
-            "strategy Pool sample-design drop_nan_labels binding is invalid"
-        )
     identity = facts.evidence_identity
     sample_execution_loader = (
-        load_strategy_sample_design_execution_binding
+        load_strategy_risk_development_execution_binding
         if require_current_pool
-        else load_historical_strategy_sample_design_execution_binding
+        else load_historical_strategy_risk_development_execution_binding
     )
     sample = sample_execution_loader(
         runtime,
@@ -1934,7 +2048,10 @@ def _bind_strategy_pool_development_execution(
         )
     if facts.sample_design_v2 is not None:
         source = facts.sample_design_v2.source_binding
-        if source.legacy != sample:
+        if not _legacy_binding_matches_risk_development(
+            source.legacy,
+            sample,
+        ):
             raise StrategyError(
                 "strategy Pool SampleDesign V2 legacy mapping changed"
             )
@@ -2029,12 +2146,12 @@ def _require_strategy_pool_development_execution_binding_on_connection(
     ):
         raise StrategyError("strategy Pool development binding changed")
     if require_current_pool:
-        require_strategy_sample_design_execution_binding_on_connection(
+        require_strategy_risk_development_execution_binding_on_connection(
             conn,
             binding.sample_design,
         )
     else:
-        require_historical_strategy_sample_design_execution_binding_on_connection(
+        require_historical_strategy_risk_development_execution_binding_on_connection(
             conn,
             binding.sample_design,
         )
@@ -2049,7 +2166,10 @@ def _require_strategy_pool_development_execution_binding_on_connection(
                 conn,
                 binding.sample_design_v2,
             )
-        if binding.sample_design_v2.source_binding.legacy != binding.sample_design:
+        if not _legacy_binding_matches_risk_development(
+            binding.sample_design_v2.source_binding.legacy,
+            binding.sample_design,
+        ):
             raise StrategyError(
                 "strategy Pool SampleDesign V2 legacy mapping changed"
             )
@@ -2164,7 +2284,7 @@ def _pool_lineage_development_facts(
             )
         return remember(_PoolDevelopmentLineageFacts(
             dataset=_pool_development_dataset(lineage.dataset),
-            sample_ref=StrategySampleDesignRef.from_value(
+            sample_ref=StrategyRiskDevelopmentRef.from_value(
                 parameters.get("sample_design_ref")
             ),
             sample_design_v2=None,
@@ -2191,7 +2311,7 @@ def _pool_lineage_development_facts(
         sample_ref = sample_design_ref_from_automatic_tree_source_refs(
             asset["source_refs"]
         )
-        if StrategySampleDesignRef.from_value(
+        if StrategyRiskDevelopmentRef.from_value(
             tree.provenance.get("sample_design_ref")
         ).to_ref_dict() != sample_ref:
             raise StrategyError(
@@ -2199,7 +2319,7 @@ def _pool_lineage_development_facts(
             )
         return remember(_PoolDevelopmentLineageFacts(
             dataset=_pool_development_dataset(lineage.dataset),
-            sample_ref=StrategySampleDesignRef.from_value(sample_ref),
+            sample_ref=StrategyRiskDevelopmentRef.from_value(sample_ref),
             sample_design_v2=None,
             evidence_identity=verified_identity,
             target_col=_required_text(
@@ -2242,7 +2362,9 @@ def _pool_lineage_development_facts(
             )
         return remember(_PoolDevelopmentLineageFacts(
             dataset=_pool_development_dataset(lineage.dataset),
-            sample_ref=source.legacy.reference,
+            sample_ref=StrategyRiskDevelopmentRef.from_value(
+                source.legacy.reference.to_ref_dict()
+            ),
             sample_design_v2=sample_v2,
             evidence_identity=verified_identity,
             target_col=target_col,
@@ -2294,7 +2416,7 @@ def _pool_lineage_development_facts(
                 "legacy Voting candidate is not bound to a governed sample "
                 "design; regenerate it before stability measurement"
             )
-        sample_ref = StrategySampleDesignRef.from_value(
+        sample_ref = StrategyRiskDevelopmentRef.from_value(
             asset["sample_design_ref"]
         )
         verified_identity = _verified_lineage_evidence_identity(lineage)

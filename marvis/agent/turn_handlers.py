@@ -234,7 +234,9 @@ from marvis.packs.strategy.model_evidence_tools import (
     _MAX_UNIVARIATE_SOURCES,
     _load_candidate_sources,
     _validate_inputs as _validate_model_evidence_v2_inputs,
+    derive_strategy_model_evidence_candidate_execution_ref,
     load_strategy_model_evidence_v2_artifact,
+    strategy_model_evidence_registry_snapshot_token,
 )
 from marvis.packs.strategy.impact_cube_tools import IMPACT_CUBE_ARTIFACT_KIND
 from marvis.packs.strategy.pool_impact_tools import (
@@ -273,6 +275,7 @@ from marvis.packs.strategy.sample_design_binding import (
     load_strategy_sample_design_execution_binding,
 )
 from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
     load_strategy_risk_development_execution_binding,
 )
 from marvis.packs.strategy.sample_design_tools import (
@@ -283,7 +286,7 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_ORIGIN_TOOL,
-    load_strategy_sample_design_v2_artifacts,
+    load_any_strategy_sample_design_v2_artifacts,
 )
 from marvis.packs.strategy.sample_design_v2_native_tools import (
     SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
@@ -982,6 +985,7 @@ def _run_strategy_setup(
             task,
             context=context,
             drop_nan_labels=False,
+            allow_native_risk_development=True,
         )
         return (proposal.template_id, slots, {})
 
@@ -1019,6 +1023,7 @@ def _run_strategy_setup(
         task,
         context=context,
         drop_nan_labels=False,
+        allow_native_risk_development=True,
     )
     return (proposal.template_id, slots, {})
 
@@ -1189,6 +1194,7 @@ def _run_rule_strategy_setup(
         task,
         context=context,
         drop_nan_labels=False,
+        allow_native_risk_development=True,
     )
     return (proposal.template_id, slots, {})
 
@@ -3234,6 +3240,7 @@ def _run_validated_strategy_request(
                     task,
                     context=context,
                     drop_nan_labels=bool(drop_nan_labels),
+                    allow_native_risk_development=True,
                 )
             )
         return _start_confirmed_strategy_plan(
@@ -3252,6 +3259,7 @@ def _run_validated_strategy_request(
             task,
             context=context,
             drop_nan_labels=bool(drop_nan_labels),
+            allow_native_risk_development=True,
         )
         return _start_confirmed_strategy_plan(
             runtime,
@@ -3287,6 +3295,7 @@ def _run_validated_strategy_request(
                     task,
                     context=context,
                     drop_nan_labels=bool(drop_nan_labels),
+                    allow_native_risk_development=True,
                 )
             )
         return _start_confirmed_strategy_plan(
@@ -3306,6 +3315,7 @@ def _run_validated_strategy_request(
             task,
             context=context,
             drop_nan_labels=bool(drop_nan_labels),
+            allow_native_risk_development=True,
         )
         return _start_confirmed_strategy_plan(
             runtime,
@@ -3392,6 +3402,7 @@ def _run_validated_strategy_request(
             task,
             context=context,
             drop_nan_labels=bool(drop_nan_labels),
+            allow_native_risk_development=True,
         )
     if "success_criteria" not in start_kwargs:
         criteria = _strategy_request_success_criteria(draft)
@@ -6822,7 +6833,9 @@ def _strategy_model_evidence_v2_plan_slots(
     identity = design["identity"]
     dataset_ref = identity["dataset_ref"]
     workspace_ref = identity["workspace_ref"]
-    legacy_ref = design["compatibility"]["legacy_development_ref"]
+    expected_candidate_ref = (
+        derive_strategy_model_evidence_candidate_execution_ref(sample_binding)
+    )
     candidate_requests: list[dict[str, str]] = []
     for artifact in artifacts:
         provenance = artifact.get("provenance")
@@ -6850,7 +6863,7 @@ def _strategy_model_evidence_v2_plan_slots(
                 "缺少完整 generation provenance；本次未创建计划。",
             )
         try:
-            source_legacy_ref = StrategySampleDesignRef.from_value(
+            source_execution_ref = StrategyRiskDevelopmentRef.from_value(
                 generation.get("sample_design_ref")
             ).to_ref_dict()
         except StrategyError as exc:
@@ -6859,7 +6872,7 @@ def _strategy_model_evidence_v2_plan_slots(
                 "一份属于最新 StrategySampleDesign V2 快照的单变量候选"
                 "包含损坏或不完整的 sample_design_ref；本次未创建计划。",
             ) from exc
-        if source_legacy_ref != legacy_ref:
+        if source_execution_ref != expected_candidate_ref:
             continue
         request = {
             "artifact_id": artifact.get("id"),
@@ -6951,6 +6964,7 @@ def _strategy_model_evidence_v2_plan_slots(
     return {
         "sample_design_ref": sample_design_ref,
         "univariate_sources": candidate_requests,
+        "expected_registry_token": registry_token,
     }
 
 
@@ -6990,13 +7004,6 @@ def _latest_verified_strategy_sample_design_v2_binding(
             "请先用自然语言固化 V2 样本设计。",
         )
     newest = bundles[-1]
-    if newest.get("origin_tool") == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL:
-        raise _StrategyV2EvidenceSetupError(
-            "strategy_sample_design_v2_native_source_unsupported",
-            "最新 StrategySampleDesign V2 来自原生活动数据集；"
-            "当前下游 ModelEvidence 尚不能消费该来源，平台不会回退到旧"
-            " compatibility 样本。",
-        )
     provenance = newest.get("provenance")
     if not isinstance(provenance, Mapping):
         raise _StrategyV2EvidenceSetupError(
@@ -7005,7 +7012,7 @@ def _latest_verified_strategy_sample_design_v2_binding(
             "本次未创建计划。",
         )
     try:
-        return load_strategy_sample_design_v2_artifacts(
+        return load_any_strategy_sample_design_v2_artifacts(
             read_runtime,
             task_id=task_id,
             membership_artifact_id=provenance.get("membership_artifact_id"),
@@ -7052,44 +7059,13 @@ def _strategy_v2_artifact_snapshot(
 def _strategy_v2_registry_token(artifacts: Sequence[Mapping]) -> str:
     """CAS token for evidence rows relevant to one ModelEvidence V2 plan."""
 
-    relevant = [
-        {
-            "id": artifact.get("id"),
-            "kind": artifact.get("kind"),
-            "content_hash": artifact.get("content_hash"),
-            "origin_tool": artifact.get("origin_tool"),
-            "provenance": artifact.get("provenance"),
-            "created_at": artifact.get("created_at"),
-        }
-        for artifact in artifacts
-        if (
-            artifact.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
-            and artifact.get("origin_tool")
-            in {
-                SAMPLE_DESIGN_V2_ORIGIN_TOOL,
-                SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
-            }
-        )
-        or (
-            artifact.get("kind") == "strategy_candidate_json"
-            and artifact.get("origin_tool")
-            == "strategy.analyze_univariate_candidates"
-        )
-    ]
     try:
-        payload = json.dumps(
-            relevant,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+        return strategy_model_evidence_registry_snapshot_token(artifacts)
+    except StrategyError as exc:
         raise _StrategyV2EvidenceSetupError(
             "strategy_model_evidence_v2_registry_unavailable",
             "Strategy ModelEvidence V2 registry snapshot 无法规范化。",
         ) from exc
-    return hashlib.sha256(payload).hexdigest()
 
 
 _STRATEGY_REPORT_POOL_TYPE_PATTERNS = {
@@ -7712,13 +7688,6 @@ def _strategy_report_latest_sample_binding(
             "当前任务没有 StrategySampleDesign V2 membership/bundle 证据。",
         )
     newest = bundles[0]
-    if newest.get("origin_tool") == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL:
-        raise _StrategyV2EvidenceSetupError(
-            "strategy_sample_design_v2_native_source_unsupported",
-            "最新 StrategySampleDesign V2 来自原生活动数据集；"
-            "当前报告适配器尚不能消费该来源，平台不会回退到旧"
-            " compatibility 样本。",
-        )
     provenance = newest.get("provenance")
     if not isinstance(provenance, Mapping):
         raise _StrategyV2EvidenceSetupError(
@@ -7727,7 +7696,7 @@ def _strategy_report_latest_sample_binding(
             "平台不会回退到旧样本设计。",
         )
     try:
-        return load_strategy_sample_design_v2_artifacts(
+        return load_any_strategy_sample_design_v2_artifacts(
             read_runtime,
             task_id=task_id,
             membership_artifact_id=provenance.get("membership_artifact_id"),
@@ -7903,12 +7872,13 @@ def _strategy_report_latest_voting_search_binding(
             )
         else:
             requirement_bindings = None
+        execution_sample_ref = (
+            derive_strategy_model_evidence_candidate_execution_ref(sample)
+        )
         if (
-            current_development.sample_design_v2 is None
-            or _strategy_report_sample_ref(
-                current_development.sample_design_v2
-            )
-            != dict(sample_ref)
+            _strategy_report_sample_ref(sample) != dict(sample_ref)
+            or current_development.sample_design.to_ref_dict()
+            != execution_sample_ref
         ):
             return None
     except (
@@ -7950,9 +7920,9 @@ def _strategy_report_latest_voting_search_binding(
         if _strategy_report_voting_search_matches(
             binding,
             task_id=task_id,
-            sample_ref=sample_ref,
             pool=pool,
             current_development=current_development,
+            execution_sample_ref=execution_sample_ref,
             candidate_ids=candidate_ids,
             requirement_bindings=requirement_bindings,
         ):
@@ -7974,9 +7944,9 @@ def _strategy_report_voting_search_matches(
     binding,
     *,
     task_id: str,
-    sample_ref: Mapping[str, object],
     pool,
     current_development,
+    execution_sample_ref: Mapping[str, object],
     candidate_ids: Sequence[str],
     requirement_bindings: Mapping[str, object] | None,
 ) -> bool:
@@ -8002,11 +7972,8 @@ def _strategy_report_voting_search_matches(
         }
     ):
         return False
-    historical_sample_v2 = historical_development.sample_design_v2
-    if (
-        historical_sample_v2 is None
-        or _strategy_report_sample_ref(historical_sample_v2)
-        != dict(sample_ref)
+    if historical_development.sample_design.to_ref_dict() != dict(
+        execution_sample_ref
     ):
         return False
 
@@ -9013,6 +8980,7 @@ def _strategy_pool_impact_plan_slots(
         task,
         context=context,
         drop_nan_labels=bool(drop_nan_labels),
+        allow_native_risk_development=True,
         month_col=slots.get("month_col"),
         loan_amount_col=slots.get("loan_amount_col"),
         overdue_amount_col=slots.get("overdue_amount_col"),
@@ -11082,7 +11050,10 @@ def _candidate_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
         "dataset_id": context.dataset_id,
         "target_col": context.target_col,
         "strategy_type": draft.strategy_type,
-        "candidate_design": dict(draft.candidate_design or {}),
+        # StrategyRequestDraft freezes nested sequences as tuples. Plan/tool
+        # inputs are JSON values, so use its public thawed projection instead
+        # of only copying the outer mapping.
+        "candidate_design": draft.to_dict()["candidate_design"],
     }
     if draft.economics_inputs is not None:
         slots["economics_inputs"] = dict(draft.economics_inputs)

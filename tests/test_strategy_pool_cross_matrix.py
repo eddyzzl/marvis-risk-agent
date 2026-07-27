@@ -13,6 +13,9 @@ from marvis.packs.strategy.cross_matrix_cell_selection import (
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+)
 from marvis.repositories.strategy_pool import (
     POOL_ARTIFACT_KIND,
     StrategyCandidatePoolRepository,
@@ -122,6 +125,53 @@ def test_cross_matrix_cell_group_materialize_add_compile_full_chain(
     assert "metrics" not in entry
     assert rule["condition"] == entry["execution"]["condition"]
     assert rule["action"] == action
+
+
+def test_native_cross_matrix_cell_materializes_current_pool_development(
+    tmp_path: Path,
+) -> None:
+    fx = _fixture(tmp_path, native=True)
+    selected = _materialize(
+        fx,
+        [fx.populated[0]["cell_id"]],
+        reason="native risk development cell",
+    )
+    added = strategy_tools.tool_add_candidate_to_pool(
+        _add_inputs(
+            selected,
+            revision=0,
+            snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fx.ctx,
+    )
+    compiled = strategy_tools.tool_compile_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": added["revision"],
+            "expected_pool_snapshot_hash": added["snapshot_hash"],
+        },
+        fx.ctx,
+    )
+    current = pool_tools.load_current_strategy_candidate_pool_artifact(
+        fx.runtime,
+        task_id=fx.task.id,
+        strategy_type="approval",
+        expected_pool_revision=added["revision"],
+        expected_pool_snapshot_hash=added["snapshot_hash"],
+    )
+    development = pool_tools.bind_strategy_pool_development_execution(
+        fx.runtime,
+        current,
+    )
+
+    assert compiled["strategy_spec"]["rules"]
+    assert isinstance(
+        development.sample_design,
+        StrategyRiskDevelopmentExecutionBinding,
+    )
+    assert development.sample_design.source_mode == "native_active_dataset"
+    assert development.sample_design.to_ref_dict() == fx.sample_design_ref
+    assert development.sample_design.reference.partition == "risk/development"
 
 
 def test_manual_v2_cross_matrix_cell_group_completes_pool_chain(

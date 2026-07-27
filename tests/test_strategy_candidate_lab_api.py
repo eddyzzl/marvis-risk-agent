@@ -9,10 +9,13 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import numpy as np
 import pandas as pd
+from pydantic import ValidationError
 import pytest
 
+from marvis.api_schemas import ManualStrategyRequest
 from marvis.app import create_app
 from marvis.db import TaskRepository
+from marvis.db_schema import connect
 from marvis.domain import TaskCreate
 from marvis.feature.univariate import analyze_univariate
 from marvis.output.strategy_candidate_report import render_strategy_candidate_bundle
@@ -55,6 +58,13 @@ from marvis.packs.strategy.evaluator import evaluate_expression_frame
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import add_verified_candidate_fragment
 from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
+from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
+from marvis.packs.strategy.pool_stability_tools import (
+    run_measure_strategy_pool_stability,
+)
+from marvis.packs.strategy.pool_validation_tools import (
+    run_measure_strategy_pool_validation,
+)
 from marvis.packs.strategy.scorecard_candidate import (
     SCORECARD_BAND_ASSET_ARTIFACT_KIND,
     SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
@@ -100,10 +110,23 @@ from marvis.repositories.strategy_pool import (
     strategy_pool_artifact_content_hash,
 )
 from marvis.repositories.plans import PlanRepository
+from marvis.repositories.strategy_reports import StrategyReportRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.settings import build_settings
 from tests.test_strategy_candidate_stability_tools import (
     _pool_add_inputs,
     _setup,
+)
+from tests.test_strategy_pool_impact_tools import (
+    _setup as _pool_impact_setup,
+)
+from tests.test_strategy_pool_stability_tools import (
+    _setup as _pool_stability_setup,
+)
+from tests.test_strategy_report_repository import (
+    _bundle as _report_bundle,
+    _register_outputs as _register_report_outputs,
+    _seed_strategy_task as _seed_report_strategy_task,
 )
 
 
@@ -1355,7 +1378,7 @@ def test_candidate_lab_replays_scorecard_pool_and_projects_safe_evidence(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v3"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v4"
     band = body["candidates"]["scorecard_band"]["latest"]
     assert band["detail"]["asset_id"] == asset["asset_id"]
     assert band["detail"]["performance"] == {"auc": 1.0, "ks": 1.0}
@@ -1936,7 +1959,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
 
     assert response.status_code == 200, response.text
     assert response.json() == {
-        "schema_version": "strategy.candidate-lab-projection.v3",
+        "schema_version": "strategy.candidate-lab-projection.v4",
         "task_id": task_id,
         "can_start": True,
         "blocked_reason": None,
@@ -1961,7 +1984,292 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
             "truncated": False,
         },
         "pools": {"latest": None, "all": [], "total": 0, "truncated": False},
+        "workflow": {
+            "sample_design": None,
+            "latest_evidence": {
+                "pool_stability": None,
+                "pool_impact": None,
+                "impact_cube": None,
+                "pool_validation": {
+                    "validation": None,
+                    "oot": None,
+                },
+            },
+            "report": None,
+            "stages": [
+                {
+                    "id": "current_context",
+                    "label": "项目现状",
+                    "status": "missing",
+                },
+                {
+                    "id": "history",
+                    "label": "历史版本",
+                    "status": "missing",
+                },
+                {
+                    "id": "sample_design",
+                    "label": "样本设计",
+                    "status": "missing",
+                },
+                {
+                    "id": "candidate_analysis",
+                    "label": "单变量/模型",
+                    "status": "missing",
+                },
+                {
+                    "id": "strategy_combination",
+                    "label": "交叉组合/策略",
+                    "status": "missing",
+                },
+                {
+                    "id": "impact",
+                    "label": "影响测算",
+                    "status": "missing",
+                },
+                {
+                    "id": "report",
+                    "label": "形成报告",
+                    "status": "missing",
+                },
+            ],
+        },
     }
+
+
+def test_candidate_lab_v4_projects_authenticated_native_dual_population_sample(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(
+        tmp_path,
+        native_sample=True,
+        target_bad_value=0,
+    )
+    app = create_app(fixture["settings"])
+    response = TestClient(app).get(
+        f"/api/tasks/{fixture['task'].id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v4"
+    sample = body["workflow"]["sample_design"]
+    assert sample["source_mode"] == "native_active_dataset"
+    assert sample["relationship"] == "parallel_time_cohorts"
+    assert sample["freshness"] == "current"
+    assert sample["target"] == {
+        "column": "bad",
+        "good_value": 1,
+        "bad_value": 0,
+        "missing_policy": "keep",
+    }
+    assert sample["populations"] == {
+        "approval": {
+            "total_count": 40,
+            "partitions": {
+                "development": 30,
+                "validation": 5,
+                "oot": 5,
+            },
+            "maturity": {
+                "status": "not_applicable",
+                "performance_window_days": None,
+                "cutoff_date": None,
+                "eligible_count": None,
+                "labeled_count": None,
+                "reason": "Approval population does not require outcome maturity.",
+            },
+        },
+        "risk": {
+            "total_count": 80,
+            "partitions": {
+                "development": 60,
+                "validation": 10,
+                "oot": 10,
+            },
+            "maturity": {
+                "status": "confirmed_matured",
+                "performance_window_days": 30,
+                "cutoff_date": "2026-05-31",
+                "eligible_count": 80,
+                "labeled_count": 80,
+                "reason": None,
+            },
+        },
+    }
+    assert sample["relationship_counts"] == {
+        "approval_and_risk": 0,
+        "approval_only": 40,
+        "risk_only": 80,
+        "neither": 0,
+    }
+    assert sample["diagnostics"]["overall_status"] == "unavailable"
+    assert body["workflow"]["stages"][2]["status"] == "complete"
+    assert "membership" not in sample
+    assert "masks" not in str(sample)
+
+
+def test_candidate_lab_v4_projects_latest_authenticated_strategy_evidence(
+    tmp_path: Path,
+) -> None:
+    fixture = _pool_stability_setup(tmp_path)
+    stability_output = run_measure_strategy_pool_stability(
+        fixture["stability_request"],
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    validation_output = run_measure_strategy_pool_validation(
+        fixture["validation_request"],
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    response = TestClient(create_app(fixture["settings"])).get(
+        f"/api/tasks/{fixture['task'].id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    evidence = response.json()["workflow"]["latest_evidence"]
+    impact_cube = evidence["impact_cube"]
+    assert impact_cube["cube_id"] == fixture["impact_output"]["cube_id"]
+    assert impact_cube["strategy_type"] == "approval"
+    assert impact_cube["partitions"] == ["development", "validation"]
+    assert impact_cube["freshness"] == "current"
+    stability = evidence["pool_stability"]
+    assert stability["stability_id"] == stability_output["stability_id"]
+    assert stability["comparison_partitions"] == ["validation"]
+    assert stability["freshness"] == "current"
+    validation = evidence["pool_validation"]["validation"]
+    assert validation["evidence_id"] == validation_output["evidence_id"]
+    assert validation["partition"] == "validation"
+    assert validation["lifecycle"]["validation_status"] == (
+        "independent_evidence"
+    )
+    assert validation["freshness"] == "current"
+    assert evidence["pool_validation"]["oot"] is None
+    assert response.json()["workflow"]["stages"][5]["status"] == "complete"
+
+
+def test_candidate_lab_v4_projects_latest_authenticated_legacy_pool_impact(
+    tmp_path: Path,
+) -> None:
+    fixture = _pool_impact_setup(tmp_path)
+    output = run_measure_pool_impact(
+        fixture["request"],
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    response = TestClient(create_app(fixture["settings"])).get(
+        f"/api/tasks/{fixture['task'].id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    impact = response.json()["workflow"]["latest_evidence"]["pool_impact"]
+    assert impact["assessment_id"] == output["assessment_id"]
+    assert impact["strategy_type"] == "approval"
+    assert impact["population_count"] == output["population_count"]
+    assert impact["labeled_count"] == output["labeled_count"]
+    assert impact["monthly_status"] == output["monthly_status"]
+    assert impact["freshness"] == "current"
+
+
+def test_candidate_lab_v4_projects_latest_authenticated_four_format_report(
+    tmp_path: Path,
+) -> None:
+    settings = build_settings(tmp_path / "workspace")
+    task_id, strategy_id = _seed_report_strategy_task(settings.db_path)
+    with connect(settings.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET status = 'created' WHERE id = ?",
+            (task_id,),
+        )
+    bundle = _report_bundle(task_id=task_id, strategy_id=strategy_id)
+    artifacts = _register_report_outputs(settings.db_path, bundle)
+    StrategyReportRepository(settings.db_path).publish(
+        bundle=bundle,
+        artifacts=artifacts,
+        expected_revision=0,
+        expected_report_id=None,
+        expected_content_hash=None,
+    )
+
+    response = TestClient(create_app(settings)).get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    report = response.json()["workflow"]["report"]
+    assert report["report_id"] == bundle["report_id"]
+    assert report["revision"] == 1
+    assert report["status"] == "partial"
+    assert report["title"] == "策略迭代报告"
+    assert report["freshness"] == "current"
+    assert set(report["artifacts"]) == {"json", "markdown", "xlsx", "docx"}
+    for output_format, artifact in report["artifacts"].items():
+        assert artifact["artifact_id"] == artifacts[output_format]["id"]
+        assert artifact["download_url"].endswith(
+            f"/{artifacts[output_format]['id']}/download"
+        )
+    assert response.json()["workflow"]["stages"][6]["status"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("workflow", "workflow_inputs"),
+    [
+        (
+            "strategy_pool_impact",
+            {
+                "strategy_type": "approval",
+                "comparison_mode": "absolute",
+                "drop_nan_labels": False,
+            },
+        ),
+        (
+            "strategy_impact_cube",
+            {
+                "strategy_type": "pricing",
+                "partitions": ["development", "validation", "oot"],
+                "month_col": "apply_month",
+            },
+        ),
+        (
+            "strategy_report_bundle_v2",
+            {"title": "策略迭代评审报告", "status": "partial"},
+        ),
+    ],
+)
+def test_manual_strategy_request_accepts_v2_workflow_spine_entries(
+    workflow: str,
+    workflow_inputs: dict,
+) -> None:
+    request = ManualStrategyRequest.model_validate(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": workflow,
+            "workflow_inputs": workflow_inputs,
+        },
+        strict=True,
+    )
+
+    assert request.workflow == workflow
+    assert request.workflow_inputs == workflow_inputs
+
+
+def test_manual_strategy_request_rejects_impact_platform_bindings() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="Extra inputs are not permitted|platform-owned",
+    ):
+        ManualStrategyRequest.model_validate(
+            {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_impact_cube",
+                "workflow_inputs": {
+                    "strategy_type": "approval",
+                    "artifact_id": "a" * 64,
+                },
+            },
+            strict=True,
+        )
 
 
 def test_task_artifact_candidate_lookup_is_exact_and_capped_at_two(

@@ -324,10 +324,14 @@ def test_impact_binding_rejects_file_or_upstream_toctou(
     source: str,
 ) -> None:
     fixture, _pool, impact = _bindings(tmp_path)
+    sample_design_record = fixture["runtime"].task_artifacts.get_for_task(
+        fixture["task"].id,
+        impact.sample_design.reference.artifact_id,
+    )
     paths = {
         "impact_artifact": impact.artifact_path,
         "dataset": impact.dataset.path,
-        "sample_design": impact.sample_design.artifact.path,
+        "sample_design": Path(sample_design_record["path"]),
     }
     path = paths[source]
     path.write_bytes(path.read_bytes() + b"tampered")

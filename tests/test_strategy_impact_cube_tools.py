@@ -26,12 +26,27 @@ from marvis.plugins.loader import load_manifest
 from marvis.plugins.schema_validation import validate_against_schema
 import marvis.packs.strategy.impact_cube_tools as impact_tools
 from marvis.packs.strategy.pool import compile_strategy_pool
+from marvis.packs.strategy.pool_tools import (
+    bind_strategy_pool_development_execution,
+    load_current_strategy_candidate_pool_artifact,
+    require_strategy_pool_development_execution_binding_on_connection,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
 from marvis.packs.strategy.strategy import build_strategy_from_spec
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from tests.test_strategy_pool_validation_tools import (
     _controlled_score_requirement,
     _setup as _pool_setup,
+)
+from tests.test_strategy_voting_candidate_tool import (
+    _setup_native as _native_pool_setup,
 )
 
 
@@ -87,44 +102,296 @@ def _validate_output(fx: dict, output: dict) -> dict:
     )
 
 
-def test_impact_cube_native_sample_fails_closed_before_artifact_or_audit(
+def _setup_native(tmp_path: Path) -> dict:
+    fx = _native_pool_setup(tmp_path)
+    pool = fx["pool"]
+    pool_binding = load_current_strategy_candidate_pool_artifact(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        strategy_type="approval",
+        expected_pool_revision=pool["revision"],
+        expected_pool_snapshot_hash=pool["snapshot_hash"],
+    )
+    records = TaskArtifactRepository(fx["settings"].db_path).list_for_task(
+        fx["task"].id
+    )
+    membership = next(
+        item
+        for item in records
+        if item["kind"]
+        == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    bundle_record = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    bundle = json.loads(Path(bundle_record["path"]).read_text("utf-8"))
+    design = bundle["sample_design"]
+    request = {
+        "strategy_type": "approval",
+        "pool_ref": {
+            "artifact_id": pool_binding.artifact_id,
+            "expected_artifact_content_hash": (
+                pool_binding.artifact_content_hash
+            ),
+            "expected_pool_id": pool["pool_id"],
+            "expected_revision": pool["revision"],
+            "expected_revision_id": pool["revision_id"],
+            "expected_snapshot_hash": pool["snapshot_hash"],
+        },
+        "sample_design_ref": {
+            "membership_artifact_id": membership["id"],
+            "expected_membership_artifact_content_hash": membership[
+                "content_hash"
+            ],
+            "bundle_artifact_id": bundle_record["id"],
+            "expected_bundle_artifact_content_hash": bundle_record[
+                "content_hash"
+            ],
+            "expected_bundle_id": bundle["bundle_id"],
+            "expected_sample_design_id": design["sample_design_id"],
+            "expected_sample_design_content_hash": design["content_hash"],
+        },
+        "partitions": ["development"],
+        "population": "risk",
+        "dimension_bindings": {
+            "month_col": None,
+            "group_col": None,
+            "segment_col": None,
+        },
+        "current_strategy_ref": None,
+        "economics_inputs": None,
+    }
+    return {**fx, "impact_request": request}
+
+
+def test_impact_cube_native_sample_keeps_parallel_populations_and_bad_zero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fx = _setup(tmp_path)
-    original_load = impact_tools._load_sample_design_binding
+    fx = _setup_native(tmp_path)
+    locks = []
 
-    def load_native_sample(*args, **kwargs):
-        binding = original_load(*args, **kwargs)
-        bundle = copy.deepcopy(binding.bundle)
-        bundle["sample_design"]["compatibility"] = {
-            "source_mode": "native_active_dataset",
-            "development_partition": "risk/development",
-        }
-        return replace(binding, bundle=bundle)
+    def track_pool_development_lock(conn, binding):
+        assert conn.in_transaction
+        locks.append(binding)
+        return require_strategy_pool_development_execution_binding_on_connection(
+            conn,
+            binding,
+        )
 
     monkeypatch.setattr(
         impact_tools,
-        "_load_sample_design_binding",
-        load_native_sample,
+        "require_strategy_pool_development_execution_binding_on_connection",
+        track_pool_development_lock,
+        raising=False,
     )
-    artifacts_before = _artifacts(fx)
-    audits_before = _measurement_audits(fx)
+    output = run_measure_strategy_impact_cube(
+        fx["impact_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
 
-    with pytest.raises(StrategyError) as raised:
+    overall = {
+        row["population_role"]: row
+        for row in output["cube"]["slices"]
+        if row["family"] == "overall"
+        and row["dimensions"]["partition"]["value"] == "development"
+    }
+    approval = overall["approval"]
+    risk = overall["risk"]
+    assert approval["population"]["value"]["count"] == 5
+    assert approval["new"]["value"]["population_count"] == 5
+    assert risk["population"]["value"]["count"] == 3
+    assert risk["population"]["value"]["risk"]["bad_count"] == 2
+    assert risk["population"]["value"]["risk"]["bad_rate"] == pytest.approx(
+        2 / 3
+    )
+    assert risk["new"]["value"]["metrics"]["overall_bad_count"] == 2
+    assert output["cube"]["source_bindings"]["target"] == {
+        "column": "bad",
+        "good_value": 1,
+        "bad_value": 0,
+        "missing_policy": "retain_population_exclude_risk_denominator",
+    }
+    assert output["cube"]["source_bindings"]["development_lineage"][
+        "legacy_development_ref"
+    ] == fx["sample_design_ref"]
+    assert {
+        (row["role"], row["population_key"], row["row_count"])
+        for row in output["cube"]["partitions"]
+    } == {
+        ("approval", "approval/development", 5),
+        ("risk", "risk/development", 3),
+    }
+    assert len(locks) >= 2
+    assert all(
+        binding.sample_design.to_ref_dict() == fx["sample_design_ref"]
+        for binding in locks
+    )
+    assert len(_artifacts(fx)) == 1
+    assert len(_measurement_audits(fx)) == 1
+
+
+@pytest.mark.parametrize("governed_field", ["bad", "segment"])
+def test_impact_cube_rejects_current_strategy_governed_column_leakage(
+    tmp_path: Path,
+    governed_field: str,
+) -> None:
+    fx = _setup_native(tmp_path)
+    current = build_strategy_from_spec(
+        {
+            "schema_version": "strategy.dsl.v1",
+            "strategy_type": "approval",
+            "match_policy": "first_match",
+            "default_action": {"type": "approval"},
+            "rules": [
+                {
+                    "rule_id": "forbidden-governed-field",
+                    "priority": 10,
+                    "condition": {
+                        "op": "compare",
+                        "field": governed_field,
+                        "operator": "==",
+                        "value": 0,
+                    },
+                    "action": {
+                        "type": "reject",
+                        "reason_code": "LEAKAGE",
+                    },
+                }
+            ],
+        }
+    )
+    fx["runtime"].strategies.create_strategy(fx["task"].id, current)
+    request = copy.deepcopy(fx["impact_request"])
+    request["current_strategy_ref"] = {
+        "strategy_id": current.id,
+        "expected_strategy_spec_hash": strategy_spec_hash(current.spec),
+    }
+
+    with pytest.raises(
+        StrategyError,
+        match=f"governed columns.*{governed_field}",
+    ):
         run_measure_strategy_impact_cube(
-            fx["impact_request"],
+            request,
             fx["ctx"],
             fx["runtime"],
         )
 
-    assert (
-        getattr(raised.value, "code", None)
-        == "strategy_sample_design_v2_native_source_unsupported"
+    assert _artifacts(fx) == []
+
+
+def test_native_impact_cube_hydrates_model_score_before_parallel_masks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup_native(tmp_path)
+    base_pool = impact_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["impact_request"],
     )
-    assert getattr(raised.value, "consumer", None) == "strategy_impact_cube"
-    assert _artifacts(fx) == artifacts_before
-    assert _measurement_audits(fx) == audits_before
+    base_development = bind_strategy_pool_development_execution(
+        fx["runtime"],
+        base_pool,
+    )
+    controlled_pool, resolved = _controlled_score_requirement(
+        pool_binding=base_pool,
+    )
+    controlled_development = replace(
+        base_development,
+        pool=controlled_pool,
+    )
+    virtual_field = resolved.virtual_fields[0]
+    calls = {"hydrate": 0, "requirement_cas": 0, "pool_cas": 0}
+
+    monkeypatch.setattr(
+        impact_tools,
+        "_load_pool_binding",
+        lambda *args, **kwargs: controlled_pool,
+    )
+    monkeypatch.setattr(
+        impact_tools,
+        "bind_strategy_pool_development_execution",
+        lambda runtime, pool: controlled_development,
+    )
+    monkeypatch.setattr(
+        impact_tools,
+        "resolve_pool_requirements",
+        lambda *args, **kwargs: resolved,
+    )
+
+    def hydrate(frame: pd.DataFrame, *, resolved: object) -> pd.DataFrame:
+        assert resolved is score_requirements
+        calls["hydrate"] += 1
+        hydrated = frame.copy(deep=True)
+        hydrated[virtual_field] = [
+            index / max(1, len(frame) - 1) for index in range(len(frame))
+        ]
+        return hydrated
+
+    def require_requirement(conn, received):
+        assert conn.in_transaction
+        assert received is score_requirements
+        calls["requirement_cas"] += 1
+
+    def require_pool(conn, received):
+        assert conn.in_transaction
+        assert received is controlled_development
+        calls["pool_cas"] += 1
+
+    monkeypatch.setattr(impact_tools, "hydrate_requirement_fields", hydrate)
+    monkeypatch.setattr(
+        impact_tools,
+        "require_resolved_pool_requirements_on_connection",
+        require_requirement,
+    )
+    monkeypatch.setattr(
+        impact_tools,
+        "require_strategy_pool_development_execution_binding_on_connection",
+        require_pool,
+    )
+    monkeypatch.setattr(
+        impact_tools,
+        "pool_requirement_bindings_provenance",
+        lambda received: {
+            "requirements_hash": received.requirements_hash,
+            "requirements": list(received.requirements),
+            "virtual_fields": list(received.virtual_fields),
+        },
+    )
+    score_requirements = resolved
+
+    output = run_measure_strategy_impact_cube(
+        fx["impact_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    overall = {
+        row["population_role"]: row
+        for row in output["cube"]["slices"]
+        if row["family"] == "overall"
+        and row["dimensions"]["partition"]["value"] == "development"
+    }
+    assert overall["approval"]["population"]["value"]["count"] == 5
+    assert overall["risk"]["population"]["value"]["count"] == 3
+    assert overall["approval"]["new"]["value"]["metrics"][
+        "reject_count"
+    ] == 1
+    assert overall["risk"]["new"]["value"]["metrics"]["reject_count"] == 0
+    assert calls["hydrate"] == 1
+    assert calls["requirement_cas"] >= 4
+    assert calls["pool_cas"] >= 4
+    provenance = _artifacts(fx)[0]["provenance"]
+    assert provenance["requirement_bindings"]["virtual_fields"] == [
+        virtual_field
+    ]
 
 
 def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
@@ -132,6 +399,7 @@ def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fx = _setup(tmp_path)
+    fx["impact_request"]["dimension_bindings"]["segment_col"] = None
     original_load = impact_tools._load_pool_binding
     base_binding = original_load(
         fx["runtime"],
@@ -176,6 +444,9 @@ def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
 
     def read_snapshot(source, *args, **kwargs):
         assert virtual_field not in kwargs["columns"]
+        assert set(
+            controlled_development.sample_design.partition_columns
+        ).issubset(kwargs["columns"])
         frame = original_read(source, *args, **kwargs)
         frame.index = pd.Index(
             range(1000, 1000 + len(frame)),
@@ -240,8 +511,12 @@ def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
     )
     monkeypatch.setattr(
         impact_tools,
-        "require_strategy_candidate_pool_artifact_binding_on_connection",
-        lambda conn, binding: None,
+        "require_strategy_pool_development_execution_binding_on_connection",
+        lambda conn, binding: (
+            None
+            if conn.in_transaction and binding is controlled_development
+            else pytest.fail("unexpected controlled development binding")
+        ),
     )
 
     output = run_measure_strategy_impact_cube(

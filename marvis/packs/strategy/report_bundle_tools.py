@@ -22,7 +22,7 @@ import re
 import sqlite3
 import stat
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from marvis.artifacts import ArtifactUnitOfWork
@@ -94,7 +94,7 @@ from marvis.packs.strategy.report_bundle_adapters import (
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
     load_any_strategy_sample_design_v2_artifacts,
-    require_strategy_sample_design_v2_artifact_binding_on_connection,
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection,
     resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.packs.strategy.voting_candidate_search_tools import (
@@ -116,6 +116,11 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+
+if TYPE_CHECKING:
+    from marvis.packs.strategy.sample_design_v2_native_tools import (
+        StrategySampleDesignV2NativeArtifactBinding,
+    )
 
 
 BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION = (
@@ -324,7 +329,10 @@ _BOUNDARY_ERRORS = (
 @dataclass(frozen=True)
 class _ReportSources:
     project_context: StrategyProjectContextArtifactBinding
-    sample_design: StrategySampleDesignV2ArtifactBinding
+    sample_design: (
+        StrategySampleDesignV2ArtifactBinding
+        | StrategySampleDesignV2NativeArtifactBinding
+    )
     candidate_pool: StrategyCandidatePoolArtifactBinding
     pool_validations: tuple[StrategyPoolValidationArtifactBinding, ...]
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None
@@ -536,7 +544,7 @@ def _load_sources(
     )
     resolve_strategy_sample_design_v2_source_mode(
         sample_design.bundle["sample_design"],
-        capability="legacy_development",
+        capability="physical_v2",
         consumer="strategy_report_bundle",
     )
     candidate_pool = load_current_strategy_candidate_pool_artifact(
@@ -878,7 +886,7 @@ def _revalidate_sources(conn, sources: _ReportSources) -> None:
         conn,
         sources.project_context,
     )
-    require_strategy_sample_design_v2_artifact_binding_on_connection(
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection(
         conn,
         sources.sample_design,
     )

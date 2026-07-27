@@ -5,6 +5,7 @@ import {
 } from "./api_v2.js";
 
 export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
+  "strategy_sample_design_v2",
   "univariate_candidate_analysis",
   "univariate_candidate_refinement",
   "cross_matrix_analysis",
@@ -20,6 +21,9 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "strategy_pool_apply",
   "strategy_pool_validation",
   "strategy_pool_stability",
+  "strategy_pool_impact",
+  "strategy_impact_cube",
+  "strategy_report_bundle_v2",
   "voting_candidate_search",
   "voting_candidate_build_from_search",
   "interactive_tree_revision",
@@ -28,6 +32,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
 ]);
 
 const WORKFLOW_LABELS = Object.freeze({
+  strategy_sample_design_v2: "创建双人群 SampleDesign V2",
   univariate_candidate_analysis: "启动单变量候选分析",
   univariate_candidate_refinement: "启动单变量候选细化",
   cross_matrix_analysis: "启动二维 Cross Matrix",
@@ -43,6 +48,9 @@ const WORKFLOW_LABELS = Object.freeze({
   strategy_pool_apply: "应用当前 Strategy Pool",
   strategy_pool_validation: "执行 Strategy Pool 独立样本回放验证",
   strategy_pool_stability: "测算 Strategy Pool 稳定性",
+  strategy_pool_impact: "测算 Strategy Pool 影响",
+  strategy_impact_cube: "生成统一策略 ImpactCube",
+  strategy_report_bundle_v2: "形成策略迭代评审报告",
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
   interactive_tree_revision: "创建不可变交互式树修订",
@@ -1090,9 +1098,201 @@ function poolCollectionHtml(pools) {
   ].join("");
 }
 
+const WORKFLOW_STAGE_STATUS_LABELS = Object.freeze({
+  complete: "已完成",
+  stale: "需刷新",
+  missing: "待补充",
+});
+
+function workflowStageSpineHtml(stages) {
+  const rows = Array.isArray(stages) ? stages.filter(isRecord).slice(0, 7) : [];
+  if (!rows.length) {
+    return '<p class="candidate-lab-empty">七阶段状态尚未由平台返回。</p>';
+  }
+  return [
+    '<ol class="candidate-lab-workflow-stages" aria-label="策略开发七阶段">',
+    ...rows.map((stage, index) => {
+      const status = ["complete", "stale", "missing"].includes(stage.status)
+        ? stage.status
+        : "missing";
+      return [
+        `<li class="candidate-lab-workflow-stage" data-workflow-stage="${escapeHtml(nonEmptyText(stage.id) || String(index + 1))}" data-status="${escapeHtml(status)}">`,
+        `<span>${index + 1}</span>`,
+        `<strong>${escapeHtml(nonEmptyText(stage.label) || `阶段 ${index + 1}`)}</strong>`,
+        `<small>${escapeHtml(WORKFLOW_STAGE_STATUS_LABELS[status])}</small>`,
+        "</li>",
+      ].join("");
+    }),
+    "</ol>",
+  ].join("");
+}
+
+function samplePopulationHtml(role, population) {
+  const title = role === "approval" ? "审批人群" : "风险表现人群";
+  if (!isRecord(population)) {
+    return [
+      `<article class="candidate-lab-evidence-card candidate-lab-sample-population" data-population-role="${escapeHtml(role)}" data-status="missing">`,
+      `<strong>${title}</strong>`,
+      "<p>尚未定义。</p>",
+      "</article>",
+    ].join("");
+  }
+  const maturity = isRecord(population.maturity) ? population.maturity : {};
+  return [
+    `<article class="candidate-lab-evidence-card candidate-lab-sample-population" data-population-role="${escapeHtml(role)}">`,
+    `<strong>${title}</strong>`,
+    factsTableHtml({
+      total: population.total_count,
+      partitions: population.partitions,
+      maturity_status: maturity.status,
+      performance_window_days: maturity.performance_window_days,
+      cutoff_date: maturity.cutoff_date,
+      eligible_count: maturity.eligible_count,
+      labeled_count: maturity.labeled_count,
+      reason: maturity.reason,
+    }),
+    "</article>",
+  ].join("");
+}
+
+function sampleDesignWorkflowHtml(sample) {
+  if (!isRecord(sample)) {
+    return [
+      '<section class="candidate-lab-subsection candidate-lab-sample-design" data-status="missing">',
+      "<h5>双人群样本设计</h5>",
+      '<p class="candidate-lab-empty">尚无当前受认证 SampleDesign V2；请先让 Agent 明确审批人群、风险表现人群、分区与成熟度。</p>',
+      "</section>",
+    ].join("");
+  }
+  const artifactUrl = safeDownloadUrl(sample.artifact?.download_url);
+  return [
+    `<section class="candidate-lab-subsection candidate-lab-sample-design" data-status="${escapeHtml(sample.freshness === "stale" ? "stale" : "complete")}">`,
+    "<header><h5>双人群样本设计</h5>",
+    artifactUrl
+      ? `<a class="button compact secondary" href="${escapeHtml(artifactUrl)}" download>下载样本设计摘要</a>`
+      : "",
+    "</header>",
+    factsTableHtml({
+      source_mode: sample.source_mode,
+      relationship: sample.relationship,
+      analysis_universe_count: sample.analysis_universe_count,
+      target: sample.target,
+      relationship_counts: sample.relationship_counts,
+      diagnostic_status: sample.diagnostics?.overall_status,
+    }),
+    '<div class="candidate-lab-result-list candidate-lab-dual-populations">',
+    samplePopulationHtml("approval", sample.populations?.approval),
+    samplePopulationHtml("risk", sample.populations?.risk),
+    "</div>",
+    "</section>",
+  ].join("");
+}
+
+function workflowEvidenceItemHtml(label, item) {
+  if (!isRecord(item)) {
+    return [
+      '<article class="candidate-lab-evidence-card" data-status="missing">',
+      `<strong>${escapeHtml(label)}</strong>`,
+      "<small>待生成</small>",
+      "</article>",
+    ].join("");
+  }
+  const downloadUrl = safeDownloadUrl(item.artifact?.download_url);
+  const freshness = item.freshness === "stale" ? "stale" : "complete";
+  return [
+    `<article class="candidate-lab-evidence-card" data-status="${freshness}">`,
+    `<strong>${escapeHtml(label)}</strong>`,
+    `<small>${freshness === "stale" ? "基于旧 Pool revision，需刷新" : "与当前 Pool 一致"}</small>`,
+    factsTableHtml({
+      strategy_type: item.strategy_type,
+      pool_revision: item.pool_revision,
+      partitions: item.partitions || item.comparison_partitions || item.partition,
+      population_count: item.population_count,
+      labeled_count: item.labeled_count,
+      lifecycle: item.lifecycle,
+    }),
+    downloadUrl
+      ? `<a class="button compact secondary" href="${escapeHtml(downloadUrl)}" download>下载证据</a>`
+      : "",
+    "</article>",
+  ].join("");
+}
+
+function workflowEvidenceHtml(latestEvidence) {
+  const evidence = isRecord(latestEvidence) ? latestEvidence : {};
+  const validations = isRecord(evidence.pool_validation)
+    ? evidence.pool_validation
+    : {};
+  return [
+    '<section class="candidate-lab-subsection candidate-lab-workflow-evidence">',
+    "<h5>最新效果与稳定性证据</h5>",
+    '<div class="candidate-lab-result-list">',
+    workflowEvidenceItemHtml("Pool Stability", evidence.pool_stability),
+    workflowEvidenceItemHtml("Pool Impact", evidence.pool_impact),
+    workflowEvidenceItemHtml("ImpactCube", evidence.impact_cube),
+    workflowEvidenceItemHtml("Validation", validations.validation),
+    workflowEvidenceItemHtml("OOT", validations.oot),
+    "</div>",
+    "</section>",
+  ].join("");
+}
+
+function workflowReportHtml(report) {
+  if (!isRecord(report)) {
+    return [
+      '<section class="candidate-lab-subsection candidate-lab-workflow-report" data-status="missing">',
+      "<h5>策略迭代评审报告</h5>",
+      '<p class="candidate-lab-empty">尚未形成报告。缺失信息可以继续在对话里补充；暂时没有的字段会保留为空。</p>',
+      "</section>",
+    ].join("");
+  }
+  const artifacts = isRecord(report.artifacts) ? report.artifacts : {};
+  const labels = {
+    json: "JSON",
+    markdown: "Markdown",
+    xlsx: "Excel",
+    docx: "Word",
+  };
+  const links = Object.entries(labels).map(([format, label]) => {
+    const url = safeDownloadUrl(artifacts[format]?.download_url);
+    return url
+      ? `<a class="button compact secondary" href="${escapeHtml(url)}" download>${label}</a>`
+      : `<span class="strategy-artifact-unavailable">${label} 不可用</span>`;
+  }).join("");
+  return [
+    `<section class="candidate-lab-subsection candidate-lab-workflow-report" data-status="${escapeHtml(report.freshness === "stale" ? "stale" : "complete")}">`,
+    "<h5>策略迭代评审报告</h5>",
+    factsTableHtml({
+      report_id: report.report_id,
+      revision: report.revision,
+      status: report.status,
+      title: report.title,
+      created_at: report.created_at,
+    }),
+    `<div class="candidate-lab-form-actions">${links}</div>`,
+    "</section>",
+  ].join("");
+}
+
+function strategyWorkflowSpineHtml(workflow) {
+  const value = isRecord(workflow) ? workflow : {};
+  return [
+    '<section class="candidate-lab-result-group candidate-lab-workflow-spine">',
+    '<header class="candidate-lab-result-head">',
+    "<div><h4>策略开发全流程</h4><p>七阶段状态、双人群样本、最新效果证据和最终报告均来自结构化任务投影。</p></div>",
+    "</header>",
+    workflowStageSpineHtml(value.stages),
+    sampleDesignWorkflowHtml(value.sample_design),
+    workflowEvidenceHtml(value.latest_evidence),
+    workflowReportHtml(value.report),
+    "</section>",
+  ].join("");
+}
+
 export function strategyCandidateLabResultsHtml(payload = {}) {
   const candidates = isRecord(payload.candidates) ? payload.candidates : {};
   return [
+    strategyWorkflowSpineHtml(payload.workflow),
     ...COLLECTION_DEFINITIONS.map(
       (definition) => candidateCollectionHtml(candidates, definition),
     ),
@@ -1581,6 +1781,242 @@ function collectScorecardCutoffSelectionInputs(form) {
   return inputs;
 }
 
+function sampleDesignLiteral(rawValue) {
+  const raw = nonEmptyText(rawValue);
+  const separator = raw.indexOf(":");
+  if (separator < 1) {
+    throw new Error(
+      "样本人群条件值必须标注类型，例如 text:APP 或 number:30。",
+    );
+  }
+  const type = raw.slice(0, separator).trim().toLowerCase();
+  const value = raw.slice(separator + 1).trim();
+  if (!value) throw new Error("样本人群条件值不能为空。");
+  if (type === "text") return value;
+  if (type === "boolean") {
+    if (!["true", "false"].includes(value.toLowerCase())) {
+      throw new Error("boolean 条件值只能是 true 或 false。");
+    }
+    return value.toLowerCase() === "true";
+  }
+  if (type !== "number") {
+    throw new Error("样本人群条件值类型只能是 text、number 或 boolean。");
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    throw new Error("样本人群 number 条件值必须是有限数字。");
+  }
+  return number;
+}
+
+function collectSamplePopulation(form, prefix) {
+  const column = formValue(form, `${prefix}_population_column`);
+  const operator = formValue(form, `${prefix}_population_operator`);
+  const rawValue = formValue(form, `${prefix}_population_value`);
+  if (!column && !operator && !rawValue) {
+    return { inclusion: null, exclusion: null };
+  }
+  if (!column || !operator) {
+    throw new Error(`${prefix === "approval" ? "审批" : "风险"}人群条件必须完整填写字段与运算符。`);
+  }
+  const condition = { column, operator };
+  if (!["is_null", "is_not_null"].includes(operator)) {
+    if (!rawValue) {
+      throw new Error(`${prefix === "approval" ? "审批" : "风险"}人群条件必须填写显式类型值。`);
+    }
+    condition.value = sampleDesignLiteral(rawValue);
+  } else if (rawValue) {
+    throw new Error("空值判断不需要填写条件值。");
+  }
+  return {
+    inclusion: { match: "all", conditions: [condition] },
+    exclusion: null,
+  };
+}
+
+function nullableText(form, name) {
+  return formValue(form, name) || null;
+}
+
+function nullableInteger(form, name) {
+  const raw = formValue(form, name);
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${fieldLabel(name)}必须是正整数。`);
+  }
+  return value;
+}
+
+function sampleTimeRange(form, prefix, label) {
+  const start = nullableText(form, `sample_${prefix}_start`);
+  const end = nullableText(form, `sample_${prefix}_end`);
+  if (!start && !end) {
+    throw new Error(`${label}至少填写一个时间边界。`);
+  }
+  if (start && end && start > end) {
+    throw new Error(`${label}开始日期不能晚于结束日期。`);
+  }
+  return { start, end };
+}
+
+function collectSampleDesignV2Inputs(form) {
+  const targetBadValue = Number(formValue(form, "sample_target_bad_value"));
+  if (![0, 1].includes(targetBadValue)) {
+    throw new Error("坏样本值只能是 0 或 1。");
+  }
+  const relationship = formValue(form, "sample_relationship");
+  if (!["nested_same_cohort", "parallel_time_cohorts"].includes(relationship)) {
+    throw new Error("请选择审批与风险人群关系。");
+  }
+  const timeField = formValue(form, "sample_time_field");
+  if (!timeField) throw new Error("请填写用于样本分区的时间字段。");
+  const maturityStatus = formValue(form, "sample_maturity_status");
+  const performanceStatus = formValue(form, "sample_performance_status");
+  const observationStatus = formValue(form, "sample_observation_status");
+  const historicalStatus = formValue(form, "sample_historical_score_status");
+  const maturityDays = nullableInteger(form, "sample_maturity_days");
+  const maturityCutoff = nullableText(form, "sample_maturity_cutoff");
+  const maturityReason = nullableText(form, "sample_maturity_reason");
+  const performanceDays = nullableInteger(form, "sample_performance_days");
+  const observationStart = nullableText(form, "sample_observation_start");
+  const observationEnd = nullableText(form, "sample_observation_end");
+  const historicalColumn = nullableText(
+    form,
+    "sample_historical_score_column",
+  );
+  const historicalDirection = nullableText(
+    form,
+    "sample_historical_score_direction",
+  );
+  const historicalReason = nullableText(
+    form,
+    "sample_historical_score_reason",
+  );
+  if (
+    ![
+      "confirmed_matured",
+      "not_matured",
+      "unknown",
+      "unavailable",
+    ].includes(maturityStatus)
+  ) {
+    throw new Error("请选择有效的样本成熟度状态。");
+  }
+  if (!["provided", "unavailable"].includes(performanceStatus)) {
+    throw new Error("请选择有效的表现窗口状态。");
+  }
+  if (!["provided", "unavailable"].includes(observationStatus)) {
+    throw new Error("请选择有效的观察窗口状态。");
+  }
+  const evaluatedMaturity = [
+    "confirmed_matured",
+    "not_matured",
+  ].includes(maturityStatus);
+  if (evaluatedMaturity) {
+    if (!maturityDays || !maturityCutoff) {
+      throw new Error("已评估成熟度必须填写表现期天数和成熟截止日。");
+    }
+    if (performanceStatus !== "provided" || performanceDays !== maturityDays) {
+      throw new Error("成熟度与表现窗口必须使用相同的已提供天数。");
+    }
+    if (maturityStatus === "not_matured" && !maturityReason) {
+      throw new Error("尚未成熟时必须填写成熟度说明。");
+    }
+    if (maturityStatus === "confirmed_matured" && maturityReason) {
+      throw new Error("已确认成熟时请清空成熟度说明。");
+    }
+  } else if (maturityDays || maturityCutoff || !maturityReason) {
+    throw new Error(
+      "成熟度未知或暂不可提供时，天数和截止日应留空并填写说明。",
+    );
+  }
+  if (
+    (performanceStatus === "provided" && !performanceDays)
+    || (performanceStatus === "unavailable" && performanceDays)
+  ) {
+    throw new Error("表现窗口状态与天数不一致。");
+  }
+  if (observationStatus === "provided") {
+    if (!observationStart || !observationEnd) {
+      throw new Error("已提供观察窗口时必须填写开始和结束日期。");
+    }
+    if (observationStart > observationEnd) {
+      throw new Error("观察窗口开始日期不能晚于结束日期。");
+    }
+  } else if (observationStart || observationEnd) {
+    throw new Error("观察窗口暂不可提供时，开始和结束日期应留空。");
+  }
+  if (
+    !["available", "unavailable", "not_applicable"].includes(historicalStatus)
+  ) {
+    throw new Error("请选择有效的历史分状态。");
+  }
+  if (historicalStatus === "available") {
+    if (
+      !historicalColumn
+      || !["higher_is_riskier", "lower_is_riskier"].includes(
+        historicalDirection,
+      )
+    ) {
+      throw new Error("历史分可用时必须填写字段和风险方向。");
+    }
+    if (historicalReason) {
+      throw new Error("历史分可用时请清空历史分说明。");
+    }
+  } else if (historicalColumn || historicalDirection || !historicalReason) {
+    throw new Error("历史分不可用或不适用时，只填写说明。");
+  }
+  return {
+    target_bad_value: targetBadValue,
+    drop_nan_labels: Boolean(
+      formField(form, "sample_drop_nan_labels")?.checked,
+    ),
+    relationship,
+    approval_population: collectSamplePopulation(form, "approval"),
+    risk_population: collectSamplePopulation(form, "risk"),
+    partitioning: {
+      method: "time_ranges",
+      column: timeField,
+      ranges: {
+        development: sampleTimeRange(form, "development", "开发集"),
+        validation: sampleTimeRange(form, "validation", "验证集"),
+        oot: sampleTimeRange(form, "oot", "OOT"),
+      },
+    },
+    maturity: {
+      status: maturityStatus,
+      performance_window_days: maturityDays,
+      cutoff_date: maturityCutoff,
+      reason: maturityReason,
+    },
+    performance_window: {
+      status: performanceStatus,
+      days: performanceDays,
+    },
+    observation_window: {
+      status: observationStatus,
+      start: observationStart,
+      end: observationEnd,
+    },
+    field_bindings: {
+      entity_field: nullableText(form, "sample_entity_field"),
+      time_field: timeField,
+      group_field: nullableText(form, "sample_group_field"),
+      month_field: nullableText(form, "sample_month_field"),
+      weight_field: nullableText(form, "sample_weight_field"),
+      loan_amount_field: nullableText(form, "sample_loan_amount_field"),
+      overdue_amount_field: nullableText(form, "sample_overdue_amount_field"),
+    },
+    historical_score: {
+      status: historicalStatus,
+      column: historicalColumn,
+      direction: historicalDirection,
+      reason: historicalReason,
+    },
+  };
+}
+
 function collectCandidateMonthlyStabilityInputs(form) {
   const mode = formValue(form, "stability_source_mode");
   if (mode === "pool_entry") {
@@ -1638,6 +2074,100 @@ function collectStrategyPoolStabilityInputs(form) {
       "pool_stability_strategy_type",
     ),
   };
+}
+
+function collectStrategyPoolImpactInputs(form) {
+  const strategyType = selectedStrategyPoolType(
+    form,
+    "pool_impact_strategy_type",
+  );
+  if (!["approval", "reject"].includes(strategyType)) {
+    throw new Error("Pool Impact 只支持 approval 或 reject Pool。");
+  }
+  const comparisonMode = formValue(form, "pool_impact_comparison_mode")
+    || "absolute";
+  const inputs = {
+    strategy_type: strategyType,
+    comparison_mode: comparisonMode,
+    drop_nan_labels: Boolean(
+      formField(form, "pool_impact_drop_nan_labels")?.checked,
+    ),
+  };
+  optionalText(
+    inputs,
+    "baseline_strategy_id",
+    formValue(form, "pool_impact_baseline_strategy_id"),
+  );
+  optionalText(inputs, "month_col", formValue(form, "pool_impact_month_col"));
+  optionalText(
+    inputs,
+    "loan_amount_col",
+    formValue(form, "pool_impact_loan_amount_col"),
+  );
+  optionalText(
+    inputs,
+    "overdue_amount_col",
+    formValue(form, "pool_impact_overdue_amount_col"),
+  );
+  if (
+    comparisonMode === "vs_baseline"
+    && !inputs.baseline_strategy_id
+  ) {
+    throw new Error("对比历史策略时必须填写完整 baseline_strategy_id。");
+  }
+  if (
+    comparisonMode === "absolute"
+    && inputs.baseline_strategy_id
+  ) {
+    throw new Error("绝对影响测算不能同时填写 baseline_strategy_id。");
+  }
+  return inputs;
+}
+
+function collectStrategyImpactCubeInputs(form) {
+  const inputs = {
+    strategy_type: selectedStrategyPoolType(
+      form,
+      "impact_cube_strategy_type",
+    ),
+  };
+  const partitions = uniqueValues(
+    checkedValues(form, "impact_cube_partitions"),
+    "ImpactCube 分区",
+  );
+  if (partitions.length) inputs.partitions = partitions;
+  optionalText(inputs, "month_col", formValue(form, "impact_cube_month_col"));
+  optionalText(inputs, "group_col", formValue(form, "impact_cube_group_col"));
+  optionalText(
+    inputs,
+    "segment_col",
+    formValue(form, "impact_cube_segment_col"),
+  );
+  optionalText(
+    inputs,
+    "current_strategy_id",
+    formValue(form, "impact_cube_current_strategy_id"),
+  );
+  const dimensions = [
+    inputs.month_col,
+    inputs.group_col,
+    inputs.segment_col,
+  ].filter(Boolean);
+  if (new Set(dimensions).size !== dimensions.length) {
+    throw new Error("月份、分组与分群维度必须使用不同字段。");
+  }
+  return inputs;
+}
+
+function collectStrategyReportBundleV2Inputs(form) {
+  const title = formValue(form, "strategy_report_title")
+    || "策略迭代评审报告";
+  if (title.length > 200) throw new Error("报告标题最多 200 个字符。");
+  const status = formValue(form, "strategy_report_status") || "partial";
+  if (!["draft", "partial", "final"].includes(status)) {
+    throw new Error("报告状态只能是 draft、partial 或 final。");
+  }
+  return { title, status };
 }
 
 function collectStrategyPoolApplyInputs(form) {
@@ -2228,6 +2758,7 @@ export function collectStrategyCandidateLabRequest(form) {
     throw new Error("Candidate Lab 表单包含未开放的策略 workflow。");
   }
   const workflowInputs = {
+    strategy_sample_design_v2: collectSampleDesignV2Inputs,
     univariate_candidate_analysis: collectUnivariateInputs,
     univariate_candidate_refinement: collectRefinementInputs,
     cross_matrix_analysis: collectCrossInputs,
@@ -2243,6 +2774,9 @@ export function collectStrategyCandidateLabRequest(form) {
     strategy_pool_apply: collectStrategyPoolApplyInputs,
     strategy_pool_validation: collectStrategyPoolValidationInputs,
     strategy_pool_stability: collectStrategyPoolStabilityInputs,
+    strategy_pool_impact: collectStrategyPoolImpactInputs,
+    strategy_impact_cube: collectStrategyImpactCubeInputs,
+    strategy_report_bundle_v2: collectStrategyReportBundleV2Inputs,
     voting_candidate_search: collectVotingCandidateSearchInputs,
     voting_candidate_build_from_search:
       collectVotingCandidateBuildFromSearchInputs,
@@ -3575,6 +4109,18 @@ function strategyPoolStabilityForm(root) {
   ) || null;
 }
 
+function strategyPoolImpactForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_impact"]',
+  ) || null;
+}
+
+function strategyImpactCubeForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_impact_cube"]',
+  ) || null;
+}
+
 function strategyPoolRemoveEntryForm(root) {
   return root?.querySelector?.(
     '[data-candidate-lab-workflow="strategy_pool_remove_entry"]',
@@ -3704,6 +4250,65 @@ function syncStrategyPoolStabilityControls(form, payload) {
         ? `已选择当前唯一的 ${selectedType} Pool；平台将自动比较 development 与所有可用 validation / OOT。`
         : "当前存在多个受认证非空 Strategy Pool，请明确选择要测算稳定性的策略类型。";
   }
+}
+
+function syncStrategyPoolImpactControls(form, payload) {
+  if (!form) return;
+  const pools = strategyPoolOperationPools(payload).filter((pool) => (
+    ["approval", "reject"].includes(pool.strategyType)
+  ));
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "pool_impact_strategy_type"),
+    pools,
+  );
+  const help = form.querySelector?.(
+    "[data-candidate-lab-pool-impact-help]",
+  );
+  if (help) {
+    help.textContent = pools.length === 0
+      ? "当前任务尚无可测算的受认证非空 approval / reject Pool。"
+      : pools.length === 1
+        ? `已选择当前唯一的 ${selectedType} Pool；不会修改 Pool 或创建策略。`
+        : "当前存在多个可测算 Pool，请明确选择 approval 或 reject。";
+  }
+}
+
+function syncStrategyImpactCubeControls(form, payload) {
+  if (!form) return;
+  const pools = strategyPoolOperationPools(payload);
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "impact_cube_strategy_type"),
+    pools,
+  );
+  const help = form.querySelector?.(
+    "[data-candidate-lab-impact-cube-help]",
+  );
+  if (help) {
+    help.textContent = pools.length === 0
+      ? "当前任务尚无可测算的受认证非空 Strategy Pool。"
+      : pools.length === 1
+        ? `已选择当前唯一的 ${selectedType} Pool；分区留空时由平台选择全部非空可用分区。`
+        : "当前存在多个受认证非空 Pool，请明确选择要测算的策略类型。";
+  }
+}
+
+function strategyMeasurementRequestIsCurrent(request, payload) {
+  if (
+    !["strategy_pool_impact", "strategy_impact_cube"].includes(
+      request?.workflow,
+    )
+  ) {
+    return true;
+  }
+  const strategyType = nonEmptyText(
+    request?.workflow_inputs?.strategy_type,
+  );
+  const pools = strategyPoolOperationPools(payload);
+  return pools.some((pool) => pool.strategyType === strategyType)
+    && (
+      request.workflow !== "strategy_pool_impact"
+      || ["approval", "reject"].includes(strategyType)
+    );
 }
 
 function strategyPoolEntryLabel(entry, displayPosition = entry.position) {
@@ -4357,6 +4962,14 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       strategyPoolStabilityForm(root),
       state.payload,
     );
+    syncStrategyPoolImpactControls(
+      strategyPoolImpactForm(root),
+      state.payload,
+    );
+    syncStrategyImpactCubeControls(
+      strategyImpactCubeForm(root),
+      state.payload,
+    );
     syncStrategyPoolApplyControls(
       strategyPoolApplyForm(root),
       state.payload,
@@ -4402,6 +5015,14 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     );
     syncStrategyPoolStabilityControls(
       strategyPoolStabilityForm(root),
+      state.payload,
+    );
+    syncStrategyPoolImpactControls(
+      strategyPoolImpactForm(root),
+      state.payload,
+    );
+    syncStrategyImpactCubeControls(
+      strategyImpactCubeForm(root),
       state.payload,
     );
     syncStrategyPoolApplyControls(
@@ -4587,6 +5208,14 @@ export function createStrategyCandidateLabController(dependencies = {}) {
           "所选 Strategy Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
         );
       }
+      if (!strategyMeasurementRequestIsCurrent(
+        strategyRequest,
+        state.payload,
+      )) {
+        throw new Error(
+          "影响测算所选 Strategy Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
       if (
         strategyRequest.workflow === "strategy_pool_apply"
         && !strategyPoolApplyOptions(state.payload).some(
@@ -4689,6 +5318,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       if (
         strategyRequest.workflow === "strategy_pool_apply"
         || strategyRequest.workflow === "strategy_pool_stability"
+        || strategyRequest.workflow === "strategy_pool_impact"
+        || strategyRequest.workflow === "strategy_impact_cube"
+        || strategyRequest.workflow === "strategy_sample_design_v2"
+        || strategyRequest.workflow === "strategy_report_bundle_v2"
         || strategyRequest.workflow === "strategy_pool_add_candidate"
         || STRATEGY_POOL_OPERATION_WORKFLOWS.includes(strategyRequest.workflow)
       ) {

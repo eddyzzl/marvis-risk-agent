@@ -18,16 +18,19 @@ from marvis.data.workspace import (
     DataWorkspaceDraft,
     data_semantic_mapping_hash,
 )
-from marvis.db import DatasetRepository, TaskRepository
+from marvis.db import DatasetRepository, StrategyRepository, TaskRepository
 from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy import pool_tools
 from marvis.packs.strategy.sample_design_v2_native_tools import (
     run_materialize_sample_design_v2_native,
 )
+from marvis.packs.strategy.strategy import build_strategy_from_spec
 from marvis.plugins.contracts import ToolContext
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestRepository,
 )
+from marvis.repositories.strategy_pool import StrategyCandidatePoolRepository
 from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactRepository,
@@ -218,6 +221,56 @@ def _model_evidence_payload() -> dict:
     }
 
 
+def _deterministic_candidate_payload(strategy_type: str) -> dict:
+    if strategy_type == "limit":
+        return {
+            "operation": "develop",
+            "strategy_type": "limit",
+            "candidate_design": {
+                "method": "score_band_limit",
+                "score_col": "legacy_score",
+                "n_bands": 2,
+                "limit_grid": [1000, 2000],
+                "max_expected_loss_per_account": 200,
+            },
+            "economics_inputs": {
+                "pd_value": 0.10,
+                "lgd_value": 0.50,
+                "utilization_value": 0.60,
+            },
+        }
+    if strategy_type == "pricing":
+        return {
+            "operation": "develop",
+            "strategy_type": "pricing",
+            "candidate_design": {
+                "method": "score_band_pricing",
+                "score_col": "legacy_score",
+                "n_bands": 2,
+                "rate_grid": [0.12, 0.18],
+                "min_roa": 0.0,
+            },
+            "economics_inputs": {
+                "ead_col": "ead",
+                "pd_col": "pd",
+                "lgd_value": 0.50,
+                "funding_rate_value": 0.04,
+                "term_months_value": 12,
+                "operating_cost_per_loan_value": 10,
+            },
+        }
+    assert strategy_type == "segmentation"
+    return {
+        "operation": "develop",
+        "strategy_type": "segmentation",
+        "candidate_design": {
+            "method": "single_variable_segmentation",
+            "feature_col": "legacy_score",
+            "n_bands": 2,
+        },
+    }
+
+
 def _legacy_sample_payload() -> dict:
     return {
         "request_kind": "standard_workflow",
@@ -272,6 +325,92 @@ def _create_strategy_task(client: TestClient, tmp_path: Path) -> str:
     return response.json()["id"]
 
 
+def _approval_strategy_spec(*, threshold: float = 250.0) -> dict:
+    return {
+        "strategy_type": "approval",
+        "default_action": {"type": "approval"},
+        "rules": [
+            {
+                "rule_id": f"legacy-score-above-{threshold:g}",
+                "priority": 10,
+                "condition": {
+                    "op": "compare",
+                    "field": "legacy_score",
+                    "operator": ">=",
+                    "value": threshold,
+                },
+                "action": {"type": "reject"},
+            }
+        ],
+    }
+
+
+def _create_stored_approval_strategy(
+    client: TestClient,
+    task_id: str,
+    *,
+    threshold: float,
+) -> str:
+    strategy = build_strategy_from_spec(
+        _approval_strategy_spec(threshold=threshold),
+        description=f"native-parallel-baseline-{threshold:g}",
+    )
+    StrategyRepository(client.app.state.settings.db_path).create_strategy(
+        task_id,
+        strategy,
+    )
+    return strategy.id
+
+
+def _materialize_native_parallel_sample_from_agent(
+    client: TestClient,
+    task_id: str,
+    monkeypatch,
+) -> dict[str, str]:
+    llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": _parallel_population_sample_v2_inputs(),
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _parallel_population_sample_v2_utterance()},
+    )
+    assert response.status_code == 202, response.text
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    assert plan.template_id == "strategy_sample_design_v2_native"
+    assert plan.status == "done"
+    output = client.app.state.plan_repo.load_step_output(plan.steps[0].id)
+    assert output["membership"]["counts"]["approval"]["development"] == 5
+    assert output["membership"]["counts"]["risk"]["development"] == 4
+    bundle = next(
+        record
+        for record in reversed(
+            TaskArtifactRepository(
+                client.app.state.settings.db_path
+            ).list_for_task(task_id)
+        )
+        if record["kind"] == "strategy_sample_design_v2_json"
+        and record["origin_tool"]
+        == "strategy.materialize_sample_design_v2_native"
+    )
+    return {
+        "artifact_id": bundle["id"],
+        "artifact_content_hash": bundle["content_hash"],
+        "sample_design_id": bundle["provenance"]["sample_design_id"],
+        "sample_design_content_hash": bundle["provenance"][
+            "sample_design_content_hash"
+        ],
+        "partition": "risk/development",
+    }
+
+
 def _register_workspace_sample(
     client: TestClient,
     task_id: str,
@@ -280,6 +419,7 @@ def _register_workspace_sample(
     nan_label: bool = False,
     target_col: str | None = "bad",
     parallel_populations: bool = False,
+    parallel_bad_pattern: list[object] | None = None,
 ):
     tmp_path.mkdir(parents=True, exist_ok=True)
     if parallel_populations:
@@ -299,7 +439,11 @@ def _register_workspace_sample(
         population = population_pattern * 3
         approval_flag = [1, 1, 0, 1, 1, 1] * 3
         risk_flag = [0, 0, 1, 1, 1, 1] * 3
-        bad: list[object] = [0, 1, 0, 0, 1, 1] * 3
+        if parallel_bad_pattern is not None:
+            assert len(parallel_bad_pattern) == 6
+        bad: list[object] = list(
+            (parallel_bad_pattern or [0, 1, 0, 0, 1, 1]) * 3
+        )
         apply_dates = [
             f"2026-{month:02d}-{day:02d}"
             for month in (1, 2, 3)
@@ -329,6 +473,11 @@ def _register_workspace_sample(
         overdue_amount = [
             float((index % 4) * 5) for index in range(len(sample_roles))
         ]
+        ead = [float(800 + index * 25) for index in range(len(sample_roles))]
+        pd_values = [
+            float(0.02 + (index % 6) * 0.03)
+            for index in range(len(sample_roles))
+        ]
     else:
         sample_roles = ["dev", "dev", "valid", "valid", "oot", "oot"]
         population = None
@@ -356,6 +505,8 @@ def _register_workspace_sample(
         customer_ids = ["a", "b", "c", "d", "e", "f"]
         loan_amount = [100.0, 200.0, 150.0, 180.0, 300.0, 250.0]
         overdue_amount = [0.0, 20.0, 0.0, 10.0, 0.0, 30.0]
+        ead = [800.0, 900.0, 1000.0, 1100.0, 1200.0, 1300.0]
+        pd_values = [0.02, 0.08, 0.04, 0.10, 0.06, 0.12]
     if nan_label:
         bad[1] = None
     row_count = len(sample_roles)
@@ -369,6 +520,8 @@ def _register_workspace_sample(
         "weight": [1.0] * row_count,
         "loan_amount": loan_amount,
         "overdue_amount": overdue_amount,
+        "ead": ead,
+        "pd": pd_values,
         "bad": bad,
     }
     if parallel_populations:
@@ -410,6 +563,8 @@ def _register_workspace_sample(
             "weight": "weight",
             "loan_amount": "loan_amount",
             "overdue_amount": "overdue_amount",
+            "ead": "feature",
+            "pd": "feature",
             **(
                 {
                     "population": "segment",
@@ -931,6 +1086,541 @@ def test_native_parallel_sample_drives_composed_candidate_workflows(
     assert len(llm.calls) == 2
 
 
+@pytest.mark.parametrize("strategy_type", ["limit", "pricing", "segmentation"])
+def test_native_parallel_sample_drives_deterministic_candidate_agent_workflow(
+    tmp_path: Path,
+    monkeypatch,
+    strategy_type: str,
+) -> None:
+    scoped = tmp_path / strategy_type
+    client = TestClient(create_app(scoped / "workspace"))
+    task_id = _create_strategy_task(client, scoped)
+    _register_workspace_sample(
+        client,
+        task_id,
+        scoped,
+        parallel_populations=True,
+    )
+    exact_ref = _materialize_native_parallel_sample_from_agent(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    llm = _SequencedStrategyLLM(_deterministic_candidate_payload(strategy_type))
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": f"基于 legacy_score 开发{strategy_type}确定性候选策略"},
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "deterministic_strategy_candidate_development",
+    ], json.dumps(response.json()["messages"][-1], ensure_ascii=False)
+    assert plans[-1]["status"] == "awaiting_confirm"
+    plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert plan.steps[0].inputs["sample_design_ref"] == exact_ref
+    assert plan.steps[2].inputs["sample_design_ref"] == exact_ref
+    design_inputs = plan.steps[0].inputs["candidate_design"]
+    grid_name = {
+        "limit": "limit_grid",
+        "pricing": "rate_grid",
+        "segmentation": None,
+    }[strategy_type]
+    if grid_name is not None:
+        assert isinstance(design_inputs[grid_name], list)
+    design = client.app.state.plan_repo.load_step_output(plan.steps[0].id)
+    assert design["design_evidence"]["development_population_count"] == 4
+    assert design["sample_design_ref"] == exact_ref
+    backtest = client.app.state.plan_repo.load_step_output(plan.steps[2].id)
+    assert backtest["population_count"] == 4
+    assert len(llm.calls) == 1
+
+
+def test_native_parallel_sample_drives_rule_mining_and_evaluation_agent_workflow(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+    )
+    exact_ref = _materialize_native_parallel_sample_from_agent(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    llm = _SequencedStrategyLLM(
+        {
+            "operation": "mine_rules",
+            "strategy_type": "reject",
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "挖掘并评估当前样本的审批拒绝规则"},
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "rule_strategy",
+    ], json.dumps(response.json()["messages"][-1], ensure_ascii=False)
+    assert plans[-1]["status"] == "awaiting_confirm"
+    plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert plan.steps[0].inputs["sample_design_ref"] == exact_ref
+    assert plan.steps[2].inputs["sample_design_ref"] == exact_ref
+    assert plan.steps[4].inputs["sample_design_ref"] == exact_ref
+    mined = client.app.state.plan_repo.load_step_output(plan.steps[0].id)
+    evaluated = client.app.state.plan_repo.load_step_output(plan.steps[2].id)
+    backtest = client.app.state.plan_repo.load_step_output(plan.steps[4].id)
+    assert mined["sample_design_ref"] == exact_ref
+    assert mined["n_rows"] == 4
+    assert evaluated["sample_design_ref"] == exact_ref
+    assert backtest["population_count"] == 4
+    assert len(llm.calls) == 1
+
+
+def test_native_parallel_sample_drives_tradeoff_cutoff_backtest_and_compare(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+        # The development workflow's default direction is higher_is_better.
+        # Keep this binding regression semantically aligned so the deterministic
+        # max-approval design yields a real cutoff instead of the valid
+        # approve-all result (whose empty-rule representation is a separate
+        # legacy build_strategy contract gap).
+        parallel_bad_pattern=[0, 1, 1, 1, 0, 0],
+    )
+    exact_ref = _materialize_native_parallel_sample_from_agent(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    baseline_strategy_id = _create_stored_approval_strategy(
+        client,
+        task_id,
+        threshold=350.0,
+    )
+    llm = _SequencedStrategyLLM(
+        {
+            "operation": "develop",
+            "strategy_type": "approval",
+            "objective": "max_approval",
+            "max_bad_rate": 0.25,
+            "min_approval_rate": 0.25,
+            "baseline_strategy_id": baseline_strategy_id,
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "扫描权衡并设计审批 cutoff，回测后与基线策略比较"},
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "strategy_development",
+    ], json.dumps(response.json()["messages"][-1], ensure_ascii=False)
+    assert plans[-1]["status"] == "awaiting_confirm"
+    plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    for step_index in (0, 1, 3, 4):
+        assert plan.steps[step_index].inputs["sample_design_ref"] == exact_ref
+    tradeoff = client.app.state.plan_repo.load_step_output(plan.steps[0].id)
+    bands = client.app.state.plan_repo.load_step_output(plan.steps[1].id)
+    backtest = client.app.state.plan_repo.load_step_output(plan.steps[3].id)
+    comparison = client.app.state.plan_repo.load_step_output(plan.steps[4].id)
+    assert tradeoff["sample_design_ref"] == exact_ref
+    assert bands["sample_design_ref"] == exact_ref
+    assert backtest["population_count"] == 4
+    assert comparison["status"] == "compared"
+    assert len(llm.calls) == 1
+
+
+def test_native_parallel_sample_drives_limit_pricing_matrix_agent_workflow(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+    )
+    exact_ref = _materialize_native_parallel_sample_from_agent(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "limit_pricing_matrix",
+            "workflow_inputs": {
+                "score_col": "legacy_score",
+                "pd_col": "pd",
+                "n_bands": 2,
+                "limit_grid": [1000, 2000],
+                "rate_grid": [0.12, 0.18],
+                "lgd": 0.50,
+                "funding_rate": 0.04,
+                "term_months": 12,
+                "cost_per_loan": 10,
+                "el_ead_max": 0.20,
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "按 legacy_score 和 pd 测算额度利率定价矩阵"},
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "strategy_limit_pricing_analysis",
+    ], json.dumps(response.json()["messages"][-1], ensure_ascii=False)
+    assert plans[-1]["status"] == "done"
+    plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert plan.steps[0].inputs["sample_design_ref"] == exact_ref
+    assert plan.steps[1].inputs["sample_design_ref"] == exact_ref
+    output = client.app.state.plan_repo.load_step_output(plan.steps[0].id)
+    assert output["source_evidence"]["sample_design_partition"] == "risk/development"
+    assert output["sample_design_ref"] == exact_ref
+    band_counts = {
+        cell["band"]: cell["count"]
+        for cell in output["matrix"]
+    }
+    assert sum(band_counts.values()) == 4
+    assert len(llm.calls) == 1
+
+
+def test_native_parallel_sample_drives_stored_strategy_backtest_and_compare(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+    )
+    exact_ref = _materialize_native_parallel_sample_from_agent(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    challenger_id = _create_stored_approval_strategy(
+        client,
+        task_id,
+        threshold=250.0,
+    )
+    baseline_id = _create_stored_approval_strategy(
+        client,
+        task_id,
+        threshold=350.0,
+    )
+    llm = _SequencedStrategyLLM(
+        {
+            "operation": "compare",
+            "strategy_type": "approval",
+            "strategy_id": challenger_id,
+            "baseline_strategy_id": baseline_id,
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "回测并比较当前审批候选策略与基线策略"},
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "stored_strategy_evaluation",
+    ], json.dumps(response.json()["messages"][-1], ensure_ascii=False)
+    assert plans[-1]["status"] == "done"
+    plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert plan.steps[0].inputs["sample_design_ref"] == exact_ref
+    backtest = client.app.state.plan_repo.load_step_output(plan.steps[0].id)
+    assert backtest["population_count"] == 4
+    assert backtest["normalized_input"]["sample_design_ref"] == exact_ref
+    assert sum(row["count"] for row in backtest["transitions"]) == 4
+    assert len(llm.calls) == 1
+
+
+def test_native_parallel_sample_does_not_expand_stored_adoption_boundary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+    )
+    _materialize_native_parallel_sample_from_agent(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    strategy_id = _create_stored_approval_strategy(
+        client,
+        task_id,
+        threshold=250.0,
+    )
+    llm = _SequencedStrategyLLM(
+        {
+            "operation": "adopt",
+            "strategy_type": "approval",
+            "strategy_id": strategy_id,
+            "adoption_reason": "仅用于验证原生样本不会绕过既有采纳边界",
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "采纳这个已有审批策略"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert (
+        response.json()["code"]
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native"
+    ]
+    assert len(llm.calls) == 1
+
+
+def test_native_parallel_candidate_natural_language_pool_add_compile_and_impact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+    )
+    sample_request = {
+        "request_kind": "standard_workflow",
+        "workflow": "strategy_sample_design_v2",
+        "workflow_inputs": _parallel_population_sample_v2_inputs(),
+    }
+    refinement_request = _refinement_payload()
+    initial_llm = _SequencedStrategyLLM(
+        sample_request,
+        refinement_request,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: initial_llm,
+    )
+
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _parallel_population_sample_v2_utterance()},
+    ).status_code == 202
+    refined = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "对 legacy_score 做等距 3 箱并保留观测坏率大于等于 50% "
+                "的候选箱，最小箱占比 2%，放款金额列 loan_amount，"
+                "逾期金额列 overdue_amount"
+            )
+        },
+    )
+    assert refined.status_code == 202, refined.text
+    refinement_plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    asset_output = client.app.state.plan_repo.load_step_output(
+        refinement_plan.steps[-1].id
+    )
+    asset_id = asset_output["asset_id"]
+
+    add_llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_pool_add_candidate",
+            "workflow_inputs": {
+                "candidate_asset_id": asset_id,
+                "strategy_type": "approval",
+                "default_action": {"type": "approval"},
+                "action": {"type": "reject"},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: add_llm,
+    )
+    added = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                f"把 {asset_id} 加入审批 Strategy Pool；默认动作 approval，"
+                "命中动作 reject"
+            )
+        },
+    )
+    assert added.status_code == 202, added.text
+
+    compile_llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_pool_compile",
+            "workflow_inputs": {"strategy_type": "approval"},
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: compile_llm,
+    )
+    compiled = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "只预览并编译审批 Strategy Pool 草案，不要采纳或部署"},
+    )
+    assert compiled.status_code == 202, compiled.text
+
+    impact_llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_pool_impact",
+            "workflow_inputs": {
+                "strategy_type": "approval",
+                "comparison_mode": "absolute",
+                "month_col": "apply_month",
+                "loan_amount_col": "loan_amount",
+                "overdue_amount_col": "overdue_amount",
+                "drop_nan_labels": False,
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: impact_llm,
+    )
+    measured = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "计算审批策略池的通过率和坏账率；月份列 apply_month，"
+                "放款金额列 loan_amount，逾期金额列 overdue_amount"
+            )
+        },
+    )
+    assert measured.status_code == 202, measured.text
+
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "strategy_univariate_candidate_refinement",
+        "strategy_pool_add_candidate",
+        "strategy_pool_compile",
+        "strategy_pool_impact",
+    ], json.dumps(measured.json()["messages"][-1], ensure_ascii=False)
+    assert all(plan["status"] == "done" for plan in plans)
+    pool = StrategyCandidatePoolRepository(
+        client.app.state.settings.db_path
+    ).get_current(task_id, "approval")
+    assert pool is not None
+    assert [entry["source"]["asset_id"] for entry in pool["entries"]] == [
+        asset_id
+    ]
+    runtime = strategy_tools._runtime(
+        ToolContext(
+            task_id=task_id,
+            seed=0,
+            datasets_root=client.app.state.settings.datasets_dir,
+            workspace=client.app.state.settings.workspace,
+        )
+    )
+    binding = pool_tools.load_current_strategy_candidate_pool_artifact(
+        runtime,
+        task_id=task_id,
+        strategy_type="approval",
+    )
+    development = pool_tools.bind_strategy_pool_development_execution(
+        runtime,
+        binding,
+    )
+    assert development.sample_design.source_mode == "native_active_dataset"
+    assert development.sample_design.reference.partition == "risk/development"
+    assert development.sample_design.development_population_count == 4
+    compile_plan = client.app.state.plan_repo.load_plan(plans[-2]["id"])
+    compile_output = client.app.state.plan_repo.load_step_output(
+        compile_plan.steps[0].id
+    )
+    assert compile_output["strategy_spec"]["rules"]
+    impact_plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert (
+        impact_plan.steps[0].inputs["sample_design_ref"]["partition"]
+        == "risk/development"
+    )
+    impact_output = client.app.state.plan_repo.load_step_output(
+        impact_plan.steps[0].id
+    )
+    assert impact_output["population_count"] == 4
+    assert len(initial_llm.calls) == 2
+    assert len(add_llm.calls) == len(compile_llm.calls) == 1
+    assert len(impact_llm.calls) == 1
+
+
 def test_fresh_sample_v2_requires_workspace_before_compiler_llm(
     tmp_path: Path,
     monkeypatch,
@@ -1127,6 +1817,7 @@ def test_fresh_model_evidence_v2_binds_live_sample_and_candidate_registry_refs(
             "expected_evidence_hash": candidate_provenance["evidence_hash"],
         }
     ]
+    assert len(step.inputs["expected_registry_token"]) == 64
     output = client.app.state.plan_repo.load_step_output(step.id)
     assert output["source_artifacts"] == [
         {
@@ -1141,6 +1832,92 @@ def test_fresh_model_evidence_v2_binds_live_sample_and_candidate_registry_refs(
     assert membership["id"] not in model_prompt
     assert sample_bundle["id"] not in model_prompt
     assert candidate["id"] not in model_prompt
+
+
+def test_native_parallel_sample_drives_model_evidence_on_exact_risk_development(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+    )
+    llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": _parallel_population_sample_v2_inputs(),
+        },
+        _univariate_payload(),
+        _model_evidence_payload(),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    sample_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _parallel_population_sample_v2_utterance()},
+    )
+    candidate_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "对 legacy_score 用 equal_width 做单变量分析，目标箱数 3，"
+                "最小箱占比 2%，放款金额列 loan_amount，"
+                "逾期金额列 overdue_amount，不设置哨兵值"
+            )
+        },
+    )
+    evidence_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "生成 Strategy ModelEvidence V2，汇总当前已认证单变量候选证据"},
+    )
+
+    assert sample_response.status_code == 202, sample_response.text
+    assert candidate_response.status_code == 202, candidate_response.text
+    assert evidence_response.status_code == 202, evidence_response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "strategy_univariate_candidate_analysis",
+        "strategy_model_evidence_v2",
+    ], json.dumps(evidence_response.json()["messages"][-1], ensure_ascii=False)
+    assert all(plan["status"] == "done" for plan in plans)
+
+    candidate_plan = client.app.state.plan_repo.load_plan(plans[1]["id"])
+    evidence_plan = client.app.state.plan_repo.load_plan(plans[2]["id"])
+    exact_ref = candidate_plan.steps[0].inputs["sample_design_ref"]
+    assert exact_ref["partition"] == "risk/development"
+    assert len(evidence_plan.steps[0].inputs["expected_registry_token"]) == 64
+    output = client.app.state.plan_repo.load_step_output(
+        evidence_plan.steps[0].id
+    )
+    assert {
+        (item["sample_ref"]["population"], item["sample_ref"]["partition"])
+        for item in output["bundle"]["univariate_evidence"]
+    } == {("risk", "development")}
+    assert {
+        (
+            item["analysis_ref"]["population"],
+            item["analysis_ref"]["partition"],
+        )
+        for item in output["bundle"]["univariate_evidence"]
+    } == {("risk", "development")}
+    model_record = next(
+        record
+        for record in TaskArtifactRepository(
+            client.app.state.settings.db_path
+        ).list_for_task(task_id)
+        if record["kind"] == "strategy_model_evidence_v2_json"
+    )
+    assert model_record["provenance"]["legacy_sample_design_ref"] == exact_ref
+    assert len(llm.calls) == 3
 
 
 def test_model_evidence_v2_needs_no_dataset_preview_but_requires_live_sample_pair(
@@ -1480,10 +2257,7 @@ def test_model_evidence_v2_never_falls_back_behind_latest_native_sample(
     )
 
     assert response.status_code == 202, response.text
-    assert (
-        response.json()["code"]
-        == "strategy_sample_design_v2_native_source_unsupported"
-    )
+    assert response.json()["code"] == "strategy_model_evidence_v2_sample_invalid"
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
         "strategy_sample_design_v2"

@@ -28,7 +28,9 @@ from marvis.packs.strategy.dsl import (
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import CandidatePoolError, validate_strategy_pool
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 
 
 VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1 = "strategy.voting-candidate-asset.v1"
@@ -1450,7 +1452,10 @@ def _schema_version(value: object) -> str:
 
 def _sample_design_ref(value: object) -> dict[str, str]:
     try:
-        return StrategySampleDesignRef.from_value(value).to_ref_dict()
+        reference = StrategyRiskDevelopmentRef.from_value(value)
+        if reference.partition not in {"development", "risk/development"}:
+            raise StrategyError("sample_design_ref.partition is unsupported")
+        return reference.to_ref_dict()
     except StrategyError as exc:
         raise VotingCandidateAssetError(
             "sample_design_ref must be one exact governed development reference"

@@ -570,11 +570,20 @@ export function createPlanRailController({
     // 下载报告 button lives in the middle driver-actions panel (renderDriverActionsPanel
     // below). The rail step row only marks that the report is ready plus a locate
     // entry that scrolls to (and flashes) the middle download card.
-    const isReportDone = (ref.tool === "generate_model_report" || ref.tool === "generate_feature_report")
+    const isDriverReport = (
+      ref.tool === "generate_model_report"
+      || ref.tool === "generate_feature_report"
+    );
+    const isStrategyReport = ref.tool === "build_report_bundle_v2";
+    const isReportDone = (isDriverReport || isStrategyReport)
       && status === "done";
     const download = isReportDone
       ? '<span class="plan-step-ready">报告已就绪</span>'
-        + '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="1" title="跳到中间的下载卡片">定位</button>'
+        + (
+          isStrategyReport
+            ? '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="strategy" title="跳到中间的策略报告产物">定位</button>'
+            : '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="1" title="跳到中间的下载卡片">定位</button>'
+        )
       : "";
     const output = planOutputButtonHtml(step);
     if (status === "failed") maybeFetchToolSchema(ref);
@@ -996,12 +1005,47 @@ export function createPlanRailController({
     strategy_delivery_json: "Strategy JSON",
     strategy_delivery_equivalence_json: "Equivalence JSON",
   };
+  const strategyReportFormatByKind = {
+    strategy_report_bundle_json: "JSON",
+    strategy_report_markdown: "Markdown",
+    strategy_report_xlsx: "Excel",
+    strategy_report_docx: "Word",
+  };
+
+  function strategyReportArtifactGroupHtml(artifacts) {
+    const byFormat = new Map();
+    for (const artifact of artifacts) {
+      const format = strategyReportFormatByKind[String(artifact?.kind || "")];
+      if (format) byFormat.set(format, artifact);
+    }
+    if (!byFormat.size) return "";
+    const actions = ["JSON", "Markdown", "Excel", "Word"].map((format) => {
+      const artifact = byFormat.get(format);
+      const downloadUrl = String(artifact?.download_url || "");
+      const available = Boolean(artifact?.available && downloadUrl);
+      return available
+        ? `<a class="button compact secondary strategy-artifact-download" href="${escapeHtml(downloadUrl)}" download>${escapeHtml(format)}</a>`
+        : `<span class="strategy-artifact-unavailable" aria-label="${escapeHtml(format)} 文件不可用">${escapeHtml(format)} 不可用</span>`;
+    }).join("");
+    return [
+      '<li class="strategy-artifact-row strategy-report-artifact-group">',
+      '<span class="strategy-artifact-copy">',
+      "<strong>策略报告</strong>",
+      "<small>同一最新修订 · JSON · Markdown · Excel · Word</small>",
+      "</span>",
+      `<span class="strategy-report-artifact-actions">${actions}</span>`,
+      "</li>",
+    ].join("");
+  }
 
   function strategyArtifactRowsHtml(artifacts) {
     if (!artifacts.length) {
       return '<p class="strategy-artifacts-empty">计划已完成，当前没有可下载的策略产物。</p>';
     }
-    const rows = artifacts.map((artifact) => {
+    const reportGroup = strategyReportArtifactGroupHtml(artifacts);
+    const rows = artifacts
+      .filter((artifact) => !strategyReportFormatByKind[String(artifact?.kind || "")])
+      .map((artifact) => {
       const filename = String(artifact?.filename || "策略产物");
       const kind = String(artifact?.kind || "artifact");
       const deliveryKind = strategyDeliveryKindLabels[kind] || "";
@@ -1031,8 +1075,8 @@ export function createPlanRailController({
         action,
         "</li>",
       ].join("");
-    });
-    return `<ul class="strategy-artifact-list">${rows.join("")}</ul>`;
+      });
+    return `<ul class="strategy-artifact-list">${reportGroup}${rows.join("")}</ul>`;
   }
 
   function strategyArtifactsCardHtml(state) {
@@ -1586,7 +1630,11 @@ export function createPlanRailController({
     if (reportLocate) {
       event.preventDefault();
       event.stopPropagation();
-      openDriverActionCard("report-download");
+      openDriverActionCard(
+        reportLocate.dataset.planReportLocate === "strategy"
+          ? "strategy-artifacts"
+          : "report-download",
+      );
       return true;
     }
     const retryButton = event.target?.closest?.("[data-plan-rail-retry]");

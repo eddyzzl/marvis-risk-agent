@@ -33,10 +33,32 @@ from marvis.packs.strategy.candidate_stability_tools import (
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
 from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
 from marvis.plugins.contracts import ToolContext
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
+
+
+def _governed_model_score_requirement() -> dict:
+    return {
+        "rule_id": "governed-model-score-rule",
+        "fragment_id": "governed-model-score-fragment",
+        "requirement": {
+            "type": "model_score_vector.v1",
+            "virtual_field": "__marvis_model_pd_0123456789abcdef",
+            "score_product": "raw_native_uncalibrated_bad_probability",
+            "score_evidence_artifact_id": "1" * 64,
+            "score_evidence_artifact_content_hash": "2" * 64,
+            "score_vector_artifact_id": "0123456789abcdef" + "3" * 48,
+            "score_vector_artifact_content_hash": "4" * 64,
+        },
+    }
 
 
 def _context(settings, task_id: str) -> ToolContext:
@@ -62,7 +84,13 @@ def _action(action_type: str, *, reason: str | None = None) -> dict:
     }
 
 
-def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
+def _setup(
+    tmp_path: Path,
+    *,
+    bind_month: bool = True,
+    native_sample: bool = False,
+    target_bad_value: int = 1,
+) -> dict:
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     task = TaskRepository(settings.db_path).create_task(
@@ -75,14 +103,29 @@ def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
             target_col="bad",
         )
     )
-    frame = pd.DataFrame(
-        {
-            "score": list(range(120)),
-            "age": [20 + (index % 60) for index in range(120)],
-            "month": ["2026-01"] * 40 + ["2026-02"] * 40 + ["2026-03"] * 40,
-            "bad": [index % 2 for index in range(120)],
-        }
-    )
+    frame_data = {
+        "score": list(range(120)),
+        "age": [20 + (index % 60) for index in range(120)],
+        "month": ["2026-01"] * 40 + ["2026-02"] * 40 + ["2026-03"] * 40,
+        "bad": [index % 2 for index in range(120)],
+    }
+    if native_sample:
+        frame_data.update(
+            {
+                "bad": [1 if index % 4 == 0 else 0 for index in range(120)],
+                "customer_id": [f"C{index:03d}" for index in range(120)],
+                "apply_date": (
+                    pd.date_range("2026-01-01", periods=120, freq="D")
+                    .strftime("%Y-%m-%d")
+                    .tolist()
+                ),
+                "segment": [["A", "B", "C"][index % 3] for index in range(120)],
+                "sample_split": (
+                    ["dev"] * 90 + ["valid"] * 15 + ["oot"] * 15
+                ),
+            }
+        )
+    frame = pd.DataFrame(frame_data)
     source_path = tmp_path / "candidate-stability.parquet"
     frame.to_parquet(source_path, index=False)
     registry = DatasetRegistry(
@@ -111,6 +154,16 @@ def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
             "age": "feature",
             "month": "month",
             "bad": "target",
+            **(
+                {
+                    "customer_id": "id",
+                    "apply_date": "date",
+                    "segment": "categorical",
+                    "sample_split": "segment",
+                }
+                if native_sample
+                else {}
+            ),
         },
     )
     workspace = workspaces.save(
@@ -124,32 +177,140 @@ def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
     )
     ctx = _context(settings, task.id)
     runtime = strategy_tools._runtime(ctx)
-    sample_request = {
-        "dataset_id": dataset.id,
-        "expected_dataset_content_hash": dataset.content_hash,
-        "workspace_revision": workspace.revision,
-        "workspace_generation": workspace.analysis_generation,
-        "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
-        "target_col": "bad",
-        "target_bad_value": 1,
-        "performance_window_status": "provided",
-        "performance_window_days": 30,
-        "observation_window_status": "provided",
-        "observation_window_start": "2026-01-01",
-        "observation_window_end": "2026-03-31",
-        "maturity_status": "confirmed_matured",
-        "drop_nan_labels": False,
-    }
-    if bind_month:
-        sample_request["month_col"] = "month"
-    sample = strategy_tools.tool_materialize_sample_design(sample_request, ctx)
-    sample_ref = {
-        "artifact_id": sample["artifact"]["artifact_id"],
-        "artifact_content_hash": sample["artifact"]["content_hash"],
-        "sample_design_id": sample["sample_design_id"],
-        "sample_design_content_hash": sample["content_hash"],
-        "partition": "development",
-    }
+    if native_sample:
+        def eq(column: str, value: object) -> dict:
+            return {
+                "op": "eq",
+                "left": {"column": column},
+                "right": {"literal": value},
+            }
+
+        def any_of(*predicates: dict) -> dict:
+            return {"op": "or", "args": list(predicates)}
+
+        sample = strategy_tools.tool_materialize_sample_design_v2_native(
+            {
+                "source_mode": "native_active_dataset",
+                "dataset_id": dataset.id,
+                "expected_dataset_content_hash": dataset.content_hash,
+                "workspace_revision": workspace.revision,
+                "workspace_generation": workspace.analysis_generation,
+                "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+                "target_col": "bad",
+                "target_bad_value": target_bad_value,
+                "drop_nan_labels": False,
+                "relationship": "parallel_time_cohorts",
+                "scope": "strategy_development",
+                "approval_population": {
+                    "inclusion": eq("segment", "A"),
+                    "exclusion": None,
+                },
+                "risk_population": {
+                    "inclusion": any_of(
+                        eq("segment", "B"),
+                        eq("segment", "C"),
+                    ),
+                    "exclusion": None,
+                },
+                "partitioning": {
+                    "method": "predicate_ast",
+                    "selectors": {
+                        "development": eq("sample_split", "dev"),
+                        "validation": eq("sample_split", "valid"),
+                        "oot": eq("sample_split", "oot"),
+                    },
+                },
+                "maturity": {
+                    "status": "confirmed_matured",
+                    "performance_window_days": 30,
+                    "cutoff_date": "2026-05-31",
+                    "reason": None,
+                },
+                "performance_window": {"status": "provided", "days": 30},
+                "observation_window": {
+                    "status": "provided",
+                    "start": "2026-01-01",
+                    "end": "2026-05-31",
+                },
+                "field_bindings": {
+                    "entity_field": "customer_id",
+                    "time_field": "apply_date",
+                    "group_field": "segment",
+                    "month_field": "month" if bind_month else None,
+                    "weight_field": None,
+                    "loan_amount_field": None,
+                    "overdue_amount_field": None,
+                },
+                "historical_score": {
+                    "status": "unavailable",
+                    "column": None,
+                    "direction": None,
+                    "reason": "not supplied for stability test",
+                },
+                "policy": {
+                    "minimum_partition_count": 1,
+                    "minimum_bad_count": 1,
+                    "minimum_label_coverage": 1.0,
+                    "minimum_historical_score_coverage": 0.0,
+                    "maximum_group_coverage_gap": 1.0,
+                    "diagnostic_severities": {
+                        "entity_overlap": "warn",
+                        "temporal_oot": "warn",
+                        "risk_outside_approval": "warn",
+                        "maturity": "fail",
+                        "label_coverage": "fail",
+                        "historical_score_coverage": "warn",
+                        "group_coverage_gap": "warn",
+                        "sufficiency": "fail",
+                    },
+                },
+            },
+            ctx,
+        )
+        bundle_record = next(
+            record
+            for record in TaskArtifactRepository(
+                settings.db_path
+            ).list_for_task(task.id)
+            if record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+            and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+        )
+        sample_ref = {
+            "artifact_id": bundle_record["id"],
+            "artifact_content_hash": bundle_record["content_hash"],
+            "sample_design_id": sample["sample_design_id"],
+            "sample_design_content_hash": sample[
+                "sample_design_content_hash"
+            ],
+            "partition": "risk/development",
+        }
+    else:
+        sample_request = {
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": target_bad_value,
+            "performance_window_status": "provided",
+            "performance_window_days": 30,
+            "observation_window_status": "provided",
+            "observation_window_start": "2026-01-01",
+            "observation_window_end": "2026-03-31",
+            "maturity_status": "confirmed_matured",
+            "drop_nan_labels": False,
+        }
+        if bind_month:
+            sample_request["month_col"] = "month"
+        sample = strategy_tools.tool_materialize_sample_design(sample_request, ctx)
+        sample_ref = {
+            "artifact_id": sample["artifact"]["artifact_id"],
+            "artifact_content_hash": sample["artifact"]["content_hash"],
+            "sample_design_id": sample["sample_design_id"],
+            "sample_design_content_hash": sample["content_hash"],
+            "partition": "development",
+        }
     source = strategy_tools.tool_analyze_univariate_candidates(
         {
             "dataset_id": dataset.id,
@@ -200,6 +361,7 @@ def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
         "source": source,
         "source_report": report,
         "sample_ref": sample_ref,
+        "frame": frame,
         "first": refine(0),
         "refine": refine,
     }
@@ -348,6 +510,130 @@ def test_pool_entry_stability_uses_incremental_first_match_and_exact_pool_cas(
             fixture["ctx"],
             fixture["runtime"],
         )
+
+
+def test_native_pool_entry_stability_uses_risk_development_mask_and_bad_zero(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(
+        tmp_path,
+        native_sample=True,
+        target_bad_value=0,
+    )
+    current = run_add_candidate_to_pool(
+        _pool_add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    [entry] = current["entries"]
+
+    output = run_measure_candidate_monthly_stability(
+        resolve_candidate_monthly_stability_inputs(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            user_pointer={
+                "source_kind": "pool_entry",
+                "strategy_type": "approval",
+                "entry_id": entry["entry_id"],
+            },
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    stability = output["stability"]
+    assert stability["sample_design_ref"] == fixture["sample_ref"]
+    assert stability["sample_design_ref"]["partition"] == "risk/development"
+    assert stability["bindings"]["target_bad_value"] == 1
+    assert stability["summary"]["population_count"] == 60
+    assert [row["sample_count"] for row in stability["monthly"]] == [26, 27, 7]
+    assert stability["baseline"]["hit_count"] == 20
+    assert stability["baseline"]["hit_bad_count"] == 15
+    assert stability["baseline"]["hit_bad_rate"] == 0.75
+
+
+def test_native_pool_stability_requirement_receives_exact_physical_v2_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(
+        tmp_path,
+        native_sample=True,
+        target_bad_value=0,
+    )
+    current = run_add_candidate_to_pool(
+        _pool_add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    [entry] = current["entries"]
+    request = resolve_candidate_monthly_stability_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_pointer={
+            "source_kind": "pool_entry",
+            "strategy_type": "approval",
+            "entry_id": entry["entry_id"],
+        },
+    )
+    requirement = _governed_model_score_requirement()
+    resolved = object()
+    captured = {}
+
+    monkeypatch.setattr(
+        candidate_stability_tools,
+        "project_pool_entry_requirements",
+        lambda _entries: (requirement,),
+    )
+
+    def resolve_requirements(
+        runtime,
+        *,
+        task_id,
+        compiled_design,
+        sample_design,
+    ):
+        captured.update(
+            runtime=runtime,
+            task_id=task_id,
+            compiled_design=compiled_design,
+            sample_design=sample_design,
+        )
+        return resolved
+
+    monkeypatch.setattr(
+        candidate_stability_tools,
+        "resolve_pool_requirements",
+        resolve_requirements,
+    )
+
+    binding = candidate_stability_tools._load_execution_binding(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        request=request,
+    )
+
+    physical = captured["sample_design"]
+    assert binding.resolved_requirements is resolved
+    assert captured["task_id"] == fixture["task"].id
+    assert captured["compiled_design"]["requirements"] == [requirement]
+    assert physical.bundle_artifact_id == fixture["sample_ref"]["artifact_id"]
+    assert physical.bundle_artifact_content_hash == fixture["sample_ref"][
+        "artifact_content_hash"
+    ]
+    assert physical.bundle["sample_design"]["content_hash"] == fixture[
+        "sample_ref"
+    ]["sample_design_content_hash"]
+    assert physical.membership["header"]["counts"]["approval"]["development"] == 30
+    assert physical.membership["header"]["counts"]["risk"]["development"] == 60
 
 
 def test_cross_matrix_pool_entry_stability_uses_full_waterfall_first_match(

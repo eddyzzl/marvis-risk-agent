@@ -830,14 +830,6 @@ def _sample_design_v2(
         raise PoolStabilityError(
             "sample design risk partition counts changed"
         )
-    for partition in partition_tuple:
-        if (
-            population_counts["risk"][partition]
-            > population_counts["approval"][partition]
-        ):
-            raise PoolStabilityError(
-                f"risk/{partition} exceeds approval population"
-            )
     result["partition_counts"] = counts
     result["population_partition_counts"] = population_counts
     return result

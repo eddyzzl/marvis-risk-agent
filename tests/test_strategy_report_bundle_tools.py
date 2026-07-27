@@ -538,7 +538,7 @@ def _run(fixture: dict) -> dict:
     )
 
 
-def test_report_source_loading_blocks_native_before_candidate_or_pool_loaders(
+def test_report_source_loading_accepts_exact_native_before_downstream_loaders(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task_id = "task-native-report"
@@ -561,6 +561,8 @@ def test_report_source_loading_blocks_native_before_candidate_or_pool_loaders(
             }
         }
     )
+    candidate_pool = object()
+    impact_cube = object()
     later_loader_calls: list[str] = []
 
     monkeypatch.setattr(
@@ -574,14 +576,24 @@ def test_report_source_loading_blocks_native_before_candidate_or_pool_loaders(
         lambda _runtime, **_kwargs: native_sample,
     )
 
-    def forbidden_candidate_loader(*_args, **_kwargs):
+    def candidate_loader(*_args, **_kwargs):
         later_loader_calls.append("candidate_pool")
-        raise AssertionError("candidate/pool loaders must not run")
+        return candidate_pool
 
     monkeypatch.setattr(
         report_tools,
         "load_current_strategy_candidate_pool_artifact",
-        forbidden_candidate_loader,
+        candidate_loader,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "load_strategy_pool_validation_artifacts",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "load_strategy_impact_cube_artifact",
+        lambda *_args, **_kwargs: impact_cube,
     )
     request = {
         "project_context_ref": {
@@ -603,21 +615,85 @@ def test_report_source_loading_blocks_native_before_candidate_or_pool_loaders(
             "expected_sample_design_content_hash": "b" * 64,
         },
         "candidate_pool_ref": {},
+        "pool_validation_refs": [],
+        "candidate_stability_ref": None,
+        "pool_stability_ref": None,
+        "voting_candidate_search_ref": None,
+        "pool_impact_ref": None,
+        "impact_cube_ref": {},
+        "model_evidence_ref": None,
+        "training_evidence_ref": None,
+        "score_evidence_ref": None,
     }
 
-    with pytest.raises(StrategyError) as raised:
-        report_tools._load_sources(
-            SimpleNamespace(),
-            task_id=task_id,
-            request=request,
-        )
-
-    assert (
-        getattr(raised.value, "code", None)
-        == "strategy_sample_design_v2_native_source_unsupported"
+    sources = report_tools._load_sources(
+        SimpleNamespace(experiments=object(), modeling_repo=object()),
+        task_id=task_id,
+        request=request,
     )
-    assert getattr(raised.value, "consumer", None) == "strategy_report_bundle"
-    assert later_loader_calls == []
+
+    assert sources.sample_design is native_sample
+    assert sources.candidate_pool is candidate_pool
+    assert sources.impact_cube is impact_cube
+    assert later_loader_calls == ["candidate_pool"]
+
+
+def test_report_writer_lock_reauthenticates_native_sample_with_generic_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = object()
+    native_sample = SimpleNamespace(
+        source_binding=SimpleNamespace(source_mode="native_active_dataset")
+    )
+    pool = object()
+    impact_cube = object()
+    sources = report_tools._ReportSources(
+        project_context=project,
+        sample_design=native_sample,
+        candidate_pool=pool,
+        pool_validations=(),
+        candidate_stability=None,
+        pool_stability=None,
+        voting_candidate_search=None,
+        pool_impact=None,
+        impact_cube=impact_cube,
+        model_evidence=None,
+        training_evidence=None,
+        score_evidence=None,
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(
+        report_tools,
+        "require_strategy_project_context_artifact_binding_on_connection",
+        lambda conn, binding: None,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "require_strategy_candidate_pool_artifact_binding_on_connection",
+        lambda conn, binding: None,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "require_strategy_impact_cube_artifact_binding_on_connection",
+        lambda conn, binding: None,
+    )
+
+    def require_any(conn, binding):
+        assert conn.in_transaction
+        calls.append(binding)
+
+    monkeypatch.setattr(
+        report_tools,
+        "require_any_strategy_sample_design_v2_artifact_binding_on_connection",
+        require_any,
+    )
+
+    report_tools._revalidate_sources(
+        SimpleNamespace(in_transaction=True),
+        sources,
+    )
+
+    assert calls == [native_sample]
 
 
 def _report_rows(fixture: dict) -> list[dict]:

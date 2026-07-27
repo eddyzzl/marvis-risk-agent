@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, is_dataclass, replace
 import hashlib
 import hmac
@@ -127,23 +127,17 @@ from marvis.packs.strategy.report_bundle_tools import (
 from marvis.packs.strategy.model_evidence_tools import (
     run_materialize_model_evidence_v2,
 )
-from marvis.packs.strategy.sample_design_binding import (
-    StrategySampleDesignExecutionBinding,
-    StrategySampleDesignRef,
-    bind_strategy_development_frame,
-    load_strategy_sample_design_execution_binding,
-    require_strategy_sample_design_execution_binding_on_connection,
-    revalidate_strategy_sample_design_execution_binding,
-)
 from marvis.packs.strategy.sample_design_execution import (
     StrategyRiskDevelopmentExecutionBinding,
     bind_strategy_risk_development_frame,
+    load_historical_strategy_risk_development_execution_binding_from_ref,
     load_strategy_risk_development_execution_binding,
+    require_historical_strategy_risk_development_execution_binding_on_connection,
     require_strategy_risk_development_execution_binding_on_connection,
+    revalidate_historical_strategy_risk_development_execution_binding,
     revalidate_strategy_risk_development_execution_binding,
 )
 from marvis.packs.strategy.sample_design_tools import (
-    load_strategy_sample_design_artifact,
     run_materialize_sample_design,
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
@@ -188,7 +182,10 @@ from marvis.packs.strategy.rules import (
     evaluate_rule_set,
     mine_rules,
 )
-from marvis.packs.strategy.legacy_adapter import legacy_strategy_to_spec
+from marvis.packs.strategy.legacy_adapter import (
+    legacy_condition_to_expression,
+    legacy_strategy_to_spec,
+)
 from marvis.packs.strategy.strategy import (
     build_strategy,
     build_strategy_from_spec,
@@ -1148,10 +1145,11 @@ def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:
             columns=columns,
         )
     )
-    if design_col == sample_binding.split_column:
-        raise StrategyError(
-            "candidate design column cannot use the sample-design split column"
-        )
+    _require_strategy_development_columns_allowed(
+        sample_binding,
+        [str(design_col), *economic_columns],
+        field_name="candidate design columns",
+    )
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame,
         target_col,
@@ -1169,7 +1167,10 @@ def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:
         candidate_policy_version=policy_version,
     )
     _assert_source_unchanged(source_path, source_hash)
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     payload = result.to_dict()
     sample_ref = sample_binding.to_ref_dict()
     lineage = payload["strategy_spec"]["metadata"]["lineage"]
@@ -1463,7 +1464,7 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
             raise StrategyError(
                 "strategy backtest target must match the confirmed DataWorkspace target"
             )
-        sample_binding = load_strategy_sample_design_execution_binding(
+        sample_binding = load_strategy_risk_development_execution_binding(
             runtime,
             task_id=task_id,
             sample_design_ref=inputs["sample_design_ref"],
@@ -1477,7 +1478,33 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
             target_col=target_col,
             drop_nan_labels=bool(inputs.get("drop_nan_labels")),
         )
-        frame = bind_strategy_development_frame(
+        economics_payload = inputs.get("economics_inputs")
+        economics_columns = (
+            [
+                str(value)
+                for key, value in dict(economics_payload).items()
+                if key.endswith("_col") and value not in (None, "")
+            ]
+            if isinstance(economics_payload, Mapping)
+            else []
+        )
+        governed_inputs = [
+            *_strategy_condition_fields(strategy),
+            *(
+                ()
+                if baseline is None
+                else _strategy_condition_fields(baseline)
+            ),
+            _optional_str(inputs.get("ead_col")),
+            _optional_str(inputs.get("pd_col")),
+            *economics_columns,
+        ]
+        _require_strategy_development_columns_allowed(
+            sample_binding,
+            governed_inputs,
+            field_name="backtest columns",
+        )
+        frame = bind_strategy_risk_development_frame(
             frame,
             binding=sample_binding,
             normalize_target=False,
@@ -1523,7 +1550,10 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
             "source dataset changed while the strategy backtest was running"
         )
     if sample_binding is not None:
-        revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+        revalidate_strategy_risk_development_execution_binding(
+            runtime,
+            sample_binding,
+        )
     backtest_id = _backtest_id(
         dataset_id,
         result,
@@ -1571,7 +1601,7 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         # between the prior read-side validation and durable persistence.
         with runtime.strategies.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            require_strategy_sample_design_execution_binding_on_connection(
+            require_strategy_risk_development_execution_binding_on_connection(
                 conn,
                 sample_binding,
             )
@@ -1641,8 +1671,15 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
             ),
         )
     )
-    if score_col == sample_binding.split_column:
-        raise StrategyError("score_col cannot use the sample-design split column")
+    _require_strategy_development_columns_allowed(
+        sample_binding,
+        [
+            score_col,
+            _optional_str(inputs.get("ead_col")),
+            _optional_str(inputs.get("pd_col")),
+        ],
+        field_name="tradeoff columns",
+    )
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame,
         target_col,
@@ -1708,7 +1745,10 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
     _assert_source_unchanged(
         source_path, str(source_evidence["dataset_content_hash"])
     )
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     result["sample_design_ref"] = sample_binding.to_ref_dict()
     return result
 
@@ -1739,8 +1779,15 @@ def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
             ),
         )
     )
-    if score_col == sample_binding.split_column:
-        raise StrategyError("score_col cannot use the sample-design split column")
+    _require_strategy_development_columns_allowed(
+        sample_binding,
+        [
+            score_col,
+            _optional_str(inputs.get("ead_col")),
+            _optional_str(inputs.get("pd_col")),
+        ],
+        field_name="cutoff-band columns",
+    )
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame,
         target_col,
@@ -1811,7 +1858,10 @@ def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
     _assert_source_unchanged(
         source_path, str(source_evidence["dataset_content_hash"])
     )
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     return {
         "bands": [_jsonable(band) for band in result.bands],
         "band_edges": [float(edge) for edge in result.band_edges],
@@ -1841,6 +1891,15 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
         )
     )
     strategy = _strategy(runtime, str(inputs["strategy_id"]), task_id=task_id)
+    _require_strategy_development_columns_allowed(
+        sample_binding,
+        [
+            *_strategy_condition_fields(strategy),
+            _optional_str(inputs.get("ead_col")),
+            _optional_str(inputs.get("pd_col")),
+        ],
+        field_name="strategy comparison columns",
+    )
     baseline_id = _optional_str(inputs.get("baseline_strategy_id"))
     if baseline_id is None:
         # No baseline means there is no comparison population or delta. Keep
@@ -1849,7 +1908,10 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
         _assert_source_unchanged(
             source_path, str(source_evidence["dataset_content_hash"])
         )
-        revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+        revalidate_strategy_risk_development_execution_binding(
+            runtime,
+            sample_binding,
+        )
         return {
             "status": "no_baseline",
             "matrix_2x2": None,
@@ -1861,6 +1923,11 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
             "sample_design_ref": sample_binding.to_ref_dict(),
         }
     baseline = _strategy(runtime, baseline_id, task_id=task_id)
+    _require_strategy_development_columns_allowed(
+        sample_binding,
+        _strategy_condition_fields(baseline),
+        field_name="baseline strategy columns",
+    )
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame,
         target_col,
@@ -1884,7 +1951,10 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
     _assert_source_unchanged(
         source_path, str(source_evidence["dataset_content_hash"])
     )
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     payload["sample_design_ref"] = sample_binding.to_ref_dict()
     return payload
 
@@ -1933,10 +2003,11 @@ def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
             normalize_target=False,
         )
     )
-    if score_col == sample_binding.split_column:
-        raise StrategyError("score_col cannot use the sample-design split column")
-    if pd_col is not None and pd_col == sample_binding.split_column:
-        raise StrategyError("pd_col cannot use the sample-design split column")
+    _require_strategy_development_columns_allowed(
+        sample_binding,
+        [score_col, pd_col],
+        field_name="limit-pricing columns",
+    )
     expected_source_hash = _optional_str(inputs.get("expected_source_hash"))
     if (
         expected_source_hash is not None
@@ -1993,7 +2064,7 @@ def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
         "cost_per_loan": params.cost_per_loan,
         "el_ead_max": params.el_ead_max,
         "risk_source": "pd_col" if pd_col else "target_col",
-        "population_scope": "development",
+        "population_scope": sample_binding.reference.partition,
         "sample_design_ref": sample_binding.to_ref_dict(),
         "limit_grid": limit_grid,
         "rate_grid": rate_grid,
@@ -2016,7 +2087,10 @@ def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
     _assert_source_unchanged(
         source_path, str(source_evidence["dataset_content_hash"])
     )
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
 
     artifacts: list[dict] = []
     # The first workflow step is a computation/decision view. Only the explicit
@@ -2212,7 +2286,7 @@ def _write_limit_pricing_artifacts(
     source_evidence: dict,
     red_flags: list[dict],
     source_path: Path,
-    sample_design_binding: StrategySampleDesignExecutionBinding,
+    sample_design_binding: StrategyRiskDevelopmentExecutionBinding,
 ) -> list[dict]:
     task_id = str(ctx.task_id)
     analysis_dir = Path(runtime.settings.tasks_dir) / task_id / "strategy_analysis"
@@ -2254,7 +2328,7 @@ def _write_limit_pricing_artifacts(
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                require_strategy_sample_design_execution_binding_on_connection(
+                require_strategy_risk_development_execution_binding_on_connection(
                     conn,
                     sample_design_binding,
                 )
@@ -2416,7 +2490,11 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
             f"{strategy.strategy_type} adoption requires a typed StrategyBacktestResult"
         )
 
-    adoption_evidence, approval_metrics = _strategy_adoption_evidence(
+    (
+        adoption_evidence,
+        approval_metrics,
+        adoption_sample_binding,
+    ) = _strategy_adoption_evidence(
         runtime,
         strategy=strategy,
         backtest=backtest,
@@ -2476,6 +2554,13 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         save_monitoring_plan(staged_json.path, monitoring_plan)
 
         def finalize_adoption(conn):
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            if adoption_sample_binding is not None:
+                require_historical_strategy_risk_development_execution_binding_on_connection(
+                    conn,
+                    adoption_sample_binding,
+                )
             adopt_result = runtime.strategies.adopt_strategy_with_audit_on_connection(
                 conn,
                 strategy_id,
@@ -2616,6 +2701,8 @@ def _adoption_artifact_provenance(
             "source_dataset_content_hash"
         ),
     }
+    if "sample_design_ref" in adoption_evidence:
+        evidence["sample_design_ref"] = adoption_evidence["sample_design_ref"]
     if kind == "monitoring_plan_json":
         evidence.update(
             {
@@ -2641,7 +2728,11 @@ def _strategy_adoption_evidence(
     backtest: BacktestRecord,
     backtest_id: str,
     task_id: str,
-) -> tuple[dict, dict | None]:
+) -> tuple[
+    dict,
+    dict | None,
+    StrategyRiskDevelopmentExecutionBinding | None,
+]:
     if isinstance(backtest, StrategyBacktestResult):
         _require_typed_adoption_quality(backtest)
         expected_effect_hash = strategy_spec_hash(
@@ -2654,31 +2745,67 @@ def _strategy_adoption_evidence(
             raise StrategyError(
                 "backtest strategy effect hash does not match the persisted strategy"
             )
-        binding = _backtest_binding(runtime, backtest_id)
-        if binding["strategy_id"] != strategy.id:
+        backtest_binding = _backtest_binding(runtime, backtest_id)
+        if backtest_binding["strategy_id"] != strategy.id:
             raise StrategyError(
                 f"backtest {backtest_id} does not belong to strategy {strategy.id}"
             )
-        if binding["dataset_task_id"] is None:
+        if backtest_binding["dataset_task_id"] is None:
             raise StrategyError(
                 "typed backtest source dataset is not registered; rerun the backtest"
             )
-        if binding["dataset_task_id"] != task_id:
+        if backtest_binding["dataset_task_id"] != task_id:
             raise StrategyError(
                 "typed backtest source dataset must belong to the same task as the strategy"
             )
-        if binding["dataset_content_hash"] is None:
+        if backtest_binding["dataset_content_hash"] is None:
             raise StrategyError(
                 "typed backtest source dataset file is unavailable; rerun the backtest"
             )
-        if binding["backtest_dataset_content_hash"] is None:
+        if backtest_binding["backtest_dataset_content_hash"] is None:
             raise StrategyError(
                 "typed backtest is missing backtest-time source dataset hash evidence; "
                 "rerun the backtest"
             )
-        if binding["dataset_content_hash"] != binding["backtest_dataset_content_hash"]:
+        if backtest_binding["dataset_content_hash"] != (
+            backtest_binding["backtest_dataset_content_hash"]
+        ):
             raise StrategyError(
                 "source dataset content hash no longer matches the backtest evidence"
+            )
+        sample_binding = None
+        sample_design_ref = backtest.normalized_input.get("sample_design_ref")
+        if sample_design_ref is not None:
+            sample_binding = (
+                load_historical_strategy_risk_development_execution_binding_from_ref(
+                    runtime,
+                    task_id=task_id,
+                    sample_design_ref=sample_design_ref,
+                )
+            )
+            expected_dataset_id = str(backtest_binding["dataset_id"])
+            expected_dataset_hash = str(
+                backtest_binding["backtest_dataset_content_hash"]
+            )
+            expected_target_col = str(backtest.normalized_input["target_col"])
+            expected_target_bad_value = int(
+                backtest.normalized_input["target_encoding"]["bad"]
+            )
+            if (
+                sample_binding.dataset_id != expected_dataset_id
+                or not hmac.compare_digest(
+                    sample_binding.dataset_content_hash,
+                    expected_dataset_hash,
+                )
+                or sample_binding.target_col != expected_target_col
+                or sample_binding.target_bad_value != expected_target_bad_value
+            ):
+                raise StrategyError(
+                    "typed backtest sample-design binding no longer matches"
+                )
+            revalidate_historical_strategy_risk_development_execution_binding(
+                runtime,
+                sample_binding,
             )
         evidence = {
             "schema_version": _ADOPTION_EVIDENCE_SCHEMA_VERSION,
@@ -2686,8 +2813,10 @@ def _strategy_adoption_evidence(
             "backtest_id": backtest_id,
             "strategy_id": strategy.id,
             "strategy_type": strategy.strategy_type,
-            "source_dataset_id": binding["dataset_id"],
-            "source_dataset_content_hash": binding["backtest_dataset_content_hash"],
+            "source_dataset_id": backtest_binding["dataset_id"],
+            "source_dataset_content_hash": backtest_binding[
+                "backtest_dataset_content_hash"
+            ],
             "strategy_effect_hash": expected_effect_hash,
             "baseline_effect_hash": backtest.normalized_input["baseline_effect_hash"],
             "target_col": str(backtest.normalized_input["target_col"]),
@@ -2706,6 +2835,8 @@ def _strategy_adoption_evidence(
             ),
             "warnings": list(backtest.warnings),
         }
+        if sample_binding is not None:
+            evidence["sample_design_ref"] = sample_binding.to_ref_dict()
         approval_metrics = (
             approval_backtest_projection(
                 backtest,
@@ -2714,7 +2845,7 @@ def _strategy_adoption_evidence(
             if strategy.strategy_type in {"approval", "reject"}
             else None
         )
-        return evidence, approval_metrics
+        return evidence, approval_metrics, sample_binding
 
     approval_metrics = approval_backtest_projection(
         backtest,
@@ -2771,7 +2902,7 @@ def _strategy_adoption_evidence(
         "warnings": [
             "legacy backtest has no task-bound dataset or label-provenance contract"
         ],
-    }, approval_metrics
+    }, approval_metrics, None
 
 
 def _adoption_decision_table_rules(strategy: Strategy) -> list[dict]:
@@ -3001,6 +3132,8 @@ def _build_adoption_monitoring_plan(
         "breakdown": [dict(row) for row in evidence["breakdown"]],
         "transitions": [dict(row) for row in evidence["transitions"]],
     }
+    if "sample_design_ref" in evidence:
+        baseline["sample_design_ref"] = dict(evidence["sample_design_ref"])
     if (
         strategy_type == "approval"
         or evidence["backtest_schema_version"] == _LEGACY_BACKTEST_SCHEMA_VERSION
@@ -3902,6 +4035,16 @@ def tool_render_challenger_report(inputs: dict, ctx) -> dict:
         filename_prefix=f"challenger_report_{strategy_id}_vs_{champion_id}",
         markdown=markdown,
         evidence=trusted["provenance"],
+        register_guard=(
+            None
+            if trusted["sample_binding"] is None
+            else lambda conn: (
+                require_historical_strategy_risk_development_execution_binding_on_connection(
+                    conn,
+                    trusted["sample_binding"],
+                )
+            )
+        ),
     )
     return {
         "status": "rendered",
@@ -3973,38 +4116,26 @@ def _trusted_challenger_report_evidence(
     sample_design_ref = normalized.get("sample_design_ref")
     sample_binding = None
     if sample_design_ref is not None:
-        reference = StrategySampleDesignRef.from_value(sample_design_ref)
-        artifact = load_strategy_sample_design_artifact(
-            runtime,
-            task_id=task_id,
-            artifact_id=reference.artifact_id,
-            expected_artifact_content_hash=reference.artifact_content_hash,
-            expected_sample_design_id=reference.sample_design_id,
-            expected_sample_design_content_hash=(
-                reference.sample_design_content_hash
-            ),
+        sample_binding = (
+            load_historical_strategy_risk_development_execution_binding_from_ref(
+                runtime,
+                task_id=task_id,
+                sample_design_ref=sample_design_ref,
+            )
         )
-        design = artifact.bundle["sample_design"]
-        workspace = DataWorkspaceRepository(
-            runtime.settings.db_path
-        ).get_or_default(task_id)
-        sample_binding = load_strategy_sample_design_execution_binding(
-            runtime,
-            task_id=task_id,
-            sample_design_ref=reference.to_ref_dict(),
-            dataset_id=dataset.id,
-            dataset_content_hash=evidence_hash,
-            workspace_revision=workspace.revision,
-            workspace_generation=workspace.analysis_generation,
-            semantic_mapping_hash=data_semantic_mapping_hash(
-                workspace.semantic_mapping
-            ),
-            target_col=target_col,
-            drop_nan_labels=bool(
-                design["target_definition"]["drop_nan_labels"]
-            ),
-        )
-        frame = bind_strategy_development_frame(
+        if (
+            sample_binding.dataset_id != dataset.id
+            or not hmac.compare_digest(
+                sample_binding.dataset_content_hash,
+                evidence_hash,
+            )
+            or sample_binding.target_col != target_col
+            or sample_binding.target_bad_value != target_bad_value
+        ):
+            raise StrategyError(
+                "challenger backtest sample-design binding no longer matches"
+            )
+        frame = bind_strategy_risk_development_frame(
             frame,
             binding=sample_binding,
             normalize_target=False,
@@ -4040,11 +4171,15 @@ def _trusted_challenger_report_evidence(
     )
     comparison = _trusted_approval_comparison(challenger_result, champion_result)
     if sample_binding is not None:
-        revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+        revalidate_historical_strategy_risk_development_execution_binding(
+            runtime,
+            sample_binding,
+        )
     return {
         "compare": comparison,
         "challenger_backtest": _approval_report_projection(challenger_result),
         "champion_backtest": _approval_report_projection(champion_result),
+        "sample_binding": sample_binding,
         "provenance": {
             "challenger_strategy_effect_hash": challenger_effect_hash,
             "champion_strategy_id": champion.id,
@@ -4355,14 +4490,16 @@ def tool_mine_rules(inputs: dict, ctx) -> dict:
         target_col,
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
-    if feature_cols and sample_binding.split_column in feature_cols:
-        raise StrategyError(
-            "feature_cols cannot include the sample-design split column"
+    if feature_cols:
+        _require_strategy_development_columns_allowed(
+            sample_binding,
+            feature_cols,
+            field_name="feature_cols",
         )
     resolved_features = feature_cols or [
         feature
         for feature in _default_feature_cols(frame, target_col)
-        if feature != sample_binding.split_column
+        if feature not in sample_binding.excluded_feature_columns
     ]
     min_support = _float_or(inputs.get("min_support"), 0.02)
     min_lift = _float_or(inputs.get("min_lift"), 1.5)
@@ -4381,7 +4518,10 @@ def tool_mine_rules(inputs: dict, ctx) -> dict:
     _assert_source_unchanged(
         source_path, str(source_evidence["dataset_content_hash"])
     )
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     return {
         "candidate_rules": candidate_rules,
         "n_rows": int(len(frame)),
@@ -4417,6 +4557,11 @@ def tool_evaluate_rule_set(inputs: dict, ctx) -> dict:
         target_col,
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
+    _require_strategy_development_columns_allowed(
+        sample_binding,
+        _strategy_rule_condition_fields(rules_ordered),
+        field_name="rule conditions",
+    )
     result = evaluate_rule_set(
         frame,
         rules_ordered,
@@ -4429,7 +4574,10 @@ def tool_evaluate_rule_set(inputs: dict, ctx) -> dict:
     _assert_source_unchanged(
         source_path, str(source_evidence["dataset_content_hash"])
     )
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     result["sample_design_ref"] = sample_binding.to_ref_dict()
     return result
 
@@ -4589,6 +4737,47 @@ def _default_feature_cols(frame: pd.DataFrame, target_col: str) -> list[str]:
     return [column for column in numeric if column != target_col]
 
 
+def _strategy_rule_condition_fields(rules: Sequence[Mapping[str, Any]]) -> set[str]:
+    fields: set[str] = set()
+    for index, rule in enumerate(rules):
+        condition = rule.get("condition")
+        if not isinstance(condition, str) or not condition.strip():
+            raise StrategyError(
+                f"rules[{index}].condition must be a non-empty string"
+            )
+        fields.update(
+            _strategy_expression_fields(
+                legacy_condition_to_expression(condition)
+            )
+        )
+    return fields
+
+
+def _strategy_condition_fields(strategy: Strategy) -> set[str]:
+    spec = strategy.spec or legacy_strategy_to_spec(strategy)
+    fields: set[str] = set()
+    for rule in spec.rules:
+        fields.update(_strategy_expression_fields(rule.condition))
+    return fields
+
+
+def _strategy_expression_fields(value: object) -> set[str]:
+    fields: set[str] = set()
+    if isinstance(value, Mapping):
+        field = value.get("field")
+        if isinstance(field, str):
+            fields.add(field)
+        for item in value.values():
+            fields.update(_strategy_expression_fields(item))
+    elif isinstance(value, Sequence) and not isinstance(
+        value,
+        str | bytes | bytearray,
+    ):
+        for item in value:
+            fields.update(_strategy_expression_fields(item))
+    return fields
+
+
 def _optional_str_list(value) -> list[str] | None:
     if value in (None, ""):
         return None
@@ -4632,6 +4821,7 @@ def _persist_verified_strategy_markdown(
     filename_prefix: str,
     markdown: str,
     evidence: Mapping[str, Any],
+    register_guard: Callable[[Any], None] | None = None,
 ) -> dict[str, Any]:
     """Persist one immutable, content-addressed Markdown strategy artifact."""
 
@@ -4670,6 +4860,10 @@ def _persist_verified_strategy_markdown(
     }
 
     def register(conn):
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if register_guard is not None:
+            register_guard(conn)
         return runtime.strategies.register_verified_strategy_artifact_with_audit_on_connection(
             conn,
             strategy_id,
@@ -5770,7 +5964,7 @@ def _strategy_development_frame_with_evidence(
     pd.DataFrame,
     dict,
     Path,
-    StrategySampleDesignExecutionBinding,
+    StrategyRiskDevelopmentExecutionBinding,
 ]:
     """Load one exact active development population under governed target semantics.
 
@@ -5821,7 +6015,7 @@ def _strategy_development_frame_with_evidence(
             "strategy development target must match the confirmed DataWorkspace target"
         )
 
-    sample_binding = load_strategy_sample_design_execution_binding(
+    sample_binding = load_strategy_risk_development_execution_binding(
         runtime,
         task_id=task_id,
         sample_design_ref=sample_design_ref,
@@ -5838,11 +6032,15 @@ def _strategy_development_frame_with_evidence(
     projected_columns = None
     if columns is not None:
         projected_columns = _unique(
-            [*columns, resolved_target_col, sample_binding.split_column]
+            [
+                *columns,
+                resolved_target_col,
+                *sample_binding.partition_columns,
+            ]
         )
     frame = runtime.backend.read_frame(source_path, columns=projected_columns)
     _assert_source_unchanged(source_path, source_hash)
-    frame = bind_strategy_development_frame(
+    frame = bind_strategy_risk_development_frame(
         frame,
         binding=sample_binding,
         normalize_target=normalize_target,
@@ -5861,13 +6059,35 @@ def _strategy_development_frame_with_evidence(
             "columns": list(projected_columns or frame.columns),
             "sample_design_ref": sample_binding.to_ref_dict(),
             "sample_design_source_ref": sample_binding.source_ref,
-            "sample_design_partition": "development",
+            "sample_design_partition": sample_binding.reference.partition,
             "target_col": sample_binding.target_col,
             "target_bad_value": sample_binding.target_bad_value,
         },
         source_path,
         sample_binding,
     )
+
+
+def _require_strategy_development_columns_allowed(
+    binding: StrategyRiskDevelopmentExecutionBinding,
+    columns: Sequence[str | None],
+    *,
+    field_name: str,
+) -> None:
+    requested = {
+        column
+        for raw in columns
+        if raw is not None and (column := str(raw).strip())
+    }
+    disallowed = sorted(
+        requested.intersection(binding.excluded_feature_columns)
+    )
+    if disallowed:
+        raise StrategyError(
+            f"{field_name} cannot use sample-design governed columns "
+            "(target, partition, or population filters): "
+            + ", ".join(disallowed)
+        )
 
 
 def _dataset_frame(

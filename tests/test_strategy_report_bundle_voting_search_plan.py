@@ -14,6 +14,17 @@ from marvis.packs.strategy.voting_candidate_search_tools import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _derive_stub_execution_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        turn_handlers,
+        "derive_strategy_model_evidence_candidate_execution_ref",
+        lambda binding: dict(binding.execution_ref),
+    )
+
+
 class _ArtifactWindow:
     def __init__(
         self,
@@ -122,6 +133,7 @@ def _sources() -> tuple[object, dict[str, object], object, object, object]:
         "sample_design_content_hash": "b" * 64,
         "partition": "development",
     }
+    sample.execution_ref = legacy_ref
     execution_sample = SimpleNamespace(
         reference=SimpleNamespace(partition="development"),
         to_ref_dict=lambda: dict(legacy_ref),
@@ -203,6 +215,54 @@ def _sources() -> tuple[object, dict[str, object], object, object, object]:
         },
     )
     return sample, sample_ref, pool, development, binding
+
+
+def _native_sources() -> tuple[object, dict[str, object], object, object, object]:
+    sample, sample_ref, pool, development, binding = _sources()
+    native_ref = {
+        "artifact_id": sample_ref["bundle_artifact_id"],
+        "artifact_content_hash": sample_ref[
+            "expected_bundle_artifact_content_hash"
+        ],
+        "sample_design_id": sample_ref["expected_sample_design_id"],
+        "sample_design_content_hash": sample_ref[
+            "expected_sample_design_content_hash"
+        ],
+        "partition": "risk/development",
+    }
+    sample.execution_ref = native_ref
+    execution_sample = SimpleNamespace(
+        **{
+            **vars(development.sample_design),
+            "reference": SimpleNamespace(partition="risk/development"),
+            "to_ref_dict": lambda: dict(native_ref),
+            "target_bad_value": 0,
+        }
+    )
+    native_development = SimpleNamespace(
+        **{
+            **vars(development),
+            "sample_design": execution_sample,
+            "sample_design_v2": None,
+        }
+    )
+    provenance = {
+        **binding.artifact_provenance,
+        "sample_design_ref": native_ref,
+        "target_binding": {
+            **binding.artifact_provenance["target_binding"],
+            "raw_bad_value": 0,
+            "sample_partition": "risk/development",
+        },
+    }
+    native_binding = SimpleNamespace(
+        **{
+            **vars(binding),
+            "artifact_provenance": provenance,
+            "pool_development": native_development,
+        }
+    )
+    return sample, sample_ref, pool, native_development, native_binding
 
 
 def _record(binding: object) -> dict[str, object]:
@@ -291,6 +351,35 @@ def test_report_voting_search_selects_first_exact_after_newer_valid_unrelated(
             turn_handlers._STRATEGY_REPORT_VOTING_SEARCH_REPLAY_LIMIT,
         )
     ]
+
+
+def test_report_voting_search_selects_exact_native_execution_without_legacy_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample, sample_ref, pool, development, exact = _native_sources()
+    monkeypatch.setattr(
+        turn_handlers,
+        "bind_strategy_pool_development_execution",
+        lambda runtime, actual_pool: development,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_historical_voting_candidate_search_artifact",
+        lambda runtime, **kwargs: exact,
+        raising=False,
+    )
+    runtime, _window = _runtime(_record(exact))
+
+    selected = turn_handlers._strategy_report_latest_voting_search_binding(
+        runtime,
+        task_id="task-report",
+        sample=sample,
+        sample_ref=sample_ref,
+        pool=pool,
+    )
+
+    assert selected is exact
 
 
 def test_report_voting_search_corrupt_newest_fails_closed_without_fallback(

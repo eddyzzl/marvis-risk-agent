@@ -104,6 +104,13 @@ from marvis.packs.strategy.interactive_tree_tools import (
     VerifiedInteractiveTreeRevision,
     load_verified_interactive_tree_revisions,
 )
+from marvis.packs.strategy.impact_cube_binding import (
+    load_strategy_impact_cube_artifact,
+)
+from marvis.packs.strategy.impact_cube_tools import (
+    IMPACT_CUBE_ARTIFACT_KIND,
+    IMPACT_CUBE_ORIGIN_TOOL,
+)
 from marvis.packs.strategy.cross_matrix_cell_selection import (
     CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
     CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL,
@@ -126,6 +133,21 @@ from marvis.packs.strategy.pool import (
     POOL_PRODUCER_VERSION,
     validate_strategy_pool,
 )
+from marvis.packs.strategy.pool_impact_tools import (
+    POOL_IMPACT_ARTIFACT_KIND,
+    POOL_IMPACT_ORIGIN_TOOL,
+    load_historical_strategy_pool_impact_artifact,
+)
+from marvis.packs.strategy.pool_stability_tools import (
+    POOL_STABILITY_ARTIFACT_KIND,
+    POOL_STABILITY_ORIGIN_TOOL,
+    authenticate_strategy_pool_stability_artifact_record,
+)
+from marvis.packs.strategy.pool_validation_tools import (
+    POOL_VALIDATION_ARTIFACT_KIND,
+    POOL_VALIDATION_ORIGIN_TOOL,
+    authenticate_strategy_pool_validation_artifact_record,
+)
 from marvis.packs.strategy.scorecard_candidate import (
     MAX_SCORECARD_BANDS,
     MAX_SCORECARD_TABLE_ROWS,
@@ -146,6 +168,11 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+    load_any_strategy_sample_design_v2_artifacts,
+    resolve_strategy_sample_design_v2_source_mode,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
 )
 from marvis.packs.strategy.scorecard_candidate_tools import (
     load_scorecard_band_asset_artifact,
@@ -178,10 +205,15 @@ from marvis.repositories.strategy_pool import (
     canonical_strategy_pool_snapshot_json,
     strategy_pool_artifact_content_hash,
 )
+from marvis.repositories.strategy_reports import (
+    STRATEGY_REPORT_ORIGIN_TOOL,
+    STRATEGY_REPORT_OUTPUT_KINDS,
+    StrategyReportRepository,
+)
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 
 
-SCHEMA_VERSION = "strategy.candidate-lab-projection.v3"
+SCHEMA_VERSION = "strategy.candidate-lab-projection.v4"
 
 UNIVARIATE_ARTIFACT_KIND = "strategy_candidate_json"
 UNIVARIATE_ORIGIN_TOOL = "strategy.analyze_univariate_candidates"
@@ -217,6 +249,9 @@ _POOL_ORIGIN_BY_OPERATION = {
 }
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SAMPLE_DESIGN_V2_BUNDLE_ID_RE = re.compile(
+    r"^strategy-sample-design-bundle-[0-9a-f]{24}$"
+)
 _MODEL_SCORE_VIRTUAL_FIELD_RE = re.compile(
     r"^__marvis_model_pd_[0-9a-f]{16}$"
 )
@@ -238,6 +273,8 @@ _MAX_SCORECARD_CUTOFF_POINTERS = MAX_SCORECARD_BANDS - 1
 _MAX_SCORECARD_POINT_POINTERS = min(MAX_SCORECARD_TABLE_ROWS, 2_000)
 _MAX_POOL_ENTRIES = 200
 _MAX_RISKS = 50
+_MAX_WORKFLOW_EVIDENCE_PER_KIND = 40
+_MAX_REPORT_REVISIONS = 20
 _UNIVARIATE_PARAMETER_FIELDS = (
     "analysis_schema_version",
     "features",
@@ -494,6 +531,27 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
     pools = _project_current_pools(
         context,
     )
+    sample_design = _project_active_sample_design(context)
+    latest_evidence = _project_latest_workflow_evidence(
+        context,
+        pools=pools,
+    )
+    report = _project_latest_strategy_report(context)
+    workflow = _workflow_projection(
+        sample_design=sample_design,
+        candidates={
+            "univariate": univariate,
+            "cross_matrix": cross_matrix,
+            "automatic_tree": automatic_tree,
+            "interactive_tree_revision": interactive_tree_revision,
+            "scorecard_band": scorecard_band,
+            "scorecard_cutoff_selection": scorecard_cutoff_selection,
+            "voting_search": voting_search,
+        },
+        pools=pools,
+        latest_evidence=latest_evidence,
+        report=report,
+    )
     active_plan = _active_plan_projection(settings, task_id)
     open_gate = _open_gate_projection(settings, task_id)
     if active_plan is not None:
@@ -549,9 +607,748 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         },
         "pool_add_sources": pool_add_sources,
         "pools": _collection(pools, len(STRATEGY_TYPES)),
+        "workflow": workflow,
     }
     _require_projection_payload_budget(projection)
     return projection
+
+
+def _project_active_sample_design(
+    context: _ProjectionContext,
+) -> dict[str, Any] | None:
+    """Project the newest real, current, fully authenticated V2 sample pair."""
+
+    records, _total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+            limit=_MAX_CANDIDATES_PER_KIND,
+        )
+    )
+    candidates = []
+    for record in records:
+        _require_record_identity(record, task_id=context.task_id)
+        if record["origin_tool"] not in {
+            SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+            SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+        }:
+            raise CandidateLabProjectionError(
+                "sample-design V2 bundle origin drifted"
+            )
+        provenance = _mapping(
+            record["provenance"],
+            "sample-design V2 bundle provenance",
+        )
+        bundle_id = provenance.get("bundle_id")
+        # Scorecard compatibility fixtures and pre-V2 placeholders may use the
+        # same kind without being valid SampleDesign V2 bundles.  They are not
+        # eligible to become the active workbench sample.
+        if (
+            not isinstance(bundle_id, str)
+            or _SAMPLE_DESIGN_V2_BUNDLE_ID_RE.fullmatch(bundle_id) is None
+        ):
+            continue
+        candidates.append(record)
+    if not candidates:
+        return None
+    record = max(
+        candidates,
+        key=lambda item: (item["created_at"], item["id"]),
+    )
+    provenance = _mapping(
+        record["provenance"],
+        "active sample-design V2 provenance",
+    )
+    try:
+        binding = load_any_strategy_sample_design_v2_artifacts(
+            _scorecard_live_runtime(context),
+            task_id=context.task_id,
+            membership_artifact_id=_text(
+                provenance.get("membership_artifact_id"),
+                "active sample membership artifact_id",
+            ),
+            expected_membership_artifact_content_hash=_sha256(
+                provenance.get("membership_artifact_content_hash"),
+                "active sample membership artifact content_hash",
+            ),
+            bundle_artifact_id=_text(
+                record.get("id"),
+                "active sample bundle artifact_id",
+            ),
+            expected_bundle_artifact_content_hash=_sha256(
+                record.get("content_hash"),
+                "active sample bundle artifact content_hash",
+            ),
+            expected_bundle_id=_text(
+                provenance.get("bundle_id"),
+                "active sample bundle_id",
+            ),
+            expected_sample_design_id=_text(
+                provenance.get("sample_design_id"),
+                "active sample design_id",
+            ),
+            expected_sample_design_content_hash=_sha256(
+                provenance.get("sample_design_content_hash"),
+                "active sample design content_hash",
+            ),
+        )
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "active sample-design V2 failed authoritative replay"
+        ) from exc
+    bundle = binding.bundle
+    design = _mapping(bundle.get("sample_design"), "active sample design")
+    populations = {
+        _text(item.get("role"), "sample population role"): item
+        for item in _sequence(
+            bundle.get("populations"),
+            "active sample populations",
+        )
+    }
+    if set(populations) != {"approval", "risk"}:
+        raise CandidateLabProjectionError(
+            "active sample must contain approval and risk populations"
+        )
+    header = _mapping(bundle.get("membership"), "active sample membership")
+    counts = _mapping(header.get("counts"), "active sample membership counts")
+    relationship_counts = _mapping(
+        counts.get("relationship"),
+        "active sample relationship counts",
+    )
+    within = _mapping(
+        relationship_counts.get("risk_within_approval"),
+        "active sample within relationship",
+    )
+    outside = _mapping(
+        relationship_counts.get("risk_outside_approval"),
+        "active sample outside relationship",
+    )
+    universe = int(counts.get("analysis_universe"))
+    approval_total = int(_mapping(counts["approval"], "approval counts")["total"])
+    risk_total = int(_mapping(counts["risk"], "risk counts")["total"])
+    overlap = int(within["total"])
+    diagnostics = list(
+        _sequence(bundle.get("diagnostics"), "active sample diagnostics")
+    )
+    diagnostic_counts = {
+        status: sum(1 for item in diagnostics if item.get("status") == status)
+        for status in ("pass", "warn", "fail", "unavailable", "not_applicable")
+    }
+    overall_status = next(
+        (
+            status
+            for status in ("fail", "warn", "unavailable", "pass")
+            if diagnostic_counts[status]
+        ),
+        "unavailable",
+    )
+    target = _mapping(
+        design.get("target_selector"),
+        "active sample target selector",
+    )
+    return {
+        "artifact": _artifact_projection(record, context.task_id),
+        "sample_design_id": design["sample_design_id"],
+        "bundle_id": bundle["bundle_id"],
+        "source_mode": resolve_strategy_sample_design_v2_source_mode(
+            design,
+            capability="physical_v2",
+            consumer="strategy_candidate_lab_projection",
+        ),
+        "freshness": "current",
+        "relationship": design["relationship"],
+        "analysis_universe_count": universe,
+        "target": {
+            "column": target["column"],
+            "good_value": target["good_value"],
+            "bad_value": target["bad_value"],
+            "missing_policy": (
+                "drop" if target["drop_missing"] else "keep"
+            ),
+        },
+        "populations": {
+            role: _sample_population_projection(populations[role])
+            for role in ("approval", "risk")
+        },
+        "relationship_counts": {
+            "approval_and_risk": overlap,
+            "approval_only": approval_total - overlap,
+            "risk_only": int(outside["total"]),
+            "neither": universe - (approval_total + risk_total - overlap),
+        },
+        "diagnostics": {
+            "overall_status": overall_status,
+            "counts": diagnostic_counts,
+        },
+    }
+
+
+def _sample_population_projection(
+    population: Mapping[str, Any],
+) -> dict[str, Any]:
+    partitions = {
+        _text(item.get("name"), "sample partition name"): int(
+            item.get("row_count")
+        )
+        for item in _sequence(
+            population.get("partitions"),
+            "sample population partitions",
+        )
+    }
+    if set(partitions) != {"development", "validation", "oot"}:
+        raise CandidateLabProjectionError(
+            "sample population partitions are incomplete"
+        )
+    maturity = _mapping(
+        population.get("maturity_evidence"),
+        "sample population maturity",
+    )
+    return {
+        "total_count": int(population["total_count"]),
+        "partitions": {
+            name: partitions[name]
+            for name in ("development", "validation", "oot")
+        },
+        "maturity": {
+            key: maturity[key]
+            for key in (
+                "status",
+                "performance_window_days",
+                "cutoff_date",
+                "eligible_count",
+                "labeled_count",
+                "reason",
+            )
+        },
+    }
+
+
+def _project_latest_workflow_evidence(
+    context: _ProjectionContext,
+    *,
+    pools: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Project newest authenticated evidence without treating it as current."""
+
+    return {
+        "pool_stability": _project_latest_pool_stability(
+            context,
+            pools=pools,
+        ),
+        "pool_impact": _project_latest_pool_impact(
+            context,
+            pools=pools,
+        ),
+        "impact_cube": _project_latest_impact_cube(
+            context,
+            pools=pools,
+        ),
+        "pool_validation": _project_latest_pool_validations(
+            context,
+            pools=pools,
+        ),
+    }
+
+
+def _latest_record_for_kind(
+    context: _ProjectionContext,
+    kind: str,
+) -> Mapping[str, Any] | None:
+    records, _total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            kind,
+            limit=_MAX_WORKFLOW_EVIDENCE_PER_KIND,
+        )
+    )
+    return None if not records else records[0]
+
+
+def _project_latest_pool_stability(
+    context: _ProjectionContext,
+    *,
+    pools: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    record = _latest_record_for_kind(context, POOL_STABILITY_ARTIFACT_KIND)
+    if record is None:
+        return None
+    raw = _read_candidate_record(
+        context,
+        record,
+        kind=POOL_STABILITY_ARTIFACT_KIND,
+        origin_tool=POOL_STABILITY_ORIGIN_TOOL,
+        directory_name="strategy_pool_stabilities",
+    )
+    stability = _json_object(raw, "strategy Pool stability")
+    try:
+        authenticated = authenticate_strategy_pool_stability_artifact_record(
+            task_id=context.task_id,
+            record=record,
+            stability=stability,
+            tasks_root=context.settings.tasks_dir,
+        )
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "latest Pool stability failed authoritative replay"
+        ) from exc
+    normalized = _mapping(
+        authenticated.get("stability"),
+        "authenticated Pool stability",
+    )
+    identity = _mapping(
+        normalized.get("identity"),
+        "Pool stability identity",
+    )
+    return {
+        "kind": "pool_stability",
+        "artifact": _artifact_projection(record, context.task_id),
+        "stability_id": normalized["stability_id"],
+        "strategy_type": identity["strategy_type"],
+        "pool_revision": identity["revision"],
+        "baseline_partition": normalized["baseline_partition"],
+        "comparison_partitions": list(normalized["comparison_partitions"]),
+        "lifecycle": dict(
+            _mapping(
+                normalized.get("lifecycle"),
+                "Pool stability lifecycle",
+            )
+        ),
+        "freshness": _pool_identity_freshness(identity, pools),
+    }
+
+
+def _project_latest_pool_impact(
+    context: _ProjectionContext,
+    *,
+    pools: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    record = _latest_record_for_kind(context, POOL_IMPACT_ARTIFACT_KIND)
+    if record is None:
+        return None
+    _require_record_identity(record, task_id=context.task_id)
+    if (
+        record["kind"] != POOL_IMPACT_ARTIFACT_KIND
+        or record["origin_tool"] != POOL_IMPACT_ORIGIN_TOOL
+    ):
+        raise CandidateLabProjectionError(
+            "latest Pool impact registry identity drifted"
+        )
+    provenance = _mapping(
+        record.get("provenance"),
+        "latest Pool impact provenance",
+    )
+    try:
+        binding = load_historical_strategy_pool_impact_artifact(
+            _scorecard_live_runtime(context),
+            task_id=context.task_id,
+            artifact_id=_sha256(
+                record.get("id"),
+                "latest Pool impact artifact_id",
+            ),
+            expected_artifact_content_hash=_sha256(
+                record.get("content_hash"),
+                "latest Pool impact artifact content_hash",
+            ),
+            expected_assessment_id=_text(
+                provenance.get("assessment_id"),
+                "latest Pool impact assessment_id",
+            ),
+            expected_assessment_content_hash=_sha256(
+                provenance.get("assessment_content_hash"),
+                "latest Pool impact assessment content_hash",
+            ),
+        )
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "latest Pool impact failed authoritative replay"
+        ) from exc
+    assessment = _mapping(
+        binding.assessment,
+        "authenticated Pool impact",
+    )
+    identity = _mapping(
+        assessment.get("identity"),
+        "Pool impact identity",
+    )
+    population = _mapping(
+        assessment.get("population"),
+        "Pool impact population",
+    )
+    lifecycle = _mapping(
+        assessment.get("lifecycle"),
+        "Pool impact lifecycle",
+    )
+    monthly = _mapping(
+        assessment.get("monthly"),
+        "Pool impact monthly",
+    )
+    return {
+        "kind": "pool_impact",
+        "artifact": _artifact_projection(record, context.task_id),
+        "assessment_id": assessment["assessment_id"],
+        "strategy_type": identity["strategy_type"],
+        "pool_revision": identity["revision"],
+        "population_count": population["population_count"],
+        "labeled_count": population["labelled_count"],
+        "monthly_status": monthly["status"],
+        "lifecycle": {
+            key: lifecycle[key]
+            for key in (
+                "candidate_stage",
+                "observation_stage",
+                "validation_status",
+            )
+        },
+        "freshness": _pool_identity_freshness(identity, pools),
+    }
+
+
+def _project_latest_impact_cube(
+    context: _ProjectionContext,
+    *,
+    pools: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    record = _latest_record_for_kind(context, IMPACT_CUBE_ARTIFACT_KIND)
+    if record is None:
+        return None
+    _require_record_identity(record, task_id=context.task_id)
+    if (
+        record["kind"] != IMPACT_CUBE_ARTIFACT_KIND
+        or record["origin_tool"] != IMPACT_CUBE_ORIGIN_TOOL
+    ):
+        raise CandidateLabProjectionError(
+            "latest ImpactCube registry identity drifted"
+        )
+    provenance = _mapping(
+        record.get("provenance"),
+        "latest ImpactCube provenance",
+    )
+    try:
+        binding = load_strategy_impact_cube_artifact(
+            _scorecard_live_runtime(context),
+            task_id=context.task_id,
+            artifact_id=_sha256(
+                record.get("id"),
+                "latest ImpactCube artifact_id",
+            ),
+            expected_artifact_content_hash=_sha256(
+                record.get("content_hash"),
+                "latest ImpactCube artifact content_hash",
+            ),
+            expected_cube_id=_text(
+                provenance.get("cube_id"),
+                "latest ImpactCube cube_id",
+            ),
+            expected_cube_content_hash=_sha256(
+                provenance.get("cube_content_hash"),
+                "latest ImpactCube content_hash",
+            ),
+        )
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "latest ImpactCube failed authoritative replay"
+        ) from exc
+    cube = _mapping(binding.cube, "authenticated ImpactCube")
+    identity = _mapping(cube.get("identity"), "ImpactCube identity")
+    partitions = []
+    for row in _sequence(cube.get("partitions"), "ImpactCube partitions"):
+        if row.get("role") != "risk":
+            continue
+        name = _text(row.get("name"), "ImpactCube partition name")
+        if name not in partitions:
+            partitions.append(name)
+    return {
+        "kind": "impact_cube",
+        "artifact": _artifact_projection(record, context.task_id),
+        "cube_id": cube["cube_id"],
+        "strategy_type": identity["strategy_type"],
+        "pool_revision": identity["revision"],
+        "partitions": partitions,
+        "slice_families": dict(
+            _mapping(
+                cube.get("slice_families"),
+                "ImpactCube slice families",
+            )
+        ),
+        "freshness": _pool_identity_freshness(identity, pools),
+    }
+
+
+def _project_latest_pool_validations(
+    context: _ProjectionContext,
+    *,
+    pools: Sequence[dict[str, Any]],
+) -> dict[str, dict[str, Any] | None]:
+    records, _total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            POOL_VALIDATION_ARTIFACT_KIND,
+            limit=_MAX_WORKFLOW_EVIDENCE_PER_KIND,
+        )
+    )
+    projected: dict[str, dict[str, Any] | None] = {
+        "validation": None,
+        "oot": None,
+    }
+    for record in records:
+        _require_record_identity(record, task_id=context.task_id)
+        if (
+            record["kind"] != POOL_VALIDATION_ARTIFACT_KIND
+            or record["origin_tool"] != POOL_VALIDATION_ORIGIN_TOOL
+        ):
+            raise CandidateLabProjectionError(
+                "latest Pool validation registry identity drifted"
+            )
+        provenance = _mapping(
+            record.get("provenance"),
+            "Pool validation provenance",
+        )
+        partition = provenance.get("partition")
+        if partition not in projected:
+            raise CandidateLabProjectionError(
+                "Pool validation partition is unsupported"
+            )
+        if projected[partition] is not None:
+            continue
+        raw = _read_candidate_record(
+            context,
+            record,
+            kind=POOL_VALIDATION_ARTIFACT_KIND,
+            origin_tool=POOL_VALIDATION_ORIGIN_TOOL,
+            directory_name="strategy_pool_validations",
+        )
+        try:
+            evidence = (
+                authenticate_strategy_pool_validation_artifact_record(
+                    task_id=context.task_id,
+                    record=record,
+                    evidence=_json_object(
+                        raw,
+                        "strategy Pool validation",
+                    ),
+                    tasks_root=context.settings.tasks_dir,
+                )
+            )
+        except StrategyError as exc:
+            raise CandidateLabProjectionError(
+                "latest Pool validation failed authoritative replay"
+            ) from exc
+        identity = _mapping(
+            evidence.get("identity"),
+            "Pool validation identity",
+        )
+        population = _mapping(
+            evidence.get("population_metrics"),
+            "Pool validation population metrics",
+        )
+        projected[partition] = {
+            "kind": "pool_validation",
+            "artifact": _artifact_projection(record, context.task_id),
+            "evidence_id": evidence["evidence_id"],
+            "strategy_type": identity["strategy_type"],
+            "pool_revision": identity["revision"],
+            "partition": evidence["partition"],
+            "population_count": population["population_count"],
+            "labeled_count": population["labelled_count"],
+            "lifecycle": dict(
+                _mapping(
+                    evidence.get("lifecycle"),
+                    "Pool validation lifecycle",
+                )
+            ),
+            "freshness": _pool_identity_freshness(identity, pools),
+        }
+        if all(projected.values()):
+            break
+    return projected
+
+
+def _pool_identity_freshness(
+    identity: Mapping[str, Any],
+    pools: Sequence[Mapping[str, Any]],
+) -> str:
+    strategy_type = _text(
+        identity.get("strategy_type"),
+        "workflow evidence strategy_type",
+    )
+    expected = {
+        "pool_id": _text(
+            identity.get("pool_id"),
+            "workflow evidence pool_id",
+        ),
+        "revision": int(identity.get("revision")),
+    }
+    current = next(
+        (
+            pool
+            for pool in pools
+            if pool.get("strategy_type") == strategy_type
+        ),
+        None,
+    )
+    if current is None:
+        return "stale"
+    return (
+        "current"
+        if all(current.get(key) == value for key, value in expected.items())
+        else "stale"
+    )
+
+
+def _project_latest_strategy_report(
+    context: _ProjectionContext,
+) -> dict[str, Any] | None:
+    json_kind = STRATEGY_REPORT_OUTPUT_KINDS["json"]
+    records, _total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            json_kind,
+            limit=_MAX_REPORT_REVISIONS,
+        )
+    )
+    if not records:
+        return None
+    record = records[0]
+    _require_record_identity(record, task_id=context.task_id)
+    if (
+        record["kind"] != json_kind
+        or record["origin_tool"] != STRATEGY_REPORT_ORIGIN_TOOL
+    ):
+        raise CandidateLabProjectionError(
+            "latest Strategy report registry identity drifted"
+        )
+    provenance = _mapping(
+        record.get("provenance"),
+        "latest Strategy report provenance",
+    )
+    report_id = _text(
+        provenance.get("report_id"),
+        "latest Strategy report_id",
+    )
+    report = StrategyReportRepository(context.settings.db_path).get_by_id(
+        task_id=context.task_id,
+        report_id=report_id,
+    )
+    if report is None:
+        raise CandidateLabProjectionError(
+            "latest Strategy report revision is missing"
+        )
+    bundle = _mapping(report.get("bundle"), "authenticated Strategy report")
+    artifacts = _mapping(
+        report.get("artifacts"),
+        "authenticated Strategy report artifacts",
+    )
+    json_artifact = _mapping(
+        artifacts.get("json"),
+        "authenticated Strategy JSON report",
+    )
+    if (
+        json_artifact.get("id") != record.get("id")
+        or json_artifact.get("content_hash") != record.get("content_hash")
+    ):
+        raise CandidateLabProjectionError(
+            "latest Strategy report JSON binding drifted"
+        )
+    title = _mapping(bundle.get("title"), "Strategy report title")
+    return {
+        "report_id": bundle["report_id"],
+        "revision": bundle["report_revision"],
+        "status": bundle["status"],
+        "title": (
+            title.get("value")
+            if title.get("availability") == "present"
+            else None
+        ),
+        "created_at": report["created_at"],
+        "freshness": "current",
+        "artifacts": {
+            output_format: (
+                None
+                if output_format not in artifacts
+                else _artifact_projection(
+                    _mapping(
+                        artifacts[output_format],
+                        f"Strategy report {output_format} artifact",
+                    ),
+                    context.task_id,
+                )
+            )
+            for output_format in ("json", "markdown", "xlsx", "docx")
+        },
+    }
+
+
+def _workflow_projection(
+    *,
+    sample_design: dict[str, Any] | None,
+    candidates: Mapping[str, Sequence[dict[str, Any]]],
+    pools: Sequence[dict[str, Any]],
+    latest_evidence: dict[str, Any],
+    report: dict[str, Any] | None,
+) -> dict[str, Any]:
+    candidate_count = sum(len(items) for items in candidates.values())
+    has_voting = bool(candidates.get("voting_search"))
+    evidence_items = [
+        latest_evidence.get(key)
+        for key in ("pool_stability", "pool_impact", "impact_cube")
+    ] + list(latest_evidence["pool_validation"].values())
+    present_evidence = [item for item in evidence_items if item is not None]
+    impact_status = (
+        "missing"
+        if not present_evidence
+        else (
+            "stale"
+            if all(item.get("freshness") == "stale" for item in present_evidence)
+            else "complete"
+        )
+    )
+    report_status = (
+        "missing"
+        if report is None
+        else (
+            "stale"
+            if report.get("freshness") == "stale"
+            else "complete"
+        )
+    )
+    stages = (
+        (
+            "current_context",
+            "项目现状",
+            "complete" if sample_design is not None else "missing",
+        ),
+        ("history", "历史版本", "missing"),
+        (
+            "sample_design",
+            "样本设计",
+            "complete" if sample_design is not None else "missing",
+        ),
+        (
+            "candidate_analysis",
+            "单变量/模型",
+            "complete" if candidate_count > 0 else "missing",
+        ),
+        (
+            "strategy_combination",
+            "交叉组合/策略",
+            "complete" if bool(pools) or has_voting else "missing",
+        ),
+        ("impact", "影响测算", impact_status),
+        ("report", "形成报告", report_status),
+    )
+    return {
+        "sample_design": sample_design,
+        "latest_evidence": latest_evidence,
+        "report": report,
+        "stages": [
+            {
+                "id": stage_id,
+                "label": label,
+                "status": status,
+            }
+            for stage_id, label, status in stages
+        ],
+    }
 
 
 def _project_pool_add_sources(
@@ -598,7 +1395,7 @@ def _project_pool_add_sources(
         context.artifact_repository.list_recent_for_task_kind_with_count(
             context.task_id,
             SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
-            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+            limit=_MAX_SCORECARD_CANDIDATES_PER_KIND,
         )
     )
     voting_records, voting_total = (

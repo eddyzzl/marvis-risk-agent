@@ -201,6 +201,7 @@ def test_model_evidence_template_has_only_task_context_refs_and_one_tool_step() 
     assert [(slot.name, slot.source) for slot in template.slots] == [
         ("sample_design_ref", "task_context"),
         ("univariate_sources", "task_context"),
+        ("expected_registry_token", "task_context"),
     ]
     assert all(slot.required for slot in template.slots)
     assert len(template.steps) == 1
@@ -209,6 +210,7 @@ def test_model_evidence_template_has_only_task_context_refs_and_one_tool_step() 
     assert step.inputs_template == {
         "sample_design_ref": "{slot:sample_design_ref}",
         "univariate_sources": "{slot:univariate_sources}",
+        "expected_registry_token": "{slot:expected_registry_token}",
     }
     assert step.depends_on_titles == ()
     assert PostCheck("nonempty", {"field": "bundle_id"}) in step.post_checks
@@ -324,6 +326,7 @@ def test_planner_rewrites_v2_anchor_refs_and_validates_model_template(tmp_path: 
                     "expected_evidence_hash": "7" * 64,
                 }
             ],
+            "expected_registry_token": "8" * 64,
         },
         task_id="task-1",
     )

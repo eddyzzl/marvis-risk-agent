@@ -195,6 +195,343 @@ def test_primary_launchers_emit_only_user_owned_inputs_and_omit_empty_methods():
     )
 
 
+def test_v2_workflow_spine_launchers_emit_only_explicit_user_controls():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          STRATEGY_CANDIDATE_LAB_WORKFLOWS,
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        function projectionOption(value) {
+          return {
+            value,
+            dataset: {
+              candidateLabProjection: "1",
+              strategyType: value,
+            },
+          };
+        }
+        function makeForm(workflow, values = {}, fields = {}, checked = {}) {
+          const controls = new Map(
+            Object.entries(values).map(([key, value]) => [key, { value }]),
+          );
+          return {
+            dataset: { candidateLabWorkflow: workflow },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              return match
+                ? fields[match[1]] || controls.get(match[1]) || null
+                : null;
+            },
+            querySelectorAll(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              return match ? (checked[match[1]] || []) : [];
+            },
+          };
+        }
+
+        for (const workflow of [
+          "strategy_sample_design_v2",
+          "strategy_pool_impact",
+          "strategy_impact_cube",
+          "strategy_report_bundle_v2",
+        ]) {
+          assert.ok(STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes(workflow));
+        }
+
+        const sampleValues = {
+          sample_target_bad_value: "1",
+          sample_relationship: "nested_same_cohort",
+          approval_population_column: "",
+          approval_population_operator: "",
+          approval_population_value: "",
+          risk_population_column: "",
+          risk_population_operator: "",
+          risk_population_value: "",
+          sample_time_field: "apply_date",
+          sample_development_start: "2026-01-01",
+          sample_development_end: "2026-03-31",
+          sample_validation_start: "2026-04-01",
+          sample_validation_end: "2026-04-30",
+          sample_oot_start: "2026-05-01",
+          sample_oot_end: "2026-05-31",
+          sample_maturity_status: "unknown",
+          sample_maturity_days: "",
+          sample_maturity_cutoff: "",
+          sample_maturity_reason: "暂未确认成熟度",
+          sample_performance_status: "unavailable",
+          sample_performance_days: "",
+          sample_observation_status: "unavailable",
+          sample_observation_start: "",
+          sample_observation_end: "",
+          sample_entity_field: "",
+          sample_group_field: "",
+          sample_month_field: "",
+          sample_weight_field: "",
+          sample_loan_amount_field: "",
+          sample_overdue_amount_field: "",
+          sample_historical_score_status: "unavailable",
+          sample_historical_score_column: "",
+          sample_historical_score_direction: "",
+          sample_historical_score_reason: "暂未提供历史分",
+        };
+        const sampleDesign = collectStrategyCandidateLabRequest(makeForm(
+          "strategy_sample_design_v2",
+          sampleValues,
+          { sample_drop_nan_labels: { checked: true } },
+        ));
+        assert.equal(sampleDesign.workflow_inputs.partitioning.column, "apply_date");
+        assert.deepEqual(sampleDesign.workflow_inputs.maturity, {
+          status: "unknown",
+          performance_window_days: null,
+          cutoff_date: null,
+          reason: "暂未确认成熟度",
+        });
+        assert.deepEqual(sampleDesign.workflow_inputs.performance_window, {
+          status: "unavailable",
+          days: null,
+        });
+        assert.deepEqual(sampleDesign.workflow_inputs.observation_window, {
+          status: "unavailable",
+          start: null,
+          end: null,
+        });
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(makeForm(
+            "strategy_sample_design_v2",
+            {
+              ...sampleValues,
+              sample_validation_start: "",
+              sample_validation_end: "",
+            },
+            { sample_drop_nan_labels: { checked: true } },
+          )),
+          /验证集.*至少填写一个时间边界/,
+        );
+
+        const poolOption = projectionOption("approval");
+        const poolImpact = collectStrategyCandidateLabRequest(makeForm(
+          "strategy_pool_impact",
+          {
+            pool_impact_comparison_mode: "absolute",
+            pool_impact_baseline_strategy_id: "",
+            pool_impact_month_col: "apply_month",
+            pool_impact_loan_amount_col: "",
+            pool_impact_overdue_amount_col: "",
+          },
+          {
+            pool_impact_strategy_type: {
+              value: "approval",
+              selectedOptions: [poolOption],
+            },
+            pool_impact_drop_nan_labels: { checked: true },
+          },
+        ));
+        assert.deepEqual(poolImpact.workflow_inputs, {
+          strategy_type: "approval",
+          comparison_mode: "absolute",
+          drop_nan_labels: true,
+          month_col: "apply_month",
+        });
+
+        const impactCube = collectStrategyCandidateLabRequest(makeForm(
+          "strategy_impact_cube",
+          {
+            impact_cube_month_col: "apply_month",
+            impact_cube_group_col: "channel",
+            impact_cube_segment_col: "",
+            impact_cube_current_strategy_id: "strategy-current",
+          },
+          {
+            impact_cube_strategy_type: {
+              value: "approval",
+              selectedOptions: [poolOption],
+            },
+          },
+          {
+            impact_cube_partitions: [
+              { value: "development" },
+              { value: "validation" },
+            ],
+          },
+        ));
+        assert.deepEqual(impactCube.workflow_inputs, {
+          strategy_type: "approval",
+          partitions: ["development", "validation"],
+          month_col: "apply_month",
+          group_col: "channel",
+          current_strategy_id: "strategy-current",
+        });
+
+        const report = collectStrategyCandidateLabRequest(makeForm(
+          "strategy_report_bundle_v2",
+          {
+            strategy_report_title: "风险策略迭代评审",
+            strategy_report_status: "partial",
+          },
+        ));
+        assert.deepEqual(report.workflow_inputs, {
+          title: "风险策略迭代评审",
+          status: "partial",
+        });
+
+        for (const request of [
+          sampleDesign,
+          poolImpact,
+          impactCube,
+          report,
+        ]) {
+          for (const forbidden of [
+            "artifact_id",
+            "pool_ref",
+            "sample_design_ref",
+            "dataset_id",
+            "target_col",
+            "revision",
+            "snapshot_hash",
+          ]) {
+            assert.equal(forbidden in request.workflow_inputs, false);
+          }
+        }
+        """
+    )
+
+
+def test_candidate_lab_renders_seven_stage_dual_population_and_report_spine():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const stages = [
+          ["current_context", "项目现状", "complete"],
+          ["history", "历史版本", "missing"],
+          ["sample_design", "样本设计", "complete"],
+          ["candidate_analysis", "单变量/模型", "complete"],
+          ["strategy_combination", "交叉组合/策略", "complete"],
+          ["impact", "影响测算", "stale"],
+          ["report", "形成报告", "complete"],
+        ].map(([id, label, status]) => ({ id, label, status }));
+        const sample = {
+          source_mode: "native_active_dataset",
+          relationship: "parallel_time_cohorts",
+          freshness: "current",
+          analysis_universe_count: 120,
+          target: { column: "bad", bad_value: 1, good_value: 0 },
+          relationship_counts: {
+            approval_and_risk: 10,
+            approval_only: 30,
+            risk_only: 70,
+            neither: 10,
+          },
+          diagnostics: { overall_status: "warn" },
+          populations: {
+            approval: {
+              total_count: 40,
+              partitions: { development: 30, validation: 5, oot: 5 },
+              maturity: { status: "not_applicable" },
+            },
+            risk: {
+              total_count: 80,
+              partitions: { development: 60, validation: 10, oot: 10 },
+              maturity: {
+                status: "confirmed_matured",
+                performance_window_days: 30,
+                cutoff_date: "2026-05-31",
+                eligible_count: 80,
+                labeled_count: 80,
+              },
+            },
+          },
+          artifact: {
+            download_url: "/api/tasks/task-1/task-artifacts/sample/download",
+          },
+          membership_token: "NEVER_RENDER_RAW_MEMBERSHIP",
+        };
+        const reportArtifacts = Object.fromEntries(
+          ["json", "markdown", "xlsx", "docx"].map((format) => [
+            format,
+            {
+              download_url:
+                `/api/tasks/task-1/task-artifacts/report-${format}/download`,
+            },
+          ]),
+        );
+        const html = strategyCandidateLabResultsHtml({
+          workflow: {
+            stages,
+            sample_design: sample,
+            latest_evidence: {
+              pool_stability: {
+                freshness: "stale",
+                strategy_type: "approval",
+                pool_revision: 2,
+                artifact: {
+                  download_url:
+                    "/api/tasks/task-1/task-artifacts/stability/download",
+                },
+              },
+              pool_impact: null,
+              impact_cube: null,
+              pool_validation: { validation: null, oot: null },
+            },
+            report: {
+              report_id: "strategy-report-1",
+              revision: 3,
+              status: "partial",
+              title: "风险策略迭代评审",
+              freshness: "current",
+              artifacts: reportArtifacts,
+            },
+          },
+          candidates: {},
+          pools: {},
+        });
+
+        assert.equal(
+          (html.match(/class="candidate-lab-workflow-stage"/g) || []).length,
+          7,
+        );
+        for (const expected of [
+          "策略开发全流程",
+          "审批人群",
+          "风险表现人群",
+          "parallel_time_cohorts",
+          "confirmed_matured",
+          "需刷新",
+          "策略迭代评审报告",
+          "JSON",
+          "Markdown",
+          "Excel",
+          "Word",
+          "report-docx/download",
+        ]) {
+          assert.ok(html.includes(expected), expected);
+        }
+        assert.equal(html.includes("NEVER_RENDER_RAW_MEMBERSHIP"), false);
+
+        const missing = strategyCandidateLabResultsHtml({
+          workflow: {
+            stages,
+            sample_design: null,
+            latest_evidence: {
+              pool_validation: { validation: null, oot: null },
+            },
+            report: null,
+          },
+          candidates: {},
+          pools: {},
+        });
+        assert.match(missing, /尚无当前受认证 SampleDesign V2/);
+        assert.match(missing, /尚未形成报告/);
+        """
+    )
+
+
 def test_scorecard_launchers_submit_only_visible_projection_ids_and_user_controls():
     run_node(
         """
@@ -1761,6 +2098,7 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
     assert 'id="strategyCandidateLabPanel"' in index_html
     assert 'id="strategyCandidateLabResults"' in index_html
     for workflow in (
+        "strategy_sample_design_v2",
         "univariate_candidate_analysis",
         "univariate_candidate_refinement",
         "cross_matrix_analysis",
@@ -1770,6 +2108,9 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
         "candidate_monthly_stability",
         "voting_candidate_search",
         "voting_candidate_build_from_search",
+        "strategy_pool_impact",
+        "strategy_impact_cube",
+        "strategy_report_bundle_v2",
     ):
         assert f'data-candidate-lab-workflow="{workflow}"' in index_html
     refinement_start = index_html.index(

@@ -22,7 +22,9 @@ import numpy as np
 import pandas as pd
 
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 from marvis.validation.binning import compute_psi
 from marvis.validation.time_periods import month_key_series
 
@@ -809,7 +811,13 @@ def _source_ref(value: object, *, basis: str) -> dict[str, Any]:
 
 def _sample_design_ref(value: object) -> dict[str, str]:
     try:
-        return StrategySampleDesignRef.from_value(value).to_ref_dict()
+        reference = StrategyRiskDevelopmentRef.from_value(value)
+        if reference.partition not in {"development", "risk/development"}:
+            raise StrategyError(
+                "sample_design_ref.partition must be development or "
+                "risk/development"
+            )
+        return reference.to_ref_dict()
     except StrategyError as exc:
         raise CandidateStabilityError(
             f"candidate stability sample_design_ref is invalid: {exc}"

@@ -28,6 +28,8 @@ from marvis.packs.strategy.pool_impact import canonical_strategy_pool_impact_jso
 from marvis.packs.strategy.pool_impact_tools import (
     POOL_IMPACT_ARTIFACT_KIND,
     POOL_IMPACT_TOOL_SCHEMA_VERSION,
+    load_historical_strategy_pool_impact_artifact,
+    load_strategy_pool_impact_artifact,
     run_measure_pool_impact,
     validate_measure_pool_impact_tool_output,
 )
@@ -41,6 +43,10 @@ from marvis.plugins.schema_validation import validate_against_schema
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
+from tests.test_strategy_pool_tools import (
+    _add_inputs as _pool_add_inputs,
+    _setup as _pool_setup,
+)
 
 
 def _automatic_tree_sample_design_source_ref(reference: dict[str, str]) -> str:
@@ -382,6 +388,127 @@ def test_measure_pool_impact_publishes_direct_canonical_artifact_idempotently(
     ]
     assert len(artifacts) == 1
     assert fx["runtime"].strategies.list_for_task(fx["task"].id) == []
+
+
+def test_measure_pool_impact_uses_native_risk_development_population(
+    tmp_path: Path,
+) -> None:
+    fixture = _pool_setup(tmp_path, native_sample=True)
+    added = run_add_candidate_to_pool(
+        _pool_add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    request = {
+        "strategy_type": "approval",
+        "expected_pool_revision": added["revision"],
+        "expected_pool_snapshot_hash": added["snapshot_hash"],
+        "dataset_id": fixture["dataset"].id,
+        "expected_dataset_content_hash": fixture["dataset"].content_hash,
+        "workspace_revision": fixture["workspace"].revision,
+        "workspace_generation": fixture["workspace"].analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(fixture["mapping"]),
+        "target_col": "bad",
+        "sample_design_ref": fixture["sample_design_ref"],
+        "comparison_mode": "absolute",
+        "drop_nan_labels": False,
+    }
+
+    output = run_measure_pool_impact(
+        request,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    manifest = load_manifest(
+        Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+        builtin=True,
+    )
+    tool = next(item for item in manifest.tools if item.name == "measure_pool_impact")
+    validate_against_schema(request, tool.input_schema, label="native Pool impact input")
+    validate_against_schema(
+        output,
+        tool.output_schema,
+        label="native Pool impact output",
+    )
+    assert output["population_count"] == 6
+    assert output["assessment"]["population"]["population_count"] == 6
+    assert output["assessment"]["bindings"]["sample_design_ref"] == fixture[
+        "sample_design_ref"
+    ]
+    record = TaskArtifactRepository(fixture["settings"].db_path).get_for_task(
+        fixture["task"].id,
+        output["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    assert record["provenance"]["sample_design_ref"] == fixture[
+        "sample_design_ref"
+    ]
+    assert record["provenance"]["sample_partition"] == "risk/development"
+    descriptor = output["artifacts"][0]
+    current = load_strategy_pool_impact_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        artifact_id=descriptor["artifact_id"],
+        expected_artifact_content_hash=descriptor["content_hash"],
+        expected_assessment_id=output["assessment_id"],
+        expected_assessment_content_hash=output["content_hash"],
+    )
+    assert current.sample_design.to_ref_dict() == fixture["sample_design_ref"]
+    assert (
+        current.artifact_provenance["sample_partition"]
+        == current.sample_design.reference.partition
+        == "risk/development"
+    )
+
+    advanced_mapping = DataSemanticMapping(
+        target_col=fixture["mapping"].target_col,
+        field_roles=fixture["mapping"].field_roles,
+        business_names={"score": "advanced workspace head"},
+    )
+    advanced = DataWorkspaceRepository(
+        fixture["settings"].db_path
+    ).save(
+        fixture["task"].id,
+        DataWorkspaceDraft(
+            active_dataset_id=fixture["dataset"].id,
+            active_dataset_content_hash=fixture["dataset"].content_hash,
+            semantic_mapping=advanced_mapping,
+        ),
+        expected_revision=fixture["workspace"].revision,
+    )
+    assert advanced.revision > fixture["workspace"].revision
+    with pytest.raises(StrategyError, match="[Ww]orkspace"):
+        load_strategy_pool_impact_artifact(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            artifact_id=descriptor["artifact_id"],
+            expected_artifact_content_hash=descriptor["content_hash"],
+        )
+
+    historical = load_historical_strategy_pool_impact_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        artifact_id=descriptor["artifact_id"],
+        expected_artifact_content_hash=descriptor["content_hash"],
+        expected_assessment_id=output["assessment_id"],
+        expected_assessment_content_hash=output["content_hash"],
+    )
+    assert historical.sample_design.to_ref_dict() == fixture["sample_design_ref"]
+    assert (
+        historical.artifact_provenance["sample_partition"]
+        == historical.sample_design.reference.partition
+        == "risk/development"
+    )
+
+    tampered_provenance = dict(record["provenance"])
+    tampered_provenance["sample_partition"] = "development"
+    with pytest.raises(StrategyError, match="sample_partition"):
+        impact_tools._validate_impact_provenance(tampered_provenance)
 
 
 def test_measure_pool_impact_inherits_custom_optional_columns_from_sample_design(

@@ -3264,7 +3264,10 @@
               "schema_version": {
                 "const": "strategy.interactive-tree-replay.v1"
               },
-              "partition": {"const": "development"},
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              },
               "source_row_count": {"type": "integer", "minimum": 1},
               "frontier_count": {"type": "integer", "minimum": 1},
               "exactly_once": {"const": true},
@@ -3807,7 +3810,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -4507,7 +4513,8 @@
                 "pattern": "^[0-9a-f]{64}$"
               },
               "partition": {
-                "const": "development"
+                "type": "string",
+                "enum": ["development", "risk/development"]
               }
             },
             "required": [
@@ -6527,7 +6534,10 @@
               "artifact_content_hash": {"$ref": "#/$defs/sha256"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"$ref": "#/$defs/sha256"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -9297,6 +9307,10 @@
               ],
               "additionalProperties": false
             }
+          },
+          "expected_registry_token": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
           }
         },
         "required": ["sample_design_ref", "univariate_sources"],
@@ -9430,7 +9444,10 @@
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
               },
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -11336,7 +11353,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -11535,7 +11555,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -12149,7 +12172,10 @@
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
               },
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -12731,7 +12757,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -12816,7 +12845,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -12885,7 +12917,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -12997,7 +13032,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -13055,7 +13093,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -13135,7 +13176,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -13276,6 +13320,36 @@
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
           },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sample_design_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "adoption_evidence": {
             "type": "object",
             "properties": {
@@ -13307,6 +13381,9 @@
                   {"$ref": "#/$defs/sha256"},
                   {"type": "null"}
                 ]
+              },
+              "sample_design_ref": {
+                "$ref": "#/$defs/sample_design_ref"
               },
               "strategy_effect_hash": {
                 "$ref": "#/$defs/sha256"
@@ -13570,7 +13647,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -13656,7 +13736,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -13707,7 +13790,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -13784,7 +13870,10 @@
               "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "sample_design_id": {"type": "string", "minLength": 1},
               "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -14451,7 +14540,10 @@
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
               },
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -14599,7 +14691,10 @@
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
               },
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",

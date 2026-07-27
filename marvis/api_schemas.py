@@ -230,8 +230,11 @@ ManualStrategyWorkflow = Literal[
     "strategy_pool_set_action",
     "strategy_pool_reorder",
     "strategy_pool_apply",
+    "strategy_pool_impact",
+    "strategy_impact_cube",
     "strategy_pool_validation",
     "strategy_pool_stability",
+    "strategy_report_bundle_v2",
 ]
 
 
@@ -1150,6 +1153,205 @@ class ManualStrategyPoolStabilityInputs(BaseModel):
     strategy_type: ManualStrategyType
 
 
+class ManualStrategyPoolImpactInputs(BaseModel):
+    """User-owned controls for the legacy approval/reject impact view."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: Literal["approval", "reject"]
+    comparison_mode: Literal["absolute", "vs_baseline"] = "absolute"
+    baseline_strategy_id: StrictCanonicalNonEmptyStr | None = None
+    month_col: StrictCanonicalNonEmptyStr | None = None
+    loan_amount_col: StrictCanonicalNonEmptyStr | None = None
+    overdue_amount_col: StrictCanonicalNonEmptyStr | None = None
+    drop_nan_labels: StrictBool = False
+
+    @model_validator(mode="after")
+    def validate_comparison_and_optional_controls(self) -> Self:
+        explicit_nulls = sorted(
+            field
+            for field in self.model_fields_set
+            if getattr(self, field) is None
+        )
+        if explicit_nulls:
+            raise ValueError(
+                "optional fields must be omitted instead of null: "
+                + ", ".join(explicit_nulls)
+            )
+        if (
+            self.comparison_mode == "vs_baseline"
+            and self.baseline_strategy_id is None
+        ):
+            raise ValueError(
+                "vs_baseline requires baseline_strategy_id"
+            )
+        if (
+            self.comparison_mode == "absolute"
+            and self.baseline_strategy_id is not None
+        ):
+            raise ValueError(
+                "absolute comparison forbids baseline_strategy_id"
+            )
+        return self
+
+
+class ManualImpactCubeColumnBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    kind: Literal["column"]
+    column: StrictCanonicalNonEmptyStr
+
+
+class ManualImpactCubeScalarBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    kind: Literal["scalar"]
+    value: StrictInt | StrictFloat
+
+    @model_validator(mode="after")
+    def require_finite_value(self) -> Self:
+        if not math.isfinite(float(self.value)):
+            raise ValueError("economics scalar must be finite")
+        if isinstance(self.value, int) and abs(self.value) > 2**53 - 1:
+            raise ValueError("economics scalar exceeds exact JSON number range")
+        return self
+
+
+ManualImpactCubeEconomicsComponent = Literal[
+    "ead",
+    "pd",
+    "annual_rate",
+    "funding_rate",
+    "lgd",
+    "operating_cost_per_loan",
+    "term_months",
+    "utilization",
+]
+ManualImpactCubeEconomicsBinding = (
+    ManualImpactCubeColumnBinding | ManualImpactCubeScalarBinding
+)
+_MANUAL_IMPACT_CUBE_ECONOMICS_COMPONENTS = {
+    "approval": frozenset(
+        {
+            "ead",
+            "pd",
+            "annual_rate",
+            "funding_rate",
+            "lgd",
+            "operating_cost_per_loan",
+            "term_months",
+        }
+    ),
+    "reject": frozenset(
+        {
+            "ead",
+            "pd",
+            "annual_rate",
+            "funding_rate",
+            "lgd",
+            "operating_cost_per_loan",
+            "term_months",
+        }
+    ),
+    "limit": frozenset({"pd", "lgd", "utilization"}),
+    "pricing": frozenset(
+        {
+            "ead",
+            "pd",
+            "lgd",
+            "funding_rate",
+            "term_months",
+            "operating_cost_per_loan",
+        }
+    ),
+    "segmentation": frozenset(),
+}
+
+
+class ManualStrategyImpactCubeInputs(BaseModel):
+    """Only explicit dimensions, partitions and typed economics are user-owned."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+    partitions: Annotated[
+        list[Literal["development", "validation", "oot"]],
+        Field(min_length=1, max_length=3),
+        AfterValidator(_unique_strings),
+    ] | None = None
+    month_col: StrictCanonicalNonEmptyStr | None = None
+    group_col: StrictCanonicalNonEmptyStr | None = None
+    segment_col: StrictCanonicalNonEmptyStr | None = None
+    current_strategy_id: StrictCanonicalNonEmptyStr | None = None
+    economics_inputs: Annotated[
+        dict[
+            ManualImpactCubeEconomicsComponent,
+            ManualImpactCubeEconomicsBinding,
+        ],
+        Field(min_length=1, max_length=16),
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_optional_and_relational_controls(self) -> Self:
+        explicit_nulls = sorted(
+            field
+            for field in self.model_fields_set
+            if getattr(self, field) is None
+        )
+        if explicit_nulls:
+            raise ValueError(
+                "optional fields must be omitted instead of null: "
+                + ", ".join(explicit_nulls)
+            )
+        dimensions = [
+            value
+            for value in (
+                self.month_col,
+                self.group_col,
+                self.segment_col,
+            )
+            if value is not None
+        ]
+        if len(dimensions) != len(set(dimensions)):
+            raise ValueError(
+                "month_col, group_col and segment_col must be distinct"
+            )
+        if self.economics_inputs is not None:
+            allowed = _MANUAL_IMPACT_CUBE_ECONOMICS_COMPONENTS[
+                self.strategy_type
+            ]
+            unsupported = sorted(set(self.economics_inputs) - allowed)
+            if unsupported:
+                raise ValueError(
+                    f"{self.strategy_type} does not support economics inputs: "
+                    + ", ".join(unsupported)
+                )
+            term = self.economics_inputs.get("term_months")
+            if (
+                isinstance(term, ManualImpactCubeScalarBinding)
+                and (
+                    not isinstance(term.value, int)
+                    or isinstance(term.value, bool)
+                    or term.value < 1
+                )
+            ):
+                raise ValueError("term_months scalar must be a positive integer")
+        return self
+
+
+class ManualStrategyReportBundleV2Inputs(BaseModel):
+    """The report writer owns evidence; the user owns only title and status."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    title: Annotated[
+        StrictStr,
+        AfterValidator(_canonical_non_empty_string),
+        StringConstraints(max_length=200),
+    ] = "策略迭代评审报告"
+    status: Literal["draft", "partial", "final"] = "partial"
+
+
 class ManualRiskThresholdSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -1309,6 +1511,15 @@ _MANUAL_STRATEGY_POOL_VALIDATION_INPUTS = TypeAdapter(
 _MANUAL_STRATEGY_POOL_STABILITY_INPUTS = TypeAdapter(
     ManualStrategyPoolStabilityInputs
 )
+_MANUAL_STRATEGY_POOL_IMPACT_INPUTS = TypeAdapter(
+    ManualStrategyPoolImpactInputs
+)
+_MANUAL_STRATEGY_IMPACT_CUBE_INPUTS = TypeAdapter(
+    ManualStrategyImpactCubeInputs
+)
+_MANUAL_STRATEGY_REPORT_BUNDLE_V2_INPUTS = TypeAdapter(
+    ManualStrategyReportBundleV2Inputs
+)
 _MANUAL_SAMPLE_DESIGN_V2_INPUTS = TypeAdapter(
     ManualSampleDesignV2Inputs
 )
@@ -1460,6 +1671,21 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "strategy_pool_impact":
+            _MANUAL_STRATEGY_POOL_IMPACT_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_impact_cube":
+            _MANUAL_STRATEGY_IMPACT_CUBE_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_report_bundle_v2":
+            _MANUAL_STRATEGY_REPORT_BUNDLE_V2_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         user_owned_identity_fields = {
             "univariate_candidate_refinement": {"source_candidate_id"},
             "scorecard_cutoff_selection": {"asset_id", "cutoff_id"},
@@ -1488,6 +1714,8 @@ class ManualStrategyRequest(BaseModel):
             "strategy_pool_remove_entry": {"entry_id"},
             "strategy_pool_set_action": {"entry_id"},
             "strategy_pool_reorder": {"ordered_ids"},
+            "strategy_pool_impact": {"baseline_strategy_id"},
+            "strategy_impact_cube": {"current_strategy_id"},
         }.get(self.workflow, set())
         forbidden = sorted(
             key

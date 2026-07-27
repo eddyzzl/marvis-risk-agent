@@ -36,10 +36,20 @@ from marvis.packs.strategy.interactive_tree_revision import (
     canonical_interactive_tree_revision_json,
     validate_interactive_tree_revision,
 )
+from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
 from marvis.plugins.contracts import ToolContext
+from marvis.plugins.loader import load_manifest
+from marvis.plugins.schema_validation import validate_against_schema
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
+from tests.test_strategy_automatic_tree_tool import (
+    _inputs as _automatic_tree_inputs,
+    _materialize_native_sample_design_ref,
+    _record_by_kind as _automatic_tree_records_by_kind,
+    _runtime as _automatic_tree_runtime,
+    _tool_context as _automatic_tree_tool_context,
+)
 
 
 INTERACTIVE_TREE_TOOL_SCHEMA_VERSION = "strategy.revise-interactive-tree-tool.v1"
@@ -313,6 +323,119 @@ def test_revise_automatic_tree_is_canonical_task_local_and_idempotent(
         scenario.source_asset,
     ).encode("utf-8")
     assert hashlib.sha256(persisted_bytes).hexdigest() == record["content_hash"]
+
+
+def test_revise_interactive_tree_replays_native_risk_development_and_bad_zero(
+    tmp_path: Path,
+) -> None:
+    (
+        settings,
+        _runner,
+        _registry,
+        task,
+        _other,
+        dataset,
+        workspace,
+        mapping,
+    ) = _automatic_tree_runtime(
+        tmp_path,
+        target_bad_value=0,
+        with_split=True,
+    )
+    native_ref = _materialize_native_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=0,
+    )
+    ctx = _automatic_tree_tool_context(settings, task)
+    strategy_tools.tool_build_automatic_tree_candidate(
+        {
+            **_automatic_tree_inputs(dataset, workspace, mapping, native_ref),
+            "features": ["score", "income"],
+        },
+        ctx,
+    )
+    source_record = _automatic_tree_records_by_kind(settings, task)[
+        AUTOMATIC_TREE_ASSET_ARTIFACT_KIND
+    ]
+    source_asset = json.loads(Path(source_record["path"]).read_text("utf-8"))
+    node_id = _split_node_ids(source_asset)[-1]
+
+    output = _invoke(
+        {
+            "source_tree_id": source_asset["asset_id"],
+            "node_id": node_id,
+            "operation": "prune_subtree",
+            "reason": "Prune native risk tree.",
+        },
+        ctx,
+    )
+
+    manifest = load_manifest(
+        Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+        builtin=True,
+    )
+    tool = next(item for item in manifest.tools if item.name == "revise_interactive_tree")
+    validate_against_schema(
+        output,
+        tool.output_schema,
+        label="native interactive-tree output",
+    )
+    assert output["replay"]["partition"] == "risk/development"
+    assert output["replay"]["source_row_count"] == 16
+    assert output["replay"]["metrics_matched"] is True
+    [revision_record] = [
+        record
+        for record in TaskArtifactRepository(settings.db_path).list_for_task(
+            task.id
+        )
+        if record["kind"] == INTERACTIVE_TREE_REVISION_ARTIFACT_KIND
+    ]
+    assert revision_record["provenance"]["sample_design_ref"] == native_ref
+    revision = json.loads(Path(revision_record["path"]).read_text("utf-8"))
+    frontier = revision["fragments"][0]
+    selection = (
+        strategy_tools.tool_materialize_interactive_tree_frontier_selection(
+            {
+                "revision_id": revision["revision_id"],
+                "source_node_id": frontier["source_node_id"],
+                "selection_reason": "Use the reviewed native frontier.",
+            },
+            ctx,
+        )
+    )
+    artifact = selection["artifacts"][0]
+    added = strategy_tools.tool_add_candidate_to_pool(
+        {
+            "source_artifact_id": artifact["artifact_id"],
+            "expected_artifact_content_hash": artifact["content_hash"],
+            "expected_asset_id": selection["semantic_tree_id"],
+            "expected_asset_hash": selection["tree_hash"],
+            "strategy_type": "approval",
+            "default_action": {
+                "type": "approval",
+                "value": "approve",
+                "reason_code": None,
+                "stop": True,
+            },
+            "action": {
+                "type": "reject",
+                "value": "reject",
+                "reason_code": "RISK",
+                "stop": True,
+            },
+            "expected_pool_revision": 0,
+            "expected_pool_snapshot_hash": ABSENT_POOL_SNAPSHOT_HASH,
+        },
+        ctx,
+    )
+    assert added["revision"] == 1
+    assert added["pool"]["entries"][0]["source"]["asset_id"] == selection[
+        "semantic_tree_id"
+    ]
 
 
 def test_revise_interactive_tree_accepts_an_exact_parent_revision_source(

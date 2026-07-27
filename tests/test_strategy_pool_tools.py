@@ -36,11 +36,24 @@ import marvis.packs.strategy.pool_tools as pool_tools_module
 from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
 from marvis.packs.strategy.pool_tools import (
     POOL_ARTIFACT_KIND,
+    bind_strategy_pool_development_execution,
+    bind_strategy_pool_revision_development_execution,
+    load_current_strategy_candidate_pool_artifact,
+    load_strategy_candidate_pool_revision_artifact,
     run_add_candidate_to_pool,
     run_compile_strategy_pool,
     run_remove_pool_entry,
     run_reorder_strategy_pool,
     run_set_pool_entry_action,
+)
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
 )
 from marvis.packs.strategy.voting_candidate_tools import run_build_voting_candidate
 from marvis.plugins.contracts import ToolContext
@@ -77,7 +90,7 @@ def _context(settings, task_id: str) -> ToolContext:
     )
 
 
-def _setup(tmp_path: Path) -> dict:
+def _setup(tmp_path: Path, *, native_sample: bool = False) -> dict:
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     tasks = TaskRepository(settings.db_path)
@@ -101,14 +114,25 @@ def _setup(tmp_path: Path) -> dict:
             target_col="bad",
         )
     )
-    frame = pd.DataFrame(
-        {
-            "score": [100, 130, 160, 190, 220, 250, 280, 310, 340, 370, 400, 430],
-            "loan_amount": [100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320],
-            "overdue_amount": [0, 0, 0, 5, 0, 10, 0, 15, 20, 25, 30, 40],
-            "bad": [0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1],
-        }
-    )
+    frame_data = {
+        "score": [100, 130, 160, 190, 220, 250, 280, 310, 340, 370, 400, 430],
+        "loan_amount": [100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320],
+        "overdue_amount": [0, 0, 0, 5, 0, 10, 0, 15, 20, 25, 30, 40],
+        "bad": [0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1],
+    }
+    if native_sample:
+        frame_data.update(
+            {
+                "customer_id": [f"C{index:03d}" for index in range(12)],
+                "apply_date": [
+                    f"2026-{1 + index // 8:02d}-{1 + index % 8:02d}"
+                    for index in range(12)
+                ],
+                "segment": ["A", "B", "B", "C", "B", "C"] * 2,
+                "sample_split": ["dev"] * 8 + ["valid"] * 2 + ["oot"] * 2,
+            }
+        )
+    frame = pd.DataFrame(frame_data)
     source_path = tmp_path / "candidate.parquet"
     frame.to_parquet(source_path, index=False)
     registry = DatasetRegistry(
@@ -133,6 +157,16 @@ def _setup(tmp_path: Path) -> dict:
             "loan_amount": "loan_amount",
             "overdue_amount": "overdue_amount",
             "bad": "target",
+            **(
+                {
+                    "customer_id": "id",
+                    "apply_date": "date",
+                    "segment": "categorical",
+                    "sample_split": "segment",
+                }
+                if native_sample
+                else {}
+            ),
         },
     )
     workspace = workspaces.save(
@@ -146,34 +180,139 @@ def _setup(tmp_path: Path) -> dict:
     )
     ctx = _context(settings, task.id)
     runtime = strategy_tools._runtime(ctx)
-    sample_design = strategy_tools.tool_materialize_sample_design(
-        {
-            "dataset_id": dataset.id,
-            "expected_dataset_content_hash": dataset.content_hash,
-            "workspace_revision": workspace.revision,
-            "workspace_generation": workspace.analysis_generation,
-            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
-            "target_col": "bad",
-            "target_bad_value": 1,
-            "performance_window_status": "provided",
-            "performance_window_days": 30,
-            "observation_window_status": "provided",
-            "observation_window_start": "2026-01-01",
-            "observation_window_end": "2026-01-31",
-            "maturity_status": "confirmed_matured",
-            "loan_amount_col": "loan_amount",
-            "overdue_amount_col": "overdue_amount",
-            "drop_nan_labels": False,
-        },
-        ctx,
-    )
-    sample_design_ref = {
-        "artifact_id": sample_design["artifact"]["artifact_id"],
-        "artifact_content_hash": sample_design["artifact"]["content_hash"],
-        "sample_design_id": sample_design["sample_design_id"],
-        "sample_design_content_hash": sample_design["content_hash"],
-        "partition": "development",
-    }
+    if native_sample:
+        def eq(column: str, value: object) -> dict:
+            return {
+                "op": "eq",
+                "left": {"column": column},
+                "right": {"literal": value},
+            }
+
+        def any_of(*predicates: dict) -> dict:
+            return {"op": "or", "args": list(predicates)}
+
+        sample_design = strategy_tools.tool_materialize_sample_design_v2_native(
+            {
+                "source_mode": "native_active_dataset",
+                "dataset_id": dataset.id,
+                "expected_dataset_content_hash": dataset.content_hash,
+                "workspace_revision": workspace.revision,
+                "workspace_generation": workspace.analysis_generation,
+                "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+                "target_col": "bad",
+                "target_bad_value": 1,
+                "drop_nan_labels": False,
+                "relationship": "parallel_time_cohorts",
+                "scope": "strategy_development",
+                "approval_population": {
+                    "inclusion": any_of(eq("segment", "A"), eq("segment", "B")),
+                    "exclusion": None,
+                },
+                "risk_population": {
+                    "inclusion": any_of(eq("segment", "B"), eq("segment", "C")),
+                    "exclusion": None,
+                },
+                "partitioning": {
+                    "method": "predicate_ast",
+                    "selectors": {
+                        "development": eq("sample_split", "dev"),
+                        "validation": eq("sample_split", "valid"),
+                        "oot": eq("sample_split", "oot"),
+                    },
+                },
+                "maturity": {
+                    "status": "confirmed_matured",
+                    "performance_window_days": 30,
+                    "cutoff_date": "2026-04-30",
+                    "reason": None,
+                },
+                "performance_window": {"status": "provided", "days": 30},
+                "observation_window": {
+                    "status": "provided",
+                    "start": "2026-01-01",
+                    "end": "2026-04-30",
+                },
+                "field_bindings": {
+                    "entity_field": "customer_id",
+                    "time_field": "apply_date",
+                    "group_field": "segment",
+                    "month_field": None,
+                    "weight_field": None,
+                    "loan_amount_field": "loan_amount",
+                    "overdue_amount_field": "overdue_amount",
+                },
+                "historical_score": {
+                    "status": "unavailable",
+                    "column": None,
+                    "direction": None,
+                    "reason": "not supplied for Pool core test",
+                },
+                "policy": {
+                    "minimum_partition_count": 1,
+                    "minimum_bad_count": 1,
+                    "minimum_label_coverage": 1.0,
+                    "minimum_historical_score_coverage": 0.0,
+                    "maximum_group_coverage_gap": 1.0,
+                    "diagnostic_severities": {
+                        "entity_overlap": "warn",
+                        "temporal_oot": "warn",
+                        "risk_outside_approval": "warn",
+                        "maturity": "fail",
+                        "label_coverage": "fail",
+                        "historical_score_coverage": "warn",
+                        "group_coverage_gap": "warn",
+                        "sufficiency": "fail",
+                    },
+                },
+            },
+            ctx,
+        )
+        bundle_record = next(
+            record
+            for record in TaskArtifactRepository(settings.db_path).list_for_task(
+                task.id
+            )
+            if record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+            and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+        )
+        sample_design_ref = {
+            "artifact_id": bundle_record["id"],
+            "artifact_content_hash": bundle_record["content_hash"],
+            "sample_design_id": sample_design["sample_design_id"],
+            "sample_design_content_hash": sample_design[
+                "sample_design_content_hash"
+            ],
+            "partition": "risk/development",
+        }
+    else:
+        sample_design = strategy_tools.tool_materialize_sample_design(
+            {
+                "dataset_id": dataset.id,
+                "expected_dataset_content_hash": dataset.content_hash,
+                "workspace_revision": workspace.revision,
+                "workspace_generation": workspace.analysis_generation,
+                "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+                "target_col": "bad",
+                "target_bad_value": 1,
+                "performance_window_status": "provided",
+                "performance_window_days": 30,
+                "observation_window_status": "provided",
+                "observation_window_start": "2026-01-01",
+                "observation_window_end": "2026-01-31",
+                "maturity_status": "confirmed_matured",
+                "loan_amount_col": "loan_amount",
+                "overdue_amount_col": "overdue_amount",
+                "drop_nan_labels": False,
+            },
+            ctx,
+        )
+        sample_design_ref = {
+            "artifact_id": sample_design["artifact"]["artifact_id"],
+            "artifact_content_hash": sample_design["artifact"]["content_hash"],
+            "sample_design_id": sample_design["sample_design_id"],
+            "sample_design_content_hash": sample_design["content_hash"],
+            "partition": "development",
+        }
     source_output = strategy_tools.tool_analyze_univariate_candidates(
         {
             "dataset_id": dataset.id,
@@ -224,7 +363,10 @@ def _setup(tmp_path: Path) -> dict:
         "ctx": ctx,
         "runtime": runtime,
         "dataset": dataset,
+        "workspace": workspace,
+        "mapping": mapping,
         "source_output": source_output,
+        "sample_design_ref": sample_design_ref,
         "first": refine(0),
         "refine": refine,
     }
@@ -484,6 +626,156 @@ def test_add_and_compile_persist_governed_pool_without_building_strategy(
         "design_hash"
     ]
     assert fixture["runtime"].strategies.list_for_task(fixture["task"].id) == []
+
+
+def test_native_refinements_reorder_compile_and_bind_current_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path, native_sample=True)
+    current_locks: list[StrategyRiskDevelopmentExecutionBinding] = []
+    historical_locks: list[StrategyRiskDevelopmentExecutionBinding] = []
+    original_current_lock = (
+        pool_tools_module.require_strategy_risk_development_execution_binding_on_connection
+    )
+    original_historical_lock = (
+        pool_tools_module.require_historical_strategy_risk_development_execution_binding_on_connection
+    )
+
+    def track_current_lock(conn, binding):
+        current_locks.append(binding)
+        return original_current_lock(conn, binding)
+
+    def track_historical_lock(conn, binding):
+        historical_locks.append(binding)
+        return original_historical_lock(conn, binding)
+
+    monkeypatch.setattr(
+        pool_tools_module,
+        "require_strategy_risk_development_execution_binding_on_connection",
+        track_current_lock,
+    )
+    monkeypatch.setattr(
+        pool_tools_module,
+        "require_historical_strategy_risk_development_execution_binding_on_connection",
+        track_historical_lock,
+    )
+    first = run_add_candidate_to_pool(
+        _add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    second = run_add_candidate_to_pool(
+        _add_inputs(
+            fixture["refine"](2),
+            expected_revision=first["revision"],
+            expected_hash=first["snapshot_hash"],
+            action=_action("review", reason="NATIVE_REVIEW"),
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    first_rule, second_rule = [entry["rule_id"] for entry in second["entries"]]
+    reordered = run_reorder_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": second["revision"],
+            "expected_pool_snapshot_hash": second["snapshot_hash"],
+            "ordered_rule_ids": [second_rule, first_rule],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    compiled = run_compile_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": reordered["revision"],
+            "expected_pool_snapshot_hash": reordered["snapshot_hash"],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    current = load_current_strategy_candidate_pool_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        strategy_type="approval",
+        expected_pool_revision=reordered["revision"],
+        expected_pool_snapshot_hash=reordered["snapshot_hash"],
+    )
+    development = bind_strategy_pool_development_execution(
+        fixture["runtime"],
+        current,
+    )
+
+    assert [rule["rule_id"] for rule in compiled["strategy_spec"]["rules"]] == [
+        second_rule,
+        first_rule,
+    ]
+    assert isinstance(
+        development.sample_design,
+        StrategyRiskDevelopmentExecutionBinding,
+    )
+    assert development.sample_design.source_mode == "native_active_dataset"
+    assert development.sample_design.to_ref_dict() == fixture["sample_design_ref"]
+    assert development.sample_design.reference.partition == "risk/development"
+    assert development.sample_design_v2 is None
+    assert current_locks == [development.sample_design]
+
+    advanced_mapping = DataSemanticMapping(
+        target_col=fixture["mapping"].target_col,
+        field_roles=fixture["mapping"].field_roles,
+        business_names={"score": "advanced Pool workspace"},
+    )
+    advanced = DataWorkspaceRepository(
+        fixture["settings"].db_path
+    ).save(
+        fixture["task"].id,
+        DataWorkspaceDraft(
+            active_dataset_id=fixture["dataset"].id,
+            active_dataset_content_hash=fixture["dataset"].content_hash,
+            semantic_mapping=advanced_mapping,
+        ),
+        expected_revision=fixture["workspace"].revision,
+    )
+    assert advanced.revision > fixture["workspace"].revision
+    with pytest.raises(StrategyError, match="[Ww]orkspace"):
+        bind_strategy_pool_development_execution(
+            fixture["runtime"],
+            current,
+        )
+
+    artifact = reordered["artifacts"][0]
+    revision = load_strategy_candidate_pool_revision_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        strategy_type="approval",
+        revision_id=reordered["pool"]["revision_id"],
+        artifact_id=artifact["artifact_id"],
+        expected_artifact_content_hash=artifact["content_hash"],
+    )
+    historical = bind_strategy_pool_revision_development_execution(
+        fixture["runtime"],
+        revision,
+    )
+    assert historical.sample_design.source_mode == "native_active_dataset"
+    assert historical.sample_design.to_ref_dict() == fixture["sample_design_ref"]
+    assert historical_locks == [historical.sample_design]
+
+    different_context = _refine_for_workspace(fixture, advanced, 1)
+    with pytest.raises(StrategyError, match="identity|sample context"):
+        run_add_candidate_to_pool(
+            _add_inputs(
+                different_context,
+                expected_revision=reordered["revision"],
+                expected_hash=reordered["snapshot_hash"],
+            ),
+            fixture["ctx"],
+            fixture["runtime"],
+        )
 
 
 def test_voting_admission_rejects_earlier_logically_dominating_rule(

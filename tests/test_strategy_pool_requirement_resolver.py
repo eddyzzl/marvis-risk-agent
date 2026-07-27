@@ -13,6 +13,7 @@ import pytest
 from marvis.packs.modeling.score_evidence_tools import (
     load_model_score_evidence_artifacts,
 )
+from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool_requirement_resolver import (
     ResolvedPoolRequirements,
@@ -26,8 +27,16 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     validate_pool_requirement_bindings_provenance,
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
     StrategySampleDesignV2ArtifactBinding,
+    load_any_strategy_sample_design_v2_artifacts,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    run_materialize_sample_design_v2_native,
+)
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from tests.test_model_score_evidence_tool import (
     _fixture,
     _run_score,
@@ -87,6 +96,128 @@ def _compiled(*requirements: dict) -> dict:
             for index, requirement in enumerate(requirements)
         ]
     }
+
+
+def _eq(column: str, value: object) -> dict:
+    return {
+        "op": "eq",
+        "left": {"column": column},
+        "right": {"literal": value},
+    }
+
+
+def _native_sample_binding(fx: dict, *, target_bad_value: int):
+    sample = run_materialize_sample_design_v2_native(
+        {
+            "source_mode": "native_active_dataset",
+            "dataset_id": fx["dataset"].id,
+            "expected_dataset_content_hash": fx["dataset"].content_hash,
+            "workspace_revision": fx["workspace"].revision,
+            "workspace_generation": fx["workspace"].analysis_generation,
+            "semantic_mapping_hash": fx["sample"]["bundle"]["sample_design"][
+                "identity"
+            ]["workspace_ref"]["semantic_mapping_hash"],
+            "target_col": "bad",
+            "target_bad_value": target_bad_value,
+            "drop_nan_labels": False,
+            "relationship": "nested_same_cohort",
+            "scope": "strategy_development",
+            "approval_population": {
+                "inclusion": None,
+                "exclusion": None,
+            },
+            "risk_population": {
+                "inclusion": _eq("risk_flag", 1),
+                "exclusion": None,
+            },
+            "partitioning": {
+                "method": "predicate_ast",
+                "selectors": {
+                    "development": _eq(
+                        "sample_partition",
+                        "development",
+                    ),
+                    "validation": _eq("sample_partition", "validation"),
+                    "oot": _eq("sample_partition", "oot"),
+                },
+            },
+            "maturity": {
+                "status": "confirmed_matured",
+                "performance_window_days": 30,
+                "cutoff_date": "2026-04-30",
+                "reason": None,
+            },
+            "performance_window": {"status": "provided", "days": 30},
+            "observation_window": {
+                "status": "provided",
+                "start": "2026-01-01",
+                "end": "2026-04-30",
+            },
+            "field_bindings": {
+                "entity_field": "customer_id",
+                "time_field": "apply_date",
+                "group_field": "channel",
+                "month_field": "apply_month",
+                "weight_field": "weight",
+                "loan_amount_field": "loan_amount",
+                "overdue_amount_field": "overdue_amount",
+            },
+            "historical_score": {
+                "status": "available",
+                "column": "legacy_score",
+                "direction": "higher_is_riskier",
+                "reason": None,
+            },
+            "policy": {
+                "minimum_partition_count": 1,
+                "minimum_bad_count": 1,
+                "minimum_label_coverage": 1.0,
+                "minimum_historical_score_coverage": 1.0,
+                "maximum_group_coverage_gap": 1.0,
+                "diagnostic_severities": {
+                    "entity_overlap": "fail",
+                    "temporal_oot": "fail",
+                    "risk_outside_approval": "fail",
+                    "maturity": "fail",
+                    "label_coverage": "fail",
+                    "historical_score_coverage": "warn",
+                    "group_coverage_gap": "warn",
+                    "sufficiency": "fail",
+                },
+            },
+        },
+        fx["ctx"],
+        strategy_tools._runtime(fx["ctx"]),
+    )
+    records = TaskArtifactRepository(
+        fx["settings"].db_path
+    ).list_for_task(fx["task"].id)
+    membership = next(
+        item
+        for item in records
+        if item["kind"]
+        == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    bundle = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    return load_any_strategy_sample_design_v2_artifacts(
+        strategy_tools._runtime(fx["ctx"]),
+        task_id=fx["task"].id,
+        membership_artifact_id=membership["id"],
+        expected_membership_artifact_content_hash=membership["content_hash"],
+        bundle_artifact_id=bundle["id"],
+        expected_bundle_artifact_content_hash=bundle["content_hash"],
+        expected_bundle_id=sample["bundle_id"],
+        expected_sample_design_id=sample["sample_design_id"],
+        expected_sample_design_content_hash=sample[
+            "sample_design_content_hash"
+        ],
+    )
 
 
 def _nested_requirement(
@@ -259,6 +390,82 @@ def test_resolver_authenticates_exact_score_reference_and_deduplicates(
     ] = "f" * 64
     with pytest.raises(StrategyError, match="changed|differ|match"):
         validate_pool_requirement_bindings_provenance(tampered)
+
+
+@pytest.mark.slow
+def test_resolver_binds_full_row_score_vector_to_native_sample(
+    tmp_path: Path,
+) -> None:
+    fx = _fixture(tmp_path, target_bad_value=0)
+    score_output = _run_score(fx, run_training(fx))
+    score = load_model_score_evidence_artifacts(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        evidence_artifact_id=score_output["artifacts"]["score_evidence"][
+            "artifact_id"
+        ],
+        expected_evidence_artifact_content_hash=score_output["artifacts"][
+            "score_evidence"
+        ]["content_hash"],
+        score_vector_artifact_id=score_output["artifacts"]["score_vector"][
+            "artifact_id"
+        ],
+        expected_score_vector_artifact_content_hash=score_output["artifacts"][
+            "score_vector"
+        ]["content_hash"],
+    )
+    selected_sample = _native_sample_binding(fx, target_bad_value=0)
+    requirement = _requirement({"binding": score})
+
+    resolved = resolve_pool_requirements(
+        strategy_tools._runtime(fx["ctx"]),
+        task_id=fx["task"].id,
+        compiled_design=_compiled(requirement),
+        sample_design=selected_sample,
+    )
+
+    assert resolved.virtual_fields == (requirement["virtual_field"],)
+    assert resolved.evidence_bindings[0].vector.row_count == (
+        selected_sample.source_binding.row_count
+    )
+    assert selected_sample.bundle["sample_design"]["compatibility"] == {
+        "source_mode": "native_active_dataset",
+        "development_partition": "risk/development",
+    }
+    with fx["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        require_resolved_pool_requirements_on_connection(conn, resolved)
+        conn.rollback()
+
+    wrong_target = replace(
+        selected_sample,
+        source_binding=replace(
+            selected_sample.source_binding,
+            target_bad_value=1,
+        ),
+    )
+    with pytest.raises(StrategyError, match="native sample semantics"):
+        resolve_pool_requirements(
+            strategy_tools._runtime(fx["ctx"]),
+            task_id=fx["task"].id,
+            compiled_design=_compiled(requirement),
+            sample_design=wrong_target,
+        )
+
+    wrong_dataset = replace(
+        selected_sample,
+        source_binding=replace(
+            selected_sample.source_binding,
+            dataset_id="different-native-dataset",
+        ),
+    )
+    with pytest.raises(StrategyError, match="dataset/workspace"):
+        resolve_pool_requirements(
+            strategy_tools._runtime(fx["ctx"]),
+            task_id=fx["task"].id,
+            compiled_design=_compiled(requirement),
+            sample_design=wrong_dataset,
+        )
 
 
 @pytest.mark.slow

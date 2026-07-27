@@ -276,6 +276,22 @@ def test_pool_impact_sample_design_reference_is_canonical_and_tamper_evident() -
         _build(sample_design_ref=malformed)
 
 
+def test_pool_impact_accepts_native_risk_development_without_legacy_drift() -> None:
+    legacy = _build()
+    assert hashlib.sha256(
+        canonical_strategy_pool_impact_json(legacy).encode("utf-8")
+    ).hexdigest() == "fc187a2370fd2ba97396a5572fd95919db208ee25ba9419993ebf8731b59a3e5"
+
+    native_ref = {**_sample_design_ref(), "partition": "risk/development"}
+    native = _build(sample_design_ref=native_ref)
+
+    assert native["bindings"]["sample_design_ref"] == native_ref
+    assert all(
+        row["source_ref"]["sample_design_ref"] == native_ref
+        for row in native["waterfall"]
+    )
+
+
 def test_pool_impact_reports_fully_shadowed_rule_and_reorder_changes_reach() -> None:
     pool = _pool(broad_first=True)
     broad = _build(pool=pool)

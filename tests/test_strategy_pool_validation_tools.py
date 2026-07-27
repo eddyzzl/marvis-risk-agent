@@ -50,9 +50,19 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     run_materialize_sample_design_v2,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    run_materialize_sample_design_v2_native,
+)
 import marvis.packs.strategy.pool_validation_tools as validation_tools
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from tests.test_strategy_sample_design_v2_tool import _setup as _sample_v2_setup
+from tests.test_strategy_pool_tools import (
+    _add_inputs as _pool_add_inputs,
+    _setup as _pool_setup,
+)
+from tests.test_strategy_sample_design_v2_native_tool import _setup_native
 
 
 def _action(action_type: str) -> dict:
@@ -219,42 +229,279 @@ def _validation_artifacts(fx: dict) -> list[dict]:
     ]
 
 
-def test_pool_validation_native_sample_fails_closed_before_artifact_write(
+def test_pool_validation_native_uses_independent_risk_partition_and_exact_ref(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fx = _setup(tmp_path)
-    original_load = validation_tools._load_sample_design_binding
+    fx = _pool_setup(tmp_path, native_sample=True)
+    locked_sources: list[str] = []
+    original_lock = (
+        validation_tools.require_strategy_pool_development_execution_binding_on_connection
+    )
 
-    def load_native_sample(*args, **kwargs):
-        binding = original_load(*args, **kwargs)
-        bundle = copy.deepcopy(binding.bundle)
-        bundle["sample_design"]["compatibility"] = {
-            "source_mode": "native_active_dataset",
-            "development_partition": "risk/development",
-        }
-        return replace(binding, bundle=bundle)
+    def track_development_lock(conn, binding):
+        locked_sources.append(binding.sample_design.source_mode)
+        return original_lock(conn, binding)
 
     monkeypatch.setattr(
         validation_tools,
-        "_load_sample_design_binding",
-        load_native_sample,
+        "require_strategy_pool_development_execution_binding_on_connection",
+        track_development_lock,
     )
-    artifacts_before = _validation_artifacts(fx)
-
-    with pytest.raises(StrategyError) as raised:
-        run_measure_strategy_pool_validation(
-            fx["validation_request"],
-            fx["ctx"],
-            fx["runtime"],
-        )
-
-    assert (
-        getattr(raised.value, "code", None)
-        == "strategy_sample_design_v2_native_source_unsupported"
+    added = run_add_candidate_to_pool(
+        _pool_add_inputs(
+            fx["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fx["ctx"],
+        fx["runtime"],
     )
-    assert getattr(raised.value, "consumer", None) == "strategy_pool_validation"
-    assert _validation_artifacts(fx) == artifacts_before
+    records = TaskArtifactRepository(fx["settings"].db_path).list_for_task(
+        fx["task"].id
+    )
+    membership = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    bundle = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    request = {
+        "strategy_type": "approval",
+        "pool_ref": {
+            "artifact_id": added["artifacts"][0]["artifact_id"],
+            "expected_artifact_content_hash": added["artifacts"][0][
+                "content_hash"
+            ],
+            "expected_pool_id": added["pool_id"],
+            "expected_revision": added["revision"],
+            "expected_revision_id": added["pool"]["revision_id"],
+            "expected_snapshot_hash": added["snapshot_hash"],
+        },
+        "sample_design_ref": {
+            "membership_artifact_id": membership["id"],
+            "expected_membership_artifact_content_hash": membership[
+                "content_hash"
+            ],
+            "bundle_artifact_id": bundle["id"],
+            "expected_bundle_artifact_content_hash": bundle["content_hash"],
+            "expected_bundle_id": bundle["provenance"]["bundle_id"],
+            "expected_sample_design_id": fx["sample_design_ref"][
+                "sample_design_id"
+            ],
+            "expected_sample_design_content_hash": fx["sample_design_ref"][
+                "sample_design_content_hash"
+            ],
+        },
+        "partition": "validation",
+        "population": "risk",
+        "comparison_mode": "absolute",
+    }
+
+    output = run_measure_strategy_pool_validation(
+        request,
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    evidence = output["evidence"]
+    assert output["population_count"] == 2
+    assert evidence["source_bindings"]["development_lineage"][
+        "legacy_development_ref"
+    ] == fx["sample_design_ref"]
+    assert evidence["source_bindings"]["target"]["bad_value"] == 1
+    assert evidence["conservation"]["risk_partition_excludes_development"] is True
+    assert locked_sources
+    assert set(locked_sources) == {"native_active_dataset"}
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=request,
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=request,
+    )
+    loaded = load_latest_strategy_pool_validation_artifacts(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        candidate_pool=pool,
+        sample_design=sample,
+    )
+    assert [item.artifact_id for item in loaded] == [
+        output["artifact"]["artifact_id"]
+    ]
+
+
+def test_pool_validation_native_normalizes_bad_zero_before_risk_metrics(
+    tmp_path: Path,
+) -> None:
+    fx = _setup_native(tmp_path, target_bad_value=0)
+    fx["request"]["partitioning"]["selectors"]["validation"] = {
+        "op": "and",
+        "args": [
+            {
+                "op": "eq",
+                "left": {"column": "sample_split"},
+                "right": {"literal": "valid"},
+            },
+            {
+                "op": "eq",
+                "left": {"column": "channel"},
+                "right": {"literal": "app"},
+            },
+        ],
+    }
+    fx["request"]["partitioning"]["selectors"]["oot"] = {
+        "op": "or",
+        "args": [
+            {
+                "op": "eq",
+                "left": {"column": "sample_split"},
+                "right": {"literal": "oot"},
+            },
+            {
+                "op": "and",
+                "args": [
+                    {
+                        "op": "eq",
+                        "left": {"column": "sample_split"},
+                        "right": {"literal": "valid"},
+                    },
+                    {
+                        "op": "eq",
+                        "left": {"column": "channel"},
+                        "right": {"literal": "web"},
+                    },
+                ],
+            },
+        ],
+    }
+    fx["request"]["policy"]["minimum_bad_count"] = 0
+    native = run_materialize_sample_design_v2_native(
+        fx["request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    records = TaskArtifactRepository(fx["settings"].db_path).list_for_task(
+        fx["task"].id
+    )
+    membership = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    bundle = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    development_ref = {
+        "artifact_id": bundle["id"],
+        "artifact_content_hash": bundle["content_hash"],
+        "sample_design_id": native["sample_design_id"],
+        "sample_design_content_hash": native["sample_design_content_hash"],
+        "partition": "risk/development",
+    }
+    workspace = fx["workspace"]
+    analysis = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            "dataset_id": fx["dataset"].id,
+            "expected_content_hash": fx["dataset"].content_hash,
+            "workspace_revision": workspace.revision,
+            "analysis_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(
+                workspace.semantic_mapping
+            ),
+            "target_col": "bad",
+            "sample_design_ref": development_ref,
+            "features": ["legacy_score"],
+            "methods": ["equal_width"],
+            "bin_count": 3,
+            "drop_nan_labels": True,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+        },
+        fx["ctx"],
+    )
+    candidate_report = next(
+        item
+        for item in analysis["artifacts"]
+        if item["kind"] == "strategy_candidate_json"
+    )
+    method = analysis["candidate_evidence"]["analysis"]["features"][0][
+        "methods"
+    ][0]
+    candidate = strategy_tools.tool_refine_univariate_candidate(
+        {
+            "source_artifact_id": candidate_report["artifact_id"],
+            "expected_artifact_content_hash": candidate_report["content_hash"],
+            "expected_candidate_id": analysis["candidate_id"],
+            "expected_evidence_hash": analysis["evidence_hash"],
+            "feature": "legacy_score",
+            "method": "equal_width",
+            "merge_groups": [],
+            "selection": {"source_bin_ids": [method["bins"][0]["id"]]},
+        },
+        fx["ctx"],
+    )
+    added = run_add_candidate_to_pool(
+        _pool_add_inputs(
+            candidate,
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fx["ctx"],
+        fx["runtime"],
+    )
+    output = run_measure_strategy_pool_validation(
+        {
+            "strategy_type": "approval",
+            "pool_ref": {
+                "artifact_id": added["artifacts"][0]["artifact_id"],
+                "expected_artifact_content_hash": added["artifacts"][0][
+                    "content_hash"
+                ],
+                "expected_pool_id": added["pool_id"],
+                "expected_revision": added["revision"],
+                "expected_revision_id": added["pool"]["revision_id"],
+                "expected_snapshot_hash": added["snapshot_hash"],
+            },
+            "sample_design_ref": {
+                "membership_artifact_id": membership["id"],
+                "expected_membership_artifact_content_hash": membership[
+                    "content_hash"
+                ],
+                "bundle_artifact_id": bundle["id"],
+                "expected_bundle_artifact_content_hash": bundle[
+                    "content_hash"
+                ],
+                "expected_bundle_id": native["bundle_id"],
+                "expected_sample_design_id": native["sample_design_id"],
+                "expected_sample_design_content_hash": native[
+                    "sample_design_content_hash"
+                ],
+            },
+            "partition": "validation",
+            "population": "risk",
+            "comparison_mode": "absolute",
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    assert output["population_count"] == 1
+    assert output["evidence"]["overall"]["effect"]["bad_count"] == 0
+    assert output["evidence"]["source_bindings"]["target"]["bad_value"] == 0
 
 
 def test_latest_pool_validation_loader_authenticates_each_available_partition(
@@ -975,6 +1222,10 @@ def test_measure_pool_validation_hydrates_score_requirement_before_partition_mas
             "virtual_fields": list(resolved.virtual_fields),
         }
 
+    def require_development_on_connection(conn, binding):
+        assert conn.in_transaction
+        assert binding is controlled_development
+
     globals_resolved = resolved
     monkeypatch.setattr(validation_tools, "_load_pool_binding", load_with_requirement)
     monkeypatch.setattr(
@@ -1015,6 +1266,11 @@ def test_measure_pool_validation_hydrates_score_requirement_before_partition_mas
         validation_tools,
         "require_strategy_candidate_pool_artifact_binding_on_connection",
         lambda conn, binding: None,
+    )
+    monkeypatch.setattr(
+        validation_tools,
+        "require_strategy_pool_development_execution_binding_on_connection",
+        require_development_on_connection,
     )
 
     output = run_measure_strategy_pool_validation(

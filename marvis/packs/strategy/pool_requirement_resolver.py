@@ -33,6 +33,10 @@ from marvis.packs.modeling.score_evidence_tools import (
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
+    resolve_strategy_sample_design_v2_source_mode,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    StrategySampleDesignV2NativeArtifactBinding,
 )
 
 
@@ -61,6 +65,10 @@ _REQUIREMENT_BINDINGS_FIELDS = frozenset(
         "requirements",
         "virtual_fields",
     }
+)
+StrategySampleDesignV2Binding = (
+    StrategySampleDesignV2ArtifactBinding
+    | StrategySampleDesignV2NativeArtifactBinding
 )
 
 
@@ -226,9 +234,9 @@ def resolve_pool_requirements(
     *,
     task_id: str,
     compiled_design: Mapping[str, Any],
-    sample_design: StrategySampleDesignV2ArtifactBinding,
+    sample_design: StrategySampleDesignV2Binding,
 ) -> ResolvedPoolRequirements:
-    """Authenticate every supported requirement against the exact V2 sample."""
+    """Authenticate requirements against the selected V2 execution source."""
 
     return _resolve_pool_requirements(
         runtime,
@@ -244,7 +252,7 @@ def resolve_historical_pool_requirements(
     *,
     task_id: str,
     compiled_design: Mapping[str, Any],
-    sample_design: StrategySampleDesignV2ArtifactBinding,
+    sample_design: StrategySampleDesignV2Binding,
 ) -> ResolvedPoolRequirements:
     """Authenticate requirements without requiring score samples to be head."""
 
@@ -262,14 +270,30 @@ def _resolve_pool_requirements(
     *,
     task_id: str,
     compiled_design: Mapping[str, Any],
-    sample_design: StrategySampleDesignV2ArtifactBinding,
+    sample_design: StrategySampleDesignV2Binding,
     require_current_scores: bool,
 ) -> ResolvedPoolRequirements:
     task = _text(task_id, "task_id")
-    if not isinstance(sample_design, StrategySampleDesignV2ArtifactBinding):
+    if not isinstance(
+        sample_design,
+        (
+            StrategySampleDesignV2ArtifactBinding,
+            StrategySampleDesignV2NativeArtifactBinding,
+        ),
+    ):
         raise StrategyError("sample-design V2 artifact binding is invalid")
     if sample_design.task_id != task:
         raise StrategyError("Pool requirements and sample design task differ")
+    if isinstance(sample_design, StrategySampleDesignV2NativeArtifactBinding):
+        source_mode = resolve_strategy_sample_design_v2_source_mode(
+            sample_design.bundle["sample_design"],
+            capability="physical_v2",
+            consumer="strategy_pool_requirement_resolver",
+        )
+        if source_mode != "native_active_dataset":
+            raise StrategyError(
+                "native sample-design V2 source mode changed"
+            )
     if not isinstance(compiled_design, Mapping):
         raise StrategyError("compiled design must be an object")
     requirements = normalize_pool_requirements(
@@ -582,7 +606,7 @@ def _model_score_requirement(value: object) -> dict[str, str]:
 def _require_exact_sample(
     binding: ModelScoreEvidenceArtifactBinding,
     *,
-    sample_design: StrategySampleDesignV2ArtifactBinding,
+    sample_design: StrategySampleDesignV2Binding,
     task_id: str,
 ) -> None:
     if binding.task_id != task_id or binding.training.task_id != task_id:
@@ -605,10 +629,35 @@ def _require_exact_sample(
         raise StrategyError(
             "model score evidence does not bind the selected dataset/workspace"
         )
-    if _sample_identity(scored_sample) != _sample_identity(sample_design):
-        raise StrategyError(
-            "model score evidence does not bind the selected SampleDesign V2"
+    if isinstance(sample_design, StrategySampleDesignV2ArtifactBinding):
+        if _sample_identity(scored_sample) != _sample_identity(sample_design):
+            raise StrategyError(
+                "model score evidence does not bind the selected "
+                "SampleDesign V2"
+            )
+    else:
+        # Score evidence is a full-universe, zero-based row vector.  Native
+        # approval/risk masks are authenticated separately by the consuming
+        # workflow, so vector reuse is governed by exact dataset/workspace,
+        # target polarity, missing-label policy, row count, and row ordinals.
+        # Legacy callers retain their established exact V2-pair identity gate.
+        source_mode = resolve_strategy_sample_design_v2_source_mode(
+            sample_design.bundle["sample_design"],
+            capability="physical_v2",
+            consumer="strategy_pool_requirement_resolver",
         )
+        if (
+            source_mode != "native_active_dataset"
+            or scored_source.target_col != selected_source.target_col
+            or scored_source.target_bad_value
+            != selected_source.target_bad_value
+            or scored_source.drop_nan_labels
+            is not selected_source.drop_nan_labels
+        ):
+            raise StrategyError(
+                "model score evidence does not bind the selected native "
+                "sample semantics"
+            )
     header = sample_design.membership["header"]
     if (
         binding.vector.row_count != selected_source.row_count
@@ -624,7 +673,7 @@ def _require_exact_sample(
 
 
 def _sample_identity(
-    binding: StrategySampleDesignV2ArtifactBinding,
+    binding: StrategySampleDesignV2Binding,
 ) -> tuple[object, ...]:
     header = binding.membership["header"]
     design = binding.bundle["sample_design"]

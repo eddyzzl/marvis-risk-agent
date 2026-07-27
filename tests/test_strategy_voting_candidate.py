@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 
 import pytest
@@ -197,6 +198,56 @@ def test_build_voting_candidate_is_canonical_self_authenticating_and_replayable(
         canonical_voting_candidate_asset_json(asset)
     ) == asset
     assert verify_voting_candidate_asset_against_pool(asset, pool) == asset
+
+
+def test_native_risk_development_ref_is_canonical_without_changing_legacy_identity() -> None:
+    legacy = _asset()
+    native = build_voting_candidate_asset(
+        _pool(),
+        selected_entry_ids=[
+            entry["entry_id"] for entry in _pool()["entries"]
+        ],
+        n=2,
+        target_col="bad",
+        sample_design_ref={
+            **SAMPLE_DESIGN_REF,
+            "partition": "risk/development",
+        },
+        effect=_effect(),
+    )
+
+    assert native["sample_design_ref"]["partition"] == "risk/development"
+    assert validate_voting_candidate_asset(native) == native
+    assert legacy["asset_id"] == "candidate-asset-d0d019535bb7f32bb37bd88fe74bf488"
+    assert legacy["asset_hash"] == (
+        "a0d6428f60781c85fe8599a3b8f84a1cba1461bebc2ba3abec9a359bcfdfa2a3"
+    )
+    assert hashlib.sha256(
+        canonical_voting_candidate_asset_json(legacy).encode("utf-8")
+    ).hexdigest() == (
+        "9c01f9df81011450ffba08a24ccf7d40a33b594db7a48532f9a32587c0aa1b15"
+    )
+
+
+@pytest.mark.parametrize("partition", ["risk/validation", "unknown", ""])
+def test_voting_candidate_rejects_unknown_sample_partition(partition: str) -> None:
+    with pytest.raises(
+        VotingCandidateAssetError,
+        match="sample_design_ref must be one exact governed development reference",
+    ):
+        build_voting_candidate_asset(
+            _pool(),
+            selected_entry_ids=[
+                entry["entry_id"] for entry in _pool()["entries"]
+            ],
+            n=2,
+            target_col="bad",
+            sample_design_ref={
+                **SAMPLE_DESIGN_REF,
+                "partition": partition,
+            },
+            effect=_effect(),
+        )
 
 
 def test_selected_entry_ids_are_an_unordered_set_canonicalized_by_pool_position() -> None:
