@@ -2152,6 +2152,7 @@ def test_vintage_curve_gates_nan_label(tmp_path):
     )
     assert confirmed.ok is True, confirmed.error
     assert confirmed.output["nan_labels_dropped"] == 1
+    assert confirmed.output["label_semantics"] == "incremental"
     assert "warnings" in confirmed.output
 
 
@@ -2216,6 +2217,7 @@ def test_tool_vintage_curve_surfaces_warnings_in_output(tmp_path):
         task_id=task.id,
     )
     assert result.ok is True, result.error
+    assert result.output["label_semantics"] == "incremental"
     assert isinstance(result.output["warnings"], list)
     assert any(
         "snapshot" in w.lower() or "快照" in w for w in result.output["warnings"]

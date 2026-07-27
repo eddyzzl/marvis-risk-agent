@@ -14,6 +14,7 @@ from openpyxl.styles import Font
 
 from marvis.artifacts import TransactionalArtifactStore
 from marvis.output.model_report import MODEL_REPORT_SHEETS
+from marvis.output.xlsx_safety import safe_xlsx_cell
 
 # (display label, ModelMetrics field stem) per target type. The stem is prefixed with
 # the split (train_/test_/oot_) to read the matching ModelMetrics attribute.
@@ -44,7 +45,7 @@ def render_minimal_model_report(experiment, out_path: Path, *, artifact=None) ->
     ]
     for offset, (key, value) in enumerate(summary_rows, start=3):
         summary[f"A{offset}"] = key
-        summary[f"B{offset}"] = value
+        summary[f"B{offset}"] = safe_xlsx_cell(value)
 
     for title in MODEL_REPORT_SHEETS:
         if title == "汇总":
@@ -85,7 +86,11 @@ def render_minimal_model_report(experiment, out_path: Path, *, artifact=None) ->
             for class_name, row in split_rows.items():
                 row = row if isinstance(row, dict) else {}
                 detail.cell(row=output_row, column=1, value=split)
-                detail.cell(row=output_row, column=2, value=str(class_name))
+                detail.cell(
+                    row=output_row,
+                    column=2,
+                    value=safe_xlsx_cell(class_name),
+                )
                 detail.cell(
                     row=output_row,
                     column=3,

@@ -407,7 +407,6 @@ class PlanExecutor:
                 raise
             if progress_publisher is not None:
                 progress_publisher.flush()
-            self._raise_if_cancelled(cancellation_check)
             if not result.ok:
                 if result.error_kind == "cancelled":
                     self._finish_cancelled_step(

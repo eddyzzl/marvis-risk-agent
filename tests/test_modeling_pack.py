@@ -1739,6 +1739,44 @@ def test_train_models_reuses_completed_recipes_after_interrupted_batch(
     ]
 
 
+def test_train_models_all_cache_hits_do_not_reload_wide_dataset(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A fully completed retry should return persisted evidence without a data reload."""
+
+    _runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+    inputs = {
+        "dataset_id": dataset.id,
+        "recipes": ["lr"],
+        "features": ["x1", "x2"],
+        "target_col": "y",
+        "split_col": "split",
+        "split_values": {"train": "train", "test": "test", "oot": "oot"},
+        "seed": 23,
+    }
+    first = modeling_tools.tool_train_models(inputs, ctx)
+
+    monkeypatch.setattr(
+        modeling_train_tools.TrainingDataset,
+        "load_compact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("completed retry must not reload the dataset")
+        ),
+    )
+    resumed = modeling_tools.tool_train_models(inputs, ctx)
+
+    assert resumed["experiment_ids"] == first["experiment_ids"]
+    assert resumed["failed"] == []
+
+
 def test_train_models_wires_scenario_eval_metric_into_champion_selection(tmp_path):
     """DOM-6 end-to-end: a marketing-style caller passes eval_metric="response_lift"
     into train_models. The champion must be selected by test_lift_head_10 (not

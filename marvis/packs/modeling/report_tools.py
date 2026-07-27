@@ -20,13 +20,21 @@ from marvis.validation.stress_test import run_stress_test
 from pathlib import Path
 
 from marvis.packs.modeling._common import MODEL_REPORT_SCORE_COL, SCORECARD_POINTS_COL, _NUMBER_TOKEN_RE, _allowed_number_tokens, _business_columns, _jsonable, _number_token_allowed, _optional_str, _ratio, _section_available, _unique_columns
-from marvis.packs.modeling._runtime import _Runtime, _artifact, _artifact_model_base_dir, _cached_dataset_runtime, _runtime
+from marvis.packs.modeling._runtime import (
+    _Runtime,
+    _artifact_model_base_dir,
+    _cached_dataset_runtime,
+    _runtime,
+    _task_artifact,
+    _task_dataset,
+    _task_experiment,
+)
 from marvis.packs.modeling.scoring import _ModelArtifactScorer, _artifact_calibration_rows
 
 
 def tool_generate_model_report(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     report_path = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs" / "model_report.xlsx"
     return _generate_model_report_for(runtime, ctx, experiment, inputs, report_path)
 
@@ -44,7 +52,7 @@ def tool_generate_model_reports(inputs: dict, ctx) -> dict:
     reports: list[dict] = []
     primary_output: dict | None = None
     for experiment_id in experiment_ids:
-        experiment = runtime.experiments.get(experiment_id)
+        experiment = _task_experiment(runtime, ctx, experiment_id)
         recipe = str(experiment.recipe_id)
         report_path = outputs_dir / _report_filename(recipe, experiment_id)
         generated = _generate_model_report_for(runtime, ctx, experiment, inputs, report_path)
@@ -82,7 +90,16 @@ def _report_filename(recipe: str, experiment_id: str) -> str:
 
 
 def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict, report_path: Path) -> dict:
-    artifact = _artifact(runtime, experiment.artifact_id) if experiment.artifact_id else None
+    """Render a report using artifacts owned by the active task only."""
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
+    dictionary_id = str(inputs.get("feature_dictionary_id") or "").strip()
+    if dictionary_id:
+        _task_dataset(runtime, ctx, dictionary_id)
+    artifact = (
+        _task_artifact(runtime, ctx, experiment.artifact_id)
+        if experiment.artifact_id
+        else None
+    )
     # The full report is binary-credit-specific (bad-rate / Vintage / OOT bins / stress).
     # For a non-binary target (regression / multiclass) write a compact metrics report so
     # the flow finishes with a downloadable artifact instead of crashing on binary-only math.
@@ -117,7 +134,6 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
             "scorecard_table": [],
             "score_bands": [],
         }
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
     dataset_path = runtime.registry.resolve_path(dataset.id)
     business = _business_columns(inputs.get("business_columns") or {})
     statuses = resolve_report_sections(

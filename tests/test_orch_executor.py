@@ -592,6 +592,43 @@ def test_plan_executor_user_cancellation_interrupts_current_step_and_plan(tmp_pa
     assert messages[0]["metadata"]["streaming"] is False
 
 
+def test_plan_executor_commits_success_before_late_cancellation_boundary(tmp_path):
+    """A stop arriving after a tool returns must not discard its side-effect evidence."""
+
+    token = JobCancellationToken(job_id="driver-job-late-cancel")
+
+    class LateCancellingRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+
+        def invoke(
+            self,
+            ref,
+            inputs,
+            *,
+            task_id,
+            cancellation_check=None,
+        ):
+            assert cancellation_check is not None
+            token.cancel()
+            return _ok({"artifact_id": "artifact-complete"})
+
+    repo = _repo(tmp_path, _plan(_step("step-1")))
+
+    result = _executor(repo, LateCancellingRunner()).run(
+        "plan-1",
+        cancellation_check=token.raise_if_cancelled,
+    )
+
+    assert result.status == PlanStatus.CANCELLED
+    plan = repo.load_plan("plan-1")
+    assert plan.steps[0].status == StepStatus.DONE
+    assert repo.load_step_output("step-1") == {"artifact_id": "artifact-complete"}
+    runs = repo.list_step_runs("step-1")
+    assert len(runs) == 1
+    assert runs[0]["status"] == "succeeded"
+
+
 def test_plan_executor_retries_transient_terminal_progress_message_update(tmp_path):
     class ProgressRunner:
         def __init__(self):

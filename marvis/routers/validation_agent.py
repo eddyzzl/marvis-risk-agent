@@ -222,7 +222,9 @@ def _enrich_historical_result_download(
         **(completion.get("metadata") or {}),
         "result_dataset": {
             "dataset_id": dataset_id,
-            "download_url": f"/api/datasets/{dataset_id}/download",
+            "download_url": (
+                f"/api/tasks/{task_id}/datasets/{dataset_id}/download"
+            ),
             "recovered_from_plan": True,
         },
     }

@@ -1,5 +1,10 @@
 # 真实材料机器预检报告
 
+> **历史失败快照，已失效，不得作为当前验收通过证据。** 本报告由旧版验收脚本
+> 生成，其中 A2/A4/A5/B5 的 `N/A` 现在都会按缺失证据判为 `FAIL`。当前脚本要求
+> 同时提供使用同一真实材料完成的 JOIN 与 Vintage 任务；此外，本快照自身已经是
+> `BLOCKED_MACHINE`，并记录了 A1 失败和模型监控失败，必须修复后重新生成。
+
 - 生成时间：`2026-07-23T16:50:11.028447+00:00`
 - 任务：`<governed-real-material-task>` · 受控真实材料建模任务
 - 计划：`<completed-modeling-plan>` · `done`
@@ -47,7 +52,7 @@
 
 ## 仍需人工完成
 
-- B1-B4 external ground-truth reconciliation and accountable signatures; the script cannot and will not fabricate them.
+- B1-B5 external ground-truth reconciliation and accountable signatures; the script cannot and will not fabricate them.
 - 完成人应在 `docs/plans/v2-real-materials-reconciliation-checklist.md` 填写外部口径、实测值及签字。
 
 ## 对抗形状与双路对账回归

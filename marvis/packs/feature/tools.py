@@ -57,7 +57,7 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
     target_col = str(inputs.get("target_col") or "").strip()
     time_col = str(inputs.get("time_col") or "").strip()
     split_col = str(inputs.get("split_col") or "").strip()
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     if not time_col and selected & {
         "psi_month_first",
         "psi_month_last",
@@ -81,6 +81,7 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
     ]
     dataset, frame = _read_frame(
         runtime,
+        ctx,
         str(inputs["dataset_id"]),
         _unique([*features, *dependency_columns]),
     )
@@ -108,7 +109,11 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
     )
     compare_frame = None
     if "psi" in selected and inputs.get("compare_dataset_id"):
-        compare_dataset = runtime.registry.get(str(inputs["compare_dataset_id"]))
+        compare_dataset = _task_dataset(
+            runtime,
+            ctx,
+            inputs["compare_dataset_id"],
+        )
         compare_available = set(
             runtime.backend.column_names(runtime.registry.resolve_path(compare_dataset.id))
         )
@@ -116,6 +121,7 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
         if compare_features:
             _compare_dataset, compare_frame = _read_frame(
                 runtime,
+                ctx,
                 str(inputs["compare_dataset_id"]),
                 compare_features,
             )
@@ -767,8 +773,8 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
 
     For a non-binary target (``target_type != "binary"``, e.g. a regression task) the
     leakage KS screen is skipped: ``feature_ks`` is a binary-only statistic and would
-    miscompute or crash on a continuous target. In that case every candidate is kept as
-    ``selected`` (ks=None) and only missing_rate / unique_count are reported."""
+    miscompute or crash on a continuous target. In that case candidates are ranked by a
+    target-type-appropriate association score after the same semantic and usability gates."""
     target_type = str(inputs.get("target_type", "binary"))
     if target_type != "binary":
         return _screen_features_non_binary(inputs, ctx)
@@ -780,7 +786,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     )
 
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     split_col = inputs.get("split_col")
     requested_features = inputs.get("features") or []
     features = _resolve_feature_cols(
@@ -896,10 +902,13 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
     KS screen is skipped, but unusable columns are still dropped into ``unusable`` — mirroring
     the binary screen — namely constant (unique_count<=1) or mostly-missing
     (missing_rate>=max_missing_rate) columns; the rest are kept as selected (ks=None)."""
-    from marvis.feature.screen import screen_features_non_binary
+    from marvis.feature.screen import (
+        DEFAULT_SCREEN_BATCH_SIZE,
+        screen_features_non_binary,
+    )
 
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     holdout = inputs.get("holdout_values")
     features = _resolve_feature_cols(
         runtime,
@@ -919,6 +928,8 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         holdout_values=tuple(str(value) for value in holdout) if holdout else ("oot",),
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
         top_k=int(inputs["top_k"]) if inputs.get("top_k") is not None else None,
+        batch_size=int(inputs.get("batch_size", DEFAULT_SCREEN_BATCH_SIZE)),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     return {
         "selected": list(result.selected),
@@ -930,6 +941,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         "unusable": [[feature, reason] for feature, reason in result.unusable],
         "scores": _jsonable(result.scores),
         "n_screened": result.n_screened,
+        "nan_labels_dropped": result.nan_labels_dropped,
         "note": "非二分类目标：跳过统计型泄漏KS筛选；语义/时序泄漏与控制列仍硬剔除",
     }
 
@@ -967,7 +979,7 @@ def tool_analyze_feature_bins(inputs: dict, ctx) -> dict:
     if requested_bins < 3 or requested_bins > 20:
         raise FeatureError("分箱数量必须是 3 到 20 之间的整数")
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     if not requested:
         return {
             "dataset_id": dataset.id,
@@ -978,6 +990,7 @@ def tool_analyze_feature_bins(inputs: dict, ctx) -> dict:
         }
     _dataset, frame = _read_frame(
         runtime,
+        ctx,
         dataset.id,
         _unique([*requested, str(inputs["target_col"])]),
     )
@@ -1009,6 +1022,7 @@ def tool_bin_feature(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     _dataset, frame = _read_frame(
         runtime,
+        ctx,
         str(inputs["dataset_id"]),
         [str(inputs["feature"]), str(inputs["target_col"])],
     )
@@ -1060,7 +1074,12 @@ def tool_compute_psi(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     feature = str(inputs["feature"])
     columns = _unique([feature, *_filter_columns(inputs.get("base_filter")), *_filter_columns(inputs.get("compare_filter"))])
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]), columns)
+    dataset, frame = _read_frame(
+        runtime,
+        ctx,
+        str(inputs["dataset_id"]),
+        columns,
+    )
     base = _apply_filter(frame, inputs.get("base_filter"))[feature].to_numpy(dtype=float)
     compare = _apply_filter(frame, inputs.get("compare_filter"))[feature].to_numpy(dtype=float)
     edges = equal_frequency_edges(base, int(inputs.get("bins") or 10))
@@ -1079,7 +1098,12 @@ def tool_compute_psi(inputs: dict, ctx) -> dict:
 
 def tool_correlation_analysis(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]), [str(item) for item in inputs["features"]])
+    dataset, frame = _read_frame(
+        runtime,
+        ctx,
+        str(inputs["dataset_id"]),
+        [str(item) for item in inputs["features"]],
+    )
     report = correlation_report(
         frame,
         [str(item) for item in inputs["features"]],
@@ -1095,7 +1119,7 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     features = [str(item) for item in inputs["features"]]
     target_col = str(inputs["target_col"])
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     required_columns = [*features, target_col]
     if inputs.get("split_col"):
         required_columns.append(str(inputs["split_col"]))
@@ -1176,7 +1200,7 @@ def tool_woe_encode_categorical(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     features = [str(item) for item in inputs["features"]]
     target_col = str(inputs["target_col"])
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     required_columns = [*features, target_col]
     if inputs.get("split_col"):
         required_columns.append(str(inputs["split_col"]))
@@ -1225,7 +1249,7 @@ def tool_woe_encode_categorical(inputs: dict, ctx) -> dict:
 
 def tool_onehot_encode(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     columns = [str(item) for item in inputs["columns"]]
     _assert_columns(frame, columns)
     encoded, mapping = onehot_encode(
@@ -1246,7 +1270,7 @@ def tool_onehot_encode(inputs: dict, ctx) -> dict:
 
 def tool_normalize(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     method = str(inputs["method"])
     out = frame.copy()
     params = {}
@@ -1295,7 +1319,7 @@ def tool_normalize(inputs: dict, ctx) -> dict:
 
 def tool_impute_missing(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     out = frame.copy()
     fill_values = {}
     indicators = {}
@@ -1355,7 +1379,7 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
 
 def tool_cap_outliers(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     out = frame.copy()
     bounds = {}
     columns = [str(column) for column in inputs["columns"]]
@@ -1470,7 +1494,7 @@ def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str
 
 def tool_cross_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     derived, new_columns = derive_batch(frame, list(inputs["recipe"]), dataset_id=dataset.id)
     result = _register_frame(runtime, derived, dataset, ctx, "cross")
     return {"result_dataset_id": result.id, "new_columns": new_columns}
@@ -1482,7 +1506,7 @@ def tool_derive_date_features(inputs: dict, ctx) -> dict:
     explicitly invoke it (with a date column identified e.g. via profiling/schema
     inference) to pull date information into the modeling frame."""
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     derived, new_columns = derive_date_features(frame, list(inputs["recipe"]))
     result = _register_frame(runtime, derived, dataset, ctx, "datefeat")
     return {"result_dataset_id": result.id, "new_columns": new_columns}
@@ -1494,6 +1518,15 @@ class _Runtime(PackRuntime):
 
 def _runtime(ctx) -> _Runtime:
     return _Runtime(ctx)
+
+
+def _task_dataset(runtime: _Runtime, ctx, dataset_id):
+    """Resolve a dataset only when it belongs to the invoking task."""
+
+    dataset = runtime.registry.get(str(dataset_id))
+    if str(dataset.task_id) != str(ctx.task_id):
+        raise FeatureError("dataset does not belong to the active task")
+    return dataset
 
 
 def _resolve_feature_cols(
@@ -1537,10 +1570,11 @@ def _flatten_feature_cols(features) -> list[str]:
 
 def _read_frame(
     runtime: _Runtime,
+    ctx,
     dataset_id: str,
     columns: list[str] | None = None,
 ):
-    dataset = runtime.registry.get(dataset_id)
+    dataset = _task_dataset(runtime, ctx, dataset_id)
     frame = runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=columns)
     return dataset, frame
 

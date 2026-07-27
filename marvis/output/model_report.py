@@ -8,6 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
 from marvis.artifacts import TransactionalArtifactStore
+from marvis.output.xlsx_safety import safe_xlsx_cell
 from marvis.packs.modeling.report_compute import ReportSectionStatus
 
 
@@ -219,7 +220,7 @@ def _write_dict_table(sheet, rows: list[dict], *, start_row: int = 1) -> None:
         return
     headers = list(rows[0].keys())
     for col_index, header in enumerate(headers, start=1):
-        sheet.cell(row=start_row, column=col_index, value=str(header))
+        sheet.cell(row=start_row, column=col_index, value=_cell(header))
     for row_index, row in enumerate(rows, start=start_row + 1):
         for col_index, header in enumerate(headers, start=1):
             sheet.cell(row=row_index, column=col_index, value=_cell(row.get(header)))
@@ -291,11 +292,7 @@ def _product_list_summary(payload: ModelReportPayload) -> str:
 
 
 def _cell(value: Any):
-    if isinstance(value, (str, int, float)) or value is None:
-        return value
-    if hasattr(value, "item"):
-        return value.item()
-    return str(value)
+    return safe_xlsx_cell(value)
 
 
 def _style_header(sheet, *, row: int = 1) -> None:

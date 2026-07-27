@@ -700,6 +700,8 @@ def screen_features_non_binary(
     max_missing_rate: float = 0.95,
     min_unique: int = 2,
     top_k: int | None = None,
+    batch_size: int = DEFAULT_SCREEN_BATCH_SIZE,
+    drop_nan_labels: bool = False,
 ) -> ScreenResult:
     """Screen regression/multiclass candidates without binary KS leakage math.
 
@@ -724,22 +726,26 @@ def screen_features_non_binary(
         sample_weight_col=sample_weight_col,
     )
     base_cols = [target_col] + ([split_col] if split_col else [])
-    base = backend.read_frame(dataset_path, columns=base_cols) if (split_col or feats) else None
-    dev = _fit_mask(base, split_col, holdout_values) if base is not None else None
-    target_dev = None
-    if base is not None:
-        target_dev = base[target_col].to_numpy(dtype=float)
-        if dev is not None:
-            target_dev = target_dev[dev]
+    base = backend.read_frame(dataset_path, columns=base_cols)
+    dev = _fit_mask(base, split_col, holdout_values)
+    nan_labels_dropped = require_labels_confirmed(
+        base.loc[dev],
+        target_col,
+        drop_nan_labels=drop_nan_labels,
+        scope="screen",
+    )
+    target_dev = base[target_col].to_numpy(dtype=float)[dev]
 
     scores: dict[str, dict[str, float | None]] = {}
     unusable: list[tuple[str, str]] = list(hard_unusable)
     clean: list[tuple[str, None]] = []
-    if feats:
-        frame = backend.read_frame(dataset_path, columns=feats)
-        for col in feats:
+    width = max(1, int(batch_size))
+    for start in range(0, len(feats), width):
+        batch = feats[start : start + width]
+        frame = backend.read_frame(dataset_path, columns=batch)
+        for col in batch:
             values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
-            v_dev = values if dev is None else values[dev]
+            v_dev = values[dev]
             finite = np.isfinite(v_dev)
             missing_rate = float(1.0 - finite.mean()) if v_dev.size else 1.0
             unique = int(np.unique(v_dev[finite]).size)
@@ -767,6 +773,7 @@ def screen_features_non_binary(
         unusable=tuple(unusable),
         scores=scores,
         n_screened=len(all_feature_names),
+        nan_labels_dropped=nan_labels_dropped,
     )
 
 
@@ -781,8 +788,17 @@ def _non_binary_assoc_score(
     it) or too few finite pairs to form a correlation/AUC."""
     if target is None:
         return None
+    values = np.asarray(values, dtype=float)
+    target = np.asarray(target, dtype=float)
+    if values.shape != target.shape:
+        return None
+    labelled = np.isfinite(target)
+    values = values[labelled]
+    target = target[labelled]
+    if target.size == 0:
+        return None
     if str(target_type) == "multiclass":
-        classes = np.unique(target[np.isfinite(target)])
+        classes = np.unique(target)
         if classes.size < 2:
             return None
         aucs = [

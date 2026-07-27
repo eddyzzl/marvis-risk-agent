@@ -5,7 +5,13 @@ from marvis.modeling_policy_signals import has_monotonic_policy, monotonic_polic
 from marvis.packs.modeling.errors import ModelingError
 
 from marvis.packs.modeling._common import _cleanup_unattached_artifact, _finite_float_or_none, _format_number_token, _is_metric_key, _jsonable, _nonnegative_float_or_none, _positive_int_or_none, _score_first, _snapshot_latest_model_meta
-from marvis.packs.modeling._runtime import _Runtime, _artifact, _artifact_base_dir, _runtime
+from marvis.packs.modeling._runtime import (
+    _Runtime,
+    _artifact_base_dir,
+    _runtime,
+    _task_artifact,
+    _task_experiment,
+)
 from marvis.packs.modeling.delivery_tools import _artifact_capabilities
 from marvis.packs.modeling.report_tools import _scorecard_table_rows
 from marvis.packs.modeling.train_tools import _binary_selection_score_and_metric, _overfit_penalized_test_ks, _refit_champion_on_train_plus_test, _resolve_scenario_eval_metric
@@ -44,6 +50,8 @@ DEFAULT_MIN_FEATURE_COUNT_WARNING = 3
 def tool_compare_experiments(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     experiment_ids = [str(item) for item in inputs["experiment_ids"]]
+    for experiment_id in experiment_ids:
+        _task_experiment(runtime, ctx, experiment_id)
     compared = runtime.experiments.compare(experiment_ids)
     rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
     _attach_capabilities_to_comparison_rows(runtime, rows)
@@ -52,7 +60,11 @@ def tool_compare_experiments(inputs: dict, ctx) -> dict:
     if not target_type and rows:
         first_id = str(rows[0].get("id") or "")
         if first_id:
-            target_type = getattr(runtime.experiments.get(first_id).config, "target_type", "binary")
+            target_type = getattr(
+                _task_experiment(runtime, ctx, first_id).config,
+                "target_type",
+                "binary",
+            )
     eval_metric = _resolve_scenario_eval_metric(
         runtime, experiment_ids, str(inputs.get("eval_metric") or "").strip()
     )
@@ -76,9 +88,15 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     experiment_ids = [str(item) for item in inputs.get("experiment_ids") or [] if str(item).strip()]
     if not experiment_ids:
         raise ModelingError("experiment_ids must not be empty")
+    for experiment_id in experiment_ids:
+        _task_experiment(runtime, ctx, experiment_id)
     target_type = str(inputs.get("target_type") or "").strip()
     if not target_type:
-        target_type = getattr(runtime.experiments.get(experiment_ids[0]).config, "target_type", "binary")
+        target_type = getattr(
+            _task_experiment(runtime, ctx, experiment_ids[0]).config,
+            "target_type",
+            "binary",
+        )
     eval_metric = _resolve_scenario_eval_metric(
         runtime, experiment_ids, str(inputs.get("eval_metric") or "").strip()
     )
@@ -129,8 +147,8 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     artifact_id = str(selected.get("artifact_id") or "")
     if not artifact_id:
         raise ModelingError(f"selected experiment has no artifact: {selected_id}")
-    artifact = _artifact(runtime, artifact_id)
-    experiment = runtime.experiments.get(selected_id)
+    artifact = _task_artifact(runtime, ctx, artifact_id)
+    experiment = _task_experiment(runtime, ctx, selected_id)
     capabilities = _artifact_capabilities(
         artifact,
         base_dir=_artifact_base_dir(runtime.settings, experiment.task_id),

@@ -62,12 +62,21 @@ class GateExecutionAdapter:
             self._repo.reset_step(gate.id)
 
     def apply_screen_selection(self, plan: Plan, gate: PlanStep | None, selection) -> None:
-        """Persist a user's edited screen-feature selection before confirming a gate."""
+        """Persist an edited screen selection and bind it to the current gate.
+
+        The current gate may sit behind a completed, deterministic
+        ``resolve_special_values`` no-op. Updating only the screen output would
+        leave that intermediary's already-materialized ``selected`` list stale,
+        so the gate must also receive the reviewed feature list as a concrete
+        input. This keeps the user's choice authoritative without rewriting a
+        completed step's execution evidence.
+        """
         if gate is None:
             return
         selected = [str(feature) for feature in (selection or []) if str(feature).strip()]
         if not selected:
             return
+        chosen_for_gate: list[str] = []
         for dep_id in gate.depends_on or []:
             dep = find_step(plan, dep_id)
             if dep is None or dep.tool_ref.tool != "screen_features":
@@ -81,6 +90,35 @@ class GateExecutionAdapter:
                 continue
             dep.output_ref = self._repo.store_step_output(dep_id, {**output, "selected": chosen})
             self._repo.update_step(dep)
+            chosen_for_gate = chosen
+
+        if not chosen_for_gate or "features" not in (gate.inputs or {}):
+            return
+        for dep_id in gate.depends_on or []:
+            dep = find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "resolve_special_values":
+                continue
+            output = self._safe_output(dep_id)
+            resolved = output.get("selected") if isinstance(output, dict) else None
+            if isinstance(resolved, list):
+                allowed = {
+                    str(feature).strip()
+                    for feature in resolved
+                    if str(feature).strip()
+                }
+                chosen_for_gate = [
+                    feature
+                    for feature in chosen_for_gate
+                    if feature in allowed
+                ]
+            break
+        if not chosen_for_gate:
+            return
+        gate.inputs = {
+            **(gate.inputs or {}),
+            "features": chosen_for_gate,
+        }
+        self._repo.update_step(gate)
 
     def apply_replan(self, plan: Plan, gate: PlanStep | None, instruction, run_seq) -> DriverTurn:
         """Regenerate remaining steps from a structural instruction and continue."""

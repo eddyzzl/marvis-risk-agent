@@ -505,6 +505,80 @@ def test_screen_non_binary_multiclass_ranks_by_one_vs_rest_auc(tmp_path):
     assert result.scores["informative"]["assoc_score"] > result.scores["noise"]["assoc_score"]
 
 
+def test_screen_non_binary_requires_nan_label_confirmation_and_reports_drop(tmp_path):
+    """Regression/multiclass screening must not coerce an unknown class to negative."""
+
+    from marvis.data.errors import NanLabelNotConfirmedError
+
+    frame = pd.DataFrame(
+        {
+            "feature": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            "target": [0.0, 1.0, np.nan, 2.0, 0.0, 1.0],
+        }
+    )
+    backend, path = _write(tmp_path, frame, name="non_binary_nan.parquet")
+
+    with pytest.raises(NanLabelNotConfirmedError, match="target"):
+        screen_features_non_binary(
+            backend,
+            path,
+            features=["feature"],
+            target_col="target",
+            target_type="multiclass",
+        )
+
+    result = screen_features_non_binary(
+        backend,
+        path,
+        features=["feature"],
+        target_col="target",
+        target_type="multiclass",
+        drop_nan_labels=True,
+    )
+
+    assert result.nan_labels_dropped == 1
+    assert result.selected == ("feature",)
+
+
+def test_screen_non_binary_default_feature_reads_are_memory_bounded(
+    tmp_path,
+    monkeypatch,
+):
+    feature_names = [f"f{index}" for index in range(41)]
+    rows = 60
+    target = np.linspace(0.0, 1.0, rows)
+    frame = pd.DataFrame(
+        {
+            **{
+                feature: target + index * 0.001
+                for index, feature in enumerate(feature_names)
+            },
+            "target": target,
+        }
+    )
+    backend, path = _write(tmp_path, frame, name="non_binary_wide.parquet")
+    original_read_frame = DataBackend.read_frame
+    requested_widths: list[int] = []
+
+    def counting_read_frame(self, call_path, *, columns=None, nrows=None):
+        if columns is not None and "target" not in columns:
+            requested_widths.append(len(columns))
+        return original_read_frame(self, call_path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(DataBackend, "read_frame", counting_read_frame)
+
+    screen_features_non_binary(
+        backend,
+        path,
+        features=feature_names,
+        target_col="target",
+        target_type="continuous",
+    )
+
+    assert requested_widths
+    assert max(requested_widths) <= 16
+
+
 def test_screen_non_binary_ties_preserve_input_order(tmp_path):
     """FS-10: a stable sort on tied association scores must not reorder input — regression
     guard for the existing continuous-screen ranked-order test expectations."""

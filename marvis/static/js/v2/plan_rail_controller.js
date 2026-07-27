@@ -523,60 +523,21 @@ export function createPlanRailController({
   // Child steps contain only their checker, number and copy. All interactive
   // controls and status tags remain in the middle stream.
   function planSubstepHtml(step, subNumber) {
-    const status = step?.status || "pending";
-    const checkerStatus = planStepToCheckerStatus(status);
+    const checkerStatus = planStepToCheckerStatus(step?.status || "pending");
     const ref = step.tool_ref || {};
     const description = step.description || step.summary || PLAN_STEP_HINTS[`${ref.plugin}.${ref.tool}`] || "";
-    const stepId = String(step?.id || "");
-    const awaiting = status === "awaiting_confirm"
-      ? (isAgentMode?.()
-        ? '<span class="plan-step-await">待确认</span>'
-        : '<span class="plan-step-await">待确认</span>'
-          + `<button type="button" class="button compact plan-step-locate" data-plan-gate-locate="${escapeHtml(stepId)}" title="跳到中间的确认卡片">定位</button>`)
-      : "";
     const tuningProgress = ["running", "checking"].includes(String(step?.status || ""))
       ? renderModelTuningProgress(step?.progress, { compact: true })
       : "";
-    // Report download no longer sits inline on the rail step row: the actual
-    // 下载报告 button lives in the middle driver-actions panel (renderDriverActionsPanel
-    // below). The rail step row only marks that the report is ready plus a locate
-    // entry that scrolls to (and flashes) the middle download card.
-    const isDriverReport = (
-      ref.tool === "generate_model_report"
-      || ref.tool === "generate_model_reports"
-      || ref.tool === "generate_feature_report"
-      || ref.tool === "generate_risk_analysis_report"
-    );
-    const isStrategyReport = ref.tool === "build_report_bundle_v2";
-    const isReportDone = (isDriverReport || isStrategyReport)
-      && status === "done";
-    const download = isReportDone
-      ? '<span class="plan-step-ready">报告已就绪</span>'
-        + (
-          isStrategyReport
-            ? '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="strategy" title="跳到中间的策略报告产物">定位</button>'
-            : '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="1" title="跳到中间的下载卡片">定位</button>'
-        )
-      : "";
-    const output = planOutputButtonHtml(step);
-    if (status === "failed") maybeFetchToolSchema(ref);
-    // Rail keeps only a lightweight entry; the editable form itself renders
-    // in the middle workspace (#planRetryPanel via renderRetryPanel below).
-    const retry = status === "failed" ? planRetryRailEntryHtml(step) : "";
-    const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";
     return [
       `<div class="notebook-step ${escapeHtml(checkerStatus)}" data-step-key="${escapeHtml(String(step.id || ""))}" data-plan-step-id="${escapeHtml(String(step.id || ""))}">`,
       renderStepChecker(checkerStatus),
       `<span class="notebook-step-no">${escapeHtml(subNumber)}</span>`,
       '<span class="plan-substep-copy">',
       `<strong>${escapeHtml(step.title || "未命名步骤")}</strong>`,
-      descriptionHtml,
+      description ? `<small>${escapeHtml(description)}</small>` : "",
       tuningProgress,
       "</span>",
-      awaiting,
-      download,
-      output,
-      retry,
       "</div>",
     ].join("");
   }
@@ -1364,65 +1325,11 @@ export function createPlanRailController({
       renderWorkflowStepper?.({ force: true });
       return true;
     }
-    // Rail's lightweight entry: open the middle retry panel and scroll to the
-    // step's card. The heavy form itself lives in the middle workspace.
-    const planRetryOpen = event.target?.closest?.("[data-plan-retry-open]");
-    if (planRetryOpen) {
-      event.preventDefault();
-      event.stopPropagation();
-      openRetryCard(planRetryOpen.dataset.planRetryOpen || "");
-      return true;
-    }
     const planRetryButton = event.target?.closest?.("[data-plan-retry-step]");
     if (planRetryButton) {
       event.preventDefault();
       event.stopPropagation();
       void retryPlanStep(planRetryButton);
-      return true;
-    }
-    // Rail's lightweight "待确认" gate entry: scroll the middle gate section into
-    // view and flash it (the confirm control itself already lives there).
-    const gateLocate = event.target?.closest?.("[data-plan-gate-locate]");
-    if (gateLocate) {
-      event.preventDefault();
-      event.stopPropagation();
-      openGateCard(gateLocate.dataset.planGateLocate || "");
-      return true;
-    }
-    // Rail's lightweight 开始执行 / 下载报告 entries: reveal the middle
-    // driver-actions panel and flash the matching action card.
-    const startLocate = event.target?.closest?.("[data-plan-start-locate]");
-    if (startLocate) {
-      event.preventDefault();
-      event.stopPropagation();
-      openDriverActionCard("start");
-      return true;
-    }
-    const reportLocate = event.target?.closest?.("[data-plan-report-locate]");
-    if (reportLocate) {
-      event.preventDefault();
-      event.stopPropagation();
-      openDriverActionCard(
-        reportLocate.dataset.planReportLocate === "strategy"
-          ? "strategy-artifacts"
-          : "report-download",
-      );
-      return true;
-    }
-    const retryButton = event.target?.closest?.("[data-plan-rail-retry]");
-    if (retryButton) {
-      event.preventDefault();
-      event.stopPropagation();
-      retryFetch();
-      return true;
-    }
-    // UX-5: "发消息介入" on a no_progress event strip row — hands the user
-    // straight into the composer instead of leaving them to hunt for it.
-    const interveneButton = event.target?.closest?.("[data-plan-rail-intervene]");
-    if (interveneButton) {
-      event.preventDefault();
-      event.stopPropagation();
-      fillComposer?.();
       return true;
     }
     return false;

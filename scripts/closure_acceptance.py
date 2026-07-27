@@ -129,6 +129,211 @@ def _task_plan(connection: sqlite3.Connection, task_id: str) -> sqlite3.Row | No
     ).fetchone()
 
 
+def _completed_task_steps(
+    connection: sqlite3.Connection,
+    task_id: str | None,
+) -> tuple[sqlite3.Row | None, list[dict[str, Any]]]:
+    if not task_id:
+        return None, []
+    plan = _task_plan(connection, str(task_id))
+    if plan is None or str(plan["status"]) != "done":
+        return plan, []
+    return plan, _step_record_rows(connection, str(plan["plan_id"]))
+
+
+def _tool_output(
+    rows: list[dict[str, Any]],
+    tool_name: str,
+) -> dict[str, Any]:
+    for row in rows:
+        if str(row.get("tool_name") or "") == tool_name:
+            output = row.get("output")
+            return output if isinstance(output, dict) else {}
+    return {}
+
+
+def _vintage_semantics_check(
+    rows: list[dict[str, Any]],
+    *,
+    task_id: str | None,
+) -> Check:
+    output = _tool_output(rows, "vintage_curve")
+    semantics = str(output.get("label_semantics") or "")
+    cohorts = output.get("cohorts")
+    curves = output.get("curves")
+    valid = (
+        semantics in {"incremental", "snapshot"}
+        and isinstance(cohorts, list)
+        and bool(cohorts)
+        and isinstance(curves, dict)
+        and bool(curves)
+    )
+    return Check(
+        "A2",
+        "PASS" if valid else "FAIL",
+        (
+            "Vintage 任务记录了标签语义并生成了非空曲线。"
+            if valid
+            else "缺少可验证的 Vintage 标签语义或曲线证据。"
+        ),
+        (
+            f"vintage_task_id={task_id or '<missing>'}; "
+            f"label_semantics={semantics or '<missing>'}; "
+            f"cohort_count={len(cohorts) if isinstance(cohorts, list) else 0}"
+        ),
+        (
+            ""
+            if valid
+            else "传入同一真实材料的已完成 --vintage-task-id，并确认 incremental/snapshot。"
+        ),
+    )
+
+
+def _join_acceptance_checks(
+    rows: list[dict[str, Any]],
+    *,
+    task_id: str | None,
+) -> list[Check]:
+    proposed = _tool_output(rows, "propose_join")
+    confirmed = _tool_output(rows, "confirm_join")
+    executed = _tool_output(rows, "execute_join")
+    joins = proposed.get("joins") if isinstance(proposed.get("joins"), list) else []
+    diagnostics = [
+        item.get("diagnostics")
+        for item in joins
+        if isinstance(item, dict) and isinstance(item.get("diagnostics"), dict)
+    ]
+    per_table = (
+        executed.get("per_table")
+        if isinstance(executed.get("per_table"), list)
+        else []
+    )
+    execution_complete = bool(
+        executed.get("result_dataset_id")
+        and per_table
+        and confirmed.get("status") == "confirmed"
+    )
+    precision_checked = bool(diagnostics) and all(
+        "precision_loss_columns" in item for item in diagnostics
+    )
+    precision_flags = sorted({
+        str(column)
+        for item in diagnostics
+        for column in (item.get("precision_loss_columns") or [])
+    })
+    dtype_checked = bool(diagnostics) and all(
+        "key_dtype_divergences" in item for item in diagnostics
+    )
+    keyed = bool(joins) and all(
+        isinstance(item.get("key_pairs"), list) and bool(item.get("key_pairs"))
+        for item in joins
+        if isinstance(item, dict)
+    )
+    a4_valid = execution_complete and precision_checked
+    a5_valid = execution_complete and dtype_checked and keyed
+
+    finite_match_rates = bool(per_table)
+    for item in per_table:
+        try:
+            rate = float(item["match_rate"])
+        except (KeyError, TypeError, ValueError):
+            finite_match_rates = False
+            break
+        if not math.isfinite(rate) or not 0.0 <= rate <= 1.0:
+            finite_match_rates = False
+            break
+    reconciliation = (
+        proposed.get("reconcile_summary")
+        if isinstance(proposed.get("reconcile_summary"), dict)
+        else {}
+    )
+    join_reconciliations = [
+        item.get("reconcile")
+        for item in joins
+        if isinstance(item, dict) and isinstance(item.get("reconcile"), dict)
+    ]
+    independently_reconciled = bool(join_reconciliations) and all(
+        item.get("consistent") is True for item in join_reconciliations
+    )
+    anchor_rows = executed.get("anchor_rows")
+    joined_rows = executed.get("joined_rows")
+    b5_valid = bool(
+        execution_complete
+        and finite_match_rates
+        and independently_reconciled
+        and reconciliation.get("blocking") is False
+        and executed.get("fan_out") is False
+        and isinstance(anchor_rows, int)
+        and joined_rows == anchor_rows
+    )
+    task_evidence = f"join_task_id={task_id or '<missing>'}"
+    return [
+        Check(
+            "A4",
+            "PASS" if a4_valid else "FAIL",
+            (
+                "Join 诊断已执行长 ID 精度检查并完成受控拼接。"
+                if a4_valid
+                else "缺少长 ID 精度诊断或已完成拼接证据。"
+            ),
+            (
+                f"{task_evidence}; precision_flags={precision_flags}; "
+                f"execution_complete={execution_complete}"
+            ),
+            (
+                ""
+                if a4_valid
+                else "传入同一真实材料的已完成 --join-task-id，并处理全部精度红旗。"
+            ),
+        ),
+        Check(
+            "A5",
+            "PASS" if a5_valid else "FAIL",
+            (
+                "Join 键的类型/匹配诊断已记录并完成受控拼接。"
+                if a5_valid
+                else "缺少空白/零填充键所需的类型与匹配诊断证据。"
+            ),
+            (
+                f"{task_evidence}; diagnostics={len(diagnostics)}; "
+                f"keyed={keyed}; execution_complete={execution_complete}"
+            ),
+            (
+                ""
+                if a5_valid
+                else "补充完成的 join 任务，并核对空白键、零填充和跨文件 dtype。"
+            ),
+        ),
+        Check(
+            "B5-INTERNAL",
+            "PASS" if b5_valid else "FAIL",
+            (
+                "Join 匹配率具备独立双路对账，且结果保持 anchor 行数。"
+                if b5_valid
+                else "Join 匹配率缺少独立双路对账、有限值或行数保持证据。"
+            ),
+            (
+                f"{task_evidence}; match_rates="
+                f"{[item.get('match_rate') for item in per_table if isinstance(item, dict)]}; "
+                f"anchor_rows={anchor_rows}; joined_rows={joined_rows}; "
+                f"independently_reconciled={independently_reconciled}"
+            ),
+            (
+                ""
+                if b5_valid
+                else "修复 join 红旗并重跑，直至内部双路对账与行数保持通过。"
+            ),
+        ),
+        Check(
+            "B5-EXTERNAL",
+            "MANUAL",
+            "内部 join 证据不能替代真实键抽样核对。",
+            f"{task_evidence}; external sampled-key reconciliation not supplied",
+            "抽样核对真实键匹配并完成 B5 签字。",
+        ),
+    ]
+
+
 def _step_record_rows(
     connection: sqlite3.Connection,
     plan_id: str,
@@ -962,6 +1167,8 @@ def inspect(
     task_id: str | None = None,
     *,
     test_evidence_path: Path | None = None,
+    join_task_id: str | None = None,
+    vintage_task_id: str | None = None,
 ) -> dict[str, Any]:
     db_path = workspace / "marvis.sqlite"
     if not db_path.is_file():
@@ -983,6 +1190,30 @@ def inspect(
 
     task_id = str(plan["task_id"])
     step_rows = _step_record_rows(connection, str(plan["plan_id"]))
+    primary_has_join = bool(
+        _tool_output(step_rows, "propose_join")
+        and _tool_output(step_rows, "execute_join")
+    )
+    resolved_join_task_id = (
+        str(join_task_id)
+        if join_task_id
+        else (task_id if primary_has_join else None)
+    )
+    if resolved_join_task_id == task_id:
+        join_rows = step_rows
+    else:
+        _join_plan, join_rows = _completed_task_steps(
+            connection,
+            resolved_join_task_id,
+        )
+    _vintage_plan, vintage_rows = _completed_task_steps(
+        connection,
+        str(vintage_task_id) if vintage_task_id else None,
+    )
+    join_checks = _join_acceptance_checks(
+        join_rows,
+        task_id=resolved_join_task_id,
+    )
     steps = _step_records(step_rows)
     split = (steps.get("切分样本") or {}).get("output") or {}
     screen = (steps.get("特征筛选") or {}).get("output") or {}
@@ -1008,11 +1239,9 @@ def inspect(
     )
 
     checks.append(
-        Check(
-            "A2",
-            "N/A",
-            "当前任务是模型开发，未执行 vintage 计算。",
-            f"plan.template_id={plan['template_id']}",
+        _vintage_semantics_check(
+            vintage_rows,
+            task_id=str(vintage_task_id) if vintage_task_id else None,
         )
     )
 
@@ -1030,22 +1259,7 @@ def inspect(
         )
     )
 
-    checks.append(
-        Check(
-            "A4",
-            "N/A",
-            "该已完成建模计划没有 join gate，不能由建模产物复核长 ID 键。",
-            "plan steps do not contain data_join tools",
-        )
-    )
-    checks.append(
-        Check(
-            "A5",
-            "N/A",
-            "该已完成建模计划没有 join gate，不能由建模产物复核空白/零填充键。",
-            "plan steps do not contain data_join tools",
-        )
-    )
+    checks.extend(join_checks[:2])
 
     split_counts = (split.get("sample_analysis") or {}).get("split_counts") or {}
     holdout = split.get("holdout_values") or []
@@ -1131,14 +1345,7 @@ def inspect(
             "提供独立复算或历史同类模型 KS，并完成 B4 外部对账签字。",
         )
     )
-    checks.append(
-        Check(
-            "B5",
-            "N/A",
-            "当前完成计划没有 join 步骤；join 匹配率需在数据处理任务单独验收。",
-            "no data_join step in completed modeling plan",
-        )
-    )
+    checks.extend(join_checks[2:])
 
     selection_metric = train.get("selection_metric")
     checks.append(
@@ -1342,6 +1549,10 @@ def inspect(
             "plan_status": plan["status"],
             "plan_updated_at": plan["updated_at"],
         },
+        "companion_tasks": {
+            "join_task_id": resolved_join_task_id,
+            "vintage_task_id": str(vintage_task_id) if vintage_task_id else None,
+        },
         "artifacts": delivery_paths,
         "artifact_applicability": {
             "report": True,
@@ -1365,7 +1576,7 @@ def inspect(
             else ("BLOCKED_MANUAL" if manual_items else "PASS")
         ),
         "manual_blocker": (
-            "B1-B3 and B4-EXTERNAL ground-truth reconciliation and accountable "
+            "B1-B3, B4-EXTERNAL, and B5-EXTERNAL ground-truth reconciliation and accountable "
             "signatures; the script cannot and will not fabricate them."
         ),
     }
@@ -1438,6 +1649,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", default="workspace")
     parser.add_argument("--task-id", default=None)
+    parser.add_argument(
+        "--join-task-id",
+        default=None,
+        help=(
+            "completed join task for the same governed real-material sample; "
+            "optional when the modeling plan itself contains join steps"
+        ),
+    )
+    parser.add_argument(
+        "--vintage-task-id",
+        default=None,
+        help="completed vintage task for the same governed real-material sample",
+    )
     parser.add_argument("--output", default=None, help="optional Markdown output path")
     parser.add_argument("--json-output", default=None)
     parser.add_argument(
@@ -1460,6 +1684,8 @@ def main(argv: list[str] | None = None) -> int:
             test_evidence_path=(
                 Path(args.test_evidence) if args.test_evidence else None
             ),
+            join_task_id=args.join_task_id,
+            vintage_task_id=args.vintage_task_id,
         )
     except (FileNotFoundError, LookupError, sqlite3.Error) as exc:
         print(json.dumps({"status": "ERROR", "error": str(exc)}, ensure_ascii=False))

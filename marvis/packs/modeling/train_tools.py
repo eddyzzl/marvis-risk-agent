@@ -52,7 +52,12 @@ from marvis.packs.modeling._common import (
     _training_params,
     _unique_columns,
 )
-from marvis.packs.modeling._runtime import _Runtime, _artifact_base_dir, _runtime
+from marvis.packs.modeling._runtime import (
+    _Runtime,
+    _artifact_base_dir,
+    _runtime,
+    _task_dataset,
+)
 from marvis.packs.modeling.scoring import _ModelArtifactScorer
 
 
@@ -288,7 +293,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     dataset = None
     if isinstance(sentinel_columns, dict) and sentinel_columns:
         runtime = _runtime(ctx)
-        dataset = runtime.registry.get(str(inputs["dataset_id"]))
+        dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
         dataset_path = runtime.registry.resolve_path(dataset.id)
         _assert_sentinel_preprocessing_governed(
             dataset_id=dataset.id,
@@ -344,7 +349,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
             },
         )
         runtime = runtime or _runtime(ctx)
-        dataset = dataset or runtime.registry.get(str(inputs["dataset_id"]))
+        dataset = dataset or _task_dataset(runtime, ctx, inputs["dataset_id"])
         dataset_path = runtime.registry.resolve_path(dataset.id)
         seed = _effective_seed(inputs, ctx)
         requested_features = [str(f) for f in inputs["features"]]
@@ -690,7 +695,7 @@ def _tuning_progress_best(result: dict) -> dict:
 
 def tool_train_model(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     recipe = str(inputs["recipe"])
     target_type = _validated_target_type([recipe], inputs.get("target_type"))
     train_params = _training_params(inputs)
@@ -852,7 +857,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     tuned params were supplied for that recipe. The single-recipe case
     (recipes=[lgb]) behaves like train_model."""
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     recipes = _normalize_recipe_list(inputs["recipes"])
     tuned_params = dict(inputs.get("params") or {})
     control_params = _training_control_params(inputs, tuned_params)
@@ -880,22 +885,8 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         preprocessing_steps=preprocessing_steps,
         governance=governance,
     )
-    training_dataset = TrainingDataset.load_compact(
-        runtime.backend,
-        dataset_path,
-        features=features,
-        target_col=target_col,
-        split_col=split_col,
-        extra_columns=[
-            str(control_params.get("sample_weight_col") or ""),
-            *[
-                str(column)
-                for column in (control_params.get("valid_group_cols") or [])
-                if str(column)
-            ],
-        ],
-    )
-    training_backend = training_dataset.backend_adapter(runtime.backend)
+    training_dataset = None
+    training_backend = None
     preprocessing_chain_traceable = bool(preprocessing_steps) or sidecar_path(dataset_path).exists()
 
     experiments: list[dict] = []
@@ -950,6 +941,23 @@ def tool_train_models(inputs: dict, ctx) -> dict:
                 "metrics": _jsonable(reusable.metrics) or {},
             })
             continue
+        if training_backend is None:
+            training_dataset = TrainingDataset.load_compact(
+                runtime.backend,
+                dataset_path,
+                features=features,
+                target_col=target_col,
+                split_col=split_col,
+                extra_columns=[
+                    str(control_params.get("sample_weight_col") or ""),
+                    *[
+                        str(column)
+                        for column in (control_params.get("valid_group_cols") or [])
+                        if str(column)
+                    ],
+                ],
+            )
+            training_backend = training_dataset.backend_adapter(runtime.backend)
         experiment_id = runtime.experiments.create(ctx.task_id, recipe, config)
         meta_snapshot = _snapshot_latest_model_meta(artifact_dir)
         result = None

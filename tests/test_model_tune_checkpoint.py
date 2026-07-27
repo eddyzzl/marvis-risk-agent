@@ -186,6 +186,7 @@ class _Registry:
         self.path = path
         self.dataset = SimpleNamespace(
             id="dataset-1",
+            task_id="task-a",
             content_hash=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
 
@@ -348,6 +349,7 @@ def test_checkpoint_miss_is_per_recipe_and_task_scoped(tmp_path, monkeypatch):
     assert calls == ["xgb"]
 
     calls.clear()
+    runtime.registry.dataset.task_id = "task-b"
     train_tools.tool_tune_hyperparameters(_tuning_inputs(xgb_trials=2), task_b)
     assert calls == ["lgb", "xgb"]
     assert (tmp_path / "tasks" / "task-a" / "modeling_artifacts" / "tuning_checkpoints" / "lgb.json").is_file()

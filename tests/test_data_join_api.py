@@ -164,7 +164,7 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
     result_dataset = done["metadata"]["result_dataset"]
     assert result_dataset["dataset_id"]
     assert result_dataset["download_url"] == (
-        f"/api/datasets/{result_dataset['dataset_id']}/download"
+        f"/api/tasks/{task_id}/datasets/{result_dataset['dataset_id']}/download"
     )
     download = client.get(result_dataset["download_url"])
     assert download.status_code == 200

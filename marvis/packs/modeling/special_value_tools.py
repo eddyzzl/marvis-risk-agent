@@ -17,7 +17,7 @@ from marvis.feature.preprocessing import (
 )
 from marvis.files import sha256_file
 from marvis.packs.modeling._common import _effective_seed, _jsonable
-from marvis.packs.modeling._runtime import _runtime
+from marvis.packs.modeling._runtime import _runtime, _task_dataset
 from marvis.packs.modeling.errors import (
     ModelingError,
     SpecialValueDecisionRequiredError,
@@ -46,7 +46,7 @@ def tool_resolve_special_values(inputs: dict, ctx) -> dict:
     """
 
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     dataset_path = runtime.registry.resolve_path(dataset.id)
     features = _unique_strings(inputs.get("features") or [])
     detected = _relevant_sentinel_columns(

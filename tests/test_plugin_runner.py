@@ -2331,6 +2331,68 @@ def test_run_worker_cancellation_terminates_and_reaps_worker_tree(monkeypatch):
     assert processes[0].communicate_calls >= 1
 
 
+def test_run_worker_completed_protocol_wins_over_late_cancellation(monkeypatch):
+    """A stop after result emission belongs to the next plan-step boundary."""
+
+    token = JobCancellationToken(job_id="driver-job-late-cancel")
+    cancellation_seen = threading.Event()
+    payload = {
+        "ok": True,
+        "worker_protocol_version": PROTOCOL_VERSION,
+        "output": {"artifact_id": "artifact-complete"},
+    }
+
+    class FakeProcess:
+        pid = 4321
+        returncode = 0
+
+        def __init__(self, args):
+            self.args = args
+
+        def communicate(self, input=None, timeout=None):
+            token.cancel()
+            assert cancellation_seen.wait(2), "watcher did not observe cancellation"
+            return WORKER_RESULT_SENTINEL + json.dumps(payload), ""
+
+        def poll(self):
+            return self.returncode
+
+    class FakeMonitor:
+        memory_limit_exceeded = False
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_terminate(_process, *, owns_process_group):
+        assert owns_process_group is True
+        cancellation_seen.set()
+
+    monkeypatch.setattr(
+        "marvis.plugins.runner.subprocess.Popen",
+        lambda args, **_kwargs: FakeProcess(args),
+    )
+    monkeypatch.setattr("marvis.plugins.runner.ProcessTreeResourceMonitor", FakeMonitor)
+    monkeypatch.setattr(
+        "marvis.plugins.runner._terminate_worker_process",
+        fake_terminate,
+    )
+
+    completed = _run_worker(
+        sys.executable,
+        {"protocol_version": PROTOCOL_VERSION},
+        timeout=30,
+        cancellation_check=token.raise_if_cancelled,
+    )
+
+    assert _parse_worker_result(completed.stdout) == payload
+
+
 def test_tool_runner_returns_audited_cancelled_result(tmp_path, monkeypatch):
     token = JobCancellationToken(job_id="driver-job-1")
     token.cancel()

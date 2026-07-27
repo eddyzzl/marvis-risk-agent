@@ -12,7 +12,15 @@ from marvis.packs.modeling.handoff import create_challenger_backtest_task, hando
 from pathlib import Path
 
 from marvis.packs.modeling._common import PMML_SUPPORTED_ALGORITHMS, _format_number_token, _is_metric_key, _json_safe, _optional_float, _resolve_artifact_path, _unique_strings
-from marvis.packs.modeling._runtime import _Runtime, _artifact, _artifact_base_dir, _runtime
+from marvis.packs.modeling._runtime import (
+    _Runtime,
+    _artifact,
+    _artifact_base_dir,
+    _runtime,
+    _task_artifact,
+    _task_dataset,
+    _task_experiment,
+)
 from marvis.packs.modeling.recipes.common import REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY
 from marvis.packs.modeling.report_tools import _scorecard_table_rows
 from marvis.packs.modeling.scoring import _artifact_calibration_metadata
@@ -115,22 +123,23 @@ DEFAULT_MONITORING_CHECKS_BY_TARGET = {
 
 def tool_export_pmml(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    artifact = _artifact(runtime, str(inputs["artifact_id"]))
-    experiment = runtime.experiments.get(artifact.experiment_id)
+    artifact = _task_artifact(runtime, ctx, inputs["artifact_id"])
+    experiment = _task_experiment(runtime, ctx, artifact.experiment_id)
     _require_pmml_supported(
         artifact,
         base_dir=_artifact_base_dir(runtime.settings, experiment.task_id),
     )
-    pmml_path = _pmml_path(runtime, artifact)
+    pmml_path = _pmml_path(runtime, ctx, artifact)
     return {"pmml_path": str(pmml_path)}
 
 
 def tool_handoff_to_validation(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
-    artifact = _artifact(runtime, experiment.artifact_id)
+    artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
+    _task_dataset(runtime, ctx, inputs["sample_dataset_id"])
     _require_pmml_supported(
         artifact,
         operation="validation handoff",
@@ -153,10 +162,10 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     ``skipped`` with a reason so the user can still use the native artifact/report.
     """
     runtime = _runtime(ctx)
-    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
-    artifact = _artifact(runtime, experiment.artifact_id)
+    artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
     capabilities = _artifact_capabilities(artifact, base_dir=base_dir)
     selection_policy_decision = _approval_policy_decision(inputs.get("selection_policy_decision"))
@@ -168,6 +177,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     )
     challenger_comparison = _challenger_comparison_payload(
         runtime=runtime,
+        ctx=ctx,
         experiment=experiment,
         artifact=artifact,
         source=inputs.get("champion_reference"),
@@ -190,7 +200,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
 
     if "export_pmml" in requested_actions:
         if capabilities.get("pmml_supported"):
-            pmml_path = str(_pmml_path(runtime, artifact))
+            pmml_path = str(_pmml_path(runtime, ctx, artifact))
             action = {"action": "export_pmml", "status": "succeeded", "pmml_path": pmml_path}
             note = _pmml_delivery_note(capabilities)
             if note:
@@ -202,6 +212,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     if "handoff_to_validation" in requested_actions:
         sample_dataset_id = str(inputs.get("sample_dataset_id") or "").strip()
         if capabilities.get("handoff_supported") and sample_dataset_id:
+            _task_dataset(runtime, ctx, sample_dataset_id)
             validation_task_id = handoff_to_validation(
                 runtime.experiments,
                 artifact,
@@ -224,6 +235,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     if "create_challenger_backtest" in requested_actions:
         sample_dataset_id = str(inputs.get("sample_dataset_id") or "").strip()
         if capabilities.get("handoff_supported") and sample_dataset_id:
+            _task_dataset(runtime, ctx, sample_dataset_id)
             challenger = create_challenger_backtest_task(
                 runtime.experiments,
                 artifact,
@@ -542,11 +554,12 @@ def _sample_weight_col_from_params(params) -> str:
 def _challenger_comparison_payload(
     *,
     runtime: _Runtime,
+    ctx,
     experiment,
     artifact: ModelArtifact,
     source,
 ) -> dict:
-    champion = _resolve_champion_reference(runtime, source)
+    champion = _resolve_champion_reference(runtime, ctx, source)
     if not champion and source is None:
         champion = _previous_selected_champion_reference(
             runtime=runtime,
@@ -586,7 +599,7 @@ def _challenger_comparison_payload(
     })
 
 
-def _resolve_champion_reference(runtime: _Runtime, source) -> dict:
+def _resolve_champion_reference(runtime: _Runtime, ctx, source) -> dict:
     if not isinstance(source, dict) or source.get("enabled") is False:
         return {}
     experiment_id = str(source.get("experiment_id") or "").strip()
@@ -596,11 +609,23 @@ def _resolve_champion_reference(runtime: _Runtime, source) -> dict:
     champion_artifact = None
     if experiment_id:
         try:
-            champion_experiment = runtime.experiments.get(experiment_id)
+            champion_experiment = _task_experiment(runtime, ctx, experiment_id)
         except KeyError as exc:
             raise ModelingError(f"champion_reference experiment_id not found: {experiment_id}") from exc
         if champion_experiment.artifact_id:
-            champion_artifact = _artifact(runtime, champion_experiment.artifact_id)
+            champion_artifact = _task_artifact(
+                runtime,
+                ctx,
+                champion_experiment.artifact_id,
+            )
+    explicit_artifact_id = str(source.get("artifact_id") or "").strip()
+    if explicit_artifact_id:
+        explicit_artifact = _task_artifact(runtime, ctx, explicit_artifact_id)
+        if champion_experiment is not None and explicit_artifact.experiment_id != champion_experiment.id:
+            raise ModelingError(
+                "champion_reference artifact_id does not belong to experiment_id"
+            )
+        champion_artifact = explicit_artifact
     if not experiment_id and not explicit_metrics and not str(source.get("artifact_id") or "").strip():
         return {}
     metrics = explicit_metrics or (
@@ -1826,15 +1851,15 @@ def _pmml_payload_support(artifact: ModelArtifact, *, base_dir: Path | None) -> 
     )
 
 
-def _pmml_path(runtime: _Runtime, artifact: ModelArtifact) -> Path:
-    experiment = runtime.experiments.get(artifact.experiment_id)
+def _pmml_path(runtime: _Runtime, ctx, artifact: ModelArtifact) -> Path:
+    experiment = _task_experiment(runtime, ctx, artifact.experiment_id)
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
     if artifact.pmml_path:
         existing = _resolve_artifact_path(artifact.pmml_path, base_dir=base_dir)
         if existing.exists():
             persist_model_meta(base_dir, artifact, config=experiment.config)
             return existing
-    dataset = runtime.registry.get(experiment.config.dataset_id)
+    dataset = _task_dataset(runtime, ctx, experiment.config.dataset_id)
     out_path = base_dir / f"{artifact.id}.pmml"
     pmml_path = export_pmml(
         artifact,

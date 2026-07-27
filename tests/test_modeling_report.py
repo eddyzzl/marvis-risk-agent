@@ -361,6 +361,38 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     assert any(status.section == "product_list" and not status.available for status in statuses)
 
 
+def test_render_model_report_escapes_formula_like_labels(tmp_path):
+    output = tmp_path / "model_report_formula_safe.xlsx"
+    render_model_report(
+        ModelReportPayload(
+            project_meta={
+                "=HYPERLINK(\"https://example.invalid\",\"open\")": "@SUM(1,1)"
+            },
+            dataset_split=[],
+            stability=[],
+            sample_analysis=[],
+            vintage=None,
+            feature_importance=[
+                {
+                    "feature": "+cmd|' /C calc'!A0",
+                    "importance": 0.7,
+                }
+            ],
+        ),
+        output,
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    summary = workbook["汇总"]
+    assert summary["A3"].data_type == "s"
+    assert str(summary["A3"].value).startswith("'")
+    assert summary["B3"].data_type == "s"
+    assert str(summary["B3"].value).startswith("'")
+    feature_sheet = workbook["特征重要性"]
+    assert feature_sheet["A2"].data_type == "s"
+    assert str(feature_sheet["A2"].value).startswith("'")
+
+
 def test_model_report_labels_higher_risk_score_band_as_reject_side(tmp_path):
     output = tmp_path / "model_report.xlsx"
     render_model_report(
@@ -1364,6 +1396,278 @@ def test_generate_model_reports_rejects_empty_experiment_ids(tmp_path):
     assert "experiment_ids" in str(result.error)
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "experiment_input"),
+    [
+        ("generate_model_report", lambda experiment_id: {"experiment_id": experiment_id}),
+        ("generate_model_reports", lambda experiment_id: {"experiment_ids": [experiment_id]}),
+    ],
+)
+def test_model_report_tools_reject_cross_task_experiments(
+    tmp_path,
+    tool_name,
+    experiment_input,
+):
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    experiment_id = _train_report_experiment(
+        runner,
+        task,
+        dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+    other_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="其他任务",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "other-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    inputs = {
+        **experiment_input(experiment_id),
+        "dataset_id": dataset.id,
+    }
+
+    result = runner.invoke(
+        ToolRef("modeling", tool_name),
+        inputs,
+        task_id=other_task.id,
+    )
+
+    assert result.ok is False
+    assert "experiment does not belong to the active task" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "compare_experiments",
+        "select_experiment",
+        "score_dataset",
+        "monitor_run",
+        "export_pmml",
+        "handoff_to_validation",
+        "post_training_action",
+        "calibrate_model",
+    ],
+)
+def test_modeling_tools_reject_cross_task_model_references(tmp_path, tool_name):
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    experiment_id = _train_report_experiment(
+        runner,
+        task,
+        dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+    experiment = ExperimentStore(settings.db_path).get(experiment_id)
+    assert experiment.artifact_id
+    other_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="跨任务引用拦截",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "other-model-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    inputs_by_tool = {
+        "compare_experiments": {"experiment_ids": [experiment_id]},
+        "select_experiment": {
+            "experiment_ids": [experiment_id],
+            "refit_on_train_plus_test": False,
+        },
+        "score_dataset": {
+            "experiment_id": experiment_id,
+            "dataset_id": dataset.id,
+        },
+        "monitor_run": {
+            "experiment_id": experiment_id,
+            "dataset_id": dataset.id,
+        },
+        "export_pmml": {"artifact_id": experiment.artifact_id},
+        "handoff_to_validation": {
+            "experiment_id": experiment_id,
+            "sample_dataset_id": dataset.id,
+        },
+        "post_training_action": {
+            "experiment_id": experiment_id,
+            "actions": ["export_pmml"],
+        },
+        "calibrate_model": {
+            "artifact_id": experiment.artifact_id,
+            "dataset_id": dataset.id,
+        },
+    }
+
+    result = runner.invoke(
+        ToolRef("modeling", tool_name),
+        inputs_by_tool[tool_name],
+        task_id=other_task.id,
+    )
+
+    assert result.ok is False
+    assert "does not belong to the active task" in str(result.error)
+
+
+def test_post_training_action_rejects_cross_task_champion_reference(tmp_path):
+    runner, settings, first_task, first_dataset = _report_runner(tmp_path)
+    first_experiment = _train_report_experiment(
+        runner,
+        first_task,
+        first_dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+    second_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="第二个建模任务",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "second-model-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    second_dataset = registry.register_existing(
+        registry.resolve_path(first_dataset.id),
+        task_id=second_task.id,
+        role="modeling_sample",
+    )
+    second_experiment = _train_report_experiment(
+        runner,
+        second_task,
+        second_dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": second_experiment,
+            "actions": ["export_pmml"],
+            "champion_reference": {"experiment_id": first_experiment},
+        },
+        task_id=second_task.id,
+    )
+
+    assert result.ok is False
+    assert "experiment does not belong to the active task" in str(result.error)
+
+
+def test_post_training_action_rejects_cross_task_challenger_dataset(tmp_path):
+    runner, settings, _first_task, first_dataset = _report_runner(tmp_path)
+    second_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="挑战者样本隔离",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "challenger-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    second_dataset = registry.register_existing(
+        registry.resolve_path(first_dataset.id),
+        task_id=second_task.id,
+        role="modeling_sample",
+    )
+    second_experiment = _train_report_experiment(
+        runner,
+        second_task,
+        second_dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": second_experiment,
+            "sample_dataset_id": first_dataset.id,
+            "actions": ["create_challenger_backtest"],
+        },
+        task_id=second_task.id,
+    )
+
+    assert result.ok is False
+    assert "dataset does not belong to the active task" in str(result.error)
+
+
+def test_generate_model_report_rejects_cross_task_dataset(tmp_path):
+    runner, settings, _first_task, first_dataset = _report_runner(tmp_path)
+    second_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="第二个报告任务",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "second-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    source_path = registry.resolve_path(first_dataset.id)
+    second_dataset = registry.register_existing(
+        source_path,
+        task_id=second_task.id,
+        role="modeling_sample",
+    )
+    second_experiment = _train_report_experiment(
+        runner,
+        second_task,
+        second_dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "generate_model_report"),
+        {
+            "experiment_id": second_experiment,
+            "dataset_id": first_dataset.id,
+        },
+        task_id=second_task.id,
+    )
+
+    assert result.ok is False
+    assert "dataset does not belong to the active task" in str(result.error)
+
+
 def test_report_filename_is_unique_for_versions_of_the_same_recipe():
     from marvis.packs.modeling.report_tools import _report_filename
 
@@ -1407,6 +1711,8 @@ def test_generate_model_report_fails_when_artifact_and_score_column_are_missing(
     assert result.error_detail["experiment_id"] == experiment_id
     assert result.error_detail["dataset_id"] == dataset.id
     assert "score" in str(result.error)
+
+
 def _score_band_runtime(tmp_path, frame: pd.DataFrame):
     path = tmp_path / "score_band_sample.parquet"
     frame.to_parquet(path, index=False)

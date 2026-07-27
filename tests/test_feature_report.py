@@ -38,6 +38,28 @@ def test_render_feature_report_handles_empty_metrics(tmp_path):
     assert sheet.max_row == 1  # header only
 
 
+def test_render_feature_report_escapes_formula_like_user_text(tmp_path):
+    out = tmp_path / "formula_safe.xlsx"
+    render_feature_report(
+        [
+            {
+                "feature": "=HYPERLINK(\"https://example.invalid\",\"open\")",
+                "recommendation": "@SUM(1,1)",
+                "recommendation_reason": "+cmd|' /C calc'!A0",
+                "ks": 0.2,
+            }
+        ],
+        out,
+    )
+
+    sheet = load_workbook(out, data_only=False)["特征指标"]
+    headers = [cell.value for cell in sheet[1]]
+    for header in ("特征", "Agent建议", "推荐原因"):
+        cell = sheet.cell(row=2, column=headers.index(header) + 1)
+        assert cell.data_type == "s"
+        assert str(cell.value).startswith("'")
+
+
 def test_render_feature_report_appends_optional_columns_only_when_present(tmp_path):
     """Head/tail lift + importance columns are written only when those keys ride in the
     metric rows (selected); a base-only report keeps its 7 columns."""

@@ -2543,6 +2543,13 @@ def test_resume_with_selection_overrides_screen_output(tmp_path):
     step's proposed ``selected`` so downstream ``$ref:...output.selected`` trains on
     exactly the user's chosen features."""
     driver, repo = _driver(tmp_path)
+    tune = next(
+        step
+        for step in repo.load_plan("plan-1").steps
+        if step.id == "tune"
+    )
+    tune.inputs = {"features": "$ref:screen.output.selected"}
+    repo.update_step(tune)
     repo.confirm_plan("plan-1")
     driver._run_and_handle("plan-1", run_seq=0)  # pause at tune gate; screen DONE with [sig1, sig2]
 
@@ -2557,6 +2564,8 @@ def test_resume_with_selection_overrides_screen_output(tmp_path):
     assert repo.load_step_output("screen")["selected"] == ["sig1"]
     screen_step = next(step for step in repo.load_plan("plan-1").steps if step.id == "screen")
     assert screen_step.output_ref == "metrics:screen:v2"
+    tune_step = next(step for step in repo.load_plan("plan-1").steps if step.id == "tune")
+    assert tune_step.inputs["features"] == ["sig1"]
 
 
 def test_resume_selection_constrained_to_known_and_allows_force_select(tmp_path):

@@ -13,12 +13,17 @@ from marvis.packs.modeling.select import select_features
 from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET
 
 from marvis.packs.modeling._common import PMML_SUPPORTED_ALGORITHMS, _disabled_algorithms, _effective_seed, _eligible_algorithms, _jsonable, _metric_policy_for_target_type, _normalize_modeling_target_type, _normalize_recipe_list, _optional_int, _optional_str, _target_type_from_recipes, _training_params, _unique_strings
-from marvis.packs.modeling._runtime import _Runtime, _resolve_feature_cols, _runtime
+from marvis.packs.modeling._runtime import (
+    _Runtime,
+    _resolve_feature_cols,
+    _runtime,
+    _task_dataset,
+)
 
 
 def tool_select_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     features = _resolve_feature_cols(
         runtime,
         dataset.id,
@@ -67,7 +72,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     if str(inputs.get("target_type", "binary")) != "binary":
         return _screen_features_non_binary(inputs, ctx)
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     requested_features = inputs.get("features") or []
     features = _resolve_feature_cols(
         runtime,
@@ -204,7 +209,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
     constant (unique_count<=1) or mostly-missing (missing_rate>=max_missing_rate) — and the
     rest are kept as selected (ks=None)."""
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     features = _resolve_feature_cols(
         runtime,
         dataset.id,

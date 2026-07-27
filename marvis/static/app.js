@@ -6087,7 +6087,14 @@ function agentMessageResultDatasetHtml(message) {
   const result = message?.metadata?.result_dataset;
   const datasetId = String(result?.dataset_id || "").trim();
   if (!datasetId) return "";
-  const href = String(result?.download_url || `/api/datasets/${encodeURIComponent(datasetId)}/download`);
+  const scopedHref = selectedTaskId
+    ? `/api/tasks/${encodeURIComponent(selectedTaskId)}/datasets/${encodeURIComponent(datasetId)}/download`
+    : "";
+  const persistedHref = String(result?.download_url || "");
+  const href = persistedHref.startsWith("/api/tasks/")
+    ? persistedHref
+    : scopedHref;
+  if (!href) return "";
   return [
     '<section class="result-dataset-download">',
     '<div class="result-dataset-download-copy">',

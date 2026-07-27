@@ -14,6 +14,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 
 from marvis.artifacts import TransactionalArtifactStore
+from marvis.output.xlsx_safety import safe_xlsx_cell
 
 
 # Columns that are useful for every report, independently of the metric
@@ -297,7 +298,7 @@ def _append_collinear_sheet(workbook: Workbook, collinear: dict) -> None:
     for cell in sheet[1]:
         cell.font = Font(bold=True)
     for feat, value in (collinear.get("vif") or {}).items():
-        sheet.append([str(feat), _cell(value)])
+        sheet.append([_cell(feat), _cell(value)])
     pairs = [p for p in (collinear.get("collinear_pairs") or []) if isinstance(p, (list, tuple)) and len(p) >= 3]
     if pairs:
         sheet.append([])
@@ -306,7 +307,7 @@ def _append_collinear_sheet(workbook: Workbook, collinear: dict) -> None:
         for cell in sheet[header]:
             cell.font = Font(bold=True)
         for pair in pairs:
-            sheet.append([str(pair[0]), str(pair[1]), _cell(pair[2])])
+            sheet.append([_cell(pair[0]), _cell(pair[1]), _cell(pair[2])])
 
 
 def _cell(value):
@@ -317,11 +318,12 @@ def _cell(value):
     if isinstance(value, dict):
         message = value.get("message")
         if message not in (None, ""):
-            return str(message)
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            value = str(message)
+        else:
+            value = json.dumps(value, ensure_ascii=False, sort_keys=True)
     if isinstance(value, (list, tuple, set)):
-        return json.dumps(list(value), ensure_ascii=False, default=str)
-    return value
+        value = json.dumps(list(value), ensure_ascii=False, default=str)
+    return safe_xlsx_cell(value)
 
 
 __all__ = ["render_feature_report"]

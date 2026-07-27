@@ -3570,7 +3570,7 @@ def _migration_023_step_run_progress(conn: sqlite3.Connection) -> None:
 def _migration_024_explicit_feature_metrics(conn: sqlite3.Connection) -> None:
     """Distinguish omitted metrics from an explicitly empty selection.
 
-    Version-8 databases already have ``metrics_json`` but cannot tell whether
+    Earlier databases already have ``metrics_json`` but cannot tell whether
     ``[]`` meant "use workflow defaults" or "calculate no optional metrics".
     Historical rows retain the former meaning through the zero default; new
     repository inserts set this flag to one for every explicit selection,

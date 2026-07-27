@@ -43,7 +43,13 @@ def _stable_repo_state(monkeypatch):
 
 
 def _inspect(workspace: Path, **kwargs):
-    return inspect(workspace, "task-1", **kwargs)
+    return inspect(
+        workspace,
+        "task-1",
+        join_task_id=kwargs.pop("join_task_id", "task-join"),
+        vintage_task_id=kwargs.pop("vintage_task_id", "task-vintage"),
+        **kwargs,
+    )
 
 
 def _check(result: dict, check_id: str) -> dict:
@@ -142,8 +148,36 @@ def _seed_workspace(
         ("task-1", "modeling", "closure", "v1", "y", "apply_month"),
     )
     connection.execute(
+        "INSERT INTO tasks VALUES (?,?,?,?,?,?)",
+        ("task-join", "data_join", "closure join", "v1", "y", "apply_month"),
+    )
+    connection.execute(
+        "INSERT INTO tasks VALUES (?,?,?,?,?,?)",
+        ("task-vintage", "vintage", "closure vintage", "v1", "y", "apply_month"),
+    )
+    connection.execute(
         "INSERT INTO plans VALUES (?,?,?,?,?)",
         ("plan-1", "task-1", "modeling", "done", "2026-07-24T00:00:00Z"),
+    )
+    connection.execute(
+        "INSERT INTO plans VALUES (?,?,?,?,?)",
+        (
+            "plan-join",
+            "task-join",
+            "data_join",
+            "done",
+            "2026-07-24T00:00:01Z",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO plans VALUES (?,?,?,?,?)",
+        (
+            "plan-vintage",
+            "task-vintage",
+            "vintage_analysis",
+            "done",
+            "2026-07-24T00:00:02Z",
+        ),
     )
 
     outputs_dir = workspace / "tasks" / "task-1" / "outputs"
@@ -267,6 +301,125 @@ def _seed_workspace(
                 json.dumps(evidence),
             ),
         )
+    companion_outputs = [
+        (
+            "join-propose",
+            "plan-join",
+            0,
+            "拼接诊断",
+            "data_ops",
+            "propose_join",
+            {
+                "join_plan_id": "join-plan-1",
+                "joins": [
+                    {
+                        "feature_id": "feature-1",
+                        "key_pairs": [
+                            {
+                                "anchor_col": "customer_id",
+                                "feature_col": "customer_id",
+                                "match_rate": 1.0,
+                            }
+                        ],
+                        "diagnostics": {
+                            "precision_loss_columns": [],
+                            "key_dtype_divergences": [],
+                            "match_rate": 1.0,
+                        },
+                        "reconcile": {
+                            "consistent": True,
+                            "primary": 100.0,
+                            "secondary": 100.0,
+                        },
+                    }
+                ],
+                "reconcile_summary": {
+                    "blocking": False,
+                    "results": [],
+                    "red_flags": [],
+                },
+            },
+        ),
+        (
+            "join-confirm",
+            "plan-join",
+            1,
+            "确认拼接",
+            "data_ops",
+            "confirm_join",
+            {"join_plan_id": "join-plan-1", "status": "confirmed"},
+        ),
+        (
+            "join-execute",
+            "plan-join",
+            2,
+            "执行拼接",
+            "data_ops",
+            "execute_join",
+            {
+                "result_dataset_id": "joined-dataset",
+                "anchor_rows": 100,
+                "joined_rows": 100,
+                "fan_out": False,
+                "per_table": [
+                    {"feature_id": "feature-1", "match_rate": 1.0}
+                ],
+            },
+        ),
+        (
+            "vintage-curve",
+            "plan-vintage",
+            0,
+            "计算 Vintage 曲线",
+            "strategy",
+            "vintage_curve",
+            {
+                "cohorts": ["2026-01"],
+                "mob_axis": [0, 1],
+                "curves": {"2026-01": [0.0, 0.1]},
+                "counts": {"2026-01": 100},
+                "summary": {},
+                "label_semantics": "snapshot",
+                "nan_labels_dropped": 0,
+                "warnings": [],
+            },
+        ),
+    ]
+    for (
+        step_id,
+        companion_plan_id,
+        idx,
+        title,
+        plugin,
+        tool_name,
+        output,
+    ) in companion_outputs:
+        connection.execute(
+            "INSERT INTO plan_steps VALUES (?,?,?,?,?,?,?,?)",
+            (
+                step_id,
+                companion_plan_id,
+                idx,
+                title,
+                plugin,
+                tool_name,
+                "done",
+                f"ref:{step_id}",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO plan_step_outputs VALUES (?,?,?)",
+            (
+                step_id,
+                json.dumps(output),
+                json.dumps(
+                    {
+                        **base_evidence,
+                        "step_run_id": f"run-{step_id}",
+                    }
+                ),
+            ),
+        )
     connection.execute(
         "INSERT INTO model_artifacts VALUES (?,?,?)",
         (
@@ -357,11 +510,37 @@ def test_machine_precheck_separates_passes_from_manual_external_reconciliation(
     assert result["machine_verdict"] == "PASS"
     assert result["closure_verdict"] == "BLOCKED_MANUAL"
     assert statuses["D1"] == "PASS"
+    assert statuses["A2"] == "PASS"
+    assert statuses["A4"] == "PASS"
+    assert statuses["A5"] == "PASS"
     assert statuses["B1"] == statuses["B2"] == statuses["B3"] == "MANUAL"
     assert statuses["B4-INTERNAL"] == "PASS"
     assert statuses["B4-EXTERNAL"] == "MANUAL"
+    assert statuses["B5-INTERNAL"] == "PASS"
+    assert statuses["B5-EXTERNAL"] == "MANUAL"
     assert "cannot and will not fabricate" in result["manual_blocker"]
     assert "真实材料机器预检报告" in render_markdown(result)
+
+
+def test_machine_precheck_blocks_when_join_or_vintage_evidence_is_missing(
+    tmp_path,
+):
+    workspace = _seed_workspace(tmp_path, sentinel=False, traceable=True)
+
+    result = inspect(workspace, "task-1")
+
+    statuses = {item["check_id"]: item["status"] for item in result["checks"]}
+    assert result["companion_tasks"] == {
+        "join_task_id": None,
+        "vintage_task_id": None,
+    }
+    assert statuses["A2"] == "FAIL"
+    assert statuses["A4"] == "FAIL"
+    assert statuses["A5"] == "FAIL"
+    assert statuses["B5-INTERNAL"] == "FAIL"
+    assert statuses["B5-EXTERNAL"] == "MANUAL"
+    assert result["machine_verdict"] == "FAIL"
+    assert result["closure_verdict"] == "BLOCKED_MACHINE"
 
 
 def test_machine_precheck_blocks_untraceable_sentinel_preprocessing(tmp_path):

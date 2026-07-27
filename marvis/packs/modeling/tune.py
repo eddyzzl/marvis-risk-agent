@@ -247,6 +247,11 @@ def _cv_folds(
     resolved_group_cols = [str(col) for col in (group_cols or []) if str(col) in frame.columns]
     groups = _group_ids(frame, resolved_group_cols)
     unique_groups = np.unique(groups)
+    if unique_groups.size < cv_folds:
+        raise ModelingError(
+            "cv_folds requires at least one distinct training group per fold: "
+            f"requested={cv_folds}, available_groups={unique_groups.size}"
+        )
     rng.shuffle(unique_groups)
     fold_of_group = {int(group): index % cv_folds for index, group in enumerate(unique_groups)}
     fold_ids = np.array([fold_of_group[int(g)] for g in groups])

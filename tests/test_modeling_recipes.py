@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import marvis.packs.modeling.recipes.lgb_multiclass as lgb_multiclass_recipe
+import marvis.packs.modeling.recipes.lgb_regressor as lgb_regressor_recipe
 from marvis.agent.modeling_setup import build_modeling_proposal
 from marvis.data.backend import DataBackend
 from marvis.data.errors import NanLabelNotConfirmedError
@@ -41,6 +43,7 @@ from marvis.packs.modeling.recipes.xgb_regressor import train_xgb_regressor
 from marvis.packs.modeling.tools import _ModelArtifactScorer
 from marvis.packs.modeling.tune import (
     _base_params_without_controls,
+    _cv_folds,
     _lgb_base_params,
     _trial_score,
     tune_hyperparameters,
@@ -1252,6 +1255,23 @@ def test_tune_hyperparameters_cv_folds_rejects_values_below_two(tmp_path):
         tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=2, cv_folds=1))
 
 
+def test_tuning_cv_rejects_more_folds_than_distinct_groups():
+    frame = pd.DataFrame(
+        {
+            "account_id": [101, 101, 202, 202],
+            "feature": [0.1, 0.2, 0.3, 0.4],
+        }
+    )
+
+    with pytest.raises(ModelingError, match="available_groups=2"):
+        _cv_folds(
+            frame,
+            cv_folds=3,
+            seed=11,
+            group_cols=["account_id"],
+        )
+
+
 def test_tune_hyperparameters_cv_folds_is_deterministic_and_reports_fold_spread(tmp_path):
     """TUNE-3: with cv_folds set, each trial's score comes from k-fold CV over
     train (mean - overfit_penalty*std of the per-fold held-out KS), reported via
@@ -1527,6 +1547,65 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
     assert [item[0] for item in first.feature_importance] == ["x1", "x2"]
 
 
+def test_lgb_regressor_early_stopping_never_uses_test_rows(
+    tmp_path,
+    monkeypatch,
+):
+    rows = 80
+    frame = pd.DataFrame({
+        "x1": np.linspace(0.0, 1.0, rows),
+        "income": np.linspace(1000.0, 5000.0, rows),
+        "split": ["train"] * 50 + ["test"] * 15 + ["oot"] * 15,
+    })
+    path = tmp_path / "regression_early_stop.parquet"
+    frame.to_parquet(path, index=False)
+    captured = {}
+
+    class FakeBooster:
+        def predict(self, data):
+            return np.zeros(len(data), dtype=float)
+
+        def save_model(self, output_path):
+            Path(output_path).write_text("fake lgb regressor", encoding="utf-8")
+
+        def feature_importance(self, *, importance_type):
+            assert importance_type == "gain"
+            return np.zeros(1, dtype=float)
+
+    def fake_train(_params, dtrain, *, valid_sets, **_kwargs):
+        captured["fit"] = set(dtrain.data.index)
+        captured["valid"] = set(valid_sets[0].data.index)
+        return FakeBooster()
+
+    monkeypatch.setattr(lgb_regressor_recipe.lgb, "train", fake_train)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1",),
+        target_col="income",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 8},
+        seed=47,
+        early_stopping_rounds=3,
+        recipe_id="lgb_regressor",
+        target_type="continuous",
+    )
+
+    lgb_regressor_recipe.train_lgb_regressor(
+        DataBackend(tmp_path),
+        path,
+        config,
+        out_dir=tmp_path / "regression_early_stop_artifact",
+    )
+
+    train_rows = set(range(50))
+    test_rows = set(range(50, 65))
+    assert captured["fit"] | captured["valid"] == train_rows
+    assert captured["fit"].isdisjoint(captured["valid"])
+    assert captured["valid"]
+    assert captured["valid"].isdisjoint(test_rows)
+
+
 def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tmp_path):
     rows = 300
     grade = [
@@ -1594,6 +1673,66 @@ def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tm
     assert [item[0] for item in first.feature_importance] == ["x1", "x2"]
     # artifact params (including per_class detail) are strict-JSON serialisable
     json.dumps(first.artifact.params, allow_nan=False)
+
+
+def test_lgb_multiclass_early_stopping_never_uses_test_rows(
+    tmp_path,
+    monkeypatch,
+):
+    rows = 120
+    classes = ("low", "medium", "high")
+    frame = pd.DataFrame({
+        "x1": np.linspace(0.0, 1.0, rows),
+        "grade": [classes[index % len(classes)] for index in range(rows)],
+        "split": ["train"] * 75 + ["test"] * 24 + ["oot"] * 21,
+    })
+    path = tmp_path / "multiclass_early_stop.parquet"
+    frame.to_parquet(path, index=False)
+    captured = {}
+
+    class FakeBooster:
+        def predict(self, data):
+            return np.full((len(data), len(classes)), 1.0 / len(classes))
+
+        def save_model(self, output_path):
+            Path(output_path).write_text("fake lgb multiclass", encoding="utf-8")
+
+        def feature_importance(self, *, importance_type):
+            assert importance_type == "gain"
+            return np.zeros(1, dtype=float)
+
+    def fake_train(_params, dtrain, *, valid_sets, **_kwargs):
+        captured["fit"] = set(dtrain.data.index)
+        captured["valid"] = set(valid_sets[0].data.index)
+        return FakeBooster()
+
+    monkeypatch.setattr(lgb_multiclass_recipe.lgb, "train", fake_train)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1",),
+        target_col="grade",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 8},
+        seed=47,
+        early_stopping_rounds=3,
+        recipe_id="lgb_multiclass",
+        target_type="multiclass",
+    )
+
+    lgb_multiclass_recipe.train_lgb_multiclass(
+        DataBackend(tmp_path),
+        path,
+        config,
+        out_dir=tmp_path / "multiclass_early_stop_artifact",
+    )
+
+    train_rows = set(range(75))
+    test_rows = set(range(75, 99))
+    assert captured["fit"] | captured["valid"] == train_rows
+    assert captured["fit"].isdisjoint(captured["valid"])
+    assert captured["valid"]
+    assert captured["valid"].isdisjoint(test_rows)
 
 
 def test_train_lgb_multiclass_rejects_class_absent_from_train(tmp_path):

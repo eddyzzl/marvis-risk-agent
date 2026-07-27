@@ -9,12 +9,16 @@ from marvis.packs.modeling.readiness import check_data_quality, modeling_readine
 from marvis.packs.modeling.reject_inference import reject_inference
 
 from marvis.packs.modeling._common import _effective_seed, _json_safe, _jsonable, _optional_float, _optional_str
-from marvis.packs.modeling._runtime import _resolve_feature_cols, _runtime
+from marvis.packs.modeling._runtime import (
+    _resolve_feature_cols,
+    _runtime,
+    _task_dataset,
+)
 
 
 def tool_check_data_quality(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     issues = check_data_quality(
         runtime.backend,
         dataset,
@@ -26,7 +30,7 @@ def tool_check_data_quality(inputs: dict, ctx) -> dict:
 
 def tool_modeling_readiness(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     return _jsonable(
         modeling_readiness(
             runtime.backend,
@@ -40,7 +44,7 @@ def tool_modeling_readiness(inputs: dict, ctx) -> dict:
 
 def tool_reject_inference(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     frame = runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id))
     result = reject_inference(
         frame,
@@ -97,7 +101,7 @@ def tool_reject_inference(inputs: dict, ctx) -> dict:
 
 def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     split_col = _optional_str(inputs.get("split_col"))
     feature_cols = _resolve_feature_cols(
         runtime,
@@ -147,7 +151,7 @@ def tool_make_split(inputs: dict, ctx) -> dict:
     # fallback). prepare_modeling_frame keeps the passed-through column's name, and names a
     # generated column SPLIT_COLUMN, so the effective name is one or the other.
     split_col = str(inputs["split_col"]) if inputs.get("split_col") else None
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     feature_cols = _resolve_feature_cols(
         runtime,
         dataset.id,

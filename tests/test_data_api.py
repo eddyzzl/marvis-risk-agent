@@ -156,6 +156,9 @@ def test_data_routes_are_served_from_dedicated_router():
     assert routes[
         ("/api/tasks/{task_id}/datasets/{dataset_id}/preview", ("GET",))
     ] == "marvis.routers.data"
+    assert routes[
+        ("/api/tasks/{task_id}/datasets/{dataset_id}/download", ("GET",))
+    ] == "marvis.routers.data"
     assert routes[("/api/datasets/{dataset_id}/preview", ("GET",))] == "marvis.routers.data"
     assert routes[("/api/tasks/{task_id}/joins/propose", ("POST",))] == "marvis.routers.data"
     assert routes[("/api/joins/{join_plan_id}", ("GET",))] == "marvis.routers.data"

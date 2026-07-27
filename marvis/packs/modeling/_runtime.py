@@ -73,6 +73,36 @@ def _artifact(runtime: _Runtime, artifact_id: str) -> ModelArtifact:
     return artifact
 
 
+def _task_dataset(runtime: _Runtime, ctx, dataset_id):
+    """Resolve a dataset only when it belongs to the invoking task."""
+
+    dataset = runtime.registry.get(str(dataset_id))
+    if str(dataset.task_id) != str(ctx.task_id):
+        raise ModelingError("dataset does not belong to the active task")
+    return dataset
+
+
+def _task_experiment(runtime: _Runtime, ctx, experiment_id):
+    """Resolve an experiment only when it belongs to the invoking task."""
+
+    experiment = runtime.experiments.get(str(experiment_id))
+    if str(experiment.task_id) != str(ctx.task_id):
+        raise ModelingError("experiment does not belong to the active task")
+    return experiment
+
+
+def _task_artifact(runtime: _Runtime, ctx, artifact_id) -> ModelArtifact:
+    """Resolve an artifact through its task-owned experiment."""
+
+    artifact = _artifact(runtime, str(artifact_id))
+    experiment = _task_experiment(runtime, ctx, artifact.experiment_id)
+    if experiment.artifact_id != artifact.id:
+        raise ModelingError(
+            "artifact is not attached to its active-task experiment"
+        )
+    return artifact
+
+
 def _artifact_base_dir(settings, task_id: str) -> Path:
     return Path(settings.tasks_dir) / task_id / MODELING_ARTIFACTS_DIR_NAME
 

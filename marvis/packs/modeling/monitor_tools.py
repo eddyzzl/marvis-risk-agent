@@ -9,7 +9,13 @@ from marvis.packs.modeling.errors import ModelingError
 from marvis.validation.binning import bin_distribution, compute_psi
 
 from marvis.packs.modeling._common import _effective_seed, _optional_float, _optional_str, _unique_columns
-from marvis.packs.modeling._runtime import _artifact, _artifact_base_dir, _runtime
+from marvis.packs.modeling._runtime import (
+    _artifact_base_dir,
+    _runtime,
+    _task_artifact,
+    _task_dataset,
+    _task_experiment,
+)
 from marvis.packs.modeling.delivery_tools import _monitoring_check_status
 from marvis.packs.modeling.scoring import _ModelArtifactScorer
 
@@ -32,13 +38,13 @@ def tool_score_dataset(inputs: dict, ctx) -> dict:
     re-inferred) and a ``modeling.dataset.scored`` audit entry.
     """
     runtime = _runtime(ctx)
-    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
-    artifact = _artifact(runtime, experiment.artifact_id)
+    artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
 
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     dataset_path = runtime.registry.resolve_path(dataset.id)
     frame = runtime.backend.read_frame(dataset_path)
     row_count = int(len(frame))
@@ -310,10 +316,10 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
     distribution -- the caller must retrain or supply an explicit baseline.
     """
     runtime = _runtime(ctx)
-    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
-    artifact = _artifact(runtime, experiment.artifact_id)
+    artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
     baseline = artifact.baseline_distributions
     if not baseline:
         raise ModelingError(
@@ -332,7 +338,7 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
     target_col = _optional_str(inputs.get("target_col"))
 
     if scored_dataset_id:
-        dataset = runtime.registry.get(scored_dataset_id)
+        dataset = _task_dataset(runtime, ctx, scored_dataset_id)
         dataset_path = runtime.registry.resolve_path(dataset.id)
         # LT-6: monitor_run only ever reads score_col/feature_list/target_col off this
         # frame (never writes it back), so project instead of pulling the full modeling
@@ -352,7 +358,7 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
             )
         scores = pd.to_numeric(frame[score_col], errors="coerce").to_numpy(dtype=float)
     else:
-        dataset = runtime.registry.get(str(dataset_id))
+        dataset = _task_dataset(runtime, ctx, dataset_id)
         dataset_path = runtime.registry.resolve_path(dataset.id)
         # LT-6: NOT column-projected, unlike the scored_dataset_id branch above --
         # replay_preprocessing=True means the preprocessing chain may reference raw

@@ -54,6 +54,80 @@ def _register_sample(registry, tmp_path):
     return registry.register_from_upload("task-feature", path, role="sample")
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "inputs"),
+    [
+        (
+            "compute_feature_metrics",
+            {"features": ["x1"], "target_col": "y"},
+        ),
+        (
+            "screen_features",
+            {"features": ["x1"], "target_col": "y"},
+        ),
+        (
+            "bin_feature",
+            {
+                "feature": "x1",
+                "target_col": "y",
+                "method": "equal_frequency",
+            },
+        ),
+        (
+            "impute_missing",
+            {
+                "columns": ["missing"],
+                "strategy": "median",
+                "allow_full_fit": True,
+            },
+        ),
+    ],
+)
+def test_feature_tools_reject_cross_task_dataset(
+    tmp_path,
+    tool_name,
+    inputs,
+):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", tool_name),
+        {"dataset_id": dataset.id, **inputs},
+        task_id="task-other",
+    )
+
+    assert result.ok is False
+    assert "dataset does not belong to the active task" in str(result.error)
+
+
+def test_feature_metrics_reject_cross_task_comparison_dataset(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    primary = _register_sample(registry, tmp_path)
+    compare_path = tmp_path / "compare.csv"
+    pd.DataFrame({"x1": [1.0, 2.0, 3.0]}).to_csv(compare_path, index=False)
+    compare = registry.register_from_upload(
+        "task-other",
+        compare_path,
+        role="comparison",
+    )
+
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": primary.id,
+            "compare_dataset_id": compare.id,
+            "features": ["x1"],
+            "target_col": "y",
+            "metrics": ["psi"],
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is False
+    assert "dataset does not belong to the active task" in str(result.error)
+
+
 def test_feature_register_frame_rolls_back_parquet_when_registration_fails(tmp_path):
     class FailingRegistry:
         def register_existing(self, *_args, **_kwargs):
@@ -1148,6 +1222,42 @@ def test_screen_features_continuous_skips_leakage_and_keeps_all(tmp_path):
     # Continuous screen reports missing_rate/unique_count only — KS is None (not computed).
     assert result.output["scores"]["x1"]["ks"] is None
     assert "missing_rate" in result.output["scores"]["x1"]
+
+
+def test_screen_features_continuous_requires_nan_label_confirmation(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "feature": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "amount": [10.0, 20.0, np.nan, 40.0, 50.0],
+        }
+    )
+    path = tmp_path / "screen_continuous_nan.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+    inputs = {
+        "dataset_id": dataset.id,
+        "features": ["feature"],
+        "target_col": "amount",
+        "target_type": "continuous",
+    }
+
+    blocked = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        inputs,
+        task_id="task-feature",
+    )
+    assert blocked.ok is False
+    assert blocked.error_kind == "nan_label_not_confirmed"
+
+    confirmed = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {**inputs, "drop_nan_labels": True},
+        task_id="task-feature",
+    )
+    assert confirmed.ok is True, confirmed.error
+    assert confirmed.output["nan_labels_dropped"] == 1
+    assert confirmed.output["selected"] == ["feature"]
 
 
 def test_screen_features_continuous_drops_constant_and_all_missing(tmp_path):

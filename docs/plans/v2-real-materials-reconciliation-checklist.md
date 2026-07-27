@@ -17,13 +17,19 @@ A/B/C/D 中能从仓库证据确定的部分，但**不会填写外部口径或�
 python scripts/closure_acceptance.py \
   --workspace workspace \
   --task-id <completed-real-material-task-id> \
+  --join-task-id <completed-join-task-id-for-the-same-material> \
+  --vintage-task-id <completed-vintage-task-id-for-the-same-material> \
   --output docs/reviews/closure-real-materials-machine-check-2026-07-24.md \
   --json-output <temporary-output.json>
 ```
 
-- 最新机器预检：[closure-real-materials-machine-check-2026-07-24.md](../reviews/closure-real-materials-machine-check-2026-07-24.md)
-- `PASS/FAIL/N/A` 来自持久化证据；`MANUAL` 只用于确实需要外部口径的项。
-- 当前机器失败必须先修复；修复后，**B1-B4 的外部口径对账及本页责任人签字是唯一允许保留的人工阻断**。
+- 建模计划本身已经包含 JOIN 时可省略 `--join-task-id`；否则必须传入使用同一份
+  真实材料完成的 JOIN 任务。Vintage 语义必须通过 `--vintage-task-id` 提供。
+- 历史阻断样例：[closure-real-materials-machine-check-2026-07-24.md](../reviews/closure-real-materials-machine-check-2026-07-24.md)。
+  它是旧版脚本生成的失败快照，不是当前验收通过证据，必须按上述参数重新生成。
+- `PASS/FAIL` 来自持久化证据；A1-A6、B4-INTERNAL、B5-INTERNAL、C/D
+  不再允许用 `N/A` 绕过。`MANUAL` 只用于确实需要外部地面真值或抽样签字的项。
+- 当前机器失败必须先修复；修复后，**B1-B5 的外部口径对账及本页责任人签字是唯一允许保留的人工阻断**。
 - 不得把合成数据、平台自身输出或 Agent 文字总结写进“外部口径来源”，也不得代签。
 
 ---

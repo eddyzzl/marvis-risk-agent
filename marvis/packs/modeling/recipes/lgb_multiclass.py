@@ -17,6 +17,7 @@ from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     artifact_params,
+    carve_early_stop_fold_for_config,
     compute_multiclass_model_metrics,
     model_params,
     pop_boost_rounds,
@@ -64,15 +65,22 @@ def train_lgb_multiclass(backend, dataset_path, config: TrainConfig, *, out_dir:
         "verbosity": -1,
     }
     num_boost_round = pop_boost_rounds(params, default=50)
+    fit_train = train
+    if config.early_stopping_rounds:
+        # Keep the formal test split out of round-count selection.  Metrics below
+        # still evaluate the untouched test set exactly once.
+        fit_train, valid = carve_early_stop_fold_for_config(train, config)
+    else:
+        valid = test
     dtrain = lgb.Dataset(
-        train[list(config.features)],
-        label=encode_multiclass_target(train[config.target_col], classes),
-        weight=sample_weight_values(train, config),
+        fit_train[list(config.features)],
+        label=encode_multiclass_target(fit_train[config.target_col], classes),
+        weight=sample_weight_values(fit_train, config),
     )
     dvalid = lgb.Dataset(
-        test[list(config.features)],
-        label=encode_multiclass_target(test[config.target_col], classes),
-        weight=sample_weight_values(test, config),
+        valid[list(config.features)],
+        label=encode_multiclass_target(valid[config.target_col], classes),
+        weight=sample_weight_values(valid, config),
         reference=dtrain,
     )
     callbacks = []

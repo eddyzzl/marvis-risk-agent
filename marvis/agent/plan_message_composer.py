@@ -203,7 +203,10 @@ class PlanMessageComposer:
         if result_dataset_id:
             meta["result_dataset"] = {
                 "dataset_id": result_dataset_id,
-                "download_url": f"/api/datasets/{result_dataset_id}/download",
+                "download_url": (
+                    f"/api/tasks/{plan.task_id}/datasets/"
+                    f"{result_dataset_id}/download"
+                ),
             }
         report_details = self._latest_report_details(plan)
         if report_details is not None:

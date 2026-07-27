@@ -1344,7 +1344,15 @@ def _run_worker(
                     json.dumps(job, ensure_ascii=False),
                     timeout=int(timeout),
                 )
-            if cancellation_watcher is not None:
+            # Once a worker has emitted a complete protocol result, its governed
+            # side effect and evidence boundary is complete.  A stop arriving in
+            # the tiny gap between result emission and ``communicate`` returning
+            # belongs to the next plan boundary and must not relabel or discard
+            # this completed result.
+            if (
+                cancellation_watcher is not None
+                and _parse_worker_result(stdout) is None
+            ):
                 cancellation_watcher.raise_if_cancelled()
         except subprocess.TimeoutExpired as exc:
             kill_worker()

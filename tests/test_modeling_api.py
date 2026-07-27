@@ -2,9 +2,10 @@
 
 task_type='modeling' is routed to the plan-conversation driver (NOT the retired
 ModelingSession prototype): leakage-aware screen -> [confirm features] -> tune +
-train -> [confirm model] -> model-development report. No LLM is configured — this
-is the no-LLM manual scenario, confirming each gate with the "确认" content.
-This test runs real screening/tuning/training, so it is slow.
+train -> [confirm model] -> model-development report. Most tests exercise the
+no-LLM manual scenario; the governed Agent-mode test installs a non-network gate
+client and uses natural-language confirmations through the full multi-file flow.
+These tests run real screening/tuning/training, so they are slow.
 """
 
 from __future__ import annotations
@@ -784,6 +785,118 @@ def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClien
     split_step = next(step for step in plan.steps if step.title == "切分样本")
     split_output = client.app.state.plan_repo.load_step_output(split_step.id)
     assert "extra_score" in split_output["feature_cols"]
+
+
+@pytest.mark.slow
+def test_modeling_agent_natural_language_completes_multi_file_delivery(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Agent mode turns natural-language instructions into the full governed flow.
+
+    The gate client is deliberately local and is not asked to auto-approve any
+    business gate. This verifies the product contract from natural-language
+    confirmation through JOIN, FEATURE, training, report, and delivery without
+    depending on an external model or network service.
+    """
+
+    class _NoNetworkGateClient:
+        def complete(self, *_args, **_kwargs):
+            raise AssertionError("NORMAL mode must not auto-approve governed gates")
+
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: _NoNetworkGateClient(),
+    )
+
+    src = _business_material_dir(tmp_path, n=360)
+    pd.DataFrame({
+        "cust_id": np.arange(360),
+        "extra_score": np.linspace(0.0, 1.0, 360),
+    }).to_parquet(src / "feature_table.parquet")
+    response = client.post("/api/tasks", json={
+        "model_name": "Agent 多表完整建模",
+        "model_version": "agent-e2e",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "agent",
+        "recipes": ["lr"],
+    })
+    assert response.status_code == 200, response.text
+    task_id = response.json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert c1["metadata"]["join_c1"]["anchor_id"]
+    assert c1["metadata"]["join_c1"]["feature_ids"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "我确认无误，请按推荐的样本主表和特征表继续。"},
+    )
+    assert response.status_code == 202, response.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans and plans[-1].template_id == "modeling_with_join"
+    plan_id = plans[-1].id
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "请开始建模吧。"},
+    )
+    assert response.status_code == 202, response.text
+
+    for _ in range(14):
+        plan = client.app.state.plan_repo.load_plan(plan_id)
+        if plan.status.value in {"done", "failed", "cancelled", "review"}:
+            break
+        latest = _last_assistant(
+            client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+        )
+        assert not latest["metadata"].get("error"), latest["content"]
+        response = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json={"content": "我确认当前结果，请继续下一步。"},
+        )
+        assert response.status_code == 202, response.text
+
+    plan = client.app.state.plan_repo.load_plan(plan_id)
+    assert plan.status.value == "done"
+    outputs = {
+        step.tool_ref.tool: client.app.state.plan_repo.load_step_output(step.id)
+        for step in plan.steps
+        if step.tool_ref is not None
+    }
+    for tool_name in (
+        "execute_join",
+        "screen_features",
+        "select_features",
+        "train_models",
+        "generate_model_reports",
+        "post_training_action",
+    ):
+        assert outputs[tool_name], tool_name
+
+    split_output = outputs["make_split"]
+    assert "extra_score" in split_output["feature_cols"]
+    report_output = outputs["generate_model_reports"]
+    assert Path(report_output["report_path"]).is_file()
+    assert report_output["reports"]
+    delivery_output = outputs["post_training_action"]
+    assert Path(delivery_output["approval_package_markdown_path"]).is_file()
+    assert Path(delivery_output["model_card_markdown_path"]).is_file()
+    assert (
+        delivery_output["model_card"]["delivery"]["validation_handoff_status"]
+        == "succeeded"
+    )
+    done = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert "计划已全部完成" in done["content"]
 
 
 def test_modeling_c1_plain_named_excel_is_included_in_three_file_proposal(

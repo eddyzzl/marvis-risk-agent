@@ -13,7 +13,13 @@ from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.recipes.common import carve_early_stop_fold
 
 from marvis.packs.modeling._common import CALIBRATION_PARAMS_KEY, _jsonable, _unique_columns
-from marvis.packs.modeling._runtime import _artifact, _artifact_model_base_dir, _runtime
+from marvis.packs.modeling._runtime import (
+    _artifact_model_base_dir,
+    _runtime,
+    _task_artifact,
+    _task_dataset,
+    _task_experiment,
+)
 from marvis.packs.modeling.scoring import _ModelArtifactScorer, _apply_calibrator, _calibration_curve_rows, _calibration_metrics, _fit_calibrator
 
 
@@ -64,8 +70,8 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
     "fit_sample(in-sample)"`` so the in-sample caveat is explicit instead of silent.
     """
     runtime = _runtime(ctx)
-    artifact = _artifact(runtime, str(inputs["artifact_id"]))
-    experiment = runtime.experiments.get(artifact.experiment_id)
+    artifact = _task_artifact(runtime, ctx, inputs["artifact_id"])
+    experiment = _task_experiment(runtime, ctx, artifact.experiment_id)
     config = experiment.config
     if getattr(config, "target_type", "binary") != "binary":
         raise ModelingError("probability calibration is only supported for binary models")
@@ -81,7 +87,7 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         raise ModelingError("min_samples must be at least 1")
 
     dataset_id = str(inputs.get("dataset_id") or config.dataset_id)
-    dataset = runtime.registry.get(dataset_id)
+    dataset = _task_dataset(runtime, ctx, dataset_id)
     target_col = str(inputs.get("target_col") or config.target_col)
     split_col = str(inputs.get("split_col") or config.split_col)
     explicit_split = inputs.get("split") or inputs.get("fit_split")
@@ -324,8 +330,8 @@ def tool_segment_value_evaluation(inputs: dict, ctx) -> dict:
     KS/AUC computed on a handful of rows is not a usable statistic).
     """
     runtime = _runtime(ctx)
-    artifact = _artifact(runtime, str(inputs["artifact_id"]))
-    experiment = runtime.experiments.get(artifact.experiment_id)
+    artifact = _task_artifact(runtime, ctx, inputs["artifact_id"])
+    experiment = _task_experiment(runtime, ctx, artifact.experiment_id)
     config = experiment.config
     if getattr(config, "target_type", "binary") != "binary":
         raise ModelingError("segment value evaluation is only supported for binary models")
@@ -334,7 +340,7 @@ def tool_segment_value_evaluation(inputs: dict, ctx) -> dict:
     if not segment_col:
         raise ModelingError("segment_col is required")
     dataset_id = str(inputs.get("dataset_id") or config.dataset_id)
-    dataset = runtime.registry.get(dataset_id)
+    dataset = _task_dataset(runtime, ctx, dataset_id)
     target_col = str(inputs.get("target_col") or config.target_col)
     split_col = str(inputs.get("split_col") or config.split_col)
     split_name = str(inputs.get("split") or "test")

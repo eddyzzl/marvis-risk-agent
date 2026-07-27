@@ -30,7 +30,7 @@ FLOW_SELECTORS = {
     ),
     "modeling": (
         "tests/test_modeling_api.py::"
-        "test_modeling_business_materials_flow_into_report_and_delivery"
+        "test_modeling_agent_natural_language_completes_multi_file_delivery"
     ),
 }
 
