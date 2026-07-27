@@ -648,7 +648,7 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 
 信息架构：Data & Semantics → Candidate Lab → Strategy Pool → Backtest & Validation → Champion/Challenger → Adoption & Artifacts → Monitoring & Iteration。
 
-**首个工作台纵切（已完成，2026-07-23）**：Candidate Lab 已实现上述四个 Manual 启动器与受认证结果/Pool 摘要，Manual 和 Agent 已共用同一 deterministic execution kernel；任务切换、active plan/open gate、澄清、失败保留输入、请求去重和投影截断均有独立前后端覆盖。后续纵切已继续补齐 Pool 全操作、交叉搜索、交互树编辑/续建和 Evidence Drawer。Phase 6 尚未完成，其余区域、完整状态持久化、长任务控制及七步 browser E2E 仍按本 Phase 交付。
+**首个工作台纵切（已完成，2026-07-23）**：Candidate Lab 已实现上述四个 Manual 启动器与受认证结果/Pool 摘要，Manual 和 Agent 已共用同一 deterministic execution kernel；任务切换、active plan/open gate、澄清、失败保留输入、请求去重和投影截断均有独立前后端覆盖。后续纵切已继续补齐 Pool 全操作、交叉搜索、交互树编辑/续建、Evidence Drawer 和本地 task-scoped 视图恢复。策略开发核心操作面已经收口；字段别名/语言的跨设备状态、全七区自动化 browser 旅程等 Phase 6 增强仍在 V2.x 继续。
 
 **Evidence Drawer 纵切（已完成，2026-07-27）**：Candidate Lab projection v10 在同一 authenticated projection 中增加任务级证据抽屉。服务端使用一次有界、task-scoped 批量查询恢复已进入领域投影的产物，并只投影 dataset lineage、artifact id/kind、来源 Tool、契约/生成器版本、内容与 provenance hash、Tool 原生 input/request hash 或明确标注的 provenance 派生绑定摘要、聚合红旗，以及最近 Agent 回复 metadata 中的受治理 memory id/category/source/confidence/reason 指针。前端不读取原始客户行、文件路径、完整 provenance 或未认证对话事实；记忆只展示审计引用，不改变确定性指标。宽桌面 1600×1000 旅程已验证展开、刷新、长 hash 换行和中文字段标签。
 
@@ -669,6 +669,15 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 - 缺关键业务口径时 Agent 必须澄清，不用技术默认值静默替代；
 - 缺可选报告资料时策略引擎继续，报告对应字段留空；缺策略正确性信息时 Manual 和 Agent 都 fail closed；
 - 用户可在一个任务中完成“数据 → 候选 → 策略池 → 回测 → OOT → 采纳 → 监控计划”，刷新/重启后可恢复。
+
+**V2 策略开发核心收口验收（通过，2026-07-27）**
+
+- 业务流程：当前项目和历史材料 → 原生双人群样本 → 单变量/模型 → Cross/树/评分卡/Voting → 五类 Pool → development/validation/OOT 影响与稳定性 → canonical Strategy → 代码与七步报告，均已有自然语言入口和确定性执行链。
+- Agent/Manual parity：两种入口共用同一 typed request、PlanValidator、Workflow、Tool、DSL、门禁和 evidence；Manual 不维护第二套计算实现。
+- 交付与审计：最终 Strategy 可生成 Python/SQL/JSON 和逐行 equivalence；报告按同一 revision 原子发布 JSON/Markdown/XLSX/DOCX；Evidence Drawer 只展示当前任务受认证 lineage、hash、红旗和 memory 审计指针。
+- 缺失信息：会改变策略语义、样本或指标的字段失败关闭；用户说明暂缺的可选评审资料保持结构化空白，不填 0、不编造。
+- 收口验证：83 个 Candidate Lab/TaskArtifact 后端与 API 测试、75 个 Candidate Lab 前端契约、5 个七步/Manual-Agent/代码交付旅程测试通过；1600×1000 宽桌面 Evidence Drawer 通过实际浏览器验收；全仓 Ruff、JavaScript 语法和 diff gate 通过。为避免重复消耗，没有对 128 个历史提交重新跑整仓全量 pytest。
+- 非阻塞后续：SQL/Hive/Impala 数据连接、跨设备/多用户视图同步、交互 revision 独立图形包和完整 browser 自动化旅程继续归入 V2.x 平台增强；它们不改变“本地文件驱动的核心策略开发七步已经可完整完成”的验收结论，也不得转移到 V3/V4。
 
 ### Phase 7：持续监控与本地经营闭环（V2.x，10-17 人日）
 
