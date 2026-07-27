@@ -7,6 +7,8 @@ from io import BytesIO
 import json
 from pathlib import Path
 import sqlite3
+import threading
+import time
 from types import SimpleNamespace
 
 from docx import Document
@@ -2195,6 +2197,35 @@ def test_build_report_bundle_rolls_back_files_rows_publication_and_audit(
         / "strategy_reports"
     )
     assert not any(report_root.rglob("report.*")) if report_root.exists() else True
+
+
+def test_report_publication_waits_for_an_existing_writer_lock(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "report-lock.sqlite"
+    owner = sqlite3.connect(db_path)
+    owner.execute("PRAGMA journal_mode=WAL")
+    owner.execute("CREATE TABLE report_lock_probe(id INTEGER PRIMARY KEY)")
+    owner.commit()
+    owner.execute("BEGIN IMMEDIATE")
+    contender_ready = threading.Event()
+
+    def contend() -> None:
+        with sqlite3.connect(db_path, timeout=0.01) as conn:
+            conn.execute("PRAGMA busy_timeout=10")
+            contender_ready.set()
+            report_tools._begin_report_publication(conn)
+            assert conn.in_transaction
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(contend)
+            assert contender_ready.wait(timeout=10.0)
+            time.sleep(0.1)
+            owner.rollback()
+            future.result(timeout=10.0)
+    finally:
+        owner.close()
 
 
 def test_build_report_bundle_identical_concurrent_writers_share_one_revision(

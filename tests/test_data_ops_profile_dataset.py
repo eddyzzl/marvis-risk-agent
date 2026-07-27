@@ -96,7 +96,7 @@ def test_profile_dataset_manifest_is_strict_read_only_and_identity_bound():
     }
 
 
-def test_data_ops_pack_permissions_do_not_expand_for_profile_dataset():
+def test_data_ops_pack_permissions_match_current_governed_tools():
     manifest_path = (
         Path(__file__).parents[1]
         / "marvis"
@@ -106,10 +106,12 @@ def test_data_ops_pack_permissions_do_not_expand_for_profile_dataset():
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["version"] == "0.4.0"
+    assert manifest["version"] == "0.6.0"
     assert set(manifest["permissions"]) == {
         "read:dataset",
+        "read:task",
         "write:dataset",
+        "write:artifact",
         "read:join_plan",
         "write:join_plan",
         "read:materials",
