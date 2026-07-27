@@ -172,7 +172,7 @@ MARVIS 已经具备较扎实的策略确定性内核和治理底座，包括策�
 | 描述统计和相关性 | 全变量统计、分布和相关性 | feature/analysis 的 Kernel 可复用，策略入口未整合 | **部分**；跨 Pack 内核覆盖，产品可达性未完成 |
 | 单规则分箱与指标 | tree/quantile/equal/chi，KS/IV/WOE/LIFT，件数+金额 | `bin_feature`、feature metrics、规则挖掘 | **部分**；缺金额维度、交互选箱入池及策略语境导出 |
 | 加权自动决策树 | 特征/权重/深度/叶约束，叶规则和代码 | 建模树模型和浅树规则挖掘，但无等价加权规则树产品 | **部分** |
-| 交互式决策树 | 节点统计、最佳切点、手动分裂/删节点、自动续建 | 无 | **缺失** |
+| 交互式决策树 | 节点统计、最佳切点、手动分裂/删节点、自动续建 | 已有不可变剪枝/调阈值/换字段、全字段或指定字段候选、精确种子受控自动续建、前沿 singleton/OR group 入池和下游回放 | **主体覆盖**；缺完整可视化、Python/SQL 和节点命中列写回 |
 | 评分卡 | 简化评分卡、写回和代码 | modeling 已有更规范的 scorecard/打分/PMML | **平台覆盖、策略集成部分**；需 scorecard-to-strategy bridge |
 | 投票池 | 单规则候选、组合搜索、自定义规则、命中分 | 无独立 n-of-k/voting 工具和 Workflow | **缺失** |
 | 交叉分析 | 2D/3D 自动交叉规则；2D 切点矩阵和 cell 选择入池 | 有 cross feature，但无等价规则枚举、规则矩阵和 cell 选择 | **缺失**；3D matrix 若实现属于 MARVIS 扩展，不是对标必需项 |
@@ -548,11 +548,13 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 
 **Candidate Lab Manual/Agent parity 首纵切（已完成，2026-07-23）**：策略任务宽桌面工作区新增 Candidate Lab，展示 task-owned、重新验真的单变量、Cross Matrix、自动树及当前 Strategy Pool；可直接启动单变量、单变量 fresh/existing refinement、Cross Matrix 和自动树。Manual 表单提交与自然语言共用 `strategy_request`、严格 compiler、PlanValidator、模板和 Tool，不维护第二套指标内核；existing refinement 的 candidate、feature/method 和 bin 只能从服务端投影选择，artifact/hash 不进入用户输入。当前活动 DataWorkspace 改变或不可用时，已有不可变 candidate 的 refinement 仍从父 artifact 恢复数据/sample lineage，并在创建计划前深验 canonical bytes、provenance、feature/method/bin；错配、损坏或跨任务引用只返回 clarification，不创建计划。投影使用 task/kind 的 `COUNT + DESC LIMIT`、总字节预算、来源 canonical/provenance 重验、重复 source cache、最新非终态 plan/assistant message 的单行查询；前端同任务 single-flight，任务切换取消旧请求，不进入轮询 tick。该纵切只覆盖已经存在的四个启动器和证据摘要，不提前宣称 Pool 全操作、交互树、评分卡、自动搜索、稳定性、代码/列写回或完整 evidence drawer 已完成。
 
-**交互式树不可变剪枝纵切（已完成，2026-07-25）**：Agent 和 Candidate Lab Manual 入口现在可从同一受认证自动树或任一历史 revision 的完整拓扑中精确选择一个仍可见、非 frontier 的 split 节点，执行 `prune_subtree` 并创建新的不可变分支；原树、父 revision 和 sibling 分支均不覆盖，也不存在平台暗选“当前最佳分支”。Tool 递归认证完整父链、task-owned registry/path/hash/provenance、样本设计与活动 DataWorkspace，在同一 development 样本上重放全部 frontier 条件并对件数、好坏、风险和金额观测做 exactly-once 守恒，再原子登记 canonical revision artifact。Candidate Lab 只投影 UI 所需的节点、frontier、历史 ID 和精确 eligible pointer，不暴露服务端 hash/binding；点击节点只预填二次确认表单，最终提交会再次按最新投影校验，计划完成后由统一 settle 轮询只刷新一次。Voting 搜索和从搜索结果构建候选的既有 Manual 表单也已补齐严格 HTTP schema，和 Agent compiler 共用相同约束。该纵切仍不等于“完整交互树”：手工改分裂、全特征最佳分裂、自动续建、frontier 入池、树代码生成/叶 ID 写回及独立验证继续留在 V2 Phase 3-5。
+**交互式树不可变剪枝纵切（已完成，2026-07-25）**：Agent 和 Candidate Lab Manual 入口现在可从同一受认证自动树或任一历史 revision 的完整拓扑中精确选择一个仍可见、非 frontier 的 split 节点，执行 `prune_subtree` 并创建新的不可变分支；原树、父 revision 和 sibling 分支均不覆盖，也不存在平台暗选“当前最佳分支”。Tool 递归认证完整父链、task-owned registry/path/hash/provenance、样本设计与活动 DataWorkspace，在同一 development 样本上重放全部 frontier 条件并对件数、好坏、风险和金额观测做 exactly-once 守恒，再原子登记 canonical revision artifact。Candidate Lab 只投影 UI 所需的节点、frontier、历史 ID 和精确 eligible pointer，不暴露服务端 hash/binding；点击节点只预填二次确认表单，最终提交会再次按最新投影校验，计划完成后由统一 settle 轮询只刷新一次。Voting 搜索和从搜索结果构建候选的既有 Manual 表单也已补齐严格 HTTP schema，和 Agent compiler 共用相同约束。当时尚未完成的手工换字段、全特征候选、自动续建和 frontier 入池现已由后续纵切补齐；完整树代码生成、节点命中列写回和专项独立验证仍留在 V2 Phase 3-5。
 
-**交互树精确替换分裂字段纵切（已完成，2026-07-27）**：`interactive_tree_revision` 在保留既有剪枝和阈值契约的同时新增 `replace_split_feature`。用户必须逐字提供唯一来源树/revision、当前可见 split node、来源树认证 feature universe 中一个不同字段及唯一有限阈值；自然语言和 Manual DTO 都拒绝“最佳字段”“自动推荐”、平台 binding 注入、同字段 no-op 与复合后续动作。确定性 replay 会使用当前 effective tree 配置，只改变目标 node 的字段/阈值/缺失路由并重算目标子树，核对其他分支未变化、完整 frontier exactly-once、最小叶、指标守恒、方向诊断和 DSL evaluator 等价；随后在 writer lock 内重新认证父链、SampleDesign、dataset/workspace 与文件字节并发布 task-owned 不可变 revision。Candidate Lab 投影只暴露认证 feature universe 和可换字段节点 pointer，不自动选字段；生成的 revision 继续复用前沿物化、Pool 和下游治理链。全字段候选指标搜索、单字段候选点和自动续建仍待后续纵切。
+**交互树精确替换分裂字段纵切（已完成，2026-07-27）**：`interactive_tree_revision` 在保留既有剪枝和阈值契约的同时新增 `replace_split_feature`。用户必须逐字提供唯一来源树/revision、当前可见 split node、来源树认证 feature universe 中一个不同字段及唯一有限阈值；自然语言和 Manual DTO 都拒绝“最佳字段”“自动推荐”、平台 binding 注入、同字段 no-op 与复合后续动作。确定性 replay 会使用当前 effective tree 配置，只改变目标 node 的字段/阈值/缺失路由并重算目标子树，核对其他分支未变化、完整 frontier exactly-once、最小叶、指标守恒、方向诊断和 DSL evaluator 等价；随后在 writer lock 内重新认证父链、SampleDesign、dataset/workspace 与文件字节并发布 task-owned 不可变 revision。Candidate Lab 投影只暴露认证 feature universe 和可换字段节点 pointer，不自动选字段；生成的 revision 继续复用前沿物化、Pool 和下游治理链。全字段候选指标搜索和受控自动续建由后续两个已完成纵切承接。
 
-**交互树节点候选搜索纵切（已完成，2026-07-27）**：新增 `interactive_tree_split_search`，自然语言与 Manual 工作台均要求唯一 task-owned automatic tree/revision、唯一当前可见 node、`all_features` 或显式 `selected_features` 范围、每特征候选阈值数和总行评估预算。平台从认证树恢复 feature universe、冻结的缺失中位数路由、风险方向、最小叶、完整父 revision 链、精确 SampleDesign 和 development 数据；内核最多接受 50 个特征、每特征 20 个阈值、1,000 个候选及 2,000 万次行评估，只固化父/左右节点的件数、好坏、坏率、可用权重、Gini 增益、方向一致性和失败约束，不输出客户明细。搜索结果有内容派生 ID/hash、canonical JSON、task artifact/provenance、writer-lock 二次计算和完整加载认证；rank 明确只作导航，`winner_selected=false`、`tree_modified=false`。Candidate Lab 只从受认证投影选择来源和节点，候选行按钮仅回填后续 `adjust_split_threshold` 或 `replace_split_feature` 表单，仍需用户单独确认，不能同轮入池、应用、采纳或部署。与参考平台相比，这保留了全字段/单字段候选能力，同时补上预算、样本 lineage、不可变证据和无暗选胜者边界；消费精确 search/candidate 证据、带明确目标/约束/停止条件的自动续建仍是下一纵切。
+**交互树节点候选搜索纵切（已完成，2026-07-27）**：新增 `interactive_tree_split_search`，自然语言与 Manual 工作台均要求唯一 task-owned automatic tree/revision、唯一当前可见 node、`all_features` 或显式 `selected_features` 范围、每特征候选阈值数和总行评估预算。平台从认证树恢复 feature universe、冻结的缺失中位数路由、风险方向、最小叶、完整父 revision 链、精确 SampleDesign 和 development 数据；内核最多接受 50 个特征、每特征 20 个阈值、1,000 个候选及 2,000 万次行评估，只固化父/左右节点的件数、好坏、坏率、可用权重、Gini 增益、方向一致性和失败约束，不输出客户明细。搜索结果有内容派生 ID/hash、canonical JSON、task artifact/provenance、writer-lock 二次计算和完整加载认证；rank 明确只作导航，`winner_selected=false`、`tree_modified=false`。Candidate Lab 只从受认证投影选择来源和节点，候选行按钮仅回填后续 `adjust_split_threshold`、`replace_split_feature` 或受控续建表单，仍需用户单独确认，不能同轮入池、应用、采纳或部署。与参考平台相比，这保留了全字段/单字段候选能力，同时补上预算、样本 lineage、不可变证据和无暗选胜者边界。
+
+**交互树精确种子受控自动续建纵切（已完成，2026-07-27）**：新增 `interactive_tree_auto_continuation` Workflow 和 `strategy.auto_continue_interactive_tree`。用户必须先查看一个受认证节点候选搜索，再逐字选择唯一 `search_id + candidate_id`，并明确最大新增深度、最小 Gini 增益、最大生成节点数、每字段阈值上限和总行评估预算；只允许固定 `max_gini_gain` 目标及稳定 tie-break，不接受“自动选最好种子”、隐式默认或同轮入池/采纳/部署。Tool 在 writer lock 内重新认证 search、候选、来源 revision 完整父链、SampleDesign、dataset/workspace 和精确节点样本，按硬上限确定性扩展，输出每个生成节点的聚合指标、停止原因、搜索消耗和 exactly-once 重放证据，并发布新的 task-owned 不可变 revision。生成拓扑可继续成为后续调阈值、换字段、剪枝和前沿物化的父 revision；物化后的叶规则可进入 Strategy Pool 并正常编译。Candidate Lab 的“带入受控续建”只回填精确指针，用户仍须确认所有上限；续建不会修改父树、Pool、当前 Strategy 或生产状态。
 
 交付：
 
@@ -774,8 +776,8 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 
 32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX、证据绑定的选箱/合并、不可变候选资产及其 Strategy Pool 入池已完成；原生 risk/development 的单变量与 historical refinement 已完成，单变量 asset 与其当前 Pool entry 的 development 逐月命中分布/PSI 已完成；原生 Pool/稳定性消费、其他候选类型和 OOT 稳定性待续）；
 33. 加权自动规则树、方向检查、树图和写回（受限完整树、叶选择/入池及自然语言 full-tree apply 已完成，原生 risk/development 建树与叶物化已接通；原生 Pool/后续消费者、交互展示、代码和列写回待续）；
-34. 交互树节点/候选/手工分裂内核；
-35. 交互树删节点、自动续建、可视化、代码和入池；
+34. 交互树节点/候选/手工分裂内核（不可变剪枝、调阈值、换字段、全字段/指定字段候选搜索已完成）；
+35. 交互树删节点、自动续建、可视化、代码和入池（删节点、精确种子受控续建、frontier singleton/OR group 入池已完成；完整可视化、代码和节点命中列写回待续）；
 36. 标准 WOE-LR 评分卡 Workbench；
 37. voting 候选、自定义规则、受预算组合和 n-of-k（显式 n-of-k 候选、同样本 lineage 及受治理入池已完成；自动搜索、自定义编辑、代码和列写回待续）；
 38. 2D/3D 自动 cross rules 与 2D matrix/cell（2D matrix、显式 cell group、同样本 lineage 及入池、原生 risk/development historical Cross 与 cell selection、有预算的 2D/3D 阈值规则搜索、精确物化、Candidate Lab、Pool 来源及报告附录已完成；人工切点、代码和列写回待续）；

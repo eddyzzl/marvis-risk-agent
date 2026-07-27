@@ -1397,6 +1397,58 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>受控自动续建交互树</strong><small>从人工明确选择的 eligible 候选继续生长 frontier 子树</small></span>
+                      </summary>
+                      <form
+                        data-candidate-lab-form
+                        data-candidate-lab-workflow="interactive_tree_auto_continuation"
+                      >
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>节点搜索证据 <b aria-hidden="true">*</b></span>
+                          <input readonly data-candidate-lab-field="interactive_tree_continuation_search_id" placeholder="请从搜索结果点击“带入受控续建”">
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>人工选择的种子候选 <b aria-hidden="true">*</b></span>
+                          <input readonly data-candidate-lab-field="interactive_tree_continuation_candidate_id" placeholder="不会按排名自动选择">
+                        </label>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>最大追加深度 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="1" max="6" step="1" value="3" data-candidate-lab-field="interactive_tree_continuation_max_depth">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最小 Gini 增益 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="0" max="0.5" step="0.0001" value="0" data-candidate-lab-field="interactive_tree_continuation_min_gain">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最大生成节点数 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="3" max="127" step="1" value="31" data-candidate-lab-field="interactive_tree_continuation_max_nodes">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>每特征最大阈值数 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="1" max="20" step="1" value="10" data-candidate-lab-field="interactive_tree_continuation_max_thresholds">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>总行评估预算 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="1" max="20000000" step="1" value="2000000" data-candidate-lab-field="interactive_tree_continuation_max_row_evaluations">
+                          </label>
+                        </div>
+                        <input type="hidden" value="max_gini_gain" data-candidate-lab-field="interactive_tree_continuation_objective">
+                        <input type="hidden" value="eligible_gain_feature_threshold_candidate_id" data-candidate-lab-field="interactive_tree_continuation_tie_break">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>续建说明</span>
+                          <input maxlength="500" autocomplete="off" data-candidate-lab-field="interactive_tree_continuation_reason" placeholder="可选：记录本次人工选择依据">
+                        </label>
+                        <p class="candidate-lab-field-help">
+                          平台只从你明确点名的候选开始，随后按固定目标和并列规则在硬预算内续建；不会自动选择种子、入池、应用、采纳或部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">确认并续建子树</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>树节点候选搜索</strong><small>对指定节点做全特征或指定特征阈值试算</small></span>
                       </summary>
                       <form

@@ -61,6 +61,7 @@ from marvis.packs.strategy.automatic_tree_leaf_tools import (
     run_materialize_automatic_tree_leaf_fragment,
 )
 from marvis.packs.strategy.interactive_tree_tools import (
+    run_auto_continue_interactive_tree,
     run_revise_interactive_tree,
 )
 from marvis.packs.strategy.interactive_tree_split_search_tools import (
@@ -906,6 +907,12 @@ def tool_revise_interactive_tree(inputs: dict, ctx) -> dict:
     """Publish one governed immutable prune revision over an automatic tree."""
 
     return run_revise_interactive_tree(inputs, ctx, _runtime(ctx))
+
+
+def tool_auto_continue_interactive_tree(inputs: dict, ctx) -> dict:
+    """Continue an exact searched frontier under explicit deterministic limits."""
+
+    return run_auto_continue_interactive_tree(inputs, ctx, _runtime(ctx))
 
 
 def tool_search_interactive_tree_split_candidates(inputs: dict, ctx) -> dict:

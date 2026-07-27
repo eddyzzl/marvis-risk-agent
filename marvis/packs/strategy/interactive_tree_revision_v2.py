@@ -58,8 +58,17 @@ _TOP_LEVEL_FIELDS = frozenset(
 _REVISION_ID_RE = re.compile(r"^interactive-tree-revision-[0-9a-f]{32}$")
 _SEMANTIC_TREE_ID_RE = re.compile(r"^interactive-tree-[0-9a-f]{32}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_GENERATED_RULE_ID_RE = re.compile(r"^candidate-rule-[0-9a-f]{32}$")
 _WARNING_CODES = frozenset(
     {"threshold_grouping_unchanged", "split_grouping_unchanged"}
+)
+_MAX_VISIBLE_NODES = 511
+_CONTINUATION_REPLAY_SCHEMA = (
+    "strategy.interactive-tree-continuation-replay.v1"
+)
+_CONTINUATION_OBJECTIVE = "max_gini_gain"
+_CONTINUATION_TIE_BREAK = (
+    "eligible_gain_feature_threshold_candidate_id"
 )
 
 
@@ -216,6 +225,97 @@ def build_replaced_interactive_tree_split_revision_v2(
     )
 
 
+def build_continued_interactive_tree_revision_v2(
+    automatic_tree_asset: Mapping[str, Any],
+    *,
+    node_id: str,
+    search_id: str,
+    search_hash: str,
+    candidate_id: str,
+    feature: str,
+    threshold: float,
+    missing_child: str,
+    controls: Mapping[str, Any],
+    reason: str | None,
+    continuation: Any,
+    parent_revision: Mapping[str, Any] | None = None,
+    ancestor_revisions: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Build one immutable, explicitly seeded bounded subtree continuation."""
+
+    source = validate_automatic_tree_asset(automatic_tree_asset)
+    parent = _validated_parent(
+        parent_revision,
+        source,
+        ancestor_revisions=ancestor_revisions,
+    )
+    current = _effective_view(source, parent)
+    normalized_node_id = _text(node_id, "node_id")
+    node = current["node_by_id"].get(normalized_node_id)
+    if node is None or normalized_node_id not in set(current["frontier"]):
+        raise InteractiveTreeRevisionV2Error(
+            "automatic continuation requires a current frontier node"
+        )
+    replay = _normalize_continuation_replay(
+        continuation.replay,
+        node_id=normalized_node_id,
+        candidate_id=_text(candidate_id, "candidate_id"),
+    )
+    normalized_controls = _normalize_continuation_controls(controls)
+    if replay["controls"] != normalized_controls:
+        raise InteractiveTreeRevisionV2Error(
+            "automatic continuation controls changed from deterministic replay"
+        )
+    edit = {
+        "operation": "auto_continue_subtree",
+        "node_id": normalized_node_id,
+        "search_id": _text(search_id, "search_id"),
+        "search_hash": _hash(search_hash, "search_hash"),
+        "candidate_id": _text(candidate_id, "candidate_id"),
+        "feature": _text(feature, "feature"),
+        "threshold": _finite_number(threshold, "threshold"),
+        "missing_child": _missing_child(missing_child),
+        "objective": _CONTINUATION_OBJECTIVE,
+        "tie_break": _CONTINUATION_TIE_BREAK,
+        "controls": normalized_controls,
+        "replay": replay,
+        "reason": _reason(reason),
+    }
+    target = next(
+        (
+            item
+            for item in continuation.nodes
+            if item.get("node_id") == normalized_node_id
+        ),
+        None,
+    )
+    if (
+        target is None
+        or target.get("kind") != "split"
+        or target.get("feature") != edit["feature"]
+        or float(target.get("threshold")) != edit["threshold"]
+        or target.get("missing_child") != edit["missing_child"]
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "automatic continuation seed changed from the generated root"
+        )
+    payload = _assemble(
+        source,
+        parent=parent,
+        edit=edit,
+        nodes=[deepcopy(item) for item in continuation.nodes],
+        visible=tuple(continuation.visible_node_ids),
+        frontier=tuple(continuation.frontier_node_ids),
+        checks=_checks([]),
+    )
+    return validate_interactive_tree_revision_v2(
+        payload,
+        source,
+        parent_revision=parent,
+        ancestor_revisions=ancestor_revisions,
+    )
+
+
 def build_pruned_interactive_tree_revision_v2(
     automatic_tree_asset: Mapping[str, Any],
     *,
@@ -249,12 +349,12 @@ def build_pruned_interactive_tree_revision_v2(
         raise InteractiveTreeRevisionV2Error(
             "interactive-tree prune node is already a frontier leaf"
         )
-    frontier = _pruned_frontier(
-        source,
+    frontier = _pruned_frontier_from_current(
+        current,
         current_frontier=tuple(current["frontier"]),
         node_id=normalized_node_id,
     )
-    visible = _visible_node_ids(source, frontier=frontier)
+    visible = _visible_node_ids_from_current(current, frontier=frontier)
     nodes = [
         deepcopy(current["node_by_id"][item])
         for item in visible
@@ -340,7 +440,28 @@ def validate_interactive_tree_revision_v2(
         raise InteractiveTreeRevisionV2Error(
             "interactive-tree v2 edit is not canonical"
         )
-    tree = _normalize_tree(payload["tree"], source=source)
+    source_node_ids = {
+        item["node_id"]
+        for item in source["tree_result"]["tree"]["nodes"]
+    }
+    parent_has_generated_nodes = (
+        parent is not None
+        and parent["schema_version"]
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+        and any(
+            item["node_id"] not in source_node_ids
+            for item in parent["tree"]["nodes"]
+        )
+    )
+    allow_generated = (
+        edit["operation"] == "auto_continue_subtree"
+        or parent_has_generated_nodes
+    )
+    tree = _normalize_tree(
+        payload["tree"],
+        source=source,
+        allow_generated=allow_generated,
+    )
     if payload["tree"] != tree:
         raise InteractiveTreeRevisionV2Error(
             "interactive-tree v2 tree is not canonical"
@@ -353,7 +474,10 @@ def validate_interactive_tree_revision_v2(
         source=source,
         parent=parent,
     )
-    _require_frontier_cover(source, tuple(tree["frontier_node_ids"]))
+    if allow_generated:
+        _require_frontier_cover_from_tree(tree)
+    else:
+        _require_frontier_cover(source, tuple(tree["frontier_node_ids"]))
     _require_metric_conservation(tree)
     _require_split_diagnostics(tree, source=source)
 
@@ -630,6 +754,7 @@ def _normalize_tree(
     value: object,
     *,
     source: Mapping[str, Any],
+    allow_generated: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise InteractiveTreeRevisionV2Error("v2 tree must be an object")
@@ -653,6 +778,15 @@ def _normalize_tree(
     nodes_value = value["nodes"]
     if not isinstance(nodes_value, list):
         raise InteractiveTreeRevisionV2Error("v2 tree nodes must be a list")
+    if allow_generated:
+        return _normalize_generated_tree(
+            tree_hash=tree_hash,
+            root_id=root_id,
+            visible=visible,
+            frontier=frontier,
+            nodes_value=nodes_value,
+            source=source,
+        )
     source_by_id = {
         item["node_id"]: item
         for item in source["tree_result"]["tree"]["nodes"]
@@ -800,6 +934,255 @@ def _normalize_tree(
     }
 
 
+def _normalize_generated_tree(
+    *,
+    tree_hash: str,
+    root_id: str,
+    visible: list[str],
+    frontier: list[str],
+    nodes_value: list[object],
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    if (
+        not visible
+        or len(visible) > _MAX_VISIBLE_NODES
+        or len(visible) != len(set(visible))
+        or not frontier
+        or len(frontier) != len(set(frontier))
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 generated topology exceeds its structural bounds"
+        )
+    source_by_id = {
+        item["node_id"]: item
+        for item in source["tree_result"]["tree"]["nodes"]
+    }
+    medians = source["tree_result"]["preprocessing"]["medians"]
+    allowed_features = set(
+        source["tree_result"]["training"]["feature_order"]
+    )
+    nodes: list[dict[str, Any]] = []
+    paths: set[tuple[str, ...]] = set()
+    for raw in nodes_value:
+        if not isinstance(raw, Mapping):
+            raise InteractiveTreeRevisionV2Error(
+                "v2 generated tree node must be an object"
+            )
+        node_id = _text(raw.get("node_id"), "node.node_id")
+        kind = raw.get("kind")
+        if kind not in {"split", "leaf"}:
+            raise InteractiveTreeRevisionV2Error(
+                "v2 generated node kind is invalid"
+            )
+        common = {
+            "node_id",
+            "kind",
+            "depth",
+            "path",
+            "condition",
+            "metrics",
+        }
+        expected = (
+            common | {"rule_id"}
+            if kind == "leaf"
+            else common
+            | {
+                "feature",
+                "threshold",
+                "base_threshold",
+                "missing_child",
+                "left_child_id",
+                "right_child_id",
+                "direction_diagnostic",
+            }
+        )
+        _exact_fields(raw, expected, f"interactive-tree v2 node {node_id}")
+        path_value = raw["path"]
+        if (
+            not isinstance(path_value, list)
+            or any(item not in {"left", "right"} for item in path_value)
+            or isinstance(raw["depth"], bool)
+            or not isinstance(raw["depth"], int)
+            or raw["depth"] != len(path_value)
+            or tuple(path_value) in paths
+        ):
+            raise InteractiveTreeRevisionV2Error(
+                "v2 generated node path is invalid"
+            )
+        paths.add(tuple(path_value))
+        base = source_by_id.get(node_id)
+        if base is not None and (
+            base["depth"] != raw["depth"]
+            or base["path"] != path_value
+            or (
+                base["kind"] != kind
+                and not (base["kind"] == "leaf" and kind == "split")
+            )
+        ):
+            raise InteractiveTreeRevisionV2Error(
+                "v2 generated topology changed a base node identity"
+            )
+        node = {
+            "node_id": node_id,
+            "kind": kind,
+            "depth": raw["depth"],
+            "path": list(path_value),
+            "condition": canonicalize_expression(raw["condition"]),
+            "metrics": _json_object(raw["metrics"], "node.metrics"),
+        }
+        if kind == "leaf":
+            rule_id = _text(raw["rule_id"], "node.rule_id")
+            if base is not None and (
+                base["kind"] != "leaf" or rule_id != base["rule_id"]
+            ):
+                raise InteractiveTreeRevisionV2Error(
+                    "v2 base leaf semantics changed"
+                )
+            if (
+                base is None
+                and _GENERATED_RULE_ID_RE.fullmatch(rule_id) is None
+            ):
+                raise InteractiveTreeRevisionV2Error(
+                    "v2 generated leaf rule identity changed"
+                )
+            node["rule_id"] = rule_id
+        else:
+            feature = _text(raw["feature"], "node.feature")
+            threshold = _finite_number(raw["threshold"], "node.threshold")
+            base_threshold = _finite_number(
+                raw["base_threshold"],
+                "node.base_threshold",
+            )
+            if feature not in allowed_features or feature not in medians:
+                raise InteractiveTreeRevisionV2Error(
+                    "v2 generated split feature is outside the universe"
+                )
+            if (
+                base is not None
+                and base["kind"] == "split"
+                and base_threshold != float(base["threshold"])
+            ):
+                raise InteractiveTreeRevisionV2Error(
+                    "v2 base split threshold identity changed"
+                )
+            missing = (
+                "left"
+                if float(medians[feature]) <= threshold
+                else "right"
+            )
+            if raw["missing_child"] != missing:
+                raise InteractiveTreeRevisionV2Error(
+                    "v2 generated split missing route changed"
+                )
+            node.update(
+                {
+                    "feature": feature,
+                    "threshold": threshold,
+                    "base_threshold": base_threshold,
+                    "missing_child": missing,
+                    "left_child_id": _text(
+                        raw["left_child_id"],
+                        "node.left_child_id",
+                    ),
+                    "right_child_id": _text(
+                        raw["right_child_id"],
+                        "node.right_child_id",
+                    ),
+                    "direction_diagnostic": _json_object(
+                        raw["direction_diagnostic"],
+                        "node.direction_diagnostic",
+                    ),
+                }
+            )
+        nodes.append(node)
+    if [item["node_id"] for item in nodes] != visible:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 generated nodes do not match visible_node_ids"
+        )
+    by_id = {item["node_id"]: item for item in nodes}
+    if len(by_id) != len(nodes) or root_id not in by_id:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 generated node identity is invalid"
+        )
+    frontier_set = set(frontier)
+    expected_visible: list[str] = []
+    expected_frontier: list[str] = []
+
+    def visit(node_id: str, expected_path: tuple[str, ...]) -> None:
+        node = by_id.get(node_id)
+        if node is None or tuple(node["path"]) != expected_path:
+            raise InteractiveTreeRevisionV2Error(
+                "v2 generated child topology is invalid"
+            )
+        expected_visible.append(node_id)
+        if node_id in frontier_set:
+            expected_frontier.append(node_id)
+            return
+        if node["kind"] != "split":
+            raise InteractiveTreeRevisionV2Error(
+                "v2 generated leaf is missing from the frontier"
+            )
+        visit(node["left_child_id"], (*expected_path, "left"))
+        visit(node["right_child_id"], (*expected_path, "right"))
+
+    visit(root_id, ())
+    if expected_visible != visible or expected_frontier != frontier:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 generated traversal order is not canonical"
+        )
+    expected_conditions = {
+        root_id: deepcopy(by_id[root_id]["condition"])
+    }
+
+    def derive(node_id: str) -> None:
+        node = by_id[node_id]
+        if node_id in frontier_set:
+            return
+        left_clause, right_clause = _branch_clauses(
+            node["feature"],
+            node["threshold"],
+            node["missing_child"],
+        )
+        for child_id, clause in (
+            (node["left_child_id"], left_clause),
+            (node["right_child_id"], right_clause),
+        ):
+            expression = (
+                clause
+                if node["path"] == []
+                else {
+                    "op": "and",
+                    "args": (
+                        [
+                            *expected_conditions[node_id]["args"],
+                            clause,
+                        ]
+                        if expected_conditions[node_id].get("op") == "and"
+                        else [expected_conditions[node_id], clause]
+                    ),
+                }
+            )
+            expected_conditions[child_id] = canonicalize_expression(
+                expression
+            )
+            derive(child_id)
+
+    derive(root_id)
+    for node in nodes:
+        if node["condition"] != expected_conditions[node["node_id"]]:
+            raise InteractiveTreeRevisionV2Error(
+                "v2 generated node condition changed from its topology: "
+                f"{node['node_id']}"
+            )
+    return {
+        "tree_hash": tree_hash,
+        "root_node_id": root_id,
+        "visible_node_ids": visible,
+        "frontier_node_ids": frontier,
+        "nodes": nodes,
+    }
+
+
 def _require_edit_transition(
     edit: Mapping[str, Any],
     *,
@@ -811,6 +1194,13 @@ def _require_edit_transition(
     operation = edit["operation"]
     node_id = edit["node_id"]
     current_node = current["node_by_id"].get(node_id)
+    if operation == "auto_continue_subtree":
+        _require_continuation_transition(
+            edit,
+            tree=tree,
+            current=current,
+        )
+        return
     if current_node is None or current_node["kind"] != "split":
         raise InteractiveTreeRevisionV2Error(
             "v2 edit target is not a current visible split"
@@ -826,12 +1216,15 @@ def _require_edit_transition(
             raise InteractiveTreeRevisionV2Error(
                 "v2 prune requires a v2 parent"
             )
-        expected_frontier = _pruned_frontier(
-            source,
+        expected_frontier = _pruned_frontier_from_current(
+            current,
             current_frontier=tuple(current["frontier"]),
             node_id=node_id,
         )
-        expected_visible = _visible_node_ids(source, frontier=expected_frontier)
+        expected_visible = _visible_node_ids_from_current(
+            current,
+            frontier=expected_frontier,
+        )
         if (
             tuple(tree["frontier_node_ids"]) != expected_frontier
             or tuple(tree["visible_node_ids"]) != expected_visible
@@ -914,6 +1307,114 @@ def _require_edit_transition(
             raise InteractiveTreeRevisionV2Error(
                 f"v2 split edit changed target {field}"
             )
+
+
+def _require_continuation_transition(
+    edit: Mapping[str, Any],
+    *,
+    tree: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> None:
+    node_id = edit["node_id"]
+    current_node = current["node_by_id"].get(node_id)
+    if current_node is None or node_id not in set(current["frontier"]):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation target is not a current frontier"
+        )
+    tree_by_id = {item["node_id"]: item for item in tree["nodes"]}
+    target = tree_by_id.get(node_id)
+    if (
+        target is None
+        or target["kind"] != "split"
+        or target["feature"] != edit["feature"]
+        or target["threshold"] != edit["threshold"]
+        or target["missing_child"] != edit["missing_child"]
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation root changed from the selected candidate"
+        )
+    for field in ("node_id", "depth", "path", "condition", "metrics"):
+        if target[field] != current_node[field]:
+            raise InteractiveTreeRevisionV2Error(
+                f"v2 continuation changed target {field}"
+            )
+    expected_base_threshold = (
+        float(current_node["base_threshold"])
+        if current_node["kind"] == "split"
+        else edit["threshold"]
+    )
+    if target["base_threshold"] != expected_base_threshold:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation root base threshold changed"
+        )
+    target_path = tuple(current_node["path"])
+    expected_outside_frontier = [
+        item
+        for item in current["frontier"]
+        if tuple(current["node_by_id"][item]["path"])[: len(target_path)]
+        != target_path
+    ]
+    new_subtree_frontier = [
+        item
+        for item in tree["frontier_node_ids"]
+        if tuple(tree_by_id[item]["path"])[: len(target_path)] == target_path
+    ]
+    if (
+        not new_subtree_frontier
+        or list(tree["frontier_node_ids"]) != sorted(
+            [*expected_outside_frontier, *new_subtree_frontier],
+            key=lambda item: _path_sort_key(tree_by_id[item]["path"]),
+        )
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation frontier changed outside its target subtree"
+        )
+    for current_id in current["visible"]:
+        current_item = current["node_by_id"][current_id]
+        path = tuple(current_item["path"])
+        inside = (
+            len(path) >= len(target_path)
+            and path[: len(target_path)] == target_path
+        )
+        if inside:
+            continue
+        if tree_by_id.get(current_id) != current_item:
+            raise InteractiveTreeRevisionV2Error(
+                "v2 continuation changed a node outside its target subtree"
+            )
+    replay = edit["replay"]
+    generated = [
+        item
+        for item in tree["nodes"]
+        if tuple(item["path"])[: len(target_path)] == target_path
+    ]
+    current_ids = set(current["node_by_id"])
+    for item in generated:
+        if item["node_id"] == node_id:
+            continue
+        if (
+            item["node_id"] in current_ids
+            or not item["node_id"].startswith("node-")
+            or (
+                item["kind"] == "split"
+                and item["base_threshold"] != item["threshold"]
+            )
+        ):
+            raise InteractiveTreeRevisionV2Error(
+                "v2 continuation generated node identity changed"
+            )
+    if (
+        replay["visible_node_count"] != len(tree["visible_node_ids"])
+        or replay["frontier_count"] != len(tree["frontier_node_ids"])
+        or replay["observed"]["generated_node_count"] != len(generated)
+        or replay["observed"]["generated_split_count"]
+        != sum(item["kind"] == "split" for item in generated)
+        or replay["observed"]["generated_leaf_count"]
+        != len(new_subtree_frontier)
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation replay counts changed from its topology"
+        )
 
 
 def _derive_fragments(
@@ -1128,6 +1629,60 @@ def _pruned_frontier(
     return tuple(item["node_id"] for item in nodes if item["node_id"] in selected)
 
 
+def _pruned_frontier_from_current(
+    current: Mapping[str, Any],
+    *,
+    current_frontier: tuple[str, ...],
+    node_id: str,
+) -> tuple[str, ...]:
+    path = tuple(current["node_by_id"][node_id]["path"])
+    descendants = {
+        item
+        for item in current_frontier
+        if tuple(current["node_by_id"][item]["path"])[: len(path)] == path
+    }
+    if not descendants:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 prune does not cover any current frontier node"
+        )
+    selected = (set(current_frontier) - descendants) | {node_id}
+    return tuple(
+        item
+        for item in current["visible"]
+        if item in selected
+    )
+
+
+def _visible_node_ids_from_current(
+    current: Mapping[str, Any],
+    *,
+    frontier: tuple[str, ...],
+) -> tuple[str, ...]:
+    by_id = current["node_by_id"]
+    frontier_set = set(frontier)
+    visible: list[str] = []
+    root_id = next(
+        item["node_id"]
+        for item in current["nodes"]
+        if item["path"] == []
+    )
+
+    def visit(node_id: str) -> None:
+        visible.append(node_id)
+        if node_id in frontier_set:
+            return
+        node = by_id[node_id]
+        if node["kind"] != "split":
+            raise InteractiveTreeRevisionV2Error(
+                "v2 frontier does not cover the current topology"
+            )
+        visit(node["left_child_id"])
+        visit(node["right_child_id"])
+
+    visit(root_id)
+    return tuple(visible)
+
+
 def _require_frontier_cover(
     source: Mapping[str, Any],
     frontier: tuple[str, ...],
@@ -1151,6 +1706,40 @@ def _require_frontier_cover(
             raise InteractiveTreeRevisionV2Error(
                 "v2 frontier does not cover each base leaf exactly once"
             )
+
+
+def _require_frontier_cover_from_tree(tree: Mapping[str, Any]) -> None:
+    by_id = {item["node_id"]: item for item in tree["nodes"]}
+    frontier = tuple(tree["frontier_node_ids"])
+    if not frontier or len(frontier) != len(set(frontier)):
+        raise InteractiveTreeRevisionV2Error("v2 frontier is invalid")
+    visited: list[str] = []
+
+    def visit(node_id: str) -> None:
+        node = by_id.get(node_id)
+        if node is None:
+            raise InteractiveTreeRevisionV2Error(
+                "v2 frontier references an absent node"
+            )
+        if node_id in set(frontier):
+            visited.append(node_id)
+            return
+        if node["kind"] != "split":
+            raise InteractiveTreeRevisionV2Error(
+                "v2 frontier does not cover the effective topology"
+            )
+        visit(node["left_child_id"])
+        visit(node["right_child_id"])
+
+    visit(tree["root_node_id"])
+    if tuple(visited) != frontier:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 frontier traversal is not canonical"
+        )
+
+
+def _path_sort_key(value: Sequence[str]) -> tuple[int, ...]:
+    return tuple(0 if item == "left" else 1 for item in value)
 
 
 def _require_metric_conservation(tree: Mapping[str, Any]) -> None:
@@ -1418,6 +2007,22 @@ def _normalize_edit(value: object) -> dict[str, Any]:
     }
     if operation == "replace_split_feature":
         expected_fields |= {"previous_feature", "feature"}
+    elif operation == "auto_continue_subtree":
+        expected_fields = {
+            "operation",
+            "node_id",
+            "search_id",
+            "search_hash",
+            "candidate_id",
+            "feature",
+            "threshold",
+            "missing_child",
+            "objective",
+            "tie_break",
+            "controls",
+            "replay",
+            "reason",
+        }
     _exact_fields(
         value,
         expected_fields,
@@ -1427,8 +2032,47 @@ def _normalize_edit(value: object) -> dict[str, Any]:
         "adjust_split_threshold",
         "replace_split_feature",
         "prune_subtree",
+        "auto_continue_subtree",
     }:
         raise InteractiveTreeRevisionV2Error("v2 edit operation is invalid")
+    if operation == "auto_continue_subtree":
+        candidate_id = _text(value["candidate_id"], "edit.candidate_id")
+        normalized = {
+            "operation": operation,
+            "node_id": _text(value["node_id"], "edit.node_id"),
+            "search_id": _text(value["search_id"], "edit.search_id"),
+            "search_hash": _hash(value["search_hash"], "edit.search_hash"),
+            "candidate_id": candidate_id,
+            "feature": _text(value["feature"], "edit.feature"),
+            "threshold": _finite_number(
+                value["threshold"],
+                "edit.threshold",
+            ),
+            "missing_child": _missing_child(value["missing_child"]),
+            "objective": _text(value["objective"], "edit.objective"),
+            "tie_break": _text(value["tie_break"], "edit.tie_break"),
+            "controls": _normalize_continuation_controls(value["controls"]),
+            "replay": _normalize_continuation_replay(
+                value["replay"],
+                node_id=_text(value["node_id"], "edit.node_id"),
+                candidate_id=candidate_id,
+            ),
+            "reason": _reason(value["reason"]),
+        }
+        if (
+            normalized["objective"] != _CONTINUATION_OBJECTIVE
+            or normalized["tie_break"] != _CONTINUATION_TIE_BREAK
+            or normalized["replay"]["objective"]
+            != normalized["objective"]
+            or normalized["replay"]["tie_break"]
+            != normalized["tie_break"]
+            or normalized["replay"]["controls"]
+            != normalized["controls"]
+        ):
+            raise InteractiveTreeRevisionV2Error(
+                "v2 continuation decision policy changed"
+            )
+        return normalized
     if operation in {
         "adjust_split_threshold",
         "replace_split_feature",
@@ -1475,6 +2119,281 @@ def _normalize_edit(value: object) -> dict[str, Any]:
         normalized["previous_feature"] = previous_feature
         normalized["feature"] = feature
     return normalized
+
+
+def _normalize_continuation_controls(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation controls must be an object"
+        )
+    _exact_fields(
+        value,
+        {
+            "features",
+            "max_additional_depth",
+            "min_gini_gain",
+            "max_generated_nodes",
+            "max_thresholds_per_feature",
+            "max_row_evaluations",
+        },
+        "v2 continuation controls",
+    )
+    features = _text_sequence(value["features"], "controls.features")
+    if (
+        not features
+        or len(features) > 50
+        or features != sorted(features)
+        or len(features) != len(set(features))
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation features are not canonical"
+        )
+    minimum_gain = _finite_number(
+        value["min_gini_gain"],
+        "controls.min_gini_gain",
+    )
+    if not 0 <= minimum_gain <= 0.5:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation min_gini_gain is invalid"
+        )
+    nodes = _bounded_positive_int(
+        value["max_generated_nodes"],
+        "controls.max_generated_nodes",
+        maximum=127,
+    )
+    if nodes < 3:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation requires at least three generated nodes"
+        )
+    return {
+        "features": features,
+        "max_additional_depth": _bounded_positive_int(
+            value["max_additional_depth"],
+            "controls.max_additional_depth",
+            maximum=6,
+        ),
+        "min_gini_gain": minimum_gain,
+        "max_generated_nodes": nodes,
+        "max_thresholds_per_feature": _bounded_positive_int(
+            value["max_thresholds_per_feature"],
+            "controls.max_thresholds_per_feature",
+            maximum=20,
+        ),
+        "max_row_evaluations": _bounded_positive_int(
+            value["max_row_evaluations"],
+            "controls.max_row_evaluations",
+            maximum=20_000_000,
+        ),
+    }
+
+
+def _normalize_continuation_replay(
+    value: object,
+    *,
+    node_id: str,
+    candidate_id: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation replay must be an object"
+        )
+    expected_fields = {
+        "schema_version",
+        "producer_version",
+        "source_tree_id",
+        "node_id",
+        "seed_candidate_id",
+        "objective",
+        "tie_break",
+        "controls",
+        "observed",
+        "source_row_count",
+        "visible_node_count",
+        "frontier_count",
+        "exactly_once",
+        "current_tree_replayed",
+        "minimum_leaf_constraints_passed",
+        "frontier_conditions_evaluator_equivalent",
+        "assignment_hash",
+        "result_hash",
+    }
+    _exact_fields(value, expected_fields, "v2 continuation replay")
+    observed = value["observed"]
+    if not isinstance(observed, Mapping):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation observed evidence must be an object"
+        )
+    _exact_fields(
+        observed,
+        {
+            "generated_node_count",
+            "generated_split_count",
+            "generated_leaf_count",
+            "row_evaluations",
+            "stop_reasons",
+        },
+        "v2 continuation observed evidence",
+    )
+    stop_reasons = observed["stop_reasons"]
+    if (
+        not isinstance(stop_reasons, Mapping)
+        or any(
+            not isinstance(key, str)
+            or not key
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+            for key, count in stop_reasons.items()
+        )
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation stop reasons are invalid"
+        )
+    controls = _normalize_continuation_controls(value["controls"])
+    normalized_observed = {
+        "generated_node_count": _bounded_positive_int(
+            observed["generated_node_count"],
+            "observed.generated_node_count",
+            maximum=controls["max_generated_nodes"],
+        ),
+        "generated_split_count": _bounded_positive_int(
+            observed["generated_split_count"],
+            "observed.generated_split_count",
+            maximum=controls["max_generated_nodes"],
+        ),
+        "generated_leaf_count": _bounded_positive_int(
+            observed["generated_leaf_count"],
+            "observed.generated_leaf_count",
+            maximum=controls["max_generated_nodes"],
+        ),
+        "row_evaluations": _bounded_nonnegative_int(
+            observed["row_evaluations"],
+            "observed.row_evaluations",
+            maximum=controls["max_row_evaluations"],
+        ),
+        "stop_reasons": {
+            key: int(stop_reasons[key])
+            for key in sorted(stop_reasons)
+        },
+    }
+    normalized = {
+        "schema_version": value["schema_version"],
+        "producer_version": value["producer_version"],
+        "source_tree_id": _text(
+            value["source_tree_id"],
+            "replay.source_tree_id",
+        ),
+        "node_id": _text(value["node_id"], "replay.node_id"),
+        "seed_candidate_id": _text(
+            value["seed_candidate_id"],
+            "replay.seed_candidate_id",
+        ),
+        "objective": _text(value["objective"], "replay.objective"),
+        "tie_break": _text(value["tie_break"], "replay.tie_break"),
+        "controls": controls,
+        "observed": normalized_observed,
+        "source_row_count": _bounded_positive_int(
+            value["source_row_count"],
+            "replay.source_row_count",
+            maximum=2_147_483_647,
+        ),
+        "visible_node_count": _bounded_positive_int(
+            value["visible_node_count"],
+            "replay.visible_node_count",
+            maximum=_MAX_VISIBLE_NODES,
+        ),
+        "frontier_count": _bounded_positive_int(
+            value["frontier_count"],
+            "replay.frontier_count",
+            maximum=_MAX_VISIBLE_NODES,
+        ),
+        "exactly_once": value["exactly_once"],
+        "current_tree_replayed": value["current_tree_replayed"],
+        "minimum_leaf_constraints_passed": value[
+            "minimum_leaf_constraints_passed"
+        ],
+        "frontier_conditions_evaluator_equivalent": value[
+            "frontier_conditions_evaluator_equivalent"
+        ],
+        "assignment_hash": _hash(
+            value["assignment_hash"],
+            "replay.assignment_hash",
+        ),
+    }
+    if (
+        normalized["schema_version"] != _CONTINUATION_REPLAY_SCHEMA
+        or normalized["producer_version"]
+        != "strategy.interactive-tree-continuation-replay/1"
+        or normalized["node_id"] != node_id
+        or normalized["seed_candidate_id"] != candidate_id
+        or normalized["objective"] != _CONTINUATION_OBJECTIVE
+        or normalized["tie_break"] != _CONTINUATION_TIE_BREAK
+        or any(
+            normalized[field] is not True
+            for field in (
+                "exactly_once",
+                "current_tree_replayed",
+                "minimum_leaf_constraints_passed",
+                "frontier_conditions_evaluator_equivalent",
+            )
+        )
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation replay claims changed"
+        )
+    if (
+        normalized_observed["generated_split_count"]
+        + normalized_observed["generated_leaf_count"]
+        != normalized_observed["generated_node_count"]
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation replay node counts do not conserve"
+        )
+    result = {
+        **normalized,
+        "result_hash": _hash(value["result_hash"], "replay.result_hash"),
+    }
+    if result["result_hash"] != _sha256(normalized):
+        raise InteractiveTreeRevisionV2Error(
+            "v2 continuation replay hash changed"
+        )
+    return result
+
+
+def _missing_child(value: object) -> str:
+    if value not in {"left", "right"}:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 split missing_child is invalid"
+        )
+    return str(value)
+
+
+def _bounded_positive_int(
+    value: object,
+    name: str,
+    *,
+    maximum: int,
+) -> int:
+    result = _bounded_nonnegative_int(value, name, maximum=maximum)
+    if result < 1:
+        raise InteractiveTreeRevisionV2Error(f"{name} must be positive")
+    return result
+
+
+def _bounded_nonnegative_int(
+    value: object,
+    name: str,
+    *,
+    maximum: int,
+) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > maximum
+    ):
+        raise InteractiveTreeRevisionV2Error(f"{name} is outside its bounds")
+    return value
 
 
 def _validated_parent(

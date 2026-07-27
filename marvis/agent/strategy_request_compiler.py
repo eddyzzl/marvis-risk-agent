@@ -74,6 +74,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "automatic_tree_apply",
     "automatic_tree_leaf_materialization",
     "interactive_tree_split_search",
+    "interactive_tree_auto_continuation",
     "interactive_tree_revision",
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
@@ -1081,6 +1082,20 @@ _INTERACTIVE_TREE_SOURCE_ID_TOKEN_RE = re.compile(
 _INTERACTIVE_TREE_NODE_ID_RE = re.compile(r"^node-[0-9a-f]{20}$")
 _INTERACTIVE_TREE_NODE_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])node-[0-9a-f]{20}(?![A-Za-z0-9_-])"
+)
+_INTERACTIVE_TREE_SPLIT_SEARCH_ID_RE = re.compile(
+    r"^interactive-tree-split-search-[0-9a-f]{32}$"
+)
+_INTERACTIVE_TREE_SPLIT_SEARCH_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])interactive-tree-split-search-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
+_INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_RE = re.compile(
+    r"^interactive-tree-split-candidate-[0-9a-f]{32}$"
+)
+_INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])interactive-tree-split-candidate-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
 )
 _INTERACTIVE_TREE_REVISION_ID_RE = re.compile(
     r"^interactive-tree-revision-[0-9a-f]{32}$"
@@ -4062,6 +4077,10 @@ def _validate_standard_workflow_payload(
             normalized = _validate_interactive_tree_split_search_inputs(
                 raw_inputs
             )
+        elif workflow == "interactive_tree_auto_continuation":
+            normalized = _validate_interactive_tree_auto_continuation_inputs(
+                raw_inputs
+            )
         elif workflow == "interactive_tree_frontier_group_materialization":
             normalized = (
                 _validate_interactive_tree_frontier_group_materialization_inputs(
@@ -6109,6 +6128,104 @@ def _validate_interactive_tree_split_search_inputs(
                 f"{workflow} {field} 必须是 1 到 {maximum} 的整数。"
             )
         normalized[field] = value
+    return normalized
+
+
+def _validate_interactive_tree_auto_continuation_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate an exact search/candidate pair and every hard control."""
+
+    workflow = "interactive_tree_auto_continuation"
+    allowed = {
+        "search_id",
+        "candidate_id",
+        "max_additional_depth",
+        "min_gini_gain",
+        "max_generated_nodes",
+        "max_thresholds_per_feature",
+        "max_row_evaluations",
+        "objective",
+        "tie_break",
+        "reason",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    required = allowed - {"reason"}
+    missing = sorted(required - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    search_id = _required_text(
+        inputs["search_id"],
+        name=f"{workflow} search_id",
+    )
+    candidate_id = _required_text(
+        inputs["candidate_id"],
+        name=f"{workflow} candidate_id",
+    )
+    if _INTERACTIVE_TREE_SPLIT_SEARCH_ID_RE.fullmatch(search_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} search_id 格式无效。"
+        )
+    if (
+        _INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_RE.fullmatch(candidate_id)
+        is None
+    ):
+        raise _DraftValidationError(
+            f"{workflow} candidate_id 格式无效。"
+        )
+    normalized: dict[str, Any] = {
+        "search_id": search_id,
+        "candidate_id": candidate_id,
+    }
+    for field, minimum, maximum in (
+        ("max_additional_depth", 1, 6),
+        ("max_generated_nodes", 3, 127),
+        ("max_thresholds_per_feature", 1, 20),
+        ("max_row_evaluations", 1, 20_000_000),
+    ):
+        value = inputs[field]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not minimum <= value <= maximum
+        ):
+            raise _DraftValidationError(
+                f"{workflow} {field} 必须是 {minimum} 到 {maximum} 的整数。"
+            )
+        normalized[field] = value
+    gain = inputs["min_gini_gain"]
+    if (
+        isinstance(gain, bool)
+        or not isinstance(gain, (int, float))
+        or not math.isfinite(float(gain))
+        or not 0 <= float(gain) <= 0.5
+    ):
+        raise _DraftValidationError(
+            f"{workflow} min_gini_gain 必须是 0 到 0.5 的有限数值。"
+        )
+    normalized["min_gini_gain"] = float(gain)
+    objective = _required_text(
+        inputs["objective"],
+        name=f"{workflow} objective",
+    )
+    tie_break = _required_text(
+        inputs["tie_break"],
+        name=f"{workflow} tie_break",
+    )
+    if objective != "max_gini_gain" or tie_break != (
+        "eligible_gain_feature_threshold_candidate_id"
+    ):
+        raise _DraftValidationError(
+            f"{workflow} objective 或 tie_break 不符合固定确定性策略。"
+        )
+    normalized["objective"] = objective
+    normalized["tie_break"] = tie_break
+    if "reason" in inputs:
+        normalized["reason"] = _interactive_tree_revision_reason(
+            inputs["reason"]
+        )
     return normalized
 
 
@@ -9736,6 +9853,8 @@ def _ground_refinement_request(
         return _ground_automatic_tree_leaf_materialization(utterance, result)
     if draft.workflow == "interactive_tree_split_search":
         return _ground_interactive_tree_split_search(utterance, result)
+    if draft.workflow == "interactive_tree_auto_continuation":
+        return _ground_interactive_tree_auto_continuation(utterance, result)
     if draft.workflow == "interactive_tree_revision":
         return _ground_interactive_tree_revision(utterance, result)
     if draft.workflow == "interactive_tree_frontier_group_materialization":
@@ -14168,6 +14287,120 @@ def _ground_interactive_tree_split_search(
     return result
 
 
+def _ground_interactive_tree_auto_continuation(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Ground one explicitly seeded and fully bounded subtree continuation."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if re.search(
+        r"(?:不要|别|无需|仅讨论|以后|将来|是否|能否|可否|"
+        r"\b(?:not|do\s+not|don't|later|future|whether|can\s+you)\b)",
+        utterance,
+        re.IGNORECASE,
+    ) or re.search(
+        r"(?:自动续建|自动继续|继续建树|续建子树|继续生长|"
+        r"auto[- ]?continue|continue\s+(?:the\s+)?tree)",
+        utterance,
+        re.IGNORECASE,
+    ) is None:
+        return _clarification(
+            "请用当前、肯定的单步命令明确要求自动续建交互树子树。",
+            code="interactive_tree_auto_continuation_intent_required",
+            fields=("continuation_intent",),
+        )
+    if re.search(
+        r"(?:加入策略池|入池|应用|采纳|部署|投产|生成报告|出报告|"
+        r"同时修改|顺便调整|再搜索|add\s+to\s+pool|adopt|deploy|"
+        r"generate\s+(?:a\s+)?report|and\s+apply)",
+        utterance,
+        re.IGNORECASE,
+    ):
+        return _clarification(
+            "本轮只允许从已明确选择的候选续建子树；入池、应用、报告、"
+            "采纳、部署或另一项树编辑必须拆成后续请求。",
+            code="interactive_tree_auto_continuation_single_step_required",
+            fields=("next_action",),
+        )
+    if re.search(
+        r"(?:artifact|content_hash|evidence_hash|sample_design_ref|"
+        r"dataset_id|workspace_revision|registry_metadata_hash|"
+        r"制品哈希|样本绑定|数据集绑定)",
+        utterance,
+        re.IGNORECASE,
+    ):
+        return _clarification(
+            "artifact、hash、数据集、workspace、样本与父链由平台恢复，"
+            "不能由续建请求覆盖。",
+            code="interactive_tree_auto_continuation_platform_controls_forbidden",
+            fields=("platform_bindings",),
+        )
+    search_matches = tuple(
+        _INTERACTIVE_TREE_SPLIT_SEARCH_ID_TOKEN_RE.finditer(utterance)
+    )
+    candidate_matches = tuple(
+        _INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_TOKEN_RE.finditer(utterance)
+    )
+    search_ids = frozenset(match.group(0) for match in search_matches)
+    candidate_ids = frozenset(match.group(0) for match in candidate_matches)
+    if (
+        len(search_matches) != 1
+        or len(search_ids) != 1
+        or len(candidate_matches) != 1
+        or len(candidate_ids) != 1
+    ):
+        return _clarification(
+            "请逐字提供且只提供一个完整 split search ID 和一个完整"
+            " eligible candidate ID；平台不会按排名、最佳或“第一个”"
+            "替你选择种子候选。",
+            code="interactive_tree_auto_continuation_explicit_ids_required",
+            fields=("search_id", "candidate_id"),
+        )
+    ungrounded: list[str] = []
+    if search_ids != {inputs["search_id"]}:
+        ungrounded.append("search_id")
+    if candidate_ids != {inputs["candidate_id"]}:
+        ungrounded.append("candidate_id")
+    for field in (
+        "max_additional_depth",
+        "min_gini_gain",
+        "max_generated_nodes",
+        "max_thresholds_per_feature",
+        "max_row_evaluations",
+    ):
+        value = inputs[field]
+        tokens = {str(value)}
+        if isinstance(value, float) and value.is_integer():
+            tokens.add(str(int(value)))
+        if not any(
+            re.search(
+                rf"(?<![0-9A-Fa-f.]){re.escape(token)}"
+                r"(?![0-9A-Fa-f.])",
+                utterance,
+            )
+            for token in tokens
+        ):
+            ungrounded.append(field)
+    for field in ("objective", "tie_break"):
+        if inputs[field] not in utterance:
+            ungrounded.append(field)
+    reason = inputs.get("reason")
+    if reason is not None and reason not in utterance:
+        ungrounded.append("reason")
+    if ungrounded:
+        return _clarification(
+            "续建必须逐字给出 search/candidate ID、追加深度、最小 Gini "
+            "增益、节点上限、每特征阈值上限、总行评估预算，以及固定的 "
+            "objective 和 tie_break；平台不会补默认值或代选候选。",
+            code="interactive_tree_auto_continuation_controls_not_grounded",
+            fields=tuple(dict.fromkeys(ungrounded)),
+        )
+    return result
+
+
 def _ground_interactive_tree_revision(
     utterance: str,
     result: StrategyRequestCompilation,
@@ -17508,6 +17741,26 @@ def _standard_workflow_confirmation_text(
             "排名只用于浏览；本步骤不会选择胜者、修改树、入池、应用、"
             "采纳或部署",
         ]
+    elif draft.workflow == "interactive_tree_auto_continuation":
+        details = [
+            "已识别为〔交互树受控自动续建 Workflow〕",
+            f"精确搜索证据：{inputs['search_id']}",
+            f"人工明确选择的种子候选：{inputs['candidate_id']}",
+            f"最大追加深度：{inputs['max_additional_depth']}",
+            f"最小 Gini 增益：{inputs['min_gini_gain']}",
+            f"最大生成节点数：{inputs['max_generated_nodes']}",
+            "每特征最大候选阈值数："
+            f"{inputs['max_thresholds_per_feature']}",
+            f"总行评估预算：{inputs['max_row_evaluations']}",
+            f"固定目标：{inputs['objective']}",
+            f"固定并列规则：{inputs['tie_break']}",
+            "平台将认证搜索、候选、树父链、数据集与 SampleDesign，并在"
+            "硬预算内确定性续建；不会自动挑选种子候选",
+            "结果只是新的 development / unvalidated 不可变修订；不会"
+            "入池、应用、采纳或部署",
+        ]
+        if "reason" in inputs:
+            details.append(f"用户原话续建说明：{inputs['reason']}")
     elif draft.workflow == "interactive_tree_revision":
         operation = inputs["operation"]
         details = [
@@ -18340,6 +18593,17 @@ def _user_prompt(
         "省略 features。不得补默认预算，不得输出平台 artifact/hash、父链、"
         "condition、metrics、dataset/workspace/SampleDesign 或明细，不得同轮"
         "选胜者、改树、自动续建、入池、应用、报告、采纳或部署。"
+        "对于 interactive_tree_auto_continuation，只能逐字抄录用户当前"
+        "肯定命令中唯一完整的 search_id、唯一完整且由用户明确选择的 "
+        "candidate_id、max_additional_depth、min_gini_gain、"
+        "max_generated_nodes、max_thresholds_per_feature、"
+        "max_row_evaluations，以及固定 objective=max_gini_gain 和 "
+        "tie_break=eligible_gain_feature_threshold_candidate_id。所有控制"
+        "都必须由用户明示，不得补默认值，不得按排名、最佳或第一名代选"
+        "种子候选。不得输出或覆盖 source tree、node、artifact/hash、父链、"
+        "condition、metrics、dataset/workspace/SampleDesign；这些由 search "
+        "证据恢复。不得同轮串联改阈值、换变量、剪枝、入池、应用、报告、"
+        "采纳或部署。"
         "对于 interactive_tree_revision，只能逐字抄录用户当前肯定命令中唯一完整的"
         " source_tree_id（candidate-asset- 或 interactive-tree-revision- 后接 32 位"
         "小写十六进制）、唯一完整的 split node_id（node- 后接 20 位小写十六进制）、"

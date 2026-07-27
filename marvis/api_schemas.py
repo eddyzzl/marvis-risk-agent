@@ -226,6 +226,7 @@ ManualStrategyWorkflow = Literal[
     "cross_rule_search",
     "cross_rule_candidate_build_from_search",
     "interactive_tree_split_search",
+    "interactive_tree_auto_continuation",
     "interactive_tree_revision",
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
@@ -556,6 +557,18 @@ ManualInteractiveTreeNodeId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^node-[0-9a-f]{20}$"),
 ]
+ManualInteractiveTreeSplitSearchId = Annotated[
+    StrictStr,
+    StringConstraints(
+        pattern=r"^interactive-tree-split-search-[0-9a-f]{32}$"
+    ),
+]
+ManualInteractiveTreeSplitCandidateId = Annotated[
+    StrictStr,
+    StringConstraints(
+        pattern=r"^interactive-tree-split-candidate-[0-9a-f]{32}$"
+    ),
+]
 ManualInteractiveTreeRevisionId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^interactive-tree-revision-[0-9a-f]{32}$"),
@@ -862,6 +875,30 @@ class ManualInteractiveTreeSplitSearchInputs(BaseModel):
             raise ValueError("selected_features requires features")
         elif len(self.features) != len(set(self.features)):
             raise ValueError("selected_features requires unique features")
+        return self
+
+
+class ManualInteractiveTreeAutoContinuationInputs(BaseModel):
+    """One exact reviewed search candidate plus explicit continuation limits."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    search_id: ManualInteractiveTreeSplitSearchId
+    candidate_id: ManualInteractiveTreeSplitCandidateId
+    max_additional_depth: StrictInt = Field(ge=1, le=6)
+    min_gini_gain: StrictInt | StrictFloat = Field(ge=0, le=0.5)
+    max_generated_nodes: StrictInt = Field(ge=3, le=127)
+    max_thresholds_per_feature: StrictInt = Field(ge=1, le=20)
+    max_row_evaluations: StrictInt = Field(ge=1, le=20_000_000)
+    objective: Literal["max_gini_gain"]
+    tie_break: Literal[
+        "eligible_gain_feature_threshold_candidate_id"
+    ]
+    reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_reason(self) -> Self:
+        _reject_explicit_null_reason(self, reason=self.reason)
         return self
 
 
@@ -1649,6 +1686,9 @@ _MANUAL_INTERACTIVE_TREE_REVISION_INPUTS = TypeAdapter(
 _MANUAL_INTERACTIVE_TREE_SPLIT_SEARCH_INPUTS = TypeAdapter(
     ManualInteractiveTreeSplitSearchInputs
 )
+_MANUAL_INTERACTIVE_TREE_AUTO_CONTINUATION_INPUTS = TypeAdapter(
+    ManualInteractiveTreeAutoContinuationInputs
+)
 _MANUAL_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION_INPUTS = TypeAdapter(
     ManualInteractiveTreeFrontierMaterializationInputs
 )
@@ -1797,6 +1837,11 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "interactive_tree_auto_continuation":
+            _MANUAL_INTERACTIVE_TREE_AUTO_CONTINUATION_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         elif self.workflow == "interactive_tree_frontier_materialization":
             _MANUAL_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION_INPUTS.validate_python(
                 self.workflow_inputs,
@@ -1912,6 +1957,10 @@ class ManualStrategyRequest(BaseModel):
             "candidate_monthly_stability": {"asset_id", "entry_id"},
             "interactive_tree_revision": {"source_tree_id", "node_id"},
             "interactive_tree_split_search": {"source_tree_id", "node_id"},
+            "interactive_tree_auto_continuation": {
+                "search_id",
+                "candidate_id",
+            },
             "interactive_tree_frontier_materialization": {
                 "revision_id",
                 "source_node_id",

@@ -1949,6 +1949,104 @@ STRATEGY_INTERACTIVE_TREE_SPLIT_SEARCH = WorkflowTemplate(
 )
 
 
+STRATEGY_INTERACTIVE_TREE_AUTO_CONTINUATION = WorkflowTemplate(
+    id="strategy_interactive_tree_auto_continuation",
+    title="交互式决策树受控自动续建",
+    goal_patterns=(
+        "从明确选择的节点候选自动续建子树",
+        "在硬预算内继续生长交互式决策树",
+        "auto continue an interactive tree from an exact candidate",
+    ),
+    slots=(
+        SlotSpec("search_id", True, "user", "Exact authenticated split search id"),
+        SlotSpec(
+            "candidate_id",
+            True,
+            "user",
+            "Exact eligible seed candidate selected by the user",
+        ),
+        SlotSpec(
+            "max_additional_depth",
+            True,
+            "user",
+            "Explicit 1..6 additional-depth limit",
+        ),
+        SlotSpec(
+            "min_gini_gain",
+            True,
+            "user",
+            "Explicit finite 0..0.5 minimum Gini gain",
+        ),
+        SlotSpec(
+            "max_generated_nodes",
+            True,
+            "user",
+            "Explicit 3..127 generated-node limit",
+        ),
+        SlotSpec(
+            "max_thresholds_per_feature",
+            True,
+            "user",
+            "Explicit 1..20 threshold-candidate limit per feature",
+        ),
+        SlotSpec(
+            "max_row_evaluations",
+            True,
+            "user",
+            "Explicit 1..20000000 aggregate row-evaluation limit",
+        ),
+        SlotSpec("objective", True, "user", "Fixed max_gini_gain objective"),
+        SlotSpec(
+            "tie_break",
+            True,
+            "user",
+            "Fixed deterministic eligible/gain/feature/threshold/id tie-break",
+        ),
+        SlotSpec(
+            "reason",
+            False,
+            "user",
+            "Optional user-owned audit rationale",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="按明确候选受控续建子树",
+            tool_ref=ToolRef("strategy", "auto_continue_interactive_tree"),
+            inputs_template={
+                "search_id": "{slot:search_id}",
+                "candidate_id": "{slot:candidate_id}",
+                "max_additional_depth": "{slot:max_additional_depth}",
+                "min_gini_gain": "{slot:min_gini_gain}",
+                "max_generated_nodes": "{slot:max_generated_nodes}",
+                "max_thresholds_per_feature": (
+                    "{slot:max_thresholds_per_feature}"
+                ),
+                "max_row_evaluations": "{slot:max_row_evaluations}",
+                "objective": "{slot:objective}",
+                "tie_break": "{slot:tie_break}",
+                "reason": "{slot:reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "revision_id"}),
+                PostCheck("nonempty", {"field": "revision_hash"}),
+                PostCheck("nonempty", {"field": "search_id"}),
+                PostCheck("nonempty", {"field": "candidate_id"}),
+                PostCheck(
+                    "one_of",
+                    {"field": "replay.exactly_once", "values": [True]},
+                ),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
     id="strategy_interactive_tree_revision",
     title="交互式决策树不可变修订",

@@ -1071,7 +1071,12 @@ def _normalize_revision_provenance(value: object) -> dict[str, Any]:
         operations = {"prune_subtree"}
     elif normalized["schema_version"] == _REVISION_ARTIFACT_SCHEMA_VERSION_V2:
         producer = INTERACTIVE_TREE_REVISION_V2_PRODUCER_VERSION
-        operations = {"prune_subtree", "adjust_split_threshold"}
+        operations = {
+            "prune_subtree",
+            "adjust_split_threshold",
+            "replace_split_feature",
+            "auto_continue_subtree",
+        }
     else:
         producer = ""
         operations = set()

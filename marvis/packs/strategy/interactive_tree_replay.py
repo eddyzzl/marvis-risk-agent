@@ -115,6 +115,12 @@ def replay_interactive_tree_split(
                 node_id: _base_effective_node(source_by_id[node_id])
                 for node_id in visible
             }
+    topology_by_id = (
+        current_nodes
+        if parent_revision is not None
+        and parent_revision["schema_version"].endswith(".v2")
+        else source_by_id
+    )
 
     if node_id not in set(visible):
         raise StrategyError(
@@ -124,7 +130,7 @@ def replay_interactive_tree_split(
         raise StrategyError(
             "interactive-tree threshold node is already a frontier leaf"
         )
-    source_node = source_by_id.get(node_id)
+    source_node = topology_by_id.get(node_id)
     if source_node is None or source_node["kind"] != "split":
         raise StrategyError(
             "interactive-tree split adjustment requires a visible split node"
@@ -156,7 +162,7 @@ def replay_interactive_tree_split(
         current_nodes[node_id]["threshold"],
         "current threshold",
     )
-    if normalized_threshold == current_threshold:
+    if not replacing_feature and normalized_threshold == current_threshold:
         raise StrategyError(
             "interactive-tree threshold adjustment is a no-op"
         )
@@ -164,7 +170,7 @@ def replay_interactive_tree_split(
     medians = automatic_tree_asset["tree_result"]["preprocessing"]["medians"]
     directions = automatic_tree_asset["tree_result"]["directions"]
     old_configs = _effective_split_configs(
-        source_by_id,
+        topology_by_id,
         current_nodes=current_nodes,
         medians=medians,
     )
@@ -182,7 +188,7 @@ def replay_interactive_tree_split(
         root_id=root_id,
         visible=visible,
         frontier=frontier,
-        source_by_id=source_by_id,
+        source_by_id=topology_by_id,
         configs=old_configs,
     )
     new_masks = _route_masks(
@@ -190,13 +196,13 @@ def replay_interactive_tree_split(
         root_id=root_id,
         visible=visible,
         frontier=frontier,
-        source_by_id=source_by_id,
+        source_by_id=topology_by_id,
         configs=new_configs,
     )
     _require_adjustment_scope(
         node_id=node_id,
         visible=visible,
-        source_by_id=source_by_id,
+        source_by_id=topology_by_id,
         old_masks=old_masks,
         new_masks=new_masks,
     )
@@ -217,7 +223,7 @@ def replay_interactive_tree_split(
             raise StrategyError(
                 "interactive-tree current visible metrics do not replay"
             )
-        source_node = source_by_id[current_id]
+        source_node = topology_by_id[current_id]
         if source_node["kind"] == "split":
             config = old_configs[current_id]
             left_mask, right_mask = _split_child_masks(
@@ -243,7 +249,7 @@ def replay_interactive_tree_split(
                 )
     replayed_nodes: list[dict[str, Any]] = []
     for current_id in visible:
-        source_node = source_by_id[current_id]
+        source_node = topology_by_id[current_id]
         mask = new_masks[current_id]
         node = {
             "node_id": current_id,
@@ -253,7 +259,7 @@ def replay_interactive_tree_split(
             "condition": _path_condition(
                 current_id,
                 root_id=root_id,
-                source_by_id=source_by_id,
+                source_by_id=topology_by_id,
                 configs=new_configs,
             ),
             "metrics": _metrics_bundle(
@@ -284,7 +290,12 @@ def replay_interactive_tree_split(
                 {
                     "feature": config["feature"],
                     "threshold": config["threshold"],
-                    "base_threshold": float(source_node["threshold"]),
+                    "base_threshold": float(
+                        current_nodes[current_id].get(
+                            "base_threshold",
+                            source_node["threshold"],
+                        )
+                    ),
                     "missing_child": config["missing_child"],
                     "left_child_id": source_node["left_child_id"],
                     "right_child_id": source_node["right_child_id"],
@@ -341,7 +352,7 @@ def replay_interactive_tree_split(
         "source_row_count": len(frame),
         "visible_node_count": len(visible),
         "visible_split_count": sum(
-            source_by_id[item]["kind"] == "split" for item in visible
+            topology_by_id[item]["kind"] == "split" for item in visible
         ),
         "frontier_count": len(frontier),
         "exactly_once": True,

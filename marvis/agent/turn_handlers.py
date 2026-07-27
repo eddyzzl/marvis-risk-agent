@@ -1951,6 +1951,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "cross_rule_search",
         "cross_rule_candidate_build_from_search",
         "interactive_tree_split_search",
+        "interactive_tree_auto_continuation",
         "interactive_tree_revision",
         "interactive_tree_frontier_group_materialization",
         "interactive_tree_frontier_materialization",
@@ -2907,6 +2908,23 @@ def _run_validated_strategy_request(
             task,
             template_id="strategy_interactive_tree_revision",
             slots=slots,
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "interactive_tree_auto_continuation"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_interactive_tree_auto_continuation",
+            slots=_interactive_tree_auto_continuation_plan_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            ),
             auto_start=auto_start,
         )
 
@@ -4339,6 +4357,19 @@ def _standard_workflow_request_preflight(
                     str(exc),
                 )
         return None
+    if draft.workflow == "interactive_tree_auto_continuation":
+        try:
+            _interactive_tree_auto_continuation_plan_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            )
+        except StrategySetupError as exc:
+            return (
+                "interactive_tree_auto_continuation_search_required",
+                str(exc),
+            )
+        return None
     if draft.workflow == "interactive_tree_frontier_group_materialization":
         # The Tool resolves the revision, canonicalizes all requested members
         # against its live frontier, and authenticates ancestry under one lock.
@@ -5049,6 +5080,55 @@ def _interactive_tree_split_search_plan_slots(
         raise StrategySetupError(
             "节点候选搜索的特征不属于来源树的认证特征全集；"
             "请刷新候选实验室并重新选择。"
+        )
+    return dict(inputs)
+
+
+def _interactive_tree_auto_continuation_plan_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Authenticate the exact persisted search and explicit seed candidate."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    search_id = inputs.get("search_id")
+    candidate_id = inputs.get("candidate_id")
+    if not isinstance(search_id, str) or not isinstance(candidate_id, str):
+        raise StrategySetupError(
+            "自动续建必须提供完整 search ID 和明确选择的 candidate ID。"
+        )
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    read_runtime = SimpleNamespace(
+        settings=runtime.settings,
+        task_artifacts=repository,
+    )
+    from marvis.packs.strategy.interactive_tree_split_search_tools import (
+        load_verified_interactive_tree_split_search,
+    )
+
+    try:
+        search = load_verified_interactive_tree_split_search(
+            read_runtime,
+            task_id=task_id,
+            search_id=search_id,
+        )
+    except Exception as exc:
+        raise StrategySetupError(
+            f"节点候选搜索 {search_id} 未通过当前任务的完整制品认证。"
+        ) from exc
+    candidate = next(
+        (
+            item
+            for item in search.result["candidates"]
+            if item.get("candidate_id") == candidate_id
+        ),
+        None,
+    )
+    if candidate is None or candidate.get("eligible") is not True:
+        raise StrategySetupError(
+            f"候选 {candidate_id} 不属于搜索 {search_id}，或未通过最小叶约束。"
         )
     return dict(inputs)
 
@@ -11704,6 +11784,7 @@ def _strategy_request_requires_dataset(
             "scorecard_cutoff_selection",
             "automatic_tree_leaf_materialization",
             "interactive_tree_split_search",
+            "interactive_tree_auto_continuation",
             "interactive_tree_revision",
             "interactive_tree_frontier_group_materialization",
             "interactive_tree_frontier_materialization",

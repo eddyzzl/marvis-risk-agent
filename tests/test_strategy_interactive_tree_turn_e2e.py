@@ -263,6 +263,104 @@ def test_structured_turn_executes_bounded_all_feature_node_search(
 
 @pytest.mark.slow
 @pytest.mark.e2e
+def test_structured_turn_continues_exact_reviewed_frontier_candidate(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    root_id = str(automatic_tree_turn["root_node_id"])
+    pruned = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "把根节点明确作为当前 frontier。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                {
+                    "source_tree_id": str(automatic_tree_turn["asset_id"]),
+                    "node_id": root_id,
+                    "operation": "prune_subtree",
+                },
+            ),
+        },
+    )
+    assert pruned.status_code == 202, pruned.text
+    prune_plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1]
+    stored_prune = client.app.state.plan_repo.load_plan(prune_plan["id"])
+    prune_output = client.app.state.plan_repo.load_step_output(
+        stored_prune.steps[0].id
+    )
+    searched = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "搜索根 frontier 的全部特征候选。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_split_search",
+                {
+                    "source_tree_id": prune_output["revision_id"],
+                    "node_id": root_id,
+                    "mode": "all_features",
+                    "max_thresholds_per_feature": 5,
+                    "max_row_evaluations": 2_000,
+                },
+            ),
+        },
+    )
+    assert searched.status_code == 202, searched.text
+    search_plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1]
+    stored_search = client.app.state.plan_repo.load_plan(search_plan["id"])
+    search_output = client.app.state.plan_repo.load_step_output(
+        stored_search.steps[0].id
+    )
+    candidate = next(
+        item
+        for item in search_output["search_result"]["candidates"]
+        if item["eligible"]
+    )
+    workflow_inputs = {
+        "search_id": search_output["search_id"],
+        "candidate_id": candidate["candidate_id"],
+        "max_additional_depth": 2,
+        "min_gini_gain": 0.0,
+        "max_generated_nodes": 7,
+        "max_thresholds_per_feature": 5,
+        "max_row_evaluations": 20_000,
+        "objective": "max_gini_gain",
+        "tie_break": "eligible_gain_feature_threshold_candidate_id",
+    }
+    continued = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "从人工明确选择的候选受控续建。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_auto_continuation",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert continued.status_code == 202, continued.text
+    plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1]
+    assert plan["template_id"] == (
+        "strategy_interactive_tree_auto_continuation"
+    )
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].tool_ref == ToolRef(
+        "strategy",
+        "auto_continue_interactive_tree",
+    )
+    assert stored.steps[0].inputs == workflow_inputs
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["search_id"] == search_output["search_id"]
+    assert output["candidate_id"] == candidate["candidate_id"]
+    assert output["replay"]["exactly_once"] is True
+    assert output["automatic_winner_selection"] is False
+    assert output["pool_modified"] is False
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
 def test_structured_turn_without_dataset_reaches_tool_instead_of_preview_preflight(
     tmp_path: Path,
 ) -> None:

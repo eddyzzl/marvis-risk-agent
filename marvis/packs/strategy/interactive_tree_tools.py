@@ -21,7 +21,7 @@ from typing import Any
 import unicodedata
 from urllib.parse import quote
 import math
-from numbers import Real
+from numbers import Integral, Real
 
 import numpy as np
 
@@ -68,6 +68,7 @@ from marvis.packs.strategy.interactive_tree_replay import (
 from marvis.packs.strategy.interactive_tree_revision_v2 import (
     InteractiveTreeRevisionV2Error,
     build_adjusted_interactive_tree_revision_v2,
+    build_continued_interactive_tree_revision_v2,
     build_replaced_interactive_tree_split_revision_v2,
 )
 from marvis.packs.strategy.sample_design_execution import (
@@ -97,6 +98,9 @@ from marvis.repositories.task_artifacts import (
 
 TOOL_SCHEMA_VERSION = "strategy.revise-interactive-tree-tool.v1"
 TOOL_SCHEMA_VERSION_V2 = "strategy.revise-interactive-tree-tool.v2"
+AUTO_CONTINUE_TOOL_SCHEMA_VERSION = (
+    "strategy.auto-continue-interactive-tree-tool.v1"
+)
 INTERACTIVE_TREE_REVISION_ARTIFACT_KIND = (
     "strategy_interactive_tree_revision_json"
 )
@@ -118,6 +122,29 @@ _INPUT_FIELDS = frozenset(
         "operation",
         "feature",
         "threshold",
+        "search_id",
+        "candidate_id",
+        "max_additional_depth",
+        "min_gini_gain",
+        "max_generated_nodes",
+        "max_thresholds_per_feature",
+        "max_row_evaluations",
+        "objective",
+        "tie_break",
+        "reason",
+    }
+)
+_AUTO_CONTINUE_INPUT_FIELDS = frozenset(
+    {
+        "search_id",
+        "candidate_id",
+        "max_additional_depth",
+        "min_gini_gain",
+        "max_generated_nodes",
+        "max_thresholds_per_feature",
+        "max_row_evaluations",
+        "objective",
+        "tie_break",
         "reason",
     }
 )
@@ -232,6 +259,57 @@ class _RevisionReadBudget:
                 "interactive-tree revision chain exceeds the aggregate byte budget"
             )
         self.used += byte_count
+
+
+def run_auto_continue_interactive_tree(
+    inputs: object,
+    ctx,
+    runtime,
+) -> dict[str, Any]:
+    """Continue one exact searched frontier under explicit hard controls."""
+
+    request = _validate_auto_continuation_inputs(inputs)
+    task_id = _required_text(ctx.task_id, "task_id")
+    from marvis.packs.strategy.interactive_tree_split_search_tools import (
+        load_verified_interactive_tree_split_search,
+    )
+
+    search = load_verified_interactive_tree_split_search(
+        runtime,
+        task_id=task_id,
+        search_id=request["search_id"],
+    )
+    candidate = next(
+        (
+            item
+            for item in search.result["candidates"]
+            if item["candidate_id"] == request["candidate_id"]
+        ),
+        None,
+    )
+    if candidate is None or candidate["eligible"] is not True:
+        raise StrategyError(
+            "automatic continuation requires one exact eligible candidate"
+        )
+    result = run_revise_interactive_tree(
+        {
+            **request,
+            "source_tree_id": search.result["source"]["source_tree_id"],
+            "node_id": search.result["source"]["node_id"],
+            "operation": "auto_continue_subtree",
+        },
+        ctx,
+        runtime,
+    )
+    return {
+        **result,
+        "schema_version": AUTO_CONTINUE_TOOL_SCHEMA_VERSION,
+        "search_id": search.result["search_id"],
+        "search_hash": search.result["search_hash"],
+        "candidate_id": candidate["candidate_id"],
+        "automatic_winner_selection": False,
+        "pool_modified": False,
+    }
 
 
 def run_revise_interactive_tree(inputs: object, ctx, runtime) -> dict[str, Any]:
@@ -857,6 +935,108 @@ def _build_revision(
     runtime,
     task_id: str,
 ) -> tuple[dict[str, Any], _ReplayBinding]:
+    if request["operation"] == "auto_continue_subtree":
+        from marvis.packs.strategy.interactive_tree_continuation import (
+            continue_interactive_tree_subtree,
+        )
+        from marvis.packs.strategy.interactive_tree_split_search_tools import (
+            load_verified_interactive_tree_split_search,
+        )
+
+        search = load_verified_interactive_tree_split_search(
+            runtime,
+            task_id=task_id,
+            search_id=request["search_id"],
+        )
+        if (
+            search.result["source"]["source_tree_id"]
+            != request["source_tree_id"]
+            or search.result["source"]["node_id"] != request["node_id"]
+            or search.source != source
+        ):
+            raise StrategyError(
+                "automatic continuation search source binding changed"
+            )
+        candidate = next(
+            (
+                item
+                for item in search.result["candidates"]
+                if item["candidate_id"] == request["candidate_id"]
+            ),
+            None,
+        )
+        if candidate is None or candidate["eligible"] is not True:
+            raise StrategyError(
+                "automatic continuation candidate is absent or ineligible"
+            )
+        context = _load_replay_context(
+            runtime,
+            task_id=task_id,
+            source=source.automatic_source,
+        )
+        controls = {
+            "features": list(search.result["request"]["features"]),
+            "max_additional_depth": request["max_additional_depth"],
+            "min_gini_gain": request["min_gini_gain"],
+            "max_generated_nodes": request["max_generated_nodes"],
+            "max_thresholds_per_feature": request[
+                "max_thresholds_per_feature"
+            ],
+            "max_row_evaluations": request["max_row_evaluations"],
+        }
+        continuation = continue_interactive_tree_subtree(
+            context.labeled,
+            source.automatic_source.asset,
+            source_tree_id=request["source_tree_id"],
+            node_id=request["node_id"],
+            seed_candidate=candidate,
+            features=controls["features"],
+            target=context.target,
+            weights=context.weights,
+            loan_values=context.loan_values,
+            overdue_values=context.overdue_values,
+            parent_revision=source.parent_revision,
+            ancestor_revisions=source.ancestor_revisions,
+            max_additional_depth=controls["max_additional_depth"],
+            min_gini_gain=controls["min_gini_gain"],
+            max_generated_nodes=controls["max_generated_nodes"],
+            max_thresholds_per_feature=controls[
+                "max_thresholds_per_feature"
+            ],
+            max_row_evaluations=controls["max_row_evaluations"],
+            objective=request["objective"],
+            tie_break=request["tie_break"],
+        )
+        try:
+            revision = build_continued_interactive_tree_revision_v2(
+                source.automatic_source.asset,
+                node_id=request["node_id"],
+                search_id=search.result["search_id"],
+                search_hash=search.result["search_hash"],
+                candidate_id=candidate["candidate_id"],
+                feature=candidate["feature"],
+                threshold=candidate["threshold"],
+                missing_child=candidate["missing_child"],
+                controls=controls,
+                reason=request.get("reason"),
+                continuation=continuation,
+                parent_revision=source.parent_revision,
+                ancestor_revisions=source.ancestor_revisions,
+            )
+        except (
+            InteractiveTreeRevisionError,
+            InteractiveTreeRevisionV2Error,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise StrategyError(
+                "automatic interactive-tree continuation is invalid"
+            ) from exc
+        return revision, _ReplayBinding(
+            data_binding=context.data_binding,
+            sample_design=context.sample_design,
+            evidence=continuation.replay,
+        )
     if request["operation"] in {
         "adjust_split_threshold",
         "replace_split_feature",
@@ -1625,6 +1805,7 @@ def _require_revision_provenance_scalars(
             "prune_subtree",
             "adjust_split_threshold",
             "replace_split_feature",
+            "auto_continue_subtree",
         }
     else:
         raise StrategyError(
@@ -1906,11 +2087,27 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
         "prune_subtree",
         "adjust_split_threshold",
         "replace_split_feature",
+        "auto_continue_subtree",
     }:
         raise StrategyError(
             "operation must be prune_subtree, adjust_split_threshold, "
-            "or replace_split_feature"
+            "replace_split_feature, or auto_continue_subtree"
         )
+    continuation_fields = _AUTO_CONTINUE_INPUT_FIELDS - {"reason"}
+    if operation == "auto_continue_subtree":
+        missing_controls = sorted(continuation_fields - actual)
+        if missing_controls:
+            raise StrategyError(
+                "automatic continuation inputs are missing: "
+                + ", ".join(missing_controls)
+            )
+    else:
+        unsupported_controls = sorted(continuation_fields & actual)
+        if unsupported_controls:
+            raise StrategyError(
+                "continuation controls are unsupported for this operation: "
+                + ", ".join(unsupported_controls)
+            )
     has_threshold = "threshold" in inputs
     has_feature = "feature" in inputs
     if operation in {
@@ -1920,8 +2117,10 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
         raise StrategyError(
             "threshold is required for a split adjustment"
         )
-    if operation == "prune_subtree" and has_threshold:
-        raise StrategyError("threshold is unsupported for prune_subtree")
+    if operation in {"prune_subtree", "auto_continue_subtree"} and has_threshold:
+        raise StrategyError(
+            "threshold is unsupported for this interactive-tree operation"
+        )
     if operation == "replace_split_feature" and not has_feature:
         raise StrategyError("feature is required for replace_split_feature")
     if operation != "replace_split_feature" and has_feature:
@@ -1943,6 +2142,10 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
         normalized["threshold"] = normalized_threshold
     if has_feature:
         normalized["feature"] = _required_text(inputs["feature"], "feature")
+    if operation == "auto_continue_subtree":
+        normalized.update(
+            _normalize_auto_continuation_controls(inputs)
+        )
     if "reason" in inputs:
         reason = inputs["reason"]
         if reason is not None:
@@ -1955,6 +2158,112 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
                 raise StrategyError("reason must be at most 500 characters")
         normalized["reason"] = reason
     return normalized
+
+
+def _validate_auto_continuation_inputs(inputs: object) -> dict[str, Any]:
+    if not isinstance(inputs, Mapping) or any(
+        not isinstance(key, str) for key in inputs
+    ):
+        raise StrategyError(
+            "auto_continue_interactive_tree inputs must be an object"
+        )
+    actual = set(inputs)
+    missing = sorted((_AUTO_CONTINUE_INPUT_FIELDS - {"reason"}) - actual)
+    unexpected = sorted(actual - _AUTO_CONTINUE_INPUT_FIELDS)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if unexpected:
+            details.append("unsupported: " + ", ".join(unexpected))
+        raise StrategyError(
+            "invalid auto_continue_interactive_tree inputs ("
+            + "; ".join(details)
+            + ")"
+        )
+    result = _normalize_auto_continuation_controls(inputs)
+    if "reason" in inputs:
+        reason = inputs["reason"]
+        if reason is not None:
+            if not isinstance(reason, str) or "\x00" in reason:
+                raise StrategyError("reason must be text or null")
+            reason = " ".join(reason.split())
+            if not reason or len(reason) > 500:
+                raise StrategyError(
+                    "reason must be non-blank and at most 500 characters"
+                )
+        result["reason"] = reason
+    return result
+
+
+def _normalize_auto_continuation_controls(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    minimum_gain = inputs["min_gini_gain"]
+    if isinstance(minimum_gain, bool) or not isinstance(minimum_gain, Real):
+        raise StrategyError("min_gini_gain must be a finite number")
+    normalized_gain = float(minimum_gain)
+    if not math.isfinite(normalized_gain) or not 0 <= normalized_gain <= 0.5:
+        raise StrategyError("min_gini_gain must be within 0..0.5")
+    nodes = _bounded_request_int(
+        inputs["max_generated_nodes"],
+        "max_generated_nodes",
+        maximum=127,
+    )
+    if nodes < 3:
+        raise StrategyError("max_generated_nodes must be at least 3")
+    objective = _required_text(inputs["objective"], "objective")
+    tie_break = _required_text(inputs["tie_break"], "tie_break")
+    if (
+        objective != "max_gini_gain"
+        or tie_break
+        != "eligible_gain_feature_threshold_candidate_id"
+    ):
+        raise StrategyError(
+            "automatic continuation objective or tie_break changed"
+        )
+    return {
+        "search_id": _required_text(inputs["search_id"], "search_id"),
+        "candidate_id": _required_text(
+            inputs["candidate_id"],
+            "candidate_id",
+        ),
+        "max_additional_depth": _bounded_request_int(
+            inputs["max_additional_depth"],
+            "max_additional_depth",
+            maximum=6,
+        ),
+        "min_gini_gain": normalized_gain,
+        "max_generated_nodes": nodes,
+        "max_thresholds_per_feature": _bounded_request_int(
+            inputs["max_thresholds_per_feature"],
+            "max_thresholds_per_feature",
+            maximum=20,
+        ),
+        "max_row_evaluations": _bounded_request_int(
+            inputs["max_row_evaluations"],
+            "max_row_evaluations",
+            maximum=20_000_000,
+        ),
+        "objective": objective,
+        "tie_break": tie_break,
+    }
+
+
+def _bounded_request_int(
+    value: object,
+    name: str,
+    *,
+    maximum: int,
+) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Integral)
+        or int(value) < 1
+        or int(value) > maximum
+    ):
+        raise StrategyError(f"{name} is outside its hard budget")
+    return int(value)
 
 
 def _safe_component(value: object, name: str) -> str:

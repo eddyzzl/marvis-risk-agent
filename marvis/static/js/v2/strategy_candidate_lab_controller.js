@@ -35,6 +35,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "voting_candidate_search",
   "voting_candidate_build_from_search",
   "interactive_tree_split_search",
+  "interactive_tree_auto_continuation",
   "interactive_tree_revision",
   "interactive_tree_frontier_group_materialization",
   "interactive_tree_frontier_materialization",
@@ -71,6 +72,7 @@ const WORKFLOW_LABELS = Object.freeze({
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
   interactive_tree_split_search: "搜索交互树节点分裂候选",
+  interactive_tree_auto_continuation: "从明确候选受控续建交互树",
   interactive_tree_revision: "创建不可变交互式树修订",
   interactive_tree_frontier_group_materialization: "物化交互树前沿 OR 分组",
   interactive_tree_frontier_materialization: "物化交互树前沿节点",
@@ -1346,7 +1348,7 @@ function interactiveTreeSplitSearchDetailHtml(item) {
     evidenceIdentityHtml(item),
     '<div class="candidate-lab-boundary-note" data-tone="info">',
     "<strong>排名仅用于浏览</strong>",
-    "<p>搜索没有选择胜者，也没有修改树。点击“带入树修订”只会回填来源、节点、字段和阈值，仍需人工确认提交。</p>",
+    "<p>搜索没有选择胜者，也没有修改树。按钮只会回填精确候选与后续控制项，仍需人工确认提交。</p>",
     "</div>",
     factsTableHtml({
       search_id: searchId,
@@ -1372,7 +1374,7 @@ function interactiveTreeSplitSearchDetailHtml(item) {
         feature !== nonEmptyText(sourceNode.feature)
         || threshold !== Number(sourceNode.threshold)
       );
-      const action = (
+      const revisionAction = (
         eligible
         && canPrefill
         && changesSplit
@@ -1390,7 +1392,25 @@ function interactiveTreeSplitSearchDetailHtml(item) {
           ` data-threshold="${escapeHtml(stablePrimitiveText(threshold))}">`,
           "带入树修订</button>",
         ].join("")
-        : "—";
+        : "";
+      const continuationAction = (
+        eligible
+        && sourceNode.is_visible === true
+        && sourceNode.is_frontier === true
+        && INTERACTIVE_TREE_SPLIT_SEARCH_ID_RE.test(searchId)
+        && INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_RE.test(candidateId)
+      )
+        ? [
+          '<button type="button" class="button compact secondary"',
+          ' data-candidate-lab-interactive-tree-auto-continuation="1"',
+          ` data-search-id="${escapeHtml(searchId)}"`,
+          ` data-candidate-id="${escapeHtml(candidateId)}">`,
+          "带入受控续建</button>",
+        ].join("")
+        : "";
+      const action = [revisionAction, continuationAction]
+        .filter(Boolean)
+        .join(" ") || "—";
       return [
         "<tr>",
         `<td>${escapeHtml(stablePrimitiveText(candidate.rank))}</td>`,
@@ -3757,6 +3777,67 @@ function collectInteractiveTreeSplitSearchInputs(form) {
   return inputs;
 }
 
+function collectInteractiveTreeAutoContinuationInputs(form) {
+  const searchId = nonEmptyText(
+    formValue(form, "interactive_tree_continuation_search_id"),
+  );
+  const candidateId = nonEmptyText(
+    formValue(form, "interactive_tree_continuation_candidate_id"),
+  );
+  if (
+    !INTERACTIVE_TREE_SPLIT_SEARCH_ID_RE.test(searchId)
+    || !INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_RE.test(candidateId)
+  ) {
+    throw new Error("请先从受认证搜索结果中明确带入一个 eligible 候选。");
+  }
+  const minimumGain = Number(
+    formValue(form, "interactive_tree_continuation_min_gain"),
+  );
+  if (!Number.isFinite(minimumGain) || minimumGain < 0 || minimumGain > 0.5) {
+    throw new Error("最小 Gini 增益必须是 0 到 0.5 的有限数值。");
+  }
+  const inputs = {
+    search_id: searchId,
+    candidate_id: candidateId,
+    max_additional_depth: parseRequiredInteger(
+      formValue(form, "interactive_tree_continuation_max_depth"),
+      "最大追加深度",
+      { min: 1, max: 6 },
+    ),
+    min_gini_gain: minimumGain,
+    max_generated_nodes: parseRequiredInteger(
+      formValue(form, "interactive_tree_continuation_max_nodes"),
+      "最大生成节点数",
+      { min: 3, max: 127 },
+    ),
+    max_thresholds_per_feature: parseRequiredInteger(
+      formValue(form, "interactive_tree_continuation_max_thresholds"),
+      "每特征最大阈值数",
+      { min: 1, max: 20 },
+    ),
+    max_row_evaluations: parseRequiredInteger(
+      formValue(form, "interactive_tree_continuation_max_row_evaluations"),
+      "总行评估预算",
+      { min: 1, max: 20000000 },
+    ),
+    objective: formValue(form, "interactive_tree_continuation_objective"),
+    tie_break: formValue(form, "interactive_tree_continuation_tie_break"),
+  };
+  if (
+    inputs.objective !== "max_gini_gain"
+    || inputs.tie_break
+      !== "eligible_gain_feature_threshold_candidate_id"
+  ) {
+    throw new Error("续建的固定目标或并列规则已改变，请刷新页面。");
+  }
+  optionalText(
+    inputs,
+    "reason",
+    formValue(form, "interactive_tree_continuation_reason"),
+  );
+  return inputs;
+}
+
 function collectInteractiveTreeRevisionInputs(form) {
   const source = selectedProjectionOption(
     form,
@@ -3973,6 +4054,8 @@ export function collectStrategyCandidateLabRequest(form) {
     voting_candidate_build_from_search:
       collectVotingCandidateBuildFromSearchInputs,
     interactive_tree_split_search: collectInteractiveTreeSplitSearchInputs,
+    interactive_tree_auto_continuation:
+      collectInteractiveTreeAutoContinuationInputs,
     interactive_tree_revision: collectInteractiveTreeRevisionInputs,
     interactive_tree_frontier_group_materialization:
       collectInteractiveTreeFrontierGroupMaterializationInputs,
@@ -7102,6 +7185,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       + "[data-candidate-lab-interactive-tree-prune], "
       + "[data-candidate-lab-interactive-tree-threshold], "
       + "[data-candidate-lab-interactive-tree-split-candidate], "
+      + "[data-candidate-lab-interactive-tree-auto-continuation], "
       + "[data-candidate-lab-interactive-tree-frontier-materialize]",
     ) || [];
     for (const control of controls) {
@@ -7598,6 +7682,25 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         );
       }
       if (
+        strategyRequest.workflow === "interactive_tree_auto_continuation"
+        && (
+          !interactiveTreeSplitCandidatePointer(
+            state.payload,
+            strategyRequest.workflow_inputs.search_id,
+            strategyRequest.workflow_inputs.candidate_id,
+          )
+          || interactiveTreeSplitCandidatePointer(
+            state.payload,
+            strategyRequest.workflow_inputs.search_id,
+            strategyRequest.workflow_inputs.candidate_id,
+          )?.search?.source_node?.is_frontier !== true
+        )
+      ) {
+        throw new Error(
+          "自动续建的搜索或候选已过期，或不再指向受认证 frontier，请刷新 Candidate Lab 后重选。",
+        );
+      }
+      if (
         strategyRequest.workflow
           === "interactive_tree_frontier_group_materialization"
         && interactiveTreeFrontierGroupPointers(
@@ -7836,6 +7939,63 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       if (launcher) launcher.open = true;
       dependencies.setActionStatus?.(
         "已带入受认证 revision 与前沿节点；确认后只物化该节点，不会自动入池。",
+        "info",
+      );
+      renderAvailability();
+      return true;
+    }
+    const continuationCandidate = event.target?.closest?.(
+      "[data-candidate-lab-interactive-tree-auto-continuation]",
+    );
+    if (continuationCandidate) {
+      event.preventDefault?.();
+      const reason = blockedReason(state, dependencies);
+      const form = panel()?.querySelector?.(
+        '[data-candidate-lab-workflow="interactive_tree_auto_continuation"]',
+      );
+      if (reason) {
+        const message = BLOCKED_REASON_COPY[reason]
+          || "当前 Candidate Lab 暂不可启动新分析。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      const searchId = nonEmptyText(
+        continuationCandidate.dataset?.searchId,
+      );
+      const candidateId = nonEmptyText(
+        continuationCandidate.dataset?.candidateId,
+      );
+      const pointer = interactiveTreeSplitCandidatePointer(
+        state.payload,
+        searchId,
+        candidateId,
+      );
+      if (
+        !form
+        || !pointer
+        || pointer.search?.source_node?.is_frontier !== true
+      ) {
+        const message = "该候选不属于当前受认证 frontier 搜索，请刷新后重试。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      const searchField = formField(
+        form,
+        "interactive_tree_continuation_search_id",
+      );
+      const candidateField = formField(
+        form,
+        "interactive_tree_continuation_candidate_id",
+      );
+      if (searchField) searchField.value = searchId;
+      if (candidateField) candidateField.value = candidateId;
+      setFormError(form, "");
+      const launcher = form.closest?.(".candidate-lab-launcher");
+      if (launcher) launcher.open = true;
+      dependencies.setActionStatus?.(
+        "已带入人工明确选择的 eligible 候选；请检查全部硬预算后再提交续建。",
         "info",
       );
       renderAvailability();
