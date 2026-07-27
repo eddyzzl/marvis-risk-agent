@@ -257,7 +257,7 @@ def test_dataset_upload_reuses_dataset_by_content_hash_across_tasks(tmp_path):
     assert audit_rows[0]["detail"]["reused_dataset_id"] == dataset_a["id"]
 
 
-def test_dataset_preview_returns_column_profiles_and_raw_samples(tmp_path):
+def test_dataset_preview_returns_column_profiles_and_masked_samples(tmp_path):
     client, settings = _client(tmp_path)
     task = _create_task(settings)
     csv_bytes = b"mobile,bad_flag\n13800138000,0\n,1\n"
@@ -276,13 +276,13 @@ def test_dataset_preview_returns_column_profiles_and_raw_samples(tmp_path):
     profiles = {profile["name"]: profile for profile in payload["column_profiles"]}
     assert profiles["mobile"]["semantic_role"] == "phone"
     assert profiles["mobile"]["null_rate"] == 0.5
-    assert profiles["mobile"]["sample_values"] == [13800138000.0]
-    assert payload["rows"][0]["mobile"] == 13800138000.0
+    assert profiles["mobile"]["sample_values"] == ["138******00"]
+    assert payload["rows"][0]["mobile"] == "138******00"
     assert payload["rows"][1]["mobile"] is None
-    assert "13800138000" in json.dumps(payload, ensure_ascii=False)
+    assert "13800138000" not in json.dumps(payload, ensure_ascii=False)
 
 
-def test_dataset_preview_returns_names_and_long_card_values_verbatim(tmp_path):
+def test_dataset_preview_masks_names_and_long_card_values(tmp_path):
     client, settings = _client(tmp_path)
     task = _create_task(settings)
     csv_bytes = (
@@ -304,16 +304,16 @@ def test_dataset_preview_returns_names_and_long_card_values_verbatim(tmp_path):
     payload = preview.json()
     dumped = json.dumps(payload, ensure_ascii=False)
     profiles = {profile["name"]: profile for profile in payload["column_profiles"]}
-    # Profiles keep their semantic metadata, while preview rows show the actual
-    # uploaded values the user asked to inspect.
+    # Names remain usable as identity semantics while samples and preview rows
+    # stay opaque; long identifiers retain only bounded edge characters.
     assert profiles["customer_name"]["semantic_role"] == "name"
-    assert payload["rows"][0]["customer_name"] == "张三丰"
-    assert payload["rows"][1]["customer_name"] == "李四"
-    assert profiles["customer_name"]["sample_values"] == ["张三丰", "李四"]
-    assert payload["rows"][0]["bank_card"] == "6222020202020202020"
-    assert "张三丰" in dumped
-    assert "李四" in dumped
-    assert "6222020202020202020" in dumped
+    assert profiles["customer_name"]["sample_values"][0].startswith("value:")
+    assert payload["rows"][0]["customer_name"].startswith("value:")
+    assert payload["rows"][0]["bank_card"].startswith("6222")
+    assert "*" in payload["rows"][0]["bank_card"]
+    assert "张三丰" not in dumped
+    assert "李四" not in dumped
+    assert "6222020202020202020" not in dumped
 
 
 def test_dataset_upload_dispatches_dataset_registered_hook(tmp_path):

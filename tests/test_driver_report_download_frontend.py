@@ -54,15 +54,16 @@ def test_driver_report_download_button_lives_in_middle_panel_with_handler():
     assert "generate_feature_report" in report_step_body
     assert "generate_risk_analysis_report" in report_step_body
 
-    # The rail substep row no longer renders the download BUTTON — only a
-    # "报告已就绪" status badge + a lightweight locate entry.
+    # The rail substep row carries status/progress only. Report readiness and
+    # every interactive report action live in the middle workspace.
     substep_body = _slice_function(plan_rail_js, "function planSubstepHtml")
     assert 'data-driver-report-download="1"' not in substep_body
-    assert "plan-step-ready" in substep_body
-    assert 'data-plan-report-locate="1"' in substep_body
-    assert "build_report_bundle_v2" in substep_body
-    assert 'data-plan-report-locate="strategy"' in substep_body
+    assert "plan-step-ready" not in substep_body
+    assert "data-plan-report-locate" not in substep_body
+    assert "build_report_bundle_v2" not in substep_body
     assert 'openDriverActionCard("strategy-artifacts")' not in substep_body
+    assert "renderStepChecker(checkerStatus)" in substep_body
+    assert "tuningProgress" in substep_body
 
     # the handler navigates to the driver-report download endpoint
     assert "function handleDriverReportDownloadClick" in app_js

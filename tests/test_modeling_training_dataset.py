@@ -33,11 +33,12 @@ class _CountingBackend:
 
 
 class _FakeRegistry:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, task_id: str = "task-1"):
         self.path = path
+        self.task_id = task_id
 
     def get(self, dataset_id: str):
-        return SimpleNamespace(id=dataset_id)
+        return SimpleNamespace(id=dataset_id, task_id=self.task_id)
 
     def resolve_path(self, dataset_id: str):
         return self.path

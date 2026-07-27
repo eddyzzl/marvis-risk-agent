@@ -8,9 +8,9 @@
 - 结论：**PASS_FOR_PR**
 
 两名独立审查者分别按 Standards 和 Spec 两个轴审查；两个轴的严重级别与结论
-保持独立，不合并重排。独立审查和随后的 PR CI 共发现 1 个 Blocker、7 个 High，
-均已修复并有定点回归。当前没有遗留 Critical、Blocker 或 High 代码问题。真实
-材料业务验收仍有外部前置条件，不能由本代码审查代签。
+保持独立，不合并重排。独立审查和随后的 PR CI 共发现 1 个 Blocker、8 个 High
+和 5 个 Medium，均已修复并有定点回归。当前没有遗留 Critical、Blocker、High
+或 Medium 代码问题。真实材料业务验收仍有外部前置条件，不能由本代码审查代签。
 
 ## Standards 轴（独立审查）
 
@@ -104,6 +104,53 @@ DFM 把任务的指标契约升级为三态：`None` 表示未配置、空列表
 先在旧实现上稳定复现，再在修复后通过；PR 中原失败的完整监控 E2E 和全部策略
 product smoke 均已通过。
 
+### Medium C2：Candidate Lab 列表查询遗漏策略描述
+
+策略元数据行解析新增 `description` 后，最近策略和本地 Champion 两条分页查询
+仍使用旧字段列表。Candidate Lab 加载这些结果时会因缺列触发 `IndexError`，
+导致候选策略实验台无法打开。
+
+修复后两条查询都显式选择 `description`，保持分页总数、任务隔离和 Champion
+筛选语义不变；Candidate Lab API 全文件回归通过。
+
+### Medium C3：成功恢复计划后可选运行时能力导致响应失败
+
+Driver turn 已成功恢复计划后，消息追加阶段直接读取 `llm_client` 和
+`hook_dispatcher`；精简运行时适配器没有这些可选能力时，会把成功执行改写成
+错误响应。内部 `_run_driver_turn` 同时把公共包装器原本可省略的 `ui_action`
+变成必填，破坏了非策略流程的旧调用契约。
+
+修复后消息阶段通过缺省 `None` 使用可选能力，`ui_action` 恢复为可省略参数；
+计划状态和确定性执行结果不受可选 Agent 集成影响。
+
+### High C4：数据预览测试错误要求回传原始个人信息
+
+两条数据预览测试曾把手机号、姓名和长卡号的脱敏契约改成“原样返回”，与生产
+实现和本地优先的数据治理边界相反。虽然运行时代码仍保持掩码/不可逆 token，
+错误测试会阻止隐私保护实现通过门禁，并为未来回归提供错误规范。
+
+修复后测试重新要求手机号掩码、姓名 token 化和长标识有界掩码，同时断言完整
+原值不会出现在响应 JSON。
+
+### Medium C5：训练缓存测试桩没有任务所有权
+
+Modeling Tool 已增加 task-scoped dataset 校验，但三个训练/调参缓存测试的伪
+registry 仍只返回 dataset id，缺少生产记录必有的 `task_id`。修复后测试桩显式
+携带所属任务，继续验证缓存、分组列投影和逐配方内存释放，同时不绕过跨任务边界。
+
+### Medium C6：报告下载前端测试仍要求右栏旧交互
+
+宽屏信息架构已把下载和定位动作收敛到中间工作区，右侧 Plan Rail 只保留
+checker、步骤文案和运行进度；旧测试仍要求右栏 `plan-step-ready` 和定位入口。
+修复后契约明确断言右栏不含下载/定位控件，并保留状态 checker 与调参进度。
+
+### Medium C7：v15 迁移测试使用当前仓储写入旧表
+
+候选池 v15→v16 迁移测试先构造真实旧库，却调用当前 TaskRepository 写入。新增
+`metrics_configured` 后当前 writer 合法地要求新列，测试因此在迁移开始前失败。
+修复后 fixture 按 v15 自身 SQL 契约播种任务，再由当前 reader 验证旧行兼容并
+执行真实升级；没有给生产 writer 增加伪旧库分支。
+
 ## 实现者复审补充修复
 
 - 非二分类 screen 增加 NaN 标签确认、丢弃计数和有界列批次读取。
@@ -131,6 +178,10 @@ product smoke 均已通过。
 - closure + Vintage + JOIN 定点组：`66 passed`。
 - 策略 PR smoke：`5 passed`，包含自然语言候选策略、标准策略工作流，以及
   `红灯 → 起新版本 → 报告` 完整链路。
+- Candidate Lab API 与计划迁移定点组：`95 passed`。
+- 第二轮 PR CI 根因定点组：`7 passed`，覆盖训练任务隔离、预览脱敏、宽屏报告
+  入口和 v15→v16 迁移。
+- 上述第二轮受影响文件完整回归：`83 passed`。
 - 先前建模受影响组：`341 passed`；Prompt/策略编译契约组：`1007 passed`。
 - 全仓 Ruff、全部前端 JavaScript 语法、`git diff --check`：通过。
 - Bandit high-severity：无高危发现。

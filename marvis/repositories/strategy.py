@@ -511,7 +511,8 @@ class StrategyRepository:
             rows = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, version, status, asset_status,
-                       adopted_at, adoption_reason, parent_strategy_id, created_at
+                       adopted_at, adoption_reason, parent_strategy_id, created_at,
+                       description
                   FROM strategies
                  WHERE task_id = ?
                  ORDER BY created_at DESC, id DESC
@@ -555,7 +556,8 @@ class StrategyRepository:
             rows = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, version, status, asset_status,
-                       adopted_at, adoption_reason, parent_strategy_id, created_at
+                       adopted_at, adoption_reason, parent_strategy_id, created_at,
+                       description
                   FROM strategies
                  WHERE task_id = ?
                    AND (status = ? OR asset_status = ?)

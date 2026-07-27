@@ -671,7 +671,7 @@ def _run_driver_turn(
     adjust_params: dict | None,
     expected_step_id: str | None,
     confirmation_source: str,
-    ui_action: str | None,
+    ui_action: str | None = None,
 ) -> dict:
     if user_text is not None:
         message_metadata = {"intent": spec.intent}
@@ -893,10 +893,10 @@ def _append_spec_messages(
             repo,
             task.id,
             turn,
-            settings=runtime.settings,
+            settings=getattr(runtime, "settings", None),
             task=task,
-            llm_client=runtime.llm_client,
-            hook_dispatcher=runtime.hook_dispatcher,
+            llm_client=getattr(runtime, "llm_client", None),
+            hook_dispatcher=getattr(runtime, "hook_dispatcher", None),
         )
     else:
         append_driver_messages(repo, task.id, turn)
