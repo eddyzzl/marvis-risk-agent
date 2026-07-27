@@ -8,9 +8,9 @@
 - 结论：**PASS_FOR_PR**
 
 两名独立审查者分别按 Standards 和 Spec 两个轴审查；两个轴的严重级别与结论
-保持独立，不合并重排。本轮共发现 1 个 Blocker、6 个 High，均已修复并有定点
-回归。当前没有遗留 Critical、Blocker 或 High 代码问题。真实材料业务验收仍有
-外部前置条件，不能由本代码审查代签。
+保持独立，不合并重排。独立审查和随后的 PR CI 共发现 1 个 Blocker、7 个 High，
+均已修复并有定点回归。当前没有遗留 Critical、Blocker 或 High 代码问题。真实
+材料业务验收仍有外部前置条件，不能由本代码审查代签。
 
 ## Standards 轴（独立审查）
 
@@ -91,6 +91,19 @@ CLI 和 checklist 已增加 `--join-task-id`、`--vintage-task-id`。
 真实任务、补齐同材料 JOIN/Vintage 证据并重新生成报告后，才能进入 B1-B5 外部
 签字；不得引用历史报告宣称结项。
 
+## PR CI 补充发现
+
+### High C1：未配置 metrics 的策略任务无法创建新版本
+
+DFM 把任务的指标契约升级为三态：`None` 表示未配置、空列表表示用户明确不选、
+非空列表表示已选择。策略监控的红灯交接仍按旧契约执行
+`list(source_task.metrics)`，因此自然语言“起新版本”在未配置指标时会以
+`NoneType is not iterable` 失败。
+
+修复后新版本交接显式保留三态，不把 `None` 偷换为空列表。新增仓储层快速回归
+先在旧实现上稳定复现，再在修复后通过；PR 中原失败的完整监控 E2E 和全部策略
+product smoke 均已通过。
+
 ## 实现者复审补充修复
 
 - 非二分类 screen 增加 NaN 标签确认、丢弃计数和有界列批次读取。
@@ -116,6 +129,8 @@ CLI 和 checklist 已增加 `--join-task-id`、`--vintage-task-id`。
 - 跨任务 Modeling Tool 组：`13 passed`。
 - closure + Agent 完整建模：`64 passed`。
 - closure + Vintage + JOIN 定点组：`66 passed`。
+- 策略 PR smoke：`5 passed`，包含自然语言候选策略、标准策略工作流，以及
+  `红灯 → 起新版本 → 报告` 完整链路。
 - 先前建模受影响组：`341 passed`；Prompt/策略编译契约组：`1007 passed`。
 - 全仓 Ruff、全部前端 JavaScript 语法、`git diff --check`：通过。
 - Bandit high-severity：无高危发现。
