@@ -2845,6 +2845,20 @@ body[data-theme="dark"] .plan-driver-action-card {
   background: color-mix(in srgb, var(--surface-soft) 56%, var(--surface));
 }
 
+.candidate-lab-evidence-drawer code,
+.candidate-lab-drawer-artifact code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.candidate-lab-drawer-artifact {
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent) 8%);
+}
+
+.candidate-lab-memory-reference .candidate-lab-card-body {
+  border-top: 0;
+}
+
 .candidate-lab-identity {
   display: grid;
   gap: 5px;

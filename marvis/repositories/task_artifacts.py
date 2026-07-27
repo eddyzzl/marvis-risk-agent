@@ -9,7 +9,7 @@ rewriting evidence.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 import hashlib
 import hmac
@@ -317,6 +317,40 @@ class TaskArtifactRepository:
                 (normalized_task_id, normalized_artifact_id),
             ).fetchone()
         return None if row is None else _record_from_row(row)
+
+    def get_many_for_task(
+        self,
+        task_id: str,
+        artifact_ids: Sequence[str],
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Resolve a bounded task-owned artifact set in one read snapshot."""
+
+        normalized_task_id = _required_text(task_id, field="task_id")
+        bounded_limit = max(1, min(int(limit), 500))
+        normalized_ids = tuple(
+            dict.fromkeys(
+                _required_text(artifact_id, field="artifact_id")
+                for artifact_id in artifact_ids
+            )
+        )
+        if not normalized_ids:
+            return []
+        selected_ids = normalized_ids[:bounded_limit]
+        placeholders = ",".join("?" for _item in selected_ids)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                  FROM task_artifacts
+                 WHERE task_id = ?
+                   AND id IN ({placeholders})
+                 ORDER BY created_at DESC, id DESC
+                """,
+                (normalized_task_id, *selected_ids),
+            ).fetchall()
+        return [_record_from_row(row) for row in rows]
 
 
 def _now() -> str:

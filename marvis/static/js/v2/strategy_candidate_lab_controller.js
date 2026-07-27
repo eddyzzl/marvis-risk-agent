@@ -237,6 +237,8 @@ const FIELD_LABELS = Object.freeze({
   base_points: "基础分值",
   base_score: "基准分",
   average_pd: "平均原始 PD",
+  artifact_id: "产物 ID",
+  artifact_schema_version: "产物契约版本",
   bin_id: "Bin ID",
   bin_label: "分箱标签",
   candidate_id: "Candidate ID",
@@ -244,6 +246,8 @@ const FIELD_LABELS = Object.freeze({
   cell_id: "Cell ID",
   column_bin_id: "列分箱",
   condition: "命中条件",
+  confidence: "置信度",
+  content_hash: "内容 Hash",
   count: "样本数",
   created_at: "创建时间",
   cutoff_id: "Cutoff ID",
@@ -265,21 +269,28 @@ const FIELD_LABELS = Object.freeze({
   iv: "IV",
   iv_contribution: "IV 贡献",
   interaction_gain_iv: "Interaction Gain IV",
+  input_binding_hash: "输入绑定 Hash",
+  input_binding_status: "输入绑定口径",
   ks: "KS",
   lifecycle: "生命周期",
   lower_bound: "下界",
   lower_inclusive: "包含下界",
   lower_risk: "低风险侧",
   monotonic_direction: "单调方向",
+  memory_id: "记忆 ID",
+  memory_type: "记忆类别",
   node_id: "节点 ID",
   lift: "Lift",
   method: "分箱方法",
   max_pairs: "最大评估组合数",
   min_nonempty_cell_count: "最小非空单元格样本数",
   observation_stage: "观测阶段",
+  origin_tool: "来源 Tool",
   pool_id: "Pool ID",
   position: "顺序",
   points: "分值",
+  producer_version: "生成器版本",
+  provenance_hash: "来源绑定 Hash",
   pair_id: "Pair ID",
   pdo: "PDO",
   display_points: "评分卡分数",
@@ -295,6 +306,9 @@ const FIELD_LABELS = Object.freeze({
   search_space: "搜索空间",
   strategy_type: "策略类型",
   source_tree_id: "操作来源树",
+  source_task_id: "来源任务",
+  source_memory_count: "来源记忆数",
+  support_count: "支持次数",
   total: "总数",
   upper_bound: "上界",
   upper_inclusive: "包含上界",
@@ -313,6 +327,7 @@ const FIELD_LABELS = Object.freeze({
   cell_count: "单元格数",
   validation_status: "验证状态",
   value: "值",
+  use_reason: "使用原因",
   woe: "WOE",
 });
 
@@ -533,7 +548,6 @@ function candidateDetailHtml(item, pointerKey) {
     '<span class="candidate-lab-card-state">查看证据</span>',
     "</summary>",
     '<div class="candidate-lab-card-body">',
-    evidenceIdentityHtml(item),
     evidenceIdentityHtml(item),
     lifecycleHtml(item.lifecycle),
     detailFacts
@@ -2020,10 +2034,206 @@ function strategyHistoryHtml(collection) {
   ].join("");
 }
 
+function evidenceDrawerArtifactHtml(artifact) {
+  const value = isRecord(artifact) ? artifact : {};
+  const inputStatus = nonEmptyText(value.input_binding_status);
+  const datasets = Array.isArray(value.datasets)
+    ? value.datasets.filter(isRecord)
+    : [];
+  const explicitInputs = Array.isArray(value.explicit_input_hashes)
+    ? value.explicit_input_hashes.filter(isRecord)
+    : [];
+  const downloadUrl = safeDownloadUrl(value.download_url);
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-drawer-artifact">',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(nonEmptyText(value.kind) || nonEmptyText(value.artifact_id) || "受认证产物")}</strong>`,
+    `<small>${escapeHtml(nonEmptyText(value.origin_tool) || "未知 Tool")} · ${escapeHtml(nonEmptyText(value.producer_version) || nonEmptyText(value.artifact_schema_version) || "版本未单独记录")}</small>`,
+    "</span>",
+    '<span class="candidate-lab-card-state">查看绑定</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    factsTableHtml({
+      artifact_id: value.artifact_id,
+      artifact_schema_version: value.artifact_schema_version,
+      producer_version: value.producer_version,
+      origin_tool: value.origin_tool,
+      created_at: value.created_at,
+      content_hash: value.content_hash,
+      provenance_hash: value.provenance_hash,
+      input_binding_hash: value.input_binding_hash,
+      input_binding_status: inputStatus === "explicit"
+        ? "Tool 明确记录"
+        : "由完整 provenance 规范化派生，未冒充原始 Tool 输入 hash",
+    }),
+    datasets.length
+      ? [
+        '<section class="candidate-lab-subsection">',
+        "<h5>数据集绑定</h5>",
+        '<div class="candidate-lab-table-scroll">',
+        '<table class="candidate-lab-table"><thead><tr><th>角色</th><th>数据集 ID</th><th>内容 Hash</th></tr></thead><tbody>',
+        ...datasets.map((dataset) => [
+          "<tr>",
+          `<td>${escapeHtml(nonEmptyText(dataset.role) || "-")}</td>`,
+          `<td><code>${escapeHtml(nonEmptyText(dataset.dataset_id) || "-")}</code></td>`,
+          `<td><code>${escapeHtml(nonEmptyText(dataset.content_hash) || "未单独记录")}</code></td>`,
+          "</tr>",
+        ].join("")),
+        "</tbody></table>",
+        "</div>",
+        "</section>",
+      ].join("")
+      : '<p class="candidate-lab-boundary-note">该产物 provenance 未单独暴露 dataset 指针；不从文件内容猜测。</p>',
+    explicitInputs.length
+      ? [
+        '<section class="candidate-lab-subsection">',
+        "<h5>Tool 明确记录的输入 Hash</h5>",
+        '<div class="candidate-lab-table-scroll">',
+        '<table class="candidate-lab-table"><thead><tr><th>字段</th><th>Hash</th></tr></thead><tbody>',
+        ...explicitInputs.map((input) => [
+          "<tr>",
+          `<td>${escapeHtml(nonEmptyText(input.field) || "-")}</td>`,
+          `<td><code>${escapeHtml(nonEmptyText(input.hash) || "-")}</code></td>`,
+          "</tr>",
+        ].join("")),
+        "</tbody></table>",
+        "</div>",
+        "</section>",
+      ].join("")
+      : "",
+    downloadUrl
+      ? `<a class="button compact secondary candidate-lab-download" href="${escapeHtml(downloadUrl)}" download>下载该受认证产物</a>`
+      : "",
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
+function evidenceDrawerDatasetsHtml(collection) {
+  const value = isRecord(collection) ? collection : {};
+  const items = Array.isArray(value.all) ? value.all.filter(isRecord) : [];
+  if (!items.length) {
+    return '<p class="candidate-lab-empty">当前投影没有可展示的数据集指针。</p>';
+  }
+  return [
+    '<div class="candidate-lab-table-scroll">',
+    '<table class="candidate-lab-table"><thead><tr><th>数据集 ID</th><th>内容 Hash</th><th>关联产物</th></tr></thead><tbody>',
+    ...items.map((dataset) => [
+      "<tr>",
+      `<td><code>${escapeHtml(nonEmptyText(dataset.dataset_id) || "-")}</code></td>`,
+      `<td><code>${escapeHtml(nonEmptyText(dataset.content_hash) || "未单独记录")}</code></td>`,
+      `<td>${escapeHtml(stablePrimitiveText(Array.isArray(dataset.artifact_ids) ? dataset.artifact_ids.length : 0))}</td>`,
+      "</tr>",
+    ].join("")),
+    "</tbody></table>",
+    "</div>",
+    value.truncated === true
+      ? '<p class="candidate-lab-truncated">数据集指针已由服务端按安全上限截断。</p>'
+      : "",
+  ].join("");
+}
+
+function evidenceDrawerRedFlagsHtml(collection) {
+  const value = isRecord(collection) ? collection : {};
+  const items = Array.isArray(value.all) ? value.all.filter(isRecord) : [];
+  if (!items.length) {
+    return '<p class="candidate-lab-empty">当前受认证投影没有红旗。</p>';
+  }
+  return [
+    '<div class="candidate-lab-risk-group" data-tone="warn">',
+    "<strong>跨证据红旗</strong>",
+    "<ul>",
+    ...items.map((flag) => (
+      `<li><code>${escapeHtml(nonEmptyText(flag.code) || "risk")}</code> ${escapeHtml(nonEmptyText(flag.message) || "-")}</li>`
+    )),
+    "</ul>",
+    "</div>",
+    value.truncated === true
+      ? '<p class="candidate-lab-truncated">红旗列表已由服务端截断。</p>'
+      : "",
+  ].join("");
+}
+
+function evidenceDrawerMemoryHtml(collection) {
+  const value = isRecord(collection) ? collection : {};
+  const items = Array.isArray(value.all) ? value.all.filter(isRecord) : [];
+  if (!items.length) {
+    return '<p class="candidate-lab-empty">最近一条 Agent 回复未引用受治理记忆。</p>';
+  }
+  return [
+    '<div class="candidate-lab-result-list">',
+    ...items.map((reference) => [
+      '<article class="candidate-lab-evidence-card candidate-lab-memory-reference">',
+      '<div class="candidate-lab-card-body">',
+      factsTableHtml({
+        memory_id: reference.id,
+        kind: reference.kind,
+        memory_type: reference.memory_type,
+        source_task_id: reference.source_task_id,
+        confidence: reference.confidence,
+        use_reason: reference.use_reason,
+        support_count: reference.support_count,
+        source_memory_count: reference.source_memory_count,
+      }),
+      "</div>",
+      "</article>",
+    ].join("")),
+    "</div>",
+    value.truncated === true
+      ? '<p class="candidate-lab-truncated">记忆引用已由服务端截断。</p>'
+      : "",
+    Number(value.omitted || 0) > 0
+      ? `<p class="candidate-lab-truncated">${escapeHtml(stablePrimitiveText(value.omitted))} 条格式无效的引用未展示。</p>`
+      : "",
+  ].join("");
+}
+
+function strategyEvidenceDrawerHtml(drawer) {
+  const value = isRecord(drawer) ? drawer : {};
+  const artifacts = isRecord(value.artifacts) ? value.artifacts : {};
+  const artifactItems = Array.isArray(artifacts.all)
+    ? artifacts.all.filter(isRecord)
+    : [];
+  return [
+    '<section class="candidate-lab-result-group candidate-lab-evidence-drawer">',
+    '<header class="candidate-lab-result-head">',
+    "<div><h4>Evidence Drawer</h4><p>统一查看当前页面已认证证据的数据集、产物、Tool/版本、内容与输入绑定 hash、红旗和最近 Agent 记忆引用。</p></div>",
+    "</header>",
+    '<p class="candidate-lab-boundary-note">仅展示当前任务且已经过对应领域 loader 重验的投影；不读取原始客户行，不把对话自由文本当成业务事实。缺少 Tool 原生输入 hash 时会明确标为 provenance 派生绑定摘要。</p>',
+    '<details class="candidate-lab-evidence-card" open>',
+    `<summary><span class="candidate-lab-card-title"><strong>受认证产物</strong><small>${escapeHtml(stablePrimitiveText(artifacts.total || 0))} 个当前任务产物</small></span><span class="candidate-lab-card-state">展开核验</span></summary>`,
+    '<div class="candidate-lab-card-body">',
+    artifactItems.length
+      ? `<div class="candidate-lab-result-list">${artifactItems.map(
+        (artifact) => evidenceDrawerArtifactHtml(artifact),
+      ).join("")}</div>`
+      : '<p class="candidate-lab-empty">当前页面尚无受认证产物。</p>',
+    artifacts.truncated === true
+      ? '<p class="candidate-lab-truncated">产物列表已由服务端按安全上限截断。</p>'
+      : "",
+    "</div>",
+    "</details>",
+    '<details class="candidate-lab-evidence-card">',
+    "<summary><span class=\"candidate-lab-card-title\"><strong>数据集绑定与红旗</strong><small>跨产物去重后的 lineage</small></span><span class=\"candidate-lab-card-state\">查看</span></summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceDrawerDatasetsHtml(value.datasets),
+    evidenceDrawerRedFlagsHtml(value.red_flags),
+    "</div>",
+    "</details>",
+    '<details class="candidate-lab-evidence-card">',
+    "<summary><span class=\"candidate-lab-card-title\"><strong>Agent 记忆引用</strong><small>最近一条回复的 metadata 审计指针</small></span><span class=\"candidate-lab-card-state\">查看</span></summary>",
+    `<div class="candidate-lab-card-body">${evidenceDrawerMemoryHtml(value.memory_references)}</div>`,
+    "</details>",
+    "</section>",
+  ].join("");
+}
+
 export function strategyCandidateLabResultsHtml(payload = {}) {
   const candidates = isRecord(payload.candidates) ? payload.candidates : {};
   return [
     strategyWorkflowSpineHtml(payload.workflow),
+    strategyEvidenceDrawerHtml(payload.evidence_drawer),
     strategyHistoryHtml(payload.strategies),
     ...COLLECTION_DEFINITIONS.map(
       (definition) => candidateCollectionHtml(candidates, definition),
@@ -7792,7 +8002,6 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         || strategyRequest.workflow === "strategy_dsl_delivery"
         || strategyRequest.workflow === "strategy_report_bundle_v2"
         || strategyRequest.workflow === "strategy_pool_add_candidate"
-        || strategyRequest.workflow === "interactive_tree_revision"
         || STRATEGY_POOL_OPERATION_WORKFLOWS.includes(strategyRequest.workflow)
       ) {
         await refresh(requestTaskId, { silent: true });

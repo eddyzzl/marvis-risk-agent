@@ -648,7 +648,9 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 
 信息架构：Data & Semantics → Candidate Lab → Strategy Pool → Backtest & Validation → Champion/Challenger → Adoption & Artifacts → Monitoring & Iteration。
 
-**首个工作台纵切（已完成，2026-07-23）**：Candidate Lab 已实现上述四个 Manual 启动器与受认证结果/Pool 摘要，Manual 和 Agent 已共用同一 deterministic execution kernel；任务切换、active plan/open gate、澄清、失败保留输入、请求去重和投影截断均有独立前后端覆盖。Phase 6 尚未完成，其余区域、完整状态持久化、全 evidence drawer、长任务控制及七步 browser E2E 仍按本 Phase 交付。
+**首个工作台纵切（已完成，2026-07-23）**：Candidate Lab 已实现上述四个 Manual 启动器与受认证结果/Pool 摘要，Manual 和 Agent 已共用同一 deterministic execution kernel；任务切换、active plan/open gate、澄清、失败保留输入、请求去重和投影截断均有独立前后端覆盖。后续纵切已继续补齐 Pool 全操作、交叉搜索、交互树编辑/续建和 Evidence Drawer。Phase 6 尚未完成，其余区域、完整状态持久化、长任务控制及七步 browser E2E 仍按本 Phase 交付。
+
+**Evidence Drawer 纵切（已完成，2026-07-27）**：Candidate Lab projection v10 在同一 authenticated projection 中增加任务级证据抽屉。服务端使用一次有界、task-scoped 批量查询恢复已进入领域投影的产物，并只投影 dataset lineage、artifact id/kind、来源 Tool、契约/生成器版本、内容与 provenance hash、Tool 原生 input/request hash 或明确标注的 provenance 派生绑定摘要、聚合红旗，以及最近 Agent 回复 metadata 中的受治理 memory id/category/source/confidence/reason 指针。前端不读取原始客户行、文件路径、完整 provenance 或未认证对话事实；记忆只展示审计引用，不改变确定性指标。宽桌面 1600×1000 旅程已验证展开、刷新、长 hash 换行和中文字段标签。
 
 交付：
 
@@ -805,7 +807,7 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 ### Phase 6：Strategy Workbench parity
 
 53. Workbench shell 与七区信息架构（Candidate Lab 首个宽桌面区域已接通，其余区域待续）；
-54. 完整 Manual 控件和 evidence drawer（单变量/Cross/自动树/refinement 启动器及受认证摘要已完成，Pool 全操作、其他候选和完整 drawer 待续）；
+54. 完整 Manual 控件和 evidence drawer（单变量、Cross、自动树/交互树、Voting、评分卡、Pool 全操作与受认证 Evidence Drawer 已完成；其余七区 Manual 控件按对应条目继续收口）；
 55. 节点/切点/cell/页面/语言状态持久化；
 56. Agent 与 Manual 共用 Workflow/DSL/gate、缺失信息状态和报告 revision；
 57. 完整七步报告 browser/API E2E、进度、取消和恢复。

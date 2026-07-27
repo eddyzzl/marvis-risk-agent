@@ -244,7 +244,7 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.strategy_lifecycle import is_locally_adopted
 
 
-SCHEMA_VERSION = "strategy.candidate-lab-projection.v9"
+SCHEMA_VERSION = "strategy.candidate-lab-projection.v10"
 
 UNIVARIATE_ARTIFACT_KIND = "strategy_candidate_json"
 UNIVARIATE_ORIGIN_TOOL = "strategy.analyze_univariate_candidates"
@@ -315,6 +315,11 @@ _MAX_WORKFLOW_EVIDENCE_PER_KIND = 40
 _MAX_REPORT_REVISIONS = 20
 _MAX_STRATEGIES = 100
 _MAX_STRATEGY_ARTIFACTS = 50
+_MAX_EVIDENCE_DRAWER_ARTIFACTS = 80
+_MAX_EVIDENCE_DRAWER_DATASETS = 80
+_MAX_EVIDENCE_DRAWER_INPUT_HASHES = 20
+_MAX_EVIDENCE_DRAWER_RED_FLAGS = 100
+_MAX_EVIDENCE_DRAWER_MEMORY_REFS = 50
 _STRATEGY_ARTIFACT_SUFFIXES = frozenset(
     {
         ".csv",
@@ -782,6 +787,10 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         "strategies": strategies,
         "workflow": workflow,
     }
+    projection["evidence_drawer"] = _build_evidence_drawer(
+        context,
+        projection,
+    )
     _require_projection_payload_budget(projection)
     return projection
 
@@ -5154,6 +5163,350 @@ def _read_regular_file(
 def _require_exact_path(record: Mapping[str, Any], expected: Path) -> None:
     if record["path"] != str(expected):
         raise CandidateLabProjectionError("artifact canonical path drifted")
+
+
+def _build_evidence_drawer(
+    context: _ProjectionContext,
+    projection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Summarize only artifacts already admitted to the safe projection."""
+
+    linked_ids = _projected_artifact_ids(projection)
+    selected_ids = linked_ids[:500]
+    records = context.artifact_repository.get_many_for_task(
+        context.task_id,
+        selected_ids,
+        limit=500,
+    )
+    projected_records = records[:_MAX_EVIDENCE_DRAWER_ARTIFACTS]
+    artifacts = [
+        _evidence_drawer_artifact(context.task_id, record)
+        for record in projected_records
+    ]
+    datasets_by_key: dict[tuple[str, str | None], dict[str, Any]] = {}
+    for artifact in artifacts:
+        for dataset in artifact["datasets"]:
+            key = (dataset["dataset_id"], dataset["content_hash"])
+            current = datasets_by_key.get(key)
+            if current is None:
+                datasets_by_key[key] = {
+                    **dataset,
+                    "artifact_ids": [artifact["artifact_id"]],
+                }
+            elif artifact["artifact_id"] not in current["artifact_ids"]:
+                current["artifact_ids"].append(artifact["artifact_id"])
+    datasets = sorted(
+        datasets_by_key.values(),
+        key=lambda item: (item["dataset_id"], item["content_hash"] or ""),
+    )
+    projected_datasets = datasets[:_MAX_EVIDENCE_DRAWER_DATASETS]
+    red_flags = _projected_red_flags(projection)
+    return {
+        "artifacts": {
+            "all": artifacts,
+            "total": len(records),
+            "linked_total": len(linked_ids),
+            "truncated": (
+                len(records) > len(artifacts)
+                or len(linked_ids) > len(selected_ids)
+            ),
+        },
+        "datasets": {
+            "all": projected_datasets,
+            "total": len(datasets),
+            "truncated": len(datasets) > len(projected_datasets),
+        },
+        "red_flags": {
+            "all": red_flags[:_MAX_EVIDENCE_DRAWER_RED_FLAGS],
+            "total": len(red_flags),
+            "truncated": len(red_flags) > _MAX_EVIDENCE_DRAWER_RED_FLAGS,
+        },
+        "memory_references": _latest_memory_reference_projection(context),
+        "boundary": {
+            "task_owned_only": True,
+            "authenticated_projection_only": True,
+            "raw_rows_included": False,
+            "free_text_used_as_business_fact": False,
+        },
+    }
+
+
+def _projected_artifact_ids(value: object) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(current: object) -> None:
+        if isinstance(current, Mapping):
+            artifact_id = current.get("artifact_id")
+            if (
+                isinstance(artifact_id, str)
+                and artifact_id
+                and artifact_id not in seen
+            ):
+                seen.add(artifact_id)
+                ordered.append(artifact_id)
+            for item in current.values():
+                visit(item)
+        elif isinstance(current, list | tuple):
+            for item in current:
+                visit(item)
+
+    visit(value)
+    return ordered
+
+
+def _evidence_drawer_artifact(
+    task_id: str,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    _require_record_identity(record, task_id=task_id)
+    provenance = _mapping(
+        record.get("provenance"),
+        "evidence drawer artifact provenance",
+    )
+    canonical_provenance = json.dumps(
+        dict(provenance),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    provenance_hash = hashlib.sha256(
+        canonical_provenance.encode("utf-8")
+    ).hexdigest()
+    explicit_hashes = _explicit_input_hashes(provenance)
+    if explicit_hashes:
+        input_binding_hash = explicit_hashes[0]["hash"]
+        input_binding_status = "explicit"
+    else:
+        input_binding_hash = provenance_hash
+        input_binding_status = "derived_from_provenance"
+    artifact = _artifact_projection(record, task_id)
+    return {
+        **artifact,
+        "kind": str(record["kind"]),
+        "origin_tool": str(record["origin_tool"]),
+        "artifact_schema_version": _optional_drawer_text(
+            provenance.get("schema_version")
+        ),
+        "producer_version": _optional_drawer_text(
+            provenance.get("producer_version")
+        ),
+        "content_hash": str(record["content_hash"]),
+        "provenance_hash": provenance_hash,
+        "input_binding_hash": input_binding_hash,
+        "input_binding_status": input_binding_status,
+        "explicit_input_hashes": explicit_hashes,
+        "datasets": _dataset_references(provenance),
+    }
+
+
+def _explicit_input_hashes(value: object) -> list[dict[str, str]]:
+    matches: dict[tuple[str, str], dict[str, str]] = {}
+
+    def visit(current: object, path: tuple[str, ...], depth: int) -> None:
+        if depth > 8:
+            return
+        if isinstance(current, Mapping):
+            for raw_key, item in current.items():
+                key = str(raw_key)
+                item_path = (*path, key)
+                lowered = key.lower()
+                if (
+                    isinstance(item, str)
+                    and _SHA256_RE.fullmatch(item)
+                    and (
+                        lowered in {
+                            "input_hash",
+                            "inputs_hash",
+                            "request_hash",
+                            "request_content_hash",
+                        }
+                        or lowered.endswith("_input_hash")
+                        or lowered.endswith("_inputs_hash")
+                        or lowered.endswith("_request_hash")
+                    )
+                ):
+                    label = ".".join(item_path)
+                    matches[(label, item.lower())] = {
+                        "field": label,
+                        "hash": item.lower(),
+                    }
+                visit(item, item_path, depth + 1)
+        elif isinstance(current, list | tuple):
+            for index, item in enumerate(current):
+                visit(item, (*path, str(index)), depth + 1)
+
+    visit(value, (), 0)
+    return list(matches.values())[:_MAX_EVIDENCE_DRAWER_INPUT_HASHES]
+
+
+def _dataset_references(value: object) -> list[dict[str, Any]]:
+    matches: dict[tuple[str, str | None], dict[str, Any]] = {}
+
+    def visit(current: object, path: tuple[str, ...], depth: int) -> None:
+        if depth > 8:
+            return
+        if isinstance(current, Mapping):
+            for raw_key, raw_id in current.items():
+                key = str(raw_key)
+                lowered = key.lower()
+                if (
+                    isinstance(raw_id, str)
+                    and raw_id
+                    and lowered.endswith("dataset_id")
+                ):
+                    prefix = key[: -len("dataset_id")]
+                    hash_value = None
+                    for hash_key in (
+                        f"{prefix}dataset_content_hash",
+                        f"{prefix}content_hash",
+                        "dataset_content_hash",
+                    ):
+                        candidate = current.get(hash_key)
+                        if (
+                            isinstance(candidate, str)
+                            and _SHA256_RE.fullmatch(candidate)
+                        ):
+                            hash_value = candidate.lower()
+                            break
+                    role = ".".join((*path, key))
+                    normalized_id = raw_id.strip()
+                    if normalized_id:
+                        matches[(normalized_id, hash_value)] = {
+                            "dataset_id": normalized_id,
+                            "content_hash": hash_value,
+                            "role": role,
+                        }
+                visit(raw_id, (*path, key), depth + 1)
+        elif isinstance(current, list | tuple):
+            for index, item in enumerate(current):
+                visit(item, (*path, str(index)), depth + 1)
+
+    visit(value, (), 0)
+    return list(matches.values())[:_MAX_EVIDENCE_DRAWER_DATASETS]
+
+
+def _projected_red_flags(value: object) -> list[dict[str, str]]:
+    matches: dict[tuple[str, str, str], dict[str, str]] = {}
+
+    def visit(current: object, depth: int) -> None:
+        if depth > 12:
+            return
+        if isinstance(current, Mapping):
+            red_flags = current.get("red_flags")
+            if isinstance(red_flags, list | tuple):
+                for raw in red_flags:
+                    if isinstance(raw, Mapping):
+                        code = _optional_drawer_text(raw.get("code")) or "risk"
+                        level = (
+                            _optional_drawer_text(raw.get("level")) or "warn"
+                        )
+                        message = (
+                            _optional_drawer_text(raw.get("message"))
+                            or _optional_drawer_text(raw)
+                        )
+                    else:
+                        code = "risk"
+                        level = "warn"
+                        message = _optional_drawer_text(raw)
+                    if message:
+                        matches[(code, level, message)] = {
+                            "code": code,
+                            "level": level,
+                            "message": message,
+                        }
+            for item in current.values():
+                visit(item, depth + 1)
+        elif isinstance(current, list | tuple):
+            for item in current:
+                visit(item, depth + 1)
+
+    visit(value, 0)
+    return list(matches.values())
+
+
+def _latest_memory_reference_projection(
+    context: _ProjectionContext,
+) -> dict[str, Any]:
+    message = TaskRepository(
+        context.settings.db_path
+    ).get_latest_assistant_message(context.task_id)
+    if message is None:
+        return {
+            "message_id": None,
+            "message_created_at": None,
+            "all": [],
+            "total": 0,
+            "omitted": 0,
+            "truncated": False,
+        }
+    metadata = message.get("metadata")
+    raw_references = (
+        metadata.get("memory_references")
+        if isinstance(metadata, Mapping)
+        else None
+    )
+    if not isinstance(raw_references, list):
+        raw_references = []
+    references: list[dict[str, Any]] = []
+    omitted = 0
+    for raw in raw_references:
+        if not isinstance(raw, Mapping):
+            omitted += 1
+            continue
+        memory_id = _optional_drawer_text(raw.get("id"))
+        if memory_id is None:
+            omitted += 1
+            continue
+        references.append(
+            {
+                "id": memory_id,
+                "kind": _optional_drawer_text(raw.get("kind")) or "raw",
+                "memory_type": _optional_drawer_text(
+                    raw.get("memory_type")
+                ),
+                "source_task_id": _optional_drawer_text(
+                    raw.get("source_task_id")
+                ),
+                "confidence": _optional_drawer_text(
+                    raw.get("confidence")
+                )
+                or "medium",
+                "use_reason": _optional_drawer_text(
+                    raw.get("use_reason")
+                ),
+                "support_count": (
+                    int(raw["support_count"])
+                    if isinstance(raw.get("support_count"), int)
+                    and not isinstance(raw.get("support_count"), bool)
+                    and raw["support_count"] >= 0
+                    else None
+                ),
+                "source_memory_count": (
+                    len(raw["source_memory_ids"])
+                    if isinstance(raw.get("source_memory_ids"), list)
+                    else 0
+                ),
+            }
+        )
+    projected = references[:_MAX_EVIDENCE_DRAWER_MEMORY_REFS]
+    return {
+        "message_id": str(message["id"]),
+        "message_created_at": str(message["created_at"]),
+        "all": projected,
+        "total": len(references),
+        "omitted": omitted,
+        "truncated": len(references) > len(projected),
+    }
+
+
+def _optional_drawer_text(value: object) -> str | None:
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        text = str(value).strip()
+        if text and "\x00" not in text:
+            return text[:4_000]
+    return None
 
 
 def _artifact_projection(

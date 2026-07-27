@@ -45,6 +45,7 @@ def _register(
     content_hash: str | None = None,
     origin_tool: str = "strategy.render_plan",
     provenance: dict | None = None,
+    created_at: str = "2026-07-18T01:02:03+00:00",
 ):
     return repo.register(
         task_id=task_id,
@@ -53,7 +54,7 @@ def _register(
         content_hash=content_hash or _sha("strategy-plan"),
         origin_tool=origin_tool,
         provenance=provenance or {"plan_id": "plan-1", "revision": 1},
-        created_at="2026-07-18T01:02:03+00:00",
+        created_at=created_at,
     )
 
 
@@ -121,6 +122,37 @@ def test_same_path_can_be_registered_for_another_kind_or_task(tmp_path):
         [first, another_kind], key=lambda row: (row["created_at"], row["id"])
     )
     assert repo.list_for_task("task-2") == [another_task]
+
+
+def test_get_many_for_task_is_bounded_deduplicated_and_task_scoped(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    _seed_task(db_path, "task-1")
+    _seed_task(db_path, "task-2")
+    repo = TaskArtifactRepository(db_path)
+    first = _register(repo, path="outputs/first.json")
+    second = _register(
+        repo,
+        path="outputs/second.json",
+        content_hash=_sha("second"),
+        created_at="2026-07-18T02:02:03+00:00",
+    )
+    foreign = _register(
+        repo,
+        task_id="task-2",
+        path="outputs/foreign.json",
+        content_hash=_sha("foreign"),
+    )
+
+    assert repo.get_many_for_task(
+        "task-1",
+        [first["id"], second["id"], first["id"], foreign["id"]],
+    ) == [second, first]
+    assert repo.get_many_for_task(
+        "task-1",
+        [first["id"], second["id"]],
+        limit=1,
+    ) == [first]
+    assert repo.get_many_for_task("task-1", []) == []
 
 
 def test_register_on_connection_participates_in_callers_transaction(tmp_path):

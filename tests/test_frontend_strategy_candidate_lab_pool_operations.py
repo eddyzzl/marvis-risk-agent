@@ -763,7 +763,7 @@ def test_pool_operation_controls_follow_complete_authenticated_pool_projection()
     )
 
 
-def test_pool_validation_type_follows_current_approval_reject_pool_projection() -> None:
+def test_pool_validation_type_follows_all_supported_current_pool_projections() -> None:
     run_node(
         r"""
         const indexHtml = readFileSync("./marvis/static/index.html", "utf8");
@@ -793,7 +793,7 @@ def test_pool_validation_type_follows_current_approval_reject_pool_projection() 
               operationPool("reject", []),
               operationPool(
                 "limit",
-                [operationEntry("b", 0, { type: "limit", value: 1000 })],
+                [],
               ),
             ]),
           ]]),
@@ -834,7 +834,7 @@ def test_pool_validation_type_follows_current_approval_reject_pool_projection() 
         );
         assert.deepEqual(
           multiple.type.options.map((option) => option.value),
-          ["", "approval", "reject"],
+          ["", "approval", "reject", "pricing"],
         );
         assert.equal(multiple.type.value, "");
         assert.match(multiple.help.textContent, /多个|明确选择/);
@@ -846,7 +846,7 @@ def test_pool_validation_type_follows_current_approval_reject_pool_projection() 
               operationPool("approval", []),
               operationPool(
                 "segmentation",
-                [operationEntry("f", 0, { type: "segment", value: "A" })],
+                [],
               ),
             ]),
           ]]),

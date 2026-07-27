@@ -31,7 +31,7 @@ def test_candidate_lab_projects_authenticated_cross_search_pairs_without_hashes(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v10"
     collection = body["candidates"]["cross_search"]
     assert collection["total"] == 1
     assert collection["truncated"] is False

@@ -1393,7 +1393,7 @@ def test_candidate_lab_replays_scorecard_pool_and_projects_safe_evidence(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v10"
     band = body["candidates"]["scorecard_band"]["latest"]
     assert band["detail"]["asset_id"] == asset["asset_id"]
     assert band["detail"]["performance"] == {"auc": 1.0, "ks": 1.0}
@@ -1423,6 +1423,87 @@ def test_candidate_lab_replays_scorecard_pool_and_projects_safe_evidence(
     assert body["pools"]["latest"]["entries"][0]["source"]["asset_type"] == (
         "scorecard_band"
     )
+
+
+def test_candidate_lab_evidence_drawer_projects_authenticated_lineage_only(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path)
+    task_id = _strategy_task(app)
+    record, _path = _register_univariate_candidate(app, task_id)
+    TaskRepository(app.state.settings.db_path).add_agent_message(
+        task_id,
+        role="assistant",
+        stage="strategy",
+        content="已使用受治理记忆补充口径提醒。",
+        metadata={
+            "memory_references": [
+                {
+                    "id": "memory-1",
+                    "kind": "raw",
+                    "memory_type": "strategy_pitfall",
+                    "source_task_id": "source-task-1",
+                    "confidence": "high",
+                    "use_reason": "提醒样本成熟度口径",
+                    "support_count": 2,
+                    "source_memory_ids": ["memory-source-1"],
+                }
+            ]
+        },
+    )
+
+    response = TestClient(app).get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v10"
+    drawer = body["evidence_drawer"]
+    assert drawer["boundary"] == {
+        "task_owned_only": True,
+        "authenticated_projection_only": True,
+        "raw_rows_included": False,
+        "free_text_used_as_business_fact": False,
+    }
+    assert drawer["artifacts"]["total"] == 1
+    artifact = drawer["artifacts"]["all"][0]
+    assert artifact["artifact_id"] == record["id"]
+    assert artifact["kind"] == "strategy_candidate_json"
+    assert artifact["origin_tool"] == "strategy.analyze_univariate_candidates"
+    assert artifact["artifact_schema_version"] == (
+        "strategy.univariate-candidate-artifact.v1"
+    )
+    assert artifact["producer_version"] == "strategy.univariate-candidate/1"
+    assert artifact["content_hash"] == record["content_hash"]
+    assert artifact["input_binding_status"] == "derived_from_provenance"
+    assert len(artifact["input_binding_hash"]) == 64
+    assert artifact["explicit_input_hashes"] == []
+    assert artifact["datasets"] == [
+        {
+            "dataset_id": "dataset-1",
+            "content_hash": HASH_A,
+            "role": "dataset_id",
+        }
+    ]
+    assert drawer["datasets"]["all"][0]["artifact_ids"] == [record["id"]]
+    assert drawer["red_flags"]["all"] == [
+        {"code": "risk", "level": "warn", "message": "test_warning"}
+    ]
+    assert drawer["memory_references"]["all"] == [
+        {
+            "id": "memory-1",
+            "kind": "raw",
+            "memory_type": "strategy_pitfall",
+            "source_task_id": "source-task-1",
+            "confidence": "high",
+            "use_reason": "提醒样本成熟度口径",
+            "support_count": 2,
+            "source_memory_count": 1,
+        }
+    ]
+    assert "path" not in str(drawer)
+    assert "source_memory_ids" not in str(drawer)
 
 
 def test_candidate_lab_bounds_scorecard_point_rows(
@@ -1730,7 +1811,9 @@ def test_candidate_lab_scorecard_projection_omits_private_bindings_and_hashes(
             }
         return set()
 
-    keys = all_keys(response.json())
+    payload = response.json()
+    drawer = payload.pop("evidence_drawer")
+    keys = all_keys(payload)
     forbidden = {
         "dataset_id",
         "dataset_content_hash",
@@ -1750,6 +1833,10 @@ def test_candidate_lab_scorecard_projection_omits_private_bindings_and_hashes(
         "score_vector_artifact_content_hash",
     }
     assert forbidden & keys == set()
+    assert drawer["boundary"]["authenticated_projection_only"] is True
+    assert "path" not in str(drawer)
+    assert "workspace_revision" not in str(drawer)
+    assert "sample_design_ref" not in str(drawer)
     private_virtual_field = (
         "__marvis_model_pd_"
         + asset["source_refs"]["score_vector"]["artifact_id"][:16]
@@ -1974,7 +2061,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
 
     assert response.status_code == 200, response.text
     assert response.json() == {
-        "schema_version": "strategy.candidate-lab-projection.v9",
+        "schema_version": "strategy.candidate-lab-projection.v10",
         "task_id": task_id,
         "can_start": True,
         "blocked_reason": None,
@@ -2009,6 +2096,38 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
             "total": 0,
             "truncated": False,
             "current_local_champions": [],
+        },
+        "evidence_drawer": {
+            "artifacts": {
+                "all": [],
+                "total": 0,
+                "linked_total": 0,
+                "truncated": False,
+            },
+            "datasets": {
+                "all": [],
+                "total": 0,
+                "truncated": False,
+            },
+            "red_flags": {
+                "all": [],
+                "total": 0,
+                "truncated": False,
+            },
+            "memory_references": {
+                "message_id": None,
+                "message_created_at": None,
+                "all": [],
+                "total": 0,
+                "omitted": 0,
+                "truncated": False,
+            },
+            "boundary": {
+                "task_owned_only": True,
+                "authenticated_projection_only": True,
+                "raw_rows_included": False,
+                "free_text_used_as_business_fact": False,
+            },
         },
         "workflow": {
             "project_context": None,
@@ -2135,7 +2254,7 @@ def test_candidate_lab_projects_authenticated_materialized_strategy_history(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v10"
     collection = body["strategies"]
     assert collection["total"] == 1
     assert collection["truncated"] is False
@@ -2363,7 +2482,7 @@ def test_candidate_lab_projects_authenticated_project_context_and_history(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v10"
     project = body["workflow"]["project_context"]
     assert project["revision_id"] == output["revision"]["revision_id"]
     assert project["revision"] == 1
@@ -2402,7 +2521,7 @@ def test_candidate_lab_v4_projects_authenticated_native_dual_population_sample(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v10"
     sample = body["workflow"]["sample_design"]
     assert sample["source_mode"] == "native_active_dataset"
     assert sample["relationship"] == "parallel_time_cohorts"
@@ -3465,7 +3584,14 @@ def test_candidate_lab_response_omits_platform_bindings_and_hashes(
             for item in value:
                 visit(item)
 
-    visit(response.json())
+    payload = response.json()
+    drawer = payload.pop("evidence_drawer")
+    visit(payload)
+    assert drawer["boundary"]["authenticated_projection_only"] is True
+    assert "path" not in str(drawer)
+    assert "workspace_revision" not in str(drawer)
+    assert "sample_context_hash" not in str(drawer)
+    assert "sample_design_ref" not in str(drawer)
 
 
 def test_candidate_lab_queries_only_latest_nonterminal_plan_summary(

@@ -4214,7 +4214,11 @@ def test_interactive_tree_threshold_controller_requires_explicit_pointer_and_ref
             reason: "人工确认 score 新阈值",
           },
         });
-        assert.equal(refreshes, 2);
+        assert.equal(
+          refreshes,
+          1,
+          "interactive tree submission settle owns the post-submit refresh",
+        );
 
         tree.pointers.nodes[0].threshold = 575.5;
         tree.pointers.eligible_threshold_adjustments[0].current_threshold =

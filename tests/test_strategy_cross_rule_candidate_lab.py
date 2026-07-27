@@ -40,7 +40,7 @@ def test_candidate_lab_projects_cross_rule_search_candidate_and_pool_source(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v10"
     [search] = body["candidates"]["cross_rule_search"]["all"]
     assert search["search_id"] == searched["search_id"]
     assert search["dimension"] == 2
