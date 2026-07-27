@@ -542,7 +542,7 @@ def test_ledger_insert_failure_rolls_back_strategy_and_creation_audit(tmp_path) 
 
 
 @pytest.mark.slow
-def test_model_score_requirements_are_materialized_but_not_claimed_ready(
+def test_model_score_requirements_are_materialized_and_runtime_ready(
     tmp_path,
 ) -> None:
     real = _real_scorecard(tmp_path)
@@ -574,8 +574,8 @@ def test_model_score_requirements_are_materialized_but_not_claimed_ready(
         ).hexdigest(),
         "requirement_count": 1,
         "virtual_fields": [virtual_field],
-        "runtime_requirements_supported": False,
-        "blocker_code": "strategy_pool_runtime_requirements_not_supported",
+        "runtime_requirements_supported": True,
+        "blocker_code": None,
     }
     strategy = StrategyRepository(real["fx"]["settings"].db_path).get_strategy(
         output["strategy_ref"]["strategy_id"]

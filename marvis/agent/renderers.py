@@ -3319,6 +3319,14 @@ def _render_measure_strategy_pool_validation(
         return _strategy_pool_validation_integrity_failure()
 
     evidence = o["evidence"]
+    if (
+        evidence["schema_version"]
+        == "strategy.pool-validation-evidence.v2"
+    ):
+        try:
+            return _render_typed_strategy_pool_validation(o)
+        except Exception:
+            return _strategy_pool_validation_integrity_failure()
     identity = evidence["identity"]
     population = evidence["population_metrics"]
     overall = evidence["overall"]
@@ -3414,6 +3422,148 @@ def _render_measure_strategy_pool_validation(
             "rows": monthly_rows,
         },
     ]
+
+
+def _render_typed_strategy_pool_validation(
+    output: Mapping[str, Any],
+) -> tuple[str, list[dict]]:
+    evidence = output["evidence"]
+    identity = evidence["identity"]
+    population = evidence["population_metrics"]
+    typed = evidence["typed_backtest"]
+    strategy_type = identity["strategy_type"]
+    labels = {
+        "limit": ("额度", "assigned_limit"),
+        "pricing": ("定价", "assigned_rate"),
+        "segmentation": ("分群", "segment"),
+    }
+    label, value_field = labels[strategy_type]
+    monthly = evidence["monthly"]
+    periods = (
+        monthly["periods"]
+        if monthly["status"] == "available"
+        else []
+    )
+    month_text = (
+        f"**{len(periods)}** 个月"
+        if monthly["status"] == "available"
+        else "月份维度不可用"
+    )
+    artifact = output["artifact"]
+    text = (
+        f"**Strategy Pool 独立样本回放验证完成**：已在 "
+        f"`{evidence['partition']}` 的 `risk` 独立分区回放当前 "
+        f"`{strategy_type}` Pool `{identity['pool_id']}` revision "
+        f"{identity['revision']}。\n"
+        f"- independent replay evidence 覆盖 "
+        f"**{population['population_count']}** 行，其中 "
+        f"**{population['labelled_count']}** 行进入风险分母、"
+        f"**{population['unlabelled_count']}** 行保留但不进入风险分母；"
+        f"{month_text}。\n"
+        f"- 结果保留原生{label}输出及其分布、标签风险和可用经济指标，"
+        "不把它改写成审批动作，也不外推为 PSI、稳定性或漂移结论。\n"
+        "- 本步骤不会修改 Pool、不会创建策略，也不晋级、不采纳、不部署。\n\n"
+        f"**独立回放 evidence artifact**：[{artifact['artifact_id']}]"
+        f"({artifact['download_url']})"
+    )
+    if output["warnings"]:
+        text += "\n\n**证据提醒**：" + "；".join(output["warnings"])
+
+    value_formatter = _pct if strategy_type == "pricing" else _num
+    distribution_rows = [
+        [
+            (
+                str(item[value_field])
+                if strategy_type == "segmentation"
+                else value_formatter(item[value_field])
+            ),
+            _num(item["count"]),
+            _pct(item["share"]),
+            _num(item["labeled_count"]),
+            _num(item["bad_count"]),
+            _pct(item["bad_rate"]),
+        ]
+        for item in typed["breakdown"]
+    ]
+    metric_rows = [
+        [key, _typed_validation_metric_text(key, value)]
+        for key, value in sorted(typed["metrics"].items())
+    ]
+    tables = [
+        {
+            "title": f"独立回放{label}指标",
+            "columns": ["指标", "值"],
+            "rows": metric_rows,
+        },
+        {
+            "title": f"独立回放{label}分布",
+            "columns": [
+                label,
+                "样本数",
+                "占比",
+                "有标签样本",
+                "坏样本数",
+                "坏率",
+            ],
+            "rows": distribution_rows,
+        },
+    ]
+    if typed["economics"]:
+        tables.append(
+            {
+                "title": f"独立回放{label}经济指标",
+                "columns": ["指标", "值"],
+                "rows": [
+                    [key, _typed_validation_metric_text(key, value)]
+                    for key, value in sorted(typed["economics"].items())
+                    if key != "by_row"
+                ],
+            }
+        )
+    if monthly["status"] == "available":
+        headline_key = {
+            "limit": "mean_limit",
+            "pricing": "mean_rate",
+            "segmentation": "segment_count",
+        }[strategy_type]
+        tables.append(
+            {
+                "title": f"独立回放逐月{label}证据",
+                "columns": [
+                    "月份",
+                    "样本数",
+                    "有标签样本",
+                    headline_key,
+                ],
+                "rows": [
+                    [
+                        str(item["value"]),
+                        _num(item["typed_backtest"]["population_count"]),
+                        _num(item["typed_backtest"]["labeled_count"]),
+                        _typed_validation_metric_text(
+                            headline_key,
+                            item["typed_backtest"]["metrics"][headline_key],
+                        ),
+                    ]
+                    for item in periods
+                ],
+            }
+        )
+    return text, tables
+
+
+def _typed_validation_metric_text(key: str, value: object) -> str:
+    if value is None:
+        return "n/a"
+    if key.endswith("_rate") or key in {
+        "mean_rate",
+        "ead_weighted_rate",
+        "roa",
+    }:
+        return _pct(value)
+    if isinstance(value, int | float):
+        return _num(value)
+    return str(value)
 
 
 def _strategy_pool_stability_integrity_failure() -> tuple[str, list[dict]]:
@@ -5225,7 +5375,8 @@ def _render_build_strategy_report_bundle_v2(o: dict):
     text = (
         f"**StrategyReportBundle V2 已生成**：报告 ID `{o['report_id']}`，"
         f"revision **{o['report_revision']}**，状态 **{o['status']}**。\n"
-        "- 本步骤只生成受治理报告：**未创建策略、未采纳、未部署或上线**。\n"
+        "- 本报告生成步骤未创建或变更策略资产，也未执行采纳、部署或上线；"
+        "报告中的生命周期状态来自已认证证据。\n"
         f"- 完整性警告：{warning_text}\n"
         f"- 下载：{downloads}"
     )

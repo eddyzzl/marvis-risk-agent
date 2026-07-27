@@ -1542,10 +1542,14 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         "measure_strategy_pool_validation inputs",
     )
     strategy_type = _text(obj["strategy_type"], "strategy_type")
-    if strategy_type not in {"approval", "reject"}:
-        raise StrategyError(
-            "Strategy Pool validation supports approval/reject only"
-        )
+    if strategy_type not in {
+        "approval",
+        "reject",
+        "limit",
+        "pricing",
+        "segmentation",
+    }:
+        raise StrategyError("Strategy Pool validation type is unsupported")
     partition = _text(obj["partition"], "partition")
     if partition not in {"validation", "oot"}:
         raise StrategyError("partition must be validation or oot")

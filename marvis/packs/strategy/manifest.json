@@ -3189,7 +3189,7 @@
     },
     {
       "name": "revise_interactive_tree",
-      "summary": "Prune one exact visible split node from a live task-owned automatic tree or immutable interactive-tree revision, replay the derived frontier against the governed development sample, and publish a new immutable revision without changing the Strategy Pool.",
+      "summary": "Prune one exact visible split or adjust its finite effective threshold from a live task-owned automatic tree or immutable interactive-tree revision, replay the complete visible tree against the governed development sample, and publish a new immutable revision without changing the Strategy Pool.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3198,7 +3198,11 @@
             "pattern": "^(?:candidate-asset|interactive-tree-revision)-[0-9a-f]{32}$"
           },
           "node_id": {"type": "string", "minLength": 1},
-          "operation": {"const": "prune_subtree"},
+          "operation": {
+            "type": "string",
+            "enum": ["prune_subtree", "adjust_split_threshold"]
+          },
+          "threshold": {"type": "number"},
           "reason": {
             "type": ["string", "null"],
             "minLength": 1,
@@ -3207,13 +3211,37 @@
           }
         },
         "required": ["source_tree_id", "node_id", "operation"],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "operation": {"const": "adjust_split_threshold"}
+              }
+            },
+            "then": {"required": ["threshold"]}
+          },
+          {
+            "if": {
+              "properties": {
+                "operation": {"const": "prune_subtree"}
+              }
+            },
+            "then": {
+              "not": {"required": ["threshold"]}
+            }
+          }
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.revise-interactive-tree-tool.v1"
+            "type": "string",
+            "enum": [
+              "strategy.revise-interactive-tree-tool.v1",
+              "strategy.revise-interactive-tree-tool.v2"
+            ]
           },
           "revision_id": {
             "type": "string",
@@ -3244,59 +3272,181 @@
             "pattern": "^interactive-tree-revision-[0-9a-f]{32}$"
           },
           "edit": {
-            "type": "object",
-            "properties": {
-              "operation": {"const": "prune_subtree"},
-              "node_id": {"type": "string", "minLength": 1},
-              "reason": {
-                "type": ["string", "null"],
-                "maxLength": 500
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "operation": {"const": "prune_subtree"},
+                  "node_id": {"type": "string", "minLength": 1},
+                  "reason": {
+                    "type": ["string", "null"],
+                    "maxLength": 500
+                  }
+                },
+                "required": ["operation", "node_id", "reason"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "operation": {"const": "adjust_split_threshold"},
+                  "node_id": {"type": "string", "minLength": 1},
+                  "previous_threshold": {"type": "number"},
+                  "threshold": {"type": "number"},
+                  "reason": {
+                    "type": ["string", "null"],
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "operation",
+                  "node_id",
+                  "previous_threshold",
+                  "threshold",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "operation": {"const": "prune_subtree"},
+                  "node_id": {"type": "string", "minLength": 1},
+                  "previous_threshold": {"type": "null"},
+                  "threshold": {"type": "null"},
+                  "reason": {
+                    "type": ["string", "null"],
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "operation",
+                  "node_id",
+                  "previous_threshold",
+                  "threshold",
+                  "reason"
+                ],
+                "additionalProperties": false
               }
-            },
-            "required": ["operation", "node_id", "reason"],
-            "additionalProperties": false
+            ]
           },
           "visible_node_count": {"type": "integer", "minimum": 1},
           "frontier_node_count": {"type": "integer", "minimum": 1},
           "replay": {
-            "type": "object",
-            "properties": {
-              "schema_version": {
-                "const": "strategy.interactive-tree-replay.v1"
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "schema_version": {
+                    "const": "strategy.interactive-tree-replay.v1"
+                  },
+                  "partition": {
+                    "type": "string",
+                    "enum": ["development", "risk/development"]
+                  },
+                  "source_row_count": {"type": "integer", "minimum": 1},
+                  "frontier_count": {"type": "integer", "minimum": 1},
+                  "exactly_once": {"const": true},
+                  "metrics_matched": {"const": true},
+                  "assignment_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "sample_context_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "result_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "schema_version",
+                  "partition",
+                  "source_row_count",
+                  "frontier_count",
+                  "exactly_once",
+                  "metrics_matched",
+                  "assignment_hash",
+                  "sample_context_hash",
+                  "result_hash"
+                ],
+                "additionalProperties": false
               },
-              "partition": {
-                "type": "string",
-                "enum": ["development", "risk/development"]
-              },
-              "source_row_count": {"type": "integer", "minimum": 1},
-              "frontier_count": {"type": "integer", "minimum": 1},
-              "exactly_once": {"const": true},
-              "metrics_matched": {"const": true},
-              "assignment_hash": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{64}$"
-              },
-              "sample_context_hash": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{64}$"
-              },
-              "result_hash": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{64}$"
+              {
+                "type": "object",
+                "properties": {
+                  "schema_version": {
+                    "const": "strategy.interactive-tree-replay.v2"
+                  },
+                  "producer_version": {
+                    "const": "strategy.interactive-tree-replay/2"
+                  },
+                  "source_row_count": {"type": "integer", "minimum": 1},
+                  "visible_node_count": {"type": "integer", "minimum": 1},
+                  "visible_split_count": {"type": "integer", "minimum": 1},
+                  "frontier_count": {"type": "integer", "minimum": 1},
+                  "exactly_once": {"const": true},
+                  "all_visible_metrics_matched": {"const": true},
+                  "all_visible_split_diagnostics_matched": {"const": true},
+                  "frontier_conditions_evaluator_equivalent": {"const": true},
+                  "minimum_leaf_constraints_passed": {"const": true},
+                  "metric_conservation_passed": {"const": true},
+                  "previous_threshold": {"type": "number"},
+                  "threshold": {"type": "number"},
+                  "previous_missing_child": {
+                    "type": "string",
+                    "enum": ["left", "right"]
+                  },
+                  "missing_child": {
+                    "type": "string",
+                    "enum": ["left", "right"]
+                  },
+                  "affected_row_count": {"type": "integer", "minimum": 0},
+                  "grouping_unchanged": {"type": "boolean"},
+                  "warning_codes": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "const": "threshold_grouping_unchanged"
+                    }
+                  },
+                  "assignment_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "result_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "schema_version",
+                  "producer_version",
+                  "source_row_count",
+                  "visible_node_count",
+                  "visible_split_count",
+                  "frontier_count",
+                  "exactly_once",
+                  "all_visible_metrics_matched",
+                  "all_visible_split_diagnostics_matched",
+                  "frontier_conditions_evaluator_equivalent",
+                  "minimum_leaf_constraints_passed",
+                  "metric_conservation_passed",
+                  "previous_threshold",
+                  "threshold",
+                  "previous_missing_child",
+                  "missing_child",
+                  "affected_row_count",
+                  "grouping_unchanged",
+                  "warning_codes",
+                  "assignment_hash",
+                  "result_hash"
+                ],
+                "additionalProperties": false
               }
-            },
-            "required": [
-              "schema_version",
-              "partition",
-              "source_row_count",
-              "frontier_count",
-              "exactly_once",
-              "metrics_matched",
-              "assignment_hash",
-              "sample_context_hash",
-              "result_hash"
-            ],
-            "additionalProperties": false
+            ]
           },
           "artifacts": {
             "type": "array",
@@ -3386,7 +3536,11 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.materialize-interactive-tree-frontier-selection-tool.v1"
+            "type": "string",
+            "enum": [
+              "strategy.materialize-interactive-tree-frontier-selection-tool.v1",
+              "strategy.materialize-interactive-tree-frontier-selection-tool.v2"
+            ]
           },
           "selection_id": {
             "type": "string",
@@ -3531,7 +3685,11 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.materialize-interactive-tree-frontier-group-selection-tool.v1"
+            "type": "string",
+            "enum": [
+              "strategy.materialize-interactive-tree-frontier-group-selection-tool.v1",
+              "strategy.materialize-interactive-tree-frontier-group-selection-tool.v2"
+            ]
           },
           "selection_id": {
             "type": "string",
@@ -5226,6 +5384,262 @@
       "memory_limit_mb": 4096
     },
     {
+      "name": "search_cross_matrix_candidates",
+      "summary": "Replay 2 to 20 explicit parent-ranked features only on the exact risk/development sample, evaluate a hard-budgeted canonical round-robin prefix of two-dimensional Cross pairs, and persist aggregate ranking evidence plus full-asset fingerprints without selecting, constructing, pooling, applying, adopting, or deploying a pair.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_artifact_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_artifact_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_candidate_id": {
+            "type": "string",
+            "pattern": "^candidate-[0-9a-f]{32}$"
+          },
+          "expected_evidence_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "features": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 20,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "max_pairs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 190
+          }
+        },
+        "required": [
+          "source_artifact_id",
+          "expected_artifact_content_hash",
+          "expected_candidate_id",
+          "expected_evidence_hash",
+          "features",
+          "max_pairs"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.search-cross-matrix-candidates-tool.v1"
+          },
+          "search_id": {
+            "type": "string",
+            "pattern": "^cross-search-[0-9a-f]{32}$"
+          },
+          "request_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source_artifact_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "candidate_id": {
+            "type": "string",
+            "pattern": "^candidate-[0-9a-f]{32}$"
+          },
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "population_count": {"type": "integer", "minimum": 1},
+          "search_space": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 190
+          },
+          "evaluated": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 190
+          },
+          "truncated": {"type": "boolean"},
+          "eligible": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 190
+          },
+          "search_result": {"type": "object"},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "kind": {
+                  "const": "strategy_cross_candidate_search_json"
+                },
+                "format": {"const": "json"},
+                "filename": {"type": "string", "minLength": 1},
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "download_url": {"type": "string", "minLength": 1}
+              },
+              "required": [
+                "artifact_id",
+                "kind",
+                "format",
+                "filename",
+                "content_hash",
+                "download_url"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "not_selected": {"const": true},
+          "not_admitted": {"const": true},
+          "not_applied": {"const": true},
+          "not_adopted": {"const": true},
+          "not_deployed": {"const": true}
+        },
+        "required": [
+          "schema_version",
+          "search_id",
+          "request_hash",
+          "content_hash",
+          "source_artifact_id",
+          "candidate_id",
+          "evidence_hash",
+          "population_count",
+          "search_space",
+          "evaluated",
+          "truncated",
+          "eligible",
+          "search_result",
+          "artifacts",
+          "not_selected",
+          "not_admitted",
+          "not_applied",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_search_cross_matrix_candidates",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "build_cross_matrix_candidate_from_search",
+      "summary": "Authenticate one exact aggregate Cross search and explicit search_id plus pair_id pointer, recompute the full pair on the same immutable risk/development source, compare every asset fingerprint, and publish the same Cross Matrix candidate produced by the explicit single-pair builder without selecting, pooling, applying, adopting, or deploying it.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "search_id": {
+            "type": "string",
+            "pattern": "^cross-search-[0-9a-f]{32}$"
+          },
+          "pair_id": {
+            "type": "string",
+            "pattern": "^cross-pair-[0-9a-f]{32}$"
+          }
+        },
+        "required": ["search_id", "pair_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.build-cross-matrix-candidate-from-search-tool.v1"
+          },
+          "source_search_selection": {
+            "type": "object",
+            "properties": {
+              "search_id": {
+                "type": "string",
+                "pattern": "^cross-search-[0-9a-f]{32}$"
+              },
+              "pair_id": {
+                "type": "string",
+                "pattern": "^cross-pair-[0-9a-f]{32}$"
+              },
+              "rank": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 190
+              },
+              "x_feature": {"type": "string", "minLength": 1},
+              "x_method": {"type": "string", "minLength": 1},
+              "y_feature": {"type": "string", "minLength": 1},
+              "y_method": {"type": "string", "minLength": 1},
+              "eligible": {"type": "boolean"}
+            },
+            "required": [
+              "search_id",
+              "pair_id",
+              "rank",
+              "x_feature",
+              "x_method",
+              "y_feature",
+              "y_method",
+              "eligible"
+            ],
+            "additionalProperties": false
+          },
+          "cross_matrix_candidate": {"type": "object"},
+          "not_selected": {"const": true},
+          "not_admitted": {"const": true},
+          "not_applied": {"const": true},
+          "not_adopted": {"const": true},
+          "not_deployed": {"const": true}
+        },
+        "required": [
+          "schema_version",
+          "source_search_selection",
+          "cross_matrix_candidate",
+          "not_selected",
+          "not_admitted",
+          "not_applied",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_build_cross_matrix_candidate_from_search",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "materialize_cross_matrix_cell_selection",
       "summary": "Verify one live task-owned canonical Cross Matrix asset and persist one explicit pointer-only non-empty cell group in source row-major order, without ranking cells, copying predicates or metrics, changing a Strategy Pool, applying, adopting, or deploying anything.",
       "input_schema": {
@@ -6587,7 +7001,11 @@
             "type": "object",
             "properties": {
               "message_id": {"type": "string", "minLength": 1},
-              "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "structured_request_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
             },
             "required": ["message_id", "content_hash"],
             "additionalProperties": false
@@ -9746,7 +10164,7 @@
     },
     {
       "name": "measure_strategy_pool_validation",
-      "summary": "Replay the exact compiled current approval/reject Strategy Pool on the authenticated StrategySampleDesign V2 risk validation or OOT membership and publish immutable aggregate-only independent evidence.",
+      "summary": "Replay the exact compiled current approval/reject/limit/pricing/segmentation Strategy Pool on the authenticated StrategySampleDesign V2 risk validation or OOT membership and publish immutable aggregate-only native typed evidence.",
       "input_schema": {
         "type": "object",
         "$defs": {
@@ -9817,7 +10235,13 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["approval", "reject"]
+            "enum": [
+              "approval",
+              "reject",
+              "limit",
+              "pricing",
+              "segmentation"
+            ]
           },
           "pool_ref": {"$ref": "#/$defs/pool_ref"},
           "sample_design_ref": {"$ref": "#/$defs/sample_design_ref"},
@@ -10718,6 +11142,9 @@
             "maximum": 4096
           },
           "equivalence": {"$ref": "#/$defs/equivalence"},
+          "runtime_requirements": {
+            "type": "object"
+          },
           "artifacts": {
             "type": "array",
             "minItems": 4,
@@ -11006,6 +11433,29 @@
             ],
             "additionalProperties": false
           },
+          "cross_candidate_search_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_search_id": {
+                "type": "string",
+                "pattern": "^cross-search-[0-9a-f]{32}$"
+              },
+              "expected_search_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "expected_artifact_content_hash",
+              "expected_search_id",
+              "expected_search_content_hash"
+            ],
+            "additionalProperties": false
+          },
           "strategy_identity": {
             "type": "object",
             "properties": {
@@ -11167,6 +11617,9 @@
           "voting_candidate_search_ref": {
             "$ref": "#/$defs/voting_candidate_search_ref"
           },
+          "cross_candidate_search_ref": {
+            "$ref": "#/$defs/cross_candidate_search_ref"
+          },
           "strategy_identity": {
             "oneOf": [
               {"$ref": "#/$defs/strategy_identity"},
@@ -11211,7 +11664,7 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.build-report-bundle-v2-tool.v6"
+            "const": "strategy.build-report-bundle-v2-tool.v7"
           },
           "report_id": {
             "type": "string",
@@ -12090,7 +12543,10 @@
             "properties": {
               "source_dataset_content_hash": {"$ref": "#/$defs/sha256"},
               "strategy_effect_hash": {"$ref": "#/$defs/sha256"},
-              "result_dataset_content_hash": {"$ref": "#/$defs/sha256"}
+              "result_dataset_content_hash": {"$ref": "#/$defs/sha256"},
+              "runtime_requirements": {
+                "type": "object"
+              }
             },
             "required": [
               "source_dataset_content_hash",
@@ -13384,6 +13840,9 @@
               },
               "sample_design_ref": {
                 "$ref": "#/$defs/sample_design_ref"
+              },
+              "runtime_requirements": {
+                "type": "object"
               },
               "strategy_effect_hash": {
                 "$ref": "#/$defs/sha256"

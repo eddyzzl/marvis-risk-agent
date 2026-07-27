@@ -103,14 +103,23 @@ def test_pool_validation_form_collects_only_type_and_partition() -> None:
             },
           },
         );
-        installSelectedOption(type, "limit", {
-          candidateLabProjection: "1",
-          strategyType: "limit",
-        });
-        assert.throws(
-          () => collectStrategyCandidateLabRequest(form),
-          /approval|reject/,
-        );
+        for (const strategyType of [
+          "approval",
+          "reject",
+          "limit",
+          "pricing",
+          "segmentation",
+        ]) {
+          installSelectedOption(type, strategyType, {
+            candidateLabProjection: "1",
+            strategyType,
+          });
+          assert.equal(
+            collectStrategyCandidateLabRequest(form)
+              .workflow_inputs.strategy_type,
+            strategyType,
+          );
+        }
         installSelectedOption(type, "reject", {
           candidateLabProjection: "1",
           strategyType: "reject",
@@ -131,12 +140,12 @@ def test_pool_validation_form_reuses_blocking_and_single_flight_submission() -> 
           const payload = payloadFor("strategy-a", { empty: true });
           const pool = {
             kind: "candidate_pool",
-            strategy_type: "reject",
+            strategy_type: "limit",
             revision: 2,
             entries: [{
               entry_id: `pool-entry-${"a".repeat(32)}`,
               position: 0,
-              action: { type: "reject" },
+              action: { type: "limit", value: 5000 },
             }],
             total: 1,
             truncated: false,
@@ -226,7 +235,7 @@ def test_pool_validation_form_reuses_blocking_and_single_flight_submission() -> 
             request_kind: "standard_workflow",
             workflow: "strategy_pool_validation",
             workflow_inputs: {
-              strategy_type: "reject",
+              strategy_type: "limit",
               partition: "oot",
             },
           },

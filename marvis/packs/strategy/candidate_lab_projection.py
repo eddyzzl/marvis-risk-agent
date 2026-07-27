@@ -129,9 +129,17 @@ from marvis.packs.strategy.cross_matrix_candidate import (
     canonical_cross_matrix_candidate_asset_json,
     parse_cross_matrix_candidate_asset_json,
 )
+from marvis.packs.strategy.cross_candidate_search_tools import (
+    CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    CROSS_CANDIDATE_SEARCH_ORIGIN_TOOL,
+    load_cross_candidate_search_artifact,
+)
 from marvis.packs.strategy.pool import (
     POOL_PRODUCER_VERSION,
     validate_strategy_pool,
+)
+from marvis.packs.strategy.pool_requirement_resolver import (
+    normalize_pool_requirements,
 )
 from marvis.packs.strategy.pool_impact_tools import (
     POOL_IMPACT_ARTIFACT_KIND,
@@ -147,6 +155,9 @@ from marvis.packs.strategy.pool_validation_tools import (
     POOL_VALIDATION_ARTIFACT_KIND,
     POOL_VALIDATION_ORIGIN_TOOL,
     authenticate_strategy_pool_validation_artifact_record,
+)
+from marvis.packs.strategy.project_context_tools import (
+    load_current_strategy_project_context_artifact,
 )
 from marvis.packs.strategy.scorecard_candidate import (
     MAX_SCORECARD_BANDS,
@@ -199,6 +210,7 @@ from marvis.packs.strategy.voting_candidate_search_tools import (
 )
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.datasets import DatasetRepository
+from marvis.repositories.strategy import StrategyRepository
 from marvis.repositories.strategy_pool import (
     POOL_ARTIFACT_KIND,
     StrategyCandidatePoolRepository,
@@ -211,9 +223,10 @@ from marvis.repositories.strategy_reports import (
     StrategyReportRepository,
 )
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.strategy_lifecycle import is_locally_adopted
 
 
-SCHEMA_VERSION = "strategy.candidate-lab-projection.v4"
+SCHEMA_VERSION = "strategy.candidate-lab-projection.v7"
 
 UNIVARIATE_ARTIFACT_KIND = "strategy_candidate_json"
 UNIVARIATE_ORIGIN_TOOL = "strategy.analyze_univariate_candidates"
@@ -262,6 +275,8 @@ _MAX_INTERACTIVE_TREE_REVISIONS = 20
 _MAX_SCORECARD_CANDIDATES_PER_KIND = 3
 _MAX_VOTING_SEARCHES = 20
 _MAX_VOTING_SEARCH_COMBINATIONS = 20
+_MAX_CROSS_SEARCHES = 20
+_MAX_CROSS_SEARCH_PAIRS = 20
 _MAX_POOL_ADD_SOURCES_PER_KIND = 20
 _MAX_RANKINGS = 50
 _MAX_METRICS = 100
@@ -275,6 +290,22 @@ _MAX_POOL_ENTRIES = 200
 _MAX_RISKS = 50
 _MAX_WORKFLOW_EVIDENCE_PER_KIND = 40
 _MAX_REPORT_REVISIONS = 20
+_MAX_STRATEGIES = 100
+_MAX_STRATEGY_ARTIFACTS = 50
+_STRATEGY_ARTIFACT_SUFFIXES = frozenset(
+    {
+        ".csv",
+        ".docx",
+        ".json",
+        ".md",
+        ".pdf",
+        ".png",
+        ".py",
+        ".sql",
+        ".svg",
+        ".xlsx",
+    }
+)
 _UNIVARIATE_PARAMETER_FIELDS = (
     "analysis_schema_version",
     "features",
@@ -408,6 +439,24 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
             r"^candidate-asset-[0-9a-f]{32}_[0-9a-f]{12}\.json$"
         ),
     )
+    cross_search_records, cross_search_total = (
+        artifact_repository.list_recent_for_task_kind_with_count(
+            task_id,
+            CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+            limit=_MAX_CROSS_SEARCHES,
+        )
+    )
+    cross_search_records = _candidate_record_window(
+        settings,
+        task_id,
+        cross_search_records,
+        kind=CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+        origin_tool=CROSS_CANDIDATE_SEARCH_ORIGIN_TOOL,
+        directory_name="strategy_cross_candidate_searches",
+        filename_pattern=re.compile(
+            r"^cross-search-[0-9a-f]{32}_[0-9a-f]{12}\.json$"
+        ),
+    )
     automatic_tree_records, automatic_tree_total = (
         artifact_repository.list_recent_for_task_kind_with_count(
             task_id,
@@ -507,6 +556,10 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         )
         for record in cross_matrix_records
     ]
+    cross_search = [
+        _project_cross_search(context, record)
+        for record in cross_search_records
+    ]
     automatic_tree = [
         _project_automatic_tree(context, record)
         for record in automatic_tree_records
@@ -531,6 +584,8 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
     pools = _project_current_pools(
         context,
     )
+    strategies = _project_strategy_history(context)
+    project_context = _project_current_project_context(context)
     sample_design = _project_active_sample_design(context)
     latest_evidence = _project_latest_workflow_evidence(
         context,
@@ -538,10 +593,12 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
     )
     report = _project_latest_strategy_report(context)
     workflow = _workflow_projection(
+        project_context=project_context,
         sample_design=sample_design,
         candidates={
             "univariate": univariate,
             "cross_matrix": cross_matrix,
+            "cross_search": cross_search,
             "automatic_tree": automatic_tree,
             "interactive_tree_revision": interactive_tree_revision,
             "scorecard_band": scorecard_band,
@@ -551,6 +608,9 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         pools=pools,
         latest_evidence=latest_evidence,
         report=report,
+    )
+    workflow["strategy_history_status"] = (
+        "complete" if strategies["total"] > 0 else "missing"
     )
     active_plan = _active_plan_projection(settings, task_id)
     open_gate = _open_gate_projection(settings, task_id)
@@ -578,6 +638,11 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
                 cross_matrix,
                 _MAX_CANDIDATES_PER_KIND,
                 total=cross_matrix_total,
+            ),
+            "cross_search": _collection(
+                cross_search,
+                _MAX_CROSS_SEARCHES,
+                total=cross_search_total,
             ),
             "automatic_tree": _collection(
                 automatic_tree,
@@ -607,6 +672,7 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         },
         "pool_add_sources": pool_add_sources,
         "pools": _collection(pools, len(STRATEGY_TYPES)),
+        "strategies": strategies,
         "workflow": workflow,
     }
     _require_projection_payload_budget(projection)
@@ -1278,8 +1344,525 @@ def _project_latest_strategy_report(
     }
 
 
+def _project_strategy_history(
+    context: _ProjectionContext,
+) -> dict[str, Any]:
+    repository = StrategyRepository(context.settings.db_path)
+    refs, total = repository.list_recent_strategy_refs_for_task_with_count(
+        context.task_id,
+        limit=_MAX_STRATEGIES,
+    )
+    if total < len(refs):
+        raise CandidateLabProjectionError(
+            "Strategy history total is inconsistent"
+        )
+
+    projected = []
+    for ref in refs:
+        binding = _authenticate_strategy_snapshot(
+            repository,
+            task_id=context.task_id,
+            ref=ref,
+        )
+        projected.append(
+            _project_strategy_history_item(
+                context,
+                repository=repository,
+                binding=binding,
+            )
+        )
+
+    champion_refs, champion_total = (
+        repository.list_current_local_champion_refs_for_task_with_count(
+            context.task_id,
+            limit=len(STRATEGY_TYPES) + 1,
+        )
+    )
+    if champion_total != len(champion_refs) or champion_total > len(
+        STRATEGY_TYPES
+    ):
+        raise CandidateLabProjectionError(
+            "current local Strategy champions are inconsistent"
+        )
+    champions = []
+    champion_types: set[str] = set()
+    for ref in champion_refs:
+        binding = _authenticate_strategy_snapshot(
+            repository,
+            task_id=context.task_id,
+            ref=ref,
+        )
+        metadata = binding["metadata"]
+        if (
+            not is_locally_adopted(
+                metadata["status"],
+                metadata["asset_status"],
+            )
+            or metadata["strategy_type"] in champion_types
+        ):
+            raise CandidateLabProjectionError(
+                "current local Strategy champion lifecycle drifted"
+            )
+        champion_types.add(metadata["strategy_type"])
+        champions.append(
+            {
+                "strategy_id": metadata["id"],
+                "strategy_type": metadata["strategy_type"],
+                "version": metadata["version"],
+            }
+        )
+
+    return {
+        "latest": projected[0] if projected else None,
+        "all": projected,
+        "total": total,
+        "truncated": total > len(projected),
+        "current_local_champions": champions,
+    }
+
+
+def _authenticate_strategy_snapshot(
+    repository: StrategyRepository,
+    *,
+    task_id: str,
+    ref: Mapping[str, Any],
+) -> dict[str, Any]:
+    strategy_id = _text(ref.get("id"), "Strategy id")
+    snapshot = repository.get_strategy_snapshot(strategy_id)
+    metadata = repository.get_strategy_meta(strategy_id)
+    spec_hash = repository.get_strategy_spec_hash(strategy_id)
+    if snapshot is None or metadata is None or spec_hash is None:
+        raise CandidateLabProjectionError("Strategy snapshot disappeared")
+    snapshot_metadata = _mapping(
+        snapshot.get("metadata"),
+        "Strategy snapshot metadata",
+    )
+    snapshot_hash = _sha256(
+        snapshot.get("strategy_spec_hash"),
+        "Strategy snapshot spec hash",
+    )
+    normalized_hash = _sha256(spec_hash, "Strategy spec hash")
+    if (
+        dict(ref) != metadata
+        or dict(snapshot_metadata) != metadata
+        or not hmac.compare_digest(snapshot_hash, normalized_hash)
+        or metadata["task_id"] != task_id
+        or metadata["strategy_type"] not in STRATEGY_TYPES
+    ):
+        raise CandidateLabProjectionError(
+            "Strategy snapshot, metadata, or spec hash drifted"
+        )
+    strategy = snapshot.get("strategy")
+    if (
+        strategy is None
+        or strategy.id != strategy_id
+        or strategy.strategy_type != metadata["strategy_type"]
+        or strategy.spec is None
+        or len(strategy.rules) != len(strategy.spec.rules)
+    ):
+        raise CandidateLabProjectionError(
+            "Strategy definition binding drifted"
+        )
+    version = metadata["version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise CandidateLabProjectionError("Strategy version is invalid")
+    _text(metadata["created_at"], "Strategy created_at")
+    if metadata["adopted_at"] is not None:
+        _text(metadata["adopted_at"], "Strategy adopted_at")
+    if metadata["parent_strategy_id"] is not None:
+        _text(metadata["parent_strategy_id"], "Strategy parent id")
+    return {
+        "strategy": strategy,
+        "metadata": metadata,
+        "strategy_spec_hash": normalized_hash,
+    }
+
+
+def _project_strategy_history_item(
+    context: _ProjectionContext,
+    *,
+    repository: StrategyRepository,
+    binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    strategy = binding["strategy"]
+    metadata = binding["metadata"]
+    strategy_id = metadata["id"]
+    materialization = repository.get_pool_materialization_for_strategy(
+        strategy_id
+    )
+    projected_materialization = None
+    if materialization is not None:
+        projected_materialization = _project_strategy_materialization(
+            materialization,
+            task_id=context.task_id,
+            strategy_id=strategy_id,
+            strategy_type=metadata["strategy_type"],
+            strategy_version=metadata["version"],
+            strategy_spec_hash=binding["strategy_spec_hash"],
+        )
+    return {
+        "strategy_id": strategy_id,
+        "strategy_type": metadata["strategy_type"],
+        "version": metadata["version"],
+        "status": metadata["status"],
+        "asset_status": metadata["asset_status"],
+        "created_at": metadata["created_at"],
+        "adopted_at": metadata["adopted_at"],
+        "parent_strategy_id": metadata["parent_strategy_id"],
+        "rule_count": len(strategy.rules),
+        "strategy_spec_hash": binding["strategy_spec_hash"],
+        "materialization": projected_materialization,
+        "artifacts": _project_strategy_artifacts(
+            context,
+            repository=repository,
+            strategy_id=strategy_id,
+        ),
+    }
+
+
+def _project_strategy_materialization(
+    value: Mapping[str, Any],
+    *,
+    task_id: str,
+    strategy_id: str,
+    strategy_type: str,
+    strategy_version: int,
+    strategy_spec_hash: str,
+) -> dict[str, Any]:
+    materialization = _mapping(value, "Strategy materialization")
+    materialization_spec_hash = _sha256(
+        materialization.get("strategy_spec_hash"),
+        "materialized Strategy spec hash",
+    )
+    if (
+        materialization.get("task_id") != task_id
+        or materialization.get("strategy_id") != strategy_id
+        or materialization.get("strategy_type") != strategy_type
+        or materialization.get("strategy_version") != strategy_version
+        or not hmac.compare_digest(
+            materialization_spec_hash,
+            strategy_spec_hash,
+        )
+    ):
+        raise CandidateLabProjectionError(
+            "Strategy materialization binding drifted"
+        )
+    requirements = normalize_pool_requirements(
+        materialization.get("requirements")
+    )
+    return {
+        "materialization_id": _text(
+            materialization.get("id"),
+            "Strategy materialization id",
+        ),
+        "pool_id": _text(
+            materialization.get("pool_id"),
+            "Strategy materialization Pool id",
+        ),
+        "pool_revision_id": _text(
+            materialization.get("pool_revision_id"),
+            "Strategy materialization Pool revision id",
+        ),
+        "pool_revision": materialization["pool_revision"],
+        "pool_artifact_id": _text(
+            materialization.get("pool_artifact_id"),
+            "Strategy materialization Pool artifact id",
+        ),
+        "design_hash": _sha256(
+            materialization.get("selected_design_hash"),
+            "Strategy materialization design hash",
+        ),
+        "requirements_count": len(requirements),
+        "runtime_blockers": [],
+    }
+
+
+def _project_strategy_artifacts(
+    context: _ProjectionContext,
+    *,
+    repository: StrategyRepository,
+    strategy_id: str,
+) -> dict[str, Any]:
+    records, total = (
+        repository.list_recent_strategy_artifacts_for_task_with_count(
+            context.task_id,
+            strategy_id,
+            limit=_MAX_STRATEGY_ARTIFACTS,
+        )
+    )
+    if total < len(records):
+        raise CandidateLabProjectionError(
+            "Strategy artifact total is inconsistent"
+        )
+    projected = [
+        _project_strategy_artifact(
+            context,
+            record=record,
+            strategy_id=strategy_id,
+        )
+        for record in records
+    ]
+    return {
+        "all": projected,
+        "total": total,
+        "truncated": total > len(projected),
+    }
+
+
+def _project_strategy_artifact(
+    context: _ProjectionContext,
+    *,
+    record: Mapping[str, Any],
+    strategy_id: str,
+) -> dict[str, Any]:
+    artifact_id = _text(record.get("id"), "Strategy artifact id")
+    if (
+        record.get("strategy_id") != strategy_id
+        or record.get("integrity_status") != "verified"
+    ):
+        raise CandidateLabProjectionError(
+            "Strategy artifact ownership or integrity metadata drifted"
+        )
+    content_size = record.get("content_size")
+    if (
+        isinstance(content_size, bool)
+        or not isinstance(content_size, int)
+        or content_size < 0
+    ):
+        raise CandidateLabProjectionError(
+            "Strategy artifact content size is invalid"
+        )
+    expected_hash = _sha256(
+        record.get("content_hash"),
+        "Strategy artifact content hash",
+    )
+    path = Path(_text(record.get("path"), "Strategy artifact path"))
+    if path.suffix.lower() not in _STRATEGY_ARTIFACT_SUFFIXES:
+        raise CandidateLabProjectionError(
+            "Strategy artifact type is not downloadable"
+        )
+    raw = _read_regular_file(
+        path,
+        root=Path(context.settings.tasks_dir) / context.task_id,
+        max_bytes=_MAX_ARTIFACT_BYTES,
+        budget=context.budget,
+    )
+    if (
+        len(raw) != content_size
+        or not hmac.compare_digest(
+            hashlib.sha256(raw).hexdigest(),
+            expected_hash,
+        )
+    ):
+        raise CandidateLabProjectionError(
+            "Strategy artifact physical bytes drifted"
+        )
+    provenance = _mapping(
+        record.get("provenance"),
+        "Strategy artifact provenance",
+    )
+    if provenance.get("task_id") not in {None, context.task_id} or provenance.get(
+        "strategy_id"
+    ) not in {None, strategy_id}:
+        raise CandidateLabProjectionError(
+            "Strategy artifact provenance ownership drifted"
+        )
+    return {
+        "artifact_id": artifact_id,
+        "kind": _text(record.get("kind"), "Strategy artifact kind"),
+        "filename": path.name,
+        "created_at": _text(
+            record.get("created_at"),
+            "Strategy artifact created_at",
+        ),
+        "content_size": content_size,
+        "download_url": (
+            f"/api/tasks/{quote(context.task_id, safe='')}"
+            f"/strategy-artifacts/{quote(artifact_id, safe='')}/download"
+        ),
+    }
+
+
+def _project_current_project_context(
+    context: _ProjectionContext,
+) -> dict[str, Any] | None:
+    runtime = SimpleNamespace(settings=context.settings)
+    binding = load_current_strategy_project_context_artifact(
+        runtime,
+        task_id=context.task_id,
+    )
+    if binding is None:
+        return None
+    record = context.artifact_repository.get_for_task(
+        context.task_id,
+        binding.artifact_id,
+    )
+    if record is None:
+        raise CandidateLabProjectionError(
+            "current Strategy project context artifact is missing"
+        )
+    _require_record_identity(record, task_id=context.task_id)
+    if (
+        Path(record["path"]) != binding.artifact_path
+        or record["content_hash"] != binding.artifact_content_hash
+        or record["provenance"] != binding.provenance
+    ):
+        raise CandidateLabProjectionError(
+            "current Strategy project context artifact binding drifted"
+        )
+    try:
+        context.budget.reserve(binding.artifact_path.stat().st_size)
+    except OSError as exc:
+        raise CandidateLabProjectionError(
+            "current Strategy project context artifact is unavailable"
+        ) from exc
+
+    revision = binding.revision
+    state = _mapping(
+        revision.get("state"),
+        "current Strategy project context state",
+    )
+    snapshot = _mapping(
+        state.get("current_project_snapshot"),
+        "current Strategy project snapshot",
+    )
+    histories = [
+        _project_strategy_history_review(item)
+        for item in _sequence(
+            state.get("historical_strategy_reviews"),
+            "historical Strategy reviews",
+        )
+    ]
+    missing = [
+        _project_missing_information(item)
+        for item in _sequence(
+            state.get("missing_information_records"),
+            "Strategy missing-information records",
+        )
+    ]
+    history_resolution = _project_history_resolution(
+        histories=histories,
+        missing=missing,
+    )
+    return {
+        "revision_id": revision["revision_id"],
+        "revision": revision["revision"],
+        "as_of": state["as_of"],
+        "freshness": "current",
+        "scope": _project_report_field(snapshot["scope"]),
+        "current": {
+            "snapshot_id": snapshot["snapshot_id"],
+            "status_fields": {
+                key: _project_report_field(snapshot["status_fields"][key])
+                for key in ("volume", "approval", "risk", "economics")
+            },
+            "maturity_summary": _project_report_field(
+                snapshot["maturity_summary"]
+            ),
+            "red_flags": _project_red_flags(snapshot["red_flags"]),
+        },
+        "historical_versions": histories,
+        "history_resolution": history_resolution,
+        "missing_information": missing,
+        "red_flags": _project_red_flags(state["red_flags"]),
+        "artifact": _artifact_projection(record, context.task_id),
+    }
+
+
+def _project_strategy_history_review(value: object) -> dict[str, Any]:
+    review = _mapping(value, "historical Strategy review")
+    effect_refs = _mapping(
+        review.get("observation_refs_by_effect_stage"),
+        "historical Strategy effect refs",
+    )
+    return {
+        "review_id": review["review_id"],
+        "version": review["version"],
+        "effective_period": _project_report_field(review["effective_period"]),
+        "asset_status": _project_report_field(review["asset_status"]),
+        "scope": _project_report_field(review["scope"]),
+        "traffic_allocation": _project_report_field(
+            review["traffic_allocation"]
+        ),
+        "availability": review["availability"],
+        "effect_stages": [
+            stage
+            for stage in (
+                "estimated",
+                "backtested",
+                "oot_validated",
+                "post_launch_observed",
+            )
+            if effect_refs.get(stage)
+        ],
+        "external_source_count": len(
+            _sequence(
+                review.get("external_source_refs"),
+                "historical Strategy external refs",
+            )
+        ),
+        "red_flags": _project_red_flags(review["red_flags"]),
+    }
+
+
+def _project_missing_information(value: object) -> dict[str, Any]:
+    record = _mapping(value, "Strategy missing-information record")
+    return {
+        "field_path": record["field_path"],
+        "status": record["status"],
+        "blocking": record["blocking"],
+        "question": record["question"],
+        "reason": record["reason"],
+        "asked_count": record["asked_count"],
+    }
+
+
+def _project_history_resolution(
+    *,
+    histories: Sequence[Mapping[str, Any]],
+    missing: Sequence[Mapping[str, Any]],
+) -> str:
+    if histories:
+        return "present"
+    record = next(
+        (
+            item
+            for item in missing
+            if item.get("field_path") == "historical_strategy_reviews"
+        ),
+        None,
+    )
+    if record is None:
+        return "pending"
+    status = record.get("status")
+    return "unavailable" if status == "unavailable" else "pending"
+
+
+def _project_report_field(value: object) -> dict[str, Any]:
+    field = _mapping(value, "Strategy report field")
+    return {
+        "availability": field["availability"],
+        "value": field["value"],
+    }
+
+
+def _project_red_flags(value: object) -> list[dict[str, Any]]:
+    return [
+        {
+            "code": flag["code"],
+            "level": flag["level"],
+            "message": flag["message"],
+        }
+        for flag in (
+            _mapping(item, "Strategy project-context red flag")
+            for item in _sequence(value, "Strategy project-context red flags")
+        )
+    ]
+
+
 def _workflow_projection(
     *,
+    project_context: dict[str, Any] | None,
     sample_design: dict[str, Any] | None,
     candidates: Mapping[str, Sequence[dict[str, Any]]],
     pools: Sequence[dict[str, Any]],
@@ -1315,9 +1898,19 @@ def _workflow_projection(
         (
             "current_context",
             "项目现状",
-            "complete" if sample_design is not None else "missing",
+            "complete" if project_context is not None else "missing",
         ),
-        ("history", "历史版本", "missing"),
+        (
+            "history",
+            "历史版本",
+            (
+                "complete"
+                if project_context is not None
+                and project_context["history_resolution"]
+                in {"present", "unavailable"}
+                else "missing"
+            ),
+        ),
         (
             "sample_design",
             "样本设计",
@@ -1337,6 +1930,7 @@ def _workflow_projection(
         ("report", "形成报告", report_status),
     )
     return {
+        "project_context": project_context,
         "sample_design": sample_design,
         "latest_evidence": latest_evidence,
         "report": report,
@@ -1771,6 +2365,70 @@ def _project_voting_search(
         "eligible": result["eligible"],
         "truncated": result["truncated"],
         "combinations": combinations,
+        "artifact": _artifact_projection(record, context.task_id),
+    }
+
+
+def _project_cross_search(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    _read_candidate_record(
+        context,
+        record,
+        kind=CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+        origin_tool=CROSS_CANDIDATE_SEARCH_ORIGIN_TOOL,
+        directory_name="strategy_cross_candidate_searches",
+    )
+    binding = load_cross_candidate_search_artifact(
+        _scorecard_live_runtime(context),
+        task_id=context.task_id,
+        artifact_id=_text(record.get("id"), "Cross search artifact id"),
+        expected_artifact_content_hash=_sha256(
+            record.get("content_hash"),
+            "Cross search artifact content hash",
+        ),
+    )
+    result = binding.result
+    configuration = result["configuration"]
+    pairs = [
+        {
+            key: item[key]
+            for key in (
+                "pair_id",
+                "x_feature",
+                "x_method",
+                "y_feature",
+                "y_method",
+                "x_axis_iv",
+                "y_axis_iv",
+                "cross_total_iv",
+                "interaction_gain_iv",
+                "cell_count",
+                "empty_cell_count",
+                "empty_cell_share",
+                "min_nonempty_cell_count",
+                "eligible",
+                "rank",
+            )
+        }
+        for item in result["pairs"][:_MAX_CROSS_SEARCH_PAIRS]
+    ]
+    return {
+        "search_id": result["search_id"],
+        "features": [
+            {
+                key: item[key]
+                for key in ("feature", "method", "axis_iv", "bin_count")
+            }
+            for item in configuration["features"]
+        ],
+        "max_pairs": configuration["max_pairs"],
+        "search_space": result["search_space"],
+        "evaluated": result["evaluated"],
+        "eligible": result["eligible"],
+        "truncated": result["truncated"],
+        "pairs": pairs,
         "artifact": _artifact_projection(record, context.task_id),
     }
 
@@ -2284,6 +2942,23 @@ def _interactive_tree_topology_pointers(
         for node in nodes
         if node.get("can_prune") is True
     ]
+    eligible_threshold_adjustments = [
+        {
+            "source_tree_id": source_tree_id,
+            "node_id": _text(
+                node.get("node_id"),
+                "interactive-tree threshold node_id",
+            ),
+            "operation": "adjust_split_threshold",
+            "feature": _text(
+                node.get("feature"),
+                "interactive-tree threshold feature",
+            ),
+            "current_threshold": float(node["threshold"]),
+        }
+        for node in nodes
+        if node.get("can_prune") is True
+    ]
     return {
         "root_node_id": _text(
             topology.get("root_node_id"),
@@ -2303,6 +2978,7 @@ def _interactive_tree_topology_pointers(
             )
         ),
         "eligible_prunes": eligible_prunes,
+        "eligible_threshold_adjustments": eligible_threshold_adjustments,
     }
 
 

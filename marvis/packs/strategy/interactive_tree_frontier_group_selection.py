@@ -28,12 +28,15 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.interactive_tree_frontier_selection import (
     IndependentlyVerifiedInteractiveTreeRevisionArtifactBinding,
     _canonicalize_selection_reason,
+    _REVISION_ARTIFACT_SCHEMA_VERSION,
+    _REVISION_ARTIFACT_SCHEMA_VERSION_V2,
     _revision_artifact_pointer,
     _revision_reference,
     _selection_reason,
     _verified_revision_artifact_binding,
 )
 from marvis.packs.strategy.interactive_tree_revision import (
+    INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION,
     validate_interactive_tree_revision,
 )
 
@@ -44,11 +47,20 @@ INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION = (
 INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION = (
     "strategy.interactive-tree-frontier-group-selection/1"
 )
+INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION_V2 = (
+    "strategy.interactive-tree-frontier-group-selection.v2"
+)
+INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION_V2 = (
+    "strategy.interactive-tree-frontier-group-selection/2"
+)
 INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND = (
     "strategy_interactive_tree_frontier_group_selection_json"
 )
 INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION = (
     "strategy.interactive-tree-frontier-group-selection-artifact.v1"
+)
+INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2 = (
+    "strategy.interactive-tree-frontier-group-selection-artifact.v2"
 )
 INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL = (
     "strategy.materialize_interactive_tree_frontier_group_selection"
@@ -181,13 +193,21 @@ def build_interactive_tree_frontier_group_selection(
         revision=revision_ref,
         source_node_ids=canonical_node_ids,
     )
+    is_v2 = (
+        revision["schema_version"]
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+    )
     body = _normalize_body(
         {
             "schema_version": (
-                INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION
+                INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION_V2
+                if is_v2
+                else INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION
             ),
             "producer_version": (
-                INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION
+                INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION_V2
+                if is_v2
+                else INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION
             ),
             "revision_artifact": _revision_artifact_pointer(
                 {
@@ -418,7 +438,10 @@ def expected_interactive_tree_frontier_group_selection_provenance(
     revision = selection["revision"]
     provenance = {
         "schema_version": (
-            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION
+            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2
+            if revision["schema_version"]
+            == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+            else INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION
         ),
         "producer_version": selection["producer_version"],
         "task_id": revision_artifact["task_id"],
@@ -459,17 +482,18 @@ def _normalize_body(value: Mapping[str, Any]) -> dict[str, Any]:
         _BODY_FIELDS,
         "interactive-tree frontier group selection body",
     )
-    if (
-        value["schema_version"]
-        != INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION
-    ):
+    schema = value["schema_version"]
+    if schema == INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION:
+        producer = INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION
+    elif schema == INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION_V2:
+        producer = (
+            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION_V2
+        )
+    else:
         raise InteractiveTreeFrontierGroupSelectionError(
             "interactive-tree frontier group selection schema_version is invalid"
         )
-    if (
-        value["producer_version"]
-        != INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION
-    ):
+    if value["producer_version"] != producer:
         raise InteractiveTreeFrontierGroupSelectionError(
             "interactive-tree frontier group selection producer_version is invalid"
         )
@@ -491,13 +515,18 @@ def _normalize_body(value: Mapping[str, Any]) -> dict[str, Any]:
         revision_artifact=revision_artifact,
         revision=revision,
     )
+    expected_schema = (
+        INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION_V2
+        if revision["schema_version"] == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+        else INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION
+    )
+    if schema != expected_schema:
+        raise InteractiveTreeFrontierGroupSelectionError(
+            "frontier group selection schema does not match revision schema"
+        )
     return {
-        "schema_version": (
-            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_SCHEMA_VERSION
-        ),
-        "producer_version": (
-            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION
-        ),
+        "schema_version": schema,
+        "producer_version": producer,
         "revision_artifact": revision_artifact,
         "revision": revision,
         "source_node_ids": source_node_ids,
@@ -547,7 +576,11 @@ def _verified_selection_artifact_binding(
             selection
         )
     )
-    if pointer["provenance"] != expected_provenance:
+    if (
+        pointer["artifact_schema_version"]
+        != expected_provenance["schema_version"]
+        or pointer["provenance"] != expected_provenance
+    ):
         raise InteractiveTreeFrontierGroupSelectionError(
             "selection artifact provenance does not match the selection"
         )
@@ -572,7 +605,10 @@ def _selection_artifact_pointer(value: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "schema_version": (
             schema,
-            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION,
+            {
+                INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION,
+                INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
+            },
         ),
         "origin_tool": (
             origin,
@@ -580,7 +616,11 @@ def _selection_artifact_pointer(value: Mapping[str, Any]) -> dict[str, Any]:
         ),
     }
     for name, (actual, expected) in constants.items():
-        if actual != expected:
+        if (
+            actual not in expected
+            if isinstance(expected, set)
+            else actual != expected
+        ):
             raise InteractiveTreeFrontierGroupSelectionError(
                 f"selection artifact {name} is invalid"
             )
@@ -733,6 +773,19 @@ def _require_revision_pointer_cross_references(
     revision: Mapping[str, Any],
 ) -> None:
     provenance = revision_artifact["provenance"]
+    expected_artifact_schema = (
+        _REVISION_ARTIFACT_SCHEMA_VERSION_V2
+        if revision["schema_version"] == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+        else _REVISION_ARTIFACT_SCHEMA_VERSION
+    )
+    if (
+        revision_artifact["artifact_schema_version"]
+        != expected_artifact_schema
+        or provenance["schema_version"] != expected_artifact_schema
+    ):
+        raise InteractiveTreeFrontierGroupSelectionError(
+            "revision artifact schema does not match group revision"
+        )
     comparisons = {
         "task_id": revision_artifact["task_id"],
         "revision_id": revision["revision_id"],

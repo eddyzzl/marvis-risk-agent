@@ -111,6 +111,7 @@ def automatic_tree_turn(
         "task_id": task_id,
         "asset_id": output["summary"]["asset_id"],
         "root_node_id": root_node_id,
+        "root_threshold": root["threshold"],
     }
 
 
@@ -249,3 +250,101 @@ def test_structured_turn_without_dataset_reaches_tool_instead_of_preview_preflig
         if message.get("role") == "assistant"
     }
     assert "strategy_dataset_context_required" not in assistant_codes
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_executes_one_exact_threshold_adjustment(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    threshold = float(automatic_tree_turn["root_threshold"]) + 0.25
+    workflow_inputs = {
+        "source_tree_id": str(automatic_tree_turn["asset_id"]),
+        "node_id": str(automatic_tree_turn["root_node_id"]),
+        "operation": "adjust_split_threshold",
+        "threshold": threshold,
+        "reason": "人工复核后微调当前可见根节点阈值",
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按当前投影中的指定节点调整阈值。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = plans[-1]
+    assert plan["template_id"] == "strategy_interactive_tree_revision"
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].inputs == workflow_inputs
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["schema_version"] == (
+        "strategy.revise-interactive-tree-tool.v2"
+    )
+    assert output["edit"] == {
+        "operation": "adjust_split_threshold",
+        "node_id": workflow_inputs["node_id"],
+        "previous_threshold": float(automatic_tree_turn["root_threshold"]),
+        "threshold": threshold,
+        "reason": workflow_inputs["reason"],
+    }
+    assert output["replay"]["exactly_once"] is True
+    assert output["replay"]["all_visible_metrics_matched"] is True
+    assert output["replay"]["threshold"] == threshold
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_threshold_turn_rejects_a_node_outside_the_current_projection(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    existing_plan_ids = {
+        item["id"]
+        for item in client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按当前投影中的指定节点调整阈值。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                {
+                    "source_tree_id": str(automatic_tree_turn["asset_id"]),
+                    "node_id": "node-" + "f" * 20,
+                    "operation": "adjust_split_threshold",
+                    "threshold": (
+                        float(automatic_tree_turn["root_threshold"]) + 0.25
+                    ),
+                },
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    current_plan_ids = {
+        item["id"]
+        for item in client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    }
+    assert current_plan_ids == existing_plan_ids
+    assistant_codes = {
+        message.get("metadata", {}).get("code")
+        for message in response.json()["messages"]
+        if message.get("role") == "assistant"
+    }
+    assert "interactive_tree_revision_current_projection_required" in (
+        assistant_codes
+    )

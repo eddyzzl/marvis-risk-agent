@@ -79,6 +79,10 @@ from marvis.packs.strategy.voting_candidate_search_tools import (
 from marvis.packs.strategy.cross_matrix_candidate_tools import (
     run_build_cross_matrix_candidate,
 )
+from marvis.packs.strategy.cross_candidate_search_tools import (
+    run_build_cross_matrix_candidate_from_search,
+    run_search_cross_matrix_candidates,
+)
 from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     run_materialize_cross_matrix_cell_selection,
 )
@@ -95,6 +99,14 @@ from marvis.packs.strategy.pool_tools import (
 )
 from marvis.packs.strategy.pool_materialization_tools import (
     run_materialize_strategy_from_pool,
+)
+from marvis.packs.strategy.materialized_runtime_requirements import (
+    MaterializedStrategyRuntimeRequirements,
+    hydrate_materialized_strategy_runtime_requirements,
+    load_historical_materialized_runtime_requirements_from_provenance,
+    load_materialized_strategy_runtime_requirements,
+    materialized_runtime_requirements_provenance,
+    require_materialized_strategy_runtime_requirements_on_connection,
 )
 from marvis.packs.strategy.pool_apply_tools import run_apply_strategy_pool
 from marvis.packs.strategy.apply_projection import (
@@ -128,6 +140,7 @@ from marvis.packs.strategy.model_evidence_tools import (
     run_materialize_model_evidence_v2,
 )
 from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
     StrategyRiskDevelopmentExecutionBinding,
     bind_strategy_risk_development_frame,
     load_historical_strategy_risk_development_execution_binding_from_ref,
@@ -938,6 +951,22 @@ def tool_build_cross_matrix_candidate(inputs: dict, ctx) -> dict:
     return run_build_cross_matrix_candidate(inputs, ctx, _runtime(ctx))
 
 
+def tool_search_cross_matrix_candidates(inputs: dict, ctx) -> dict:
+    """Search bounded Cross pairs without selecting or constructing one."""
+
+    return run_search_cross_matrix_candidates(inputs, ctx, _runtime(ctx))
+
+
+def tool_build_cross_matrix_candidate_from_search(inputs: dict, ctx) -> dict:
+    """Build one exact Cross candidate from an authenticated search pointer."""
+
+    return run_build_cross_matrix_candidate_from_search(
+        inputs,
+        ctx,
+        _runtime(ctx),
+    )
+
+
 def tool_materialize_cross_matrix_cell_selection(inputs: dict, ctx) -> dict:
     """Persist one explicit pointer to a verified Cross Matrix cell group."""
 
@@ -1331,25 +1360,42 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
     dataset = _owned_dataset(runtime, dataset_id, task_id=task_id)
     source_path = runtime.registry.resolve_path(dataset.id)
     source_hash = sha256_file(source_path)
-    frame = runtime.backend.read_frame(source_path)
+    source_frame = runtime.backend.read_frame(source_path)
     if sha256_file(source_path) != source_hash:
         raise StrategyError(
             "source dataset changed while the strategy was being applied"
         )
+    runtime_requirements = load_materialized_strategy_runtime_requirements(
+        runtime,
+        task_id=task_id,
+        strategy_id=strategy.id,
+        dataset_id=dataset.id,
+        dataset_content_hash=source_hash,
+    )
+    requirements_provenance = materialized_runtime_requirements_provenance(
+        candidate=runtime_requirements,
+        baseline=None,
+    )
+    evaluation_frame = hydrate_materialized_strategy_runtime_requirements(
+        source_frame,
+        (runtime_requirements,),
+    )
     output_columns = resolve_apply_output_columns(
-        frame.columns,
+        source_frame.columns,
         output_prefix=inputs.get("output_prefix"),
         output_columns=inputs.get("output_columns"),
         default_prefix=DEFAULT_STRATEGY_APPLY_PREFIX,
         include_entry_id=False,
     ).as_dict()
 
-    evaluation = evaluate_strategy_frame(frame, spec)
+    evaluation = evaluate_strategy_frame(evaluation_frame, spec)
     serialized = serialize_strategy_decisions(
         evaluation.decisions,
         strategy_type=spec.strategy_type,
     )
-    derived = frame.copy()
+    # Virtual model-score fields are an execution dependency, not a derived
+    # dataset feature. Persist only the governed source columns plus decisions.
+    derived = source_frame.copy()
     derived[output_columns["action"]] = evaluation.action_type
     derived[output_columns["value"]] = serialized.values
     derived[output_columns["value_type"]] = serialized.value_types
@@ -1373,6 +1419,8 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
             "strategy_effect_hash": strategy_hash,
             "result_dataset_content_hash": result_hash,
         }
+        if requirements_provenance is not None:
+            evidence["runtime_requirements"] = requirements_provenance
 
         def audit_factory(registered_dataset):
             return {
@@ -1384,7 +1432,7 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
                     "source_dataset_id": dataset.id,
                     "strategy_id": strategy.id,
                     "strategy_type": spec.strategy_type,
-                    "population_count": int(len(frame)),
+                    "population_count": int(len(source_frame)),
                     "action_counts": action_counts,
                     "rule_counts": rule_counts,
                     "default_count": default_count,
@@ -1393,9 +1441,17 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
                 },
             }
 
-        registered = uow.finalize_with_connection(
-            runtime.repo.transaction,
-            lambda conn: runtime.registry.register_existing_with_audit_on_connection(
+        def finalize_apply(conn):
+            if runtime_requirements is not None:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                require_materialized_strategy_runtime_requirements_on_connection(
+                    conn,
+                    runtime,
+                    runtime_requirements,
+                )
+                _assert_source_unchanged(source_path, source_hash)
+            return runtime.registry.register_existing_with_audit_on_connection(
                 conn,
                 staged.final_path,
                 audit_factory=audit_factory,
@@ -1403,7 +1459,11 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
                 role="strategy.applied",
                 anchor_target=dataset.id,
                 seed=int(ctx.seed or 0),
-            ),
+            )
+
+        registered = uow.finalize_with_connection(
+            runtime.repo.transaction,
+            finalize_apply,
         )
     except Exception:
         uow.rollback()
@@ -1415,7 +1475,7 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
         "strategy_type": spec.strategy_type,
         "source_dataset_id": dataset.id,
         "result_dataset_id": registered.id,
-        "population_count": int(len(frame)),
+        "population_count": int(len(source_frame)),
         "action_counts": action_counts,
         "rule_counts": rule_counts,
         "default_count": default_count,
@@ -1443,41 +1503,106 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         raise StrategyError(
             "source dataset changed while the strategy backtest was running"
         )
-    target_col = str(inputs["target_col"])
-    sample_binding = None
-    if inputs.get("sample_design_ref") is not None:
-        try:
-            workspace = DataWorkspaceRepository(
-                runtime.settings.db_path
-            ).get_or_default(task_id)
-        except DataWorkspaceDataError as exc:
-            raise StrategyError("strategy backtest DataWorkspace is invalid") from exc
-        if (
-            workspace.active_dataset_id != dataset.id
-            or workspace.active_dataset_content_hash
-            != source_dataset_content_hash
-        ):
-            raise StrategyError(
-                "strategy backtest dataset must be the exact active DataWorkspace dataset"
-            )
-        if workspace.semantic_mapping.target_col != target_col:
-            raise StrategyError(
-                "strategy backtest target must match the confirmed DataWorkspace target"
-            )
-        sample_binding = load_strategy_risk_development_execution_binding(
+    candidate_runtime_requirements = (
+        load_materialized_strategy_runtime_requirements(
             runtime,
             task_id=task_id,
-            sample_design_ref=inputs["sample_design_ref"],
+            strategy_id=strategy.id,
             dataset_id=dataset.id,
             dataset_content_hash=source_dataset_content_hash,
-            workspace_revision=workspace.revision,
-            workspace_generation=workspace.analysis_generation,
-            semantic_mapping_hash=data_semantic_mapping_hash(
-                workspace.semantic_mapping
-            ),
-            target_col=target_col,
-            drop_nan_labels=bool(inputs.get("drop_nan_labels")),
         )
+    )
+    baseline_runtime_requirements = (
+        None
+        if baseline is None
+        else load_materialized_strategy_runtime_requirements(
+            runtime,
+            task_id=task_id,
+            strategy_id=baseline.id,
+            dataset_id=dataset.id,
+            dataset_content_hash=source_dataset_content_hash,
+        )
+    )
+    requirements_provenance = materialized_runtime_requirements_provenance(
+        candidate=candidate_runtime_requirements,
+        baseline=baseline_runtime_requirements,
+    )
+    frame = hydrate_materialized_strategy_runtime_requirements(
+        frame,
+        (
+            candidate_runtime_requirements,
+            baseline_runtime_requirements,
+        ),
+    )
+    target_col = str(inputs["target_col"])
+    sample_binding = None
+    historical_sample_binding = False
+    if inputs.get("sample_design_ref") is not None:
+        runtime_sample = (
+            candidate_runtime_requirements.development.sample_design
+            if candidate_runtime_requirements is not None
+            else (
+                baseline_runtime_requirements.development.sample_design
+                if baseline_runtime_requirements is not None
+                else None
+            )
+        )
+        if runtime_sample is not None:
+            reference = StrategyRiskDevelopmentRef.from_value(
+                inputs["sample_design_ref"]
+            )
+            if (
+                reference != runtime_sample.reference
+                or runtime_sample.dataset_id != dataset.id
+                or runtime_sample.dataset_content_hash
+                != source_dataset_content_hash
+                or runtime_sample.target_col != target_col
+                or runtime_sample.drop_nan_labels
+                is not bool(inputs.get("drop_nan_labels"))
+            ):
+                raise StrategyError(
+                    "strategy backtest sample must match the materialized "
+                    "Strategy Pool sample"
+                )
+            sample_binding = runtime_sample
+            historical_sample_binding = True
+        else:
+            try:
+                workspace = DataWorkspaceRepository(
+                    runtime.settings.db_path
+                ).get_or_default(task_id)
+            except DataWorkspaceDataError as exc:
+                raise StrategyError(
+                    "strategy backtest DataWorkspace is invalid"
+                ) from exc
+            if (
+                workspace.active_dataset_id != dataset.id
+                or workspace.active_dataset_content_hash
+                != source_dataset_content_hash
+            ):
+                raise StrategyError(
+                    "strategy backtest dataset must be the exact active "
+                    "DataWorkspace dataset"
+                )
+            if workspace.semantic_mapping.target_col != target_col:
+                raise StrategyError(
+                    "strategy backtest target must match the confirmed "
+                    "DataWorkspace target"
+                )
+            sample_binding = load_strategy_risk_development_execution_binding(
+                runtime,
+                task_id=task_id,
+                sample_design_ref=inputs["sample_design_ref"],
+                dataset_id=dataset.id,
+                dataset_content_hash=source_dataset_content_hash,
+                workspace_revision=workspace.revision,
+                workspace_generation=workspace.analysis_generation,
+                semantic_mapping_hash=data_semantic_mapping_hash(
+                    workspace.semantic_mapping
+                ),
+                target_col=target_col,
+                drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+            )
         economics_payload = inputs.get("economics_inputs")
         economics_columns = (
             [
@@ -1535,6 +1660,7 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         sample_design_ref=(
             None if sample_binding is None else sample_binding.to_ref_dict()
         ),
+        runtime_requirements=requirements_provenance,
         strategy_id=strategy.id,
         baseline=(
             None
@@ -1550,7 +1676,11 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
             "source dataset changed while the strategy backtest was running"
         )
     if sample_binding is not None:
-        revalidate_strategy_risk_development_execution_binding(
+        (
+            revalidate_historical_strategy_risk_development_execution_binding
+            if historical_sample_binding
+            else revalidate_strategy_risk_development_execution_binding
+        )(
             runtime,
             sample_binding,
         )
@@ -1578,7 +1708,9 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
             **_backtest_audit_summary(result),
         },
     }
-    if sample_binding is None:
+    if requirements_provenance is not None:
+        audit["detail"]["runtime_requirements"] = requirements_provenance
+    if sample_binding is None and requirements_provenance is None:
         # The unbound branch is the explicit legacy/direct-tool compatibility
         # boundary. V2 workflows always supply a governed sample reference.
         existing = runtime.strategies.get_backtest(backtest_id)
@@ -1601,10 +1733,25 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         # between the prior read-side validation and durable persistence.
         with runtime.strategies.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            require_strategy_risk_development_execution_binding_on_connection(
-                conn,
-                sample_binding,
-            )
+            if sample_binding is not None:
+                (
+                    require_historical_strategy_risk_development_execution_binding_on_connection
+                    if historical_sample_binding
+                    else require_strategy_risk_development_execution_binding_on_connection
+                )(
+                    conn,
+                    sample_binding,
+                )
+            for runtime_binding in (
+                candidate_runtime_requirements,
+                baseline_runtime_requirements,
+            ):
+                if runtime_binding is not None:
+                    require_materialized_strategy_runtime_requirements_on_connection(
+                        conn,
+                        runtime,
+                        runtime_binding,
+                    )
             _assert_source_unchanged(source_path, source_dataset_content_hash)
             existing = runtime.strategies.get_backtest_on_connection(
                 conn,
@@ -2494,6 +2641,7 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         adoption_evidence,
         approval_metrics,
         adoption_sample_binding,
+        adoption_runtime_requirements,
     ) = _strategy_adoption_evidence(
         runtime,
         strategy=strategy,
@@ -2560,6 +2708,30 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
                 require_historical_strategy_risk_development_execution_binding_on_connection(
                     conn,
                     adoption_sample_binding,
+                )
+            for runtime_binding in adoption_runtime_requirements:
+                require_materialized_strategy_runtime_requirements_on_connection(
+                    conn,
+                    runtime,
+                    runtime_binding,
+                )
+            if adoption_runtime_requirements:
+                source_dataset_id = adoption_evidence.get(
+                    "source_dataset_id"
+                )
+                source_dataset_hash = adoption_evidence.get(
+                    "source_dataset_content_hash"
+                )
+                if not isinstance(source_dataset_id, str) or not isinstance(
+                    source_dataset_hash,
+                    str,
+                ):
+                    raise StrategyError(
+                        "runtime-requirement adoption source evidence is incomplete"
+                    )
+                _assert_source_unchanged(
+                    runtime.registry.resolve_path(source_dataset_id),
+                    source_dataset_hash,
                 )
             adopt_result = runtime.strategies.adopt_strategy_with_audit_on_connection(
                 conn,
@@ -2703,6 +2875,10 @@ def _adoption_artifact_provenance(
     }
     if "sample_design_ref" in adoption_evidence:
         evidence["sample_design_ref"] = adoption_evidence["sample_design_ref"]
+    if "runtime_requirements" in adoption_evidence:
+        evidence["runtime_requirements"] = adoption_evidence[
+            "runtime_requirements"
+        ]
     if kind == "monitoring_plan_json":
         evidence.update(
             {
@@ -2732,6 +2908,7 @@ def _strategy_adoption_evidence(
     dict,
     dict | None,
     StrategyRiskDevelopmentExecutionBinding | None,
+    tuple[MaterializedStrategyRuntimeRequirements, ...],
 ]:
     if isinstance(backtest, StrategyBacktestResult):
         _require_typed_adoption_quality(backtest)
@@ -2837,6 +3014,52 @@ def _strategy_adoption_evidence(
         }
         if sample_binding is not None:
             evidence["sample_design_ref"] = sample_binding.to_ref_dict()
+        runtime_bindings: tuple[
+            MaterializedStrategyRuntimeRequirements, ...
+        ] = ()
+        runtime_requirements = backtest.normalized_input.get(
+            "runtime_requirements"
+        )
+        if runtime_requirements is not None:
+            candidate_runtime, baseline_runtime = (
+                load_historical_materialized_runtime_requirements_from_provenance(
+                    runtime,
+                    task_id=task_id,
+                    candidate_strategy_id=strategy.id,
+                    dataset_id=str(backtest_binding["dataset_id"]),
+                    dataset_content_hash=str(
+                        backtest_binding["backtest_dataset_content_hash"]
+                    ),
+                    provenance=runtime_requirements,
+                )
+            )
+            runtime_bindings = tuple(
+                binding
+                for binding in (candidate_runtime, baseline_runtime)
+                if binding is not None
+            )
+            evidence["runtime_requirements"] = (
+                materialized_runtime_requirements_provenance(
+                    candidate=candidate_runtime,
+                    baseline=baseline_runtime,
+                )
+            )
+        elif (
+            load_materialized_strategy_runtime_requirements(
+                runtime,
+                task_id=task_id,
+                strategy_id=strategy.id,
+                dataset_id=str(backtest_binding["dataset_id"]),
+                dataset_content_hash=str(
+                    backtest_binding["backtest_dataset_content_hash"]
+                ),
+            )
+            is not None
+        ):
+            raise StrategyError(
+                "typed backtest is missing materialized runtime requirements; "
+                "rerun the backtest"
+            )
         approval_metrics = (
             approval_backtest_projection(
                 backtest,
@@ -2845,7 +3068,12 @@ def _strategy_adoption_evidence(
             if strategy.strategy_type in {"approval", "reject"}
             else None
         )
-        return evidence, approval_metrics, sample_binding
+        return (
+            evidence,
+            approval_metrics,
+            sample_binding,
+            runtime_bindings,
+        )
 
     approval_metrics = approval_backtest_projection(
         backtest,
@@ -2902,7 +3130,7 @@ def _strategy_adoption_evidence(
         "warnings": [
             "legacy backtest has no task-bound dataset or label-provenance contract"
         ],
-    }, approval_metrics, None
+    }, approval_metrics, None, ()
 
 
 def _adoption_decision_table_rules(strategy: Strategy) -> list[dict]:
@@ -3134,6 +3362,10 @@ def _build_adoption_monitoring_plan(
     }
     if "sample_design_ref" in evidence:
         baseline["sample_design_ref"] = dict(evidence["sample_design_ref"])
+    if "runtime_requirements" in evidence:
+        baseline["runtime_requirements"] = dict(
+            evidence["runtime_requirements"]
+        )
     if (
         strategy_type == "approval"
         or evidence["backtest_schema_version"] == _LEGACY_BACKTEST_SCHEMA_VERSION

@@ -135,7 +135,7 @@ def test_cross_cell_selection_compiles_exact_set_with_prompt_v20() -> None:
         CELL_A,
         CELL_B,
     }
-    assert llm.calls[0]["prompt_version"] == 47
+    assert llm.calls[0]["prompt_version"] == 50
     assert "cross_matrix_cell_selection" in llm.calls[0]["system_prompt"]
 
 

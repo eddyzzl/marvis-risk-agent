@@ -45,6 +45,12 @@ from marvis.packs.strategy.candidate_stability_tools import (
     load_candidate_stability_artifact,
     require_candidate_stability_artifact_binding_on_connection,
 )
+from marvis.packs.strategy.cross_candidate_search_tools import (
+    CrossCandidateSearchArtifactBinding,
+    load_cross_candidate_search_artifact,
+    require_cross_candidate_search_artifact_binding_on_connection,
+)
+from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.impact_cube_binding import (
     StrategyImpactCubeArtifactBinding,
@@ -124,7 +130,7 @@ if TYPE_CHECKING:
 
 
 BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION = (
-    "strategy.build-report-bundle-v2-tool.v6"
+    "strategy.build-report-bundle-v2-tool.v7"
 )
 BUILD_STRATEGY_REPORT_BUNDLE_V2_AUDIT_KIND = (
     "strategy.report_bundle.published"
@@ -146,6 +152,7 @@ _INPUT_FIELDS = frozenset(
         "candidate_stability_ref",
         "pool_stability_ref",
         "voting_candidate_search_ref",
+        "cross_candidate_search_ref",
         "pool_impact_ref",
         "impact_cube_ref",
         "strategy_identity",
@@ -219,6 +226,14 @@ _VOTING_CANDIDATE_SEARCH_REF_FIELDS = frozenset(
         "expected_search_content_hash",
     }
 )
+_CROSS_CANDIDATE_SEARCH_REF_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_search_id",
+        "expected_search_content_hash",
+    }
+)
 _IMPACT_REF_FIELDS = frozenset(
     {
         "artifact_id",
@@ -237,6 +252,26 @@ _IMPACT_CUBE_REF_FIELDS = frozenset(
 )
 _STRATEGY_IDENTITY_FIELDS = frozenset(
     {"strategy_id", "strategy_version", "strategy_type"}
+)
+_POOL_MATERIALIZATION_AUTH_FIELDS = frozenset(
+    {
+        "id",
+        "task_id",
+        "strategy_type",
+        "strategy_id",
+        "pool_id",
+        "pool_revision_id",
+        "pool_revision",
+        "pool_snapshot_hash",
+        "pool_artifact_id",
+        "pool_artifact_content_hash",
+        "selected_design_hash",
+        "requirements",
+        "requirements_hash",
+        "strategy_spec_hash",
+        "strategy_dsl_content_hash",
+        "audit_id",
+    }
 )
 _MODEL_REF_FIELDS = frozenset(
     {
@@ -306,6 +341,9 @@ _POOL_STABILITY_ID_RE = re.compile(
 _VOTING_CANDIDATE_SEARCH_ID_RE = re.compile(
     r"^voting-search-[0-9a-f]{32}$"
 )
+_CROSS_CANDIDATE_SEARCH_ID_RE = re.compile(
+    r"^cross-search-[0-9a-f]{32}$"
+)
 _IMPACT_CUBE_ID_RE = re.compile(
     r"^strategy-impact-cube-[0-9a-f]{24}$"
 )
@@ -338,11 +376,118 @@ class _ReportSources:
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None
     pool_stability: StrategyPoolStabilityArtifactBinding | None
     voting_candidate_search: VotingCandidateSearchArtifactBinding | None
+    cross_candidate_search: CrossCandidateSearchArtifactBinding | None
     pool_impact: StrategyPoolImpactArtifactBinding | None
     impact_cube: StrategyImpactCubeArtifactBinding | None
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None
     training_evidence: ModelingTrainingEvidenceArtifactBinding | None
     score_evidence: ModelScoreEvidenceArtifactBinding | None
+    strategy_authentication: Mapping[str, Any] | None
+
+
+def authenticate_strategy_report_identity_for_pool_on_connection(
+    repository,
+    conn,
+    *,
+    task_id: str,
+    candidate_pool: StrategyCandidatePoolArtifactBinding,
+    expected_identity: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Bind report identity only through the Pool's immutable materialization."""
+
+    materialization = (
+        repository.get_pool_materialization_for_pool_revision_on_connection(
+            conn,
+            candidate_pool.pool["revision_id"],
+        )
+    )
+    if materialization is None:
+        if expected_identity is None:
+            return None
+        raise StrategyError(
+            "strategy identity has no exact current Pool materialization"
+        )
+    authenticated = repository.require_pool_materialization_on_connection(
+        conn,
+        {
+            field: materialization[field]
+            for field in _POOL_MATERIALIZATION_AUTH_FIELDS
+        },
+    )
+    materialization = authenticated["materialization"]
+    strategy = authenticated["strategy"]
+    metadata = authenticated["metadata"]
+    design = candidate_pool.compiled_design
+    requirements_json = _canonical_json(design["requirements"])
+    expected_materialization = {
+        "task_id": task_id,
+        "strategy_type": candidate_pool.strategy_type,
+        "pool_id": candidate_pool.pool["pool_id"],
+        "pool_revision_id": candidate_pool.pool["revision_id"],
+        "pool_revision": candidate_pool.pool["revision"],
+        "pool_snapshot_hash": candidate_pool.pool["snapshot_hash"],
+        "pool_artifact_id": candidate_pool.artifact_id,
+        "pool_artifact_content_hash": candidate_pool.artifact_content_hash,
+        "selected_design_hash": design["design_hash"],
+        "requirements": design["requirements"],
+        "requirements_hash": hashlib.sha256(
+            requirements_json.encode("utf-8")
+        ).hexdigest(),
+        "strategy_spec_hash": strategy_spec_hash(design["strategy_spec"]),
+    }
+    if any(
+        materialization.get(field) != expected
+        for field, expected in expected_materialization.items()
+    ):
+        raise StrategyError(
+            "strategy Pool materialization differs from the current "
+            "authenticated Pool design"
+        )
+    if (
+        strategy.id != materialization["strategy_id"]
+        or strategy.spec is None
+        or strategy.spec.to_dict() != design["strategy_spec"]
+        or metadata.get("task_id") != task_id
+        or metadata.get("id") != materialization["strategy_id"]
+        or metadata.get("strategy_type") != candidate_pool.strategy_type
+        or metadata.get("version") != materialization["strategy_version"]
+    ):
+        raise StrategyError(
+            "materialized Strategy identity differs from the current "
+            "authenticated Pool design"
+        )
+    identity = {
+        "strategy_id": materialization["strategy_id"],
+        "strategy_version": str(materialization["strategy_version"]),
+        "strategy_type": materialization["strategy_type"],
+    }
+    if expected_identity is not None and dict(expected_identity) != identity:
+        raise StrategyError(
+            "strategy identity does not match the current Pool materialization"
+        )
+    lifecycle_body = {
+        "strategy_id": identity["strategy_id"],
+        "strategy_version": identity["strategy_version"],
+        "strategy_type": identity["strategy_type"],
+        "status": metadata["status"],
+        "asset_status": metadata["asset_status"],
+    }
+    lifecycle_hash = hashlib.sha256(
+        _canonical_json(lifecycle_body).encode("utf-8")
+    ).hexdigest()
+    return {
+        "identity": identity,
+        "materialization": materialization,
+        "strategy_metadata": metadata,
+        "strategy_lifecycle": {
+            **lifecycle_body,
+            "source_ref": build_source_ref(
+                kind="strategy_lifecycle",
+                ref_id=identity["strategy_id"],
+                content_hash=lifecycle_hash,
+            ),
+        },
+    }
 
 
 def run_build_strategy_report_bundle_v2(inputs, ctx, runtime) -> dict[str, Any]:
@@ -365,11 +510,17 @@ def run_build_strategy_report_bundle_v2(inputs, ctx, runtime) -> dict[str, Any]:
             candidate_stability=sources.candidate_stability,
             pool_stability=sources.pool_stability,
             voting_candidate_search=sources.voting_candidate_search,
+            cross_candidate_search=sources.cross_candidate_search,
             pool_impact=sources.pool_impact,
             impact_cube=sources.impact_cube,
             model_evidence=sources.model_evidence,
             training_evidence=sources.training_evidence,
             score_evidence=sources.score_evidence,
+            strategy_lifecycle=(
+                None
+                if sources.strategy_authentication is None
+                else sources.strategy_authentication["strategy_lifecycle"]
+            ),
         )
         title_source = build_source_ref(
             kind="tool_input",
@@ -552,6 +703,22 @@ def _load_sources(
         task_id=task_id,
         **request["candidate_pool_ref"],
     )
+    strategy_authentication = None
+    if request["strategy_identity"] is not None:
+        with runtime.strategies.transaction() as conn:
+            strategy_authentication = (
+                authenticate_strategy_report_identity_for_pool_on_connection(
+                    runtime.strategies,
+                    conn,
+                    task_id=task_id,
+                    candidate_pool=candidate_pool,
+                    expected_identity=request["strategy_identity"],
+                )
+            )
+        if strategy_authentication is None:
+            raise StrategyError(
+                "strategy identity has no exact current Pool materialization"
+            )
     pool_validations = load_strategy_pool_validation_artifacts(
         runtime,
         task_id=task_id,
@@ -575,6 +742,15 @@ def _load_sources(
             runtime,
             task_id=task_id,
             **request["voting_candidate_search_ref"],
+        )
+    )
+    cross_candidate_search = (
+        None
+        if request["cross_candidate_search_ref"] is None
+        else load_cross_candidate_search_artifact(
+            runtime,
+            task_id=task_id,
+            **request["cross_candidate_search_ref"],
         )
     )
     impact_cube = (
@@ -659,11 +835,13 @@ def _load_sources(
         candidate_stability=candidate_stability,
         pool_stability=pool_stability,
         voting_candidate_search=voting_candidate_search,
+        cross_candidate_search=cross_candidate_search,
         pool_impact=pool_impact,
         impact_cube=impact_cube,
         model_evidence=model_evidence,
         training_evidence=training_evidence,
         score_evidence=score_evidence,
+        strategy_authentication=strategy_authentication,
     )
 
 
@@ -741,7 +919,11 @@ def _publish_report(
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                _revalidate_sources(conn, sources)
+                _revalidate_sources(
+                    conn,
+                    sources,
+                    strategies=runtime.strategies,
+                )
                 reused = _prepare_outputs_under_lock(
                     conn,
                     uow=uow,
@@ -788,7 +970,11 @@ def _publish_report(
                 result = validate_build_strategy_report_bundle_v2_tool_output(
                     _tool_output(publication)
                 )
-                _revalidate_sources(conn, sources)
+                _revalidate_sources(
+                    conn,
+                    sources,
+                    strategies=runtime.strategies,
+                )
                 for output_format in _OUTPUT_FORMATS:
                     _read_exact_regular_file(
                         paths[output_format],
@@ -881,7 +1067,7 @@ def _prepare_outputs_under_lock(
     return False
 
 
-def _revalidate_sources(conn, sources: _ReportSources) -> None:
+def _revalidate_sources(conn, sources: _ReportSources, *, strategies) -> None:
     require_strategy_project_context_artifact_binding_on_connection(
         conn,
         sources.project_context,
@@ -894,6 +1080,20 @@ def _revalidate_sources(conn, sources: _ReportSources) -> None:
         conn,
         sources.candidate_pool,
     )
+    if sources.strategy_authentication is not None:
+        current_strategy_authentication = (
+            authenticate_strategy_report_identity_for_pool_on_connection(
+                strategies,
+                conn,
+                task_id=sources.candidate_pool.task_id,
+                candidate_pool=sources.candidate_pool,
+                expected_identity=sources.strategy_authentication["identity"],
+            )
+        )
+        if current_strategy_authentication != sources.strategy_authentication:
+            raise StrategyError(
+                "materialized Strategy lifecycle changed before report publication"
+            )
     for validation in sources.pool_validations:
         require_strategy_pool_validation_artifact_binding_on_connection(
             conn,
@@ -913,6 +1113,11 @@ def _revalidate_sources(conn, sources: _ReportSources) -> None:
         require_voting_candidate_search_artifact_binding_on_connection(
             conn,
             sources.voting_candidate_search,
+        )
+    if sources.cross_candidate_search is not None:
+        require_cross_candidate_search_artifact_binding_on_connection(
+            conn,
+            sources.cross_candidate_search,
         )
     if sources.impact_cube is not None:
         require_strategy_impact_cube_artifact_binding_on_connection(
@@ -1055,12 +1260,36 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
         "candidate_stability": None,
         "pool_stability": None,
         "voting_candidate_search": None,
+        "cross_candidate_search": None,
         "pool_impact": None,
         "impact_cube": None,
         "model_evidence": None,
         "training_evidence": None,
         "score_evidence": None,
+        "strategy_materialization": None,
     }
+    if sources.strategy_authentication is not None:
+        authenticated = sources.strategy_authentication
+        materialization = authenticated["materialization"]
+        metadata = authenticated["strategy_metadata"]
+        result["strategy_materialization"] = {
+            "materialization_id": materialization["id"],
+            "strategy_id": materialization["strategy_id"],
+            "strategy_version": materialization["strategy_version"],
+            "strategy_spec_hash": materialization["strategy_spec_hash"],
+            "selected_design_hash": materialization["selected_design_hash"],
+            "pool_revision_id": materialization["pool_revision_id"],
+            "pool_snapshot_hash": materialization["pool_snapshot_hash"],
+            "pool_artifact_id": materialization["pool_artifact_id"],
+            "pool_artifact_content_hash": materialization[
+                "pool_artifact_content_hash"
+            ],
+            "status": metadata["status"],
+            "asset_status": metadata["asset_status"],
+            "lifecycle_ref": authenticated["strategy_lifecycle"][
+                "source_ref"
+            ],
+        }
     if sources.impact_cube is not None:
         result["impact_cube"] = {
             "artifact_id": sources.impact_cube.artifact_id,
@@ -1119,6 +1348,17 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
             "search_id": sources.voting_candidate_search.result["search_id"],
             "search_content_hash": (
                 sources.voting_candidate_search.result["content_hash"]
+            ),
+        }
+    if sources.cross_candidate_search is not None:
+        result["cross_candidate_search"] = {
+            "artifact_id": sources.cross_candidate_search.artifact_id,
+            "content_hash": (
+                sources.cross_candidate_search.artifact_content_hash
+            ),
+            "search_id": sources.cross_candidate_search.result["search_id"],
+            "search_content_hash": (
+                sources.cross_candidate_search.result["content_hash"]
             ),
         }
     if sources.model_evidence is not None:
@@ -1278,6 +1518,11 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     request["voting_candidate_search_ref"] = (
         _optional_voting_candidate_search_ref(
             request["voting_candidate_search_ref"]
+        )
+    )
+    request["cross_candidate_search_ref"] = (
+        _optional_cross_candidate_search_ref(
+            request["cross_candidate_search_ref"]
         )
     )
     request["impact_cube_ref"] = _optional_impact_cube_ref(
@@ -1527,6 +1772,41 @@ def _optional_voting_candidate_search_ref(
         "expected_search_content_hash": _hash(
             obj["expected_search_content_hash"],
             "voting_candidate_search_ref.expected_search_content_hash",
+        ),
+    }
+
+
+def _optional_cross_candidate_search_ref(
+    value: object,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    obj = _exact_object(
+        value,
+        _CROSS_CANDIDATE_SEARCH_REF_FIELDS,
+        "cross_candidate_search_ref",
+    )
+    search_id = _text(
+        obj["expected_search_id"],
+        "cross_candidate_search_ref.expected_search_id",
+    )
+    if _CROSS_CANDIDATE_SEARCH_ID_RE.fullmatch(search_id) is None:
+        raise StrategyError(
+            "cross_candidate_search_ref.expected_search_id is not canonical"
+        )
+    return {
+        "artifact_id": _hash(
+            obj["artifact_id"],
+            "cross_candidate_search_ref.artifact_id",
+        ),
+        "expected_artifact_content_hash": _hash(
+            obj["expected_artifact_content_hash"],
+            "cross_candidate_search_ref.expected_artifact_content_hash",
+        ),
+        "expected_search_id": search_id,
+        "expected_search_content_hash": _hash(
+            obj["expected_search_content_hash"],
+            "cross_candidate_search_ref.expected_search_content_hash",
         ),
     }
 

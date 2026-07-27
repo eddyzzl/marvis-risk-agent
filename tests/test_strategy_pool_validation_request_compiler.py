@@ -73,6 +73,21 @@ def _compile(utterance: str, workflow_inputs: dict, *, workflow: str = "strategy
             "oot",
             "validate the current reject pool on OOT",
         ),
+        (
+            "limit",
+            "validation",
+            "在验证集上回放当前额度策略池",
+        ),
+        (
+            "pricing",
+            "oot",
+            "在 OOT 上验证当前定价策略池",
+        ),
+        (
+            "segmentation",
+            "validation",
+            "在验证集上复核当前分群策略池",
+        ),
     ],
 )
 def test_pool_validation_accepts_only_explicit_type_and_independent_partition(
@@ -104,7 +119,7 @@ def test_pool_validation_accepts_only_explicit_type_and_independent_partition(
     assert partition in result.confirmation
     assert "不会修改 Pool" in result.confirmation
     assert "不晋级、不采纳、不部署" in result.confirmation
-    assert llm.calls[0]["prompt_version"] == 47
+    assert llm.calls[0]["prompt_version"] == 50
     assert "strategy_pool_validation" in llm.calls[0]["system_prompt"]
     assert "independent replay evidence" in llm.calls[0]["system_prompt"]
 
@@ -114,18 +129,6 @@ def test_pool_validation_accepts_only_explicit_type_and_independent_partition(
     [
         ({}, "strategy_type"),
         ({"strategy_type": "approval"}, "partition"),
-        (
-            {"strategy_type": "limit", "partition": "validation"},
-            "strategy_type",
-        ),
-        (
-            {"strategy_type": "pricing", "partition": "oot"},
-            "strategy_type",
-        ),
-        (
-            {"strategy_type": "segmentation", "partition": "validation"},
-            "strategy_type",
-        ),
         (
             {"strategy_type": "approval", "partition": "development"},
             "partition",
@@ -334,11 +337,6 @@ def test_pool_validation_rejects_platform_owned_inputs(
             "对当前审批策略池执行 validation 和 OOT 独立样本回放验证",
             {"strategy_type": "approval", "partition": "validation"},
             "strategy_pool_validation_controls_not_grounded",
-        ),
-        (
-            "对当前额度策略池执行 validation 独立样本回放验证",
-            {"strategy_type": "limit", "partition": "validation"},
-            "invalid_strategy_request",
         ),
         (
             "对当前审批策略池执行 development 独立样本回放验证",

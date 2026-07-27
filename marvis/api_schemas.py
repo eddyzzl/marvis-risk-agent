@@ -210,6 +210,7 @@ class ReportFieldsUpdateRequest(BaseModel):
 
 
 ManualStrategyWorkflow = Literal[
+    "strategy_project_context",
     "strategy_sample_design_v2",
     "univariate_candidate_analysis",
     "cross_matrix_analysis",
@@ -220,6 +221,8 @@ ManualStrategyWorkflow = Literal[
     "candidate_monthly_stability",
     "voting_candidate_search",
     "voting_candidate_build_from_search",
+    "cross_matrix_candidate_search",
+    "cross_matrix_candidate_build_from_search",
     "interactive_tree_revision",
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
@@ -234,6 +237,7 @@ ManualStrategyWorkflow = Literal[
     "strategy_impact_cube",
     "strategy_pool_validation",
     "strategy_pool_stability",
+    "strategy_dsl_delivery",
     "strategy_report_bundle_v2",
 ]
 
@@ -569,6 +573,14 @@ ManualVotingComboId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^voting-combo-[0-9a-f]{32}$"),
 ]
+ManualCrossSearchId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^cross-search-[0-9a-f]{32}$"),
+]
+ManualCrossPairId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^cross-pair-[0-9a-f]{32}$"),
+]
 ManualVotingMetric = Literal[
     "hit_count",
     "hit_share",
@@ -755,19 +767,37 @@ ManualCandidateStabilityInputs = (
 
 
 class ManualInteractiveTreeRevisionInputs(BaseModel):
-    """One visible tree/node pointer for an immutable prune revision."""
+    """One visible tree/node pointer for one immutable tree edit."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     source_tree_id: ManualInteractiveTreeSourceId
     node_id: ManualInteractiveTreeNodeId
-    operation: Literal["prune_subtree"]
+    operation: Literal["prune_subtree", "adjust_split_threshold"]
+    threshold: StrictInt | StrictFloat | None = None
     reason: ManualSelectionReason | None = None
 
     @model_validator(mode="after")
-    def reject_explicit_null_reason(self) -> Self:
+    def validate_operation_fields(self) -> Self:
+        if "threshold" in self.model_fields_set and self.threshold is None:
+            raise ValueError(
+                "optional fields must be omitted instead of null: threshold"
+            )
         if "reason" in self.model_fields_set and self.reason is None:
             raise ValueError("optional fields must be omitted instead of null: reason")
+        if self.operation == "adjust_split_threshold":
+            if self.threshold is None:
+                raise ValueError(
+                    "adjust_split_threshold requires a finite threshold"
+                )
+            if (
+                not math.isfinite(float(self.threshold))
+                or isinstance(self.threshold, int)
+                and abs(self.threshold) > 2**53 - 1
+            ):
+                raise ValueError("threshold must be a finite exact JSON number")
+        elif self.threshold is not None:
+            raise ValueError("prune_subtree forbids threshold")
         return self
 
 
@@ -913,6 +943,28 @@ class ManualVotingCandidateBuildFromSearchInputs(BaseModel):
                 "optional fields must be omitted instead of null: strategy_type"
             )
         return self
+
+
+class ManualCrossMatrixCandidateSearchInputs(BaseModel):
+    """Only user-selected features and a bounded pair count cross the UI."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    features: Annotated[
+        list[StrictCanonicalNonEmptyStr],
+        Field(min_length=2, max_length=20),
+        AfterValidator(_unique_strings),
+    ]
+    max_pairs: StrictInt = Field(ge=1, le=190)
+
+
+class ManualCrossMatrixCandidateBuildFromSearchInputs(BaseModel):
+    """One literal authenticated search/pair pointer tuple."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    search_id: ManualCrossSearchId
+    pair_id: ManualCrossPairId
 
 
 class ManualStrategyPoolDecisionAction(BaseModel):
@@ -1137,11 +1189,11 @@ class ManualStrategyPoolApplyInputs(BaseModel):
 
 
 class ManualStrategyPoolValidationInputs(BaseModel):
-    """Only an approval/reject Pool type and independent partition are user-owned."""
+    """Any non-empty typed Pool may be validated on an independent partition."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    strategy_type: Literal["approval", "reject"]
+    strategy_type: ManualStrategyType
     partition: Literal["validation", "oot"]
 
 
@@ -1484,6 +1536,12 @@ _MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS = TypeAdapter(
 _MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
     ManualVotingCandidateBuildFromSearchInputs
 )
+_MANUAL_CROSS_MATRIX_CANDIDATE_SEARCH_INPUTS = TypeAdapter(
+    ManualCrossMatrixCandidateSearchInputs
+)
+_MANUAL_CROSS_MATRIX_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
+    ManualCrossMatrixCandidateBuildFromSearchInputs
+)
 _MANUAL_STRATEGY_POOL_COMPILE_INPUTS = TypeAdapter(
     ManualStrategyPoolCompileInputs
 )
@@ -1626,6 +1684,19 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "cross_matrix_candidate_search":
+            _MANUAL_CROSS_MATRIX_CANDIDATE_SEARCH_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "cross_matrix_candidate_build_from_search":
+            (
+                _MANUAL_CROSS_MATRIX_CANDIDATE_BUILD_FROM_SEARCH_INPUTS
+                .validate_python(
+                    self.workflow_inputs,
+                    strict=True,
+                )
+            )
         elif self.workflow == "strategy_pool_compile":
             _MANUAL_STRATEGY_POOL_COMPILE_INPUTS.validate_python(
                 self.workflow_inputs,
@@ -1707,6 +1778,10 @@ class ManualStrategyRequest(BaseModel):
                 "search_id",
                 "combo_id",
             },
+            "cross_matrix_candidate_build_from_search": {
+                "search_id",
+                "pair_id",
+            },
             "strategy_pool_add_candidate": {
                 "candidate_asset_id",
                 "selection_id",
@@ -1716,6 +1791,7 @@ class ManualStrategyRequest(BaseModel):
             "strategy_pool_reorder": {"ordered_ids"},
             "strategy_pool_impact": {"baseline_strategy_id"},
             "strategy_impact_cube": {"current_strategy_id"},
+            "strategy_dsl_delivery": {"strategy_id"},
         }.get(self.workflow, set())
         forbidden = sorted(
             key
@@ -1745,6 +1821,71 @@ class ManualStrategyRequest(BaseModel):
         return self
 
 
+ManualStrategyAdoptionReason = Annotated[
+    StrictStr,
+    StringConstraints(
+        strip_whitespace=False,
+        min_length=1,
+        max_length=1000,
+    ),
+    AfterValidator(_canonical_non_empty_string),
+]
+ManualStrategyEconomicsValue = (
+    StrictCanonicalNonEmptyStr | StrictInt | StrictFloat
+)
+
+
+class ManualStrategyLifecycleRequest(BaseModel):
+    """User-reviewed lifecycle decision routed through the governed Agent gate.
+
+    Candidate Lab may prepare only a local-adoption request.  Asset lifecycle,
+    validation status, evidence identities and deployment state remain
+    platform-owned and therefore cannot cross this HTTP boundary.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        allow_inf_nan=False,
+    )
+
+    request_kind: Literal["strategy_lifecycle"]
+    operation: Literal["adopt"]
+    strategy_type: ManualStrategyType
+    strategy_id: StrictCanonicalNonEmptyStr
+    adoption_reason: ManualStrategyAdoptionReason
+    economics_inputs: (
+        dict[StrictCanonicalNonEmptyStr, ManualStrategyEconomicsValue] | None
+    ) = None
+
+    @model_validator(mode="after")
+    def validate_type_specific_economics_presence(self) -> Self:
+        if (
+            "economics_inputs" in self.model_fields_set
+            and self.economics_inputs is None
+        ):
+            raise ValueError("economics_inputs must be omitted instead of null")
+        economic_type = self.strategy_type in {"limit", "pricing"}
+        if economic_type and self.economics_inputs is None:
+            raise ValueError(
+                f"{self.strategy_type} adoption requires economics_inputs"
+            )
+        if not economic_type and self.economics_inputs is not None:
+            raise ValueError(
+                "economics_inputs is only allowed for limit or pricing adoption"
+            )
+        if self.economics_inputs is not None and len(self.economics_inputs) > 12:
+            raise ValueError("economics_inputs exceeds the bounded field budget")
+        return self
+
+
+ManualAgentStrategyRequest = Annotated[
+    ManualStrategyRequest | ManualStrategyLifecycleRequest,
+    Field(discriminator="request_kind"),
+]
+
+
 class AgentMessageRequest(BaseModel):
     content: str
     model_id: str | None = None
@@ -1757,7 +1898,7 @@ class AgentMessageRequest(BaseModel):
     # Candidate Lab manual controls use the same canonical request and trusted
     # execution kernel as natural-language strategy requests. The free-text
     # content remains a user-visible action label, not executable business input.
-    strategy_request: ManualStrategyRequest | None = None
+    strategy_request: ManualAgentStrategyRequest | None = None
     # Optional edited feature set from the §4 interactive screening table; when a
     # screening gate is confirmed this overrides the screen's proposed `selected`.
     selection: list[str] | None = None

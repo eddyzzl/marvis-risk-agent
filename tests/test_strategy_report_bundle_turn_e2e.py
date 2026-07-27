@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -20,6 +21,7 @@ from marvis.agent.turn_handlers import (
     _strategy_report_bundle_v2_plan_slots,
     _strategy_report_current_pool_binding,
     _strategy_report_identity,
+    _strategy_report_latest_cross_search_binding,
     _strategy_report_latest_impact_cube_binding,
     _strategy_report_latest_pool_impact_binding,
     _strategy_report_latest_sample_binding,
@@ -29,10 +31,16 @@ from marvis.agent.turn_handlers import (
     _strategy_report_requested_pool_type,
 )
 from marvis.app import create_app
+from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.db import TaskRepository
+from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.candidate_stability_tools import (
     resolve_candidate_monthly_stability_inputs,
     run_measure_candidate_monthly_stability,
+)
+from marvis.packs.strategy.cross_candidate_search_tools import (
+    CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    run_search_cross_matrix_candidates,
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.impact_cube_tools import (
@@ -42,7 +50,13 @@ from marvis.packs.strategy.model_evidence_tools import (
     MODEL_EVIDENCE_V2_ARTIFACT_KIND,
 )
 from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
-from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
+from marvis.packs.strategy.pool_materialization_tools import (
+    run_materialize_strategy_from_pool,
+)
+from marvis.packs.strategy.pool_tools import (
+    load_current_strategy_candidate_pool_artifact,
+    run_add_candidate_to_pool,
+)
 from marvis.packs.strategy.pool_stability_tools import (
     run_measure_strategy_pool_stability,
 )
@@ -73,6 +87,7 @@ from test_strategy_report_bundle_tools import (
     _setup,
     _setup_impact_cube_report,
 )
+from test_strategy_pool_impact_tools import _setup as _impact_setup
 from test_strategy_candidate_stability_tools import (
     _pool_add_inputs as _candidate_stability_pool_add_inputs,
     _setup as _candidate_stability_setup,
@@ -116,6 +131,46 @@ def _draft(
 
 def _runtime(fixture: dict) -> SimpleNamespace:
     return SimpleNamespace(settings=fixture["settings"])
+
+
+def _attach_cross_search(fixture: dict) -> dict:
+    source = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            "dataset_id": fixture["dataset"].id,
+            "expected_content_hash": fixture["dataset"].content_hash,
+            "workspace_revision": fixture["workspace"].revision,
+            "analysis_generation": fixture["workspace"].analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(
+                fixture["mapping"]
+            ),
+            "target_col": "bad",
+            "sample_design_ref": fixture["sample_design_ref"],
+            "features": ["score", "loan_amount"],
+            "methods": ["equal_width"],
+            "bin_count": 3,
+            "drop_nan_labels": True,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+        },
+        fixture["ctx"],
+    )
+    source_artifact = next(
+        item
+        for item in source["artifacts"]
+        if item["kind"] == "strategy_candidate_json"
+    )
+    return run_search_cross_matrix_candidates(
+        {
+            "source_artifact_id": source_artifact["artifact_id"],
+            "expected_artifact_content_hash": source_artifact["content_hash"],
+            "expected_candidate_id": source["candidate_id"],
+            "expected_evidence_hash": source["evidence_hash"],
+            "features": ["score", "loan_amount"],
+            "max_pairs": 1,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
 
 
 def _setup_native_parallel_report(tmp_path: Path) -> dict:
@@ -365,6 +420,7 @@ def test_report_turn_binds_exact_current_sources_and_first_head(
     assert slots["impact_cube_ref"] is None
     assert slots["candidate_stability_ref"] is None
     assert slots["voting_candidate_search_ref"] is None
+    assert slots["cross_candidate_search_ref"] is None
     assert slots["pool_validation_refs"] == []
     assert slots["report_revision"] == 1
     assert slots["previous_report_id"] is None
@@ -450,6 +506,194 @@ def test_report_turn_passes_exact_selected_voting_search_to_preflight(
         "expected_search_id": search.result["search_id"],
         "expected_search_content_hash": search.result["content_hash"],
     }
+
+
+def test_report_turn_passes_exact_selected_cross_search_to_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    search = SimpleNamespace(
+        artifact_id="a" * 64,
+        artifact_content_hash="b" * 64,
+        result={
+            "search_id": "cross-search-" + ("1" * 32),
+            "content_hash": "c" * 64,
+        },
+    )
+    observed = {}
+    original_adapter = (
+        turn_handlers.build_strategy_report_bundle_source_inputs
+    )
+
+    def capture_preflight(**kwargs):
+        observed["search"] = kwargs.pop("cross_candidate_search")
+        return original_adapter(**kwargs)
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "_strategy_report_latest_cross_search_binding",
+        lambda *args, **kwargs: search,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "build_strategy_report_bundle_source_inputs",
+        capture_preflight,
+    )
+
+    slots = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert observed["search"] is search
+    assert slots["cross_candidate_search_ref"] == {
+        "artifact_id": search.artifact_id,
+        "expected_artifact_content_hash": search.artifact_content_hash,
+        "expected_search_id": search.result["search_id"],
+        "expected_search_content_hash": search.result["content_hash"],
+    }
+
+
+def test_report_cross_search_window_skips_authenticated_unrelated_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    newest = {
+        "id": "a" * 64,
+        "content_hash": "b" * 64,
+        "kind": CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    }
+    older = {
+        "id": "c" * 64,
+        "content_hash": "d" * 64,
+        "kind": CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    }
+    unrelated = SimpleNamespace(marker="unrelated")
+    compatible = SimpleNamespace(marker="compatible")
+    loaded = []
+
+    def load_search(runtime, **kwargs):
+        del runtime
+        loaded.append(kwargs)
+        return (
+            unrelated
+            if kwargs["artifact_id"] == newest["id"]
+            else compatible
+        )
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_cross_candidate_search_artifact",
+        load_search,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "_strategy_report_cross_search_matches",
+        lambda binding, **kwargs: binding is compatible,
+    )
+
+    selected = _strategy_report_latest_cross_search_binding(
+        _window_runtime(newest, older),
+        task_id="task-report",
+        sample=object(),
+    )
+
+    assert selected is compatible
+    assert loaded == [
+        {
+            "task_id": "task-report",
+            "artifact_id": newest["id"],
+            "expected_artifact_content_hash": newest["content_hash"],
+        },
+        {
+            "task_id": "task-report",
+            "artifact_id": older["id"],
+            "expected_artifact_content_hash": older["content_hash"],
+        },
+    ]
+
+
+def test_report_cross_search_window_corruption_fails_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    newest = {
+        "id": "a" * 64,
+        "content_hash": "b" * 64,
+        "kind": CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    }
+    older = {
+        "id": "c" * 64,
+        "content_hash": "d" * 64,
+        "kind": CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    }
+
+    def corrupt_newest(runtime, **kwargs):
+        del runtime
+        if kwargs["artifact_id"] == newest["id"]:
+            raise StrategyError("Cross search artifact bytes changed")
+        pytest.fail("corrupt newest Cross search must stop selection")
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_cross_candidate_search_artifact",
+        corrupt_newest,
+    )
+
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
+        _strategy_report_latest_cross_search_binding(
+            _window_runtime(newest, older),
+            task_id="task-report",
+            sample=object(),
+        )
+
+    assert raised.value.code == (
+        "strategy_report_bundle_v2_cross_candidate_search_invalid"
+    )
+
+
+def test_report_cross_search_window_exhaustion_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay_limit = (
+        turn_handlers._STRATEGY_REPORT_CROSS_SEARCH_REPLAY_LIMIT
+    )
+    records = tuple(
+        {
+            "id": f"{index:064x}",
+            "content_hash": "b" * 64,
+            "kind": CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+        }
+        for index in range(replay_limit)
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_cross_candidate_search_artifact",
+        lambda runtime, **kwargs: SimpleNamespace(marker=kwargs["artifact_id"]),
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "_strategy_report_cross_search_matches",
+        lambda *args, **kwargs: False,
+    )
+
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
+        _strategy_report_latest_cross_search_binding(
+            _window_runtime(
+                *records,
+                totals={
+                    CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND: replay_limit + 1
+                },
+            ),
+            task_id="task-report",
+            sample=object(),
+        )
+
+    assert raised.value.code == (
+        "strategy_report_bundle_v2_cross_candidate_search_"
+        "selection_window_exhausted"
+    )
 
 
 def test_report_turn_binds_exact_pool_validation_refs_and_preflights_bindings(
@@ -1681,67 +1925,63 @@ def test_report_turn_corrupt_latest_same_kind_never_falls_back(
     )
 
 
-def test_report_turn_strategy_identity_requires_one_exact_same_type_strategy(
+def test_report_turn_strategy_identity_uses_only_exact_pool_materialization(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _StrategyRepository:
-        matches = [
-            {
-                "id": "strategy-1",
-                "task_id": "task-1",
-                "strategy_type": "approval",
-                "version": 3,
-            }
-        ]
-
-        def __init__(self, db_path: Path) -> None:
-            pass
-
-        def list_meta_for_task(self, task_id: str) -> list[dict]:
-            return list(self.matches)
-
-        def get_strategy(self, strategy_id: str):
-            return SimpleNamespace(
-                spec={"schema_version": "strategy.v2"},
-                strategy_type="approval",
-            )
-
-        def get_strategy_spec_hash(self, strategy_id: str) -> str:
-            return "a" * 64
-
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyRepository",
-        _StrategyRepository,
-    )
-    runtime = SimpleNamespace(
-        settings=SimpleNamespace(db_path=tmp_path / "db.sqlite")
+    fixture = _impact_setup(tmp_path)
+    pool = load_current_strategy_candidate_pool_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        strategy_type="approval",
+        expected_pool_revision=fixture["pool"]["revision"],
+        expected_pool_snapshot_hash=fixture["pool"]["snapshot_hash"],
     )
 
     assert _strategy_report_identity(
-        runtime,
-        task_id="task-1",
-        strategy_type="approval",
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        candidate_pool=pool,
+    ) is None
+
+    materialized = run_materialize_strategy_from_pool(
+        {
+            "strategy_type": pool.strategy_type,
+            "expected_pool_revision": pool.pool["revision"],
+            "expected_pool_snapshot_hash": pool.pool["snapshot_hash"],
+            "expected_pool_artifact_id": pool.artifact_id,
+            "expected_pool_artifact_content_hash": pool.artifact_content_hash,
+            "expected_design_hash": pool.compiled_design["design_hash"],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    exact_id = materialized["strategy_ref"]["strategy_id"]
+    exact = fixture["runtime"].strategies.get_strategy(exact_id)
+    assert exact is not None
+    fixture["runtime"].strategies.create_strategy(
+        fixture["task"].id,
+        replace(exact, id="unrelated-same-type-strategy"),
+    )
+
+    assert _strategy_report_identity(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        candidate_pool=pool,
     ) == {
-        "strategy_id": "strategy-1",
-        "strategy_version": "3",
+        "strategy_id": exact_id,
+        "strategy_version": "1",
         "strategy_type": "approval",
     }
-    _StrategyRepository.matches.append(
-        {
-            "id": "strategy-2",
-            "task_id": "task-1",
-            "strategy_type": "approval",
-            "version": 1,
-        }
-    )
-    assert (
+    forged_design = deepcopy(pool.compiled_design)
+    forged_design["design_hash"] = "f" * 64
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_identity(
-            runtime,
-            task_id="task-1",
-            strategy_type="approval",
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            candidate_pool=replace(pool, compiled_design=forged_design),
         )
-        is None
+    assert raised.value.code == (
+        "strategy_report_bundle_v2_strategy_identity_invalid"
     )
 
 
@@ -1799,8 +2039,69 @@ def test_report_command_autostarts_exact_one_step_without_dataset_preview(
         if message.get("role") == "assistant"
     )
     assert output["report_id"] in rendered_messages
-    assert "未创建策略、未采纳、未部署或上线" in rendered_messages
+    assert "本报告生成步骤未创建或变更策略资产" in rendered_messages
+    assert "生命周期状态来自已认证证据" in rendered_messages
     assert rendered_messages.count("](/api/tasks/") == 4
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_report_command_projects_latest_exact_cross_search_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    searched = _attach_cross_search(fixture)
+    search_artifact = searched["artifacts"][0]
+    client = TestClient(create_app(fixture["settings"].workspace))
+    llm = _ReportLLM()
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{fixture['task'].id}/agent/messages",
+        json={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert response.status_code == 202, response.text
+    [plan] = client.get(
+        f"/api/tasks/{fixture['task'].id}/plans"
+    ).json()["plans"]
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    [step] = stored.steps
+    assert step.inputs["cross_candidate_search_ref"] == {
+        "artifact_id": search_artifact["artifact_id"],
+        "expected_artifact_content_hash": search_artifact["content_hash"],
+        "expected_search_id": searched["search_id"],
+        "expected_search_content_hash": searched["content_hash"],
+    }
+    output = client.app.state.plan_repo.load_step_output(step.id)
+    candidate = output["bundle"]["sections"][4]
+    table = next(
+        item
+        for item in candidate["tables"]
+        if item["table_id"] == "cross_candidate_search_pairs"
+    )
+    assert [
+        row["cells"]["pair_id"]["value"] for row in table["rows"]
+    ] == [
+        item["pair_id"]
+        for item in searched["search_result"]["pairs"]
+    ]
+    rendered = json.dumps(output["bundle"], ensure_ascii=False).lower()
+    for forbidden in (
+        "asset_fingerprint",
+        "trial_accounting",
+        "winner",
+        "champion",
+        "selected_pair",
+        "built_pair",
+    ):
+        assert forbidden not in rendered
     assert len(llm.calls) == 1
 
 

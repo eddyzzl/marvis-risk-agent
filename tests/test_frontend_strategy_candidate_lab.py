@@ -532,6 +532,217 @@ def test_candidate_lab_renders_seven_stage_dual_population_and_report_spine():
     )
 
 
+def test_candidate_lab_renders_project_context_history_and_missing_information():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const html = strategyCandidateLabResultsHtml({
+          workflow: {
+            stages: [],
+            project_context: {
+              revision_id: "strategy-project-context-revision-123",
+              revision: 2,
+              as_of: "2026-07-27",
+              freshness: "current",
+              scope: { availability: "present", value: "存量复借策略" },
+              current: {
+                snapshot_id: "current-project-snapshot-123",
+                status_fields: {
+                  volume: {
+                    availability: "present",
+                    value: [{ metric_key: "application_count", value: 1000 }],
+                  },
+                  approval: { availability: "unavailable", value: null },
+                  risk: {
+                    availability: "present",
+                    value: [{ metric_key: "bad_rate", value: 0.031 }],
+                  },
+                  economics: { availability: "unavailable", value: null },
+                },
+                maturity_summary: {
+                  availability: "present",
+                  value: { status: "confirmed_matured" },
+                },
+                red_flags: [],
+              },
+              historical_versions: [{
+                review_id: "historical-strategy-review-123",
+                version: 3,
+                effective_period: {
+                  availability: "present",
+                  value: { start: "2026-01-01", end: "2026-03-31" },
+                },
+                asset_status: {
+                  availability: "present",
+                  value: "adopted_local",
+                },
+                scope: { availability: "present", value: "复借客群" },
+                traffic_allocation: {
+                  availability: "unavailable",
+                  value: null,
+                },
+                availability: "present",
+                effect_stages: ["backtested", "oot_validated"],
+                external_source_count: 1,
+                red_flags: [],
+              }],
+              history_resolution: "present",
+              missing_information: [{
+                field_path: "current.status_fields.economics",
+                status: "pending",
+                blocking: "report_optional",
+                question: "如有收益口径，请提供。",
+                reason: "No governed economics evidence is available.",
+                asked_count: 1,
+              }],
+              red_flags: [],
+              artifact: {
+                download_url:
+                  "/api/tasks/task-1/task-artifacts/project-context/download",
+              },
+            },
+            sample_design: null,
+            latest_evidence: { pool_validation: {} },
+            report: null,
+          },
+          candidates: {},
+          pools: {},
+        });
+
+        assert.match(html, /项目现状与历史版本/);
+        assert.match(html, /存量复借策略/);
+        assert.match(html, /版本 3/);
+        assert.match(html, /backtested/);
+        assert.match(html, /oot_validated/);
+        assert.match(html, /如有收益口径，请提供。/);
+        assert.match(html, /下载项目上下文/);
+        assert.doesNotMatch(html, /No governed economics evidence/);
+        """
+    )
+
+
+def test_workbench_context_materialization_and_delivery_collect_only_user_controls():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        function makeForm(workflow, fields = {}, lists = {}) {
+          return {
+            dataset: { candidateLabWorkflow: workflow },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              return match ? (fields[match[1]] || null) : null;
+            },
+            querySelectorAll(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              const values = match ? (lists[match[1]] || []) : [];
+              return selector.includes(":checked")
+                ? values.filter((item) => item.checked)
+                : values;
+            },
+          };
+        }
+
+        const context = collectStrategyCandidateLabRequest(makeForm(
+          "strategy_project_context",
+          {
+            project_context_as_of: { value: "2026-07-27" },
+            project_context_scope: { value: "存量复借策略" },
+            project_context_business_context: {
+              value: "project.channel=自营\\nproject.product=云闪付",
+            },
+            project_context_external_reports: {
+              value: "历史策略.xlsx\\n历史复盘.pdf",
+            },
+          },
+          {
+            project_context_unavailable: [
+              { checked: true, value: "current.status_fields.economics" },
+              { checked: false, value: "historical_strategy_reviews" },
+            ],
+          },
+        ));
+        assert.deepEqual(context, {
+          request_kind: "standard_workflow",
+          workflow: "strategy_project_context",
+          workflow_inputs: {
+            as_of: "2026-07-27",
+            scope: "存量复借策略",
+            business_context: {
+              "project.channel": "自营",
+              "project.product": "云闪付",
+            },
+            explicit_unavailable: ["current.status_fields.economics"],
+            external_report_filenames: ["历史策略.xlsx", "历史复盘.pdf"],
+          },
+        });
+
+        const materializeOption = {
+          value: "approval",
+          dataset: {
+            candidateLabProjection: "1",
+            poolId: "strategy-pool-1",
+          },
+        };
+        const materialize = collectStrategyCandidateLabRequest(makeForm(
+          "strategy_pool_materialize",
+          {
+            pool_materialize_strategy_type: {
+              value: "approval",
+              selectedOptions: [materializeOption],
+            },
+          },
+        ));
+        assert.deepEqual(materialize.workflow_inputs, {
+          strategy_type: "approval",
+        });
+
+        const strategyOption = {
+          value: "strategy-current-v2",
+          dataset: {
+            candidateLabProjection: "1",
+            strategyId: "strategy-current-v2",
+          },
+        };
+        const delivery = collectStrategyCandidateLabRequest(makeForm(
+          "strategy_dsl_delivery",
+          {
+            dsl_delivery_strategy_id: {
+              value: "strategy-current-v2",
+              selectedOptions: [strategyOption],
+            },
+          },
+        ));
+        assert.deepEqual(delivery.workflow_inputs, {
+          strategy_id: "strategy-current-v2",
+        });
+
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(makeForm(
+            "strategy_project_context",
+            {
+              project_context_as_of: { value: "2026-07-27" },
+              project_context_scope: { value: "" },
+              project_context_business_context: {
+                value: "artifact_id=forged",
+              },
+              project_context_external_reports: { value: "" },
+            },
+            { project_context_unavailable: [] },
+          )),
+          /字段路径|不允许/,
+        );
+      """
+    )
+
+
 def test_scorecard_launchers_submit_only_visible_projection_ids_and_user_controls():
     run_node(
         """
@@ -2098,10 +2309,13 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
     assert 'id="strategyCandidateLabPanel"' in index_html
     assert 'id="strategyCandidateLabResults"' in index_html
     for workflow in (
+        "strategy_project_context",
         "strategy_sample_design_v2",
         "univariate_candidate_analysis",
         "univariate_candidate_refinement",
         "cross_matrix_analysis",
+        "cross_matrix_candidate_search",
+        "cross_matrix_candidate_build_from_search",
         "automatic_tree_candidate_build",
         "scorecard_band_build",
         "scorecard_cutoff_selection",
@@ -2110,6 +2324,9 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
         "voting_candidate_build_from_search",
         "strategy_pool_impact",
         "strategy_impact_cube",
+        "strategy_pool_materialize",
+        "strategy_lifecycle_adopt",
+        "strategy_dsl_delivery",
         "strategy_report_bundle_v2",
     ):
         assert f'data-candidate-lab-workflow="{workflow}"' in index_html
@@ -2204,6 +2421,102 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
     assert "不会自动进入 Strategy Pool" in index_html
     assert "最佳 Cutoff" not in index_html
     assert "不会自动构建、选择、入池或部署" in index_html
+    cross_search_start = index_html.index(
+        'data-candidate-lab-workflow="cross_matrix_candidate_search"'
+    )
+    cross_search_end = index_html.index("</form>", cross_search_start)
+    cross_search_html = index_html[cross_search_start:cross_search_end]
+    assert 'data-candidate-lab-field="cross_search_features"' in (
+        cross_search_html
+    )
+    assert 'data-candidate-lab-field="cross_search_max_pairs"' in (
+        cross_search_html
+    )
+    cross_build_start = index_html.index(
+        'data-candidate-lab-workflow="cross_matrix_candidate_build_from_search"'
+    )
+    cross_build_end = index_html.index("</form>", cross_build_start)
+    cross_build_html = index_html[cross_build_start:cross_build_end]
+    assert 'data-candidate-lab-field="cross_build_search_id"' in (
+        cross_build_html
+    )
+    assert 'data-candidate-lab-field="cross_build_pair_id"' in (
+        cross_build_html
+    )
+    for forbidden in (
+        "method",
+        "candidate_id",
+        "artifact_id",
+        "content_hash",
+        "eligible",
+        "rank",
+        "interaction_gain_iv",
+    ):
+        assert f'data-candidate-lab-field="{forbidden}"' not in cross_search_html
+        assert f'data-candidate-lab-field="{forbidden}"' not in cross_build_html
+    assert "不会自动构建 Cross Matrix、加入 Pool、采纳或部署" in (
+        cross_search_html
+    )
+    assert "不会自动入 Pool、采纳或部署" in cross_build_html
+    interactive_tree_start = index_html.index(
+        'data-candidate-lab-workflow="interactive_tree_revision"'
+    )
+    interactive_tree_end = index_html.index("</form>", interactive_tree_start)
+    interactive_tree_html = index_html[
+        interactive_tree_start:interactive_tree_end
+    ]
+    for field in (
+        "interactive_tree_operation",
+        "interactive_tree_source_id",
+        "interactive_tree_node_id",
+        "interactive_tree_threshold",
+        "interactive_tree_reason",
+    ):
+        assert f'data-candidate-lab-field="{field}"' in interactive_tree_html
+    for forbidden in (
+        "feature",
+        "current_threshold",
+        "asset_hash",
+        "metrics",
+        "base_threshold",
+    ):
+        assert f'data-candidate-lab-field="{forbidden}"' not in (
+            interactive_tree_html
+        )
+    assert "不会写回来源树、物化 frontier、入池、采纳或部署" in (
+        interactive_tree_html
+    )
+    adoption_start = index_html.index(
+        'data-candidate-lab-workflow="strategy_lifecycle_adopt"'
+    )
+    adoption_end = index_html.index("</form>", adoption_start)
+    adoption_html = index_html[adoption_start:adoption_end]
+    for field in (
+        "lifecycle_adopt_strategy_id",
+        "lifecycle_adoption_reason",
+        "lifecycle_adopt_pd_mode",
+        "lifecycle_adopt_pd_column",
+        "lifecycle_adopt_pd_value",
+        "lifecycle_adopt_lgd_mode",
+        "lifecycle_adopt_lgd_column",
+        "lifecycle_adopt_lgd_value",
+        "lifecycle_adopt_utilization_mode",
+        "lifecycle_adopt_ead_mode",
+        "lifecycle_adopt_funding_rate_mode",
+        "lifecycle_adopt_term_months_mode",
+        "lifecycle_adopt_operating_cost_per_loan_mode",
+    ):
+        assert f'data-candidate-lab-field="{field}"' in adoption_html
+    for forbidden in (
+        "asset_status",
+        "status",
+        "content_hash",
+        "validation_metrics",
+        "deployment_status",
+    ):
+        assert f'data-candidate-lab-field="{forbidden}"' not in adoption_html
+    assert "重新回测并等待人工确认" in adoption_html
+    assert "本地采纳不是生产部署" in adoption_html
     assert "text:001" in index_html
     assert "number:-9999" in index_html
     assert ".candidate-lab-layout" in workbench_css
@@ -2215,3 +2528,1558 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
         workbench_css.index("/* Candidate Lab") :
         workbench_css.index("/* Modeling setup gate controls.")
     ]
+
+
+def test_local_strategy_adoption_collector_emits_only_governed_user_controls():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        function strategyOption(strategyId, strategyType, assetStatus = "draft") {
+          return {
+            value: strategyId,
+            dataset: {
+              candidateLabProjection: "1",
+              strategyId,
+              strategyType,
+              assetStatus,
+            },
+          };
+        }
+
+        function makeForm(strategyType, fields = {}, optionStatus = "draft") {
+          const strategyId = `strategy-${strategyType}-v2`;
+          const option = strategyOption(strategyId, strategyType, optionStatus);
+          const values = {
+            lifecycle_adopt_strategy_id: {
+              value: strategyId,
+              selectedOptions: [option],
+            },
+            lifecycle_adoption_reason: {
+              value: "已复核回测、影响测算与报告证据，同意进入本地采纳确认",
+            },
+            ...fields,
+          };
+          return {
+            dataset: { candidateLabWorkflow: "strategy_lifecycle_adopt" },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              return match ? (values[match[1]] || null) : null;
+            },
+            querySelectorAll() { return []; },
+          };
+        }
+
+        const limit = collectStrategyCandidateLabRequest(makeForm("limit", {
+          lifecycle_adopt_pd_mode: { value: "column" },
+          lifecycle_adopt_pd_column: { value: "pd_12m" },
+          lifecycle_adopt_pd_value: { value: "0.01" },
+          lifecycle_adopt_lgd_mode: { value: "value" },
+          lifecycle_adopt_lgd_column: { value: "forged_lgd" },
+          lifecycle_adopt_lgd_value: { value: "0.45" },
+          lifecycle_adopt_utilization_mode: { value: "column" },
+          lifecycle_adopt_utilization_column: { value: "utilization" },
+          lifecycle_adopt_utilization_value: { value: "0.8" },
+        }));
+        assert.deepEqual(limit, {
+          request_kind: "strategy_lifecycle",
+          operation: "adopt",
+          strategy_type: "limit",
+          strategy_id: "strategy-limit-v2",
+          adoption_reason: "已复核回测、影响测算与报告证据，同意进入本地采纳确认",
+          economics_inputs: {
+            pd_col: "pd_12m",
+            lgd_value: 0.45,
+            utilization_col: "utilization",
+          },
+        });
+
+        const pricing = collectStrategyCandidateLabRequest(makeForm("pricing", {
+          lifecycle_adopt_ead_mode: { value: "column" },
+          lifecycle_adopt_ead_column: { value: "ead" },
+          lifecycle_adopt_pd_mode: { value: "column" },
+          lifecycle_adopt_pd_column: { value: "pd_12m" },
+          lifecycle_adopt_lgd_mode: { value: "value" },
+          lifecycle_adopt_lgd_value: { value: "0.5" },
+          lifecycle_adopt_funding_rate_mode: { value: "value" },
+          lifecycle_adopt_funding_rate_value: { value: "0.04" },
+          lifecycle_adopt_term_months_mode: { value: "value" },
+          lifecycle_adopt_term_months_value: { value: "12" },
+          lifecycle_adopt_operating_cost_per_loan_mode: { value: "value" },
+          lifecycle_adopt_operating_cost_per_loan_value: { value: "12" },
+        }));
+        assert.deepEqual(pricing.economics_inputs, {
+          ead_col: "ead",
+          pd_col: "pd_12m",
+          lgd_value: 0.5,
+          funding_rate_value: 0.04,
+          term_months_value: 12,
+          operating_cost_per_loan_value: 12,
+        });
+
+        for (const strategyType of ["approval", "reject", "segmentation"]) {
+          const request = collectStrategyCandidateLabRequest(makeForm(
+            strategyType,
+            {
+              lifecycle_adopt_pd_mode: { value: "value" },
+              lifecycle_adopt_pd_value: { value: "0.01" },
+            },
+          ));
+          assert.equal("economics_inputs" in request, false);
+          for (const forbidden of [
+            "asset_status",
+            "status",
+            "content_hash",
+            "validation_metrics",
+            "deployment_status",
+          ]) {
+            assert.equal(forbidden in request, false);
+          }
+        }
+
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(
+            makeForm("approval", {}, "adopted_local"),
+          ),
+          /draft|草稿|受认证投影/,
+        );
+        """
+    )
+
+
+def test_strategy_history_renders_local_champions_blockers_and_safe_artifacts():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const html = strategyCandidateLabResultsHtml({
+          strategies: {
+            latest: null,
+            total: 2,
+            truncated: false,
+            current_local_champions: [{
+              strategy_id: "strategy-approval-v1",
+              strategy_type: "approval",
+              version: 1,
+            }],
+            all: [
+              {
+                strategy_id: "strategy-limit-v2",
+                strategy_type: "limit",
+                version: 2,
+                status: "draft",
+                asset_status: "draft",
+                created_at: "2026-07-27T02:00:00+00:00",
+                adopted_at: null,
+                parent_strategy_id: "strategy-limit-v1",
+                rule_count: 3,
+                strategy_spec_hash:
+                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                materialization: {
+                  materialization_id: "materialization-limit-v2",
+                  pool_id: "strategy-pool-limit",
+                  pool_revision_id: "pool-revision-limit-4",
+                  pool_revision: 4,
+                  requirements_count: 2,
+                  runtime_blockers: [
+                    "缺少运行列 income",
+                    "<img src=x onerror=alert(1)>",
+                  ],
+                },
+                artifacts: {
+                  all: [{
+                    artifact_id: "strategy-artifact-limit-json",
+                    kind: "strategy_json",
+                    filename: "limit-strategy.json",
+                    created_at: "2026-07-27T02:01:00+00:00",
+                    content_size: 1200,
+                    download_url:
+                      "/api/tasks/task-1/strategy-artifacts/strategy-artifact-limit-json/download",
+                  }, {
+                    artifact_id: "strategy-artifact-forged",
+                    kind: "strategy_sql",
+                    filename: "forged.sql",
+                    download_url: "javascript:alert(1)",
+                  }],
+                  total: 2,
+                  truncated: false,
+                },
+              },
+              {
+                strategy_id: "strategy-approval-v1",
+                strategy_type: "approval",
+                version: 1,
+                status: "adopted",
+                asset_status: "adopted_local",
+                created_at: "2026-07-27T01:00:00+00:00",
+                adopted_at: "2026-07-27T01:30:00+00:00",
+                parent_strategy_id: null,
+                rule_count: 4,
+                strategy_spec_hash:
+                  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                materialization: null,
+                artifacts: { all: [], total: 0, truncated: false },
+              },
+            ],
+          },
+          workflow: {},
+          candidates: {},
+          pools: {},
+        });
+
+        for (const expected of [
+          "策略版本历史",
+          "当前本地策略",
+          "strategy-limit-v2",
+          "strategy-approval-v1",
+          "额度策略",
+          "审批策略",
+          "draft",
+          "本地已采纳",
+          "materialization-limit-v2",
+          "pool-revision-limit-4",
+          "运行阻塞",
+          "缺少运行列 income",
+          "下载 limit-strategy.json",
+          "本地采纳",
+          "不是生产部署",
+        ]) {
+          assert.ok(html.includes(expected), expected);
+        }
+        assert.ok(
+          html.includes(
+            "/api/tasks/task-1/strategy-artifacts/strategy-artifact-limit-json/download",
+          ),
+        );
+        assert.equal(html.includes("javascript:alert"), false);
+        assert.equal(html.includes("<img src=x"), false);
+        assert.equal(
+          html.includes(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          ),
+          false,
+        );
+        assert.equal(
+          html.includes(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          ),
+          false,
+        );
+        """
+    )
+
+
+def test_strategy_workbench_accepts_only_known_canonical_hex_strategy_ids():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const strategyId = "0123456789abcdef0123456789abcdef";
+        const option = {
+          value: strategyId,
+          dataset: {
+            candidateLabProjection: "1",
+            strategyId,
+            strategyType: "approval",
+            assetStatus: "draft",
+          },
+        };
+        const fields = {
+          lifecycle_adopt_strategy_id: {
+            value: strategyId,
+            selectedOptions: [option],
+          },
+          lifecycle_adoption_reason: {
+            value: "已复核回测和风险影响，同意提交本地采纳确认",
+          },
+        };
+        const form = (workflow) => ({
+          dataset: { candidateLabWorkflow: workflow },
+          querySelector(selector) {
+            const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+            if (!match) return null;
+            if (match[1] === "dsl_delivery_strategy_id") {
+              return {
+                value: strategyId,
+                selectedOptions: [{
+                  value: strategyId,
+                  dataset: {
+                    candidateLabProjection: "1",
+                    strategyId,
+                  },
+                }],
+              };
+            }
+            return fields[match[1]] || null;
+          },
+          querySelectorAll() { return []; },
+        });
+
+        assert.equal(
+          collectStrategyCandidateLabRequest(
+            form("strategy_lifecycle_adopt"),
+          ).strategy_id,
+          strategyId,
+        );
+        assert.equal(
+          collectStrategyCandidateLabRequest(
+            form("strategy_dsl_delivery"),
+          ).workflow_inputs.strategy_id,
+          strategyId,
+        );
+        const html = strategyCandidateLabResultsHtml({
+          strategies: {
+            latest: null,
+            all: [{
+              strategy_id: strategyId,
+              strategy_type: "approval",
+              version: 3,
+              status: "draft",
+              asset_status: "draft",
+              artifacts: { all: [], total: 0, truncated: false },
+            }],
+            total: 1,
+            truncated: false,
+            current_local_champions: [],
+          },
+          workflow: {},
+          candidates: {},
+          pools: {},
+        });
+        assert.ok(html.includes(strategyId));
+
+        const forged = {
+          ...option,
+          value: "arbitrary strategy id",
+          dataset: {
+            ...option.dataset,
+            strategyId: "arbitrary strategy id",
+          },
+        };
+        fields.lifecycle_adopt_strategy_id = {
+          value: forged.value,
+          selectedOptions: [forged],
+        };
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(
+            form("strategy_lifecycle_adopt"),
+          ),
+          /draft|草稿|受认证投影/,
+        );
+        """
+    )
+
+
+def test_local_strategy_adoption_uses_candidate_lab_submit_settle_and_refresh():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          createStrategyCandidateLabController,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const strategyOption = {
+          value: "strategy-approval-v2",
+          dataset: {
+            candidateLabProjection: "1",
+            strategyId: "strategy-approval-v2",
+            strategyType: "approval",
+            assetStatus: "draft",
+          },
+        };
+        const fields = new Map([
+          ["lifecycle_adopt_strategy_id", {
+            value: "strategy-approval-v2",
+            selectedOptions: [strategyOption],
+          }],
+          ["lifecycle_adoption_reason", {
+            value: "已复核回测和风险影响，同意提交本地采纳人工确认",
+          }],
+        ]);
+        const errorTarget = { textContent: "" };
+        const form = {
+          dataset: { candidateLabWorkflow: "strategy_lifecycle_adopt" },
+          querySelector(selector) {
+            if (selector === "[data-candidate-lab-form-error]") {
+              return errorTarget;
+            }
+            const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+            return match ? (fields.get(match[1]) || null) : null;
+          },
+          querySelectorAll() { return []; },
+        };
+        const panel = {
+          classList: { toggle() {} },
+          dataset: {},
+          setAttribute() {},
+          querySelector() { return null; },
+          querySelectorAll() { return []; },
+        };
+        const ids = {
+          strategyCandidateLabPanel: panel,
+          strategyCandidateLabResults: { innerHTML: "" },
+          strategyCandidateLabStatus: { textContent: "", dataset: {} },
+        };
+        const payload = {
+          task_id: "task-1",
+          can_start: true,
+          blocked_reason: null,
+          workflow: {},
+          candidates: {},
+          pools: {},
+          strategies: {
+            latest: null,
+            all: [{
+              strategy_id: "strategy-approval-v2",
+              strategy_type: "approval",
+              version: 2,
+              status: "draft",
+              asset_status: "draft",
+              materialization: { runtime_blockers: [] },
+            }],
+            total: 1,
+            truncated: false,
+            current_local_champions: [],
+          },
+        };
+        const submits = [];
+        const polls = [];
+        const settles = [];
+        let refreshes = 0;
+        const controller = createStrategyCandidateLabController({
+          $: (id) => ids[id] || null,
+          getSelectedTask: () => ({ id: "task-1", task_type: "strategy" }),
+          getSelectedTaskId: () => "task-1",
+          getBlockedReason: () => "",
+          getStrategyCandidateLab: async () => {
+            refreshes += 1;
+            return payload;
+          },
+          submitStrategyCandidateLabRequest: async (...args) => {
+            submits.push(args);
+            return { status: "accepted", messages: [] };
+          },
+          pollAgentMessagesUntilSettled: (...args) => {
+            polls.push(args);
+          },
+          settleCandidateLabSubmission: async (...args) => {
+            settles.push(args);
+          },
+        });
+
+        await controller.selectTask({ id: "task-1", task_type: "strategy" });
+        const result = await controller.submit(form);
+
+        assert.equal(result.status, "accepted");
+        assert.equal(submits.length, 1);
+        assert.deepEqual(submits[0], [
+          "task-1",
+          {
+            request_kind: "strategy_lifecycle",
+            operation: "adopt",
+            strategy_type: "approval",
+            strategy_id: "strategy-approval-v2",
+            adoption_reason: "已复核回测和风险影响，同意提交本地采纳人工确认",
+          },
+          "提交策略本地采纳确认",
+        ]);
+        assert.equal(polls.length, 1);
+        assert.equal(settles.length, 1);
+        assert.equal(refreshes, 2);
+        assert.equal(controller.getState().submitting, false);
+        assert.equal(errorTarget.textContent, "");
+        """
+    )
+
+
+def test_cross_auto_search_collectors_emit_only_explicit_governed_controls():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        function makeForm(workflow, fields) {
+          return {
+            dataset: { candidateLabWorkflow: workflow },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              return match ? (fields[match[1]] || null) : null;
+            },
+            querySelectorAll() { return []; },
+          };
+        }
+
+        const featureOption = (feature, projection = "1") => ({
+          value: feature,
+          dataset: {
+            candidateLabProjection: projection,
+            feature,
+            method: "forged-method-must-not-submit",
+            candidateId: "forged-candidate-must-not-submit",
+            contentHash: "forged-hash-must-not-submit",
+          },
+        });
+        const search = collectStrategyCandidateLabRequest(makeForm(
+          "cross_matrix_candidate_search",
+          {
+            cross_search_features: {
+              selectedOptions: [
+                featureOption("age"),
+                featureOption("score"),
+                featureOption("income"),
+              ],
+            },
+            cross_search_max_pairs: { value: "12" },
+            artifact_id: { value: "forged-artifact" },
+          },
+        ));
+        assert.deepEqual(search, {
+          request_kind: "standard_workflow",
+          workflow: "cross_matrix_candidate_search",
+          workflow_inputs: {
+            features: ["age", "score", "income"],
+            max_pairs: 12,
+          },
+        });
+        for (const forbidden of [
+          "method",
+          "methods",
+          "candidate_id",
+          "artifact_id",
+          "content_hash",
+        ]) {
+          assert.equal(forbidden in search.workflow_inputs, false);
+        }
+
+        const searchId = "cross-search-0123456789abcdef0123456789abcdef";
+        const pairId = "cross-pair-fedcba9876543210fedcba9876543210";
+        const build = collectStrategyCandidateLabRequest(makeForm(
+          "cross_matrix_candidate_build_from_search",
+          {
+            cross_build_search_id: {
+              value: searchId,
+              selectedOptions: [{
+                value: searchId,
+                dataset: {
+                  candidateLabProjection: "1",
+                  searchId,
+                  eligible: "false",
+                  rank: "7",
+                },
+              }],
+            },
+            cross_build_pair_id: {
+              value: pairId,
+              selectedOptions: [{
+                value: pairId,
+                dataset: {
+                  candidateLabProjection: "1",
+                  searchId,
+                  pairId,
+                  eligible: "false",
+                  rank: "7",
+                  interactionGainIv: "0.31",
+                },
+              }],
+            },
+          },
+        ));
+        assert.deepEqual(build, {
+          request_kind: "standard_workflow",
+          workflow: "cross_matrix_candidate_build_from_search",
+          workflow_inputs: { search_id: searchId, pair_id: pairId },
+        });
+
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(makeForm(
+            "cross_matrix_candidate_search",
+            {
+              cross_search_features: {
+                selectedOptions: [
+                  featureOption("age"),
+                  featureOption("age"),
+                ],
+              },
+              cross_search_max_pairs: { value: "1" },
+            },
+          )),
+          /重复|独立/,
+        );
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(makeForm(
+            "cross_matrix_candidate_search",
+            {
+              cross_search_features: {
+                selectedOptions: [
+                  featureOption("age"),
+                  featureOption("score", "0"),
+                ],
+              },
+              cross_search_max_pairs: { value: "191" },
+            },
+          )),
+          /受认证投影|1 到 190/,
+        );
+        """
+    )
+
+
+def test_cross_auto_search_renders_aggregate_pairs_budget_and_safe_download():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const html = strategyCandidateLabResultsHtml({
+          workflow: {},
+          pools: {},
+          strategies: {},
+          candidates: {
+            cross_search: {
+              latest: null,
+              total: 1,
+              truncated: false,
+              all: [{
+                search_id:
+                  "cross-search-0123456789abcdef0123456789abcdef",
+                features: [{
+                  feature: "age",
+                  method: "equal_frequency",
+                  axis_iv: 0.08,
+                  bin_count: 5,
+                }, {
+                  feature: "score",
+                  method: "tree",
+                  axis_iv: 0.24,
+                  bin_count: 6,
+                }, {
+                  feature: "income",
+                  method: "chimerge",
+                  axis_iv: 0.12,
+                  bin_count: 4,
+                }],
+                max_pairs: 20,
+                search_space: 190,
+                evaluated: 20,
+                eligible: 7,
+                truncated: true,
+                pairs: [{
+                  pair_id:
+                    "cross-pair-0123456789abcdef0123456789abcdef",
+                  x_feature: "age",
+                  x_method: "equal_frequency",
+                  y_feature: "score",
+                  y_method: "tree",
+                  x_axis_iv: 0.08,
+                  y_axis_iv: 0.24,
+                  cross_total_iv: 0.51,
+                  interaction_gain_iv: 0.19,
+                  cell_count: 30,
+                  empty_cell_count: 3,
+                  empty_cell_share: 0.1,
+                  min_nonempty_cell_count: 42,
+                  eligible: true,
+                  rank: 1,
+                }, {
+                  pair_id:
+                    "cross-pair-fedcba9876543210fedcba9876543210",
+                  x_feature: "age",
+                  x_method: "equal_frequency",
+                  y_feature: "<img src=x onerror=alert(1)>",
+                  y_method: "chimerge",
+                  x_axis_iv: 0.08,
+                  y_axis_iv: 0.12,
+                  cross_total_iv: 0.2,
+                  interaction_gain_iv: 0,
+                  cell_count: 20,
+                  empty_cell_count: 12,
+                  empty_cell_share: 0.6,
+                  min_nonempty_cell_count: 2,
+                  eligible: false,
+                  rank: 2,
+                }],
+                artifact: {
+                  artifact_id: "artifact-cross-search-1",
+                  created_at: "2026-07-27T03:00:00+00:00",
+                  download_url:
+                    "/api/tasks/task-1/task-artifacts/artifact-cross-search-1/download",
+                },
+              }],
+            },
+          },
+        });
+
+        for (const expected of [
+          "Cross 自动搜索",
+          "cross-search-0123456789abcdef0123456789abcdef",
+          "搜索参数与预算",
+          "190",
+          "20",
+          "7",
+          "Top Pairs",
+          "cross-pair-0123456789abcdef0123456789abcdef",
+          "Interaction Gain IV",
+          "空单元格占比",
+          "0.6",
+          "预算截断",
+          "不会自动构建、入池、采纳或部署",
+          "下载受认证产物",
+        ]) {
+          assert.ok(html.includes(expected), expected);
+        }
+        assert.ok(html.includes(
+          "/api/tasks/task-1/task-artifacts/artifact-cross-search-1/download",
+        ));
+        assert.equal(html.includes("<img src=x"), false);
+        assert.equal(html.includes("最佳"), false);
+        assert.equal(html.includes("冠军"), false);
+        """
+    )
+
+
+def test_cross_auto_search_submits_only_current_projection_and_refreshes():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          createStrategyCandidateLabController,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const searchId = "cross-search-0123456789abcdef0123456789abcdef";
+        const pairId = "cross-pair-0123456789abcdef0123456789abcdef";
+        const featureOption = (feature) => ({
+          value: feature,
+          dataset: { candidateLabProjection: "1", feature },
+        });
+        const projectedOption = (value, dataset) => ({
+          value,
+          dataset: { candidateLabProjection: "1", ...dataset },
+        });
+        const errorTarget = { textContent: "" };
+        const form = (workflow, fields) => ({
+          dataset: { candidateLabWorkflow: workflow },
+          querySelector(selector) {
+            if (selector === "[data-candidate-lab-form-error]") {
+              return errorTarget;
+            }
+            const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+            return match ? (fields[match[1]] || null) : null;
+          },
+          querySelectorAll() { return []; },
+        });
+        const searchForm = form("cross_matrix_candidate_search", {
+          cross_search_features: {
+            selectedOptions: [featureOption("age"), featureOption("score")],
+          },
+          cross_search_max_pairs: { value: "1" },
+        });
+        const buildForm = (selectedPairId) => form(
+          "cross_matrix_candidate_build_from_search",
+          {
+            cross_build_search_id: {
+              value: searchId,
+              selectedOptions: [projectedOption(
+                searchId,
+                { searchId },
+              )],
+            },
+            cross_build_pair_id: {
+              value: selectedPairId,
+              selectedOptions: [projectedOption(
+                selectedPairId,
+                { searchId, pairId: selectedPairId },
+              )],
+            },
+          },
+        );
+
+        const payload = {
+          task_id: "task-1",
+          can_start: true,
+          blocked_reason: null,
+          workflow: {},
+          pools: {},
+          strategies: {},
+          candidates: {
+            univariate: {
+              latest: null,
+              total: 1,
+              truncated: false,
+              all: [{
+                candidate_id: "candidate-source",
+                artifact: { artifact_id: "artifact-source" },
+                pointers: {
+                  bins: [
+                    { feature: "age", method: "equal_frequency" },
+                    { feature: "score", method: "tree" },
+                  ],
+                },
+              }],
+            },
+            cross_search: {
+              latest: null,
+              total: 1,
+              truncated: false,
+              all: [{
+                search_id: searchId,
+                evaluated: 1,
+                search_space: 1,
+                eligible: 1,
+                artifact: { artifact_id: "artifact-cross-search" },
+                pairs: [{
+                  pair_id: pairId,
+                  x_feature: "age",
+                  x_method: "equal_frequency",
+                  y_feature: "score",
+                  y_method: "tree",
+                  eligible: true,
+                  rank: 1,
+                }],
+              }],
+            },
+          },
+        };
+        const panel = {
+          classList: { toggle() {} },
+          dataset: {},
+          setAttribute() {},
+          querySelector() { return null; },
+          querySelectorAll() { return []; },
+        };
+        const ids = {
+          strategyCandidateLabPanel: panel,
+          strategyCandidateLabResults: { innerHTML: "" },
+          strategyCandidateLabStatus: { textContent: "", dataset: {} },
+        };
+        const submits = [];
+        const polls = [];
+        const settles = [];
+        let refreshes = 0;
+        const controller = createStrategyCandidateLabController({
+          $: (id) => ids[id] || null,
+          getSelectedTask: () => ({ id: "task-1", task_type: "strategy" }),
+          getSelectedTaskId: () => "task-1",
+          getBlockedReason: () => "",
+          getStrategyCandidateLab: async () => {
+            refreshes += 1;
+            return payload;
+          },
+          submitStrategyCandidateLabRequest: async (...args) => {
+            submits.push(args);
+            return { status: "accepted", messages: [] };
+          },
+          pollAgentMessagesUntilSettled: (...args) => {
+            polls.push(args);
+          },
+          settleCandidateLabSubmission: async (...args) => {
+            settles.push(args);
+          },
+        });
+
+        await controller.selectTask({ id: "task-1", task_type: "strategy" });
+        await controller.submit(searchForm);
+        await controller.submit(buildForm(pairId));
+
+        assert.equal(submits.length, 2);
+        assert.deepEqual(submits.map((call) => call[1]), [{
+          request_kind: "standard_workflow",
+          workflow: "cross_matrix_candidate_search",
+          workflow_inputs: { features: ["age", "score"], max_pairs: 1 },
+        }, {
+          request_kind: "standard_workflow",
+          workflow: "cross_matrix_candidate_build_from_search",
+          workflow_inputs: { search_id: searchId, pair_id: pairId },
+        }]);
+        assert.equal(polls.length, 2);
+        assert.equal(settles.length, 2);
+        assert.equal(refreshes, 3);
+
+        const stalePairId =
+          "cross-pair-fedcba9876543210fedcba9876543210";
+        const stale = await controller.submit(buildForm(stalePairId));
+        assert.equal(stale, null);
+        assert.equal(submits.length, 2);
+        assert.match(errorTarget.textContent, /已过期|受认证投影/);
+        """
+    )
+
+
+def test_cross_build_projection_never_auto_selects_single_search_or_pair():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          createStrategyCandidateLabController,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        class FakeSelect {
+          constructor(fieldName) {
+            this.dataset = { candidateLabField: fieldName };
+            this.options = [];
+            this.selectedOptions = [];
+            this._value = "";
+            this._html = "";
+            this.form = null;
+          }
+          set innerHTML(value) {
+            this._html = value;
+            this.options = [...value.matchAll(/<option value="([^"]*)"/g)]
+              .map((match) => ({ value: match[1], selected: false }));
+            this.value = "";
+          }
+          get innerHTML() { return this._html; }
+          set value(value) {
+            this._value = String(value);
+            for (const option of this.options) {
+              option.selected = option.value === this._value;
+            }
+            this.selectedOptions = this.options.filter(
+              (option) => option.selected,
+            );
+          }
+          get value() { return this._value; }
+          closest(selector) {
+            if (selector === "[data-candidate-lab-field]") return this;
+            return selector.includes(
+              'cross_matrix_candidate_build_from_search',
+            )
+              ? this.form
+              : null;
+          }
+        }
+
+        const searchId = "cross-search-0123456789abcdef0123456789abcdef";
+        const pairId = "cross-pair-0123456789abcdef0123456789abcdef";
+        const searchSelect = new FakeSelect("cross_build_search_id");
+        const pairSelect = new FakeSelect("cross_build_pair_id");
+        const help = { textContent: "" };
+        const buildForm = {
+          querySelector(selector) {
+            if (selector.includes('cross_build_search_id')) return searchSelect;
+            if (selector.includes('cross_build_pair_id')) return pairSelect;
+            if (selector === "[data-candidate-lab-cross-build-help]") {
+              return help;
+            }
+            return null;
+          },
+          querySelectorAll() { return []; },
+        };
+        searchSelect.form = buildForm;
+        pairSelect.form = buildForm;
+        const featureSelect = new FakeSelect("cross_search_features");
+        const searchHelp = { textContent: "" };
+        const searchForm = {
+          querySelector(selector) {
+            if (selector.includes('cross_search_features')) {
+              return featureSelect;
+            }
+            if (selector === "[data-candidate-lab-cross-search-help]") {
+              return searchHelp;
+            }
+            return null;
+          },
+          querySelectorAll() { return []; },
+        };
+        const panel = {
+          classList: { toggle() {} },
+          dataset: {},
+          setAttribute() {},
+          querySelector(selector) {
+            if (selector.includes(
+              'cross_matrix_candidate_build_from_search',
+            )) {
+              return buildForm;
+            }
+            if (selector.includes('cross_matrix_candidate_search')) {
+              return searchForm;
+            }
+            return null;
+          },
+          querySelectorAll(selector) {
+            return selector === "[data-candidate-lab-form]"
+              ? [searchForm, buildForm]
+              : [];
+          },
+        };
+        const ids = {
+          strategyCandidateLabPanel: panel,
+          strategyCandidateLabResults: { innerHTML: "" },
+          strategyCandidateLabStatus: { textContent: "", dataset: {} },
+        };
+        const payload = {
+          task_id: "task-1",
+          can_start: true,
+          blocked_reason: null,
+          workflow: {},
+          pools: {},
+          strategies: {},
+          candidates: {
+            univariate: {
+              latest: null,
+              total: 1,
+              truncated: false,
+              all: [{
+                candidate_id: "candidate-source",
+                artifact: { artifact_id: "artifact-source" },
+                pointers: {
+                  bins: [
+                    { feature: "age", method: "equal_frequency" },
+                    { feature: "score", method: "tree" },
+                  ],
+                },
+              }],
+            },
+            cross_search: {
+              latest: null,
+              total: 1,
+              truncated: false,
+              all: [{
+                search_id: searchId,
+                evaluated: 1,
+                search_space: 1,
+                eligible: 1,
+                artifact: { artifact_id: "artifact-search" },
+                pairs: [{
+                  pair_id: pairId,
+                  x_feature: "age",
+                  x_method: "equal_frequency",
+                  y_feature: "score",
+                  y_method: "tree",
+                  cell_count: 20,
+                  empty_cell_count: 2,
+                  empty_cell_share: 0.1,
+                  eligible: true,
+                  rank: 1,
+                }],
+              }],
+            },
+          },
+        };
+        const controller = createStrategyCandidateLabController({
+          $: (id) => ids[id] || null,
+          getSelectedTask: () => ({ id: "task-1", task_type: "strategy" }),
+          getSelectedTaskId: () => "task-1",
+          getStrategyCandidateLab: async () => payload,
+        });
+
+        await controller.selectTask({ id: "task-1", task_type: "strategy" });
+        assert.ok(searchSelect.innerHTML.includes(searchId));
+        assert.equal(searchSelect.value, "");
+        assert.equal(pairSelect.innerHTML.includes(pairId), false);
+
+        searchSelect.value = searchId;
+        controller.handleChange({ target: searchSelect });
+        assert.ok(pairSelect.innerHTML.includes(pairId));
+        assert.equal(pairSelect.value, "");
+        assert.match(help.textContent, /不会自动代选/);
+        assert.ok(featureSelect.innerHTML.includes("age"));
+        assert.ok(featureSelect.innerHTML.includes("score"));
+        assert.equal(featureSelect.selectedOptions.length, 0);
+        """
+    )
+
+
+def test_interactive_tree_threshold_collector_is_pointer_only_and_keeps_prune():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const sourceTreeId =
+          "candidate-asset-0123456789abcdef0123456789abcdef";
+        const nodeId = "node-0123456789abcdef0123";
+        const sourceOption = {
+          value: sourceTreeId,
+          dataset: {
+            candidateLabProjection: "1",
+            sourceTreeId,
+          },
+        };
+        const nodeOption = (operation, currentThreshold = "600") => ({
+          value: nodeId,
+          dataset: {
+            candidateLabProjection: "1",
+            sourceTreeId,
+            nodeId,
+            operation,
+            feature: "score",
+            currentThreshold,
+            assetHash: "forged-hash-must-not-submit",
+            metrics: "forged-metrics-must-not-submit",
+          },
+        });
+        function form(operation, threshold, option = nodeOption(operation)) {
+          const fields = {
+            interactive_tree_operation: { value: operation },
+            interactive_tree_source_id: {
+              value: sourceTreeId,
+              selectedOptions: [sourceOption],
+            },
+            interactive_tree_node_id: {
+              value: nodeId,
+              selectedOptions: [option],
+            },
+            interactive_tree_threshold: { value: threshold },
+            interactive_tree_reason: {
+              value: "业务希望把 score 分界从 600 调整到 575.5",
+            },
+          };
+          return {
+            dataset: { candidateLabWorkflow: "interactive_tree_revision" },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              return match ? (fields[match[1]] || null) : null;
+            },
+            querySelectorAll() { return []; },
+          };
+        }
+
+        const adjustment = collectStrategyCandidateLabRequest(
+          form("adjust_split_threshold", "575.5"),
+        );
+        assert.deepEqual(adjustment, {
+          request_kind: "standard_workflow",
+          workflow: "interactive_tree_revision",
+          workflow_inputs: {
+            source_tree_id: sourceTreeId,
+            node_id: nodeId,
+            operation: "adjust_split_threshold",
+            threshold: 575.5,
+            reason: "业务希望把 score 分界从 600 调整到 575.5",
+          },
+        });
+        for (const forbidden of [
+          "feature",
+          "current_threshold",
+          "asset_hash",
+          "metrics",
+          "threshold_delta",
+        ]) {
+          assert.equal(forbidden in adjustment.workflow_inputs, false);
+        }
+
+        const prune = collectStrategyCandidateLabRequest(
+          form("prune_subtree", "999", nodeOption("prune_subtree")),
+        );
+        assert.deepEqual(prune.workflow_inputs, {
+          source_tree_id: sourceTreeId,
+          node_id: nodeId,
+          operation: "prune_subtree",
+          reason: "业务希望把 score 分界从 600 调整到 575.5",
+        });
+
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(
+            form("adjust_split_threshold", "600"),
+          ),
+          /不同|当前阈值/,
+        );
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(
+            form("adjust_split_threshold", "Infinity"),
+          ),
+          /有限|finite/,
+        );
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(
+            form(
+              "adjust_split_threshold",
+              "575.5",
+              nodeOption("prune_subtree"),
+            ),
+          ),
+          /受认证|阈值调整/,
+        );
+        """
+    )
+
+
+def test_interactive_tree_render_exposes_authenticated_threshold_adjustments():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const sourceTreeId =
+          "candidate-asset-0123456789abcdef0123456789abcdef";
+        const nodeId = "node-0123456789abcdef0123";
+        const tree = {
+          kind: "automatic_tree",
+          candidate_id: "candidate-tree",
+          detail: {
+            source_tree_id: sourceTreeId,
+            asset_id: sourceTreeId,
+            summary: { node_count: 3 },
+          },
+          pointers: {
+            nodes: [{
+              node_id: nodeId,
+              kind: "split",
+              depth: 0,
+              feature: "score",
+              threshold: 600,
+              missing_child: "left",
+              is_visible: true,
+              is_frontier: false,
+              can_prune: true,
+              metrics: { count: 1000, bad_rate: 0.12 },
+            }],
+            eligible_prunes: [{
+              source_tree_id: sourceTreeId,
+              node_id: nodeId,
+              operation: "prune_subtree",
+            }],
+            eligible_threshold_adjustments: [{
+              source_tree_id: sourceTreeId,
+              node_id: nodeId,
+              operation: "adjust_split_threshold",
+              feature: "score",
+              current_threshold: 600,
+            }],
+            leaves: [],
+          },
+          artifact: {
+            artifact_id: "artifact-tree",
+            download_url:
+              "/api/tasks/task-1/task-artifacts/artifact-tree/download",
+          },
+        };
+        const html = strategyCandidateLabResultsHtml({
+          workflow: {},
+          pools: {},
+          strategies: {},
+          candidates: {
+            automatic_tree: {
+              latest: null,
+              all: [tree],
+              total: 1,
+              truncated: false,
+            },
+          },
+        });
+
+        for (const expected of [
+          "score ≤ 600",
+          "剪枝到此节点",
+          "调整 score 阈值",
+          'data-candidate-lab-interactive-tree-threshold="1"',
+          `data-source-tree-id="${sourceTreeId}"`,
+          `data-node-id="${nodeId}"`,
+          'data-current-threshold="600"',
+          "每次剪枝或阈值调整都会创建新 revision",
+          "不会写回来源树、物化 frontier、入池、采纳或部署",
+        ]) {
+          assert.ok(html.includes(expected), expected);
+        }
+        assert.equal(html.includes("最佳"), false);
+        assert.equal(html.includes("排名"), false);
+        """
+    )
+
+
+def test_interactive_tree_threshold_controller_requires_explicit_pointer_and_refreshes():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          createStrategyCandidateLabController,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        class FakeSelect {
+          constructor(fieldName, value = "") {
+            this.dataset = { candidateLabField: fieldName };
+            this.options = [];
+            this._value = value;
+            this.form = null;
+          }
+          set innerHTML(html) {
+            this.options = Array.from(
+              html.matchAll(/<option value="([^"]*)"([^>]*)>(.*?)<\\/option>/g),
+            ).map((match) => {
+              const attrs = match[2];
+              const data = {};
+              for (const [attribute, key] of [
+                ["candidate-lab-projection", "candidateLabProjection"],
+                ["source-tree-id", "sourceTreeId"],
+                ["node-id", "nodeId"],
+                ["operation", "operation"],
+                ["feature", "feature"],
+                ["current-threshold", "currentThreshold"],
+              ]) {
+                const value = attrs.match(
+                  new RegExp(`data-${attribute}="([^"]*)"`),
+                );
+                if (value) data[key] = value[1];
+              }
+              return {
+                value: match[1],
+                selected: false,
+                dataset: data,
+              };
+            });
+            this.value = "";
+          }
+          set value(value) {
+            this._value = String(value);
+            for (const option of this.options) {
+              option.selected = option.value === this._value;
+            }
+          }
+          get value() { return this._value; }
+          get selectedOptions() {
+            return this.options.filter((option) => option.selected);
+          }
+          closest(selector) {
+            if (selector === "[data-candidate-lab-field]") return this;
+            return selector.includes("interactive_tree_revision")
+              ? this.form
+              : null;
+          }
+        }
+
+        const sourceTreeId =
+          "candidate-asset-0123456789abcdef0123456789abcdef";
+        const nodeId = "node-0123456789abcdef0123";
+        const operation = new FakeSelect(
+          "interactive_tree_operation",
+          "prune_subtree",
+        );
+        operation.options = [
+          { value: "prune_subtree", selected: true, dataset: {} },
+          {
+            value: "adjust_split_threshold",
+            selected: false,
+            dataset: {},
+          },
+        ];
+        const source = new FakeSelect("interactive_tree_source_id");
+        const node = new FakeSelect("interactive_tree_node_id");
+        const threshold = {
+          value: "",
+          dataset: { candidateLabField: "interactive_tree_threshold" },
+          closest(selector) {
+            if (selector === "[data-candidate-lab-field]") return this;
+            return selector.includes("interactive_tree_revision")
+              ? form
+              : null;
+          },
+        };
+        const reason = {
+          value: "人工确认 score 新阈值",
+          dataset: { candidateLabField: "interactive_tree_reason" },
+          closest() { return null; },
+        };
+        const feature = { textContent: "" };
+        const currentThreshold = { textContent: "" };
+        const help = { textContent: "" };
+        const errorTarget = { textContent: "" };
+        const hiddenClasses = new Set(["hidden"]);
+        const thresholdPanel = {
+          classList: {
+            contains: (name) => hiddenClasses.has(name),
+            toggle(name, force) {
+              if (force) hiddenClasses.add(name);
+              else hiddenClasses.delete(name);
+            },
+          },
+        };
+        const launcher = { open: false };
+        const fields = new Map([
+          ["interactive_tree_operation", operation],
+          ["interactive_tree_source_id", source],
+          ["interactive_tree_node_id", node],
+          ["interactive_tree_threshold", threshold],
+          ["interactive_tree_reason", reason],
+        ]);
+        const form = {
+          dataset: { candidateLabWorkflow: "interactive_tree_revision" },
+          querySelector(selector) {
+            if (selector === "[data-candidate-lab-form-error]") {
+              return errorTarget;
+            }
+            if (selector === "[data-candidate-lab-tree-threshold-panel]") {
+              return thresholdPanel;
+            }
+            if (selector === "[data-candidate-lab-tree-threshold-feature]") {
+              return feature;
+            }
+            if (selector === "[data-candidate-lab-tree-current-threshold]") {
+              return currentThreshold;
+            }
+            if (selector === "[data-candidate-lab-tree-help]") return help;
+            const match = selector.match(
+              /data-candidate-lab-field="([^"]+)"/,
+            );
+            return match ? (fields.get(match[1]) || null) : null;
+          },
+          querySelectorAll() { return []; },
+          closest(selector) {
+            return selector === ".candidate-lab-launcher" ? launcher : null;
+          },
+          reset() {},
+        };
+        operation.form = form;
+        source.form = form;
+        node.form = form;
+        const panel = {
+          classList: { toggle() {} },
+          dataset: {},
+          setAttribute() {},
+          querySelector(selector) {
+            return selector.includes("interactive_tree_revision")
+              ? form
+              : null;
+          },
+          querySelectorAll() { return []; },
+        };
+        const ids = {
+          strategyCandidateLabPanel: panel,
+          strategyCandidateLabResults: { innerHTML: "" },
+          strategyCandidateLabStatus: { textContent: "", dataset: {} },
+        };
+        const tree = {
+          kind: "automatic_tree",
+          candidate_id: "candidate-tree",
+          detail: {
+            source_tree_id: sourceTreeId,
+            asset_id: sourceTreeId,
+          },
+          pointers: {
+            nodes: [{
+              node_id: nodeId,
+              kind: "split",
+              feature: "score",
+              threshold: 600,
+              is_visible: true,
+              is_frontier: false,
+              can_prune: true,
+            }],
+            eligible_prunes: [{
+              source_tree_id: sourceTreeId,
+              node_id: nodeId,
+              operation: "prune_subtree",
+            }],
+            eligible_threshold_adjustments: [{
+              source_tree_id: sourceTreeId,
+              node_id: nodeId,
+              operation: "adjust_split_threshold",
+              feature: "score",
+              current_threshold: 600,
+            }],
+          },
+        };
+        const payload = {
+          task_id: "task-1",
+          can_start: true,
+          blocked_reason: null,
+          workflow: {},
+          pools: {},
+          strategies: {},
+          candidates: {
+            automatic_tree: {
+              latest: null,
+              total: 1,
+              truncated: false,
+              all: [tree],
+            },
+          },
+        };
+        const submits = [];
+        let refreshes = 0;
+        const controller = createStrategyCandidateLabController({
+          $: (id) => ids[id] || null,
+          getSelectedTask: () => ({ id: "task-1", task_type: "strategy" }),
+          getSelectedTaskId: () => "task-1",
+          getBlockedReason: () => "",
+          getStrategyCandidateLab: async () => {
+            refreshes += 1;
+            return payload;
+          },
+          submitStrategyCandidateLabRequest: async (...args) => {
+            submits.push(args);
+            return { status: "accepted", messages: [] };
+          },
+          pollAgentMessagesUntilSettled() {},
+          settleCandidateLabSubmission: async () => {},
+        });
+
+        await controller.selectTask({ id: "task-1", task_type: "strategy" });
+        assert.equal(source.value, "");
+        assert.equal(node.value, "");
+        assert.ok(source.options.some(
+          (option) => option.value === sourceTreeId,
+        ));
+
+        const thresholdButton = {
+          dataset: {
+            sourceTreeId,
+            nodeId,
+            feature: "score",
+            currentThreshold: "600",
+          },
+          closest(selector) {
+            return selector
+              === "[data-candidate-lab-interactive-tree-threshold]"
+              ? this
+              : null;
+          },
+        };
+        assert.equal(controller.handleClick({
+          target: thresholdButton,
+          preventDefault() {},
+        }), true);
+        assert.equal(operation.value, "adjust_split_threshold");
+        assert.equal(source.value, sourceTreeId);
+        assert.equal(node.value, nodeId);
+        assert.equal(feature.textContent, "score");
+        assert.equal(currentThreshold.textContent, "600");
+        assert.equal(hiddenClasses.has("hidden"), false);
+        assert.match(help.textContent, /不会自动|明确选择/);
+
+        threshold.value = "575.5";
+        const result = await controller.submit(form);
+        assert.equal(result.status, "accepted");
+        assert.equal(submits.length, 1);
+        assert.deepEqual(submits[0][1], {
+          request_kind: "standard_workflow",
+          workflow: "interactive_tree_revision",
+          workflow_inputs: {
+            source_tree_id: sourceTreeId,
+            node_id: nodeId,
+            operation: "adjust_split_threshold",
+            threshold: 575.5,
+            reason: "人工确认 score 新阈值",
+          },
+        });
+        assert.equal(refreshes, 2);
+
+        tree.pointers.nodes[0].threshold = 575.5;
+        tree.pointers.eligible_threshold_adjustments[0].current_threshold =
+          575.5;
+        source.value = sourceTreeId;
+        node.value = nodeId;
+        threshold.value = "575.5";
+        const stale = await controller.submit(form);
+        assert.equal(stale, null);
+        assert.equal(submits.length, 1);
+        assert.match(errorTarget.textContent, /已过期|当前阈值|受认证投影/);
+        """
+    )

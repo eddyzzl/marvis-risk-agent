@@ -20,6 +20,8 @@ import stat
 from typing import Any
 import unicodedata
 from urllib.parse import quote
+import math
+from numbers import Real
 
 import numpy as np
 
@@ -52,10 +54,19 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.evaluator import evaluate_expression_frame
 from marvis.packs.strategy.interactive_tree_revision import (
     INTERACTIVE_TREE_REVISION_PRODUCER_VERSION,
+    INTERACTIVE_TREE_REVISION_V2_PRODUCER_VERSION,
+    INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION,
     InteractiveTreeRevisionError,
     build_interactive_tree_revision,
     canonical_interactive_tree_revision_json,
     validate_interactive_tree_revision,
+)
+from marvis.packs.strategy.interactive_tree_replay import (
+    replay_interactive_tree_threshold,
+)
+from marvis.packs.strategy.interactive_tree_revision_v2 import (
+    InteractiveTreeRevisionV2Error,
+    build_adjusted_interactive_tree_revision_v2,
 )
 from marvis.packs.strategy.sample_design_execution import (
     StrategyRiskDevelopmentExecutionBinding,
@@ -83,11 +94,15 @@ from marvis.repositories.task_artifacts import (
 
 
 TOOL_SCHEMA_VERSION = "strategy.revise-interactive-tree-tool.v1"
+TOOL_SCHEMA_VERSION_V2 = "strategy.revise-interactive-tree-tool.v2"
 INTERACTIVE_TREE_REVISION_ARTIFACT_KIND = (
     "strategy_interactive_tree_revision_json"
 )
 INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION = (
     "strategy.interactive-tree-revision-artifact.v1"
+)
+INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2 = (
+    "strategy.interactive-tree-revision-artifact.v2"
 )
 INTERACTIVE_TREE_REVISION_ORIGIN_TOOL = "strategy.revise_interactive_tree"
 MAX_INTERACTIVE_TREE_REVISION_BYTES = 4 * 1024 * 1024
@@ -95,9 +110,11 @@ MAX_INTERACTIVE_TREE_REVISION_CHAIN = 511
 MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES = 64 * 1024 * 1024
 
 _INPUT_FIELDS = frozenset(
-    {"source_tree_id", "node_id", "operation", "reason"}
+    {"source_tree_id", "node_id", "operation", "threshold", "reason"}
 )
-_REQUIRED_INPUT_FIELDS = _INPUT_FIELDS - {"reason"}
+_REQUIRED_INPUT_FIELDS = frozenset(
+    {"source_tree_id", "node_id", "operation"}
+)
 _PROVENANCE_FIELDS = frozenset(
     {
         "schema_version",
@@ -183,6 +200,18 @@ class _ReplayBinding:
     evidence: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _ReplayContext:
+    data_binding: Any
+    sample_design: StrategyRiskDevelopmentExecutionBinding
+    labeled: Any
+    target: np.ndarray
+    weights: np.ndarray | None
+    loan_values: np.ndarray | None
+    overdue_values: np.ndarray | None
+    context_hash: str
+
+
 @dataclass
 class _RevisionReadBudget:
     limit: int
@@ -219,7 +248,12 @@ def run_revise_interactive_tree(inputs: object, ctx, runtime) -> dict[str, Any]:
             automatic_source_cache=automatic_source_cache,
             budget=read_budget,
         )
-    revision = _build_revision(source, request=request)
+    revision, replay = _build_revision(
+        source,
+        request=request,
+        runtime=runtime,
+        task_id=task_id,
+    )
     canonical = canonical_interactive_tree_revision_json(
         revision,
         source.automatic_source.asset,
@@ -228,12 +262,6 @@ def run_revise_interactive_tree(inputs: object, ctx, runtime) -> dict[str, Any]:
     ).encode("utf-8")
     if len(canonical) > MAX_INTERACTIVE_TREE_REVISION_BYTES:
         raise StrategyError("interactive-tree revision exceeds the JSON byte budget")
-    replay = _replay_revision(
-        runtime,
-        task_id=task_id,
-        source=source.automatic_source,
-        revision=revision,
-    )
     content_hash = hashlib.sha256(canonical).hexdigest()
     provenance = interactive_tree_revision_provenance(
         revision,
@@ -253,7 +281,12 @@ def run_revise_interactive_tree(inputs: object, ctx, runtime) -> dict[str, Any]:
         replay=replay,
     )
     return {
-        "schema_version": TOOL_SCHEMA_VERSION,
+        "schema_version": (
+            TOOL_SCHEMA_VERSION_V2
+            if revision["schema_version"]
+            == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+            else TOOL_SCHEMA_VERSION
+        ),
         "revision_id": revision["revision_id"],
         "revision_hash": revision["revision_hash"],
         "semantic_tree_id": revision["semantic_tree_id"],
@@ -309,7 +342,12 @@ def interactive_tree_revision_provenance(
             parent_revision=parent_revision,
             ancestor_revisions=ancestor_revisions,
         )
-    except (InteractiveTreeRevisionError, TypeError, ValueError) as exc:
+    except (
+        InteractiveTreeRevisionError,
+        InteractiveTreeRevisionV2Error,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise StrategyError("interactive-tree revision failed validation") from exc
     sample_ref = sample_design_ref_from_automatic_tree_source_refs(
         automatic_source.asset["source_refs"]
@@ -319,9 +357,21 @@ def interactive_tree_revision_provenance(
     parent_revision_id = (
         None if parent_ref is None else parent_ref["revision_id"]
     )
+    is_v2 = (
+        revision["schema_version"]
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+    )
     provenance = {
-        "schema_version": INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION,
-        "producer_version": INTERACTIVE_TREE_REVISION_PRODUCER_VERSION,
+        "schema_version": (
+            INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2
+            if is_v2
+            else INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION
+        ),
+        "producer_version": (
+            INTERACTIVE_TREE_REVISION_V2_PRODUCER_VERSION
+            if is_v2
+            else INTERACTIVE_TREE_REVISION_PRODUCER_VERSION
+        ),
         "task_id": revision["identity"]["task_id"],
         "kind": INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
         "format": "json",
@@ -732,7 +782,12 @@ def _load_verified_interactive_tree_revision_on_connection(
                     else parent_binding.ancestor_revisions
                 ),
             ).encode("utf-8")
-        except (InteractiveTreeRevisionError, TypeError, ValueError) as exc:
+        except (
+            InteractiveTreeRevisionError,
+            InteractiveTreeRevisionV2Error,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise StrategyError(
                 "interactive-tree revision artifact failed validation"
             ) from exc
@@ -790,17 +845,71 @@ def _build_revision(
     source: _ResolvedRevisionSource,
     *,
     request: Mapping[str, Any],
-) -> dict[str, Any]:
+    runtime,
+    task_id: str,
+) -> tuple[dict[str, Any], _ReplayBinding]:
+    if request["operation"] == "adjust_split_threshold":
+        context = _load_replay_context(
+            runtime,
+            task_id=task_id,
+            source=source.automatic_source,
+        )
+        replay_result = replay_interactive_tree_threshold(
+            context.labeled,
+            source.automatic_source.asset,
+            node_id=request["node_id"],
+            threshold=request["threshold"],
+            target=context.target,
+            weights=context.weights,
+            loan_values=context.loan_values,
+            overdue_values=context.overdue_values,
+            parent_revision=source.parent_revision,
+        )
+        try:
+            revision = build_adjusted_interactive_tree_revision_v2(
+                source.automatic_source.asset,
+                node_id=request["node_id"],
+                threshold=request["threshold"],
+                reason=request.get("reason"),
+                replay=replay_result,
+                parent_revision=source.parent_revision,
+                ancestor_revisions=source.ancestor_revisions,
+            )
+        except (
+            InteractiveTreeRevisionError,
+            InteractiveTreeRevisionV2Error,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise StrategyError(
+                "interactive-tree threshold revision edit is invalid"
+            ) from exc
+        return revision, _ReplayBinding(
+            data_binding=context.data_binding,
+            sample_design=context.sample_design,
+            evidence=replay_result.replay,
+        )
     try:
-        return build_interactive_tree_revision(
+        revision = build_interactive_tree_revision(
             source.automatic_source.asset,
             node_id=request["node_id"],
             reason=request.get("reason"),
             parent_revision=source.parent_revision,
             ancestor_revisions=source.ancestor_revisions,
         )
-    except (InteractiveTreeRevisionError, TypeError, ValueError) as exc:
+    except (
+        InteractiveTreeRevisionError,
+        InteractiveTreeRevisionV2Error,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise StrategyError("interactive-tree revision edit is invalid") from exc
+    return revision, _replay_revision(
+        runtime,
+        task_id=task_id,
+        source=source.automatic_source,
+        revision=revision,
+    )
 
 
 def _interactive_tree_sample_design_contract(
@@ -880,6 +989,159 @@ def _interactive_tree_sample_design_contract(
         "loan_amount_field": fields["loan_amount_field"],
         "overdue_amount_field": fields["overdue_amount_field"],
     }
+
+
+def _load_replay_context(
+    runtime,
+    *,
+    task_id: str,
+    source: VerifiedAutomaticTreeSource,
+) -> _ReplayContext:
+    """Load and bind the exact development population for deterministic replay."""
+
+    asset = source.asset
+    identity = asset["identity"]
+    training = asset["tree_result"]["training"]
+    sample_ref = StrategyRiskDevelopmentRef.from_value(
+        sample_design_ref_from_automatic_tree_source_refs(asset["source_refs"])
+    )
+    sample_contract = _interactive_tree_sample_design_contract(
+        runtime,
+        task_id=task_id,
+        reference=sample_ref,
+    )
+    weight_col = (
+        None
+        if training["sample_weight"]["status"] == "not_applicable"
+        else training["sample_weight"]["column"]
+    )
+    expected_optional = {
+        "weight_field": weight_col,
+        "loan_amount_field": training["loan_amount_col"],
+        "overdue_amount_field": training["overdue_amount_col"],
+    }
+    for field, expected in expected_optional.items():
+        if sample_contract[field] != expected:
+            raise StrategyError(
+                f"interactive-tree sample-design {field} changed from the base tree"
+            )
+    data_binding = _load_binding(
+        runtime,
+        task_id=task_id,
+        dataset_id=identity["dataset_id"],
+        expected_content_hash=identity["dataset_content_hash"],
+        expected_revision=identity["workspace_revision"],
+        expected_generation=identity["workspace_generation"],
+        expected_semantic_hash=identity["semantic_mapping_hash"],
+    )
+    if not hmac.compare_digest(
+        data_binding.registry_metadata_hash,
+        identity["registry_metadata_hash"],
+    ):
+        raise StrategyError(
+            "interactive-tree dataset registry metadata changed from the base tree"
+        )
+    sample_design = load_strategy_risk_development_execution_binding(
+        runtime,
+        task_id=task_id,
+        sample_design_ref=sample_ref.to_ref_dict(),
+        dataset_id=identity["dataset_id"],
+        dataset_content_hash=identity["dataset_content_hash"],
+        workspace_revision=identity["workspace_revision"],
+        workspace_generation=identity["workspace_generation"],
+        semantic_mapping_hash=identity["semantic_mapping_hash"],
+        target_col=training["target_col"],
+        drop_nan_labels=sample_contract["drop_nan_labels"],
+        month_col=sample_contract["month_field"],
+        weight_col=weight_col,
+        loan_amount_col=training["loan_amount_col"],
+        overdue_amount_col=training["overdue_amount_col"],
+    )
+    projected = list(training["feature_order"])
+    for column in (
+        training["target_col"],
+        weight_col,
+        training["loan_amount_col"],
+        training["overdue_amount_col"],
+        *sample_design.partition_columns,
+    ):
+        if column is not None and column not in projected:
+            projected.append(column)
+    frame = runtime.backend.read_frame(data_binding.path, columns=projected)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_design,
+    )
+    if not hmac.compare_digest(
+        sha256_file(data_binding.path),
+        data_binding.content_hash,
+    ):
+        raise StrategyError("interactive-tree source dataset bytes changed")
+    frame = bind_strategy_risk_development_frame(
+        frame,
+        binding=sample_design,
+    )
+    labeled, dropped = resolve_labeled_frame(
+        frame,
+        training["target_col"],
+        drop_nan_labels=sample_design.drop_nan_labels,
+        scope="interactive-tree development sample",
+    )
+    labeled = labeled.reset_index(drop=True)
+    if len(labeled) != int(training["row_count"]):
+        raise StrategyError(
+            "interactive-tree development row count changed from the base tree"
+        )
+    context_hash = automatic_tree_sample_context_hash(
+        task_id=task_id,
+        binding=data_binding,
+        target_col=training["target_col"],
+        labeled_row_count=len(labeled),
+        drop_nan_labels=sample_design.drop_nan_labels,
+        nan_labels_dropped=dropped,
+        loan_amount_col=training["loan_amount_col"],
+        overdue_amount_col=training["overdue_amount_col"],
+        sample_design_ref=sample_design.to_ref_dict(),
+    )
+    if not hmac.compare_digest(context_hash, identity["sample_context_hash"]):
+        raise StrategyError(
+            "interactive-tree development sample context changed from the base tree"
+        )
+    target = _strict_binary_target(
+        labeled[training["target_col"]],
+        column=training["target_col"],
+    )
+    weights = (
+        None
+        if weight_col is None
+        else _strict_positive_weights(labeled[weight_col], column=weight_col)
+    )
+    loan_values = (
+        None
+        if training["loan_amount_col"] is None
+        else _strict_amounts(
+            labeled[training["loan_amount_col"]],
+            column=training["loan_amount_col"],
+        )
+    )
+    overdue_values = (
+        None
+        if training["overdue_amount_col"] is None
+        else _strict_amounts(
+            labeled[training["overdue_amount_col"]],
+            column=training["overdue_amount_col"],
+        )
+    )
+    return _ReplayContext(
+        data_binding=data_binding,
+        sample_design=sample_design,
+        labeled=labeled,
+        target=target,
+        weights=weights,
+        loan_values=loan_values,
+        overdue_values=overdue_values,
+        context_hash=context_hash,
+    )
 
 
 def _replay_revision(
@@ -1134,9 +1396,11 @@ def _persist_revision(
                     automatic_source_cache=locked_automatic_source_cache,
                     budget=locked_read_budget,
                 )
-                locked_revision = _build_revision(
+                locked_revision, locked_replay = _build_revision(
                     locked_source,
                     request=request,
+                    runtime=runtime,
+                    task_id=task_id,
                 )
                 locked_canonical = canonical_interactive_tree_revision_json(
                     locked_revision,
@@ -1153,6 +1417,7 @@ def _persist_revision(
                 if (
                     locked_source != source
                     or locked_revision != revision
+                    or locked_replay.evidence != replay.evidence
                     or not hmac.compare_digest(locked_canonical, canonical)
                     or not hmac.compare_digest(
                         _canonical_json(locked_provenance),
@@ -1315,20 +1580,34 @@ def _require_revision_provenance_scalars(
     task_id: str,
     revision_id: str,
 ) -> None:
+    schema = provenance["schema_version"]
+    if schema == INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION:
+        producer = INTERACTIVE_TREE_REVISION_PRODUCER_VERSION
+        operations = {"prune_subtree"}
+    elif schema == INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2:
+        producer = INTERACTIVE_TREE_REVISION_V2_PRODUCER_VERSION
+        operations = {"prune_subtree", "adjust_split_threshold"}
+    else:
+        raise StrategyError(
+            "interactive-tree revision provenance schema_version changed"
+        )
     expected = {
-        "schema_version": INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION,
-        "producer_version": INTERACTIVE_TREE_REVISION_PRODUCER_VERSION,
+        "schema_version": schema,
+        "producer_version": producer,
         "task_id": task_id,
         "kind": INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
         "format": "json",
         "revision_id": revision_id,
-        "edit_operation": "prune_subtree",
     }
     for field, value in expected.items():
         if provenance[field] != value:
             raise StrategyError(
                 f"interactive-tree revision provenance {field} changed"
             )
+    if provenance["edit_operation"] not in operations:
+        raise StrategyError(
+            "interactive-tree revision provenance edit_operation changed"
+        )
     for field in (
         "revision_hash",
         "tree_hash",
@@ -1584,13 +1863,30 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
     source_tree_id = _required_text(inputs["source_tree_id"], "source_tree_id")
     node_id = _required_text(inputs["node_id"], "node_id")
     operation = _required_text(inputs["operation"], "operation")
-    if operation != "prune_subtree":
-        raise StrategyError("operation must be prune_subtree")
+    if operation not in {"prune_subtree", "adjust_split_threshold"}:
+        raise StrategyError(
+            "operation must be prune_subtree or adjust_split_threshold"
+        )
+    has_threshold = "threshold" in inputs
+    if operation == "adjust_split_threshold" and not has_threshold:
+        raise StrategyError(
+            "threshold is required for adjust_split_threshold"
+        )
+    if operation == "prune_subtree" and has_threshold:
+        raise StrategyError("threshold is unsupported for prune_subtree")
     normalized: dict[str, Any] = {
         "source_tree_id": source_tree_id,
         "node_id": node_id,
         "operation": operation,
     }
+    if has_threshold:
+        threshold = inputs["threshold"]
+        if isinstance(threshold, bool) or not isinstance(threshold, Real):
+            raise StrategyError("threshold must be a finite number")
+        normalized_threshold = float(threshold)
+        if not math.isfinite(normalized_threshold):
+            raise StrategyError("threshold must be a finite number")
+        normalized["threshold"] = normalized_threshold
     if "reason" in inputs:
         reason = inputs["reason"]
         if reason is not None:
@@ -1727,11 +2023,13 @@ def _stat_identity(value) -> tuple[int, int, int, int, int]:
 __all__ = [
     "INTERACTIVE_TREE_REVISION_ARTIFACT_KIND",
     "INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION",
+    "INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2",
     "INTERACTIVE_TREE_REVISION_ORIGIN_TOOL",
     "MAX_INTERACTIVE_TREE_REVISION_BYTES",
     "MAX_INTERACTIVE_TREE_REVISION_CHAIN",
     "MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES",
     "TOOL_SCHEMA_VERSION",
+    "TOOL_SCHEMA_VERSION_V2",
     "VerifiedInteractiveTreeRevision",
     "canonical_interactive_tree_revision_path",
     "interactive_tree_revision_provenance",

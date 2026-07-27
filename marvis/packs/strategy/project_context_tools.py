@@ -31,6 +31,20 @@ from marvis.packs.strategy.dsl import (
     strategy_spec_hash,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.impact_cube import (
+    MAX_IMPACT_CUBE_JSON_BYTES,
+    canonical_strategy_impact_cube_json,
+    validate_strategy_impact_cube,
+)
+from marvis.packs.strategy.impact_cube_binding import (
+    StrategyImpactCubeArtifactBinding,
+    require_strategy_impact_cube_artifact_binding_on_connection,
+    validate_strategy_impact_cube_artifact_binding,
+)
+from marvis.packs.strategy.impact_cube_tools import (
+    IMPACT_CUBE_ARTIFACT_KIND,
+    IMPACT_CUBE_ORIGIN_TOOL,
+)
 from marvis.packs.strategy.pool_impact import (
     STRATEGY_POOL_IMPACT_PRODUCER_VERSION,
     canonical_strategy_pool_impact_json,
@@ -55,12 +69,27 @@ from marvis.packs.strategy.project_context import (
     build_strategy_project_context_state,
     canonical_strategy_project_context_revision_json,
     diff_strategy_rules,
+    strategy_project_context_structured_request_sha256,
     strategy_project_context_revision_from_json,
 )
 from marvis.packs.strategy.sample_design import (
     STRATEGY_SAMPLE_DESIGN_PRODUCER_VERSION,
     canonical_strategy_sample_design_bundle_json,
     strategy_sample_design_bundle_from_json,
+)
+from marvis.packs.strategy.sample_design_v2 import (
+    canonical_strategy_sample_design_v2_bundle_json,
+    strategy_sample_design_v2_bundle_from_json,
+)
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    load_historical_native_strategy_sample_design_v2_artifacts,
+    require_historical_native_strategy_sample_design_v2_artifact_binding_on_connection,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_ORIGIN_TOOL,
 )
 from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
@@ -830,11 +859,16 @@ def _validate_inputs(value: object) -> dict[str, Any]:
             "existing project context CAS requires revision id and state hash"
         )
     message = value["user_message_ref"]
-    if not isinstance(message, Mapping) or set(message) != {
-        "message_id",
-        "content_hash",
+    message_fields = set(message) if isinstance(message, Mapping) else set()
+    required_message_fields = {"message_id", "content_hash"}
+    if message_fields not in {
+        frozenset(required_message_fields),
+        frozenset(required_message_fields | {"structured_request_sha256"}),
     }:
-        raise StrategyError("user_message_ref must contain message_id and content_hash")
+        raise StrategyError(
+            "user_message_ref must contain message_id, content_hash and only "
+            "an optional structured_request_sha256"
+        )
     as_of = _iso_date(value["as_of"], "as_of")
     scope = _optional_bounded_text(value.get("scope"), "scope", MAX_SCOPE_CHARS)
     business = value["business_context"]
@@ -882,16 +916,22 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         maximum=MAX_EXTERNAL_REPORTS,
         item_maximum=MAX_EXTERNAL_FILENAME_CHARS,
     )
+    normalized_message_ref = {
+        "message_id": _text(message["message_id"], "user_message_ref.message_id"),
+        "content_hash": _hash(
+            message["content_hash"], "user_message_ref.content_hash"
+        ),
+    }
+    if "structured_request_sha256" in message:
+        normalized_message_ref["structured_request_sha256"] = _hash(
+            message["structured_request_sha256"],
+            "user_message_ref.structured_request_sha256",
+        )
     return {
         "expected_revision": revision,
         "expected_revision_id": revision_id,
         "expected_state_hash": state_hash,
-        "user_message_ref": {
-            "message_id": _text(message["message_id"], "user_message_ref.message_id"),
-            "content_hash": _hash(
-                message["content_hash"], "user_message_ref.content_hash"
-            ),
-        },
+        "user_message_ref": normalized_message_ref,
         "as_of": as_of,
         "scope": scope,
         "business_context": normalized_business,
@@ -920,6 +960,8 @@ def _discover_evidence(
     tasks_root: Path,
     include_context_artifacts: bool = False,
 ) -> dict[str, Any]:
+    if not conn.in_transaction:
+        conn.execute("BEGIN")
     task = conn.execute(
         "SELECT id, task_type, source_dir FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
@@ -928,7 +970,8 @@ def _discover_evidence(
     if str(task["task_type"]) != "strategy":
         raise StrategyError("StrategyProjectContext requires a strategy task")
     message = conn.execute(
-        "SELECT id, task_id, role, content, created_at FROM agent_messages WHERE id = ?",
+        "SELECT id, task_id, role, content, created_at, metadata_json "
+        "FROM agent_messages WHERE id = ?",
         (request["user_message_ref"]["message_id"],),
     ).fetchone()
     if (
@@ -944,11 +987,15 @@ def _discover_evidence(
         message_hash, request["user_message_ref"]["content_hash"]
     ):
         raise StrategyError("user_message_ref content hash changed")
-    _validate_external_report_message_bindings(
-        source_dir=str(task["source_dir"]),
-        filenames=request["external_report_filenames"],
-        persisted_message=str(message["content"]),
-    )
+    if not _validate_structured_project_context_message_binding(
+        message=message,
+        request=request,
+    ):
+        _validate_external_report_message_bindings(
+            source_dir=str(task["source_dir"]),
+            filenames=request["external_report_filenames"],
+            persisted_message=str(message["content"]),
+        )
     message_ref = build_source_ref(
         kind="agent_message", ref_id=str(message["id"]), content_hash=message_hash
     )
@@ -962,6 +1009,7 @@ def _discover_evidence(
         task_id=task_id,
         tasks_root=tasks_root,
         dataset_by_id=dataset_by_id,
+        runtime=runtime,
         include_context_artifacts=include_context_artifacts,
     )
     strategies = _discover_strategies(
@@ -1084,11 +1132,14 @@ def _discover_task_artifacts(
     task_id: str,
     tasks_root: Path,
     dataset_by_id: Mapping[str, Any],
+    runtime,
     include_context_artifacts: bool,
 ) -> dict[str, list[dict[str, Any]]]:
     kinds = [
         SAMPLE_DESIGN_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
         POOL_IMPACT_ARTIFACT_KIND,
+        IMPACT_CUBE_ARTIFACT_KIND,
         PROJECT_CONTEXT_EXTERNAL_ARTIFACT_KIND,
     ]
     if include_context_artifacts:
@@ -1098,7 +1149,13 @@ def _discover_task_artifacts(
         f"SELECT * FROM task_artifacts WHERE task_id = ? AND kind IN ({placeholders}) ORDER BY created_at, id",
         (task_id, *kinds),
     ).fetchall()
-    result = {"sample_designs": [], "pool_impacts": [], "external_reports": []}
+    result = {
+        "sample_designs": [],
+        "sample_designs_v2": [],
+        "pool_impacts": [],
+        "impact_cubes": [],
+        "external_reports": [],
+    }
     external_total_size = 0
     for row in rows:
         kind = str(row["kind"])
@@ -1121,7 +1178,15 @@ def _discover_task_artifacts(
                     "registered external reports exceed total byte limit"
                 )
         else:
-            raw = _read_verified_registered_artifact(record, tasks_root=tasks_root)
+            raw = _read_verified_registered_artifact(
+                record,
+                tasks_root=tasks_root,
+                max_bytes=(
+                    MAX_IMPACT_CUBE_JSON_BYTES
+                    if kind == IMPACT_CUBE_ARTIFACT_KIND
+                    else MAX_PROJECT_CONTEXT_JSON_BYTES
+                ),
+            )
         if kind == SAMPLE_DESIGN_ARTIFACT_KIND:
             assert raw is not None
             if record["origin_tool"] != SAMPLE_DESIGN_ORIGIN_TOOL:
@@ -1170,6 +1235,66 @@ def _discover_task_artifacts(
             ):
                 raise StrategyError("strategy sample-design dataset binding changed")
             result["sample_designs"].append({**record, "bundle": bundle})
+        elif kind == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND:
+            if record["origin_tool"] != SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL:
+                if (
+                    record["origin_tool"] != SAMPLE_DESIGN_V2_ORIGIN_TOOL
+                    or record["provenance"].get("source_mode")
+                    == "native_active_dataset"
+                ):
+                    raise StrategyError(
+                        "strategy sample-design V2 artifact origin changed"
+                    )
+                # Compatibility V2 bundles remain downstream evidence for their
+                # own consumers; ProjectContext only promotes the native V2
+                # source that can be replayed without a V1 anchor.
+                continue
+            binding = load_historical_native_strategy_sample_design_v2_artifacts(
+                runtime,
+                task_id=task_id,
+                membership_artifact_id=record["provenance"].get(
+                    "membership_artifact_id"
+                ),
+                expected_membership_artifact_content_hash=record[
+                    "provenance"
+                ].get("membership_artifact_content_hash"),
+                bundle_artifact_id=record["id"],
+                expected_bundle_artifact_content_hash=record["content_hash"],
+                expected_bundle_id=record["provenance"].get("bundle_id"),
+                expected_sample_design_id=record["provenance"].get(
+                    "sample_design_id"
+                ),
+                expected_sample_design_content_hash=record["provenance"].get(
+                    "sample_design_content_hash"
+                ),
+            )
+            require_historical_native_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+            dataset_ref = binding.bundle["sample_design"]["identity"]["dataset_ref"]
+            dataset = dataset_by_id.get(dataset_ref["dataset_id"])
+            if (
+                dataset is None
+                or dataset["content_hash"] != dataset_ref["content_hash"]
+            ):
+                raise StrategyError(
+                    "native strategy sample-design V2 dataset binding changed"
+                )
+            result["sample_designs_v2"].append(
+                {
+                    **record,
+                    "bundle": binding.bundle,
+                    "membership": binding.membership["header"],
+                    "membership_artifact_ref": build_source_ref(
+                        kind="task_artifact",
+                        ref_id=binding.membership_artifact_id,
+                        content_hash=(
+                            binding.membership_artifact_content_hash
+                        ),
+                    ),
+                }
+            )
         elif kind == POOL_IMPACT_ARTIFACT_KIND:
             assert raw is not None
             if record["origin_tool"] != POOL_IMPACT_ORIGIN_TOOL:
@@ -1219,6 +1344,48 @@ def _discover_task_artifacts(
             if dataset is None or dataset["content_hash"] != dataset_hash:
                 raise StrategyError("Pool impact dataset binding changed")
             result["pool_impacts"].append({**record, "assessment": assessment})
+        elif kind == IMPACT_CUBE_ARTIFACT_KIND:
+            if record["origin_tool"] != IMPACT_CUBE_ORIGIN_TOOL:
+                raise StrategyError("ImpactCube artifact origin changed")
+            assert raw is not None
+            try:
+                cube = validate_strategy_impact_cube(json.loads(raw))
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+                RecursionError,
+            ) as exc:
+                raise StrategyError("ImpactCube artifact JSON is invalid") from exc
+            canonical = canonical_strategy_impact_cube_json(cube).encode("utf-8")
+            if raw != canonical:
+                raise StrategyError("ImpactCube artifact bytes are not canonical")
+            binding = StrategyImpactCubeArtifactBinding(
+                task_id=task_id,
+                artifact_id=record["id"],
+                artifact_path=Path(record["path"]),
+                artifact_content_hash=record["content_hash"],
+                artifact_provenance=record["provenance"],
+                artifact_provenance_json=_canonical_json(record["provenance"]),
+                cube=cube,
+                tasks_root=Path(tasks_root).absolute(),
+                db_path=Path(runtime.settings.db_path).absolute(),
+            )
+            validate_strategy_impact_cube_artifact_binding(binding)
+            require_strategy_impact_cube_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+            dataset_ref = cube["source_bindings"]["dataset"]
+            dataset = dataset_by_id.get(dataset_ref["dataset_id"])
+            if (
+                dataset is None
+                or dataset["content_hash"]
+                != dataset_ref["dataset_content_hash"]
+            ):
+                raise StrategyError("ImpactCube dataset binding changed")
+            result["impact_cubes"].append({**record, "cube": cube})
         else:
             provenance = record["provenance"]
             if set(provenance) != {
@@ -1455,6 +1622,26 @@ def _sample_design_proves_cutoff(artifact: Mapping[str, Any], *, as_of: str) -> 
     )
 
 
+def _native_sample_design_proves_cutoff(
+    artifact: Mapping[str, Any],
+    *,
+    as_of: str,
+) -> bool:
+    if not _timestamp_on_or_before_as_of(
+        artifact["created_at"],
+        as_of=as_of,
+        field="sample_design_v2.created_at",
+    ):
+        return False
+    observation_window = artifact["bundle"]["sample_design"][
+        "sample_semantics"
+    ]["observation_window"]
+    return (
+        observation_window["status"] == "provided"
+        and observation_window["end"] <= as_of
+    )
+
+
 def _strategies_at_cutoff(
     strategies: Sequence[Mapping[str, Any]], *, as_of: str
 ) -> list[dict[str, Any]]:
@@ -1512,6 +1699,11 @@ def _build_state(
         for item in evidence["artifacts"]["sample_designs"]
         if _sample_design_proves_cutoff(item, as_of=as_of)
     ]
+    native_sample_designs = [
+        item
+        for item in evidence["artifacts"]["sample_designs_v2"]
+        if _native_sample_design_proves_cutoff(item, as_of=as_of)
+    ]
     eligible_sample_artifact_ids = {item["id"] for item in sample_designs}
     pool_impacts = [
         item
@@ -1522,8 +1714,41 @@ def _build_state(
         and item["assessment"]["bindings"]["sample_design_ref"]["artifact_id"]
         in eligible_sample_artifact_ids
     ]
-    sample = sample_designs[-1] if sample_designs else None
+    sample_candidates = [
+        *((item["created_at"], item["id"], "legacy", item) for item in sample_designs),
+        *(
+            (item["created_at"], item["id"], "native_v2", item)
+            for item in native_sample_designs
+        ),
+    ]
+    sample_mode = None
+    sample = None
+    if sample_candidates:
+        _, _, sample_mode, sample = max(
+            sample_candidates,
+            key=lambda item: (item[0], item[1]),
+        )
     pool = pool_impacts[-1] if pool_impacts else None
+    impact_cubes = [
+        item
+        for item in evidence["artifacts"]["impact_cubes"]
+        if _timestamp_on_or_before_as_of(
+            item["created_at"],
+            as_of=as_of,
+            field="impact_cube.created_at",
+        )
+        and sample_mode == "native_v2"
+        and sample is not None
+        and item["cube"]["source_bindings"]["sample_design_v2"][
+            "bundle_artifact_id"
+        ]
+        == sample["id"]
+        and item["cube"]["source_bindings"]["sample_design_v2"][
+            "bundle_artifact_content_hash"
+        ]
+        == sample["content_hash"]
+    ]
+    impact_cube = impact_cubes[-1] if impact_cubes else None
     strategies = _strategies_at_cutoff(evidence["strategies"], as_of=as_of)
     monitoring = {
         category: [
@@ -1546,7 +1771,9 @@ def _build_state(
         "artifacts": {
             **evidence["artifacts"],
             "sample_designs": sample_designs,
+            "sample_designs_v2": native_sample_designs,
             "pool_impacts": pool_impacts,
+            "impact_cubes": impact_cubes,
         },
     }
     champion_candidates = [
@@ -1593,7 +1820,7 @@ def _build_state(
     volume_field = _absent_field("current.status_fields.volume", explicit=explicit)
     risk_field = _absent_field("current.status_fields.risk", explicit=explicit)
     maturity_field = _absent_field("current.maturity_summary", explicit=explicit)
-    if sample is not None:
+    if sample is not None and sample_mode == "legacy":
         bundle = sample["bundle"]
         definitions = {
             item["metric_definition_id"]: item for item in bundle["metric_definitions"]
@@ -1649,7 +1876,94 @@ def _build_state(
             as_of=request["as_of"],
             blocking="validation",
         )
-    if latest_backtest is not None:
+    elif sample is not None and sample_mode == "native_v2":
+        bundle = sample["bundle"]
+        definitions = {
+            item["metric_definition_id"]: item
+            for item in bundle["metric_definitions"]
+        }
+        observations = bundle["metric_observations"]
+        metric_def_refs = [
+            build_source_ref(
+                kind="metric_definition",
+                ref_id=item["metric_definition_id"],
+                content_hash=item["content_hash"],
+            )
+            for item in bundle["metric_definitions"]
+        ]
+        metric_obs_refs = [
+            build_source_ref(
+                kind="metric_observation",
+                ref_id=item["observation_id"],
+                content_hash=item["content_hash"],
+            )
+            for item in observations
+        ]
+        volume_field = _native_sample_metric_field(
+            observations,
+            definitions,
+            population="approval",
+            partition="overall",
+            families={"volume"},
+            as_of=request["as_of"],
+        )
+        risk_field = _native_sample_metric_field(
+            observations,
+            definitions,
+            population="risk",
+            partition="overall",
+            families={"risk"},
+            as_of=request["as_of"],
+        )
+        risk_population = next(
+            item for item in bundle["populations"] if item["role"] == "risk"
+        )
+        maturity = risk_population["maturity_evidence"]
+        maturity_source = [
+            build_source_ref(
+                kind="sample_design",
+                ref_id=bundle["sample_design"]["sample_design_id"],
+                content_hash=bundle["sample_design"]["content_hash"],
+            )
+        ]
+        maturity_status = maturity["status"]
+        if maturity_status == "confirmed_matured":
+            maturity_field = build_report_field(
+                value={
+                    "population": "risk",
+                    **{
+                        key: maturity[key]
+                        for key in (
+                            "status",
+                            "performance_window_days",
+                            "cutoff_date",
+                            "eligible_count",
+                            "labeled_count",
+                            "reason",
+                        )
+                    },
+                },
+                availability="present",
+                origin="tool_output",
+                source_refs=maturity_source,
+                as_of=request["as_of"],
+                blocking="validation",
+            )
+        else:
+            maturity_field = build_report_field(
+                value=None,
+                availability=(
+                    "not_matured"
+                    if maturity_status == "not_matured"
+                    else "unavailable"
+                ),
+                origin="tool_output",
+                source_refs=maturity_source,
+                as_of=request["as_of"],
+                blocking="validation",
+                note=maturity["reason"],
+            )
+    if latest_backtest is not None and sample_mode != "native_v2":
         if volume_field["availability"] != "present":
             volume_field = build_report_field(
                 value={
@@ -1677,7 +1991,11 @@ def _build_state(
                 blocking="strategy",
             )
     latest_monitoring_run = monitoring["runs"][-1] if monitoring["runs"] else None
-    if risk_field["availability"] != "present" and latest_monitoring_run is not None:
+    if (
+        risk_field["availability"] != "present"
+        and latest_monitoring_run is not None
+        and sample_mode != "native_v2"
+    ):
         risk_field = build_report_field(
             value={
                 "overall_level": latest_monitoring_run["overall_level"],
@@ -1691,7 +2009,24 @@ def _build_state(
         )
 
     approval_field = _absent_field("current.status_fields.approval", explicit=explicit)
-    if pool is not None:
+    if impact_cube is not None and _impact_cube_has_validation_and_oot(
+        impact_cube["cube"]
+    ):
+        cube = impact_cube["cube"]
+        ref = build_source_ref(
+            kind="impact_cube",
+            ref_id=cube["cube_id"],
+            content_hash=cube["content_hash"],
+        )
+        approval_field = build_report_field(
+            value=_impact_cube_approval_summary(cube),
+            availability="present",
+            origin="tool_output",
+            source_refs=[ref],
+            as_of=request["as_of"],
+            blocking="impact",
+        )
+    elif pool is not None and sample_mode != "native_v2":
         assessment = pool["assessment"]
         ref = build_source_ref(
             kind="pool_impact",
@@ -1710,7 +2045,10 @@ def _build_state(
             as_of=request["as_of"],
             blocking="impact",
         )
-    elif latest_approval_backtest is not None:
+    elif (
+        latest_approval_backtest is not None
+        and sample_mode != "native_v2"
+    ):
         metrics = latest_approval_backtest["result"]["metrics"]
         approval_field = build_report_field(
             value={
@@ -1942,10 +2280,20 @@ def _build_state(
         external_refs=external_refs,
     )
     extra_sources = [message_ref]
-    for category in ("sample_designs", "pool_impacts", "external_reports"):
+    for category in (
+        "sample_designs",
+        "sample_designs_v2",
+        "pool_impacts",
+        "impact_cubes",
+        "external_reports",
+    ):
         extra_sources.extend(
             item["artifact_ref"] for item in state_evidence["artifacts"][category]
         )
+    extra_sources.extend(
+        item["membership_artifact_ref"]
+        for item in state_evidence["artifacts"]["sample_designs_v2"]
+    )
     for snapshot_source in external:
         external_path = _external_artifact_path(
             tasks_root,
@@ -2112,6 +2460,142 @@ def _sample_metric_field(
         source_refs=refs,
         as_of=as_of,
     )
+
+
+def _native_sample_metric_field(
+    observations: Sequence[Mapping[str, Any]],
+    definitions: Mapping[str, Mapping[str, Any]],
+    *,
+    population: str,
+    partition: str,
+    families: set[str],
+    as_of: str,
+) -> dict[str, Any]:
+    definition_order = {
+        definition_id: index
+        for index, definition_id in enumerate(definitions)
+    }
+    selected = []
+    refs = []
+    statuses = []
+    relevant = [
+        observation
+        for observation in observations
+        if observation["population"] == population
+        and observation["partition"] == partition
+        and definitions[
+            observation["metric_definition_ref"]["metric_definition_id"]
+        ]["metric_family"]
+        in families
+    ]
+    relevant.sort(
+        key=lambda observation: definition_order[
+            observation["metric_definition_ref"]["metric_definition_id"]
+        ]
+    )
+    for observation in relevant:
+        definition = definitions[
+            observation["metric_definition_ref"]["metric_definition_id"]
+        ]
+        statuses.append(observation["status"])
+        refs.append(
+            build_source_ref(
+                kind="metric_observation",
+                ref_id=observation["observation_id"],
+                content_hash=observation["content_hash"],
+            )
+        )
+        if observation["status"] == "present":
+            selected.append(
+                {
+                    "metric_key": definition["metric_key"],
+                    "partition": partition,
+                    "population": population,
+                    "unit": definition["unit"],
+                    "value": observation["value"],
+                }
+            )
+    if selected:
+        return build_report_field(
+            value=selected,
+            availability="present",
+            origin="tool_output",
+            source_refs=refs,
+            as_of=as_of,
+        )
+    return build_report_field(
+        value=None,
+        availability=(
+            "not_matured" if "not_matured" in statuses else "unavailable"
+        ),
+        origin="tool_output",
+        source_refs=refs,
+        as_of=as_of,
+    )
+
+
+def _impact_cube_approval_summary(cube: Mapping[str, Any]) -> dict[str, Any]:
+    partitions = []
+    for partition in cube["partitions"]:
+        if partition["role"] != "approval":
+            continue
+        name = partition["name"]
+        matches = [
+            item
+            for item in cube["slices"]
+            if item["population_role"] == "approval"
+            and item["family"] == "overall"
+            and item["dimensions"]["partition"]
+            == {"kind": "value", "value": name}
+            and all(
+                item["dimensions"][dimension] == {
+                    "kind": "all",
+                    "value": None,
+                }
+                for dimension in (
+                    "month",
+                    "group",
+                    "segment",
+                    "new_action_bucket",
+                )
+            )
+        ]
+        if len(matches) != 1:
+            raise StrategyError(
+                "ImpactCube approval partition does not have one overall aggregate"
+            )
+        aggregate = matches[0]
+        partitions.append(
+            {
+                "partition": name,
+                "effect_stage": partition["effect_stage"],
+                "validation_status": partition["validation_status"],
+                "population": aggregate["population"]["value"],
+                "population_availability": aggregate["population"][
+                    "availability"
+                ],
+                "new": aggregate["new"]["value"],
+                "new_availability": aggregate["new"]["availability"],
+                "new_reason": aggregate["new"]["reason"],
+            }
+        )
+    if not partitions:
+        raise StrategyError("ImpactCube has no approval population aggregates")
+    return {
+        "cube_id": cube["cube_id"],
+        "strategy_type": cube["identity"]["strategy_type"],
+        "partitions": partitions,
+    }
+
+
+def _impact_cube_has_validation_and_oot(cube: Mapping[str, Any]) -> bool:
+    independently_validated = {
+        partition["name"]
+        for partition in cube["partitions"]
+        if partition["role"] == "approval"
+        and partition["validation_status"] == "independent_evidence"
+    }
+    return {"validation", "oot"} <= independently_validated
 
 
 def _missing_records(
@@ -2491,6 +2975,58 @@ def _validate_external_report_message_bindings(
         )
 
 
+def _validate_structured_project_context_message_binding(
+    *,
+    message,
+    request: Mapping[str, Any],
+) -> bool:
+    """Authenticate a manual-UI DTO committed by the bound user message.
+
+    Free-form Agent requests continue to ground file names in the persisted
+    utterance. Candidate Lab requests instead bind their validated typed DTO by
+    digest, keeping the visible message as a short action label.
+    """
+
+    try:
+        metadata = json.loads(str(message["metadata_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise StrategyError("bound user message metadata is invalid") from exc
+    if not isinstance(metadata, dict):
+        raise StrategyError("bound user message metadata must be an object")
+    manual_project_context = (
+        metadata.get("intent") == "strategy_request"
+        and metadata.get("request_source") == "manual_ui"
+        and metadata.get("workflow") == "strategy_project_context"
+    )
+    bound_hash = request["user_message_ref"].get(
+        "structured_request_sha256"
+    )
+    if not manual_project_context:
+        if bound_hash is not None:
+            raise StrategyError(
+                "structured request digest is not owned by this user message"
+            )
+        return False
+    metadata_hash = metadata.get("structured_request_sha256")
+    if not isinstance(bound_hash, str) or not isinstance(metadata_hash, str):
+        raise StrategyError(
+            "manual project-context message lacks a structured request digest"
+        )
+    expected_hash = strategy_project_context_structured_request_sha256(
+        as_of=request["as_of"],
+        scope=request.get("scope"),
+        business_context=request["business_context"],
+        explicit_unavailable=request["explicit_unavailable"],
+        external_report_filenames=request["external_report_filenames"],
+    )
+    if not (
+        hmac.compare_digest(bound_hash, metadata_hash)
+        and hmac.compare_digest(bound_hash, expected_hash)
+    ):
+        raise StrategyError("manual project-context structured request changed")
+    return True
+
+
 def _stream_regular_nofollow(
     path: Path,
     *,
@@ -2580,10 +3116,14 @@ def _artifact_row(row, *, task_id: str, tasks_root: Path) -> dict[str, Any]:
 
 
 def _read_verified_registered_artifact(
-    record: Mapping[str, Any], *, tasks_root: Path
+    record: Mapping[str, Any],
+    *,
+    tasks_root: Path,
+    max_bytes: int = MAX_PROJECT_CONTEXT_JSON_BYTES,
 ) -> bytes:
     data, digest = _read_regular_nofollow(
-        Path(record["path"]), max_bytes=MAX_PROJECT_CONTEXT_JSON_BYTES
+        Path(record["path"]),
+        max_bytes=max_bytes,
     )
     if not hmac.compare_digest(digest, record["content_hash"]):
         raise StrategyError("task artifact bytes do not match its registry hash")
@@ -2810,6 +3350,7 @@ def _verify_live_refs(
             "external_report",
             "sample_design",
             "pool_impact",
+            "impact_cube",
             "metric_definition",
             "metric_observation",
         }:
@@ -2832,14 +3373,19 @@ def _verify_live_refs(
 def _resolve_artifact_derived_ref(
     conn, *, tasks_root: Path, task_id: str, kind: str, ref_id: str, expected: str
 ) -> str | None:
+    artifact_kinds = (
+        SAMPLE_DESIGN_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+        POOL_IMPACT_ARTIFACT_KIND,
+        IMPACT_CUBE_ARTIFACT_KIND,
+        PROJECT_CONTEXT_EXTERNAL_ARTIFACT_KIND,
+    )
+    placeholders = ",".join("?" for _ in artifact_kinds)
     rows = conn.execute(
-        "SELECT * FROM task_artifacts WHERE task_id = ? AND kind IN (?, ?, ?)",
-        (
-            task_id,
-            SAMPLE_DESIGN_ARTIFACT_KIND,
-            POOL_IMPACT_ARTIFACT_KIND,
-            PROJECT_CONTEXT_EXTERNAL_ARTIFACT_KIND,
-        ),
+        "SELECT * FROM task_artifacts "
+        f"WHERE task_id = ? AND kind IN ({placeholders})",
+        (task_id, *artifact_kinds),
     ).fetchall()
     for row in rows:
         record = _artifact_row(row, task_id=task_id, tasks_root=tasks_root)
@@ -2852,7 +3398,15 @@ def _resolve_artifact_derived_ref(
                 max_bytes=MAX_EXTERNAL_REPORT_BYTES,
             )
         else:
-            raw = _read_verified_registered_artifact(record, tasks_root=tasks_root)
+            raw = _read_verified_registered_artifact(
+                record,
+                tasks_root=tasks_root,
+                max_bytes=(
+                    MAX_IMPACT_CUBE_JSON_BYTES
+                    if record["kind"] == IMPACT_CUBE_ARTIFACT_KIND
+                    else MAX_PROJECT_CONTEXT_JSON_BYTES
+                ),
+            )
         if kind == "task_artifact" and record["id"] == ref_id:
             return record["content_hash"]
         if (
@@ -2876,11 +3430,54 @@ def _resolve_artifact_derived_ref(
             for item in bundle["metric_observations"]:
                 if kind == "metric_observation" and item["observation_id"] == ref_id:
                     return item["content_hash"]
+        if (
+            record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+            and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+        ):
+            assert raw is not None
+            bundle_v2 = strategy_sample_design_v2_bundle_from_json(raw)
+            if (
+                canonical_strategy_sample_design_v2_bundle_json(
+                    bundle_v2
+                ).encode("utf-8")
+                != raw
+            ):
+                raise StrategyError(
+                    "native sample-design V2 artifact bytes are not canonical"
+                )
+            design_v2 = bundle_v2["sample_design"]
+            if (
+                kind == "sample_design"
+                and design_v2["sample_design_id"] == ref_id
+            ):
+                return design_v2["content_hash"]
+            for item in bundle_v2["metric_definitions"]:
+                if (
+                    kind == "metric_definition"
+                    and item["metric_definition_id"] == ref_id
+                ):
+                    return item["content_hash"]
+            for item in bundle_v2["metric_observations"]:
+                if (
+                    kind == "metric_observation"
+                    and item["observation_id"] == ref_id
+                ):
+                    return item["content_hash"]
         if record["kind"] == POOL_IMPACT_ARTIFACT_KIND:
             assert raw is not None
             assessment = validate_strategy_pool_impact_assessment(json.loads(raw))
             if kind == "pool_impact" and assessment["assessment_id"] == ref_id:
                 return assessment["content_hash"]
+        if record["kind"] == IMPACT_CUBE_ARTIFACT_KIND:
+            assert raw is not None
+            cube = validate_strategy_impact_cube(json.loads(raw))
+            if (
+                canonical_strategy_impact_cube_json(cube).encode("utf-8")
+                != raw
+            ):
+                raise StrategyError("ImpactCube artifact bytes are not canonical")
+            if kind == "impact_cube" and cube["cube_id"] == ref_id:
+                return cube["content_hash"]
     return None
 
 

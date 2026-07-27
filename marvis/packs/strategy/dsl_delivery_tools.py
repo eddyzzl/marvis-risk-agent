@@ -45,6 +45,13 @@ from marvis.packs.strategy.dsl_delivery import (
     verify_strategy_delivery_equivalence,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.materialized_runtime_requirements import (
+    hydrate_materialized_strategy_runtime_requirements,
+    load_materialized_strategy_runtime_requirements,
+    materialized_runtime_requirements_provenance,
+    require_materialized_strategy_runtime_requirements_on_connection,
+    validate_materialized_runtime_requirements_provenance,
+)
 from marvis.repositories.audit import _write_audit_row
 from marvis.repositories.strategy import _strategy_spec_hash_from_row
 from marvis.repositories.task_artifacts import (
@@ -117,6 +124,7 @@ _OUTPUT_FIELDS = frozenset(
         "not_deployed",
     }
 )
+_OPTIONAL_OUTPUT_FIELDS = frozenset({"runtime_requirements"})
 _ARTIFACT_FIELDS = frozenset(
     {
         "artifact_id",
@@ -158,6 +166,10 @@ _ARTIFACT_PROVENANCE_FIELDS = frozenset(
         "artifact_content_hash",
     }
 )
+_OPTIONAL_ARTIFACT_PROVENANCE_FIELDS = frozenset(
+    {"runtime_requirements"}
+)
+_UNSPECIFIED_RUNTIME_REQUIREMENTS = object()
 _FILE_CONTRACT = {
     "python": {
         "kind": DELIVERY_ARTIFACT_KINDS["python"],
@@ -1025,6 +1037,14 @@ def run_export_strategy_delivery(inputs, ctx, runtime) -> dict[str, Any]:
                 "expected_content_hash"
             ],
         )
+        runtime_requirements = source["runtime_requirements"]
+        frame = hydrate_materialized_strategy_runtime_requirements(
+            frame,
+            (runtime_requirements,),
+        )
+        requirements_provenance = source[
+            "runtime_requirements_provenance"
+        ]
         spec = source["spec"]
         equivalence = verify_strategy_delivery_equivalence(
             spec,
@@ -1043,12 +1063,19 @@ def run_export_strategy_delivery(inputs, ctx, runtime) -> dict[str, Any]:
             maximum_equivalence_rows=request["maximum_equivalence_rows"],
             equivalence=equivalence,
             content_hashes=content_hashes,
+            runtime_requirements=requirements_provenance,
         )
+        request_hash_payload: object = request
+        if requirements_provenance is not None:
+            request_hash_payload = {
+                "request": request,
+                "runtime_requirements": requirements_provenance,
+            }
         return _publish_delivery(
             runtime,
             task_id=task_id,
             request=request,
-            request_hash=_sha256_json(request),
+            request_hash=_sha256_json(request_hash_payload),
             source=source,
             delivery_id=delivery_id,
             equivalence=equivalence,
@@ -1073,7 +1100,19 @@ def validate_export_strategy_delivery_tool_output(
     """Validate a Tool output against the exact refs held by its caller."""
 
     obj = _canonical_object(value, "export_strategy_delivery output")
-    _exact_fields(obj, _OUTPUT_FIELDS, "export_strategy_delivery output")
+    output_fields = (
+        _OUTPUT_FIELDS | _OPTIONAL_OUTPUT_FIELDS
+        if "runtime_requirements" in obj
+        else _OUTPUT_FIELDS
+    )
+    _exact_fields(obj, output_fields, "export_strategy_delivery output")
+    runtime_requirements = (
+        validate_materialized_runtime_requirements_provenance(
+            obj["runtime_requirements"]
+        )
+        if "runtime_requirements" in obj
+        else None
+    )
     strategy_ref = _strategy_ref(obj["strategy_ref"])
     dataset_ref = _dataset_ref(obj["dataset_ref"])
     trusted_strategy = _strategy_ref(expected_strategy_ref)
@@ -1179,6 +1218,7 @@ def validate_export_strategy_delivery_tool_output(
         maximum_equivalence_rows=maximum_rows,
         equivalence=equivalence,
         content_hashes=content_hashes,
+        runtime_requirements=runtime_requirements,
     )
     if (
         not isinstance(obj["delivery_id"], str)
@@ -1198,6 +1238,8 @@ def validate_export_strategy_delivery_tool_output(
     obj["workspace_ref"] = workspace_ref
     obj["equivalence"] = equivalence
     obj["artifacts"] = artifacts
+    if runtime_requirements is not None:
+        obj["runtime_requirements"] = runtime_requirements
     return obj
 
 
@@ -1211,6 +1253,9 @@ def validate_strategy_delivery_artifact_records(
     expected_workspace_ref: Mapping[str, Any],
     expected_maximum_equivalence_rows: int,
     expected_equivalence: Mapping[str, Any],
+    expected_runtime_requirements: Mapping[str, Any] | None | object = (
+        _UNSPECIFIED_RUNTIME_REQUIREMENTS
+    ),
 ) -> dict[str, dict[str, str]]:
     """Authenticate the four registry rows behind a rendered delivery."""
 
@@ -1253,6 +1298,20 @@ def validate_strategy_delivery_artifact_records(
             "equivalence.sample_hash",
         ),
     }
+    infer_runtime_requirements = (
+        expected_runtime_requirements
+        is _UNSPECIFIED_RUNTIME_REQUIREMENTS
+    )
+    runtime_requirements = None
+    if (
+        not infer_runtime_requirements
+        and expected_runtime_requirements is not None
+    ):
+        runtime_requirements = (
+            validate_materialized_runtime_requirements_provenance(
+                expected_runtime_requirements
+            )
+        )
     projections: dict[str, dict[str, str]] = {}
     seen_ids: set[str] = set()
     for name, contract in _FILE_CONTRACT.items():
@@ -1316,9 +1375,33 @@ def validate_strategy_delivery_artifact_records(
             record["provenance"],
             f"strategy delivery artifact records.{name}.provenance",
         )
+        record_runtime_requirements = (
+            validate_materialized_runtime_requirements_provenance(
+                provenance["runtime_requirements"]
+            )
+            if "runtime_requirements" in provenance
+            else None
+        )
+        if infer_runtime_requirements:
+            if not projections:
+                runtime_requirements = record_runtime_requirements
+            elif record_runtime_requirements != runtime_requirements:
+                raise StrategyDeliveryToolError(
+                    "strategy delivery artifact runtime requirements drifted"
+                )
+        elif record_runtime_requirements != runtime_requirements:
+            raise StrategyDeliveryToolError(
+                "strategy delivery artifact runtime requirements drifted"
+            )
+        provenance_fields = (
+            _ARTIFACT_PROVENANCE_FIELDS
+            | _OPTIONAL_ARTIFACT_PROVENANCE_FIELDS
+            if runtime_requirements is not None
+            else _ARTIFACT_PROVENANCE_FIELDS
+        )
         _exact_fields(
             provenance,
-            _ARTIFACT_PROVENANCE_FIELDS,
+            provenance_fields,
             f"strategy delivery artifact records.{name}.provenance",
         )
         expected_provenance = {
@@ -1338,6 +1421,10 @@ def validate_strategy_delivery_artifact_records(
             "artifact_kind": contract["kind"],
             "artifact_content_hash": content_hash,
         }
+        if runtime_requirements is not None:
+            expected_provenance["runtime_requirements"] = (
+                runtime_requirements
+            )
         if provenance != expected_provenance:
             raise StrategyDeliveryToolError(
                 f"strategy delivery artifact record {name} provenance drifted"
@@ -1346,6 +1433,22 @@ def validate_strategy_delivery_artifact_records(
             "artifact_id": artifact_id,
             "content_hash": content_hash,
         }
+    expected_from_records = _delivery_id(
+        strategy_ref=strategy_ref,
+        dataset_ref=dataset_ref,
+        workspace_ref=workspace_ref,
+        maximum_equivalence_rows=maximum_rows,
+        equivalence=equivalence,
+        content_hashes={
+            name: projections[name]["content_hash"]
+            for name in _FILE_CONTRACT
+        },
+        runtime_requirements=runtime_requirements,
+    )
+    if expected_from_records != expected_delivery_id:
+        raise StrategyDeliveryToolError(
+            "strategy delivery artifact records do not bind the delivery id"
+        )
     return projections
 
 
@@ -1520,11 +1623,25 @@ def _load_exact_sources(
         raise StrategyDeliveryToolError(
             "dataset no longer matches the exact delivery request"
         ) from exc
+    runtime_requirements = load_materialized_strategy_runtime_requirements(
+        runtime,
+        task_id=task_id,
+        strategy_id=strategy_ref["strategy_id"],
+        dataset_id=dataset_ref["dataset_id"],
+        dataset_content_hash=dataset_ref["expected_content_hash"],
+    )
+    requirements_provenance = materialized_runtime_requirements_provenance(
+        candidate=runtime_requirements,
+        baseline=None,
+    )
     return {
+        "runtime": runtime,
         "spec": spec,
         "dataset_path": dataset_path,
         "dataset_root": Path(runtime.settings.datasets_dir).absolute(),
         "dataset_source_path": str(dataset.source_path),
+        "runtime_requirements": runtime_requirements,
+        "runtime_requirements_provenance": requirements_provenance,
     }
 
 
@@ -1678,6 +1795,7 @@ def _delivery_id(
     maximum_equivalence_rows: int,
     equivalence: Mapping[str, Any],
     content_hashes: Mapping[str, str],
+    runtime_requirements: Mapping[str, Any] | None = None,
 ) -> str:
     if set(content_hashes) != set(_FILE_CONTRACT):
         raise StrategyDeliveryToolError(
@@ -1702,6 +1820,12 @@ def _delivery_id(
             for name in _FILE_CONTRACT
         },
     }
+    if runtime_requirements is not None:
+        body["runtime_requirements"] = (
+            validate_materialized_runtime_requirements_provenance(
+                runtime_requirements
+            )
+        )
     return "strategy-delivery-" + _sha256_json(body)[:24]
 
 
@@ -1741,6 +1865,13 @@ def _publish_delivery(
         "not_adopted": True,
         "not_deployed": True,
     }
+    requirements_provenance = source[
+        "runtime_requirements_provenance"
+    ]
+    if requirements_provenance is not None:
+        provenance_base["runtime_requirements"] = (
+            requirements_provenance
+        )
     registry_replay = False
     records: list[dict[str, Any]]
     validated_output: dict[str, Any]
@@ -1800,6 +1931,7 @@ def _publish_delivery(
                 equivalence=equivalence,
                 records=records,
                 registry_replay=registry_replay,
+                runtime_requirements=requirements_provenance,
             )
             for name in _FILE_CONTRACT:
                 uow.require_final(
@@ -1814,6 +1946,7 @@ def _publish_delivery(
                 delivery_id=delivery_id,
                 equivalence=equivalence,
                 records=records,
+                runtime_requirements=requirements_provenance,
             )
     except Exception:
         uow.rollback()
@@ -1835,6 +1968,7 @@ def _build_validated_delivery_output(
     delivery_id: str,
     equivalence: Mapping[str, Any],
     records: list[Mapping[str, Any]],
+    runtime_requirements: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     output = {
         "schema_version": DELIVERY_TOOL_SCHEMA_VERSION,
@@ -1865,6 +1999,8 @@ def _build_validated_delivery_output(
         "not_adopted": True,
         "not_deployed": True,
     }
+    if runtime_requirements is not None:
+        output["runtime_requirements"] = dict(runtime_requirements)
     return validate_export_strategy_delivery_tool_output(
         output,
         expected_task_id=task_id,
@@ -2738,6 +2874,13 @@ def _revalidate_sources_on_connection(
         raise StrategyDeliveryToolError(
             "DataWorkspace no longer matches the exact delivery request"
         )
+    runtime_requirements = source["runtime_requirements"]
+    if runtime_requirements is not None:
+        require_materialized_strategy_runtime_requirements_on_connection(
+            conn,
+            source["runtime"],
+            runtime_requirements,
+        )
     _require_authenticated_file_hash(
         source["dataset_path"],
         root=source["dataset_root"],
@@ -2921,6 +3064,7 @@ def _write_or_require_delivery_audit(
     equivalence: Mapping[str, Any],
     records: list[Mapping[str, Any]],
     registry_replay: bool,
+    runtime_requirements: Mapping[str, Any] | None,
 ) -> None:
     detail = {
         "task_id": task_id,
@@ -2933,6 +3077,12 @@ def _write_or_require_delivery_audit(
         "not_adopted": True,
         "not_deployed": True,
     }
+    if runtime_requirements is not None:
+        detail["runtime_requirements"] = (
+            validate_materialized_runtime_requirements_provenance(
+                runtime_requirements
+            )
+        )
     rows = conn.execute(
         """
         SELECT kind, target_ref, inputs_hash, actor, outcome, detail_json

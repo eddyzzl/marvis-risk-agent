@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from marvis.orchestrator.contracts import PostCheck
 from marvis.orchestrator.templates.sample import BUILTIN_TEMPLATES
 from marvis.orchestrator.templates.strategy import STRATEGY_POOL_VALIDATION
+from marvis.plugins.loader import load_manifest
 from marvis.plugins.manifest import ToolRef
 
 
@@ -48,3 +51,21 @@ def test_pool_validation_template_keeps_only_two_controls_user_owned() -> None:
         "population": "{slot:population}",
         "comparison_mode": "{slot:comparison_mode}",
     }
+
+
+def test_pool_validation_manifest_accepts_every_v2_strategy_type() -> None:
+    packs_root = Path(__file__).parents[1] / "marvis" / "packs"
+    manifest = load_manifest(packs_root / "strategy", builtin=True)
+    tool = next(
+        item
+        for item in manifest.tools
+        if item.name == "measure_strategy_pool_validation"
+    )
+
+    assert tool.input_schema["properties"]["strategy_type"]["enum"] == [
+        "approval",
+        "reject",
+        "limit",
+        "pricing",
+        "segmentation",
+    ]

@@ -95,6 +95,7 @@ from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
 from marvis.packs.strategy.interactive_tree_frontier_selection import (
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
     INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
     interactive_tree_frontier_selection_to_verified_candidate_fragment,
 )
@@ -106,6 +107,7 @@ from marvis.packs.strategy.interactive_tree_frontier_tools import (
 from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL,
     interactive_tree_frontier_group_selection_to_verified_candidate_fragment,
 )
@@ -117,6 +119,7 @@ from marvis.packs.strategy.interactive_tree_frontier_group_tools import (
 from marvis.packs.strategy.interactive_tree_tools import (
     INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
     INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2,
     INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
     VerifiedInteractiveTreeRevision,
 )
@@ -3063,15 +3066,30 @@ def _load_candidate_lineage(
         INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
         INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
     )
+    interactive_frontier_v2_triple = (
+        INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
+        INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
+        INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
+    )
     interactive_frontier_group_triple = (
         INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
         INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL,
         INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION,
     )
+    interactive_frontier_group_v2_triple = (
+        INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
+        INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL,
+        INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
+    )
     interactive_revision_triple = (
         INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
         INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
         INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION,
+    )
+    interactive_revision_v2_triple = (
+        INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+        INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+        INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2,
     )
     voting_triple = (
         VOTING_CANDIDATE_ARTIFACT_KIND,
@@ -3128,7 +3146,7 @@ def _load_candidate_lineage(
             expected_asset_hash=expected_asset_hash,
             cache=cache if cache is not None else _LineageCache.empty(),
         )
-    if triple == interactive_frontier_triple:
+    if triple in {interactive_frontier_triple, interactive_frontier_v2_triple}:
         return _load_interactive_tree_candidate_lineage(
             runtime,
             task_id=task_id,
@@ -3138,7 +3156,10 @@ def _load_candidate_lineage(
             expected_asset_hash=expected_asset_hash,
             cache=cache if cache is not None else _LineageCache.empty(),
         )
-    if triple == interactive_frontier_group_triple:
+    if triple in {
+        interactive_frontier_group_triple,
+        interactive_frontier_group_v2_triple,
+    }:
         return _load_interactive_tree_group_candidate_lineage(
             runtime,
             task_id=task_id,
@@ -3148,7 +3169,7 @@ def _load_candidate_lineage(
             expected_asset_hash=expected_asset_hash,
             cache=cache if cache is not None else _LineageCache.empty(),
         )
-    if triple == interactive_revision_triple:
+    if triple in {interactive_revision_triple, interactive_revision_v2_triple}:
         raise StrategyError(
             "complete interactive-tree revision artifacts cannot be admitted "
             "directly; materialize one frontier selection first"

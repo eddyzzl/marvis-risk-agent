@@ -40,6 +40,15 @@ from marvis.packs.strategy.candidate_stability_tools import (
     ARTIFACT_SCHEMA_VERSION as CANDIDATE_STABILITY_ARTIFACT_SCHEMA_VERSION,
     StrategyCandidateStabilityArtifactBinding,
 )
+from marvis.packs.strategy.cross_candidate_search import (
+    CROSS_CANDIDATE_SEARCH_PRODUCER_VERSION,
+    canonical_cross_candidate_search_result_json,
+    validate_cross_candidate_search_result,
+)
+from marvis.packs.strategy.cross_candidate_search_tools import (
+    CROSS_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
+    CrossCandidateSearchArtifactBinding,
+)
 from marvis.packs.strategy.model_evidence import (
     canonical_strategy_model_evidence_bundle_json,
     validate_strategy_model_evidence_bundle,
@@ -84,8 +93,12 @@ from marvis.packs.strategy.pool_stability_tools import (
     StrategyPoolStabilityArtifactBinding,
 )
 from marvis.packs.strategy.pool_validation import (
+    STRATEGY_POOL_VALIDATION_PRODUCER_VERSION,
     canonical_strategy_pool_validation_json,
     validate_strategy_pool_validation_evidence,
+)
+from marvis.packs.strategy.pool_validation_typed import (
+    STRATEGY_POOL_TYPED_VALIDATION_SCHEMA_VERSION,
 )
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
@@ -149,6 +162,7 @@ from marvis.packs.strategy.voting_candidate_search_tools import (
     VotingCandidateSearchArtifactBinding,
 )
 from marvis.repositories.task_artifacts import stable_task_artifact_id
+from marvis.strategy_lifecycle import resolve_asset_status
 
 
 _StrategySampleDesignV2Binding = (
@@ -163,6 +177,10 @@ _MAX_SCORECARD_REPORT_TABLE_JSON_BYTES = 8 * 1024 * 1024
 _MAX_VOTING_SEARCH_REPORT_COMBINATIONS = 20
 _VOTING_SEARCH_REPORT_TITLE = (
     "Voting候选组合搜索结果（开发回测，仅供选择，未构建/未入池）"
+)
+_MAX_CROSS_SEARCH_REPORT_PAIRS = 20
+_CROSS_SEARCH_REPORT_TITLE = (
+    "Cross候选字段对搜索结果（开发回测，仅供明确选择，未构建/未入池）"
 )
 _VOTING_SEARCH_PROVENANCE_FIELDS = frozenset(
     {
@@ -185,6 +203,43 @@ _VOTING_SEARCH_PROVENANCE_FIELDS = frozenset(
 )
 _VOTING_SEARCH_LIFECYCLE = {
     "mutated_pool": False,
+    "selected": False,
+    "admitted": False,
+    "applied": False,
+    "adopted": False,
+    "deployed": False,
+}
+_CROSS_SEARCH_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "search_id",
+        "search_content_hash",
+        "request_hash",
+        "source_artifact_id",
+        "source_artifact_content_hash",
+        "candidate_id",
+        "evidence_hash",
+        "dataset_id",
+        "dataset_content_hash",
+        "registry_metadata_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "sample_design_ref",
+        "sample_context_hash",
+        "sample_partition",
+        "target_col",
+        "drop_nan_labels",
+        "nan_labels_dropped",
+        "labeled_count",
+        "features",
+        "max_pairs",
+        "lifecycle",
+    }
+)
+_CROSS_SEARCH_LIFECYCLE = {
     "selected": False,
     "admitted": False,
     "applied": False,
@@ -313,6 +368,25 @@ def validate_candidate_stability_report_compatibility(
     return stability
 
 
+def validate_cross_candidate_search_report_compatibility(
+    *,
+    cross_candidate_search: CrossCandidateSearchArtifactBinding,
+    sample_design: _StrategySampleDesignV2Binding,
+) -> dict[str, Any]:
+    """Authenticate aggregate Cross search evidence for one exact V2 sample."""
+
+    sample = _authenticated_sample_design(sample_design)
+    _require_same_task(
+        sample_design.task_id,
+        cross_candidate_search=cross_candidate_search,
+    )
+    return _authenticated_cross_candidate_search(
+        cross_candidate_search,
+        sample_binding=sample_design,
+        sample=sample,
+    )
+
+
 def build_strategy_report_bundle_source_inputs(
     *,
     project_context: StrategyProjectContextArtifactBinding,
@@ -324,11 +398,13 @@ def build_strategy_report_bundle_source_inputs(
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None = None,
     pool_stability: StrategyPoolStabilityArtifactBinding | None = None,
     voting_candidate_search: VotingCandidateSearchArtifactBinding | None = None,
+    cross_candidate_search: CrossCandidateSearchArtifactBinding | None = None,
     pool_impact: StrategyPoolImpactArtifactBinding | None = None,
     impact_cube: StrategyImpactCubeArtifactBinding | None = None,
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None = None,
     training_evidence: ModelingTrainingEvidenceArtifactBinding | None = None,
     score_evidence: ModelScoreEvidenceArtifactBinding | None = None,
+    strategy_lifecycle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic evidence-only kwargs for ``build_strategy_report_bundle``.
 
@@ -347,6 +423,7 @@ def build_strategy_report_bundle_source_inputs(
         candidate_stability=candidate_stability,
         pool_stability=pool_stability,
         voting_candidate_search=voting_candidate_search,
+        cross_candidate_search=cross_candidate_search,
         pool_impact=(
             None if impact_cube is not None else pool_impact
         ),
@@ -382,6 +459,15 @@ def build_strategy_report_bundle_source_inputs(
             pool_binding=candidate_pool,
             pool=pool,
             compiled_design=design,
+        )
+    )
+    cross_search = (
+        None
+        if cross_candidate_search is None
+        else _authenticated_cross_candidate_search(
+            cross_candidate_search,
+            sample_binding=sample_design,
+            sample=sample,
         )
     )
     try:
@@ -497,6 +583,11 @@ def build_strategy_report_bundle_source_inputs(
         candidate_pool.artifact_id,
         candidate_pool.artifact_content_hash,
     )
+    lifecycle = _strategy_lifecycle_projection(
+        strategy_lifecycle,
+        pool=pool,
+        pool_ref=pool_ref,
+    )
     stability_source_ref = (
         None
         if stability is None
@@ -512,6 +603,15 @@ def build_strategy_report_bundle_source_inputs(
             "voting_candidate_search",
             voting_candidate_search.artifact_id,
             voting_candidate_search.artifact_content_hash,
+        )
+    )
+    cross_search_ref = (
+        None
+        if cross_candidate_search is None
+        else _artifact_ref(
+            "cross_candidate_search",
+            cross_candidate_search.artifact_id,
+            cross_candidate_search.artifact_content_hash,
         )
     )
     validation_refs = {
@@ -619,7 +719,10 @@ def build_strategy_report_bundle_source_inputs(
             stability_source_ref=refs.stability_source,
             voting_search=voting_search,
             voting_search_ref=voting_search_ref,
+            cross_search=cross_search,
+            cross_search_ref=cross_search_ref,
             dataset_ref=_dataset_ref_from_sample(sample),
+            strategy_lifecycle=lifecycle,
         ),
     }
     allow_oot_validated = not _has_validation_blocker(
@@ -662,6 +765,7 @@ def build_strategy_report_bundle_source_inputs(
             pool_ref=refs.pool,
             impact_ref=refs.impact,
             allow_oot_validated=allow_oot_validated,
+            strategy_lifecycle=lifecycle,
         )
         if cube is not None
         else _final_document_section(
@@ -670,6 +774,7 @@ def build_strategy_report_bundle_source_inputs(
             impact=impact,
             pool_ref=refs.pool,
             impact_ref=refs.impact,
+            strategy_lifecycle=lifecycle,
         )
     )
     final_document = _with_pool_validation_final_document(
@@ -778,6 +883,16 @@ def build_strategy_report_bundle_source_inputs(
                     []
                     if voting_search_ref is None
                     else [voting_search_ref]
+                ),
+                *(
+                    []
+                    if cross_search_ref is None
+                    else [cross_search_ref]
+                ),
+                *(
+                    []
+                    if strategy_lifecycle is None
+                    else [lifecycle["source_ref"]]
                 ),
                 *validation_refs.values(),
                 *(
@@ -1299,7 +1414,7 @@ def _require_pool_validation_provenance(
         for key in ("month_col", "loan_amount_col", "overdue_amount_col")
     }
     expected_scalars = {
-        "producer_version": evidence["producer_version"],
+        "producer_version": STRATEGY_POOL_VALIDATION_PRODUCER_VERSION,
         "task_id": identity["task_id"],
         "evidence_id": evidence["evidence_id"],
         "evidence_content_hash": evidence["content_hash"],
@@ -1625,7 +1740,7 @@ def _authenticated_voting_candidate_search(
         or (
             source_mode == "legacy_anchored"
             and execution_sample.split_column
-            != semantics["split_definition"]["column"]
+            != getattr(execution_sample._legacy, "split_column", None)
         )
         or (
             source_mode == "native_active_dataset"
@@ -1824,6 +1939,203 @@ def _authenticated_voting_candidate_search(
     if provenance != expected_provenance:
         raise StrategyReportBundleError(
             "Voting search artifact provenance identity changed"
+        )
+    return result
+
+
+def _authenticated_cross_candidate_search(
+    binding: CrossCandidateSearchArtifactBinding,
+    *,
+    sample_binding: _StrategySampleDesignV2Binding,
+    sample: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Authenticate one aggregate Cross search against the report sample only."""
+
+    _require_binding_type(
+        binding,
+        CrossCandidateSearchArtifactBinding,
+        "Cross search",
+    )
+    try:
+        result = validate_cross_candidate_search_result(binding.result)
+    except StrategyError as exc:
+        raise StrategyReportBundleError(
+            "Cross search result evidence is invalid"
+        ) from exc
+    if result != binding.result or binding.task_id != sample_binding.task_id:
+        raise StrategyReportBundleError(
+            "Cross search binding identity changed"
+        )
+    _require_canonical_artifact_hash(
+        binding.artifact_content_hash,
+        canonical_cross_candidate_search_result_json(result),
+        "Cross search",
+    )
+    try:
+        canonical_provenance = json.dumps(
+            binding.artifact_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        provenance = json.loads(canonical_provenance)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyReportBundleError(
+            "Cross search artifact provenance is invalid"
+        ) from exc
+    if (
+        not isinstance(provenance, dict)
+        or set(provenance) != _CROSS_SEARCH_PROVENANCE_FIELDS
+        or binding.artifact_provenance_json != canonical_provenance
+    ):
+        raise StrategyReportBundleError(
+            "Cross search artifact provenance fields changed"
+        )
+
+    execution = binding.sample_binding
+    _require_binding_type(
+        execution,
+        StrategyRiskDevelopmentExecutionBinding,
+        "Cross search risk-development sample",
+    )
+    design = sample["sample_design"]
+    identity = design["identity"]
+    dataset_ref = identity["dataset_ref"]
+    workspace_ref = identity["workspace_ref"]
+    target = design["target_selector"]
+    semantics = design["sample_semantics"]
+    fields = semantics["field_bindings"]
+    source_mode = resolve_strategy_sample_design_v2_source_mode(
+        design,
+        capability="physical_v2",
+        consumer="strategy_report_bundle_cross_search",
+    )
+    expected_execution_ref = _sample_risk_development_ref(sample_binding)
+    risk_population = next(
+        (
+            item
+            for item in sample["populations"]
+            if item["role"] == "risk"
+        ),
+        None,
+    )
+    if risk_population is None:
+        raise StrategyReportBundleError(
+            "Cross search sample-design risk population is missing"
+        )
+    development = next(
+        (
+            item
+            for item in risk_population["partitions"]
+            if item["name"] == "development"
+        ),
+        None,
+    )
+    if development is None:
+        raise StrategyReportBundleError(
+            "Cross search sample-design development population is missing"
+        )
+    expected_development_count = development["row_count"]
+    if (
+        execution.to_ref_dict() != expected_execution_ref
+        or execution.reference.partition
+        != expected_execution_ref["partition"]
+        or execution.source_mode != source_mode
+        or execution.task_id != sample_binding.task_id
+        or execution.dataset_id != dataset_ref["dataset_id"]
+        or execution.dataset_content_hash != dataset_ref["content_hash"]
+        or execution.workspace_revision != workspace_ref["revision"]
+        or execution.workspace_generation != workspace_ref["generation"]
+        or execution.semantic_mapping_hash
+        != workspace_ref["semantic_mapping_hash"]
+        or execution.target_col != target["column"]
+        or execution.target_bad_value != target["bad_value"]
+        or execution.drop_nan_labels != target["drop_missing"]
+        or (
+            source_mode == "legacy_anchored"
+            and execution.split_column
+            != getattr(execution._legacy, "split_column", None)
+        )
+        or (
+            source_mode == "native_active_dataset"
+            and execution.split_column is not None
+        )
+        or execution.development_population_count
+        != expected_development_count
+        or execution.active_population_count
+        != (
+            risk_population["total_count"]
+            if source_mode == "legacy_anchored"
+            else sample_binding.membership["header"]["row_count"]
+        )
+        or execution.month_col != fields["month_field"]
+        or execution.weight_col != fields["weight_field"]
+        or execution.loan_amount_col != fields["loan_amount_field"]
+        or execution.overdue_amount_col != fields["overdue_amount_field"]
+    ):
+        raise StrategyReportBundleError(
+            "Cross search risk-development sample, target, or workspace changed"
+        )
+
+    dataset = binding.dataset
+    source = binding.source
+    if (
+        getattr(dataset, "task_id", None) != sample_binding.task_id
+        or getattr(dataset, "dataset_id", None) != dataset_ref["dataset_id"]
+        or getattr(dataset, "content_hash", None) != dataset_ref["content_hash"]
+        or getattr(source, "task_id", None) != sample_binding.task_id
+    ):
+        raise StrategyReportBundleError(
+            "Cross search dataset or source belongs to another sample"
+        )
+    dropped = provenance["nan_labels_dropped"]
+    if (
+        isinstance(dropped, bool)
+        or not isinstance(dropped, int)
+        or dropped < 0
+        or result["population"]["row_count"] + dropped
+        != expected_development_count
+        or (dropped > 0 and not execution.drop_nan_labels)
+    ):
+        raise StrategyReportBundleError(
+            "Cross search labelled population binding changed"
+        )
+    expected_provenance = {
+        "schema_version": CROSS_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": CROSS_CANDIDATE_SEARCH_PRODUCER_VERSION,
+        "task_id": binding.task_id,
+        "search_id": result["search_id"],
+        "search_content_hash": result["content_hash"],
+        "request_hash": result["request_hash"],
+        "source_artifact_id": getattr(source, "artifact_id", None),
+        "source_artifact_content_hash": getattr(source, "content_hash", None),
+        "candidate_id": result["source"]["candidate_id"],
+        "evidence_hash": result["source"]["evidence_hash"],
+        "dataset_id": getattr(dataset, "dataset_id", None),
+        "dataset_content_hash": getattr(dataset, "content_hash", None),
+        "registry_metadata_hash": getattr(
+            dataset,
+            "registry_metadata_hash",
+            None,
+        ),
+        "workspace_revision": execution.workspace_revision,
+        "workspace_generation": execution.workspace_generation,
+        "semantic_mapping_hash": execution.semantic_mapping_hash,
+        "sample_design_ref": execution.to_ref_dict(),
+        "sample_context_hash": result["source"]["sample_context_hash"],
+        "sample_partition": "risk/development",
+        "target_col": execution.target_col,
+        "drop_nan_labels": execution.drop_nan_labels,
+        "nan_labels_dropped": dropped,
+        "labeled_count": result["population"]["row_count"],
+        "features": result["configuration"]["features"],
+        "max_pairs": result["configuration"]["max_pairs"],
+        "lifecycle": _CROSS_SEARCH_LIFECYCLE,
+    }
+    if provenance != expected_provenance:
+        raise StrategyReportBundleError(
+            "Cross search artifact provenance identity changed"
         )
     return result
 
@@ -3044,6 +3356,109 @@ def _model_section(
     )
 
 
+def _strategy_lifecycle_projection(
+    value: Mapping[str, Any] | None,
+    *,
+    pool: Mapping[str, Any],
+    pool_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    if value is None:
+        return {
+            "strategy_status": "candidate",
+            "adoption_status": "not_adopted",
+            "deployment_status": "not_deployed",
+            "creates_strategy": False,
+            "source_ref": dict(pool_ref),
+        }
+    fields = {
+        "strategy_id",
+        "strategy_version",
+        "strategy_type",
+        "status",
+        "asset_status",
+        "source_ref",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise StrategyReportBundleError(
+            "strategy lifecycle projection fields are invalid"
+        )
+    text_fields = {}
+    for field in fields - {"source_ref"}:
+        item = value[field]
+        if not isinstance(item, str) or not item or item != item.strip():
+            raise StrategyReportBundleError(
+                f"strategy lifecycle {field} is invalid"
+            )
+        text_fields[field] = item
+    if (
+        text_fields["strategy_type"] != pool["strategy_type"]
+        or not text_fields["strategy_version"].isdigit()
+        or int(text_fields["strategy_version"]) < 1
+    ):
+        raise StrategyReportBundleError(
+            "strategy lifecycle identity differs from the Candidate Pool"
+        )
+    try:
+        asset_status = resolve_asset_status(
+            text_fields["status"],
+            text_fields["asset_status"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise StrategyReportBundleError(
+            "strategy lifecycle status pair is invalid"
+        ) from exc
+    source = value["source_ref"]
+    if not isinstance(source, Mapping):
+        raise StrategyReportBundleError(
+            "strategy lifecycle source reference is invalid"
+        )
+    source_ref = _artifact_ref(
+        str(source.get("kind")),
+        str(source.get("ref_id")),
+        str(source.get("content_hash")),
+    )
+    lifecycle_body = {
+        field: text_fields[field]
+        for field in (
+            "strategy_id",
+            "strategy_version",
+            "strategy_type",
+            "status",
+            "asset_status",
+        )
+    }
+    expected_hash = hashlib.sha256(
+        json.dumps(
+            lifecycle_body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        source_ref["kind"] != "strategy_lifecycle"
+        or source_ref["ref_id"] != text_fields["strategy_id"]
+        or source_ref["content_hash"] != expected_hash
+    ):
+        raise StrategyReportBundleError(
+            "strategy lifecycle source identity changed"
+        )
+    adopted_local = (
+        text_fields["status"] == "adopted"
+        and asset_status == "adopted_local"
+    )
+    return {
+        "strategy_status": text_fields["status"],
+        "adoption_status": (
+            "adopted" if adopted_local else "not_adopted"
+        ),
+        "deployment_status": asset_status,
+        "creates_strategy": True,
+        "source_ref": source_ref,
+    }
+
+
 def _candidate_section(
     *,
     pool: Mapping[str, Any],
@@ -3057,9 +3472,13 @@ def _candidate_section(
     stability_source_ref: Mapping[str, str] | None,
     voting_search: Mapping[str, Any] | None,
     voting_search_ref: Mapping[str, str] | None,
+    cross_search: Mapping[str, Any] | None,
+    cross_search_ref: Mapping[str, str] | None,
     dataset_ref: Mapping[str, str],
+    strategy_lifecycle: Mapping[str, Any],
 ) -> dict[str, Any]:
     source_ref = pool_ref
+    lifecycle_ref = strategy_lifecycle["source_ref"]
     candidate_rows = [
         {
             "row_id": entry["entry_id"],
@@ -3079,6 +3498,14 @@ def _candidate_section(
                     entry["source"]["validation_status"],
                     source_ref,
                 ),
+                "adoption_status": _present_field(
+                    strategy_lifecycle["adoption_status"],
+                    lifecycle_ref,
+                ),
+                "deployment_status": _present_field(
+                    strategy_lifecycle["deployment_status"],
+                    lifecycle_ref,
+                ),
             },
         }
         for entry in pool["entries"]
@@ -3096,9 +3523,11 @@ def _candidate_section(
             _column("action", "动作"),
             _column("candidate_stage", "候选阶段"),
             _column("validation_status", "验证状态"),
+            _column("adoption_status", "采纳状态"),
+            _column("deployment_status", "本地资产状态"),
         ],
         rows=candidate_rows,
-        source_refs=[source_ref],
+        source_refs=_dedupe_refs([source_ref, lifecycle_ref]),
     )
     strategy_rows = [
         {
@@ -3107,8 +3536,18 @@ def _candidate_section(
                 "priority": _present_field(item["priority"], source_ref),
                 "rule_id": _present_field(item["rule_id"], source_ref),
                 "action": _present_field(item["action"]["type"], source_ref),
-                "adoption_status": _present_field("not_adopted", source_ref),
-                "deployment_status": _present_field("not_deployed", source_ref),
+                "strategy_status": _present_field(
+                    strategy_lifecycle["strategy_status"],
+                    lifecycle_ref,
+                ),
+                "adoption_status": _present_field(
+                    strategy_lifecycle["adoption_status"],
+                    lifecycle_ref,
+                ),
+                "deployment_status": _present_field(
+                    strategy_lifecycle["deployment_status"],
+                    lifecycle_ref,
+                ),
             },
         }
         for item in compiled_design["strategy_spec"]["rules"]
@@ -3123,11 +3562,12 @@ def _candidate_section(
             _column("priority", "优先级"),
             _column("rule_id", "规则ID"),
             _column("action", "动作"),
+            _column("strategy_status", "策略状态"),
             _column("adoption_status", "采纳状态"),
-            _column("deployment_status", "部署状态"),
+            _column("deployment_status", "本地资产状态"),
         ],
         rows=strategy_rows,
-        source_refs=[source_ref],
+        source_refs=_dedupe_refs([source_ref, lifecycle_ref]),
     )
     summary_fields = [
         _named(
@@ -3151,14 +3591,28 @@ def _candidate_section(
             _present_field(compiled_design["design_hash"], source_ref),
         ),
         _named(
+            "strategy_status",
+            "策略状态",
+            _present_field(
+                strategy_lifecycle["strategy_status"],
+                lifecycle_ref,
+            ),
+        ),
+        _named(
             "adoption_status",
             "采纳状态",
-            _present_field("not_adopted", source_ref),
+            _present_field(
+                strategy_lifecycle["adoption_status"],
+                lifecycle_ref,
+            ),
         ),
         _named(
             "deployment_status",
-            "部署状态",
-            _present_field("not_deployed", source_ref),
+            "本地资产状态",
+            _present_field(
+                strategy_lifecycle["deployment_status"],
+                lifecycle_ref,
+            ),
         ),
     ]
     tables = [candidates, strategy]
@@ -3194,6 +3648,7 @@ def _candidate_section(
     section_refs = _dedupe_refs(
         [
             pool_ref,
+            lifecycle_ref,
             *scorecard_report["artifact_refs"],
             *scorecard_backtest_refs,
             *scorecard_frozen_refs,
@@ -3301,6 +3756,7 @@ def _candidate_section(
         section_refs = _dedupe_refs(
             [
                 pool_ref,
+                lifecycle_ref,
                 *scorecard_report["artifact_refs"],
                 *scorecard_backtest_refs,
                 *scorecard_frozen_refs,
@@ -3338,6 +3794,37 @@ def _candidate_section(
                 *section_refs,
                 dataset_ref,
                 voting_search_ref,
+            ]
+        )
+    if cross_search is not None:
+        if cross_search_ref is None:
+            raise StrategyReportBundleError(
+                "Cross search projection requires an authenticated result reference"
+            )
+        cross_projection = _cross_search_report_projection(
+            cross_search,
+            source_ref=cross_search_ref,
+        )
+        summary_fields.extend(cross_projection["summary_fields"])
+        tables.append(cross_projection["table"])
+        stage_evidence.append(
+            {
+                "effect_stage": "backtested",
+                "population": "risk",
+                "partition": "development",
+                "binding": {
+                    "kind": "development_backtest",
+                    "dataset_ref": dataset_ref,
+                    "frozen_artifact_ref": cross_search_ref,
+                    "result_ref": cross_search_ref,
+                },
+            }
+        )
+        section_refs = _dedupe_refs(
+            [
+                *section_refs,
+                dataset_ref,
+                cross_search_ref,
             ]
         )
     return build_strategy_report_section(
@@ -3451,6 +3938,98 @@ def _voting_search_report_projection(
                 "voting_search_displayed",
                 "Voting报告展示组合数",
                 _present_field(len(combinations), source_ref),
+            ),
+        ],
+        "table": table,
+    }
+
+
+def _cross_search_report_projection(
+    result: Mapping[str, Any],
+    *,
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    pairs = list(result["pairs"][:_MAX_CROSS_SEARCH_REPORT_PAIRS])
+    fields = (
+        "pair_id",
+        "x_feature",
+        "x_method",
+        "y_feature",
+        "y_method",
+        "x_axis_iv",
+        "y_axis_iv",
+        "cross_total_iv",
+        "interaction_gain_iv",
+        "cell_count",
+        "empty_cell_count",
+        "empty_cell_share",
+        "min_nonempty_cell_count",
+        "eligible",
+        "rank",
+    )
+    rows = [
+        {
+            "row_id": pair["pair_id"],
+            "cells": {
+                field: _present_field(pair[field], source_ref)
+                for field in fields
+            },
+        }
+        for pair in pairs
+    ]
+    table = build_strategy_report_table(
+        table_id="cross_candidate_search_pairs",
+        title=_CROSS_SEARCH_REPORT_TITLE,
+        sheet_key="appendix_cross_search",
+        granularity="aggregate",
+        content_class="metric_summary",
+        effect_stage="backtested",
+        columns=[
+            _column("pair_id", "字段对ID"),
+            _column("x_feature", "X字段"),
+            _column("x_method", "X分箱方法"),
+            _column("y_feature", "Y字段"),
+            _column("y_method", "Y分箱方法"),
+            _column("x_axis_iv", "X轴IV"),
+            _column("y_axis_iv", "Y轴IV"),
+            _column("cross_total_iv", "交叉总IV"),
+            _column("interaction_gain_iv", "交互增益IV"),
+            _column("cell_count", "单元格数"),
+            _column("empty_cell_count", "空单元格数"),
+            _column("empty_cell_share", "空单元格占比"),
+            _column("min_nonempty_cell_count", "最小非空单元格样本数"),
+            _column("eligible", "是否满足构建条件"),
+            _column("rank", "稳定排序"),
+        ],
+        rows=rows,
+        source_refs=[source_ref],
+    )
+    return {
+        "summary_fields": [
+            _named(
+                "cross_search_search_space",
+                "Cross搜索空间",
+                _present_field(result["search_space"], source_ref),
+            ),
+            _named(
+                "cross_search_evaluated",
+                "Cross已评估字段对数",
+                _present_field(result["evaluated"], source_ref),
+            ),
+            _named(
+                "cross_search_truncated",
+                "Cross搜索是否截断",
+                _present_field(result["truncated"], source_ref),
+            ),
+            _named(
+                "cross_search_eligible",
+                "Cross可构建字段对数",
+                _present_field(result["eligible"], source_ref),
+            ),
+            _named(
+                "cross_search_displayed",
+                "Cross报告展示字段对数",
+                _present_field(len(pairs), source_ref),
             ),
         ],
         "table": table,
@@ -4301,66 +4880,148 @@ def _with_pool_validation_evidence(
 ) -> dict[str, Any]:
     if not validations:
         return dict(section)
+    typed_validation = (
+        validations[0][1]["schema_version"]
+        == STRATEGY_POOL_TYPED_VALIDATION_SCHEMA_VERSION
+    )
+    if any(
+        (
+            evidence["schema_version"]
+            == STRATEGY_POOL_TYPED_VALIDATION_SCHEMA_VERSION
+        )
+        != typed_validation
+        for _binding, evidence in validations
+    ):
+        raise StrategyReportBundleError(
+            "Pool validation evidence versions cannot be mixed"
+        )
     summary_fields = list(section["summary_fields"])
     for _binding, evidence in validations:
         partition = evidence["partition"]
         source_ref = validation_refs[partition]
         population = evidence["population_metrics"]
-        metrics = evidence["overall"]["actions"]["metrics"]
-        summary_fields.extend(
-            [
-                _named(
-                    f"pool_{partition}_validation_status",
-                    f"{partition} 独立重放状态",
-                    _present_field(
-                        evidence["lifecycle"]["validation_status"],
-                        source_ref,
+        if typed_validation:
+            risk = evidence["risk_summary"]
+            summary_fields.extend(
+                [
+                    _named(
+                        f"pool_{partition}_validation_status",
+                        f"{partition} 独立重放状态",
+                        _present_field(
+                            evidence["lifecycle"]["validation_status"],
+                            source_ref,
+                        ),
                     ),
-                ),
-                _named(
-                    f"pool_{partition}_population_count",
-                    f"{partition} 独立重放样本数",
-                    _present_field(
-                        population["population_count"],
-                        source_ref,
+                    _named(
+                        f"pool_{partition}_strategy_type",
+                        f"{partition} 独立重放策略类型",
+                        _present_field(
+                            evidence["identity"]["strategy_type"],
+                            source_ref,
+                        ),
                     ),
-                ),
-                _named(
-                    f"pool_{partition}_label_coverage",
-                    f"{partition} 标签覆盖率",
-                    _present_field(
-                        population["label_coverage"],
-                        source_ref,
+                    _named(
+                        f"pool_{partition}_population_count",
+                        f"{partition} 独立重放样本数",
+                        _present_field(
+                            population["population_count"],
+                            source_ref,
+                        ),
                     ),
-                ),
-                _named(
-                    f"pool_{partition}_overall_bad_rate",
-                    f"{partition} 整体坏样本率",
-                    _nullable_metric_field(
-                        metrics["overall_bad_rate"],
-                        source_ref,
+                    _named(
+                        f"pool_{partition}_label_coverage",
+                        f"{partition} 标签覆盖率",
+                        _present_field(
+                            population["label_coverage"],
+                            source_ref,
+                        ),
                     ),
-                ),
-            ]
+                    _named(
+                        f"pool_{partition}_overall_bad_rate",
+                        f"{partition} 整体坏样本率",
+                        _nullable_metric_field(
+                            risk["overall_bad_rate"],
+                            source_ref,
+                        ),
+                    ),
+                ]
+            )
+        else:
+            metrics = evidence["overall"]["actions"]["metrics"]
+            summary_fields.extend(
+                [
+                    _named(
+                        f"pool_{partition}_validation_status",
+                        f"{partition} 独立重放状态",
+                        _present_field(
+                            evidence["lifecycle"]["validation_status"],
+                            source_ref,
+                        ),
+                    ),
+                    _named(
+                        f"pool_{partition}_population_count",
+                        f"{partition} 独立重放样本数",
+                        _present_field(
+                            population["population_count"],
+                            source_ref,
+                        ),
+                    ),
+                    _named(
+                        f"pool_{partition}_label_coverage",
+                        f"{partition} 标签覆盖率",
+                        _present_field(
+                            population["label_coverage"],
+                            source_ref,
+                        ),
+                    ),
+                    _named(
+                        f"pool_{partition}_overall_bad_rate",
+                        f"{partition} 整体坏样本率",
+                        _nullable_metric_field(
+                            metrics["overall_bad_rate"],
+                            source_ref,
+                        ),
+                    ),
+                ]
+            )
+    if typed_validation:
+        tables = [
+            *section["tables"],
+            _typed_pool_validation_summary_table(
+                validations,
+                validation_refs=validation_refs,
+                claim_oot_validated=claim_oot_validated,
+            ),
+            _typed_pool_validation_distribution_table(
+                validations,
+                validation_refs=validation_refs,
+                claim_oot_validated=claim_oot_validated,
+            ),
+        ]
+        monthly = _typed_pool_validation_monthly_table(
+            validations,
+            validation_refs=validation_refs,
+            claim_oot_validated=claim_oot_validated,
         )
-    tables = [
-        *section["tables"],
-        _pool_validation_summary_table(
+    else:
+        tables = [
+            *section["tables"],
+            _pool_validation_summary_table(
+                validations,
+                validation_refs=validation_refs,
+                claim_oot_validated=claim_oot_validated,
+            ),
+            _pool_validation_action_table(
+                validations,
+                validation_refs=validation_refs,
+                claim_oot_validated=claim_oot_validated,
+            ),
+        ]
+        monthly = _pool_validation_monthly_table(
             validations,
             validation_refs=validation_refs,
             claim_oot_validated=claim_oot_validated,
-        ),
-        _pool_validation_action_table(
-            validations,
-            validation_refs=validation_refs,
-            claim_oot_validated=claim_oot_validated,
-        ),
-    ]
-    monthly = _pool_validation_monthly_table(
-        validations,
-        validation_refs=validation_refs,
-        claim_oot_validated=claim_oot_validated,
-    )
+        )
     if monthly is not None:
         tables.append(monthly)
     red_flags = [
@@ -4731,6 +5392,375 @@ def _with_pool_stability_final_document(
         source_refs=_dedupe_refs(
             [*section["source_refs"], stability_ref]
         ),
+    )
+
+
+def _typed_pool_validation_strategy_type(
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+) -> str:
+    strategy_types = {
+        str(evidence["identity"]["strategy_type"])
+        for _binding, evidence in validations
+    }
+    if len(strategy_types) != 1:
+        raise StrategyReportBundleError(
+            "typed Pool validation strategy types changed"
+        )
+    strategy_type = strategy_types.pop()
+    if strategy_type not in {"limit", "pricing", "segmentation"}:
+        raise StrategyReportBundleError(
+            "typed Pool validation strategy type is unsupported"
+        )
+    return strategy_type
+
+
+def _typed_pool_headline_columns(
+    strategy_type: str,
+) -> list[dict[str, Any]]:
+    if strategy_type == "limit":
+        return [
+            _column("total_limit", "总额度", unit="amount", precision=2),
+            _column("mean_limit", "平均额度", unit="amount", precision=2),
+            _column("min_limit", "最低额度", unit="amount", precision=2),
+            _column("max_limit", "最高额度", unit="amount", precision=2),
+        ]
+    if strategy_type == "pricing":
+        return [
+            _column("mean_rate", "平均定价利率", unit="%", precision=6),
+        ]
+    return [
+        _column("segment_count", "分群数", unit="count", precision=0),
+    ]
+
+
+def _typed_pool_headline_cells(
+    strategy_type: str,
+    metrics: Mapping[str, Any],
+    *,
+    source_ref: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    keys = {
+        "limit": ("total_limit", "mean_limit", "min_limit", "max_limit"),
+        "pricing": ("mean_rate",),
+        "segmentation": ("segment_count",),
+    }[strategy_type]
+    return {
+        key: _nullable_metric_field(metrics[key], source_ref)
+        for key in keys
+    }
+
+
+def _typed_pool_validation_summary_table(
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+    *,
+    validation_refs: Mapping[str, Mapping[str, str]],
+    claim_oot_validated: bool,
+) -> dict[str, Any]:
+    strategy_type = _typed_pool_validation_strategy_type(validations)
+    rows = []
+    for _binding, evidence in validations:
+        partition = evidence["partition"]
+        source_ref = validation_refs[partition]
+        population = evidence["population_metrics"]
+        risk = evidence["risk_summary"]
+        result = evidence["typed_backtest"]
+        rows.append(
+            {
+                "row_id": f"pool-typed-independent-{partition}",
+                "cells": {
+                    "partition": _present_field(partition, source_ref),
+                    "lifecycle_stage": _present_field(
+                        evidence["lifecycle"]["stage"],
+                        source_ref,
+                    ),
+                    "validation_status": _present_field(
+                        evidence["lifecycle"]["validation_status"],
+                        source_ref,
+                    ),
+                    "strategy_type": _present_field(
+                        strategy_type,
+                        source_ref,
+                    ),
+                    "population_count": _present_field(
+                        population["population_count"],
+                        source_ref,
+                    ),
+                    "labelled_count": _present_field(
+                        population["labelled_count"],
+                        source_ref,
+                    ),
+                    "unlabelled_count": _present_field(
+                        population["unlabelled_count"],
+                        source_ref,
+                    ),
+                    "label_coverage": _present_field(
+                        population["label_coverage"],
+                        source_ref,
+                    ),
+                    "overall_bad_count": _present_field(
+                        risk["overall_bad_count"],
+                        source_ref,
+                    ),
+                    "overall_bad_rate": _nullable_metric_field(
+                        risk["overall_bad_rate"],
+                        source_ref,
+                    ),
+                    "monthly_status": _present_field(
+                        evidence["monthly"]["status"],
+                        source_ref,
+                    ),
+                    **_typed_pool_headline_cells(
+                        strategy_type,
+                        result["metrics"],
+                        source_ref=source_ref,
+                    ),
+                },
+            }
+        )
+    return build_strategy_report_table(
+        table_id="strategy_pool_typed_independent_validation_summary",
+        title="当前策略池 typed 独立 validation/OOT 重放汇总",
+        sheet_key="10_validation",
+        granularity="aggregate",
+        content_class="metric_summary",
+        effect_stage=(
+            "oot_validated" if claim_oot_validated else None
+        ),
+        columns=[
+            _column("partition", "样本分区"),
+            _column("lifecycle_stage", "证据分区"),
+            _column("validation_status", "验证状态"),
+            _column("strategy_type", "策略类型"),
+            _column("population_count", "样本数", unit="count", precision=0),
+            _column("labelled_count", "有标签数", unit="count", precision=0),
+            _column("unlabelled_count", "无标签数", unit="count", precision=0),
+            _column("label_coverage", "标签覆盖率", unit="%", precision=4),
+            _column(
+                "overall_bad_count",
+                "整体坏样本数",
+                unit="count",
+                precision=0,
+            ),
+            _column("overall_bad_rate", "整体坏样本率", unit="%", precision=4),
+            _column("monthly_status", "逐月结果状态"),
+            *_typed_pool_headline_columns(strategy_type),
+        ],
+        rows=rows,
+        source_refs=list(validation_refs.values()),
+    )
+
+
+def _typed_pool_distribution_value_column(
+    strategy_type: str,
+) -> dict[str, Any]:
+    if strategy_type == "limit":
+        return _column(
+            "assigned_limit",
+            "分配额度",
+            unit="amount",
+            precision=2,
+        )
+    if strategy_type == "pricing":
+        return _column(
+            "assigned_rate",
+            "分配利率",
+            unit="%",
+            precision=6,
+        )
+    return _column("segment", "分群")
+
+
+def _typed_pool_distribution_value_key(strategy_type: str) -> str:
+    return {
+        "limit": "assigned_limit",
+        "pricing": "assigned_rate",
+        "segmentation": "segment",
+    }[strategy_type]
+
+
+def _typed_pool_validation_distribution_table(
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+    *,
+    validation_refs: Mapping[str, Mapping[str, str]],
+    claim_oot_validated: bool,
+) -> dict[str, Any]:
+    strategy_type = _typed_pool_validation_strategy_type(validations)
+    value_key = _typed_pool_distribution_value_key(strategy_type)
+    rows = []
+    for _binding, evidence in validations:
+        partition = evidence["partition"]
+        source_ref = validation_refs[partition]
+        for position, item in enumerate(
+            evidence["typed_backtest"]["breakdown"]
+        ):
+            cells = {
+                "partition": _present_field(partition, source_ref),
+                "strategy_type": _present_field(
+                    strategy_type,
+                    source_ref,
+                ),
+                value_key: _present_field(item[value_key], source_ref),
+                "count": _present_field(item["count"], source_ref),
+                "share": _present_field(item["share"], source_ref),
+                "labelled_count": _present_field(
+                    item["labeled_count"],
+                    source_ref,
+                ),
+                "bad_count": _present_field(
+                    item["bad_count"],
+                    source_ref,
+                ),
+                "bad_rate": _nullable_metric_field(
+                    item["bad_rate"],
+                    source_ref,
+                ),
+            }
+            if strategy_type == "segmentation":
+                cells["lift"] = _nullable_metric_field(
+                    item["lift"],
+                    source_ref,
+                )
+            rows.append(
+                {
+                    "row_id": (
+                        f"pool-typed-independent-{partition}-{position}"
+                    ),
+                    "cells": cells,
+                }
+            )
+    columns = [
+        _column("partition", "样本分区"),
+        _column("strategy_type", "策略类型"),
+        _typed_pool_distribution_value_column(strategy_type),
+        _column("count", "样本数", unit="count", precision=0),
+        _column("share", "样本占比", unit="%", precision=4),
+        _column("labelled_count", "有标签数", unit="count", precision=0),
+        _column("bad_count", "坏样本数", unit="count", precision=0),
+        _column("bad_rate", "坏样本率", unit="%", precision=4),
+    ]
+    if strategy_type == "segmentation":
+        columns.append(_column("lift", "风险提升度", precision=4))
+    return build_strategy_report_table(
+        table_id="strategy_pool_typed_independent_validation_distribution",
+        title="当前策略池 typed 独立重放分布",
+        sheet_key="10_validation",
+        granularity="aggregate",
+        content_class="metric_summary",
+        effect_stage=(
+            "oot_validated" if claim_oot_validated else None
+        ),
+        columns=columns,
+        rows=rows,
+        source_refs=list(validation_refs.values()),
+    )
+
+
+def _typed_pool_validation_monthly_table(
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+    *,
+    validation_refs: Mapping[str, Mapping[str, str]],
+    claim_oot_validated: bool,
+) -> dict[str, Any] | None:
+    strategy_type = _typed_pool_validation_strategy_type(validations)
+    rows = []
+    used_refs: list[Mapping[str, str]] = []
+    for _binding, evidence in validations:
+        monthly = evidence["monthly"]
+        if monthly["status"] != "available":
+            continue
+        partition = evidence["partition"]
+        source_ref = validation_refs[partition]
+        used_refs.append(source_ref)
+        for position, period in enumerate(monthly["periods"]):
+            result = period["typed_backtest"]
+            risk = period["risk_summary"]
+            period_value = (
+                "(null)" if period["value"] is None else period["value"]
+            )
+            rows.append(
+                {
+                    "row_id": (
+                        f"pool-typed-independent-{partition}-monthly-"
+                        f"{position}"
+                    ),
+                    "cells": {
+                        "partition": _present_field(
+                            partition,
+                            source_ref,
+                        ),
+                        "period": _present_field(
+                            period_value,
+                            source_ref,
+                        ),
+                        "strategy_type": _present_field(
+                            strategy_type,
+                            source_ref,
+                        ),
+                        "population_count": _present_field(
+                            result["population_count"],
+                            source_ref,
+                        ),
+                        "labelled_count": _present_field(
+                            result["labeled_count"],
+                            source_ref,
+                        ),
+                        "label_coverage": _present_field(
+                            result["label_coverage"],
+                            source_ref,
+                        ),
+                        "overall_bad_count": _present_field(
+                            risk["overall_bad_count"],
+                            source_ref,
+                        ),
+                        "overall_bad_rate": _nullable_metric_field(
+                            risk["overall_bad_rate"],
+                            source_ref,
+                        ),
+                        **_typed_pool_headline_cells(
+                            strategy_type,
+                            result["metrics"],
+                            source_ref=source_ref,
+                        ),
+                    },
+                }
+            )
+    if not rows:
+        return None
+    return build_strategy_report_table(
+        table_id="strategy_pool_typed_independent_validation_monthly",
+        title="当前策略池 typed 独立重放逐月效果",
+        sheet_key="10_validation",
+        granularity="aggregate",
+        content_class="monthly_summary",
+        effect_stage=(
+            "oot_validated" if claim_oot_validated else None
+        ),
+        columns=[
+            _column("partition", "样本分区"),
+            _column("period", "月份"),
+            _column("strategy_type", "策略类型"),
+            _column("population_count", "样本数", unit="count", precision=0),
+            _column("labelled_count", "有标签数", unit="count", precision=0),
+            _column("label_coverage", "标签覆盖率", unit="%", precision=4),
+            _column(
+                "overall_bad_count",
+                "整体坏样本数",
+                unit="count",
+                precision=0,
+            ),
+            _column("overall_bad_rate", "整体坏样本率", unit="%", precision=4),
+            *_typed_pool_headline_columns(strategy_type),
+        ],
+        rows=rows,
+        source_refs=_dedupe_refs(used_refs),
     )
 
 
@@ -5712,6 +6742,7 @@ def _impact_cube_final_document_section(
     pool_ref: Mapping[str, str],
     impact_ref: Mapping[str, str],
     allow_oot_validated: bool,
+    strategy_lifecycle: Mapping[str, Any],
 ) -> dict[str, Any]:
     claimable_partitions = [
         row
@@ -5731,6 +6762,7 @@ def _impact_cube_final_document_section(
             row["validation_status"] for row in claimable_partitions
         )
     )
+    lifecycle_ref = strategy_lifecycle["source_ref"]
     return build_strategy_report_section(
         key="final_document",
         title=_SECTION_TITLES["final_document"],
@@ -5757,22 +6789,39 @@ def _impact_cube_final_document_section(
                 _present_field(validation_statuses, impact_ref),
             ),
             _named(
+                "strategy_status",
+                "策略状态",
+                _present_field(
+                    strategy_lifecycle["strategy_status"],
+                    lifecycle_ref,
+                ),
+            ),
+            _named(
                 "adoption_status",
                 "采纳状态",
-                _present_field("not_adopted", impact_ref),
+                _present_field(
+                    strategy_lifecycle["adoption_status"],
+                    lifecycle_ref,
+                ),
             ),
             _named(
                 "deployment_status",
-                "部署状态",
-                _present_field("not_deployed", impact_ref),
+                "本地资产状态",
+                _present_field(
+                    strategy_lifecycle["deployment_status"],
+                    lifecycle_ref,
+                ),
             ),
             _named(
                 "creates_strategy",
-                "是否已创建生产策略",
-                _present_field(False, impact_ref),
+                "是否已创建本地策略资产",
+                _present_field(
+                    strategy_lifecycle["creates_strategy"],
+                    lifecycle_ref,
+                ),
             ),
         ],
-        source_refs=[pool_ref, impact_ref],
+        source_refs=_dedupe_refs([pool_ref, impact_ref, lifecycle_ref]),
     )
 
 
@@ -5878,7 +6927,9 @@ def _final_document_section(
     impact: Mapping[str, Any],
     pool_ref: Mapping[str, str],
     impact_ref: Mapping[str, str],
+    strategy_lifecycle: Mapping[str, Any],
 ) -> dict[str, Any]:
+    lifecycle_ref = strategy_lifecycle["source_ref"]
     return build_strategy_report_section(
         key="final_document",
         title=_SECTION_TITLES["final_document"],
@@ -5903,22 +6954,39 @@ def _final_document_section(
                 ),
             ),
             _named(
+                "strategy_status",
+                "策略状态",
+                _present_field(
+                    strategy_lifecycle["strategy_status"],
+                    lifecycle_ref,
+                ),
+            ),
+            _named(
                 "adoption_status",
                 "采纳状态",
-                _present_field("not_adopted", impact_ref),
+                _present_field(
+                    strategy_lifecycle["adoption_status"],
+                    lifecycle_ref,
+                ),
             ),
             _named(
                 "deployment_status",
-                "部署状态",
-                _present_field("not_deployed", impact_ref),
+                "本地资产状态",
+                _present_field(
+                    strategy_lifecycle["deployment_status"],
+                    lifecycle_ref,
+                ),
             ),
             _named(
                 "creates_strategy",
-                "是否已创建生产策略",
-                _present_field(False, impact_ref),
+                "是否已创建本地策略资产",
+                _present_field(
+                    strategy_lifecycle["creates_strategy"],
+                    lifecycle_ref,
+                ),
             ),
         ],
-        source_refs=[pool_ref, impact_ref],
+        source_refs=_dedupe_refs([pool_ref, impact_ref, lifecycle_ref]),
     )
 
 
@@ -7011,5 +8079,6 @@ __all__ = [
     "StrategyImpactCubeArtifactBinding",
     "build_strategy_report_bundle_source_inputs",
     "validate_candidate_stability_report_compatibility",
+    "validate_cross_candidate_search_report_compatibility",
     "validate_strategy_impact_cube_artifact_binding",
 ]

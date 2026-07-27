@@ -31,9 +31,6 @@ from marvis.repositories.strategy import (
 
 MATERIALIZATION_TOOL_SCHEMA_VERSION = "strategy.pool-materialization-tool.v1"
 MATERIALIZATION_AUDIT_KIND = POOL_MATERIALIZATION_AUDIT_KIND
-_RUNTIME_REQUIREMENTS_BLOCKER = (
-    "strategy_pool_runtime_requirements_not_supported"
-)
 _INPUT_FIELDS = frozenset(
     {
         "strategy_type",
@@ -199,7 +196,6 @@ def _tool_output(persisted: Mapping[str, Any]) -> dict[str, Any]:
         field = str(item["requirement"]["virtual_field"])
         if field not in virtual_fields:
             virtual_fields.append(field)
-    runtime_requirements_supported = not normalized_requirements
     return {
         "schema_version": MATERIALIZATION_TOOL_SCHEMA_VERSION,
         "materialization_id": materialization["id"],
@@ -227,12 +223,8 @@ def _tool_output(persisted: Mapping[str, Any]) -> dict[str, Any]:
             "requirements_hash": materialization["requirements_hash"],
             "requirement_count": len(normalized_requirements),
             "virtual_fields": virtual_fields,
-            "runtime_requirements_supported": runtime_requirements_supported,
-            "blocker_code": (
-                None
-                if runtime_requirements_supported
-                else _RUNTIME_REQUIREMENTS_BLOCKER
-            ),
+            "runtime_requirements_supported": True,
+            "blocker_code": None,
         },
         "lifecycle": {
             "created_status": "draft",

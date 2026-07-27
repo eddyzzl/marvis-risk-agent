@@ -36,6 +36,13 @@ NODE_FIELDS = {
     "can_prune",
 }
 PRUNE_FIELDS = {"source_tree_id", "node_id", "operation"}
+THRESHOLD_ADJUSTMENT_FIELDS = {
+    "source_tree_id",
+    "node_id",
+    "operation",
+    "feature",
+    "current_threshold",
+}
 
 
 def _revise(
@@ -114,6 +121,24 @@ def _assert_operable_topology(
             "source_tree_id": source_tree_id,
             "node_id": node["node_id"],
             "operation": "prune_subtree",
+        }
+        for node in nodes
+        if node["can_prune"]
+    ]
+    eligible_threshold_adjustments = item["pointers"][
+        "eligible_threshold_adjustments"
+    ]
+    assert all(
+        set(pointer) == THRESHOLD_ADJUSTMENT_FIELDS
+        for pointer in eligible_threshold_adjustments
+    )
+    assert eligible_threshold_adjustments == [
+        {
+            "source_tree_id": source_tree_id,
+            "node_id": node["node_id"],
+            "operation": "adjust_split_threshold",
+            "feature": node["feature"],
+            "current_threshold": node["threshold"],
         }
         for node in nodes
         if node["can_prune"]
@@ -273,10 +298,85 @@ def test_candidate_lab_projects_each_tree_source_without_inventing_one_current_b
         by_id[second["revision_id"]]["pointers"]["visible_node_ids"]
         != by_id[sibling["revision_id"]]["pointers"]["visible_node_ids"]
     )
-    assert _current_keys(base_after) == set()
-    assert _current_keys(revisions) == set()
+    assert _current_keys(base_after) == {"current_threshold"}
+    assert _current_keys(revisions) == {"current_threshold"}
     assert _hash_keys(base_after) == set()
     assert _hash_keys(revisions) == set()
+
+
+def test_candidate_lab_projects_effective_threshold_revision_as_new_immutable_source(
+    scenario,
+) -> None:
+    client = TestClient(create_app(scenario.settings))
+    asset = scenario.source_asset
+    asset_id = asset["asset_id"]
+    root_id = asset["tree_result"]["tree"]["root_node_id"]
+
+    before_response = client.get(
+        f"/api/tasks/{scenario.task.id}/strategy-candidate-lab"
+    )
+    assert before_response.status_code == 200, before_response.text
+    base_before = _automatic_item(before_response.json(), asset_id)
+    base_adjustments_before = base_before["pointers"][
+        "eligible_threshold_adjustments"
+    ]
+    base_root_before = next(
+        pointer
+        for pointer in base_adjustments_before
+        if pointer["node_id"] == root_id
+    )
+
+    adjusted = strategy_tools.tool_revise_interactive_tree(
+        {
+            "source_tree_id": asset_id,
+            "node_id": root_id,
+            "operation": "adjust_split_threshold",
+            "threshold": 1.5,
+            "reason": "Review the effective root split.",
+        },
+        scenario.ctx,
+    )
+
+    after_response = client.get(
+        f"/api/tasks/{scenario.task.id}/strategy-candidate-lab"
+    )
+    assert after_response.status_code == 200, after_response.text
+    projection = after_response.json()
+    base_after = _automatic_item(projection, asset_id)
+    assert (
+        base_after["pointers"]["eligible_threshold_adjustments"]
+        == base_adjustments_before
+    )
+
+    revision = next(
+        item
+        for item in projection["candidates"]["interactive_tree_revision"]["all"]
+        if item["detail"]["revision_id"] == adjusted["revision_id"]
+    )
+    assert revision["detail"]["source_tree_id"] == adjusted["revision_id"]
+    assert revision["detail"]["derived_from_source_tree_id"] == asset_id
+    revision_adjustments = revision["pointers"][
+        "eligible_threshold_adjustments"
+    ]
+    assert all(
+        set(pointer) == THRESHOLD_ADJUSTMENT_FIELDS
+        for pointer in revision_adjustments
+    )
+    revised_root = next(
+        pointer
+        for pointer in revision_adjustments
+        if pointer["node_id"] == root_id
+    )
+    assert base_root_before["current_threshold"] == 0.5
+    assert revised_root == {
+        "source_tree_id": adjusted["revision_id"],
+        "node_id": root_id,
+        "operation": "adjust_split_threshold",
+        "feature": base_root_before["feature"],
+        "current_threshold": 1.5,
+    }
+    assert _current_keys(revision) == {"current_threshold"}
+    assert _hash_keys(revision) == set()
 
 
 def test_candidate_lab_replays_interactive_frontier_pool_sources(

@@ -331,6 +331,45 @@ def test_report_bundle_manifest_accepts_only_exact_optional_voting_search_ref(
         )
 
 
+def test_report_bundle_manifest_accepts_only_exact_optional_cross_search_ref(
+    tmp_path,
+) -> None:
+    manifest = _real_builtin_registry(tmp_path).get("strategy")
+    tool = next(
+        item for item in manifest.tools if item.name == "build_report_bundle_v2"
+    )
+    schema = tool.input_schema
+    cross_schema = {
+        **schema["$defs"]["cross_candidate_search_ref"],
+        "$defs": {"sha256": schema["$defs"]["sha256"]},
+    }
+    cross_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": "cross-search-" + ("1" * 32),
+        "expected_search_content_hash": "c" * 64,
+    }
+
+    assert schema["properties"]["cross_candidate_search_ref"] == {
+        "$ref": "#/$defs/cross_candidate_search_ref"
+    }
+    assert "cross_candidate_search_ref" not in schema["required"]
+    assert set(cross_schema["properties"]) == set(cross_ref)
+    assert set(cross_schema["required"]) == set(cross_ref)
+    assert cross_schema["additionalProperties"] is False
+    validate_against_schema(
+        cross_ref,
+        cross_schema,
+        label="cross_candidate_search_ref",
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {**cross_ref, "schema_version": "forged.v1"},
+            cross_schema,
+            label="cross_candidate_search_ref",
+        )
+
+
 def test_strategy_v2_materializers_are_thin_runtime_forwarders(monkeypatch):
     ctx = object()
     runtime = object()
@@ -534,6 +573,8 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "search_voting_candidates",
         "build_voting_candidate_from_search",
         "build_cross_matrix_candidate",
+        "search_cross_matrix_candidates",
+        "build_cross_matrix_candidate_from_search",
         "materialize_cross_matrix_cell_selection",
         "build_scorecard_band_asset",
         "materialize_scorecard_cutoff_selection",
@@ -586,7 +627,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert delivery_tool.output_schema["additionalProperties"] is False
     report_output_schema = report_bundle_tool.output_schema
     assert report_output_schema["properties"]["schema_version"] == {
-        "const": "strategy.build-report-bundle-v2-tool.v6"
+        "const": "strategy.build-report-bundle-v2-tool.v7"
     }
     report_artifacts = report_output_schema["properties"]["artifacts"]
     assert report_artifacts["minItems"] == 4
@@ -852,12 +893,18 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         interactive_tree_revision_tool.output_schema["properties"][
             "schema_version"
         ]
-        == {"const": "strategy.revise-interactive-tree-tool.v1"}
+        == {
+            "type": "string",
+            "enum": [
+                "strategy.revise-interactive-tree-tool.v1",
+                "strategy.revise-interactive-tree-tool.v2",
+            ],
+        }
     )
     assert (
         interactive_tree_revision_tool.output_schema["properties"]["replay"][
-            "properties"
-        ]["exactly_once"]
+            "oneOf"
+        ][0]["properties"]["exactly_once"]
         == {"const": True}
     )
     assert voting_tool.determinism == "deterministic"

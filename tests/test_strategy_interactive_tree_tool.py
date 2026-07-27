@@ -325,6 +325,62 @@ def test_revise_automatic_tree_is_canonical_task_local_and_idempotent(
     assert hashlib.sha256(persisted_bytes).hexdigest() == record["content_hash"]
 
 
+def test_revise_interactive_tree_adjusts_visible_split_threshold_as_v2(
+    scenario: _Scenario,
+) -> None:
+    root_id = scenario.source_asset["tree_result"]["tree"]["root_node_id"]
+    root = next(
+        node
+        for node in scenario.source_asset["tree_result"]["tree"]["nodes"]
+        if node["node_id"] == root_id
+    )
+    assert root["feature"] == "z"
+    assert root["threshold"] == 0.5
+
+    result = _invoke(
+        {
+            "source_tree_id": scenario.source_asset["asset_id"],
+            "node_id": root_id,
+            "operation": "adjust_split_threshold",
+            "threshold": 1.5,
+            "reason": "Broaden the low-risk root branch.",
+        },
+        scenario.ctx,
+    )
+
+    assert result["schema_version"] == "strategy.revise-interactive-tree-tool.v2"
+    assert result["edit"] == {
+        "operation": "adjust_split_threshold",
+        "node_id": root_id,
+        "previous_threshold": 0.5,
+        "threshold": 1.5,
+        "reason": "Broaden the low-risk root branch.",
+    }
+    assert result["replay"]["schema_version"] == (
+        "strategy.interactive-tree-replay.v2"
+    )
+    assert result["replay"]["exactly_once"] is True
+    assert result["replay"]["all_visible_metrics_matched"] is True
+    assert result["replay"]["all_visible_split_diagnostics_matched"] is True
+
+    [record] = _revision_records(scenario)
+    persisted = json.loads(Path(record["path"]).read_text(encoding="utf-8"))
+    assert persisted["schema_version"] == (
+        "strategy.interactive-tree-revision.v2"
+    )
+    adjusted_root = next(
+        node
+        for node in persisted["tree"]["nodes"]
+        if node["node_id"] == root_id
+    )
+    assert adjusted_root["threshold"] == 1.5
+    assert adjusted_root["missing_child"] == "left"
+    assert validate_interactive_tree_revision(
+        persisted,
+        scenario.source_asset,
+    ) == persisted
+
+
 def test_revise_interactive_tree_replays_native_risk_development_and_bad_zero(
     tmp_path: Path,
 ) -> None:

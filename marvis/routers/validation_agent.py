@@ -261,7 +261,10 @@ def post_agent_message(
             strategy_request=(
                 None
                 if payload.strategy_request is None
-                else payload.strategy_request.model_dump(mode="python")
+                else payload.strategy_request.model_dump(
+                    mode="python",
+                    exclude_none=True,
+                )
             ),
             recovery_model_id=payload.model_id,
             recovery_effort=payload.effort,

@@ -5,10 +5,13 @@ import {
 } from "./api_v2.js";
 
 export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
+  "strategy_project_context",
   "strategy_sample_design_v2",
   "univariate_candidate_analysis",
   "univariate_candidate_refinement",
   "cross_matrix_analysis",
+  "cross_matrix_candidate_search",
+  "cross_matrix_candidate_build_from_search",
   "automatic_tree_candidate_build",
   "scorecard_band_build",
   "scorecard_cutoff_selection",
@@ -23,6 +26,9 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "strategy_pool_stability",
   "strategy_pool_impact",
   "strategy_impact_cube",
+  "strategy_pool_materialize",
+  "strategy_lifecycle_adopt",
+  "strategy_dsl_delivery",
   "strategy_report_bundle_v2",
   "voting_candidate_search",
   "voting_candidate_build_from_search",
@@ -32,10 +38,13 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
 ]);
 
 const WORKFLOW_LABELS = Object.freeze({
+  strategy_project_context: "固化当前项目现状与历史材料",
   strategy_sample_design_v2: "创建双人群 SampleDesign V2",
   univariate_candidate_analysis: "启动单变量候选分析",
   univariate_candidate_refinement: "启动单变量候选细化",
   cross_matrix_analysis: "启动二维 Cross Matrix",
+  cross_matrix_candidate_search: "搜索 Cross Matrix 字段组合",
+  cross_matrix_candidate_build_from_search: "从搜索结果构建 Cross Matrix 候选",
   automatic_tree_candidate_build: "启动自动规则树",
   scorecard_band_build: "生成评分卡分档证据",
   scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
@@ -50,6 +59,9 @@ const WORKFLOW_LABELS = Object.freeze({
   strategy_pool_stability: "测算 Strategy Pool 稳定性",
   strategy_pool_impact: "测算 Strategy Pool 影响",
   strategy_impact_cube: "生成统一策略 ImpactCube",
+  strategy_pool_materialize: "把当前 Strategy Pool 物化为草稿策略",
+  strategy_lifecycle_adopt: "提交策略本地采纳确认",
+  strategy_dsl_delivery: "生成策略等价代码交付包",
   strategy_report_bundle_v2: "形成策略迭代评审报告",
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
@@ -70,6 +82,12 @@ const COLLECTION_DEFINITIONS = Object.freeze([
     title: "Cross Matrix",
     description: "二维交叉轴、单元格证据与风险观测",
     pointerKey: "cells",
+  },
+  {
+    key: "cross_search",
+    title: "Cross 自动搜索",
+    description: "受认证单变量字段的两两组合搜索、交互增益与稀疏性证据",
+    pointerKey: "",
   },
   {
     key: "automatic_tree",
@@ -128,6 +146,8 @@ const VOTING_SEARCH_METRICS = Object.freeze([
 const VOTING_RULE_ID_RE = /^candidate-rule-[0-9a-f]{32}$/;
 const VOTING_SEARCH_ID_RE = /^voting-search-[0-9a-f]{32}$/;
 const VOTING_COMBO_ID_RE = /^voting-combo-[0-9a-f]{32}$/;
+const CROSS_SEARCH_ID_RE = /^cross-search-[0-9a-f]{32}$/;
+const CROSS_PAIR_ID_RE = /^cross-pair-[0-9a-f]{32}$/;
 const INTERACTIVE_TREE_SOURCE_ID_RE = /^(?:candidate-asset-[0-9a-f]{32}|interactive-tree-revision-[0-9a-f]{32})$/;
 const INTERACTIVE_TREE_NODE_ID_RE = /^node-[0-9a-f]{20}$/;
 const INTERACTIVE_TREE_REVISION_ID_RE = /^interactive-tree-revision-[0-9a-f]{32}$/;
@@ -153,6 +173,9 @@ const STRATEGY_POOL_OPERATION_WORKFLOWS = Object.freeze([
   "strategy_pool_reorder",
 ]);
 const STRATEGY_POOL_ENTRY_ID_RE = /^pool-entry-[0-9a-f]{32}$/;
+const STRATEGY_ID_RE = /^(?:strategy-[A-Za-z0-9][A-Za-z0-9_-]*|[0-9a-f]{32})$/;
+const PROJECT_CONTEXT_FIELD_PATH_RE = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){0,7}$/;
+const PROJECT_CONTEXT_PLATFORM_FIELD_RE = /(?:^|\.)(?:artifact_id|content_hash|dataset_id|revision|revision_id|strategy_id|target_col)$/;
 const STRATEGY_POOL_APPLY_PREFIX_RE = /^[A-Za-z_][A-Za-z0-9_]{0,47}$/;
 const STRATEGY_POOL_CANDIDATE_ASSET_ID_RE = /^candidate-asset-[0-9a-f]{32}$/;
 const STRATEGY_POOL_ADD_SELECTION_RE = /^(?:automatic-tree-leaf-selection|interactive-tree-frontier-selection|interactive-tree-frontier-group-selection|cross-matrix-cell-selection|scorecard-cutoff-selection)-[0-9a-f]{32}$/;
@@ -197,6 +220,10 @@ const FIELD_LABELS = Object.freeze({
   default_action: "默认动作",
   effect: "效果",
   effect_id: "Effect ID",
+  eligible: "符合约束",
+  empty_cell_count: "空单元格数",
+  empty_cell_share: "空单元格占比",
+  evaluated: "实际评估组合数",
   execution_pd: "执行原始 PD",
   enabled: "启用",
   evidence_hash: "Evidence Hash",
@@ -207,6 +234,7 @@ const FIELD_LABELS = Object.freeze({
   good_count: "好样本",
   iv: "IV",
   iv_contribution: "IV 贡献",
+  interaction_gain_iv: "Interaction Gain IV",
   ks: "KS",
   lifecycle: "生命周期",
   lower_bound: "下界",
@@ -216,10 +244,13 @@ const FIELD_LABELS = Object.freeze({
   node_id: "节点 ID",
   lift: "Lift",
   method: "分箱方法",
+  max_pairs: "最大评估组合数",
+  min_nonempty_cell_count: "最小非空单元格样本数",
   observation_stage: "观测阶段",
   pool_id: "Pool ID",
   position: "顺序",
   points: "分值",
+  pair_id: "Pair ID",
   pdo: "PDO",
   display_points: "评分卡分数",
   revision: "Revision",
@@ -230,6 +261,8 @@ const FIELD_LABELS = Object.freeze({
   share: "占比",
   snapshot_hash: "Snapshot Hash",
   status: "状态",
+  search_id: "Search ID",
+  search_space: "搜索空间",
   strategy_type: "策略类型",
   source_tree_id: "操作来源树",
   total: "总数",
@@ -240,6 +273,14 @@ const FIELD_LABELS = Object.freeze({
   offset: "Offset",
   tree_id: "Tree ID",
   tree_result_hash: "Tree Result Hash",
+  x_axis_iv: "X Axis IV",
+  x_feature: "X 轴字段",
+  x_method: "X 轴方法",
+  y_axis_iv: "Y Axis IV",
+  y_feature: "Y 轴字段",
+  y_method: "Y 轴方法",
+  cross_total_iv: "Cross Total IV",
+  cell_count: "单元格数",
   validation_status: "验证状态",
   value: "值",
   woe: "WOE",
@@ -763,6 +804,82 @@ function votingSearchDetailHtml(item) {
   ].join("");
 }
 
+function crossSearchDetailHtml(item) {
+  const features = Array.isArray(item?.features)
+    ? item.features.filter(isRecord)
+    : [];
+  const pairs = Array.isArray(item?.pairs)
+    ? item.pairs.filter(isRecord)
+    : [];
+  const title = nonEmptyText(item?.search_id) || "Cross 自动搜索";
+  const truncated = item?.truncated === true;
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-cross-search-card">',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(title)}</strong>`,
+    `<small>${escapeHtml(stablePrimitiveText(item?.evaluated))} / ${escapeHtml(stablePrimitiveText(item?.search_space))} 个组合已评估 · 未构建</small>`,
+    "</span>",
+    '<span class="candidate-lab-card-state">查看组合证据</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml({ artifact: item?.artifact }),
+    '<div class="candidate-lab-boundary-note" data-tone="info">',
+    "<strong>候选边界</strong>",
+    "<p>Pair 的 rank、eligible 与指标只描述确定性搜索结果；页面不会自动构建、入池、采纳或部署，必须由用户明确选择完整 Pair。</p>",
+    "</div>",
+    '<section class="candidate-lab-subsection"><h5>搜索参数与预算</h5>',
+    factsTableHtml({
+      max_pairs: item?.max_pairs,
+      search_space: item?.search_space,
+      evaluated: item?.evaluated,
+      eligible: item?.eligible,
+      truncated,
+    }),
+    "</section>",
+    '<section class="candidate-lab-subsection"><h5>参与搜索的单变量字段</h5>',
+    scorecardRowsTableHtml(
+      features,
+      ["feature", "method", "axis_iv", "bin_count"],
+      "当前受认证搜索没有可见字段配置。",
+    ),
+    "</section>",
+    '<section class="candidate-lab-subsection"><h5>Top Pairs（仅展示，不代替选择）</h5>',
+    scorecardRowsTableHtml(
+      pairs,
+      [
+        "rank",
+        "pair_id",
+        "x_feature",
+        "x_method",
+        "y_feature",
+        "y_method",
+        "x_axis_iv",
+        "y_axis_iv",
+        "cross_total_iv",
+        "interaction_gain_iv",
+        "cell_count",
+        "empty_cell_count",
+        "empty_cell_share",
+        "min_nonempty_cell_count",
+        "eligible",
+      ],
+      "当前受认证搜索没有可见 Pair。",
+    ),
+    "</section>",
+    truncated
+      ? [
+        '<div class="candidate-lab-risk-group" data-tone="warn">',
+        "<strong>预算截断</strong>",
+        `<p>搜索空间 ${escapeHtml(stablePrimitiveText(item?.search_space))} 个组合，本次预算最多评估 ${escapeHtml(stablePrimitiveText(item?.max_pairs))} 个，实际评估 ${escapeHtml(stablePrimitiveText(item?.evaluated))} 个；页面不会推断未评估组合。</p>`,
+        "</div>",
+      ].join("")
+      : '<p class="candidate-lab-field-help">本次搜索未触发预算截断；可见 Pair 仍需用户逐项明确选择。</p>',
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
 function interactiveTreeEligiblePointers(item) {
   const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
   const nodes = new Map(
@@ -788,6 +905,52 @@ function interactiveTreeEligiblePointers(item) {
       || node?.is_visible !== true
       || node?.is_frontier === true
       || node?.can_prune !== true
+      || seen.has(key)
+    ) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function interactiveTreeThresholdEligiblePointers(item) {
+  const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
+  const nodes = new Map(
+    (Array.isArray(item?.pointers?.nodes) ? item.pointers.nodes : [])
+      .filter(isRecord)
+      .map((node) => [nonEmptyText(node.node_id), node]),
+  );
+  const pointers = Array.isArray(
+    item?.pointers?.eligible_threshold_adjustments,
+  )
+    ? item.pointers.eligible_threshold_adjustments.filter(isRecord)
+    : [];
+  const seen = new Set();
+  return pointers.filter((pointer) => {
+    const pointerSource = nonEmptyText(pointer.source_tree_id);
+    const nodeId = nonEmptyText(pointer.node_id);
+    const feature = nonEmptyText(pointer.feature);
+    const currentThreshold = Number(pointer.current_threshold);
+    const node = nodes.get(nodeId);
+    const nodeThreshold = Number(node?.threshold);
+    const key = `${pointerSource}\u001f${nodeId}`;
+    if (
+      pointerSource !== sourceTreeId
+      || !INTERACTIVE_TREE_SOURCE_ID_RE.test(pointerSource)
+      || !INTERACTIVE_TREE_NODE_ID_RE.test(nodeId)
+      || pointer.operation !== "adjust_split_threshold"
+      || !feature
+      || typeof pointer.current_threshold !== "number"
+      || !Number.isFinite(currentThreshold)
+      || node?.kind !== "split"
+      || node?.is_visible !== true
+      || node?.is_frontier === true
+      || node?.can_prune !== true
+      || nonEmptyText(node?.feature) !== feature
+      || typeof node?.threshold !== "number"
+      || !Number.isFinite(nodeThreshold)
+      || nodeThreshold !== currentThreshold
       || seen.has(key)
     ) {
       return false;
@@ -848,6 +1011,14 @@ function interactiveTreeNodesHtml(item) {
       (pointer) => `${pointer.source_tree_id}\u001f${pointer.node_id}`,
     ),
   );
+  const thresholdAdjustments = new Map(
+    interactiveTreeThresholdEligiblePointers(item).map(
+      (pointer) => [
+        `${pointer.source_tree_id}\u001f${pointer.node_id}`,
+        pointer,
+      ],
+    ),
+  );
   const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
   const revisionId = item?.kind === "interactive_tree_revision"
     ? nonEmptyText(item?.detail?.revision_id)
@@ -879,6 +1050,19 @@ function interactiveTreeNodesHtml(item) {
           ' data-candidate-lab-interactive-tree-prune="1"',
           ` data-source-tree-id="${escapeHtml(sourceTreeId)}"`,
           ` data-node-id="${escapeHtml(nodeId)}">剪枝到此节点</button>`,
+        ].join(""));
+      }
+      const thresholdAdjustment = thresholdAdjustments.get(key);
+      if (thresholdAdjustment) {
+        actions.push([
+          '<button type="button" class="button compact secondary candidate-lab-tree-threshold"',
+          ' data-candidate-lab-interactive-tree-threshold="1"',
+          ` data-source-tree-id="${escapeHtml(sourceTreeId)}"`,
+          ` data-node-id="${escapeHtml(nodeId)}"`,
+          ` data-feature="${escapeHtml(thresholdAdjustment.feature)}"`,
+          ` data-current-threshold="${escapeHtml(stablePrimitiveText(
+            thresholdAdjustment.current_threshold,
+          ))}">调整 ${escapeHtml(thresholdAdjustment.feature)} 阈值</button>`,
         ].join(""));
       }
       if (
@@ -933,7 +1117,7 @@ function interactiveTreeDetailHtml(item) {
     lifecycleHtml(item.lifecycle),
     '<div class="candidate-lab-boundary-note" data-tone="info">',
     "<strong>不可变分支</strong>",
-    "<p>每次剪枝都会创建新 revision；原树和已有分支不被覆盖，页面不会替你挑选节点、入池或部署。</p>",
+    "<p>每次剪枝或阈值调整都会创建新 revision；不会写回来源树、物化 frontier、入池、采纳或部署，页面也不会替你挑选节点。</p>",
     "</div>",
     '<section class="candidate-lab-subsection"><h5>树与修订身份</h5>',
     factsTableHtml({
@@ -987,6 +1171,9 @@ function candidateItemHtml(item, definition) {
   }
   if (definition.key === "voting_search") {
     return votingSearchDetailHtml(item);
+  }
+  if (definition.key === "cross_search") {
+    return crossSearchDetailHtml(item);
   }
   return candidateDetailHtml(item, definition.pointerKey);
 }
@@ -1104,6 +1291,12 @@ const WORKFLOW_STAGE_STATUS_LABELS = Object.freeze({
   missing: "待补充",
 });
 
+const REPORT_FIELD_AVAILABILITY_LABELS = Object.freeze({
+  unavailable: "暂未提供",
+  not_applicable: "不适用",
+  not_matured: "样本未成熟",
+});
+
 function workflowStageSpineHtml(stages) {
   const rows = Array.isArray(stages) ? stages.filter(isRecord).slice(0, 7) : [];
   if (!rows.length) {
@@ -1124,6 +1317,95 @@ function workflowStageSpineHtml(stages) {
       ].join("");
     }),
     "</ol>",
+  ].join("");
+}
+
+function reportFieldReadableValue(field) {
+  if (!isRecord(field)) return "暂未提供";
+  if (field.availability === "present") return readableValue(field.value);
+  return REPORT_FIELD_AVAILABILITY_LABELS[field.availability]
+    || nonEmptyText(field.availability)
+    || "暂未提供";
+}
+
+function projectContextHistoryHtml(histories) {
+  const rows = Array.isArray(histories) ? histories.filter(isRecord) : [];
+  if (!rows.length) {
+    return '<p class="candidate-lab-empty">当前没有可展示的历史策略版本；如已明确暂缺，报告会保留为空。</p>';
+  }
+  return [
+    '<div class="candidate-lab-result-list">',
+    ...rows.map((history) => [
+      '<article class="candidate-lab-evidence-card candidate-lab-project-history">',
+      `<strong>${history.version === null || history.version === undefined ? "外部历史材料" : `版本 ${escapeHtml(history.version)}`}</strong>`,
+      factsTableHtml({
+        availability: history.availability,
+        effective_period: reportFieldReadableValue(history.effective_period),
+        asset_status: reportFieldReadableValue(history.asset_status),
+        scope: reportFieldReadableValue(history.scope),
+        traffic_allocation: reportFieldReadableValue(history.traffic_allocation),
+        effect_stages: history.effect_stages,
+        external_source_count: history.external_source_count,
+      }),
+      "</article>",
+    ].join("")),
+    "</div>",
+  ].join("");
+}
+
+function projectContextMissingHtml(records) {
+  const pending = Array.isArray(records)
+    ? records.filter((item) => isRecord(item) && item.status === "pending")
+    : [];
+  if (!pending.length) return "";
+  return [
+    '<section class="candidate-lab-subsection candidate-lab-missing-information">',
+    "<h5>还可补充的信息</h5>",
+    "<ul>",
+    ...pending.map((item) => (
+      `<li><strong>${escapeHtml(fieldLabel(item.field_path))}</strong><span>${escapeHtml(item.question)}</span></li>`
+    )),
+    "</ul>",
+    "</section>",
+  ].join("");
+}
+
+function projectContextWorkflowHtml(project) {
+  if (!isRecord(project)) {
+    return [
+      '<section class="candidate-lab-subsection candidate-lab-project-context" data-status="missing">',
+      "<h5>项目现状与历史版本</h5>",
+      '<p class="candidate-lab-empty">尚未固化当前项目状况和历史材料。可以直接告诉 Agent 已知信息；暂时没有的可明确说明暂缺。</p>',
+      "</section>",
+    ].join("");
+  }
+  const current = isRecord(project.current) ? project.current : {};
+  const statusFields = isRecord(current.status_fields)
+    ? current.status_fields
+    : {};
+  const downloadUrl = safeDownloadUrl(project.artifact?.download_url);
+  return [
+    '<section class="candidate-lab-subsection candidate-lab-project-context" data-status="complete">',
+    "<header><div><h5>项目现状与历史版本</h5>",
+    `<p>上下文 revision ${escapeHtml(stablePrimitiveText(project.revision))} · ${escapeHtml(stablePrimitiveText(project.as_of))}</p></div>`,
+    downloadUrl
+      ? `<a class="button compact secondary" href="${escapeHtml(downloadUrl)}" download>下载项目上下文</a>`
+      : "",
+    "</header>",
+    factsTableHtml({
+      scope: reportFieldReadableValue(project.scope),
+      volume: reportFieldReadableValue(statusFields.volume),
+      approval: reportFieldReadableValue(statusFields.approval),
+      risk: reportFieldReadableValue(statusFields.risk),
+      economics: reportFieldReadableValue(statusFields.economics),
+      maturity: reportFieldReadableValue(current.maturity_summary),
+      history_resolution: project.history_resolution,
+    }),
+    '<section class="candidate-lab-subsection"><h5>历史策略版本</h5>',
+    projectContextHistoryHtml(project.historical_versions),
+    "</section>",
+    projectContextMissingHtml(project.missing_information),
+    "</section>",
   ].join("");
 }
 
@@ -1282,9 +1564,168 @@ function strategyWorkflowSpineHtml(workflow) {
     "<div><h4>策略开发全流程</h4><p>七阶段状态、双人群样本、最新效果证据和最终报告均来自结构化任务投影。</p></div>",
     "</header>",
     workflowStageSpineHtml(value.stages),
+    projectContextWorkflowHtml(value.project_context),
     sampleDesignWorkflowHtml(value.sample_design),
     workflowEvidenceHtml(value.latest_evidence),
     workflowReportHtml(value.report),
+    "</section>",
+  ].join("");
+}
+
+const STRATEGY_TYPE_LABELS = Object.freeze({
+  approval: "审批策略",
+  reject: "拒绝策略",
+  limit: "额度策略",
+  pricing: "定价策略",
+  segmentation: "分群策略",
+});
+
+const STRATEGY_ASSET_STATUS_LABELS = Object.freeze({
+  draft: "draft",
+  validated: "已验证",
+  adopted_local: "本地已采纳",
+});
+
+function strategyMaterializationHtml(materialization) {
+  if (!isRecord(materialization)) {
+    return [
+      '<section class="candidate-lab-subsection">',
+      "<h5>物化与运行要求</h5>",
+      '<p class="candidate-lab-empty">该版本没有 Strategy Pool 物化记录。</p>',
+      "</section>",
+    ].join("");
+  }
+  const blockers = Array.isArray(materialization.runtime_blockers)
+    ? materialization.runtime_blockers
+    : [];
+  return [
+    '<section class="candidate-lab-subsection">',
+    "<h5>物化与运行要求</h5>",
+    factsTableHtml({
+      materialization_id: materialization.materialization_id,
+      pool_id: materialization.pool_id,
+      pool_revision_id: materialization.pool_revision_id,
+      pool_revision: materialization.pool_revision,
+      requirements_count: materialization.requirements_count,
+    }),
+    blockers.length
+      ? [
+        '<div class="candidate-lab-risk-group" data-tone="warn">',
+        "<strong>运行阻塞</strong>",
+        "<ul>",
+        ...blockers.slice(0, 24).map(
+          (blocker) => `<li>${escapeHtml(readableValue(blocker))}</li>`,
+        ),
+        "</ul>",
+        blockers.length > 24
+          ? "<p>其余运行阻塞已由服务端截断。</p>"
+          : "",
+        "</div>",
+      ].join("")
+      : '<p class="candidate-lab-boundary-note">当前投影未发现运行阻塞。</p>',
+    "</section>",
+  ].join("");
+}
+
+function strategyArtifactsHtml(artifacts) {
+  const value = isRecord(artifacts) ? artifacts : {};
+  const items = Array.isArray(value.all) ? value.all.filter(isRecord) : [];
+  if (!items.length) {
+    return [
+      '<section class="candidate-lab-subsection">',
+      "<h5>策略产物</h5>",
+      '<p class="candidate-lab-empty">当前版本尚无已验证、可下载的策略产物。</p>',
+      "</section>",
+    ].join("");
+  }
+  return [
+    '<section class="candidate-lab-subsection">',
+    "<h5>策略产物</h5>",
+    '<div class="candidate-lab-form-actions">',
+    ...items.slice(0, 40).map((artifact) => {
+      const filename = nonEmptyText(artifact.filename)
+        || nonEmptyText(artifact.kind)
+        || "策略产物";
+      const url = safeDownloadUrl(artifact.download_url);
+      return url
+        ? `<a class="button compact secondary" href="${escapeHtml(url)}" download>下载 ${escapeHtml(filename)}</a>`
+        : `<span class="strategy-artifact-unavailable">${escapeHtml(filename)} 不可下载</span>`;
+    }),
+    "</div>",
+    value.truncated === true
+      ? '<p class="candidate-lab-truncated">策略产物列表已由服务端截断。</p>'
+      : "",
+    "</section>",
+  ].join("");
+}
+
+function strategyHistoryItemHtml(strategy, championIds) {
+  const strategyId = nonEmptyText(strategy?.strategy_id) || "策略版本";
+  const strategyType = nonEmptyText(strategy?.strategy_type);
+  const assetStatus = nonEmptyText(strategy?.asset_status);
+  const isChampion = championIds.has(strategyId);
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-strategy-history-card">',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(strategyId)}</strong>`,
+    `<small>${escapeHtml(STRATEGY_TYPE_LABELS[strategyType] || strategyType || "策略")} · v${escapeHtml(stablePrimitiveText(strategy?.version))} · ${escapeHtml(STRATEGY_ASSET_STATUS_LABELS[assetStatus] || assetStatus || nonEmptyText(strategy?.status) || "-")}</small>`,
+    "</span>",
+    isChampion
+      ? '<span class="candidate-lab-card-state">当前本地策略</span>'
+      : '<span class="candidate-lab-card-state">查看版本</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    factsTableHtml({
+      status: strategy?.status,
+      asset_status: STRATEGY_ASSET_STATUS_LABELS[assetStatus] || assetStatus,
+      created_at: strategy?.created_at,
+      adopted_at: strategy?.adopted_at,
+      parent_strategy_id: strategy?.parent_strategy_id,
+      rule_count: strategy?.rule_count,
+    }),
+    strategyMaterializationHtml(strategy?.materialization),
+    strategyArtifactsHtml(strategy?.artifacts),
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
+function strategyHistoryHtml(collection) {
+  const value = isRecord(collection) ? collection : {};
+  const strategies = projectedStrategyItems({ strategies: value });
+  const champions = Array.isArray(value.current_local_champions)
+    ? value.current_local_champions.filter(isRecord)
+    : [];
+  const championIds = new Set(
+    champions.map((champion) => nonEmptyText(champion.strategy_id)).filter(Boolean),
+  );
+  const championSummary = champions.length
+    ? [
+      '<div class="candidate-lab-boundary-note" data-tone="info">',
+      "<strong>当前本地策略</strong>",
+      `<p>${champions.slice(0, 5).map((champion) => {
+        const type = nonEmptyText(champion.strategy_type);
+        return `${escapeHtml(STRATEGY_TYPE_LABELS[type] || type)}：${escapeHtml(nonEmptyText(champion.strategy_id))}（v${escapeHtml(stablePrimitiveText(champion.version))}）`;
+      }).join("；")}</p>`,
+      "</div>",
+    ].join("")
+    : '<p class="candidate-lab-empty">当前任务尚无本地已采纳策略。</p>';
+  return [
+    '<section class="candidate-lab-result-group candidate-lab-strategy-history">',
+    '<header class="candidate-lab-result-head">',
+    "<div><h4>策略版本历史</h4><p>仅展示当前任务受认证的策略快照、物化关系、运行阻塞和已验证产物。</p></div>",
+    "</header>",
+    championSummary,
+    '<p class="candidate-lab-boundary-note">本地采纳会先提交回测并等待人工确认，不是生产部署，也不会自动启动监控。</p>',
+    strategies.length
+      ? `<div class="candidate-lab-result-list">${strategies.map(
+        (strategy) => strategyHistoryItemHtml(strategy, championIds),
+      ).join("")}</div>`
+      : '<p class="candidate-lab-empty">尚无策略版本；请先把完整 Strategy Pool 物化为 draft 草稿策略。</p>',
+    value.truncated === true
+      ? `<p class="candidate-lab-truncated">已显示 ${escapeHtml(strategies.length)} / ${escapeHtml(stablePrimitiveText(value.total))} 个最新策略版本，其余历史已由服务端截断。</p>`
+      : "",
     "</section>",
   ].join("");
 }
@@ -1293,6 +1734,7 @@ export function strategyCandidateLabResultsHtml(payload = {}) {
   const candidates = isRecord(payload.candidates) ? payload.candidates : {};
   return [
     strategyWorkflowSpineHtml(payload.workflow),
+    strategyHistoryHtml(payload.strategies),
     ...COLLECTION_DEFINITIONS.map(
       (definition) => candidateCollectionHtml(candidates, definition),
     ),
@@ -1313,6 +1755,192 @@ function splitValues(value) {
     .split(/[\s,，、;；]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function splitContextList(value) {
+  return String(value || "")
+    .split(/[\n,，;；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseProjectBusinessContext(value) {
+  const lines = String(value || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (lines.length > 50) {
+    throw new Error("项目业务信息最多填写 50 个字段。");
+  }
+  const context = {};
+  for (const line of lines) {
+    const separator = line.indexOf("=");
+    if (separator <= 0 || separator === line.length - 1) {
+      throw new Error("项目业务信息请按 field.path=内容 每行填写一项。");
+    }
+    const fieldPath = line.slice(0, separator).trim();
+    const fieldValue = line.slice(separator + 1).trim();
+    if (
+      !PROJECT_CONTEXT_FIELD_PATH_RE.test(fieldPath)
+      || PROJECT_CONTEXT_PLATFORM_FIELD_RE.test(fieldPath)
+    ) {
+      throw new Error(`项目业务信息字段路径不允许：${fieldPath || "-"}`);
+    }
+    if (Object.hasOwn(context, fieldPath)) {
+      throw new Error(`项目业务信息字段路径重复：${fieldPath}`);
+    }
+    if (!fieldValue || fieldValue.length > 4000) {
+      throw new Error(`项目业务信息 ${fieldPath} 必须是 1 到 4000 个字符。`);
+    }
+    context[fieldPath] = fieldValue;
+  }
+  return context;
+}
+
+function collectStrategyProjectContextInputs(form) {
+  const asOf = formValue(form, "project_context_as_of");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+    throw new Error("请填写项目现状截止日期（YYYY-MM-DD）。");
+  }
+  const inputs = {
+    as_of: asOf,
+    business_context: parseProjectBusinessContext(
+      formValue(form, "project_context_business_context"),
+    ),
+    explicit_unavailable: checkedValues(form, "project_context_unavailable"),
+    external_report_filenames: splitContextList(
+      formValue(form, "project_context_external_reports"),
+    ),
+  };
+  const scope = formValue(form, "project_context_scope");
+  if (scope) inputs.scope = scope;
+  if (inputs.external_report_filenames.length > 20) {
+    throw new Error("外部历史材料文件名最多填写 20 个。");
+  }
+  if (
+    inputs.external_report_filenames.some(
+      (name) => !name || name.includes("/") || name.includes("\\") || name.includes("\0"),
+    )
+  ) {
+    throw new Error("外部历史材料只能填写任务材料目录中的文件名。");
+  }
+  if (
+    inputs.explicit_unavailable.some(
+      (fieldPath) => !PROJECT_CONTEXT_FIELD_PATH_RE.test(fieldPath),
+    )
+  ) {
+    throw new Error("暂缺信息字段路径无效。");
+  }
+  return inputs;
+}
+
+function collectStrategyPoolMaterializeInputs(form) {
+  const select = formField(form, "pool_materialize_strategy_type");
+  const strategyType = nonEmptyText(select?.value);
+  const option = select?.selectedOptions?.[0];
+  if (
+    !STRATEGY_POOL_TYPES.includes(strategyType)
+    || option?.dataset?.candidateLabProjection !== "1"
+    || nonEmptyText(option?.dataset?.poolId) === ""
+  ) {
+    throw new Error("请选择当前受认证的非空 Strategy Pool。");
+  }
+  return { strategy_type: strategyType };
+}
+
+function collectStrategyDslDeliveryInputs(form) {
+  const select = formField(form, "dsl_delivery_strategy_id");
+  const strategyId = nonEmptyText(select?.value);
+  const option = select?.selectedOptions?.[0];
+  if (
+    !STRATEGY_ID_RE.test(strategyId)
+    || option?.dataset?.candidateLabProjection !== "1"
+    || nonEmptyText(option?.dataset?.strategyId) !== strategyId
+  ) {
+    throw new Error("请选择当前任务受认证的策略版本。");
+  }
+  return { strategy_id: strategyId };
+}
+
+const STRATEGY_ADOPTION_ECONOMICS_COMPONENTS = Object.freeze({
+  limit: Object.freeze(["pd", "lgd", "utilization"]),
+  pricing: Object.freeze([
+    "ead",
+    "pd",
+    "lgd",
+    "funding_rate",
+    "term_months",
+    "operating_cost_per_loan",
+  ]),
+});
+
+function collectStrategyLifecycleAdoptionRequest(form) {
+  const option = selectedProjectionOption(
+    form,
+    "lifecycle_adopt_strategy_id",
+    "待采纳 draft 策略",
+  );
+  const strategyId = nonEmptyText(option.value);
+  const strategyType = nonEmptyText(option.dataset?.strategyType);
+  if (
+    !STRATEGY_ID_RE.test(strategyId)
+    || nonEmptyText(option.dataset?.strategyId) !== strategyId
+    || !STRATEGY_POOL_TYPES.includes(strategyType)
+    || nonEmptyText(option.dataset?.assetStatus) !== "draft"
+  ) {
+    throw new Error("只能从当前受认证投影选择 draft 草稿策略。");
+  }
+  const adoptionReason = formValue(form, "lifecycle_adoption_reason");
+  if (adoptionReason.length < 2 || adoptionReason.length > 1000) {
+    throw new Error("本地采纳理由必须是 2 到 1000 个字符。");
+  }
+  const request = {
+    request_kind: "strategy_lifecycle",
+    operation: "adopt",
+    strategy_type: strategyType,
+    strategy_id: strategyId,
+    adoption_reason: adoptionReason,
+  };
+  const components = STRATEGY_ADOPTION_ECONOMICS_COMPONENTS[strategyType];
+  if (!components) return request;
+
+  const economicsInputs = {};
+  for (const component of components) {
+    const mode = formValue(form, `lifecycle_adopt_${component}_mode`);
+    if (mode === "column") {
+      const column = formValue(
+        form,
+        `lifecycle_adopt_${component}_column`,
+      );
+      if (!column || column.length > 200) {
+        throw new Error(`${fieldLabel(component)} 必须填写可用数据列。`);
+      }
+      economicsInputs[`${component}_col`] = column;
+      continue;
+    }
+    if (mode !== "value") {
+      throw new Error(
+        `${fieldLabel(component)} 必须选择使用数据列或固定值。`,
+      );
+    }
+    const rawValue = formValue(form, `lifecycle_adopt_${component}_value`);
+    const value = Number(rawValue);
+    if (
+      !rawValue
+      || !Number.isFinite(value)
+      || value < 0
+      || (component === "term_months" && value <= 0)
+      || (
+        ["pd", "lgd", "utilization", "funding_rate"].includes(component)
+        && value > 1
+      )
+    ) {
+      throw new Error(`${fieldLabel(component)} 固定值不符合经济口径范围。`);
+    }
+    economicsInputs[`${component}_value`] = value;
+  }
+  request.economics_inputs = economicsInputs;
+  return request;
 }
 
 function uniqueValues(values, label) {
@@ -1676,6 +2304,61 @@ function collectCrossInputs(form) {
     inputs.manual_breakpoints = manualBreakpoints;
   }
   return inputs;
+}
+
+function collectCrossCandidateSearchInputs(form) {
+  const select = formField(form, "cross_search_features");
+  const options = Array.from(select?.selectedOptions || []);
+  if (options.length < 2 || options.length > 20) {
+    throw new Error("Cross 自动搜索必须明确选择 2 到 20 个独立字段。");
+  }
+  if (options.some((option) => (
+    option.dataset?.candidateLabProjection !== "1"
+    || nonEmptyText(option.value) !== nonEmptyText(option.dataset?.feature)
+    || !nonEmptyText(option.value)
+  ))) {
+    throw new Error("Cross 自动搜索字段必须来自当前单变量受认证投影。");
+  }
+  const features = options.map((option) => nonEmptyText(option.value));
+  if (new Set(features).size !== features.length) {
+    throw new Error("Cross 自动搜索不能重复选择同一字段，必须使用独立字段。");
+  }
+  const maxPairs = optionalNumber(
+    form,
+    "cross_search_max_pairs",
+    { integer: true },
+  );
+  if (maxPairs === undefined || maxPairs < 1 || maxPairs > 190) {
+    throw new Error("Cross 自动搜索预算 max_pairs 必须是 1 到 190 的整数。");
+  }
+  return { features, max_pairs: maxPairs };
+}
+
+function collectCrossCandidateBuildFromSearchInputs(form) {
+  const search = selectedProjectionOption(
+    form,
+    "cross_build_search_id",
+    "Cross 搜索证据",
+  );
+  const pair = selectedProjectionOption(
+    form,
+    "cross_build_pair_id",
+    "Cross 字段组合",
+  );
+  const searchId = nonEmptyText(search.value);
+  const pairId = nonEmptyText(pair.value);
+  if (
+    !CROSS_SEARCH_ID_RE.test(searchId)
+    || !CROSS_PAIR_ID_RE.test(pairId)
+    || nonEmptyText(search.dataset?.searchId) !== searchId
+    || nonEmptyText(pair.dataset?.searchId) !== searchId
+    || nonEmptyText(pair.dataset?.pairId) !== pairId
+  ) {
+    throw new Error(
+      "Cross 字段组合必须属于当前选择的受认证搜索证据。",
+    );
+  }
+  return { search_id: searchId, pair_id: pairId };
 }
 
 function collectTreeInputs(form) {
@@ -2051,9 +2734,9 @@ function collectStrategyPoolValidationInputs(form) {
     "pool_validation_strategy_type",
   );
   const partition = formValue(form, "pool_validation_partition");
-  if (!["approval", "reject"].includes(strategyType)) {
+  if (!STRATEGY_POOL_TYPES.includes(strategyType)) {
     throw new Error(
-      "独立样本回放验证的 Strategy Pool 类型只能是 approval 或 reject。",
+      "独立样本回放验证需要选择受认证的 Strategy Pool 类型。",
     );
   }
   if (!["validation", "oot"].includes(partition)) {
@@ -2651,19 +3334,53 @@ function collectInteractiveTreeRevisionInputs(form) {
   );
   const sourceTreeId = nonEmptyText(source.value);
   const nodeId = nonEmptyText(node.value);
+  const operation = formValue(form, "interactive_tree_operation")
+    || "prune_subtree";
   if (
     !INTERACTIVE_TREE_SOURCE_ID_RE.test(sourceTreeId)
     || !INTERACTIVE_TREE_NODE_ID_RE.test(nodeId)
+    || nonEmptyText(source.dataset?.sourceTreeId) !== sourceTreeId
     || nonEmptyText(node.dataset?.sourceTreeId) !== sourceTreeId
-    || node.dataset?.operation !== "prune_subtree"
+    || nonEmptyText(node.dataset?.nodeId) !== nodeId
+    || !["prune_subtree", "adjust_split_threshold"].includes(operation)
+    || node.dataset?.operation !== operation
   ) {
-    throw new Error("交互式树节点必须来自当前选择分支的受认证可剪枝投影。");
+    throw new Error(
+      "交互式树节点必须来自当前选择分支和操作的受认证投影。",
+    );
   }
   const inputs = {
     source_tree_id: sourceTreeId,
     node_id: nodeId,
-    operation: "prune_subtree",
+    operation,
   };
+  if (operation === "adjust_split_threshold") {
+    const currentThreshold = Number(
+      nonEmptyText(node.dataset?.currentThreshold),
+    );
+    const rawThreshold = formValue(form, "interactive_tree_threshold");
+    const threshold = Number(rawThreshold);
+    if (
+      !nonEmptyText(node.dataset?.feature)
+      || !Number.isFinite(currentThreshold)
+    ) {
+      throw new Error("阈值调整必须来自包含当前字段和阈值的受认证投影。");
+    }
+    if (
+      !rawThreshold
+      || !Number.isFinite(threshold)
+      || (
+        Number.isInteger(threshold)
+        && !Number.isSafeInteger(threshold)
+      )
+    ) {
+      throw new Error("新 threshold 必须是有限且可精确表达的数字。");
+    }
+    if (threshold === currentThreshold) {
+      throw new Error("新 threshold 必须与当前阈值不同。");
+    }
+    inputs.threshold = threshold;
+  }
   optionalText(inputs, "reason", formValue(form, "interactive_tree_reason"));
   return inputs;
 }
@@ -2757,11 +3474,18 @@ export function collectStrategyCandidateLabRequest(form) {
   if (!STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes(workflow)) {
     throw new Error("Candidate Lab 表单包含未开放的策略 workflow。");
   }
+  if (workflow === "strategy_lifecycle_adopt") {
+    return collectStrategyLifecycleAdoptionRequest(form);
+  }
   const workflowInputs = {
+    strategy_project_context: collectStrategyProjectContextInputs,
     strategy_sample_design_v2: collectSampleDesignV2Inputs,
     univariate_candidate_analysis: collectUnivariateInputs,
     univariate_candidate_refinement: collectRefinementInputs,
     cross_matrix_analysis: collectCrossInputs,
+    cross_matrix_candidate_search: collectCrossCandidateSearchInputs,
+    cross_matrix_candidate_build_from_search:
+      collectCrossCandidateBuildFromSearchInputs,
     automatic_tree_candidate_build: collectTreeInputs,
     scorecard_band_build: collectScorecardBandInputs,
     scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
@@ -2776,6 +3500,8 @@ export function collectStrategyCandidateLabRequest(form) {
     strategy_pool_stability: collectStrategyPoolStabilityInputs,
     strategy_pool_impact: collectStrategyPoolImpactInputs,
     strategy_impact_cube: collectStrategyImpactCubeInputs,
+    strategy_pool_materialize: collectStrategyPoolMaterializeInputs,
+    strategy_dsl_delivery: collectStrategyDslDeliveryInputs,
     strategy_report_bundle_v2: collectStrategyReportBundleV2Inputs,
     voting_candidate_search: collectVotingCandidateSearchInputs,
     voting_candidate_build_from_search:
@@ -2899,41 +3625,119 @@ function interactiveTreeProjectionSources(payload) {
 }
 
 function interactiveTreePointer(payload, sourceTreeId, nodeId) {
+  return interactiveTreeRevisionPointer(
+    payload,
+    sourceTreeId,
+    nodeId,
+    "prune_subtree",
+  );
+}
+
+function interactiveTreePointersForOperation(item, operation) {
+  return operation === "adjust_split_threshold"
+    ? interactiveTreeThresholdEligiblePointers(item)
+    : interactiveTreeEligiblePointers(item);
+}
+
+function interactiveTreeRevisionPointer(
+  payload,
+  sourceTreeId,
+  nodeId,
+  operation,
+) {
   const source = interactiveTreeProjectionSources(payload).find(
     (item) => item?.detail?.source_tree_id === sourceTreeId,
   );
   if (!source) return null;
-  return interactiveTreeEligiblePointers(source).find(
+  return interactiveTreePointersForOperation(source, operation).find(
     (pointer) => pointer.node_id === nodeId,
   ) || null;
+}
+
+function interactiveTreeRevisionRequestIsCurrent(payload, inputs) {
+  if (!isRecord(inputs)) return false;
+  const operation = nonEmptyText(inputs.operation);
+  const pointer = interactiveTreeRevisionPointer(
+    payload,
+    nonEmptyText(inputs.source_tree_id),
+    nonEmptyText(inputs.node_id),
+    operation,
+  );
+  if (!pointer) return false;
+  if (operation === "prune_subtree") {
+    return !Object.prototype.hasOwnProperty.call(inputs, "threshold");
+  }
+  if (operation !== "adjust_split_threshold") return false;
+  const threshold = Number(inputs.threshold);
+  return (
+    typeof inputs.threshold === "number"
+    && Number.isFinite(threshold)
+    && threshold !== Number(pointer.current_threshold)
+  );
 }
 
 function syncInteractiveTreeRevisionControls(
   form,
   payload,
   {
+    requestedOperation = "",
     requestedSourceTreeId = "",
     requestedNodeId = "",
     preserveNode = true,
   } = {},
 ) {
   if (!form) return;
+  const operationField = formField(form, "interactive_tree_operation");
   const sourceSelect = formField(form, "interactive_tree_source_id");
   const nodeSelect = formField(form, "interactive_tree_node_id");
   if (!sourceSelect || !nodeSelect) return;
+  const allowedOperations = [
+    "prune_subtree",
+    "adjust_split_threshold",
+  ];
+  const requested = nonEmptyText(requestedOperation);
+  if (operationField && allowedOperations.includes(requested)) {
+    operationField.value = requested;
+  }
+  const operation = allowedOperations.includes(formValue(
+    form,
+    "interactive_tree_operation",
+  ))
+    ? formValue(form, "interactive_tree_operation")
+    : "prune_subtree";
   const sources = interactiveTreeProjectionSources(payload);
   const previousSource = nonEmptyText(sourceSelect.value);
+  const previousNode = preserveNode ? nonEmptyText(nodeSelect.value) : "";
+  const previousNodeOption = Array.from(
+    nodeSelect.selectedOptions || [],
+  )[0] || null;
+  const previousPointerIdentity = previousNodeOption
+    ? [
+      nonEmptyText(previousNodeOption.dataset?.sourceTreeId),
+      nonEmptyText(previousNodeOption.dataset?.nodeId),
+      nonEmptyText(previousNodeOption.dataset?.operation),
+      nonEmptyText(previousNodeOption.dataset?.currentThreshold),
+    ].join("\u001f")
+    : "";
+  const thresholdField = formField(form, "interactive_tree_threshold");
+  const previousThreshold = String(thresholdField?.value ?? "");
   sourceSelect.innerHTML = [
     '<option value="">请选择自动树或不可变 revision</option>',
     ...sources.map((item) => {
       const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
-      const eligibleCount = interactiveTreeEligiblePointers(item).length;
+      const eligibleCount = interactiveTreePointersForOperation(
+        item,
+        operation,
+      ).length;
       const type = item?.kind === "interactive_tree_revision"
         ? "revision"
         : "automatic";
+      const pointerLabel = operation === "adjust_split_threshold"
+        ? "个可调阈值节点"
+        : "个可剪枝节点";
       return projectionOptionHtml(
         sourceTreeId,
-        `${sourceTreeId} · ${type} · ${eligibleCount} 个可剪枝节点`,
+        `${sourceTreeId} · ${type} · ${eligibleCount} ${pointerLabel}`,
         {
           "candidate-lab-projection": "1",
           "source-tree-id": sourceTreeId,
@@ -2944,8 +3748,8 @@ function syncInteractiveTreeRevisionControls(
   const preferredSource = nonEmptyText(requestedSourceTreeId) || previousSource;
   if (selectContainsValue(sourceSelect, preferredSource)) {
     sourceSelect.value = preferredSource;
-  } else if (sources.length) {
-    sourceSelect.value = nonEmptyText(sources[0]?.detail?.source_tree_id);
+  } else {
+    sourceSelect.value = "";
   }
 
   const selectedSourceId = nonEmptyText(sourceSelect.value);
@@ -2953,9 +3757,8 @@ function syncInteractiveTreeRevisionControls(
     (item) => item?.detail?.source_tree_id === selectedSourceId,
   );
   const pointers = selectedSource
-    ? interactiveTreeEligiblePointers(selectedSource)
+    ? interactiveTreePointersForOperation(selectedSource, operation)
     : [];
-  const previousNode = preserveNode ? nonEmptyText(nodeSelect.value) : "";
   nodeSelect.innerHTML = [
     '<option value="">请选择当前分支可见 split 节点</option>',
     ...pointers.map((pointer) => {
@@ -2971,7 +3774,16 @@ function syncInteractiveTreeRevisionControls(
         {
           "candidate-lab-projection": "1",
           "source-tree-id": pointer.source_tree_id,
-          operation: "prune_subtree",
+          "node-id": pointer.node_id,
+          operation,
+          ...(operation === "adjust_split_threshold"
+            ? {
+              feature: pointer.feature,
+              "current-threshold": stablePrimitiveText(
+                pointer.current_threshold,
+              ),
+            }
+            : {}),
         },
       );
     }),
@@ -2979,16 +3791,72 @@ function syncInteractiveTreeRevisionControls(
   const preferredNode = nonEmptyText(requestedNodeId) || previousNode;
   if (selectContainsValue(nodeSelect, preferredNode)) {
     nodeSelect.value = preferredNode;
-  } else if (pointers.length) {
-    nodeSelect.value = pointers[0].node_id;
+  } else {
+    nodeSelect.value = "";
+  }
+  const selectedNodeOption = Array.from(
+    nodeSelect.selectedOptions || [],
+  )[0] || null;
+  const selectedPointerIdentity = selectedNodeOption
+    ? [
+      nonEmptyText(selectedNodeOption.dataset?.sourceTreeId),
+      nonEmptyText(selectedNodeOption.dataset?.nodeId),
+      nonEmptyText(selectedNodeOption.dataset?.operation),
+      nonEmptyText(selectedNodeOption.dataset?.currentThreshold),
+    ].join("\u001f")
+    : "";
+  const isThresholdAdjustment = operation === "adjust_split_threshold";
+  const thresholdPanel = form.querySelector?.(
+    "[data-candidate-lab-tree-threshold-panel]",
+  );
+  thresholdPanel?.classList?.toggle?.("hidden", !isThresholdAdjustment);
+  const thresholdFeature = form.querySelector?.(
+    "[data-candidate-lab-tree-threshold-feature]",
+  );
+  if (thresholdFeature) {
+    thresholdFeature.textContent = isThresholdAdjustment
+      ? nonEmptyText(selectedNodeOption?.dataset?.feature) || "请先选择节点"
+      : "—";
+  }
+  const currentThreshold = form.querySelector?.(
+    "[data-candidate-lab-tree-current-threshold]",
+  );
+  if (currentThreshold) {
+    currentThreshold.textContent = isThresholdAdjustment
+      ? nonEmptyText(selectedNodeOption?.dataset?.currentThreshold)
+        || "请先选择节点"
+      : "—";
+  }
+  if (thresholdField) {
+    thresholdField.value = (
+      isThresholdAdjustment
+      && previousPointerIdentity
+      && previousPointerIdentity === selectedPointerIdentity
+    )
+      ? previousThreshold
+      : "";
   }
   const help = form.querySelector?.("[data-candidate-lab-tree-help]");
   if (help) {
-    help.textContent = sources.length
-      ? pointers.length
-        ? "选择后会创建新 revision；不会覆盖来源树，也不会自动入池。"
-        : "该分支当前没有可继续剪枝的可见 split 节点。"
-      : "当前任务尚无受认证自动树，请先构建自动规则树。";
+    if (!sources.length) {
+      help.textContent = "当前任务尚无受认证自动树，请先构建自动规则树。";
+    } else if (!selectedSource) {
+      help.textContent = "请明确选择来源树或 revision；即使只有一个，页面也不会自动代选。";
+    } else if (!pointers.length) {
+      help.textContent = isThresholdAdjustment
+        ? "该分支当前没有受认证的可调阈值 split 节点。"
+        : "该分支当前没有可继续剪枝的可见 split 节点。";
+    } else if (!selectedNodeOption) {
+      help.textContent = "请明确选择一个受认证 split 节点；页面不会按效果、排名或数量自动代选。";
+    } else if (isThresholdAdjustment) {
+      help.textContent = `当前 ${nonEmptyText(
+        selectedNodeOption.dataset?.feature,
+      )} 阈值为 ${nonEmptyText(
+        selectedNodeOption.dataset?.currentThreshold,
+      )}；新阈值必须不同，页面不会自动代选，提交只创建不可变 revision。`;
+    } else {
+      help.textContent = "确认后只创建不可变剪枝 revision；不会覆盖来源树，也不会自动入池。";
+    }
   }
 }
 
@@ -4097,6 +4965,30 @@ function strategyPoolCompileForm(root) {
   ) || null;
 }
 
+function strategyProjectContextForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_project_context"]',
+  ) || null;
+}
+
+function strategyPoolMaterializeForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_materialize"]',
+  ) || null;
+}
+
+function strategyLifecycleAdoptionForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_lifecycle_adopt"]',
+  ) || null;
+}
+
+function strategyDslDeliveryForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_dsl_delivery"]',
+  ) || null;
+}
+
 function strategyPoolValidationForm(root) {
   return root?.querySelector?.(
     '[data-candidate-lab-workflow="strategy_pool_validation"]',
@@ -4175,6 +5067,7 @@ function strategyPoolOperationPools(payload) {
     }
     byType.set(strategyType, {
       strategyType,
+      poolId: nonEmptyText(pool.pool_id),
       entries: entries.map((entry) => ({
         entryId: nonEmptyText(entry.entry_id),
         position: entry.position,
@@ -4199,6 +5092,7 @@ function syncStrategyPoolTypeSelect(select, pools) {
       {
         "candidate-lab-projection": "1",
         "strategy-type": pool.strategyType,
+        "pool-id": pool.poolId,
       },
     )),
   ].join("");
@@ -4212,11 +5106,270 @@ function syncStrategyPoolTypeSelect(select, pools) {
   return nonEmptyText(select.value);
 }
 
+function syncStrategyProjectContextControls(form) {
+  if (!form) return;
+  const asOf = formField(form, "project_context_as_of");
+  if (!asOf || nonEmptyText(asOf.value)) return;
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  asOf.value = `${year}-${month}-${day}`;
+}
+
+function syncStrategyPoolMaterializeControls(form, payload) {
+  if (!form) return;
+  const pools = strategyPoolOperationPools(payload);
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "pool_materialize_strategy_type"),
+    pools,
+  );
+  const help = form.querySelector?.(
+    "[data-candidate-lab-pool-materialize-help]",
+  );
+  if (help) {
+    help.textContent = pools.length === 0
+      ? "当前任务尚无可物化的受认证非空 Strategy Pool。"
+      : pools.length === 1
+        ? `已选择当前唯一的 ${selectedType} Pool；物化后仍是 draft 策略。`
+        : "当前存在多个受认证非空 Pool，请明确选择要物化的策略类型。";
+  }
+}
+
+function projectedStrategyItems(payload) {
+  const collection = isRecord(payload?.strategies) ? payload.strategies : {};
+  const items = Array.isArray(collection.all)
+    ? collection.all.filter(isRecord)
+    : [];
+  const seen = new Set();
+  const unique = [];
+  for (const strategy of items) {
+    const strategyId = nonEmptyText(strategy.strategy_id);
+    if (!strategyId || seen.has(strategyId)) continue;
+    seen.add(strategyId);
+    unique.push(strategy);
+  }
+  const latest = isRecord(collection.latest) ? collection.latest : null;
+  const latestId = nonEmptyText(latest?.strategy_id);
+  if (latestId && !seen.has(latestId)) unique.unshift(latest);
+  return unique;
+}
+
+function strategyDeliveryOptions(payload) {
+  return projectedStrategyItems(payload).filter((strategy) => (
+    STRATEGY_ID_RE.test(nonEmptyText(strategy?.strategy_id))
+    && STRATEGY_POOL_TYPES.includes(nonEmptyText(strategy?.strategy_type))
+    && ["draft", "validated", "adopted_local"].includes(
+      nonEmptyText(strategy?.asset_status),
+    )
+  )).map((strategy) => ({
+    strategyId: nonEmptyText(strategy.strategy_id),
+    strategyType: nonEmptyText(strategy.strategy_type),
+    version: strategy.version,
+    assetStatus: nonEmptyText(strategy.asset_status),
+  }));
+}
+
+function syncStrategyDslDeliveryControls(form, payload) {
+  if (!form) return;
+  const select = formField(form, "dsl_delivery_strategy_id");
+  if (!select) return;
+  const strategies = strategyDeliveryOptions(payload);
+  const previous = nonEmptyText(select.value);
+  select.innerHTML = [
+    '<option value="">请选择当前任务策略版本</option>',
+    ...strategies.map((strategy) => projectionOptionHtml(
+      strategy.strategyId,
+      `${strategy.strategyType} · v${stablePrimitiveText(strategy.version)} · ${strategy.assetStatus}`,
+      {
+        "candidate-lab-projection": "1",
+        "strategy-id": strategy.strategyId,
+      },
+    )),
+  ].join("");
+  if (previous && selectContainsValue(select, previous)) {
+    select.value = previous;
+  } else if (strategies.length === 1) {
+    select.value = strategies[0].strategyId;
+  } else {
+    select.value = "";
+  }
+  const help = form.querySelector?.(
+    "[data-candidate-lab-dsl-delivery-help]",
+  );
+  if (help) {
+    help.textContent = strategies.length === 0
+      ? "当前任务尚无可交付的 canonical Strategy；请先物化当前 Pool。"
+      : strategies.length === 1
+        ? "已选择当前唯一策略；平台会重新绑定活动数据并执行逐行等价验证。"
+        : "当前有多个可交付策略版本，请明确选择完整版本。";
+  }
+}
+
+function strategyLifecycleAdoptionOptions(payload) {
+  return projectedStrategyItems(payload).filter((strategy) => (
+    STRATEGY_ID_RE.test(nonEmptyText(strategy?.strategy_id))
+    && STRATEGY_POOL_TYPES.includes(nonEmptyText(strategy?.strategy_type))
+    && nonEmptyText(strategy?.asset_status) === "draft"
+  )).map((strategy) => ({
+    strategyId: nonEmptyText(strategy.strategy_id),
+    strategyType: nonEmptyText(strategy.strategy_type),
+    version: strategy.version,
+    assetStatus: "draft",
+    runtimeBlockers: Array.isArray(strategy?.materialization?.runtime_blockers)
+      ? strategy.materialization.runtime_blockers.length
+      : 0,
+  }));
+}
+
+function strategyProjectionAvailableColumns(payload) {
+  const workflow = isRecord(payload?.workflow) ? payload.workflow : {};
+  const sample = isRecord(workflow.sample_design)
+    ? workflow.sample_design
+    : {};
+  const sources = [
+    payload?.available_columns,
+    payload?.task?.available_columns,
+    workflow.available_columns,
+    sample.available_columns,
+    sample.column_whitelist,
+    sample.dataset?.available_columns,
+  ];
+  const columns = [];
+  const seen = new Set();
+  for (const source of sources) {
+    if (!Array.isArray(source)) continue;
+    for (const item of source) {
+      const column = nonEmptyText(
+        typeof item === "string" ? item : item?.name || item?.column,
+      );
+      if (!column || seen.has(column)) continue;
+      seen.add(column);
+      columns.push(column);
+      if (columns.length >= 500) return columns;
+    }
+  }
+  return columns;
+}
+
+function syncStrategyLifecycleAdoptionEconomics(form, strategyType) {
+  const economics = form?.querySelector?.(
+    "[data-candidate-lab-adoption-economics]",
+  );
+  const economicType = ["limit", "pricing"].includes(strategyType);
+  economics?.classList?.toggle?.("hidden", !economicType);
+  const components = form?.querySelectorAll?.(
+    "[data-candidate-lab-adoption-component]",
+  ) || [];
+  for (const component of components) {
+    const name = nonEmptyText(component.dataset?.candidateLabAdoptionComponent);
+    const allowedTypes = nonEmptyText(component.dataset?.strategyTypes)
+      .split(/\s+/)
+      .filter(Boolean);
+    const visible = economicType && allowedTypes.includes(strategyType);
+    component.classList?.toggle?.("hidden", !visible);
+    const mode = formField(form, `lifecycle_adopt_${name}_mode`);
+    if (visible && !["column", "value"].includes(nonEmptyText(mode?.value))) {
+      mode.value = "column";
+    }
+    const selectedMode = nonEmptyText(mode?.value) || "column";
+    const bindings = component.querySelectorAll?.(
+      "[data-candidate-lab-adoption-binding]",
+    ) || [];
+    for (const binding of bindings) {
+      binding.classList?.toggle?.(
+        "hidden",
+        nonEmptyText(binding.dataset?.candidateLabAdoptionBinding)
+          !== selectedMode,
+      );
+    }
+  }
+}
+
+function syncStrategyLifecycleAdoptionControls(form, payload) {
+  if (!form) return;
+  const select = formField(form, "lifecycle_adopt_strategy_id");
+  if (!select) return;
+  const strategies = strategyLifecycleAdoptionOptions(payload);
+  const previous = nonEmptyText(select.value);
+  select.innerHTML = [
+    '<option value="">请选择当前 draft 草稿策略</option>',
+    ...strategies.map((strategy) => projectionOptionHtml(
+      strategy.strategyId,
+      `${STRATEGY_TYPE_LABELS[strategy.strategyType] || strategy.strategyType} · v${stablePrimitiveText(strategy.version)} · draft${strategy.runtimeBlockers ? ` · ${strategy.runtimeBlockers} 项运行阻塞` : ""}`,
+      {
+        "candidate-lab-projection": "1",
+        "strategy-id": strategy.strategyId,
+        "strategy-type": strategy.strategyType,
+        "asset-status": strategy.assetStatus,
+      },
+    )),
+  ].join("");
+  if (previous && selectContainsValue(select, previous)) {
+    select.value = previous;
+  } else if (strategies.length === 1) {
+    select.value = strategies[0].strategyId;
+  } else {
+    select.value = "";
+  }
+  const selected = Array.from(select.selectedOptions || [])[0] || null;
+  const strategyType = nonEmptyText(selected?.dataset?.strategyType);
+  syncStrategyLifecycleAdoptionEconomics(form, strategyType);
+
+  const help = form.querySelector?.("[data-candidate-lab-adoption-help]");
+  if (help) {
+    help.textContent = strategies.length === 0
+      ? "当前任务尚无可提交采纳的 draft 策略；请先物化完整 Strategy Pool。"
+      : strategies.length === 1
+        ? "已选择当前唯一 draft 策略；提交后平台会重新回测并等待人工确认。"
+        : "当前有多个 draft 策略版本，请明确选择要重新回测并提交人工确认的版本。";
+  }
+
+  const columns = strategyProjectionAvailableColumns(payload);
+  const datalist = form.querySelector?.(
+    "[data-candidate-lab-adoption-available-columns]",
+  );
+  if (datalist) {
+    datalist.innerHTML = columns.map(
+      (column) => `<option value="${escapeHtml(column)}"></option>`,
+    ).join("");
+  }
+  const columnsHelp = form.querySelector?.(
+    "[data-candidate-lab-adoption-columns-help]",
+  );
+  if (columnsHelp) {
+    columnsHelp.textContent = columns.length
+      ? `当前投影提供 ${columns.length} 个可用列建议；也可输入列名，平台仍会按任务列白名单核验。`
+      : "当前投影未提供列建议；可以输入列名，平台会按任务列白名单核验，不存在或不可用的列不会通过。";
+  }
+}
+
+function strategyWorkbenchRequestIsCurrent(request, payload) {
+  if (request?.request_kind === "strategy_lifecycle") {
+    return strategyLifecycleAdoptionOptions(payload).some((strategy) => (
+      strategy.strategyId === request.strategy_id
+      && strategy.strategyType === request.strategy_type
+      && strategy.assetStatus === "draft"
+    ));
+  }
+  if (request?.workflow === "strategy_pool_materialize") {
+    return strategyPoolOperationPools(payload).some(
+      (pool) => pool.strategyType === request.workflow_inputs?.strategy_type,
+    );
+  }
+  if (request?.workflow === "strategy_dsl_delivery") {
+    return strategyDeliveryOptions(payload).some(
+      (strategy) => (
+        strategy.strategyId === request.workflow_inputs?.strategy_id
+      ),
+    );
+  }
+  return true;
+}
+
 function syncStrategyPoolValidationControls(form, payload) {
   if (!form) return;
-  const pools = strategyPoolOperationPools(payload).filter((pool) => (
-    ["approval", "reject"].includes(pool.strategyType)
-  ));
+  const pools = strategyPoolOperationPools(payload);
   const selectedType = syncStrategyPoolTypeSelect(
     formField(form, "pool_validation_strategy_type"),
     pools,
@@ -4226,10 +5379,10 @@ function syncStrategyPoolValidationControls(form, payload) {
   );
   if (help) {
     help.textContent = pools.length === 0
-      ? "当前任务尚无可验证的受认证非空审批或拒绝 Pool。"
+      ? "当前任务尚无可验证的受认证非空 Strategy Pool。"
       : pools.length === 1
         ? `已选择当前唯一的 ${selectedType} Pool；请选择 validation 或 OOT 分区。`
-        : "当前存在多个可验证的非空 Pool，请明确选择 approval 或 reject。";
+        : "当前存在多个可验证的非空 Pool，请明确选择策略类型。";
   }
 }
 
@@ -4579,7 +5732,7 @@ function strategyPoolValidationRequestIsCurrent(request, payload) {
     request?.workflow_inputs?.strategy_type,
   );
   return (
-    ["approval", "reject"].includes(strategyType)
+    STRATEGY_POOL_TYPES.includes(strategyType)
     && strategyPoolOperationPools(payload).some(
       (pool) => pool.strategyType === strategyType,
     )
@@ -4596,6 +5749,199 @@ function strategyPoolStabilityRequestIsCurrent(request, payload) {
     && strategyPoolOperationPools(payload).some(
       (pool) => pool.strategyType === strategyType,
     )
+  );
+}
+
+function crossCandidateSearchForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="cross_matrix_candidate_search"]',
+  ) || null;
+}
+
+function crossCandidateBuildForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="cross_matrix_candidate_build_from_search"]',
+  ) || null;
+}
+
+function crossSearchFeatureOptions(payload) {
+  const byFeature = new Map();
+  for (const candidate of univariateProjectionCandidates(payload)) {
+    for (const pair of univariateCandidatePairs(candidate)) {
+      if (!byFeature.has(pair.feature)) byFeature.set(pair.feature, new Set());
+      byFeature.get(pair.feature).add(pair.method);
+    }
+  }
+  return [...byFeature.entries()].map(([feature, methods]) => ({
+    feature,
+    methodCount: methods.size,
+  }));
+}
+
+function syncCrossCandidateSearchControls(form, payload) {
+  if (!form) return;
+  const select = formField(form, "cross_search_features");
+  if (!select) return;
+  const features = crossSearchFeatureOptions(payload);
+  const previous = new Set(selectedValues(select));
+  select.innerHTML = features.length
+    ? features.map((item) => projectionOptionHtml(
+      item.feature,
+      `${item.feature} · ${item.methodCount} 种受认证分箱方法`,
+      {
+        "candidate-lab-projection": "1",
+        feature: item.feature,
+      },
+    )).join("")
+    : '<option value="" disabled>当前没有可搜索的单变量字段</option>';
+  for (const option of Array.from(select.options || [])) {
+    option.selected = previous.has(option.value);
+  }
+  const selectedCount = selectedValues(select).length;
+  const searchSpace = selectedCount * (selectedCount - 1) / 2;
+  const help = form.querySelector?.(
+    "[data-candidate-lab-cross-search-help]",
+  );
+  if (help) {
+    help.textContent = features.length < 2
+      ? "当前单变量受认证投影不足 2 个独立字段，请先完成更多单变量分析。"
+      : selectedCount < 2
+        ? `当前有 ${features.length} 个独立字段可选；请明确选择 2–20 个，页面不会自动代选。`
+        : `已明确选择 ${selectedCount} 个字段，对应 ${searchSpace} 个两两组合；实际评估数量受 max_pairs 预算限制。`;
+  }
+}
+
+function crossSearchProjectionCandidates(payload) {
+  const collection = isRecord(payload?.candidates?.cross_search)
+    ? payload.candidates.cross_search
+    : {};
+  const seen = new Set();
+  return collectionItems(collection).filter((search) => {
+    const searchId = nonEmptyText(search?.search_id);
+    if (!CROSS_SEARCH_ID_RE.test(searchId) || seen.has(searchId)) return false;
+    seen.add(searchId);
+    return true;
+  });
+}
+
+function crossSearchPairs(search) {
+  const seen = new Set();
+  return (Array.isArray(search?.pairs) ? search.pairs : []).filter((pair) => {
+    const pairId = nonEmptyText(pair?.pair_id);
+    if (!isRecord(pair) || !CROSS_PAIR_ID_RE.test(pairId) || seen.has(pairId)) {
+      return false;
+    }
+    seen.add(pairId);
+    return true;
+  });
+}
+
+function crossPairOptionLabel(pair) {
+  const eligibility = pair?.eligible === true
+    ? "eligible"
+    : "不符合稀疏性门槛";
+  return [
+    nonEmptyText(pair?.pair_id),
+    `${nonEmptyText(pair?.x_feature)}/${nonEmptyText(pair?.x_method)}`,
+    `× ${nonEmptyText(pair?.y_feature)}/${nonEmptyText(pair?.y_method)}`,
+    eligibility,
+    `空单元格 ${stablePrimitiveText(pair?.empty_cell_count)}/${stablePrimitiveText(pair?.cell_count)}`,
+    `占比 ${stablePrimitiveText(pair?.empty_cell_share)}`,
+    `rank ${stablePrimitiveText(pair?.rank)}`,
+  ].join(" · ");
+}
+
+function syncCrossCandidateBuildControls(
+  form,
+  payload,
+  { preservePair = true } = {},
+) {
+  if (!form) return;
+  const searches = crossSearchProjectionCandidates(payload);
+  const searchSelect = formField(form, "cross_build_search_id");
+  const pairSelect = formField(form, "cross_build_pair_id");
+  if (!searchSelect || !pairSelect) return;
+  const previousSearchId = nonEmptyText(searchSelect.value);
+  searchSelect.innerHTML = [
+    '<option value="">请明确选择一份受认证 Cross 搜索</option>',
+    ...searches.map((search) => projectionOptionHtml(
+      search.search_id,
+      `${search.search_id} · 已评估 ${stablePrimitiveText(search.evaluated)} / ${stablePrimitiveText(search.search_space)} · eligible ${stablePrimitiveText(search.eligible)}`,
+      {
+        "candidate-lab-projection": "1",
+        "search-id": nonEmptyText(search.search_id),
+      },
+    )),
+  ].join("");
+  searchSelect.value = selectContainsValue(searchSelect, previousSearchId)
+    ? previousSearchId
+    : "";
+
+  const searchId = nonEmptyText(searchSelect.value);
+  const search = searches.find((item) => item.search_id === searchId);
+  const pairs = crossSearchPairs(search);
+  const previousPairId = nonEmptyText(pairSelect.value);
+  const previousSource = nonEmptyText(
+    Array.from(pairSelect.selectedOptions || [])[0]?.dataset?.searchId,
+  );
+  pairSelect.innerHTML = [
+    `<option value="">${searchId ? "请明确选择该搜索中的完整 Pair" : "请先明确选择一份搜索证据"}</option>`,
+    ...pairs.map((pair) => projectionOptionHtml(
+      pair.pair_id,
+      crossPairOptionLabel(pair),
+      {
+        "candidate-lab-projection": "1",
+        "search-id": searchId,
+        "pair-id": nonEmptyText(pair.pair_id),
+        eligible: pair.eligible === true ? "1" : "0",
+      },
+    )),
+  ].join("");
+  if (
+    preservePair
+    && previousSource === searchId
+    && selectContainsValue(pairSelect, previousPairId)
+  ) {
+    pairSelect.value = previousPairId;
+  } else {
+    pairSelect.value = "";
+  }
+  const help = form.querySelector?.("[data-candidate-lab-cross-build-help]");
+  if (help) {
+    help.textContent = searches.length === 0
+      ? "当前任务尚无受认证 Cross 搜索，请先运行自动搜索。"
+      : !searchId
+        ? "请明确选择搜索；即使只有一个搜索，页面也不会把它当作推荐自动代选。"
+        : pairs.length === 0
+          ? "该搜索没有可见 Pair，无法从当前投影构建候选。"
+          : "请逐项查看 eligible、空单元格与稀疏性后明确选择 Pair；即使只有一个也不会自动代选。";
+  }
+}
+
+function crossCandidateRequestIsCurrent(request, payload) {
+  if (request?.workflow === "cross_matrix_candidate_search") {
+    const available = new Set(
+      crossSearchFeatureOptions(payload).map((item) => item.feature),
+    );
+    const features = request?.workflow_inputs?.features;
+    return (
+      Array.isArray(features)
+      && features.length >= 2
+      && features.length <= 20
+      && new Set(features).size === features.length
+      && features.every((feature) => available.has(feature))
+    );
+  }
+  if (
+    request?.workflow !== "cross_matrix_candidate_build_from_search"
+  ) {
+    return true;
+  }
+  const search = crossSearchProjectionCandidates(payload).find(
+    (item) => item.search_id === request?.workflow_inputs?.search_id,
+  );
+  return crossSearchPairs(search).some(
+    (pair) => pair.pair_id === request?.workflow_inputs?.pair_id,
   );
 }
 
@@ -4868,6 +6214,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       + "[data-candidate-lab-form] textarea, "
       + "[data-candidate-lab-form] button, "
       + "[data-candidate-lab-interactive-tree-prune], "
+      + "[data-candidate-lab-interactive-tree-threshold], "
       + "[data-candidate-lab-interactive-tree-frontier-materialize]",
     ) || [];
     for (const control of controls) {
@@ -4892,6 +6239,18 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       const poolAddPlacementPanel = control.closest?.(
         "[data-candidate-lab-pool-add-placement-panel]",
       );
+      const adoptionEconomicsPanel = control.closest?.(
+        "[data-candidate-lab-adoption-economics]",
+      );
+      const adoptionComponent = control.closest?.(
+        "[data-candidate-lab-adoption-component]",
+      );
+      const adoptionBinding = control.closest?.(
+        "[data-candidate-lab-adoption-binding]",
+      );
+      const treeThresholdPanel = control.closest?.(
+        "[data-candidate-lab-tree-threshold-panel]",
+      );
       const hiddenByMode = Boolean(
         refinementPanel?.classList?.contains?.("hidden")
         || scorecardPanel?.classList?.contains?.("hidden")
@@ -4899,7 +6258,11 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         || poolActionValuePanel?.classList?.contains?.("hidden")
         || poolAddDefaultValuePanel?.classList?.contains?.("hidden")
         || poolAddActionValuePanel?.classList?.contains?.("hidden")
-        || poolAddPlacementPanel?.classList?.contains?.("hidden"),
+        || poolAddPlacementPanel?.classList?.contains?.("hidden")
+        || adoptionEconomicsPanel?.classList?.contains?.("hidden")
+        || adoptionComponent?.classList?.contains?.("hidden")
+        || adoptionBinding?.classList?.contains?.("hidden")
+        || treeThresholdPanel?.classList?.contains?.("hidden"),
       );
       const locked = (
         control.dataset?.candidateLabPoolAddLocked === "1"
@@ -4944,6 +6307,9 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         ].join("");
       }
     }
+    syncStrategyProjectContextControls(
+      strategyProjectContextForm(root),
+    );
     syncRefinementForm(root, state.payload);
     syncScorecardForms(root, state.payload);
     syncCandidateStabilityControls(
@@ -4970,11 +6336,31 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       strategyImpactCubeForm(root),
       state.payload,
     );
+    syncStrategyPoolMaterializeControls(
+      strategyPoolMaterializeForm(root),
+      state.payload,
+    );
+    syncStrategyLifecycleAdoptionControls(
+      strategyLifecycleAdoptionForm(root),
+      state.payload,
+    );
+    syncStrategyDslDeliveryControls(
+      strategyDslDeliveryForm(root),
+      state.payload,
+    );
     syncStrategyPoolApplyControls(
       strategyPoolApplyForm(root),
       state.payload,
     );
     syncStrategyPoolOperationForms(root, state.payload);
+    syncCrossCandidateSearchControls(
+      crossCandidateSearchForm(root),
+      state.payload,
+    );
+    syncCrossCandidateBuildControls(
+      crossCandidateBuildForm(root),
+      state.payload,
+    );
     syncVotingForms(root, state.payload);
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
@@ -4998,6 +6384,9 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       form.reset?.();
       setFormError(form, "");
     }
+    syncStrategyProjectContextControls(
+      strategyProjectContextForm(root),
+    );
     syncRefinementForm(root, state.payload, { preserveBins: false });
     syncScorecardForms(root, state.payload);
     syncCandidateStabilityControls(
@@ -5025,11 +6414,32 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       strategyImpactCubeForm(root),
       state.payload,
     );
+    syncStrategyPoolMaterializeControls(
+      strategyPoolMaterializeForm(root),
+      state.payload,
+    );
+    syncStrategyLifecycleAdoptionControls(
+      strategyLifecycleAdoptionForm(root),
+      state.payload,
+    );
+    syncStrategyDslDeliveryControls(
+      strategyDslDeliveryForm(root),
+      state.payload,
+    );
     syncStrategyPoolApplyControls(
       strategyPoolApplyForm(root),
       state.payload,
     );
     syncStrategyPoolOperationForms(root, state.payload);
+    syncCrossCandidateSearchControls(
+      crossCandidateSearchForm(root),
+      state.payload,
+    );
+    syncCrossCandidateBuildControls(
+      crossCandidateBuildForm(root),
+      state.payload,
+      { preservePair: false },
+    );
     syncVotingForms(root, state.payload);
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
@@ -5197,7 +6607,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         state.payload,
       )) {
         throw new Error(
-          "所选审批或拒绝 Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
+          "所选 Strategy Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
         );
       }
       if (!strategyPoolStabilityRequestIsCurrent(
@@ -5216,6 +6626,22 @@ export function createStrategyCandidateLabController(dependencies = {}) {
           "影响测算所选 Strategy Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
         );
       }
+      if (!strategyWorkbenchRequestIsCurrent(
+        strategyRequest,
+        state.payload,
+      )) {
+        throw new Error(
+          "所选 Pool 或策略版本已过期、不完整或不属于当前任务受认证投影，请刷新 Strategy Workbench 后重选。",
+        );
+      }
+      if (!crossCandidateRequestIsCurrent(
+        strategyRequest,
+        state.payload,
+      )) {
+        throw new Error(
+          "所选单变量字段、Cross 搜索或 Pair 已过期或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
       if (
         strategyRequest.workflow === "strategy_pool_apply"
         && !strategyPoolApplyOptions(state.payload).some(
@@ -5230,14 +6656,13 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       }
       if (
         strategyRequest.workflow === "interactive_tree_revision"
-        && !interactiveTreePointer(
+        && !interactiveTreeRevisionRequestIsCurrent(
           state.payload,
-          strategyRequest.workflow_inputs.source_tree_id,
-          strategyRequest.workflow_inputs.node_id,
+          strategyRequest.workflow_inputs,
         )
       ) {
         throw new Error(
-          "交互式树剪枝指针已过期或不属于当前任务的受认证投影，请刷新 Candidate Lab 后重选。",
+          "交互式树修订指针或当前阈值已过期，或不属于当前任务的受认证投影，请刷新 Candidate Lab 后重选。",
         );
       }
       if (
@@ -5274,7 +6699,9 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     }
 
     const workflow = strategyRequest.workflow;
-    const content = WORKFLOW_LABELS[workflow] || "从 Candidate Lab 启动策略分析";
+    const content = strategyRequest.request_kind === "strategy_lifecycle"
+      ? WORKFLOW_LABELS.strategy_lifecycle_adopt
+      : WORKFLOW_LABELS[workflow] || "从 Candidate Lab 启动策略分析";
     setFormError(form, "");
     state.submitting = true;
     renderAvailability();
@@ -5316,13 +6743,21 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       await dependencies.settleCandidateLabSubmission?.(requestTaskId);
       if (selectedTaskId() !== requestTaskId) return result;
       if (
-        strategyRequest.workflow === "strategy_pool_apply"
+        strategyRequest.request_kind === "strategy_lifecycle"
+        || strategyRequest.workflow === "cross_matrix_candidate_search"
+        || strategyRequest.workflow
+          === "cross_matrix_candidate_build_from_search"
+        || strategyRequest.workflow === "strategy_pool_apply"
         || strategyRequest.workflow === "strategy_pool_stability"
         || strategyRequest.workflow === "strategy_pool_impact"
         || strategyRequest.workflow === "strategy_impact_cube"
+        || strategyRequest.workflow === "strategy_project_context"
         || strategyRequest.workflow === "strategy_sample_design_v2"
+        || strategyRequest.workflow === "strategy_pool_materialize"
+        || strategyRequest.workflow === "strategy_dsl_delivery"
         || strategyRequest.workflow === "strategy_report_bundle_v2"
         || strategyRequest.workflow === "strategy_pool_add_candidate"
+        || strategyRequest.workflow === "interactive_tree_revision"
         || STRATEGY_POOL_OPERATION_WORKFLOWS.includes(strategyRequest.workflow)
       ) {
         await refresh(requestTaskId, { silent: true });
@@ -5474,6 +6909,63 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       renderAvailability();
       return true;
     }
+    const thresholdAdjustment = event.target?.closest?.(
+      "[data-candidate-lab-interactive-tree-threshold]",
+    );
+    if (thresholdAdjustment) {
+      event.preventDefault?.();
+      const reason = blockedReason(state, dependencies);
+      const form = interactiveTreeForm(panel());
+      if (reason) {
+        const message = BLOCKED_REASON_COPY[reason]
+          || "当前 Candidate Lab 暂不可启动新分析。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      const sourceTreeId = nonEmptyText(
+        thresholdAdjustment.dataset?.sourceTreeId,
+      );
+      const nodeId = nonEmptyText(thresholdAdjustment.dataset?.nodeId);
+      const pointer = interactiveTreeRevisionPointer(
+        state.payload,
+        sourceTreeId,
+        nodeId,
+        "adjust_split_threshold",
+      );
+      if (
+        !pointer
+        || !form
+        || nonEmptyText(thresholdAdjustment.dataset?.feature)
+          !== pointer.feature
+        || nonEmptyText(thresholdAdjustment.dataset?.currentThreshold)
+          !== stablePrimitiveText(pointer.current_threshold)
+      ) {
+        const message = "该阈值调整指针不属于当前任务的受认证 Candidate Lab 投影。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      syncInteractiveTreeRevisionControls(
+        form,
+        state.payload,
+        {
+          requestedOperation: "adjust_split_threshold",
+          requestedSourceTreeId: sourceTreeId,
+          requestedNodeId: nodeId,
+          preserveNode: false,
+        },
+      );
+      setFormError(form, "");
+      const launcher = form.closest?.(".candidate-lab-launcher");
+      if (launcher) launcher.open = true;
+      dependencies.setActionStatus?.(
+        "已带入受认证分支、字段与当前阈值；请明确填写不同的新阈值后创建不可变 revision。",
+        "info",
+      );
+      renderAvailability();
+      return true;
+    }
     const prune = event.target?.closest?.(
       "[data-candidate-lab-interactive-tree-prune]",
     );
@@ -5505,6 +6997,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         form,
         state.payload,
         {
+          requestedOperation: "prune_subtree",
           requestedSourceTreeId: sourceTreeId,
           requestedNodeId: nodeId,
           preserveNode: false,
@@ -5531,6 +7024,55 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     const field = event.target?.closest?.("[data-candidate-lab-field]");
     if (!field) return false;
     const fieldName = field.dataset?.candidateLabField;
+    const adoption = field.closest?.(
+      '[data-candidate-lab-workflow="strategy_lifecycle_adopt"]',
+    );
+    if (adoption && fieldName === "lifecycle_adopt_strategy_id") {
+      syncStrategyLifecycleAdoptionControls(adoption, state.payload);
+      renderAvailability();
+      return true;
+    }
+    if (
+      adoption
+      && /^lifecycle_adopt_[a-z_]+_mode$/.test(fieldName || "")
+    ) {
+      const selected = Array.from(
+        formField(adoption, "lifecycle_adopt_strategy_id")
+          ?.selectedOptions || [],
+      )[0] || null;
+      syncStrategyLifecycleAdoptionEconomics(
+        adoption,
+        nonEmptyText(selected?.dataset?.strategyType),
+      );
+      renderAvailability();
+      return true;
+    }
+    const crossSearch = field.closest?.(
+      '[data-candidate-lab-workflow="cross_matrix_candidate_search"]',
+    );
+    if (
+      crossSearch
+      && (
+        fieldName === "cross_search_features"
+        || fieldName === "cross_search_max_pairs"
+      )
+    ) {
+      syncCrossCandidateSearchControls(crossSearch, state.payload);
+      renderAvailability();
+      return true;
+    }
+    const crossBuild = field.closest?.(
+      '[data-candidate-lab-workflow="cross_matrix_candidate_build_from_search"]',
+    );
+    if (crossBuild && fieldName === "cross_build_search_id") {
+      syncCrossCandidateBuildControls(
+        crossBuild,
+        state.payload,
+        { preservePair: false },
+      );
+      renderAvailability();
+      return true;
+    }
     const refinement = field.closest?.(
       '[data-candidate-lab-workflow="univariate_candidate_refinement"]',
     );
@@ -5693,12 +7235,18 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     );
     if (
       interactiveTree
-      && fieldName === "interactive_tree_source_id"
+      && [
+        "interactive_tree_operation",
+        "interactive_tree_source_id",
+        "interactive_tree_node_id",
+      ].includes(fieldName)
     ) {
       syncInteractiveTreeRevisionControls(
         interactiveTree,
         state.payload,
-        { preserveNode: false },
+        {
+          preserveNode: fieldName === "interactive_tree_node_id",
+        },
       );
       renderAvailability();
       return true;

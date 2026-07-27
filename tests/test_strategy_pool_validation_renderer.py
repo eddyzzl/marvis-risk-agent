@@ -6,6 +6,8 @@ from copy import deepcopy
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStep, StepStatus
@@ -16,9 +18,20 @@ from marvis.packs.strategy.pool_validation_tools import (
     POOL_VALIDATION_ARTIFACT_KIND,
     POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION,
     POOL_VALIDATION_ORIGIN_TOOL,
+    run_measure_strategy_pool_validation,
 )
+from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
+from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
 from marvis.repositories.task_artifacts import stable_task_artifact_id
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.plugins.manifest import ToolRef
+from tests.test_strategy_pool_tools import (
+    _add_inputs as _pool_add_inputs,
+    _setup as _pool_setup,
+)
+from tests.test_strategy_pool_validation_tools import (
+    _native_validation_request,
+)
 from tests.test_strategy_pool_validation import _build
 
 
@@ -234,6 +247,89 @@ def test_pool_validation_renderer_surfaces_independent_replay_not_psi(
         table for table in tables if table["title"] == "独立回放逐月证据"
     )
     assert len(monthly["rows"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("strategy_type", "default_action", "action", "table_title"),
+    [
+        (
+            "limit",
+            {"type": "limit", "value": 1_000},
+            {"type": "limit", "value": 2_000},
+            "独立回放额度分布",
+        ),
+        (
+            "pricing",
+            {"type": "pricing", "value": 0.10},
+            {"type": "pricing", "value": 0.20},
+            "独立回放定价分布",
+        ),
+        (
+            "segmentation",
+            {"type": "segment", "value": "standard"},
+            {"type": "segment", "value": "priority"},
+            "独立回放分群分布",
+        ),
+    ],
+)
+def test_pool_validation_renderer_surfaces_native_typed_distribution(
+    tmp_path: Path,
+    strategy_type: str,
+    default_action: dict,
+    action: dict,
+    table_title: str,
+) -> None:
+    fx = _pool_setup(tmp_path / strategy_type, native_sample=True)
+    added_inputs = _pool_add_inputs(
+        fx["first"],
+        expected_revision=0,
+        expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+    )
+    added_inputs.update(
+        {
+            "strategy_type": strategy_type,
+            "default_action": default_action,
+            "action": action,
+        }
+    )
+    added = run_add_candidate_to_pool(
+        added_inputs,
+        fx["ctx"],
+        fx["runtime"],
+    )
+    request = _native_validation_request(
+        fx,
+        added,
+        strategy_type=strategy_type,
+    )
+    output = run_measure_strategy_pool_validation(
+        request,
+        fx["ctx"],
+        fx["runtime"],
+    )
+    record = next(
+        item
+        for item in TaskArtifactRepository(
+            fx["settings"].db_path
+        ).list_for_task(fx["task"].id)
+        if item["id"] == output["artifact"]["artifact_id"]
+    )
+
+    text, tables = render_tool_output(
+        "measure_strategy_pool_validation",
+        output,
+        trusted_task_id=fx["task"].id,
+        trusted_inputs=request,
+        trusted_artifacts=_trusted_artifacts(
+            record,
+            fx["settings"].tasks_dir,
+        ),
+    )
+
+    assert "独立样本回放验证完成" in text
+    assert strategy_type in text
+    assert "结果完整性校验失败" not in text
+    assert any(table["title"] == table_title for table in tables)
 
 
 def test_pool_validation_renderer_fails_closed_on_task_or_plan_input_drift(

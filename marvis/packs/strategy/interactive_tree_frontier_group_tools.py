@@ -18,8 +18,10 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL,
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION,
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION_V2,
     InteractiveTreeFrontierGroupSelectionError,
     build_interactive_tree_frontier_group_selection,
     canonical_interactive_tree_frontier_group_selection_json,
@@ -30,6 +32,7 @@ from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
 from marvis.packs.strategy.interactive_tree_revision import (
     INTERACTIVE_TREE_ASSET_TYPE,
     INTERACTIVE_TREE_REVISION_SCHEMA_VERSION,
+    INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION,
 )
 from marvis.packs.strategy.interactive_tree_tools import (
     VerifiedInteractiveTreeRevision,
@@ -41,6 +44,9 @@ from marvis.repositories.task_artifacts import stable_task_artifact_id
 
 TOOL_SCHEMA_VERSION = (
     "strategy.materialize-interactive-tree-frontier-group-selection-tool.v1"
+)
+TOOL_SCHEMA_VERSION_V2 = (
+    "strategy.materialize-interactive-tree-frontier-group-selection-tool.v2"
 )
 MAX_INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_BYTES = 1024 * 1024
 MAX_INTERACTIVE_TREE_FRONTIER_GROUP_REVISION_BYTES = 64 * 1024 * 1024
@@ -172,6 +178,10 @@ def run_materialize_interactive_tree_frontier_group_selection(
         provenance=provenance,
     )
     ancestry = revision.ancestor_revisions
+    is_v2 = (
+        revision.revision["schema_version"]
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+    )
     fragment = (
         interactive_tree_frontier_group_selection_to_verified_candidate_fragment(
             selection,
@@ -184,7 +194,9 @@ def run_materialize_interactive_tree_frontier_group_selection(
                     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND
                 ),
                 "artifact_schema_version": (
-                    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION
+                    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2
+                    if is_v2
+                    else INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION
                 ),
                 "content_hash": content_hash,
                 "origin_tool": (
@@ -202,7 +214,9 @@ def run_materialize_interactive_tree_frontier_group_selection(
     revision_ref = selection["revision"]
     fragment_ref = fragment["fragment"]
     return {
-        "schema_version": TOOL_SCHEMA_VERSION,
+        "schema_version": (
+            TOOL_SCHEMA_VERSION_V2 if is_v2 else TOOL_SCHEMA_VERSION
+        ),
         "selection_id": selection["selection_id"],
         "selection_hash": selection["selection_hash"],
         "group_id": selection["group_id"],
@@ -376,13 +390,34 @@ def load_verified_interactive_tree_frontier_group_selection_artifact_on_connecti
         _PROVENANCE_FIELDS,
         "interactive-tree frontier group selection provenance",
     )
-    expected_fixed = {
-        "schema_version": (
+    revision_schema = provenance["revision_schema_version"]
+    if revision_schema == INTERACTIVE_TREE_REVISION_SCHEMA_VERSION:
+        selection_artifact_schema = (
             INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION
-        ),
-        "producer_version": (
+        )
+        selection_producer = (
             INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION
-        ),
+        )
+        revision_artifact_schema = (
+            revision_tools.INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION
+        )
+    elif revision_schema == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION:
+        selection_artifact_schema = (
+            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2
+        )
+        selection_producer = (
+            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_PRODUCER_VERSION_V2
+        )
+        revision_artifact_schema = (
+            revision_tools.INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2
+        )
+    else:
+        raise StrategyError(
+            "interactive-tree frontier group revision schema changed"
+        )
+    expected_fixed = {
+        "schema_version": selection_artifact_schema,
+        "producer_version": selection_producer,
         "task_id": normalized_task,
         "kind": INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
         "format": "json",
@@ -390,12 +425,12 @@ def load_verified_interactive_tree_frontier_group_selection_artifact_on_connecti
             revision_tools.INTERACTIVE_TREE_REVISION_ARTIFACT_KIND
         ),
         "revision_artifact_schema_version": (
-            revision_tools.INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION
+            revision_artifact_schema
         ),
         "revision_artifact_origin_tool": (
             revision_tools.INTERACTIVE_TREE_REVISION_ORIGIN_TOOL
         ),
-        "revision_schema_version": INTERACTIVE_TREE_REVISION_SCHEMA_VERSION,
+        "revision_schema_version": revision_schema,
         "semantic_tree_id": normalized_asset_id,
         "tree_hash": normalized_asset_hash,
         "asset_type": INTERACTIVE_TREE_ASSET_TYPE,
@@ -955,10 +990,12 @@ def _require_exact_fields(
 __all__ = [
     "INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND",
     "INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION",
+    "INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2",
     "INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL",
     "MAX_INTERACTIVE_TREE_FRONTIER_GROUP_REVISION_BYTES",
     "MAX_INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_BYTES",
     "TOOL_SCHEMA_VERSION",
+    "TOOL_SCHEMA_VERSION_V2",
     "VerifiedInteractiveTreeFrontierGroupSelection",
     "canonical_interactive_tree_frontier_group_selection_path",
     "interactive_tree_frontier_group_selection_provenance",

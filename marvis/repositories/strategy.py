@@ -486,6 +486,85 @@ class StrategyRepository:
             "strategy_spec_hash": spec_hash,
         }
 
+    def list_recent_strategy_refs_for_task_with_count(
+        self,
+        task_id: str,
+        *,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return one bounded newest-first lifecycle window and exact count."""
+
+        normalized_task_id = _required_artifact_text(task_id, field="task_id")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        bounded_limit = min(limit, 100)
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN")
+            count_row = conn.execute(
+                "SELECT COUNT(*) AS total FROM strategies WHERE task_id = ?",
+                (normalized_task_id,),
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT id, task_id, strategy_type, version, status, asset_status,
+                       adopted_at, adoption_reason, parent_strategy_id, created_at
+                  FROM strategies
+                 WHERE task_id = ?
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?
+                """,
+                (normalized_task_id, bounded_limit),
+            ).fetchall()
+        return (
+            [_strategy_meta_from_row(row) for row in rows],
+            int(count_row["total"]),
+        )
+
+    def list_current_local_champion_refs_for_task_with_count(
+        self,
+        task_id: str,
+        *,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return a bounded set of rows that claim current local adoption."""
+
+        normalized_task_id = _required_artifact_text(task_id, field="task_id")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        bounded_limit = min(limit, 10)
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN")
+            params = (
+                normalized_task_id,
+                LEGACY_STATUS_ADOPTED,
+                ASSET_STATUS_ADOPTED_LOCAL,
+            )
+            count_row = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                  FROM strategies
+                 WHERE task_id = ?
+                   AND (status = ? OR asset_status = ?)
+                """,
+                params,
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT id, task_id, strategy_type, version, status, asset_status,
+                       adopted_at, adoption_reason, parent_strategy_id, created_at
+                  FROM strategies
+                 WHERE task_id = ?
+                   AND (status = ? OR asset_status = ?)
+                 ORDER BY strategy_type, created_at DESC, id DESC
+                 LIMIT ?
+                """,
+                (*params, bounded_limit),
+            ).fetchall()
+        return (
+            [_strategy_meta_from_row(row) for row in rows],
+            int(count_row["total"]),
+        )
+
     def get_pool_materialization(
         self,
         materialization_id: str,
@@ -539,6 +618,47 @@ class StrategyRepository:
             SELECT *
               FROM strategy_pool_materializations
              WHERE pool_revision_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        persisted = _pool_materialization_from_row(row)
+        authenticated = _require_pool_materialization_on_connection(
+            conn,
+            expected={
+                field: persisted[field]
+                for field in _POOL_MATERIALIZATION_INPUT_FIELDS
+            },
+        )
+        return authenticated["materialization"]
+
+    def get_pool_materialization_for_strategy(
+        self,
+        strategy_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the authenticated immutable Pool lineage for one Strategy."""
+
+        with connect(self.db_path) as conn:
+            return self.get_pool_materialization_for_strategy_on_connection(
+                conn,
+                strategy_id,
+            )
+
+    def get_pool_materialization_for_strategy_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        strategy_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_id = _pool_materialization_text(
+            strategy_id,
+            "strategy_id",
+        )
+        row = conn.execute(
+            """
+            SELECT *
+              FROM strategy_pool_materializations
+             WHERE strategy_id = ?
             """,
             (normalized_id,),
         ).fetchone()
@@ -1142,6 +1262,55 @@ class StrategyRepository:
                 (strategy_id,),
             ).fetchall()
         return [_strategy_artifact_record_from_row(row) for row in rows]
+
+    def list_recent_strategy_artifacts_for_task_with_count(
+        self,
+        task_id: str,
+        strategy_id: str,
+        *,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return a bounded task-owned artifact window for one Strategy."""
+
+        normalized_task_id = _required_artifact_text(task_id, field="task_id")
+        normalized_strategy_id = _required_artifact_text(
+            strategy_id,
+            field="strategy_id",
+        )
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        bounded_limit = min(limit, 50)
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN")
+            count_row = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                  FROM strategy_artifacts a
+                  JOIN strategies s ON s.id = a.strategy_id
+                 WHERE s.task_id = ? AND a.strategy_id = ?
+                """,
+                (normalized_task_id, normalized_strategy_id),
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT a.id, a.strategy_id, a.kind, a.path, a.created_at,
+                       a.content_hash, a.content_size, a.provenance_json
+                  FROM strategy_artifacts a
+                  JOIN strategies s ON s.id = a.strategy_id
+                 WHERE s.task_id = ? AND a.strategy_id = ?
+                 ORDER BY a.created_at DESC, a.id DESC
+                 LIMIT ?
+                """,
+                (
+                    normalized_task_id,
+                    normalized_strategy_id,
+                    bounded_limit,
+                ),
+            ).fetchall()
+        return (
+            [_strategy_artifact_record_from_row(row) for row in rows],
+            int(count_row["total"]),
+        )
 
     def list_strategy_artifacts_for_task(self, task_id: str) -> list[dict]:
         """Return artifact rows joined to their task-owned strategy metadata."""

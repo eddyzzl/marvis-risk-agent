@@ -353,6 +353,144 @@ STRATEGY_CROSS_MATRIX_ANALYSIS = WorkflowTemplate(
 )
 
 
+STRATEGY_CROSS_MATRIX_CANDIDATE_SEARCH = WorkflowTemplate(
+    id="strategy_cross_matrix_candidate_search",
+    title="Cross Matrix 自动特征组合搜索",
+    goal_patterns=(
+        "搜索 Cross Matrix 候选组合",
+        "枚举交叉矩阵特征对",
+        "search Cross Matrix candidate pairs",
+    ),
+    slots=(
+        SlotSpec(
+            "source_artifact_id",
+            True,
+            "task_context",
+            "Latest exact univariate candidate evidence artifact",
+        ),
+        SlotSpec(
+            "expected_artifact_content_hash",
+            True,
+            "task_context",
+            "Authenticated source artifact content hash",
+        ),
+        SlotSpec(
+            "expected_candidate_id",
+            True,
+            "task_context",
+            "Authenticated parent candidate id",
+        ),
+        SlotSpec(
+            "expected_evidence_hash",
+            True,
+            "task_context",
+            "Authenticated parent evidence hash",
+        ),
+        SlotSpec(
+            "features",
+            True,
+            "user",
+            "Two to twenty explicit candidate feature names",
+        ),
+        SlotSpec(
+            "max_pairs",
+            True,
+            "user",
+            "Hard one-to-190 deterministic pair evaluation budget",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="搜索 Cross Matrix 候选组合",
+            tool_ref=ToolRef("strategy", "search_cross_matrix_candidates"),
+            inputs_template={
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_artifact_content_hash": (
+                    "{slot:expected_artifact_content_hash}"
+                ),
+                "expected_candidate_id": "{slot:expected_candidate_id}",
+                "expected_evidence_hash": "{slot:expected_evidence_hash}",
+                "features": "{slot:features}",
+                "max_pairs": "{slot:max_pairs}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "search_id"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_CROSS_MATRIX_CANDIDATE_BUILD_FROM_SEARCH = WorkflowTemplate(
+    id="strategy_cross_matrix_candidate_build_from_search",
+    title="Cross 搜索特征对精确候选构建",
+    goal_patterns=(
+        "从 Cross 搜索结果构建候选",
+        "物化指定 Cross 搜索特征对",
+        "build Cross candidate from search result",
+    ),
+    slots=(
+        SlotSpec(
+            "search_id",
+            True,
+            "user",
+            "Exact authenticated Cross search id",
+        ),
+        SlotSpec(
+            "pair_id",
+            True,
+            "user",
+            "Exact evaluated Cross feature-pair id",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="从搜索特征对构建 Cross 候选",
+            tool_ref=ToolRef(
+                "strategy",
+                "build_cross_matrix_candidate_from_search",
+            ),
+            inputs_template={
+                "search_id": "{slot:search_id}",
+                "pair_id": "{slot:pair_id}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck(
+                    "nonempty",
+                    {"field": "cross_matrix_candidate.asset_id"},
+                ),
+                PostCheck(
+                    "nonempty",
+                    {"field": "cross_matrix_candidate.asset_hash"},
+                ),
+                PostCheck(
+                    "nonempty",
+                    {"field": "source_search_selection.search_id"},
+                ),
+                PostCheck(
+                    "nonempty",
+                    {"field": "source_search_selection.pair_id"},
+                ),
+                PostCheck(
+                    "nonempty",
+                    {"field": "cross_matrix_candidate.artifacts"},
+                ),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_CROSS_MATRIX_CELL_SELECTION = WorkflowTemplate(
     id="strategy_cross_matrix_cell_selection",
     title="Cross Matrix 精确单元格选择",
@@ -1609,12 +1747,14 @@ STRATEGY_AUTOMATIC_TREE_LEAF_MATERIALIZATION = WorkflowTemplate(
 
 STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
     id="strategy_interactive_tree_revision",
-    title="交互式决策树修剪修订",
+    title="交互式决策树不可变修订",
     goal_patterns=(
         "修剪交互式决策树节点",
         "删除决策树子树",
         "基于自动树创建修剪版本",
+        "调整交互式决策树分裂阈值",
         "prune an interactive decision tree subtree",
+        "adjust an interactive decision tree split threshold",
         "create an immutable interactive tree revision",
     ),
     slots=(
@@ -1631,10 +1771,22 @@ STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
             "Exact currently visible split-node id",
         ),
         SlotSpec(
+            "operation",
+            True,
+            "user",
+            "Exact prune_subtree or adjust_split_threshold operation",
+        ),
+        SlotSpec(
+            "threshold",
+            False,
+            "user",
+            "Exact finite user-owned threshold for a threshold adjustment",
+        ),
+        SlotSpec(
             "reason",
             False,
             "user",
-            "Optional user-owned audit rationale for this prune",
+            "Optional user-owned audit rationale for this tree edit",
         ),
     ),
     steps=(
@@ -1644,7 +1796,8 @@ STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
             inputs_template={
                 "source_tree_id": "{slot:source_tree_id}",
                 "node_id": "{slot:node_id}",
-                "operation": "prune_subtree",
+                "operation": "{slot:operation}",
+                "threshold": "{slot:threshold}",
                 "reason": "{slot:reason}",
             },
             depends_on_titles=(),
@@ -1656,10 +1809,6 @@ STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
                 PostCheck(
                     "one_of",
                     {"field": "replay.exactly_once", "values": [True]},
-                ),
-                PostCheck(
-                    "one_of",
-                    {"field": "replay.metrics_matched", "values": [True]},
                 ),
                 PostCheck("nonempty", {"field": "replay.result_hash"}),
                 PostCheck("nonempty", {"field": "artifacts"}),
@@ -2537,7 +2686,7 @@ STRATEGY_POOL_VALIDATION = WorkflowTemplate(
             "strategy_type",
             True,
             "user",
-            "Explicit approval/reject Strategy Pool type",
+            "Explicit approval/reject/limit/pricing/segmentation Pool type",
         ),
         SlotSpec(
             "partition",
@@ -3038,6 +3187,12 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
             "Optional exact authenticated Voting candidate search evidence",
         ),
         SlotSpec(
+            "cross_candidate_search_ref",
+            False,
+            "task_context",
+            "Optional exact authenticated Cross candidate search evidence",
+        ),
+        SlotSpec(
             "report_revision",
             True,
             "task_context",
@@ -3103,6 +3258,9 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
                 "candidate_stability_ref": "{slot:candidate_stability_ref}",
                 "voting_candidate_search_ref": (
                     "{slot:voting_candidate_search_ref}"
+                ),
+                "cross_candidate_search_ref": (
+                    "{slot:cross_candidate_search_ref}"
                 ),
                 "report_revision": "{slot:report_revision}",
                 "previous_report_id": "{slot:previous_report_id}",

@@ -36,6 +36,8 @@ from marvis.packs.strategy.interactive_tree_revision import (
     INTERACTIVE_TREE_ASSET_TYPE,
     INTERACTIVE_TREE_REVISION_PRODUCER_VERSION,
     INTERACTIVE_TREE_REVISION_SCHEMA_VERSION,
+    INTERACTIVE_TREE_REVISION_V2_PRODUCER_VERSION,
+    INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION,
     canonical_interactive_tree_revision_json,
     validate_interactive_tree_revision,
 )
@@ -50,11 +52,20 @@ INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION = (
 INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION = (
     "strategy.interactive-tree-frontier-selection/1"
 )
+INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION_V2 = (
+    "strategy.interactive-tree-frontier-selection.v2"
+)
+INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION_V2 = (
+    "strategy.interactive-tree-frontier-selection/2"
+)
 INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND = (
     "strategy_interactive_tree_frontier_selection_json"
 )
 INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION = (
     "strategy.interactive-tree-frontier-selection-artifact.v1"
+)
+INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2 = (
+    "strategy.interactive-tree-frontier-selection-artifact.v2"
 )
 INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL = (
     "strategy.materialize_interactive_tree_frontier_selection"
@@ -63,6 +74,9 @@ INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL = (
 _REVISION_ARTIFACT_KIND = "strategy_interactive_tree_revision_json"
 _REVISION_ARTIFACT_SCHEMA_VERSION = (
     "strategy.interactive-tree-revision-artifact.v1"
+)
+_REVISION_ARTIFACT_SCHEMA_VERSION_V2 = (
+    "strategy.interactive-tree-revision-artifact.v2"
 )
 _REVISION_ARTIFACT_ORIGIN_TOOL = "strategy.revise_interactive_tree"
 _MAX_SELECTION_REASON_LENGTH = 500
@@ -275,10 +289,22 @@ def build_interactive_tree_frontier_selection(
             "source_node_id must identify exactly one current revision frontier node"
         )
     reason = _canonicalize_selection_reason(selection_reason)
+    is_v2 = (
+        revision["schema_version"]
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+    )
     body = _normalize_body(
         {
-            "schema_version": INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION,
-            "producer_version": INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION,
+            "schema_version": (
+                INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION_V2
+                if is_v2
+                else INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION
+            ),
+            "producer_version": (
+                INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION_V2
+                if is_v2
+                else INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION
+            ),
             "revision_artifact": _revision_artifact_pointer(
                 {
                     field: binding[field]
@@ -456,14 +482,16 @@ def interactive_tree_frontier_selection_to_verified_candidate_fragment(
 
 def _normalize_body(value: Mapping[str, Any]) -> dict[str, Any]:
     _exact_fields(value, _BODY_FIELDS, "interactive-tree frontier selection body")
-    if value["schema_version"] != INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION:
+    schema = value["schema_version"]
+    if schema == INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION:
+        producer = INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION
+    elif schema == INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION_V2:
+        producer = INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION_V2
+    else:
         raise InteractiveTreeFrontierSelectionError(
             "interactive-tree frontier selection schema_version is invalid"
         )
-    if (
-        value["producer_version"]
-        != INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION
-    ):
+    if value["producer_version"] != producer:
         raise InteractiveTreeFrontierSelectionError(
             "interactive-tree frontier selection producer_version is invalid"
         )
@@ -475,9 +503,18 @@ def _normalize_body(value: Mapping[str, Any]) -> dict[str, Any]:
         revision_artifact=revision_artifact,
         revision=revision,
     )
+    expected_schema = (
+        INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION_V2
+        if revision["schema_version"] == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+        else INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION
+    )
+    if schema != expected_schema:
+        raise InteractiveTreeFrontierSelectionError(
+            "selection schema does not match revision schema"
+        )
     return {
-        "schema_version": INTERACTIVE_TREE_FRONTIER_SELECTION_SCHEMA_VERSION,
-        "producer_version": INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION,
+        "schema_version": schema,
+        "producer_version": producer,
         "revision_artifact": revision_artifact,
         "revision": revision,
         "frontier": frontier,
@@ -577,7 +614,11 @@ def _verified_selection_artifact_binding(
             "selection artifact content hash does not match canonical bytes"
         )
     expected_provenance = _expected_selection_provenance(selection)
-    if pointer["provenance"] != expected_provenance:
+    if (
+        pointer["artifact_schema_version"]
+        != expected_provenance["schema_version"]
+        or pointer["provenance"] != expected_provenance
+    ):
         raise InteractiveTreeFrontierSelectionError(
             "selection artifact provenance does not match the selection"
         )
@@ -612,7 +653,10 @@ def _selection_artifact_pointer(value: object) -> dict[str, Any]:
         raise InteractiveTreeFrontierSelectionError(
             "selection artifact kind is invalid"
         )
-    if schema != INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION:
+    if schema not in {
+        INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+        INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
+    }:
         raise InteractiveTreeFrontierSelectionError(
             "selection artifact schema version is invalid"
         )
@@ -758,21 +802,35 @@ def _normalize_selection_provenance(value: object) -> dict[str, Any]:
             pattern=_EFFECT_ID_RE,
         ),
     }
-    constants = {
-        "schema_version": (
+    revision_schema = normalized["revision_schema_version"]
+    if revision_schema == INTERACTIVE_TREE_REVISION_SCHEMA_VERSION:
+        selection_schema = (
             INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
-        ),
-        "producer_version": (
+        )
+        selection_producer = (
             INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION
-        ),
+        )
+        revision_artifact_schema = _REVISION_ARTIFACT_SCHEMA_VERSION
+    elif revision_schema == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION:
+        selection_schema = (
+            INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2
+        )
+        selection_producer = (
+            INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION_V2
+        )
+        revision_artifact_schema = _REVISION_ARTIFACT_SCHEMA_VERSION_V2
+    else:
+        raise InteractiveTreeFrontierSelectionError(
+            "selection artifact provenance revision schema is invalid"
+        )
+    constants = {
+        "schema_version": selection_schema,
+        "producer_version": selection_producer,
         "kind": INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
         "format": "json",
         "revision_artifact_kind": _REVISION_ARTIFACT_KIND,
-        "revision_artifact_schema_version": (
-            _REVISION_ARTIFACT_SCHEMA_VERSION
-        ),
+        "revision_artifact_schema_version": revision_artifact_schema,
         "revision_artifact_origin_tool": _REVISION_ARTIFACT_ORIGIN_TOOL,
-        "revision_schema_version": INTERACTIVE_TREE_REVISION_SCHEMA_VERSION,
         "asset_type": INTERACTIVE_TREE_ASSET_TYPE,
     }
     for field, expected in constants.items():
@@ -792,7 +850,10 @@ def _expected_selection_provenance(
     return _normalize_selection_provenance(
         {
             "schema_version": (
-                INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
+                INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2
+                if revision["schema_version"]
+                == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+                else INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
             ),
             "producer_version": selection["producer_version"],
             "task_id": revision_artifact["task_id"],
@@ -869,7 +930,10 @@ def _revision_artifact_pointer(value: object) -> dict[str, Any]:
         raise InteractiveTreeFrontierSelectionError(
             "revision artifact kind is invalid"
         )
-    if schema != _REVISION_ARTIFACT_SCHEMA_VERSION:
+    if schema not in {
+        _REVISION_ARTIFACT_SCHEMA_VERSION,
+        _REVISION_ARTIFACT_SCHEMA_VERSION_V2,
+    }:
         raise InteractiveTreeFrontierSelectionError(
             "revision artifact schema version is invalid"
         )
@@ -1002,13 +1066,20 @@ def _normalize_revision_provenance(value: object) -> dict[str, Any]:
         ),
         "sample_design_ref": sample_ref,
     }
+    if normalized["schema_version"] == _REVISION_ARTIFACT_SCHEMA_VERSION:
+        producer = INTERACTIVE_TREE_REVISION_PRODUCER_VERSION
+        operations = {"prune_subtree"}
+    elif normalized["schema_version"] == _REVISION_ARTIFACT_SCHEMA_VERSION_V2:
+        producer = INTERACTIVE_TREE_REVISION_V2_PRODUCER_VERSION
+        operations = {"prune_subtree", "adjust_split_threshold"}
+    else:
+        producer = ""
+        operations = set()
     if (
-        normalized["schema_version"] != _REVISION_ARTIFACT_SCHEMA_VERSION
-        or normalized["producer_version"]
-        != INTERACTIVE_TREE_REVISION_PRODUCER_VERSION
+        normalized["producer_version"] != producer
         or normalized["kind"] != _REVISION_ARTIFACT_KIND
         or normalized["format"] != "json"
-        or normalized["edit_operation"] != "prune_subtree"
+        or normalized["edit_operation"] not in operations
     ):
         raise InteractiveTreeFrontierSelectionError(
             "revision artifact provenance constants are invalid"
@@ -1025,7 +1096,12 @@ def _expected_revision_provenance(
     parent_revision_id = None if parent is None else parent["revision_id"]
     return _normalize_revision_provenance(
         {
-            "schema_version": _REVISION_ARTIFACT_SCHEMA_VERSION,
+            "schema_version": (
+                _REVISION_ARTIFACT_SCHEMA_VERSION_V2
+                if revision["schema_version"]
+                == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+                else _REVISION_ARTIFACT_SCHEMA_VERSION
+            ),
             "producer_version": revision["producer_version"],
             "task_id": revision["identity"]["task_id"],
             "kind": _REVISION_ARTIFACT_KIND,
@@ -1075,7 +1151,10 @@ def _normalize_revision_reference(value: object) -> dict[str, Any]:
     _exact_fields(value, _REVISION_FIELDS, "revision reference")
     schema = _canonical_text(value["schema_version"], "revision.schema_version")
     asset_type = _canonical_text(value["asset_type"], "revision.asset_type")
-    if schema != INTERACTIVE_TREE_REVISION_SCHEMA_VERSION:
+    if schema not in {
+        INTERACTIVE_TREE_REVISION_SCHEMA_VERSION,
+        INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION,
+    }:
         raise InteractiveTreeFrontierSelectionError(
             "revision schema_version is invalid"
         )
@@ -1155,6 +1234,19 @@ def _require_pointer_cross_references(
     revision: Mapping[str, Any],
 ) -> None:
     provenance = revision_artifact["provenance"]
+    expected_artifact_schema = (
+        _REVISION_ARTIFACT_SCHEMA_VERSION_V2
+        if revision["schema_version"] == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+        else _REVISION_ARTIFACT_SCHEMA_VERSION
+    )
+    if (
+        revision_artifact["artifact_schema_version"]
+        != expected_artifact_schema
+        or provenance["schema_version"] != expected_artifact_schema
+    ):
+        raise InteractiveTreeFrontierSelectionError(
+            "revision artifact schema does not match selection revision"
+        )
     comparisons = {
         "task_id": revision_artifact["task_id"],
         "revision_id": revision["revision_id"],

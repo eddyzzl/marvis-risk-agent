@@ -106,9 +106,14 @@ def _sample_binding(
     )
 
 
+@pytest.mark.parametrize(
+    "strategy_type",
+    ["approval", "reject", "limit", "pricing", "segmentation"],
+)
 def test_turn_binds_exact_pool_sample_and_fixed_replay_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    strategy_type: str,
 ) -> None:
     pool = _pool_binding()
     sample = _sample_binding()
@@ -154,10 +159,10 @@ def test_turn_binds_exact_pool_sample_and_fixed_replay_contract(
     slots = _strategy_pool_validation_plan_slots(
         _runtime(tmp_path),
         SimpleNamespace(id="task-1"),
-        _draft(),
+        _draft(strategy_type),
     )
 
-    assert calls["pool"] == ("read-runtime", "task-1", "approval")
+    assert calls["pool"] == ("read-runtime", "task-1", strategy_type)
     assert calls["sample"] == ("read-runtime", "task-1")
     assert calls["requirements"] == (
         "read-runtime",
@@ -166,7 +171,7 @@ def test_turn_binds_exact_pool_sample_and_fixed_replay_contract(
         sample,
     )
     assert slots == {
-        "strategy_type": "approval",
+        "strategy_type": strategy_type,
         "partition": "validation",
         "pool_ref": {
             "artifact_id": "1" * 64,
@@ -316,7 +321,7 @@ def test_manual_request_accepts_exactly_type_and_partition() -> None:
         "partition": "oot",
     }
     for forged in (
-        {"strategy_type": "limit", "partition": "validation"},
+        {"strategy_type": "review", "partition": "validation"},
         {"strategy_type": "approval", "partition": "development"},
         {
             "strategy_type": "approval",

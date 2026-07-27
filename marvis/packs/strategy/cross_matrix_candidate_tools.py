@@ -9,7 +9,7 @@ the kernel-owned asset.  It does not select cells or admit/adopt/deploy rules.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import hmac
 import json
@@ -118,6 +118,45 @@ _ASSET_PROVENANCE_FIELDS = frozenset(
 def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     """Build and persist one complete development-stage Cross Matrix asset."""
 
+    return _run_build_cross_matrix_candidate(
+        inputs,
+        ctx,
+        runtime,
+        expected_asset_fingerprint=None,
+        registration_guard=None,
+    )
+
+
+def run_build_cross_matrix_candidate_with_registration_guard(
+    inputs,
+    ctx,
+    runtime,
+    *,
+    expected_asset_fingerprint: Mapping[str, Any],
+    registration_guard: Callable[[Any], None],
+) -> dict[str, Any]:
+    """Recompute one exact pair and guard its registration with caller evidence."""
+
+    if not callable(registration_guard):
+        raise StrategyError("Cross Matrix registration guard is invalid")
+    expected = _normalize_asset_fingerprint(expected_asset_fingerprint)
+    return _run_build_cross_matrix_candidate(
+        inputs,
+        ctx,
+        runtime,
+        expected_asset_fingerprint=expected,
+        registration_guard=registration_guard,
+    )
+
+
+def _run_build_cross_matrix_candidate(
+    inputs,
+    ctx,
+    runtime,
+    *,
+    expected_asset_fingerprint: Mapping[str, str] | None,
+    registration_guard: Callable[[Any], None] | None,
+) -> dict[str, Any]:
     normalized = _validate_inputs(inputs)
     if normalized["x_feature"] == normalized["y_feature"]:
         raise StrategyError("Cross Matrix axis features must be distinct")
@@ -271,6 +310,14 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     asset = validate_cross_matrix_candidate_asset(asset)
     if rebuild_cross_matrix_candidate_asset(asset, evidence) != asset:
         raise StrategyError("Cross Matrix asset does not rebuild against exact evidence")
+    actual_fingerprint = _asset_fingerprint(asset)
+    if (
+        expected_asset_fingerprint is not None
+        and actual_fingerprint != expected_asset_fingerprint
+    ):
+        raise StrategyError(
+            "Cross Matrix from-search asset fingerprint changed during exact replay"
+        )
     candidate_asset_tools._require_source_unchanged(runtime, source)
     candidate_asset_tools._require_dataset_unchanged(runtime, dataset)
 
@@ -291,6 +338,7 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         column_axis=asset["axes"][1],
         cell_count=cell_count,
         content=content,
+        registration_guard=registration_guard,
     )
     row_axis_output = _axis_projection(asset["axes"][0])
     column_axis_output = _axis_projection(asset["axes"][1])
@@ -849,6 +897,58 @@ def _axis_provenance(axis: Mapping[str, Any]) -> dict[str, Any]:
     return projection
 
 
+def _asset_fingerprint(asset: Mapping[str, Any]) -> dict[str, str]:
+    try:
+        value = {
+            "asset_id": asset["asset_id"],
+            "asset_hash": asset["asset_hash"],
+            "measurement_hash": asset["measurement"]["measurement_hash"],
+            "matrix_hash": asset["matrix"]["matrix_hash"],
+            "summary_hash": asset["summary"]["summary_hash"],
+        }
+    except (KeyError, TypeError) as exc:
+        raise StrategyError("Cross Matrix asset fingerprint is incomplete") from exc
+    return _normalize_asset_fingerprint(value)
+
+
+def _normalize_asset_fingerprint(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise StrategyError("Cross Matrix asset fingerprint must be an object")
+    expected = frozenset(
+        {
+            "asset_id",
+            "asset_hash",
+            "measurement_hash",
+            "matrix_hash",
+            "summary_hash",
+        }
+    )
+    if set(value) != expected:
+        raise StrategyError("Cross Matrix asset fingerprint fields are invalid")
+    asset_id = _text(value["asset_id"], "Cross Matrix fingerprint asset_id")
+    if _SAFE_ASSET_ID_RE.fullmatch(asset_id) is None:
+        raise StrategyError("Cross Matrix fingerprint asset_id is invalid")
+    return {
+        "asset_id": asset_id,
+        "asset_hash": _sha256_text(
+            value["asset_hash"],
+            "Cross Matrix fingerprint asset_hash",
+        ),
+        "measurement_hash": _sha256_text(
+            value["measurement_hash"],
+            "Cross Matrix fingerprint measurement_hash",
+        ),
+        "matrix_hash": _sha256_text(
+            value["matrix_hash"],
+            "Cross Matrix fingerprint matrix_hash",
+        ),
+        "summary_hash": _sha256_text(
+            value["summary_hash"],
+            "Cross Matrix fingerprint summary_hash",
+        ),
+    }
+
+
 def _persist_asset(
     runtime,
     *,
@@ -862,6 +962,7 @@ def _persist_asset(
     column_axis: Mapping[str, Any],
     cell_count: int,
     content: bytes,
+    registration_guard: Callable[[Any], None] | None,
 ) -> dict[str, Any]:
     revalidate_historical_strategy_risk_development_execution_binding(
         runtime,
@@ -932,6 +1033,8 @@ def _persist_asset(
                     conn,
                     sample_design_binding,
                 )
+                if registration_guard is not None:
+                    registration_guard(conn)
                 candidate_asset_tools._require_regular_artifact_path(
                     source.path,
                     root=tasks_root,
@@ -1058,4 +1161,5 @@ __all__ = [
     "TOOL_SCHEMA_VERSION",
     "TOOL_V2_SCHEMA_VERSION",
     "run_build_cross_matrix_candidate",
+    "run_build_cross_matrix_candidate_with_registration_guard",
 ]

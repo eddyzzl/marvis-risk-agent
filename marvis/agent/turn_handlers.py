@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import hashlib
+import hmac
 import json
 import math
 from pathlib import Path
@@ -164,6 +165,12 @@ from marvis.packs.strategy.interactive_tree_frontier_group_tools import (
 from marvis.packs.strategy.interactive_tree_frontier_tools import (
     load_verified_interactive_tree_frontier_selection_artifact_on_connection,
 )
+from marvis.packs.strategy.interactive_tree_revision import (
+    interactive_tree_topology_evidence,
+)
+from marvis.packs.strategy.interactive_tree_tools import (
+    load_verified_interactive_tree_revision,
+)
 from marvis.packs.strategy.voting_candidate_fragment import (
     VOTING_CANDIDATE_ARTIFACT_KIND,
     VOTING_CANDIDATE_ORIGIN_TOOL,
@@ -184,6 +191,11 @@ from marvis.packs.strategy.cross_matrix_candidate_tools import (
     ASSET_ARTIFACT_KIND as CROSS_MATRIX_SOURCE_ARTIFACT_KIND,
     ASSET_ARTIFACT_SCHEMA_VERSION as CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION,
     ORIGIN_TOOL as CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.cross_candidate_search_tools import (
+    CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    load_cross_candidate_search_artifact,
+    resolve_cross_candidate_search_pair,
 )
 from marvis.packs.strategy.cross_matrix_cell_selection import (
     CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
@@ -260,14 +272,19 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     project_pool_entry_requirements,
     resolve_pool_requirements,
 )
+from marvis.packs.strategy.project_context import (
+    strategy_project_context_structured_request_sha256,
+)
 from marvis.packs.strategy.project_context_tools import (
     load_current_strategy_project_context_artifact,
 )
 from marvis.packs.strategy.report_bundle_adapters import (
     build_strategy_report_bundle_source_inputs,
     validate_candidate_stability_report_compatibility,
+    validate_cross_candidate_search_report_compatibility,
 )
 from marvis.packs.strategy.report_bundle_tools import (
+    authenticate_strategy_report_identity_for_pool_on_connection,
     load_strategy_impact_cube_artifact,
 )
 from marvis.packs.strategy.sample_design_binding import (
@@ -1736,10 +1753,10 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
     r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|汇总|归集|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|验证|回放|应用|执行|写回|回写|回填|打标|"
-    r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
+    r"对比|比较|搜索|查找|检索|枚举|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
     r"develop|design|create|build|train|materialize|aggregate|collect|compute|calculate|analy[sz]e|evaluate|backtest|validate|replay|run|apply|compare|"
-    r"adopt|report|monitor|mine|refine|select|merge|add|remove|delete|reorder|compile|preview)",
+    r"search|find|enumerate|screen|adopt|report|monitor|mine|refine|select|merge|add|remove|delete|reorder|compile|preview)",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
@@ -1909,6 +1926,7 @@ def _is_strategy_request_intent(text: str) -> bool:
 
 _MANUAL_STRATEGY_WORKFLOWS = frozenset(
     {
+        "strategy_project_context",
         "strategy_sample_design_v2",
         "univariate_candidate_analysis",
         "cross_matrix_analysis",
@@ -1919,6 +1937,8 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "candidate_monthly_stability",
         "voting_candidate_search",
         "voting_candidate_build_from_search",
+        "cross_matrix_candidate_search",
+        "cross_matrix_candidate_build_from_search",
         "interactive_tree_revision",
         "interactive_tree_frontier_group_materialization",
         "interactive_tree_frontier_materialization",
@@ -1931,6 +1951,10 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "strategy_pool_apply",
         "strategy_pool_validation",
         "strategy_pool_stability",
+        "strategy_pool_impact",
+        "strategy_impact_cube",
+        "strategy_dsl_delivery",
+        "strategy_report_bundle_v2",
     }
 )
 
@@ -1952,12 +1976,36 @@ def _handle_structured_strategy_request_turn(
 
     if task.task_type != TASK_TYPE_STRATEGY:
         raise DriverError("strategy_request 只能用于 strategy 类型任务。")
+    request_kind = strategy_request.get("request_kind")
     workflow = strategy_request.get("workflow")
-    if (
-        not isinstance(workflow, str)
-        or workflow not in _MANUAL_STRATEGY_WORKFLOWS
-    ):
-        raise DriverError("strategy_request 包含未开放的 Candidate Lab workflow。")
+    if request_kind == "standard_workflow":
+        if (
+            not isinstance(workflow, str)
+            or workflow not in _MANUAL_STRATEGY_WORKFLOWS
+        ):
+            raise DriverError(
+                "strategy_request 包含未开放的 Candidate Lab workflow。"
+            )
+        source_metadata = {
+            "intent": "strategy_request",
+            "request_source": "manual_ui",
+            "workflow": workflow,
+        }
+    elif request_kind == "strategy_lifecycle":
+        operation = strategy_request.get("operation")
+        strategy_type = strategy_request.get("strategy_type")
+        if operation != "adopt" or not isinstance(strategy_type, str):
+            raise DriverError(
+                "Candidate Lab 生命周期入口只开放本地采纳复核。"
+            )
+        source_metadata = {
+            "intent": "strategy_request",
+            "request_source": "manual_ui",
+            "operation": operation,
+            "strategy_type": strategy_type,
+        }
+    else:
+        raise DriverError("strategy_request.request_kind 无效。")
 
     conversation = repo.list_agent_messages(task.id)
     if _active_plan(runtime.plan_repo, task.id) is not None:
@@ -1968,18 +2016,6 @@ def _handle_structured_strategy_request_turn(
     pending = _latest_strategy_request_pending(conversation)
     if pending is not None:
         _invalidate_pending_strategy_request(runtime, task, pending)
-
-    source_message = repo.add_agent_message(
-        task.id,
-        role="user",
-        stage="chat",
-        content=str(user_text or "").strip(),
-        metadata={
-            "intent": "strategy_request",
-            "request_source": "manual_ui",
-            "workflow": workflow,
-        },
-    )
 
     preview = None
     preview_error = None
@@ -1994,6 +2030,13 @@ def _handle_structured_strategy_request_turn(
         target_col=None if preview is None else preview.target_col,
     )
     if compilation.draft is None:
+        repo.add_agent_message(
+            task.id,
+            role="user",
+            stage="chat",
+            content=str(user_text or "").strip(),
+            metadata=source_metadata,
+        )
         return _strategy_request_clarification_response(
             repo,
             task,
@@ -2005,11 +2048,40 @@ def _handle_structured_strategy_request_turn(
             fields=compilation.clarification_fields,
         )
     draft = compilation.draft
-    if (
-        not isinstance(draft, StandardWorkflowRequestDraft)
-        or draft.workflow != workflow
+    if request_kind == "standard_workflow":
+        if (
+            not isinstance(draft, StandardWorkflowRequestDraft)
+            or draft.workflow != workflow
+        ):
+            raise DriverError("Candidate Lab 请求未编译为预期的标准 Workflow。")
+    elif (
+        not isinstance(draft, StrategyRequestDraft)
+        or draft.operation != "adopt"
+        or draft.strategy_type != strategy_request.get("strategy_type")
     ):
-        raise DriverError("Candidate Lab 请求未编译为预期的标准 Workflow。")
+        raise DriverError("Candidate Lab 请求未编译为预期的本地采纳复核。")
+
+    if isinstance(draft, StandardWorkflowRequestDraft):
+        draft_inputs = draft.to_dict()["workflow_inputs"]
+        if draft.workflow == "strategy_project_context":
+            source_metadata["structured_request_sha256"] = (
+                strategy_project_context_structured_request_sha256(
+                    as_of=draft_inputs["as_of"],
+                    scope=draft_inputs.get("scope"),
+                    business_context=draft_inputs["business_context"],
+                    explicit_unavailable=draft_inputs["explicit_unavailable"],
+                    external_report_filenames=draft_inputs[
+                        "external_report_filenames"
+                    ],
+                )
+            )
+    source_message = repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=str(user_text or "").strip(),
+        metadata=source_metadata,
+    )
 
     preflight = _strategy_request_preflight(runtime, task, draft)
     if preflight is not None:
@@ -2789,12 +2861,22 @@ def _run_validated_strategy_request(
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "interactive_tree_revision"
     ):
+        inputs = draft.to_dict()["workflow_inputs"]
+        slots = (
+            _interactive_tree_revision_plan_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            )
+            if inputs.get("operation") == "adjust_split_threshold"
+            else dict(inputs)
+        )
         return _start_confirmed_strategy_plan(
             runtime,
             repo,
             task,
             template_id="strategy_interactive_tree_revision",
-            slots=dict(draft.to_dict()["workflow_inputs"]),
+            slots=slots,
             auto_start=auto_start,
         )
 
@@ -2840,6 +2922,41 @@ def _run_validated_strategy_request(
                 runtime,
                 task_id=task.id,
                 draft=draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "cross_matrix_candidate_search"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_cross_matrix_candidate_search",
+            slots=_strategy_cross_candidate_search_plan_slots(
+                runtime,
+                task,
+                draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow
+        == "cross_matrix_candidate_build_from_search"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_cross_matrix_candidate_build_from_search",
+            slots=_strategy_cross_candidate_build_from_search_plan_slots(
+                runtime,
+                task,
+                draft,
             ),
             auto_start=auto_start,
         )
@@ -4122,9 +4239,22 @@ def _standard_workflow_request_preflight(
             return ("automatic_tree_leaf_source_required", str(exc))
         return None
     if draft.workflow == "interactive_tree_revision":
-        # The Tool resolves and authenticates the exact task-local tree or
-        # revision under the same writer lock used for replay and persistence.
-        # A separate preflight lookup would create a second binding window.
+        # Threshold edits are exposed by a manual tree projection, so reject a
+        # stale/hidden split before a plan is created.  The Tool still repeats
+        # full authentication under its writer lock before replay/persistence.
+        # Existing prune requests intentionally retain their Tool-owned binding.
+        if draft.workflow_inputs.get("operation") == "adjust_split_threshold":
+            try:
+                _interactive_tree_revision_plan_slots(
+                    runtime,
+                    task_id=task.id,
+                    draft=draft,
+                )
+            except StrategySetupError as exc:
+                return (
+                    "interactive_tree_revision_current_projection_required",
+                    str(exc),
+                )
         return None
     if draft.workflow == "interactive_tree_frontier_group_materialization":
         # The Tool resolves the revision, canonicalizes all requested members
@@ -4149,6 +4279,22 @@ def _standard_workflow_request_preflight(
             _strategy_voting_candidate_search_plan_slots(runtime, task, draft)
         except StrategySetupError as exc:
             return ("strategy_voting_search_pool_binding_required", str(exc))
+        return None
+    if draft.workflow == "cross_matrix_candidate_search":
+        try:
+            _strategy_cross_candidate_search_plan_slots(runtime, task, draft)
+        except StrategySetupError as exc:
+            return ("strategy_cross_search_source_binding_required", str(exc))
+        return None
+    if draft.workflow == "cross_matrix_candidate_build_from_search":
+        try:
+            _strategy_cross_candidate_build_from_search_plan_slots(
+                runtime,
+                task,
+                draft,
+            )
+        except StrategySetupError as exc:
+            return ("strategy_cross_search_pair_binding_required", str(exc))
         return None
     if draft.workflow == "voting_candidate_build_from_search":
         try:
@@ -4732,6 +4878,154 @@ def _candidate_source_artifact_slots(
     }
 
 
+def _interactive_tree_revision_plan_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Authenticate the threshold target, then inject only user controls.
+
+    This read-side projection is a usability preflight, not the execution
+    authority.  ``revise_interactive_tree`` repeats the complete source/ancestry
+    authentication under its writer lock before deterministic replay.
+    """
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    source_tree_id = inputs.get("source_tree_id")
+    node_id = inputs.get("node_id")
+    if (
+        inputs.get("operation") != "adjust_split_threshold"
+        or not isinstance(source_tree_id, str)
+        or not isinstance(node_id, str)
+    ):
+        raise StrategySetupError(
+            "交互树阈值调整必须提供完整来源树、当前可见 split node 和新阈值。"
+        )
+
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    if source_tree_id.startswith("candidate-asset-"):
+        try:
+            artifacts = repository.list_for_task(task_id)
+        except Exception as exc:
+            raise StrategySetupError(
+                "当前任务的交互树 artifact registry 无法读取，不能核对当前投影。"
+            ) from exc
+        matches = []
+        for artifact in artifacts:
+            if not isinstance(artifact, Mapping):
+                raise StrategySetupError(
+                    "当前任务的交互树 artifact 记录结构无效。"
+                )
+            provenance = artifact.get("provenance")
+            if (
+                artifact.get("kind") == AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND
+                and artifact.get("origin_tool")
+                == AUTOMATIC_TREE_SOURCE_ARTIFACT_ORIGIN_TOOL
+                and isinstance(provenance, Mapping)
+                and provenance.get("asset_id") == source_tree_id
+            ):
+                matches.append(artifact)
+        if len(matches) != 1:
+            raise StrategySetupError(
+                f"当前任务没有唯一的自动树资产 {source_tree_id}；请从当前树投影"
+                "复制完整来源 ID。"
+            )
+        artifact = matches[0]
+        provenance = artifact.get("provenance")
+        assert isinstance(provenance, Mapping)
+        required = (
+            artifact.get("id"),
+            artifact.get("content_hash"),
+            provenance.get("asset_hash"),
+            provenance.get("tree_result_hash"),
+        )
+        if not all(isinstance(value, str) and value for value in required):
+            raise StrategySetupError(
+                f"自动树资产 {source_tree_id} 的完整性绑定不完整，请重新构建。"
+            )
+        try:
+            with repository.transaction() as conn:
+                verified_source = (
+                    load_verified_automatic_tree_source_artifact_on_connection(
+                        conn,
+                        tasks_dir=runtime.settings.tasks_dir,
+                        task_id=task_id,
+                        artifact_id=str(artifact["id"]),
+                        expected_content_hash=str(artifact["content_hash"]),
+                        expected_asset_id=source_tree_id,
+                        expected_asset_hash=str(provenance["asset_hash"]),
+                        expected_tree_result_hash=str(
+                            provenance["tree_result_hash"]
+                        ),
+                    )
+                )
+            topology = interactive_tree_topology_evidence(
+                verified_source.asset,
+            )
+        except Exception as exc:
+            raise StrategySetupError(
+                f"自动树资产 {source_tree_id} 未通过完整制品认证，不能调整阈值。"
+            ) from exc
+    else:
+        read_runtime = SimpleNamespace(
+            settings=runtime.settings,
+            task_artifacts=repository,
+        )
+        try:
+            verified_revision = load_verified_interactive_tree_revision(
+                read_runtime,
+                task_id=task_id,
+                revision_id=source_tree_id,
+            )
+            ancestors = verified_revision.ancestor_revisions
+            topology = interactive_tree_topology_evidence(
+                verified_revision.automatic_source.asset,
+                revision_payload=verified_revision.revision,
+                parent_revision=(ancestors[0] if ancestors else None),
+                ancestor_revisions=(ancestors[1:] if ancestors else ()),
+            )
+        except Exception as exc:
+            raise StrategySetupError(
+                f"交互树修订 {source_tree_id} 未通过完整父链认证，不能调整阈值。"
+            ) from exc
+
+    projected_nodes = topology.get("nodes")
+    matches = (
+        [
+            node
+            for node in projected_nodes
+            if isinstance(node, Mapping) and node.get("node_id") == node_id
+        ]
+        if isinstance(projected_nodes, list)
+        else []
+    )
+    if (
+        len(matches) != 1
+        or matches[0].get("kind") != "split"
+        or matches[0].get("is_visible") is not True
+        or matches[0].get("can_prune") is not True
+    ):
+        raise StrategySetupError(
+            f"节点 {node_id} 不是来源树 {source_tree_id} 当前投影中的可编辑 "
+            "split node；请刷新树视图并重新选择。"
+        )
+
+    # Never pass projection rows, metrics, hashes or ancestry through a user
+    # plan.  The deterministic Tool recovers those facts itself.
+    return {
+        field: inputs[field]
+        for field in (
+            "source_tree_id",
+            "node_id",
+            "operation",
+            "threshold",
+            "reason",
+        )
+        if field in inputs
+    }
+
+
 def _automatic_tree_leaf_materialization_slots(
     runtime: DriverTurnRuntime,
     *,
@@ -5143,6 +5437,120 @@ def _cross_matrix_cell_selection_slots(
     return slots
 
 
+def _latest_cross_candidate_search_source_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+) -> dict[str, str]:
+    """Bind the newest univariate evidence exactly; never fall back on damage."""
+
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    try:
+        artifacts = repository.list_for_task(task_id)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前任务的单变量候选 artifact registry 无法读取，"
+            "不能安全创建 Cross 自动搜索计划。"
+        ) from exc
+    matches = [
+        artifact
+        for artifact in artifacts
+        if isinstance(artifact, Mapping)
+        and artifact.get("kind") == "strategy_candidate_json"
+        and artifact.get("origin_tool")
+        == "strategy.analyze_univariate_candidates"
+    ]
+    if not matches:
+        raise StrategySetupError(
+            "当前任务没有单变量候选证据；请先运行单变量候选分析，"
+            "再搜索 Cross Matrix 特征组合。"
+        )
+    latest = matches[-1]
+    provenance = latest.get("provenance")
+    artifact_id = latest.get("id")
+    content_hash = latest.get("content_hash")
+    candidate_id = (
+        provenance.get("candidate_id")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    evidence_hash = (
+        provenance.get("evidence_hash")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if (
+        not isinstance(artifact_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", artifact_id) is None
+        or not isinstance(content_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
+        or not isinstance(candidate_id, str)
+        or re.fullmatch(r"candidate-[0-9a-f]{32}", candidate_id) is None
+        or not isinstance(evidence_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence_hash) is None
+    ):
+        raise StrategySetupError(
+            "最新单变量候选证据的 artifact/candidate/evidence 身份不完整；"
+            "平台不会回退到更旧证据，请重新运行单变量分析。"
+        )
+    return {
+        "source_artifact_id": artifact_id,
+        "expected_artifact_content_hash": content_hash,
+        "expected_candidate_id": candidate_id,
+        "expected_evidence_hash": evidence_hash,
+    }
+
+
+def _strategy_cross_candidate_search_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Combine only user search controls with the platform-owned source."""
+
+    if draft.workflow != "cross_matrix_candidate_search":
+        raise StrategySetupError(
+            "Cross 自动组合搜索 slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    return {
+        **_latest_cross_candidate_search_source_slots(
+            runtime,
+            task_id=task.id,
+        ),
+        "features": list(inputs["features"]),
+        "max_pairs": inputs["max_pairs"],
+    }
+
+
+def _strategy_cross_candidate_build_from_search_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Preflight exact pointers without copying recovered pair facts."""
+
+    if draft.workflow != "cross_matrix_candidate_build_from_search":
+        raise StrategySetupError(
+            "Cross 搜索结果构建 slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    try:
+        read_runtime = _strategy_report_read_runtime(runtime)
+        resolve_cross_candidate_search_pair(
+            read_runtime,
+            task_id=task.id,
+            search_id=inputs["search_id"],
+            pair_id=inputs["pair_id"],
+        )
+    except StrategyError as exc:
+        raise StrategySetupError(str(exc)) from exc
+    return {
+        "search_id": inputs["search_id"],
+        "pair_id": inputs["pair_id"],
+    }
+
+
 def _strategy_voting_candidate_search_plan_slots(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
@@ -5438,9 +5846,15 @@ def _strategy_pool_validation_plan_slots(
     inputs = draft.to_dict()["workflow_inputs"]
     strategy_type = str(inputs.get("strategy_type") or "")
     partition = str(inputs.get("partition") or "")
-    if strategy_type not in {"approval", "reject"}:
+    if strategy_type not in {
+        "approval",
+        "reject",
+        "limit",
+        "pricing",
+        "segmentation",
+    }:
         raise StrategySetupError(
-            "独立样本回放验证只支持 approval 或 reject Strategy Pool。"
+            "独立样本回放验证 strategy_type 不受支持。"
         )
     if partition not in {"validation", "oot"}:
         raise StrategySetupError(
@@ -6442,16 +6856,50 @@ def _strategy_project_context_plan_slots(
     explicit_unavailable.difference_update(
         field_path for field_path, value in new_business.items() if value is not None
     )
+    user_message_ref = {
+        "message_id": message_id,
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
+    structured_request_sha256 = (source_message.get("metadata") or {}).get(
+        "structured_request_sha256"
+    )
+    if (
+        (source_message.get("metadata") or {}).get("request_source") == "manual_ui"
+        and not isinstance(structured_request_sha256, str)
+    ):
+        raise StrategySetupError(
+            "Candidate Lab 项目上下文缺少结构化用户请求绑定，请重新提交表单。"
+        )
+    if isinstance(structured_request_sha256, str):
+        expected_structured_sha256 = (
+            strategy_project_context_structured_request_sha256(
+                as_of=inputs["as_of"],
+                scope=inputs.get("scope"),
+                business_context=inputs.get("business_context") or {},
+                explicit_unavailable=inputs.get("explicit_unavailable") or [],
+                external_report_filenames=inputs.get(
+                    "external_report_filenames"
+                )
+                or [],
+            )
+        )
+        if not hmac.compare_digest(
+            structured_request_sha256,
+            expected_structured_sha256,
+        ):
+            raise StrategySetupError(
+                "Candidate Lab 项目上下文结构化请求绑定已变化，请重新提交表单。"
+            )
+        user_message_ref["structured_request_sha256"] = (
+            structured_request_sha256
+        )
     return {
         "expected_revision": 0 if current is None else current["revision"],
         "expected_revision_id": (
             None if current is None else current["revision_id"]
         ),
         "expected_state_hash": None if current is None else current["state_hash"],
-        "user_message_ref": {
-            "message_id": message_id,
-            "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        },
+        "user_message_ref": user_message_ref,
         "as_of": inputs["as_of"],
         "scope": inputs.get("scope"),
         "business_context": new_business,
@@ -7130,6 +7578,9 @@ _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT = 64
 _STRATEGY_REPORT_VOTING_SEARCH_REPLAY_LIMIT = (
     _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT
 )
+_STRATEGY_REPORT_CROSS_SEARCH_REPLAY_LIMIT = (
+    _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT
+)
 _STRATEGY_REPORT_POOL_STABILITY_REPLAY_LIMIT = (
     _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT
 )
@@ -7228,6 +7679,25 @@ def _strategy_report_bundle_v2_plan_slots(
             "expected_search_id": voting_candidate_search.result["search_id"],
             "expected_search_content_hash": (
                 voting_candidate_search.result["content_hash"]
+            ),
+        }
+    )
+    cross_candidate_search = _strategy_report_latest_cross_search_binding(
+        read_runtime,
+        task_id=task.id,
+        sample=sample,
+    )
+    cross_candidate_search_ref = (
+        None
+        if cross_candidate_search is None
+        else {
+            "artifact_id": cross_candidate_search.artifact_id,
+            "expected_artifact_content_hash": (
+                cross_candidate_search.artifact_content_hash
+            ),
+            "expected_search_id": cross_candidate_search.result["search_id"],
+            "expected_search_content_hash": (
+                cross_candidate_search.result["content_hash"]
             ),
         }
     )
@@ -7343,7 +7813,7 @@ def _strategy_report_bundle_v2_plan_slots(
     strategy_identity = _strategy_report_identity(
         runtime,
         task_id=task.id,
-        strategy_type=pool.strategy_type,
+        candidate_pool=pool,
     )
     strategy_id = (
         None if strategy_identity is None else strategy_identity["strategy_id"]
@@ -7372,6 +7842,7 @@ def _strategy_report_bundle_v2_plan_slots(
             candidate_stability=candidate_stability,
             pool_stability=pool_stability,
             voting_candidate_search=voting_candidate_search,
+            cross_candidate_search=cross_candidate_search,
             pool_impact=impact,
             impact_cube=impact_cube,
             model_evidence=model_evidence,
@@ -7404,6 +7875,7 @@ def _strategy_report_bundle_v2_plan_slots(
         "candidate_stability_ref": candidate_stability_ref,
         "pool_stability_ref": pool_stability_ref,
         "voting_candidate_search_ref": voting_candidate_search_ref,
+        "cross_candidate_search_ref": cross_candidate_search_ref,
         "pool_impact_ref": pool_impact_ref,
         "impact_cube_ref": impact_cube_ref,
         "report_revision": int(head["current_revision"]) + 1,
@@ -8031,6 +8503,83 @@ def _strategy_report_voting_search_matches(
     return True
 
 
+def _strategy_report_latest_cross_search_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    sample,
+):
+    """Select the newest fully authenticated Cross search for this V2 sample."""
+
+    records, total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
+        limit=_STRATEGY_REPORT_CROSS_SEARCH_REPLAY_LIMIT,
+        unavailable_code=(
+            "strategy_report_bundle_v2_cross_candidate_search_"
+            "registry_unavailable"
+        ),
+        invalid_code=(
+            "strategy_report_bundle_v2_cross_candidate_search_invalid"
+        ),
+        label="Cross candidate search",
+    )
+    for item in records:
+        try:
+            binding = load_cross_candidate_search_artifact(
+                read_runtime,
+                task_id=task_id,
+                artifact_id=item.get("id"),
+                expected_artifact_content_hash=item.get("content_hash"),
+            )
+        except (
+            KeyError,
+            ModelingError,
+            StrategyError,
+            TypeError,
+            ValueError,
+            *_STRATEGY_V2_ARTIFACT_ERRORS,
+        ) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_cross_candidate_search_invalid",
+                "最新待判定的 Cross 候选搜索 artifact 未通过文件、registry、"
+                "provenance 或样本绑定复核；其真实身份无法确认，平台不会"
+                "回退到旧搜索证据。",
+            ) from exc
+        if _strategy_report_cross_search_matches(
+            binding,
+            sample=sample,
+        ):
+            return binding
+    if total > _STRATEGY_REPORT_CROSS_SEARCH_REPLAY_LIMIT:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_cross_candidate_search_"
+            "selection_window_exhausted",
+            "已完整认证最新 "
+            f"{_STRATEGY_REPORT_CROSS_SEARCH_REPLAY_LIMIT} 个 Cross 候选搜索 "
+            "artifact，但 registry 仍有更早记录；平台无法证明窗口外"
+            "不存在与当前 SampleDesign 完全一致的搜索证据，本次未创建"
+            "报告计划。",
+        )
+    return None
+
+
+def _strategy_report_cross_search_matches(
+    binding,
+    *,
+    sample,
+) -> bool:
+    try:
+        validate_cross_candidate_search_report_compatibility(
+            cross_candidate_search=binding,
+            sample_design=sample,
+        )
+    except StrategyError:
+        return False
+    return True
+
+
 def _strategy_report_latest_impact_cube_binding(
     read_runtime: SimpleNamespace,
     *,
@@ -8552,49 +9101,30 @@ def _strategy_report_identity(
     runtime: DriverTurnRuntime,
     *,
     task_id: str,
-    strategy_type: str,
+    candidate_pool,
 ) -> dict[str, str] | None:
     repository = StrategyRepository(runtime.settings.db_path)
     try:
-        matches = [
-            item
-            for item in repository.list_meta_for_task(task_id)
-            if item.get("task_id") == task_id
-            and item.get("strategy_type") == strategy_type
-        ]
-    except Exception:
-        return None
-    if len(matches) != 1:
-        return None
-    metadata = matches[0]
-    strategy_id = metadata.get("id")
-    version = metadata.get("version")
-    if (
-        not isinstance(strategy_id, str)
-        or not strategy_id
-        or isinstance(version, bool)
-        or not isinstance(version, int)
-        or version <= 0
-    ):
-        return None
-    try:
-        strategy = repository.get_strategy(strategy_id)
-        spec_hash = repository.get_strategy_spec_hash(strategy_id)
-    except Exception:
-        return None
-    if (
-        strategy is None
-        or strategy.spec is None
-        or strategy.strategy_type != strategy_type
-        or not isinstance(spec_hash, str)
-        or re.fullmatch(r"[0-9a-f]{64}", spec_hash) is None
-    ):
-        return None
-    return {
-        "strategy_id": strategy_id,
-        "strategy_version": str(version),
-        "strategy_type": strategy_type,
-    }
+        with repository.transaction() as conn:
+            authenticated = (
+                authenticate_strategy_report_identity_for_pool_on_connection(
+                    repository,
+                    conn,
+                    task_id=task_id,
+                    candidate_pool=candidate_pool,
+                )
+            )
+    except Exception as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_strategy_identity_invalid",
+            "当前 Strategy Pool 的物化策略身份、不可变账本或生命周期"
+            "未通过完整性复核；本次未创建计划。",
+        ) from exc
+    return (
+        None
+        if authenticated is None
+        else dict(authenticated["identity"])
+    )
 
 
 def _latest_matching_strategy_sample_design_ref(
@@ -10847,6 +11377,8 @@ def _strategy_request_requires_dataset(
             "voting_candidate_search",
             "voting_candidate_build_from_search",
             "voting_candidate_build",
+            "cross_matrix_candidate_search",
+            "cross_matrix_candidate_build_from_search",
         }:
             return False
         return True

@@ -71,12 +71,15 @@ def test_interactive_tree_revision_is_one_nongated_builtin_tool_step() -> None:
     assert set(slot_sources) == {
         "source_tree_id",
         "node_id",
+        "operation",
+        "threshold",
         "reason",
     }
     assert set(slot_sources.values()) == {"user"}
     assert {slot.name for slot in template.slots if slot.required} == {
         "source_tree_id",
         "node_id",
+        "operation",
     }
 
     [step] = template.steps
@@ -84,7 +87,8 @@ def test_interactive_tree_revision_is_one_nongated_builtin_tool_step() -> None:
     assert step.inputs_template == {
         "source_tree_id": "{slot:source_tree_id}",
         "node_id": "{slot:node_id}",
-        "operation": "prune_subtree",
+        "operation": "{slot:operation}",
+        "threshold": "{slot:threshold}",
         "reason": "{slot:reason}",
     }
     assert step.depends_on_titles == ()
@@ -105,13 +109,6 @@ def test_interactive_tree_revision_is_one_nongated_builtin_tool_step() -> None:
                 "values": [True],
             },
         ),
-        PostCheck(
-            "one_of",
-            {
-                "field": "replay.metrics_matched",
-                "values": [True],
-            },
-        ),
         PostCheck("nonempty", {"field": "replay.result_hash"}),
         PostCheck("nonempty", {"field": "artifacts"}),
     )
@@ -128,6 +125,7 @@ def test_interactive_tree_revision_template_matches_the_closed_tool_contract(
         "source_tree_id",
         "node_id",
         "operation",
+        "threshold",
         "reason",
     }
     assert set(tool.input_schema["required"]) == {

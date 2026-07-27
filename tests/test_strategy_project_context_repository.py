@@ -142,16 +142,16 @@ def test_migration_019_is_registered_idempotent_and_creates_guarded_ledger(tmp_p
         assert (
             conn.execute("PRAGMA user_version").fetchone()[0]
             == db_schema_module.SCHEMA_VERSION
-            == 21
         )
+        assert db_schema_module.SCHEMA_VERSION >= 21
         assert (
             19,
             db_schema_module._migration_019_strategy_project_context,
         ) in db_schema_module._MIGRATIONS
-        assert db_schema_module._MIGRATIONS[-1] == (
+        assert (
             21,
             db_schema_module._migration_021_strategy_report_docx,
-        )
+        ) in db_schema_module._MIGRATIONS
         tables = {
             row[0]
             for row in conn.execute(

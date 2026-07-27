@@ -21,6 +21,9 @@ from marvis.db import DatasetRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.packs.strategy.monitoring_plan import MonitoringPlan
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.project_context import (
+    strategy_project_context_structured_request_sha256,
+)
 from marvis.packs.strategy.project_context_tools import (
     PROJECT_CONTEXT_ARTIFACT_KIND,
     PROJECT_CONTEXT_TOOL_SCHEMA_VERSION,
@@ -210,6 +213,56 @@ def test_external_report_is_opaque_content_addressed_evidence(tmp_path: Path) ->
     assert "historical_strategy_reviews" not in {
         item["field_path"] for item in output["missing_information_records"]
     }
+
+
+def test_manual_structured_message_digest_rejects_changed_report_selection(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    source_dir = Path(fx["task"].source_dir)
+    (source_dir / "one.pdf").write_bytes(b"one")
+    (source_dir / "two.pdf").write_bytes(b"two")
+    request = {
+        **fx["request"],
+        "explicit_unavailable": [],
+        "external_report_filenames": ["one.pdf"],
+    }
+    request_sha256 = strategy_project_context_structured_request_sha256(
+        as_of=request["as_of"],
+        scope=request["scope"],
+        business_context=request["business_context"],
+        explicit_unavailable=request["explicit_unavailable"],
+        external_report_filenames=request["external_report_filenames"],
+    )
+    message = TaskRepository(fx["settings"].db_path).add_agent_message(
+        fx["task"].id,
+        role="user",
+        stage="chat",
+        content="人工界面执行 strategy_project_context",
+        metadata={
+            "intent": "strategy_request",
+            "request_source": "manual_ui",
+            "workflow": "strategy_project_context",
+            "structured_request_sha256": request_sha256,
+        },
+    )
+    request["user_message_ref"] = {
+        "message_id": message["id"],
+        "content_hash": hashlib.sha256(
+            message["content"].encode("utf-8")
+        ).hexdigest(),
+        "structured_request_sha256": request_sha256,
+    }
+
+    with pytest.raises(
+        StrategyError,
+        match="manual project-context structured request changed",
+    ):
+        run_materialize_project_context(
+            {**request, "external_report_filenames": ["two.pdf"]},
+            fx["ctx"],
+            fx["runtime"],
+        )
 
 
 def test_same_external_content_is_reusable_across_user_messages(
@@ -670,6 +723,7 @@ def test_discovers_strategy_lineage_rule_diff_typed_backtest_and_monitoring_plan
         ),
         expected_revision=0,
         plan_id="monitor-plan-context-1",
+        created_at="2026-06-05T00:00:00+00:00",
     )
 
     output = run_materialize_project_context(fx["request"], fx["ctx"], fx["runtime"])
@@ -776,7 +830,11 @@ def test_discovers_sample_design_before_missing_and_preserves_observed_zero(
         fx["runtime"],
     )
 
-    output = run_materialize_project_context(fx["request"], fx["ctx"], fx["runtime"])
+    output = run_materialize_project_context(
+        {**fx["request"], "as_of": "2026-12-31"},
+        fx["ctx"],
+        fx["runtime"],
+    )
 
     snapshot = output["revision"]["state"]["current_project_snapshot"]
     assert snapshot["status_fields"]["volume"]["availability"] == "present"

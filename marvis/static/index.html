@@ -1357,6 +1357,46 @@
                   <div class="candidate-lab-launchers" aria-label="候选分析启动器">
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>项目现状与历史材料</strong><small>风险、通过率、经营背景和历史策略证据</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_project_context">
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>现状截止日 <b aria-hidden="true">*</b></span>
+                            <input type="date" data-candidate-lab-field="project_context_as_of" data-candidate-lab-default-today="1">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>项目范围</span>
+                            <input maxlength="4000" autocomplete="off" data-candidate-lab-field="project_context_scope" placeholder="例如：存量经营复借策略">
+                          </label>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>业务背景（每行 field.path=内容）</span>
+                          <textarea rows="4" data-candidate-lab-field="project_context_business_context" placeholder="project.channel=自营&#10;project.product=复借"></textarea>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>任务材料目录中的历史文件名（每行一个）</span>
+                          <textarea rows="3" data-candidate-lab-field="project_context_external_reports" placeholder="历史策略评审.xlsx&#10;存量效果复盘.pdf"></textarea>
+                        </label>
+                        <fieldset class="candidate-lab-methods">
+                          <legend>当前暂时无法提供的信息</legend>
+                          <label><input type="checkbox" value="current.status_fields.volume" data-candidate-lab-field="project_context_unavailable">当前业务量</label>
+                          <label><input type="checkbox" value="current.status_fields.approval" data-candidate-lab-field="project_context_unavailable">当前通过率</label>
+                          <label><input type="checkbox" value="current.status_fields.risk" data-candidate-lab-field="project_context_unavailable">当前风险</label>
+                          <label><input type="checkbox" value="current.status_fields.economics" data-candidate-lab-field="project_context_unavailable">收益/成本口径</label>
+                          <label><input type="checkbox" value="current.maturity_summary" data-candidate-lab-field="project_context_unavailable">成熟度信息</label>
+                          <label><input type="checkbox" value="historical_strategy_reviews" data-candidate-lab-field="project_context_unavailable">历史策略资料</label>
+                        </fieldset>
+                        <p class="candidate-lab-boundary-note">
+                          平台只把本轮用户说明、任务内确定性证据和点名的历史材料固化为项目上下文；没有的信息可明确暂缺，不会填成 0。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">固化项目上下文</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>双人群样本设计</strong><small>审批人群与风险表现人群、分区和成熟度</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="strategy_sample_design_v2">
@@ -1551,6 +1591,206 @@
                         <p class="candidate-lab-boundary-note">样本、目标、Pool revision 与指标由平台绑定和确定性计算；不会写回策略。</p>
                         <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
                         <button type="submit" class="button compact primary">生成 ImpactCube</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>物化草稿策略</strong><small>把当前完整 Pool 冻结为可审计的 canonical Strategy</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_materialize">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_materialize_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-materialize-help>当前任务尚无可物化的非空 Strategy Pool。</p>
+                        <p class="candidate-lab-boundary-note">
+                          物化只创建 draft 策略并绑定 Pool revision、样本和运行要求；不会采纳、部署或启动监控。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">物化草稿策略</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>提交本地采纳</strong><small>选择当前 draft 策略，重新回测后进入人工确认</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_lifecycle_adopt">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>待采纳草稿策略 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="lifecycle_adopt_strategy_id">
+                            <option value="">等待当前任务 draft 策略受认证投影</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-adoption-help>请先把完整 Strategy Pool 物化为 draft 草稿策略。</p>
+                        <datalist id="strategyLifecycleAvailableColumns" data-candidate-lab-adoption-available-columns></datalist>
+
+                        <fieldset class="candidate-lab-methods hidden" data-candidate-lab-adoption-economics>
+                          <legend>经济测算口径（逐项选择数据列或固定值）</legend>
+
+                          <div class="candidate-lab-form-grid hidden" data-candidate-lab-adoption-component="ead" data-strategy-types="pricing">
+                            <label class="candidate-lab-field">
+                              <span>风险暴露 EAD 取值方式</span>
+                              <select data-candidate-lab-field="lifecycle_adopt_ead_mode">
+                                <option value="column">使用数据列</option>
+                                <option value="value">使用固定值</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field" data-candidate-lab-adoption-binding="column">
+                              <span>EAD 数据列</span>
+                              <input list="strategyLifecycleAvailableColumns" autocomplete="off" data-candidate-lab-field="lifecycle_adopt_ead_column">
+                            </label>
+                            <label class="candidate-lab-field hidden" data-candidate-lab-adoption-binding="value">
+                              <span>EAD 固定值</span>
+                              <input type="number" min="0" step="any" data-candidate-lab-field="lifecycle_adopt_ead_value">
+                            </label>
+                          </div>
+
+                          <div class="candidate-lab-form-grid hidden" data-candidate-lab-adoption-component="pd" data-strategy-types="limit pricing">
+                            <label class="candidate-lab-field">
+                              <span>预计违约概率 PD 取值方式</span>
+                              <select data-candidate-lab-field="lifecycle_adopt_pd_mode">
+                                <option value="column">使用数据列</option>
+                                <option value="value">使用固定值</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field" data-candidate-lab-adoption-binding="column">
+                              <span>PD 数据列</span>
+                              <input list="strategyLifecycleAvailableColumns" autocomplete="off" data-candidate-lab-field="lifecycle_adopt_pd_column">
+                            </label>
+                            <label class="candidate-lab-field hidden" data-candidate-lab-adoption-binding="value">
+                              <span>PD 固定值（0 到 1）</span>
+                              <input type="number" min="0" max="1" step="any" data-candidate-lab-field="lifecycle_adopt_pd_value">
+                            </label>
+                          </div>
+
+                          <div class="candidate-lab-form-grid hidden" data-candidate-lab-adoption-component="lgd" data-strategy-types="limit pricing">
+                            <label class="candidate-lab-field">
+                              <span>违约损失率 LGD 取值方式</span>
+                              <select data-candidate-lab-field="lifecycle_adopt_lgd_mode">
+                                <option value="column">使用数据列</option>
+                                <option value="value">使用固定值</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field" data-candidate-lab-adoption-binding="column">
+                              <span>LGD 数据列</span>
+                              <input list="strategyLifecycleAvailableColumns" autocomplete="off" data-candidate-lab-field="lifecycle_adopt_lgd_column">
+                            </label>
+                            <label class="candidate-lab-field hidden" data-candidate-lab-adoption-binding="value">
+                              <span>LGD 固定值（0 到 1）</span>
+                              <input type="number" min="0" max="1" step="any" data-candidate-lab-field="lifecycle_adopt_lgd_value">
+                            </label>
+                          </div>
+
+                          <div class="candidate-lab-form-grid hidden" data-candidate-lab-adoption-component="utilization" data-strategy-types="limit">
+                            <label class="candidate-lab-field">
+                              <span>额度使用率取值方式</span>
+                              <select data-candidate-lab-field="lifecycle_adopt_utilization_mode">
+                                <option value="column">使用数据列</option>
+                                <option value="value">使用固定值</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field" data-candidate-lab-adoption-binding="column">
+                              <span>额度使用率数据列</span>
+                              <input list="strategyLifecycleAvailableColumns" autocomplete="off" data-candidate-lab-field="lifecycle_adopt_utilization_column">
+                            </label>
+                            <label class="candidate-lab-field hidden" data-candidate-lab-adoption-binding="value">
+                              <span>额度使用率固定值（0 到 1）</span>
+                              <input type="number" min="0" max="1" step="any" data-candidate-lab-field="lifecycle_adopt_utilization_value">
+                            </label>
+                          </div>
+
+                          <div class="candidate-lab-form-grid hidden" data-candidate-lab-adoption-component="funding_rate" data-strategy-types="pricing">
+                            <label class="candidate-lab-field">
+                              <span>资金成本率取值方式</span>
+                              <select data-candidate-lab-field="lifecycle_adopt_funding_rate_mode">
+                                <option value="column">使用数据列</option>
+                                <option value="value">使用固定值</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field" data-candidate-lab-adoption-binding="column">
+                              <span>资金成本率数据列</span>
+                              <input list="strategyLifecycleAvailableColumns" autocomplete="off" data-candidate-lab-field="lifecycle_adopt_funding_rate_column">
+                            </label>
+                            <label class="candidate-lab-field hidden" data-candidate-lab-adoption-binding="value">
+                              <span>资金成本率固定值（0 到 1）</span>
+                              <input type="number" min="0" max="1" step="any" data-candidate-lab-field="lifecycle_adopt_funding_rate_value">
+                            </label>
+                          </div>
+
+                          <div class="candidate-lab-form-grid hidden" data-candidate-lab-adoption-component="term_months" data-strategy-types="pricing">
+                            <label class="candidate-lab-field">
+                              <span>期限（月）取值方式</span>
+                              <select data-candidate-lab-field="lifecycle_adopt_term_months_mode">
+                                <option value="column">使用数据列</option>
+                                <option value="value">使用固定值</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field" data-candidate-lab-adoption-binding="column">
+                              <span>期限数据列</span>
+                              <input list="strategyLifecycleAvailableColumns" autocomplete="off" data-candidate-lab-field="lifecycle_adopt_term_months_column">
+                            </label>
+                            <label class="candidate-lab-field hidden" data-candidate-lab-adoption-binding="value">
+                              <span>固定期限（月）</span>
+                              <input type="number" min="0.000001" step="any" data-candidate-lab-field="lifecycle_adopt_term_months_value">
+                            </label>
+                          </div>
+
+                          <div class="candidate-lab-form-grid hidden" data-candidate-lab-adoption-component="operating_cost_per_loan" data-strategy-types="pricing">
+                            <label class="candidate-lab-field">
+                              <span>单笔运营成本取值方式</span>
+                              <select data-candidate-lab-field="lifecycle_adopt_operating_cost_per_loan_mode">
+                                <option value="column">使用数据列</option>
+                                <option value="value">使用固定值</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field" data-candidate-lab-adoption-binding="column">
+                              <span>单笔运营成本数据列</span>
+                              <input list="strategyLifecycleAvailableColumns" autocomplete="off" data-candidate-lab-field="lifecycle_adopt_operating_cost_per_loan_column">
+                            </label>
+                            <label class="candidate-lab-field hidden" data-candidate-lab-adoption-binding="value">
+                              <span>单笔运营成本固定值</span>
+                              <input type="number" min="0" step="any" data-candidate-lab-field="lifecycle_adopt_operating_cost_per_loan_value">
+                            </label>
+                          </div>
+
+                          <p class="candidate-lab-field-help" data-candidate-lab-adoption-columns-help>
+                            如当前投影提供可用列，可直接从输入建议中选择；也可输入列名，平台仍会按任务列白名单核验。
+                          </p>
+                        </fieldset>
+
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>本地采纳理由 <b aria-hidden="true">*</b></span>
+                          <textarea rows="3" maxlength="1000" data-candidate-lab-field="lifecycle_adoption_reason" placeholder="请说明已复核哪些回测、风险影响和业务约束，以及为什么同意进入本地采纳确认。"></textarea>
+                        </label>
+                        <p class="candidate-lab-boundary-note">
+                          提交后平台会重新回测并等待人工确认；本地采纳不是生产部署，不会自动发布、实时评分或启动监控。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">提交本地采纳复核</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>等价代码交付</strong><small>生成 Python、SQL、JSON 和逐行等价验证证据</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_dsl_delivery">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>策略版本 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="dsl_delivery_strategy_id">
+                            <option value="">等待当前任务策略版本受认证投影</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-dsl-delivery-help>请先把当前 Pool 物化为草稿策略。</p>
+                        <p class="candidate-lab-boundary-note">
+                          交付会从受认证 Strategy DSL 和活动数据生成代码及等价性报告；不采纳、不部署策略。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">生成等价交付包</button>
                       </form>
                     </details>
 
@@ -1925,6 +2165,60 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>Cross 自动搜索</strong><small>从当前单变量证据明确选择字段，按预算评估两两组合</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="cross_matrix_candidate_search">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>参与搜索的独立字段（2–20 个） <b aria-hidden="true">*</b></span>
+                          <select multiple size="8" data-candidate-lab-field="cross_search_features">
+                            <option value="" disabled>等待当前单变量受认证投影</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>最多评估的字段组合数 <b aria-hidden="true">*</b></span>
+                          <input type="number" min="1" max="190" step="1" value="20" data-candidate-lab-field="cross_search_max_pairs">
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-cross-search-help>
+                          请先完成单变量分析；这里不会让用户提交分箱方法、Candidate、Artifact 或哈希。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          按住 Command/Ctrl 明确选择 2–20 个不同字段。搜索只生成组合评估证据，不会自动构建 Cross Matrix、加入 Pool、采纳或部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">搜索字段组合</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>从搜索构建 Cross Matrix</strong><small>逐项选择完整搜索与 Pair 指针</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="cross_matrix_candidate_build_from_search">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Cross 搜索证据 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="cross_build_search_id">
+                            <option value="">等待当前 Cross 搜索受认证投影</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>字段 Pair <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="cross_build_pair_id">
+                            <option value="">请先明确选择一份搜索证据</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-cross-build-help>
+                          页面会显示 eligible、空单元格和稀疏性信息，但不会按 rank 或指标自动代选。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          只提交当前投影中的完整 search_id 与 pair_id。构建结果仍是候选，不会自动入 Pool、采纳或部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">构建所选 Cross Matrix</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>Cross Matrix</strong><small>两个字段的二维交叉分析</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="cross_matrix_analysis">
@@ -2051,7 +2345,7 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
-                        <span><strong>交互式树修订</strong><small>从受认证可见节点创建不可变剪枝分支</small></span>
+                        <span><strong>交互式树修订</strong><small>从受认证 split 节点创建不可变剪枝或阈值调整分支</small></span>
                       </summary>
                       <form
                         data-candidate-lab-form
@@ -2059,17 +2353,43 @@
                         data-candidate-lab-interactive-tree-operation
                       >
                         <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>修订操作 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="interactive_tree_operation">
+                            <option value="prune_subtree" selected>剪枝到所选节点</option>
+                            <option value="adjust_split_threshold">调整所选 split 节点阈值</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
                           <span>来源树 / Revision <b aria-hidden="true">*</b></span>
                           <select data-candidate-lab-field="interactive_tree_source_id">
                             <option value="">请选择自动树或不可变 revision</option>
                           </select>
                         </label>
                         <label class="candidate-lab-field candidate-lab-field-wide">
-                          <span>可剪枝节点 <b aria-hidden="true">*</b></span>
+                          <span>可操作 split 节点 <b aria-hidden="true">*</b></span>
                           <select data-candidate-lab-field="interactive_tree_node_id">
                             <option value="">请选择当前分支可见 split 节点</option>
                           </select>
                         </label>
+                        <div
+                          class="candidate-lab-field-grid hidden"
+                          data-candidate-lab-tree-threshold-panel
+                        >
+                          <p class="candidate-lab-field-help candidate-lab-field-wide">
+                            当前字段：<strong data-candidate-lab-tree-threshold-feature>—</strong>
+                            · 当前阈值：<strong data-candidate-lab-tree-current-threshold>—</strong>
+                          </p>
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>新阈值 <b aria-hidden="true">*</b></span>
+                            <input
+                              type="number"
+                              step="any"
+                              inputmode="decimal"
+                              data-candidate-lab-field="interactive_tree_threshold"
+                              placeholder="必须是有限数，且与当前阈值不同"
+                            >
+                          </label>
+                        </div>
                         <label class="candidate-lab-field candidate-lab-field-wide">
                           <span>修订理由</span>
                           <textarea
@@ -2081,6 +2401,9 @@
                         </label>
                         <p class="candidate-lab-field-help" data-candidate-lab-tree-help>
                           当前任务尚无受认证自动树，请先构建自动规则树。
+                        </p>
+                        <p class="candidate-lab-field-help">
+                          此操作只创建不可变 revision，不会写回来源树、物化 frontier、入池、采纳或部署。
                         </p>
                         <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
                         <button type="submit" class="button compact primary">确认创建不可变 Revision</button>
@@ -2251,7 +2574,7 @@
                           <label class="candidate-lab-field">
                             <span>Strategy Pool 类型 <b aria-hidden="true">*</b></span>
                             <select data-candidate-lab-field="pool_validation_strategy_type">
-                              <option value="">等待当前非空审批 / 拒绝 Pool 受认证投影</option>
+                              <option value="">等待当前非空 Strategy Pool 受认证投影</option>
                             </select>
                           </label>
                           <label class="candidate-lab-field">
@@ -2263,10 +2586,10 @@
                           </label>
                         </div>
                         <p class="candidate-lab-field-help" data-candidate-lab-pool-validation-help>
-                          当前任务尚无可验证的受认证非空审批或拒绝 Pool。
+                          当前任务尚无可验证的受认证非空 Strategy Pool。
                         </p>
                         <p class="candidate-lab-boundary-note">
-                          本操作只生成 independent replay evidence，展示所选独立分区的实际动作、风险、金额和逐月结果；不修改 Pool、不创建策略，也不晋级、采纳或部署。
+                          本操作只生成 independent replay evidence：审批/拒绝保留动作、风险、金额和逐月结果，额度/定价/分群保留原生数值或分群分布；不修改 Pool、不创建策略，也不晋级、采纳或部署。
                         </p>
                         <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
                         <button type="submit" class="button compact primary">执行独立样本回放验证</button>

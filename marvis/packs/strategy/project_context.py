@@ -1834,6 +1834,41 @@ def _canonical_json(value: object) -> str:
         raise StrategyProjectContextError("value is not finite canonical JSON") from exc
 
 
+def strategy_project_context_structured_request_sha256(
+    *,
+    as_of: str,
+    scope: str | None,
+    business_context: Mapping[str, str | None],
+    explicit_unavailable: Sequence[str],
+    external_report_filenames: Sequence[str],
+) -> str:
+    """Commit one validated manual ProjectContext DTO to a stable digest.
+
+    The digest lets a user-visible action-label message bind the exact structured
+    facts submitted beside it without copying those facts into free-form chat.
+    Both the Agent preparation boundary and the deterministic Tool recompute this
+    same canonical envelope.
+    """
+
+    workflow_inputs: dict[str, object] = {
+        "as_of": as_of,
+        "business_context": dict(business_context),
+        "explicit_unavailable": list(explicit_unavailable),
+        "external_report_filenames": list(external_report_filenames),
+    }
+    if scope is not None:
+        workflow_inputs["scope"] = scope
+    return _sha256(
+        _canonical_json(
+            {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_project_context",
+                "workflow_inputs": workflow_inputs,
+            }
+        )
+    )
+
+
 def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -1885,6 +1920,7 @@ __all__ = [
     "diff_strategy_rules",
     "strategy_project_context_operation_hash",
     "strategy_project_context_revision_from_json",
+    "strategy_project_context_structured_request_sha256",
     "strategy_project_context_state_hash",
     "strategy_project_context_state_from_json",
     "validate_current_project_snapshot",

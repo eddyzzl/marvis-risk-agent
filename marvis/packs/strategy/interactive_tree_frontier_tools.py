@@ -18,8 +18,10 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.interactive_tree_frontier_selection import (
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
     INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
     INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION,
+    INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION_V2,
     InteractiveTreeFrontierSelectionError,
     build_interactive_tree_frontier_selection,
     canonical_interactive_tree_frontier_selection_json,
@@ -28,6 +30,7 @@ from marvis.packs.strategy.interactive_tree_frontier_selection import (
 from marvis.packs.strategy.interactive_tree_revision import (
     INTERACTIVE_TREE_ASSET_TYPE,
     INTERACTIVE_TREE_REVISION_SCHEMA_VERSION,
+    INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION,
 )
 from marvis.packs.strategy.interactive_tree_tools import (
     VerifiedInteractiveTreeRevision,
@@ -39,6 +42,9 @@ from marvis.repositories.task_artifacts import stable_task_artifact_id
 
 TOOL_SCHEMA_VERSION = (
     "strategy.materialize-interactive-tree-frontier-selection-tool.v1"
+)
+TOOL_SCHEMA_VERSION_V2 = (
+    "strategy.materialize-interactive-tree-frontier-selection-tool.v2"
 )
 MAX_INTERACTIVE_TREE_FRONTIER_SELECTION_BYTES = 1024 * 1024
 MAX_INTERACTIVE_TREE_FRONTIER_REVISION_BYTES = 64 * 1024 * 1024
@@ -169,7 +175,12 @@ def run_materialize_interactive_tree_frontier_selection(
     frontier = selection["frontier"]
     revision_ref = selection["revision"]
     return {
-        "schema_version": TOOL_SCHEMA_VERSION,
+        "schema_version": (
+            TOOL_SCHEMA_VERSION_V2
+            if revision_ref["schema_version"]
+            == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+            else TOOL_SCHEMA_VERSION
+        ),
         "selection_id": selection["selection_id"],
         "selection_hash": selection["selection_hash"],
         "selection_reason": selection["selection_reason"],
@@ -224,12 +235,20 @@ def interactive_tree_frontier_selection_provenance(
     artifact = selection["revision_artifact"]
     revision = selection["revision"]
     frontier = selection["frontier"]
+    is_v2 = (
+        revision["schema_version"]
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+    )
     provenance = {
         "schema_version": (
-            INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
+            INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2
+            if is_v2
+            else INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
         ),
         "producer_version": (
-            INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION
+            INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION_V2
+            if is_v2
+            else INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION
         ),
         "task_id": artifact["task_id"],
         "kind": INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
@@ -370,12 +389,37 @@ def load_verified_interactive_tree_frontier_selection_artifact_on_connection(
         _PROVENANCE_FIELDS,
         "interactive-tree frontier selection provenance",
     )
+    revision_schema = provenance["revision_schema_version"]
+    if revision_schema == INTERACTIVE_TREE_REVISION_SCHEMA_VERSION:
+        selection_artifact_schema = (
+            INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
+        )
+        selection_producer = (
+            INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION
+        )
+        revision_artifact_schema = (
+            revision_tools.INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION
+        )
+    elif revision_schema == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION:
+        selection_artifact_schema = (
+            INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2
+        )
+        selection_producer = (
+            INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION_V2
+        )
+        revision_artifact_schema = (
+            revision_tools.INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2
+        )
+    else:
+        raise StrategyError(
+            "interactive-tree frontier selection revision schema changed"
+        )
     expected_fixed_provenance = {
         "schema_version": (
-            INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
+            selection_artifact_schema
         ),
         "producer_version": (
-            INTERACTIVE_TREE_FRONTIER_SELECTION_PRODUCER_VERSION
+            selection_producer
         ),
         "task_id": normalized_task,
         "kind": INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
@@ -384,12 +428,12 @@ def load_verified_interactive_tree_frontier_selection_artifact_on_connection(
             revision_tools.INTERACTIVE_TREE_REVISION_ARTIFACT_KIND
         ),
         "revision_artifact_schema_version": (
-            revision_tools.INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION
+            revision_artifact_schema
         ),
         "revision_artifact_origin_tool": (
             revision_tools.INTERACTIVE_TREE_REVISION_ORIGIN_TOOL
         ),
-        "revision_schema_version": INTERACTIVE_TREE_REVISION_SCHEMA_VERSION,
+        "revision_schema_version": revision_schema,
         "semantic_tree_id": normalized_asset_id,
         "tree_hash": normalized_asset_hash,
         "asset_type": INTERACTIVE_TREE_ASSET_TYPE,
@@ -924,10 +968,12 @@ def _require_exact_fields(
 __all__ = [
     "INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND",
     "INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION",
+    "INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2",
     "INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL",
     "MAX_INTERACTIVE_TREE_FRONTIER_SELECTION_BYTES",
     "MAX_INTERACTIVE_TREE_FRONTIER_REVISION_BYTES",
     "TOOL_SCHEMA_VERSION",
+    "TOOL_SCHEMA_VERSION_V2",
     "VerifiedInteractiveTreeFrontierSelection",
     "canonical_interactive_tree_frontier_selection_path",
     "interactive_tree_frontier_selection_provenance",

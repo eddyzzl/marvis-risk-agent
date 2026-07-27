@@ -30,6 +30,12 @@ INTERACTIVE_TREE_REVISION_SCHEMA_VERSION = (
 INTERACTIVE_TREE_REVISION_PRODUCER_VERSION = (
     "strategy.interactive-tree-revision/1"
 )
+INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION = (
+    "strategy.interactive-tree-revision.v2"
+)
+INTERACTIVE_TREE_REVISION_V2_PRODUCER_VERSION = (
+    "strategy.interactive-tree-revision/2"
+)
 INTERACTIVE_TREE_ASSET_TYPE = "interactive_rule_tree"
 MAX_INTERACTIVE_TREE_NODES = 511
 MAX_EDIT_REASON_LENGTH = 500
@@ -95,6 +101,23 @@ def build_interactive_tree_revision(
     ``node_id`` must identify a split node that is currently visible.  Hidden
     descendants and already-materialized frontier nodes cannot be pruned again.
     """
+
+    if (
+        isinstance(parent_revision, Mapping)
+        and parent_revision.get("schema_version")
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+    ):
+        from marvis.packs.strategy.interactive_tree_revision_v2 import (
+            build_pruned_interactive_tree_revision_v2,
+        )
+
+        return build_pruned_interactive_tree_revision_v2(
+            automatic_tree_asset,
+            node_id=node_id,
+            reason=reason,
+            parent_revision=parent_revision,
+            ancestor_revisions=ancestor_revisions,
+        )
 
     source = validate_automatic_tree_asset(automatic_tree_asset)
     source_index = _source_index(source)
@@ -176,6 +199,17 @@ def validate_interactive_tree_revision(
     if not isinstance(payload, Mapping):
         raise InteractiveTreeRevisionError(
             "interactive-tree revision must be an object"
+        )
+    if payload.get("schema_version") == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION:
+        from marvis.packs.strategy.interactive_tree_revision_v2 import (
+            validate_interactive_tree_revision_v2,
+        )
+
+        return validate_interactive_tree_revision_v2(
+            payload,
+            automatic_tree_asset,
+            parent_revision=parent_revision,
+            ancestor_revisions=ancestor_revisions,
         )
     _exact_fields(payload, _TOP_LEVEL_FIELDS, "interactive-tree revision")
     source = validate_automatic_tree_asset(automatic_tree_asset)
@@ -377,6 +411,22 @@ def canonical_interactive_tree_revision_json(
 ) -> str:
     """Return strict canonical JSON for one verified revision."""
 
+    if (
+        isinstance(payload, Mapping)
+        and payload.get("schema_version")
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+    ):
+        from marvis.packs.strategy.interactive_tree_revision_v2 import (
+            canonical_interactive_tree_revision_v2_json,
+        )
+
+        return canonical_interactive_tree_revision_v2_json(
+            payload,
+            automatic_tree_asset,
+            parent_revision=parent_revision,
+            ancestor_revisions=ancestor_revisions,
+        )
+
     validated = validate_interactive_tree_revision(
         payload,
         automatic_tree_asset,
@@ -400,6 +450,22 @@ def interactive_tree_revision_to_candidate_fragments(
     ancestor_revisions: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Return detached generic candidate fragments for Pool adapters."""
+
+    if (
+        isinstance(payload, Mapping)
+        and payload.get("schema_version")
+        == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION
+    ):
+        from marvis.packs.strategy.interactive_tree_revision_v2 import (
+            interactive_tree_revision_v2_to_candidate_fragments,
+        )
+
+        return interactive_tree_revision_v2_to_candidate_fragments(
+            payload,
+            automatic_tree_asset,
+            parent_revision=parent_revision,
+            ancestor_revisions=ancestor_revisions,
+        )
 
     revision = validate_interactive_tree_revision(
         payload,
@@ -453,6 +519,12 @@ def interactive_tree_topology_evidence(
             parent_revision=parent_revision,
             ancestor_revisions=ancestors,
         )
+        if revision["schema_version"] == INTERACTIVE_TREE_REVISION_V2_SCHEMA_VERSION:
+            from marvis.packs.strategy.interactive_tree_revision_v2 import (
+                interactive_tree_topology_evidence_v2,
+            )
+
+            return interactive_tree_topology_evidence_v2(revision)
         frontier = tuple(revision["tree"]["frontier_node_ids"])
     _require_frontier_cover(source_index, frontier=frontier)
     visible = _visible_node_ids(source_index, frontier=frontier)

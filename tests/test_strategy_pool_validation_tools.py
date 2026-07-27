@@ -229,6 +229,136 @@ def _validation_artifacts(fx: dict) -> list[dict]:
     ]
 
 
+def _native_validation_request(
+    fx: dict,
+    added: dict,
+    *,
+    strategy_type: str,
+    partition: str = "validation",
+) -> dict:
+    records = TaskArtifactRepository(fx["settings"].db_path).list_for_task(
+        fx["task"].id
+    )
+    membership = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    bundle = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and item["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    return {
+        "strategy_type": strategy_type,
+        "pool_ref": {
+            "artifact_id": added["artifacts"][0]["artifact_id"],
+            "expected_artifact_content_hash": added["artifacts"][0][
+                "content_hash"
+            ],
+            "expected_pool_id": added["pool_id"],
+            "expected_revision": added["revision"],
+            "expected_revision_id": added["pool"]["revision_id"],
+            "expected_snapshot_hash": added["snapshot_hash"],
+        },
+        "sample_design_ref": {
+            "membership_artifact_id": membership["id"],
+            "expected_membership_artifact_content_hash": membership[
+                "content_hash"
+            ],
+            "bundle_artifact_id": bundle["id"],
+            "expected_bundle_artifact_content_hash": bundle["content_hash"],
+            "expected_bundle_id": bundle["provenance"]["bundle_id"],
+            "expected_sample_design_id": fx["sample_design_ref"][
+                "sample_design_id"
+            ],
+            "expected_sample_design_content_hash": fx["sample_design_ref"][
+                "sample_design_content_hash"
+            ],
+        },
+        "partition": partition,
+        "population": "risk",
+        "comparison_mode": "absolute",
+    }
+
+
+@pytest.mark.parametrize(
+    ("strategy_type", "default_action", "action", "breakdown_field"),
+    [
+        (
+            "limit",
+            {"type": "limit", "value": 1_000},
+            {"type": "limit", "value": 2_000},
+            "assigned_limit",
+        ),
+        (
+            "pricing",
+            {"type": "pricing", "value": 0.10},
+            {"type": "pricing", "value": 0.20},
+            "assigned_rate",
+        ),
+        (
+            "segmentation",
+            {"type": "segment", "value": "standard"},
+            {"type": "segment", "value": "priority"},
+            "segment",
+        ),
+    ],
+)
+def test_measure_pool_validation_emits_typed_independent_evidence_for_all_types(
+    tmp_path: Path,
+    strategy_type: str,
+    default_action: dict,
+    action: dict,
+    breakdown_field: str,
+) -> None:
+    fx = _pool_setup(tmp_path / strategy_type, native_sample=True)
+    added_inputs = _pool_add_inputs(
+        fx["first"],
+        expected_revision=0,
+        expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+    )
+    added_inputs.update(
+        {
+            "strategy_type": strategy_type,
+            "default_action": default_action,
+            "action": action,
+        }
+    )
+    added = run_add_candidate_to_pool(
+        added_inputs,
+        fx["ctx"],
+        fx["runtime"],
+    )
+    request = _native_validation_request(
+        fx,
+        added,
+        strategy_type=strategy_type,
+    )
+
+    output = run_measure_strategy_pool_validation(
+        request,
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    evidence = output["evidence"]
+    typed = evidence["typed_backtest"]
+    assert evidence["schema_version"] == "strategy.pool-validation-evidence.v2"
+    assert evidence["identity"]["strategy_type"] == strategy_type
+    assert typed["strategy_type"] == strategy_type
+    assert typed["population_count"] == output["population_count"] == 2
+    assert sum(row["count"] for row in typed["breakdown"]) == 2
+    assert all(breakdown_field in row for row in typed["breakdown"])
+    assert all(evidence["conservation"].values())
+    assert evidence["lifecycle"]["validation_status"] == "independent_evidence"
+    assert output["not_mutated_pool"] is True
+    assert output["not_created_strategy"] is True
+    assert len(_validation_artifacts(fx)) == 1
+
+
 def test_pool_validation_native_uses_independent_risk_partition_and_exact_ref(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

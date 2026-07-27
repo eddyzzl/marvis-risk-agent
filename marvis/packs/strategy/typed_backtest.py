@@ -322,7 +322,10 @@ _NORMALIZED_INPUT_KEYS = {
     "economics_input_evidence",
     "approval_profit_input",
 }
-_OPTIONAL_NORMALIZED_INPUT_KEYS = {"sample_design_ref"}
+_OPTIONAL_NORMALIZED_INPUT_KEYS = {
+    "sample_design_ref",
+    "runtime_requirements",
+}
 _LIMIT_ECONOMICS_INPUT_KEYS = {"pd", "lgd", "utilization"}
 _PRICING_ECONOMICS_INPUT_KEYS = {
     "ead",
@@ -348,11 +351,10 @@ def _validate_backtest_semantics(result: StrategyBacktestResult) -> None:
 
 def _validate_normalized_input(result: StrategyBacktestResult) -> None:
     normalized = result.normalized_input
-    expected_keys = (
-        _NORMALIZED_INPUT_KEYS | _OPTIONAL_NORMALIZED_INPUT_KEYS
-        if "sample_design_ref" in normalized
-        else _NORMALIZED_INPUT_KEYS
+    optional_keys = set(normalized).intersection(
+        _OPTIONAL_NORMALIZED_INPUT_KEYS
     )
+    expected_keys = _NORMALIZED_INPUT_KEYS | optional_keys
     _require_exact_keys(normalized, expected_keys, name="normalized_input")
     if normalized["strategy_schema_version"] != STRATEGY_DSL_SCHEMA_VERSION:
         raise StrategyError("normalized_input.strategy_schema_version is unsupported")
@@ -376,6 +378,13 @@ def _validate_normalized_input(result: StrategyBacktestResult) -> None:
         raise StrategyError("normalized_input.target_encoding is unsupported")
     if "sample_design_ref" in normalized:
         _strategy_development_ref(normalized["sample_design_ref"])
+    if "runtime_requirements" in normalized:
+        _validated_runtime_requirements_input(
+            normalized["runtime_requirements"],
+            strategy_id=result.strategy_id,
+            strategy_effect_hash=normalized["strategy_effect_hash"],
+            baseline_effect_hash=baseline_hash,
+        )
     expected_literals = {
         "missing_label_policy": "exclude_from_label_metrics",
         "population_rate_denominator": "population_count",
@@ -1435,6 +1444,7 @@ def run_typed_backtest(
     target_col: str,
     target_bad_value: int = 1,
     sample_design_ref: Mapping[str, Any] | None = None,
+    runtime_requirements: Mapping[str, Any] | None = None,
     strategy_id: str | None = None,
     baseline: StrategySpec | Mapping[str, Any] | None = None,
     economics: Mapping[str, Any] | None = None,
@@ -1628,6 +1638,15 @@ def run_typed_backtest(
         normalized_input["sample_design_ref"] = (
             _strategy_development_ref(sample_design_ref).to_ref_dict()
         )
+    if runtime_requirements is not None:
+        normalized_input["runtime_requirements"] = (
+            _validated_runtime_requirements_input(
+                runtime_requirements,
+                strategy_id=resolved_strategy_id,
+                strategy_effect_hash=effect_hash,
+                baseline_effect_hash=baseline_hash,
+            )
+        )
     return StrategyBacktestResult(
         strategy_id=resolved_strategy_id,
         strategy_type=parsed.strategy_type,
@@ -1651,6 +1670,37 @@ def _strategy_development_ref(value: object) -> StrategyRiskDevelopmentRef:
             "risk/development for strategy backtesting"
         )
     return reference
+
+
+def _validated_runtime_requirements_input(
+    value: object,
+    *,
+    strategy_id: str,
+    strategy_effect_hash: str,
+    baseline_effect_hash: str | None,
+) -> dict[str, Any]:
+    from marvis.packs.strategy.materialized_runtime_requirements import (
+        validate_materialized_runtime_requirements_provenance,
+    )
+
+    normalized = validate_materialized_runtime_requirements_provenance(value)
+    candidate = normalized["candidate"]
+    baseline = normalized["baseline"]
+    if candidate is not None and (
+        candidate["strategy_id"] != strategy_id
+        or candidate["strategy_spec_hash"] != strategy_effect_hash
+    ):
+        raise StrategyError(
+            "candidate runtime requirements do not match the backtested Strategy"
+        )
+    if baseline is not None and (
+        baseline_effect_hash is None
+        or baseline["strategy_spec_hash"] != baseline_effect_hash
+    ):
+        raise StrategyError(
+            "baseline runtime requirements do not match the backtested baseline"
+        )
+    return normalized
 
 
 def _assert_count(value: object, *, name: str) -> None:

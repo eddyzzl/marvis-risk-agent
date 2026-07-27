@@ -33,6 +33,15 @@ from marvis.packs.modeling.score_evidence_tools import (
 from marvis.packs.strategy.candidate_fragment import (
     build_verified_candidate_fragment,
 )
+from marvis.packs.strategy.cross_candidate_search import (
+    CROSS_CANDIDATE_SEARCH_PRODUCER_VERSION,
+    canonical_cross_candidate_search_result_json,
+    search_cross_candidate_pairs,
+)
+from marvis.packs.strategy.cross_candidate_search_tools import (
+    CROSS_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
+    CrossCandidateSearchArtifactBinding,
+)
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.candidate_stability import (
     CANDIDATE_STABILITY_PRODUCER_VERSION,
@@ -182,6 +191,9 @@ from tests.test_strategy_model_evidence import (
     _comparison as _model_comparison,
     _model as _single_model_evidence,
     _univariate as _univariate_evidence,
+)
+from tests.test_strategy_cross_candidate_search import (
+    _request as _cross_search_request,
 )
 from tests.test_strategy_sample_design_v2 import (
     _components as _sample_components,
@@ -1537,6 +1549,90 @@ def _voting_search_binding(
     )
 
 
+def _cross_search_binding(
+    tmp_path: Path,
+    sample: (
+        StrategySampleDesignV2ArtifactBinding
+        | StrategySampleDesignV2NativeArtifactBinding
+    ),
+    pool: StrategyCandidatePoolArtifactBinding,
+) -> CrossCandidateSearchArtifactBinding:
+    voting = _voting_search_binding(tmp_path, sample, pool)
+    execution = voting.pool_development.sample_design
+    dataset = voting.pool_development.dataset
+    request = _cross_search_request()
+    development_count = execution.development_population_count
+    request["population"] = {
+        "row_count": development_count,
+        "good": max(0, development_count - 1),
+        "bad": min(1, development_count),
+    }
+    for trial in request["pair_trials"]:
+        trial["min_nonempty_cell_count"] = 1
+    result = search_cross_candidate_pairs(request)
+    provenance = {
+        "schema_version": CROSS_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": CROSS_CANDIDATE_SEARCH_PRODUCER_VERSION,
+        "task_id": sample.task_id,
+        "search_id": result["search_id"],
+        "search_content_hash": result["content_hash"],
+        "request_hash": result["request_hash"],
+        "source_artifact_id": _hash("cross-parent-artifact"),
+        "source_artifact_content_hash": _hash("cross-parent-content"),
+        "candidate_id": result["source"]["candidate_id"],
+        "evidence_hash": result["source"]["evidence_hash"],
+        "dataset_id": execution.dataset_id,
+        "dataset_content_hash": execution.dataset_content_hash,
+        "registry_metadata_hash": dataset.registry_metadata_hash,
+        "workspace_revision": execution.workspace_revision,
+        "workspace_generation": execution.workspace_generation,
+        "semantic_mapping_hash": execution.semantic_mapping_hash,
+        "sample_design_ref": execution.to_ref_dict(),
+        "sample_context_hash": result["source"]["sample_context_hash"],
+        "sample_partition": "risk/development",
+        "target_col": execution.target_col,
+        "drop_nan_labels": execution.drop_nan_labels,
+        "nan_labels_dropped": 0,
+        "labeled_count": development_count,
+        "features": result["configuration"]["features"],
+        "max_pairs": result["configuration"]["max_pairs"],
+        "lifecycle": {
+            "selected": False,
+            "admitted": False,
+            "applied": False,
+            "adopted": False,
+            "deployed": False,
+        },
+    }
+    provenance_json = json.dumps(
+        provenance,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    canonical = canonical_cross_candidate_search_result_json(result)
+    return CrossCandidateSearchArtifactBinding(
+        task_id=sample.task_id,
+        artifact_id=_hash("cross-search-artifact"),
+        artifact_path=tmp_path / "cross-search.json",
+        artifact_content_hash=_file_hash(canonical),
+        artifact_provenance=provenance,
+        artifact_provenance_json=provenance_json,
+        result=result,
+        source=SimpleNamespace(
+            task_id=sample.task_id,
+            artifact_id=provenance["source_artifact_id"],
+            content_hash=provenance["source_artifact_content_hash"],
+        ),
+        dataset=dataset,
+        sample_binding=execution,
+        evidence={"identity": {}},
+        tasks_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
+
+
 def _zip_xml_text(raw: bytes) -> str:
     with ZipFile(BytesIO(raw), "r") as archive:
         return "".join(
@@ -2579,6 +2675,124 @@ def test_adapter_projects_independent_pool_validation_as_oot_stage_and_conclusio
     assert bundle["strategy_id"] is None
 
 
+@pytest.mark.parametrize(
+    ("strategy_type", "value_field"),
+    [
+        ("limit", "assigned_limit"),
+        ("pricing", "assigned_rate"),
+        ("segmentation", "segment"),
+    ],
+)
+def test_adapter_projects_native_typed_pool_validation_without_action_coercion(
+    tmp_path: Path,
+    strategy_type: str,
+    value_field: str,
+) -> None:
+    sample = _sample_with_dataset_source(
+        _sample_binding(tmp_path),
+        tmp_path,
+    )
+    dataset = sample.bundle["sample_design"]["identity"]["dataset_ref"]
+    project = _project_binding(
+        tmp_path,
+        task_id=sample.task_id,
+        dataset_ref=build_source_ref(
+            kind="dataset",
+            ref_id=dataset["dataset_id"],
+            content_hash=dataset["content_hash"],
+        ),
+    )
+    pool = _pool_binding_for_strategy_type(
+        tmp_path,
+        sample,
+        strategy_type,
+    )
+    validation = _pool_validation_binding(
+        tmp_path,
+        sample,
+        pool,
+        partition="validation",
+    )
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        pool_validations=(validation,),
+        impact_cube=impact_cube,
+    )
+
+    impact_section = next(
+        section
+        for section in result["sections"]
+        if section["key"] == "impact_assessment"
+    )
+    tables = {
+        table["table_id"]: table for table in impact_section["tables"]
+    }
+    summary = tables[
+        "strategy_pool_typed_independent_validation_summary"
+    ]
+    distribution = tables[
+        "strategy_pool_typed_independent_validation_distribution"
+    ]
+    monthly = tables[
+        "strategy_pool_typed_independent_validation_monthly"
+    ]
+    assert summary["rows"][0]["cells"]["strategy_type"]["value"] == (
+        strategy_type
+    )
+    assert summary["rows"][0]["cells"]["overall_bad_count"]["value"] == (
+        validation.evidence["risk_summary"]["overall_bad_count"]
+    )
+    assert summary["rows"][0]["cells"]["overall_bad_rate"]["value"] == (
+        validation.evidence["risk_summary"]["overall_bad_rate"]
+    )
+    assert value_field in {
+        column["key"] for column in distribution["columns"]
+    }
+    assert distribution["rows"]
+    assert all(
+        "action" not in row["cells"]
+        for row in distribution["rows"]
+    )
+    assert monthly["rows"]
+    monthly_risk = validation.evidence["monthly"]["periods"][0][
+        "risk_summary"
+    ]
+    assert monthly["rows"][0]["cells"]["overall_bad_count"]["value"] == (
+        monthly_risk["overall_bad_count"]
+    )
+    assert monthly["rows"][0]["cells"]["overall_bad_rate"]["value"] == (
+        monthly_risk["overall_bad_rate"]
+    )
+    assert all(
+        row["cells"]["strategy_type"]["value"] == strategy_type
+        and "action" not in row["cells"]
+        for row in monthly["rows"]
+    )
+    assert (
+        "strategy_pool_independent_validation_actions"
+        not in tables
+    )
+    bundle = build_strategy_report_bundle(
+        task_id=project.task_id,
+        report_revision=1,
+        strategy_id=None,
+        strategy_version=None,
+        strategy_type=strategy_type,
+        title=_present(
+            f"{strategy_type} 独立策略验证",
+            result["strategy_artifact_refs"][0],
+        ),
+        status="partial",
+        generated_at="2026-07-27T12:00:00+08:00",
+        **result,
+    )
+    assert bundle["strategy_type"] == strategy_type
+
+
 def test_pool_validation_report_adapter_accepts_native_exact_development_ref(
     tmp_path: Path,
 ) -> None:
@@ -2929,6 +3143,185 @@ def test_adapter_projects_voting_search_only_as_twenty_row_development_evidence(
     for forbidden in ("winner", "champion", "selected", "冠军", "最佳"):
         assert forbidden not in markdown.lower()
         assert forbidden not in docx_text.lower()
+
+
+def test_adapter_projects_authenticated_cross_search_without_pool_membership_claims(
+    tmp_path: Path,
+) -> None:
+    bindings = _bindings(tmp_path, candidate_count=7)
+    project, sample, pool, _impact = bindings
+    search = _cross_search_binding(tmp_path, sample, pool)
+
+    without_search = _project(bindings)
+    projected = _project(bindings, cross_candidate_search=search)
+
+    candidate_without = without_search["sections"][4]
+    candidate_with = projected["sections"][4]
+    base_tables = {
+        table["table_id"]: table for table in candidate_without["tables"]
+    }
+    projected_tables = {
+        table["table_id"]: table for table in candidate_with["tables"]
+    }
+    assert (
+        projected_tables["candidate_pool_entries"]
+        == base_tables["candidate_pool_entries"]
+    )
+    assert (
+        projected_tables["compiled_candidate_design"]
+        == base_tables["compiled_candidate_design"]
+    )
+    table = projected_tables["cross_candidate_search_pairs"]
+    assert table["title"] == (
+        "Cross候选字段对搜索结果（开发回测，仅供明确选择，未构建/未入池）"
+    )
+    assert [
+        row["cells"]["pair_id"]["value"] for row in table["rows"]
+    ] == [item["pair_id"] for item in search.result["pairs"]]
+    assert any(
+        item["binding"]["result_ref"]["kind"]
+        == "cross_candidate_search"
+        and item["binding"]["frozen_artifact_ref"]["kind"]
+        == "cross_candidate_search"
+        for item in candidate_with["stage_evidence"]
+    )
+    assert any(
+        ref["kind"] == "cross_candidate_search"
+        and ref["ref_id"] == search.artifact_id
+        and ref["content_hash"] == search.artifact_content_hash
+        for ref in projected["strategy_artifact_refs"]
+    )
+    rendered = json.dumps(projected, ensure_ascii=False, sort_keys=True).lower()
+    for forbidden in (
+        "asset_fingerprint",
+        "trial_accounting",
+        "source_artifact_id",
+        "source_artifact_content_hash",
+        "winner",
+        "champion",
+        "selected_pair",
+        "built_pair",
+        "in_pool",
+        "冠军",
+        "最佳",
+    ):
+        assert forbidden not in rendered
+
+
+def test_cross_search_report_adapter_rejects_sample_or_provenance_drift(
+    tmp_path: Path,
+) -> None:
+    bindings = _bindings(tmp_path, candidate_count=7)
+    _project_context, sample, pool, _impact = bindings
+    search = _cross_search_binding(tmp_path, sample, pool)
+
+    wrong_sample_ref = dict(search.artifact_provenance["sample_design_ref"])
+    wrong_sample_ref["artifact_content_hash"] = "f" * 64
+    forged_provenance = {
+        **search.artifact_provenance,
+        "sample_design_ref": wrong_sample_ref,
+    }
+    forged = replace(
+        search,
+        artifact_provenance=forged_provenance,
+        artifact_provenance_json=json.dumps(
+            forged_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="Cross search.*sample|provenance",
+    ):
+        _project(bindings, cross_candidate_search=forged)
+
+    drifted_execution = replace(search.sample_binding, target_col="other_target")
+    drifted_provenance = {
+        **search.artifact_provenance,
+        "target_col": "other_target",
+    }
+    drifted = replace(
+        search,
+        artifact_provenance=drifted_provenance,
+        artifact_provenance_json=json.dumps(
+            drifted_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        sample_binding=drifted_execution,
+    )
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="Cross search.*target|sample|risk-development",
+    ):
+        _project(bindings, cross_candidate_search=drifted)
+
+
+def test_cross_search_report_projection_is_aggregate_and_never_claims_selection() -> None:
+    result = search_cross_candidate_pairs(_cross_search_request())
+    source_ref = _source(
+        "cross-search-artifact",
+        kind="cross_candidate_search",
+    )
+
+    projected = report_adapters._cross_search_report_projection(
+        result,
+        source_ref=source_ref,
+    )
+
+    table = projected["table"]
+    assert table["table_id"] == "cross_candidate_search_pairs"
+    assert table["sheet_key"] == "appendix_cross_search"
+    assert table["effect_stage"] == "backtested"
+    assert [
+        row["cells"]["pair_id"]["value"]
+        for row in table["rows"]
+    ] == [item["pair_id"] for item in result["pairs"]]
+    assert [
+        row["cells"]["eligible"]["value"]
+        for row in table["rows"]
+    ] == [item["eligible"] for item in result["pairs"]]
+    assert {
+        "pair_id",
+        "x_feature",
+        "x_method",
+        "y_feature",
+        "y_method",
+        "x_axis_iv",
+        "y_axis_iv",
+        "cross_total_iv",
+        "interaction_gain_iv",
+        "cell_count",
+        "empty_cell_count",
+        "empty_cell_share",
+        "min_nonempty_cell_count",
+        "eligible",
+        "rank",
+    } == {column["key"] for column in table["columns"]}
+    rendered = json.dumps(projected, ensure_ascii=False, sort_keys=True)
+    for forbidden in (
+        "asset_fingerprint",
+        "winner",
+        "champion",
+        "selected_pair",
+        "冠军",
+        "最佳",
+    ):
+        assert forbidden not in rendered.lower()
+    summary = {
+        item["field_id"]: item["field"]["value"]
+        for item in projected["summary_fields"]
+    }
+    assert summary == {
+        "cross_search_search_space": result["search_space"],
+        "cross_search_evaluated": result["evaluated"],
+        "cross_search_truncated": result["truncated"],
+        "cross_search_eligible": result["eligible"],
+        "cross_search_displayed": len(result["pairs"]),
+    }
 
 
 def test_voting_search_report_adapter_accepts_native_generic_development(
@@ -3521,14 +3914,28 @@ def test_adapter_never_leaks_raw_rows_pii_or_overclaims_lifecycle(
             },
         }
     ]
-    assert {
+    candidate_fields = {
         item["field_id"]: item["field"]["value"]
         for item in candidates["summary_fields"]
-    }["adoption_status"] == "not_adopted"
+    }
+    assert candidate_fields["strategy_status"] == "candidate"
+    assert candidate_fields["adoption_status"] == "not_adopted"
+    assert candidate_fields["deployment_status"] == "not_deployed"
+    for table_id in ("candidate_pool_entries", "compiled_candidate_design"):
+        table = next(
+            item for item in candidates["tables"] if item["table_id"] == table_id
+        )
+        assert {
+            row["cells"]["adoption_status"]["value"] for row in table["rows"]
+        } == {"not_adopted"}
+        assert {
+            row["cells"]["deployment_status"]["value"] for row in table["rows"]
+        } == {"not_deployed"}
     final_fields = {
         item["field_id"]: item["field"]["value"]
         for item in final["summary_fields"]
     }
+    assert final_fields["strategy_status"] == "candidate"
     assert final_fields["adoption_status"] == "not_adopted"
     assert final_fields["deployment_status"] == "not_deployed"
     assert final_fields["creates_strategy"] is False

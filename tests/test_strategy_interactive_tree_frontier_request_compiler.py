@@ -171,7 +171,7 @@ def test_frontier_materialization_nl_is_exactly_grounded_and_bumps_prompt() -> N
 
     assert result.draft is not None
     assert result.draft.to_dict() == expected
-    assert llm.calls[0]["prompt_version"] == 47
+    assert llm.calls[0]["prompt_version"] == 50
     assert "interactive_tree_frontier_materialization" in (
         llm.calls[0]["system_prompt"]
     )

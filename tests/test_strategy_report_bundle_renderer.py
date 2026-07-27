@@ -19,7 +19,8 @@ def test_report_renderer_shows_governed_identity_warnings_and_four_downloads(
     assert output["report_id"] in text
     assert f"revision **{output['report_revision']}**" in text
     assert f"状态 **{output['status']}**" in text
-    assert "未创建策略、未采纳、未部署或上线" in text
+    assert "本报告生成步骤未创建或变更策略资产" in text
+    assert "生命周期状态来自已认证证据" in text
     for warning in output["warnings"]:
         assert warning in text
     assert text.count("](/api/tasks/") == 4

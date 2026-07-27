@@ -203,6 +203,32 @@ def build_strategy_pool_validation_evidence(
     """Build aggregate-only validation/OOT evidence from exact selected rows."""
 
     current_pool = validate_strategy_pool(pool)
+    if current_pool["strategy_type"] in {
+        "limit",
+        "pricing",
+        "segmentation",
+    }:
+        from marvis.packs.strategy.pool_validation_typed import (
+            build_typed_strategy_pool_validation_evidence,
+        )
+
+        return build_typed_strategy_pool_validation_evidence(
+            pool=current_pool,
+            frame=frame,
+            pool_artifact_ref=pool_artifact_ref,
+            sample_design_v2_ref=sample_design_v2_ref,
+            dataset_binding=dataset_binding,
+            legacy_development_ref=legacy_development_ref,
+            partition=partition,
+            population=population,
+            comparison_mode=comparison_mode,
+            target_col=target_col,
+            target_bad_value=target_bad_value,
+            month_col=month_col,
+            loan_amount_col=loan_amount_col,
+            overdue_amount_col=overdue_amount_col,
+            development_rows_excluded=development_rows_excluded,
+        )
     selected_partition = _partition(partition)
     if population != "risk":
         raise StrategyError("Strategy Pool validation population must be risk")
@@ -339,6 +365,15 @@ def validate_strategy_pool_validation_evidence(
     """Validate hashes, source binding shape, aggregates, and conservation."""
 
     obj = _json_object(payload, "Strategy Pool validation evidence")
+    if (
+        obj.get("schema_version")
+        == "strategy.pool-validation-evidence.v2"
+    ):
+        from marvis.packs.strategy.pool_validation_typed import (
+            validate_typed_strategy_pool_validation_evidence,
+        )
+
+        return validate_typed_strategy_pool_validation_evidence(obj)
     _exact_fields(obj, _TOP_LEVEL_FIELDS, "Strategy Pool validation evidence")
     if obj["schema_version"] != STRATEGY_POOL_VALIDATION_SCHEMA_VERSION:
         raise StrategyError(
@@ -401,6 +436,10 @@ def validate_strategy_pool_validation_evidence(
         )
 
     identity = _identity(obj["identity"])
+    if identity["strategy_type"] not in {"approval", "reject"}:
+        raise StrategyError(
+            "Strategy Pool validation V1 supports approval/reject only"
+        )
     sources = _json_object(
         obj["source_bindings"],
         "Strategy Pool validation source_bindings",
@@ -735,10 +774,14 @@ def _identity(value: object) -> dict[str, Any]:
             "identity.strategy_spec_hash",
         ),
     }
-    if normalized["strategy_type"] not in {"approval", "reject"}:
-        raise StrategyError(
-            "Strategy Pool validation supports approval/reject only"
-        )
+    if normalized["strategy_type"] not in {
+        "approval",
+        "reject",
+        "limit",
+        "pricing",
+        "segmentation",
+    }:
+        raise StrategyError("Strategy Pool validation type is unsupported")
     return normalized
 
 

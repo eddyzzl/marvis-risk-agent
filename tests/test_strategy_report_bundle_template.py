@@ -31,6 +31,7 @@ def _report_slots(
     *,
     candidate_stability_ref: dict | None,
     voting_candidate_search_ref: dict | None = None,
+    cross_candidate_search_ref: dict | None = None,
     pool_validation_refs: list[dict] | None = None,
 ) -> dict[str, object]:
     return {
@@ -67,6 +68,7 @@ def _report_slots(
         },
         "candidate_stability_ref": candidate_stability_ref,
         "voting_candidate_search_ref": voting_candidate_search_ref,
+        "cross_candidate_search_ref": cross_candidate_search_ref,
         "pool_validation_refs": (
             [] if pool_validation_refs is None else pool_validation_refs
         ),
@@ -112,6 +114,7 @@ def test_report_bundle_exposes_only_title_and_status_as_user_slots() -> None:
         "pool_stability_ref",
         "candidate_stability_ref",
         "voting_candidate_search_ref",
+        "cross_candidate_search_ref",
         "pool_validation_refs",
         "report_revision",
         "previous_report_id",
@@ -247,3 +250,36 @@ def test_report_bundle_omits_none_voting_search_task_context(
 
     assert validator.validate(plan) == []
     assert "voting_candidate_search_ref" not in plan.steps[0].inputs
+
+
+def test_report_bundle_passes_and_omits_exact_optional_cross_search_context(
+    tmp_path: Path,
+) -> None:
+    load_builtin_templates()
+    tools = _tool_registry(tmp_path)
+    validator = PlanValidator(tools)
+    cross_ref = {
+        "artifact_id": "b" * 64,
+        "expected_artifact_content_hash": "c" * 64,
+        "expected_search_id": "cross-search-" + ("1" * 32),
+        "expected_search_content_hash": "d" * 64,
+    }
+
+    with_cross = Planner(tools, lambda: None, validator).from_template(
+        get_template("strategy_report_bundle_v2"),
+        _report_slots(
+            candidate_stability_ref=None,
+            cross_candidate_search_ref=cross_ref,
+        ),
+        task_id="task-1",
+    )
+    without_cross = Planner(tools, lambda: None, validator).from_template(
+        get_template("strategy_report_bundle_v2"),
+        _report_slots(candidate_stability_ref=None),
+        task_id="task-2",
+    )
+
+    assert validator.validate(with_cross) == []
+    assert with_cross.steps[0].inputs["cross_candidate_search_ref"] == cross_ref
+    assert validator.validate(without_cross) == []
+    assert "cross_candidate_search_ref" not in without_cross.steps[0].inputs

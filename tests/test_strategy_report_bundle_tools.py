@@ -28,6 +28,9 @@ from marvis.packs.strategy.impact_cube_tools import (
     run_measure_strategy_impact_cube,
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
+from marvis.packs.strategy.pool_materialization_tools import (
+    run_materialize_strategy_from_pool,
+)
 from marvis.packs.strategy.pool_stability_tools import (
     POOL_STABILITY_MEASUREMENT_AUDIT_KIND,
     run_measure_strategy_pool_stability,
@@ -538,6 +541,32 @@ def _run(fixture: dict) -> dict:
     )
 
 
+def _materialize_report_pool(fixture: dict) -> dict:
+    pool = load_current_strategy_candidate_pool_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        **fixture["request"]["candidate_pool_ref"],
+    )
+    materialized = run_materialize_strategy_from_pool(
+        {
+            "strategy_type": pool.strategy_type,
+            "expected_pool_revision": pool.pool["revision"],
+            "expected_pool_snapshot_hash": pool.pool["snapshot_hash"],
+            "expected_pool_artifact_id": pool.artifact_id,
+            "expected_pool_artifact_content_hash": pool.artifact_content_hash,
+            "expected_design_hash": pool.compiled_design["design_hash"],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    fixture["request"]["strategy_identity"] = {
+        "strategy_id": materialized["strategy_ref"]["strategy_id"],
+        "strategy_version": str(materialized["strategy_ref"]["version"]),
+        "strategy_type": materialized["strategy_ref"]["strategy_type"],
+    }
+    return materialized
+
+
 def test_report_source_loading_accepts_exact_native_before_downstream_loaders(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -619,8 +648,10 @@ def test_report_source_loading_accepts_exact_native_before_downstream_loaders(
         "candidate_stability_ref": None,
         "pool_stability_ref": None,
         "voting_candidate_search_ref": None,
+        "cross_candidate_search_ref": None,
         "pool_impact_ref": None,
         "impact_cube_ref": {},
+        "strategy_identity": None,
         "model_evidence_ref": None,
         "training_evidence_ref": None,
         "score_evidence_ref": None,
@@ -655,11 +686,13 @@ def test_report_writer_lock_reauthenticates_native_sample_with_generic_boundary(
         candidate_stability=None,
         pool_stability=None,
         voting_candidate_search=None,
+        cross_candidate_search=None,
         pool_impact=None,
         impact_cube=impact_cube,
         model_evidence=None,
         training_evidence=None,
         score_evidence=None,
+        strategy_authentication=None,
     )
     calls: list[object] = []
     monkeypatch.setattr(
@@ -691,6 +724,7 @@ def test_report_writer_lock_reauthenticates_native_sample_with_generic_boundary(
     report_tools._revalidate_sources(
         SimpleNamespace(in_transaction=True),
         sources,
+        strategies=object(),
     )
 
     assert calls == [native_sample]
@@ -786,7 +820,6 @@ def test_build_report_bundle_publishes_four_exact_governed_outputs(
         )
         for table in impact["tables"]
     )
-
     tool = next(
         item
         for item in load_manifest(
@@ -801,6 +834,157 @@ def test_build_report_bundle_publishes_four_exact_governed_outputs(
         label="report bundle input",
     )
     validate_against_schema(output, tool.output_schema, label="report bundle output")
+
+
+def test_build_report_bundle_rejects_forged_manual_strategy_identity(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    _materialize_report_pool(fixture)
+    fixture["request"]["strategy_identity"] = {
+        **fixture["request"]["strategy_identity"],
+        "strategy_id": "unrelated-same-type-strategy",
+    }
+
+    with pytest.raises(
+        StrategyError,
+        match="identity does not match the current Pool materialization",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+    report_root = (
+        Path(fixture["settings"].tasks_dir)
+        / fixture["task"].id
+        / "strategy_reports"
+    )
+    assert not any(report_root.rglob("report.*")) if report_root.exists() else True
+
+
+def test_build_report_bundle_rechecks_materialized_strategy_under_writer_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    materialized = _materialize_report_pool(fixture)
+    strategy_id = materialized["strategy_ref"]["strategy_id"]
+    original_render = report_tools.render_strategy_report_bundle
+    changed = False
+
+    def adopt_after_preflight(bundle):
+        nonlocal changed
+        rendered = original_render(bundle)
+        if not changed:
+            changed = True
+            fixture["runtime"].strategies.adopt_strategy_with_audit(
+                strategy_id,
+                reason="committee changed lifecycle during report build",
+                audit={
+                    "kind": "strategy.adopt",
+                    "target_ref": strategy_id,
+                    "outcome": "succeeded",
+                },
+                adopted_at="2026-07-25T08:30:00+00:00",
+            )
+        return rendered
+
+    monkeypatch.setattr(
+        report_tools,
+        "render_strategy_report_bundle",
+        adopt_after_preflight,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="lifecycle changed before report publication",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategy_report_revisions"
+        ).fetchone()[0] == 0
+    report_root = (
+        Path(fixture["settings"].tasks_dir)
+        / fixture["task"].id
+        / "strategy_reports"
+    )
+    assert not any(report_root.rglob("report.*")) if report_root.exists() else True
+
+
+def test_build_report_bundle_projects_authenticated_local_adoption_lifecycle(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    materialized = _materialize_report_pool(fixture)
+    strategy_id = materialized["strategy_ref"]["strategy_id"]
+    fixture["runtime"].strategies.adopt_strategy_with_audit(
+        strategy_id,
+        reason="committee approved exact Pool materialization",
+        audit={
+            "kind": "strategy.adopt",
+            "target_ref": strategy_id,
+            "outcome": "succeeded",
+        },
+        adopted_at="2026-07-25T08:30:00+00:00",
+    )
+
+    output = _run(fixture)
+
+    candidate = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "candidate_combinations"
+    )
+    candidate_fields = {
+        item["field_id"]: item["field"]["value"]
+        for item in candidate["summary_fields"]
+    }
+    assert candidate_fields["strategy_status"] == "adopted"
+    assert candidate_fields["adoption_status"] == "adopted"
+    assert candidate_fields["deployment_status"] == "adopted_local"
+    for table_id in ("candidate_pool_entries", "compiled_candidate_design"):
+        table = next(
+            item for item in candidate["tables"] if item["table_id"] == table_id
+        )
+        assert {
+            row["cells"]["adoption_status"]["value"] for row in table["rows"]
+        } == {"adopted"}
+        assert {
+            row["cells"]["deployment_status"]["value"] for row in table["rows"]
+        } == {"adopted_local"}
+    final = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "final_document"
+    )
+    final_fields = {
+        item["field_id"]: item["field"]["value"]
+        for item in final["summary_fields"]
+    }
+    assert final_fields["strategy_status"] == "adopted"
+    assert final_fields["adoption_status"] == "adopted"
+    assert final_fields["deployment_status"] == "adopted_local"
+    assert final_fields["creates_strategy"] is True
+    assert output["strategy_id"] == strategy_id
+    assert output["not_deployed"] is True
+    lifecycle_refs = [
+        ref
+        for ref in output["bundle"]["strategy_artifact_refs"]
+        if ref["kind"] == "strategy_lifecycle"
+    ]
+    assert len(lifecycle_refs) == 1
+    assert lifecycle_refs[0]["ref_id"] == strategy_id
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    materialization_source = audit["source_artifacts"][
+        "strategy_materialization"
+    ]
+    assert materialization_source["strategy_id"] == strategy_id
+    assert materialization_source["status"] == "adopted"
+    assert materialization_source["asset_status"] == "adopted_local"
+    assert materialization_source["lifecycle_ref"] == lifecycle_refs[0]
 
 
 def test_report_bundle_projects_platform_bound_pool_validation_refs_exactly(
@@ -930,7 +1114,7 @@ def test_report_bundle_projects_platform_bound_pool_validation_refs_exactly(
 def test_report_bundle_tool_schema_version_is_v6() -> None:
     assert (
         BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION
-        == "strategy.build-report-bundle-v2-tool.v6"
+        == "strategy.build-report-bundle-v2-tool.v7"
     )
 
 
@@ -1489,7 +1673,7 @@ def test_report_bundle_passes_exact_voting_search_binding_and_audits_it(
         "search_content_hash": search_hash,
     }
     assert output["schema_version"] == (
-        "strategy.build-report-bundle-v2-tool.v6"
+        "strategy.build-report-bundle-v2-tool.v7"
     )
 
 
@@ -1508,6 +1692,101 @@ def test_report_bundle_rejects_unknown_voting_search_ref_fields(
     with pytest.raises(
         StrategyError,
         match="voting_candidate_search_ref.*fields",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_report_bundle_passes_exact_cross_search_binding_and_audits_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    search_id = "cross-search-" + ("1" * 32)
+    search_hash = "c" * 64
+    cross_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": search_id,
+        "expected_search_content_hash": search_hash,
+    }
+    fixture["request"]["cross_candidate_search_ref"] = cross_ref
+    binding = SimpleNamespace(
+        artifact_id=cross_ref["artifact_id"],
+        artifact_content_hash=cross_ref[
+            "expected_artifact_content_hash"
+        ],
+        result={
+            "search_id": search_id,
+            "content_hash": search_hash,
+        },
+    )
+    observed = {}
+    original_adapter = report_tools.build_strategy_report_bundle_source_inputs
+
+    def load_search(runtime, **kwargs):
+        observed["loader"] = (runtime, kwargs)
+        return binding
+
+    def capture_search_binding(**kwargs):
+        observed["binding"] = kwargs["cross_candidate_search"]
+        kwargs.pop("cross_candidate_search")
+        return original_adapter(**kwargs)
+
+    monkeypatch.setattr(
+        report_tools,
+        "load_cross_candidate_search_artifact",
+        load_search,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "require_cross_candidate_search_artifact_binding_on_connection",
+        lambda conn, actual: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "build_strategy_report_bundle_source_inputs",
+        capture_search_binding,
+    )
+
+    output = _run(fixture)
+
+    assert observed["binding"] is binding
+    assert observed["loader"][1] == {
+        "task_id": fixture["task"].id,
+        **cross_ref,
+    }
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    assert audit["source_artifacts"]["cross_candidate_search"] == {
+        "artifact_id": binding.artifact_id,
+        "content_hash": binding.artifact_content_hash,
+        "search_id": search_id,
+        "search_content_hash": search_hash,
+    }
+    assert output["schema_version"] == (
+        "strategy.build-report-bundle-v2-tool.v7"
+    )
+
+
+def test_report_bundle_rejects_unknown_cross_search_ref_fields(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    fixture["request"]["cross_candidate_search_ref"] = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": "cross-search-" + ("1" * 32),
+        "expected_search_content_hash": "c" * 64,
+        "schema_version": "forged.v1",
+    }
+
+    with pytest.raises(
+        StrategyError,
+        match="cross_candidate_search_ref.*fields",
     ):
         _run(fixture)
 
@@ -2121,6 +2400,77 @@ def test_build_report_bundle_revalidates_voting_search_immediately_before_commit
         assert conn.execute(
             "SELECT COUNT(*) FROM strategy_report_revisions"
         ).fetchone()[0] == 0
+    report_root = (
+        Path(fixture["settings"].tasks_dir)
+        / fixture["task"].id
+        / "strategy_reports"
+    )
+    assert not any(report_root.rglob("report.*")) if report_root.exists() else True
+
+
+def test_build_report_bundle_revalidates_cross_search_immediately_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    cross_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": "cross-search-" + ("1" * 32),
+        "expected_search_content_hash": "c" * 64,
+    }
+    fixture["request"]["cross_candidate_search_ref"] = cross_ref
+    binding = SimpleNamespace(
+        artifact_id=cross_ref["artifact_id"],
+        artifact_content_hash=cross_ref[
+            "expected_artifact_content_hash"
+        ],
+        result={
+            "search_id": cross_ref["expected_search_id"],
+            "content_hash": cross_ref["expected_search_content_hash"],
+        },
+    )
+    original_adapter = report_tools.build_strategy_report_bundle_source_inputs
+    guard_calls = 0
+
+    def adapter_without_fake_binding(**kwargs):
+        assert kwargs.pop("cross_candidate_search") is binding
+        return original_adapter(**kwargs)
+
+    def revalidate_search(conn, actual):
+        nonlocal guard_calls
+        assert actual is binding
+        guard_calls += 1
+        if guard_calls == 2:
+            raise StrategyError("Cross search registry binding changed")
+
+    monkeypatch.setattr(
+        report_tools,
+        "load_cross_candidate_search_artifact",
+        lambda runtime, **kwargs: binding,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "require_cross_candidate_search_artifact_binding_on_connection",
+        revalidate_search,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "build_strategy_report_bundle_source_inputs",
+        adapter_without_fake_binding,
+    )
+
+    with pytest.raises(
+        StrategyError,
+        match="Cross search|registry|artifact|hash|bytes",
+    ):
+        _run(fixture)
+
+    assert guard_calls == 2
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
     report_root = (
         Path(fixture["settings"].tasks_dir)
         / fixture["task"].id

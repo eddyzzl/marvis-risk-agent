@@ -12,7 +12,7 @@ import pandas as pd
 from pydantic import ValidationError
 import pytest
 
-from marvis.api_schemas import ManualStrategyRequest
+from marvis.api_schemas import AgentMessageRequest, ManualStrategyRequest
 from marvis.app import create_app
 from marvis.db import TaskRepository
 from marvis.db_schema import connect
@@ -49,6 +49,7 @@ from marvis.packs.strategy.candidate_fragment import (
     univariate_asset_to_verified_fragment,
 )
 from marvis.packs.strategy.candidate_evidence import build_candidate_evidence
+from marvis.packs.strategy.contracts import Strategy, StrategyRule
 from marvis.packs.strategy.cross_matrix_candidate import (
     CROSS_MATRIX_MEASUREMENT_SCHEMA_VERSION,
     build_cross_matrix_candidate_asset,
@@ -56,7 +57,13 @@ from marvis.packs.strategy.cross_matrix_candidate import (
 )
 from marvis.packs.strategy.evaluator import evaluate_expression_frame
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.pool import add_verified_candidate_fragment
+from marvis.packs.strategy.pool import (
+    add_verified_candidate_fragment,
+    compile_strategy_pool,
+)
+from marvis.packs.strategy.pool_materialization_tools import (
+    run_materialize_strategy_from_pool,
+)
 from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
 from marvis.packs.strategy.pool_stability_tools import (
@@ -64,6 +71,9 @@ from marvis.packs.strategy.pool_stability_tools import (
 )
 from marvis.packs.strategy.pool_validation_tools import (
     run_measure_strategy_pool_validation,
+)
+from marvis.packs.strategy.project_context_tools import (
+    run_materialize_project_context,
 )
 from marvis.packs.strategy.scorecard_candidate import (
     SCORECARD_BAND_ASSET_ARTIFACT_KIND,
@@ -111,6 +121,7 @@ from marvis.repositories.strategy_pool import (
 )
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.strategy_reports import StrategyReportRepository
+from marvis.repositories.strategy import StrategyRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
 from tests.test_strategy_candidate_stability_tools import (
@@ -122,6 +133,10 @@ from tests.test_strategy_pool_impact_tools import (
 )
 from tests.test_strategy_pool_stability_tools import (
     _setup as _pool_stability_setup,
+)
+from tests.test_strategy_project_context_tool import (
+    _request_bound_to_message as _project_context_request_bound_to_message,
+    _setup as _project_context_setup,
 )
 from tests.test_strategy_report_repository import (
     _bundle as _report_bundle,
@@ -1378,7 +1393,7 @@ def test_candidate_lab_replays_scorecard_pool_and_projects_safe_evidence(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v4"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v7"
     band = body["candidates"]["scorecard_band"]["latest"]
     assert band["detail"]["asset_id"] == asset["asset_id"]
     assert band["detail"]["performance"] == {"auc": 1.0, "ks": 1.0}
@@ -1959,7 +1974,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
 
     assert response.status_code == 200, response.text
     assert response.json() == {
-        "schema_version": "strategy.candidate-lab-projection.v4",
+        "schema_version": "strategy.candidate-lab-projection.v7",
         "task_id": task_id,
         "can_start": True,
         "blocked_reason": None,
@@ -1970,6 +1985,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
             for kind in (
                 "univariate",
                 "cross_matrix",
+                "cross_search",
                 "automatic_tree",
                 "interactive_tree_revision",
                 "scorecard_band",
@@ -1984,7 +2000,15 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
             "truncated": False,
         },
         "pools": {"latest": None, "all": [], "total": 0, "truncated": False},
+        "strategies": {
+            "latest": None,
+            "all": [],
+            "total": 0,
+            "truncated": False,
+            "current_local_champions": [],
+        },
         "workflow": {
+            "project_context": None,
             "sample_design": None,
             "latest_evidence": {
                 "pool_stability": None,
@@ -1996,6 +2020,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
                 },
             },
             "report": None,
+            "strategy_history_status": "missing",
             "stages": [
                 {
                     "id": "current_context",
@@ -2037,6 +2062,328 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
     }
 
 
+def test_candidate_lab_projects_authenticated_materialized_strategy_history(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    added = run_add_candidate_to_pool(
+        _pool_add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    compiled = compile_strategy_pool(added["pool"])
+    pool_artifact = added["artifacts"][0]
+    materialized = run_materialize_strategy_from_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": added["revision"],
+            "expected_pool_snapshot_hash": added["snapshot_hash"],
+            "expected_pool_artifact_id": pool_artifact["artifact_id"],
+            "expected_pool_artifact_content_hash": pool_artifact["content_hash"],
+            "expected_design_hash": compiled["design_hash"],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    strategy_id = materialized["strategy_ref"]["strategy_id"]
+    repository = StrategyRepository(fixture["settings"].db_path)
+    repository.adopt_strategy_with_audit(
+        strategy_id,
+        reason="Candidate Lab lifecycle projection",
+        audit={
+            "kind": "strategy.adopt",
+            "target_ref": strategy_id,
+            "outcome": "succeeded",
+            "detail": {"source": "candidate_lab_api_test"},
+        },
+        adopted_at="2026-07-27T00:00:00+00:00",
+    )
+    artifact_path = (
+        fixture["settings"].tasks_dir
+        / fixture["task"].id
+        / "strategy_outputs"
+        / "approval_strategy.sql"
+    )
+    artifact_path.parent.mkdir(parents=True)
+    artifact_bytes = b"SELECT 'governed strategy artifact';\n"
+    artifact_path.write_bytes(artifact_bytes)
+    strategy_artifact = repository.register_verified_strategy_artifact(
+        strategy_id,
+        kind="strategy_sql",
+        path=str(artifact_path),
+        content_hash=hashlib.sha256(artifact_bytes).hexdigest(),
+        content_size=len(artifact_bytes),
+        provenance={
+            "schema_version": "strategy-artifact-provenance.v1",
+            "task_id": fixture["task"].id,
+            "strategy_id": strategy_id,
+            "producer_version": "candidate-lab-test/1",
+        },
+        created_at="2026-07-27T00:01:00+00:00",
+    )
+
+    response = TestClient(create_app(fixture["settings"])).get(
+        f"/api/tasks/{fixture['task'].id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v7"
+    collection = body["strategies"]
+    assert collection["total"] == 1
+    assert collection["truncated"] is False
+    assert len(collection["all"]) == 1
+    assert collection["latest"] == collection["all"][0]
+    assert collection["current_local_champions"] == [
+        {
+            "strategy_id": strategy_id,
+            "strategy_type": "approval",
+            "version": 1,
+        }
+    ]
+    projected = collection["latest"]
+    metadata = repository.get_strategy_meta(strategy_id)
+    assert metadata is not None
+    assert projected == {
+        "strategy_id": strategy_id,
+        "strategy_type": "approval",
+        "version": 1,
+        "status": "adopted",
+        "asset_status": "adopted_local",
+        "created_at": metadata["created_at"],
+        "adopted_at": "2026-07-27T00:00:00+00:00",
+        "parent_strategy_id": None,
+        "rule_count": 1,
+        "strategy_spec_hash": materialized["strategy_ref"][
+            "strategy_spec_hash"
+        ],
+        "materialization": {
+            "materialization_id": materialized["materialization_id"],
+            "pool_id": added["pool"]["pool_id"],
+            "pool_revision_id": added["pool"]["revision_id"],
+            "pool_revision": added["revision"],
+            "pool_artifact_id": pool_artifact["artifact_id"],
+            "design_hash": compiled["design_hash"],
+            "requirements_count": 0,
+            "runtime_blockers": [],
+        },
+        "artifacts": {
+            "all": [
+                {
+                    "artifact_id": strategy_artifact["id"],
+                    "kind": "strategy_sql",
+                    "filename": "approval_strategy.sql",
+                    "created_at": "2026-07-27T00:01:00+00:00",
+                    "content_size": len(artifact_bytes),
+                    "download_url": (
+                        f"/api/tasks/{fixture['task'].id}/strategy-artifacts/"
+                        f"{strategy_artifact['id']}/download"
+                    ),
+                }
+            ],
+            "total": 1,
+            "truncated": False,
+        },
+    }
+    assert body["workflow"]["strategy_history_status"] == "complete"
+    assert str(artifact_path) not in str(collection)
+    assert "provenance" not in str(collection)
+    assert "model_score_vector" not in str(collection)
+
+
+def test_candidate_lab_bounds_strategy_history_to_newest_one_hundred(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path)
+    task_id = _strategy_task(app)
+    repository = StrategyRepository(app.state.settings.db_path)
+    for index in range(101):
+        repository.create_strategy(
+            task_id,
+            Strategy(
+                id=f"strategy-history-{index:03d}",
+                strategy_type="approval",
+                rules=(
+                    StrategyRule(
+                        condition=f"score < {500 + index}",
+                        decision="reject",
+                        value=None,
+                    ),
+                ),
+                score_col="score",
+                default_decision="approve",
+                description=f"bounded strategy history {index}",
+            ),
+            created_at=(
+                f"2026-07-27T00:{index // 60:02d}:{index % 60:02d}+00:00"
+            ),
+        )
+
+    response = TestClient(app).get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    collection = response.json()["strategies"]
+    assert collection["total"] == 101
+    assert collection["truncated"] is True
+    assert len(collection["all"]) == 100
+    assert collection["latest"]["strategy_id"] == "strategy-history-100"
+    assert collection["all"][-1]["strategy_id"] == "strategy-history-001"
+    assert "strategy-history-000" not in {
+        item["strategy_id"] for item in collection["all"]
+    }
+    assert collection["current_local_champions"] == []
+
+
+@pytest.mark.parametrize("corrupt_id", ["strategy-newest", "strategy-older"])
+def test_candidate_lab_fails_closed_for_any_corrupt_projected_strategy(
+    tmp_path: Path,
+    corrupt_id: str,
+) -> None:
+    app = create_app(tmp_path)
+    task_id = _strategy_task(app)
+    repository = StrategyRepository(app.state.settings.db_path)
+    for strategy_id, created_at in (
+        ("strategy-older", "2026-07-27T00:00:00+00:00"),
+        ("strategy-newest", "2026-07-27T00:01:00+00:00"),
+    ):
+        repository.create_strategy(
+            task_id,
+            Strategy(
+                id=strategy_id,
+                strategy_type="approval",
+                rules=(
+                    StrategyRule(
+                        condition="score < 600",
+                        decision="reject",
+                        value=None,
+                    ),
+                ),
+                score_col="score",
+                default_decision="approve",
+                description="fail closed strategy history",
+            ),
+            created_at=created_at,
+        )
+    with connect(app.state.settings.db_path) as conn:
+        conn.execute(
+            "UPDATE strategies SET rules_json = ? WHERE id = ?",
+            ("not-json", corrupt_id),
+        )
+
+    response = TestClient(app).get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 409
+    assert "strategy-older" not in response.text
+    assert "strategy-newest" not in response.text
+
+
+def test_candidate_lab_fails_closed_when_strategy_artifact_bytes_drift(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path)
+    task_id = _strategy_task(app)
+    repository = StrategyRepository(app.state.settings.db_path)
+    strategy = Strategy(
+        id="strategy-with-drifted-artifact",
+        strategy_type="approval",
+        rules=(
+            StrategyRule(
+                condition="score < 600",
+                decision="reject",
+                value=None,
+            ),
+        ),
+        score_col="score",
+        default_decision="approve",
+        description="artifact integrity",
+    )
+    repository.create_strategy(task_id, strategy)
+    artifact_path = (
+        app.state.settings.tasks_dir
+        / task_id
+        / "strategy_outputs"
+        / "strategy.json"
+    )
+    artifact_path.parent.mkdir(parents=True)
+    original = b'{"status":"verified"}'
+    artifact_path.write_bytes(original)
+    repository.register_verified_strategy_artifact(
+        strategy.id,
+        kind="strategy_json",
+        path=str(artifact_path),
+        content_hash=hashlib.sha256(original).hexdigest(),
+        content_size=len(original),
+        provenance={
+            "task_id": task_id,
+            "strategy_id": strategy.id,
+        },
+    )
+    artifact_path.write_bytes(b'{"status":"tampered"}')
+
+    response = TestClient(app).get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 409
+    assert str(artifact_path) not in response.text
+
+
+def test_candidate_lab_projects_authenticated_project_context_and_history(
+    tmp_path: Path,
+) -> None:
+    fixture = _project_context_setup(tmp_path)
+    history_path = Path(fixture["task"].source_dir) / "历史策略评审.xlsx"
+    history_path.write_bytes(b"governed historical strategy evidence")
+    request = _project_context_request_bound_to_message(
+        fixture,
+        "请使用历史策略评审.xlsx 补充历史版本材料。",
+        explicit_unavailable=[],
+        external_report_filenames=[history_path.name],
+    )
+    output = run_materialize_project_context(
+        request,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    response = TestClient(create_app(fixture["settings"])).get(
+        f"/api/tasks/{fixture['task'].id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v7"
+    project = body["workflow"]["project_context"]
+    assert project["revision_id"] == output["revision"]["revision_id"]
+    assert project["revision"] == 1
+    assert project["freshness"] == "current"
+    assert project["scope"] == {
+        "availability": "present",
+        "value": "贷前准入策略",
+    }
+    assert project["history_resolution"] == "present"
+    assert len(project["historical_versions"]) == 1
+    history = project["historical_versions"][0]
+    assert history["availability"] == "present"
+    assert history["external_source_count"] == 1
+    assert history["effect_stages"] == []
+    assert project["artifact"]["download_url"].startswith(
+        f"/api/tasks/{fixture['task'].id}/task-artifacts/"
+    )
+    assert body["workflow"]["stages"][0]["status"] == "complete"
+    assert body["workflow"]["stages"][1]["status"] == "complete"
+    assert "source_dir" not in str(project)
+    assert str(history_path) not in str(project)
+
+
 def test_candidate_lab_v4_projects_authenticated_native_dual_population_sample(
     tmp_path: Path,
 ) -> None:
@@ -2052,7 +2399,7 @@ def test_candidate_lab_v4_projects_authenticated_native_dual_population_sample(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v4"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v7"
     sample = body["workflow"]["sample_design"]
     assert sample["source_mode"] == "native_active_dataset"
     assert sample["relationship"] == "parallel_time_cohorts"
@@ -2235,6 +2582,24 @@ def test_candidate_lab_v4_projects_latest_authenticated_four_format_report(
             "strategy_report_bundle_v2",
             {"title": "策略迭代评审报告", "status": "partial"},
         ),
+        (
+            "strategy_project_context",
+            {
+                "as_of": "2026-07-27",
+                "scope": "存量复借策略",
+                "business_context": {"project.channel": "自营"},
+                "explicit_unavailable": ["historical_strategy_reviews"],
+                "external_report_filenames": [],
+            },
+        ),
+        (
+            "strategy_pool_materialize",
+            {"strategy_type": "approval"},
+        ),
+        (
+            "strategy_dsl_delivery",
+            {"strategy_id": "strategy-current-v2"},
+        ),
     ],
 )
 def test_manual_strategy_request_accepts_v2_workflow_spine_entries(
@@ -2254,6 +2619,31 @@ def test_manual_strategy_request_accepts_v2_workflow_spine_entries(
     assert request.workflow_inputs == workflow_inputs
 
 
+@pytest.mark.parametrize(
+    "strategy_type",
+    ["approval", "reject", "limit", "pricing", "segmentation"],
+)
+def test_manual_pool_validation_accepts_all_five_strategy_types(
+    strategy_type: str,
+) -> None:
+    request = ManualStrategyRequest.model_validate(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_pool_validation",
+            "workflow_inputs": {
+                "strategy_type": strategy_type,
+                "partition": "oot",
+            },
+        },
+        strict=True,
+    )
+
+    assert request.workflow_inputs == {
+        "strategy_type": strategy_type,
+        "partition": "oot",
+    }
+
+
 def test_manual_strategy_request_rejects_impact_platform_bindings() -> None:
     with pytest.raises(
         ValidationError,
@@ -2266,6 +2656,86 @@ def test_manual_strategy_request_rejects_impact_platform_bindings() -> None:
                 "workflow_inputs": {
                     "strategy_type": "approval",
                     "artifact_id": "a" * 64,
+                },
+            },
+            strict=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("strategy_type", "economics_inputs"),
+    [
+        ("approval", None),
+        ("reject", None),
+        (
+            "limit",
+            {
+                "pd_col": "pd_12m",
+                "lgd_value": 0.5,
+                "utilization_value": 0.6,
+            },
+        ),
+        (
+            "pricing",
+            {
+                "ead_col": "ead",
+                "pd_col": "pd_12m",
+                "lgd_value": 0.5,
+                "funding_rate_value": 0.03,
+                "term_months_value": 12,
+                "operating_cost_per_loan_value": 10,
+            },
+        ),
+        ("segmentation", None),
+    ],
+)
+def test_manual_strategy_adoption_accepts_all_five_types_without_platform_bindings(
+    strategy_type: str,
+    economics_inputs: dict | None,
+) -> None:
+    strategy_request = {
+        "request_kind": "strategy_lifecycle",
+        "operation": "adopt",
+        "strategy_type": strategy_type,
+        "strategy_id": "strategy-current-v2",
+        "adoption_reason": "已复核独立验证、影响测算和报告证据，同意本地采纳",
+    }
+    if economics_inputs is not None:
+        strategy_request["economics_inputs"] = economics_inputs
+
+    request = AgentMessageRequest.model_validate(
+        {
+            "content": "提交本地采纳复核",
+            "strategy_request": strategy_request,
+        },
+        strict=True,
+    )
+
+    assert request.strategy_request is not None
+    assert request.strategy_request.model_dump(
+        mode="python",
+        exclude_none=True,
+    ) == strategy_request
+
+
+@pytest.mark.parametrize(
+    "forged_field",
+    ["asset_status", "deployment_status", "validation_metrics", "content_hash"],
+)
+def test_manual_strategy_adoption_rejects_platform_lifecycle_claims(
+    forged_field: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        AgentMessageRequest.model_validate(
+            {
+                "content": "提交本地采纳复核",
+                "strategy_request": {
+                    "request_kind": "strategy_lifecycle",
+                    "operation": "adopt",
+                    "strategy_type": "approval",
+                    "strategy_id": "strategy-current-v2",
+                    "adoption_reason": "已完成业务复核",
+                    forged_field: "forged",
                 },
             },
             strict=True,

@@ -12,8 +12,9 @@ from pydantic import ValidationError
 from marvis.agent import turn_handlers
 from marvis.api_schemas import ManualStrategyRequest
 from marvis.app import create_app
-from marvis.db import TaskRepository
+from marvis.db import StrategyRepository, TaskRepository
 from marvis.orchestrator.contracts import Plan, PlanStatus
+from marvis.packs.strategy.strategy import build_strategy_from_spec
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestRepository,
 )
@@ -159,6 +160,207 @@ def test_sample_design_v2_manual_request_accepts_only_fresh_user_dto() -> None:
 
     assert request.workflow == "strategy_sample_design_v2"
     assert request.workflow_inputs["relationship"] == "nested_same_cohort"
+
+
+def test_manual_project_context_binds_typed_external_report_without_rewriting_label(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path)
+    report_path = tmp_path / "source" / "历史策略评审.xlsx"
+    report_path.write_bytes(b"opaque reviewed strategy evidence")
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: _BombLLM(),
+    )
+    body = _request(
+        "strategy_project_context",
+        {
+            "as_of": "2026-07-27",
+            "scope": "存量复借策略",
+            "business_context": {"project.channel": "自营"},
+            "explicit_unavailable": ["historical_strategy_reviews"],
+            "external_report_filenames": [report_path.name],
+        },
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=body,
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_project_context"
+    ], response.text
+    assert plans[0]["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    source_message = next(
+        message
+        for message in response.json()["messages"]
+        if message["role"] == "user"
+    )
+    assert source_message["content"] == body["content"]
+    request_sha256 = source_message["metadata"]["structured_request_sha256"]
+    assert len(request_sha256) == 64
+    assert stored.steps[0].inputs["user_message_ref"][
+        "structured_request_sha256"
+    ] == request_sha256
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["external_artifacts"][0]["kind"] == (
+        "strategy_history_external_source"
+    )
+
+
+@pytest.mark.parametrize(
+    ("workflow", "workflow_inputs"),
+    [
+        (
+            "strategy_project_context",
+            {
+                "as_of": "2026-07-27",
+                "scope": "存量复借策略",
+                "business_context": {"project.channel": "自营"},
+                "explicit_unavailable": ["historical_strategy_reviews"],
+                "external_report_filenames": [],
+            },
+        ),
+        (
+            "strategy_pool_impact",
+            {
+                "strategy_type": "approval",
+                "comparison_mode": "absolute",
+                "drop_nan_labels": False,
+            },
+        ),
+        (
+            "strategy_impact_cube",
+            {
+                "strategy_type": "pricing",
+                "partitions": ["development", "validation", "oot"],
+            },
+        ),
+        (
+            "strategy_dsl_delivery",
+            {"strategy_id": "strategy-current-v2"},
+        ),
+        (
+            "strategy_report_bundle_v2",
+            {"title": "策略迭代评审报告", "status": "partial"},
+        ),
+    ],
+)
+def test_public_manual_workbench_spine_reaches_governed_preflight_without_llm(
+    tmp_path: Path,
+    monkeypatch,
+    workflow: str,
+    workflow_inputs: dict,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path)
+    reached = []
+
+    def stop_at_preflight(runtime, task, draft):
+        del runtime, task
+        reached.append(draft.workflow)
+        return ("test_preflight_reached", "governed preflight reached")
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "_strategy_request_preflight",
+        stop_at_preflight,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: _BombLLM(),
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(workflow, workflow_inputs),
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "clarification_required"
+    assert reached == [workflow]
+
+
+def test_typed_local_adoption_runs_backtest_and_stops_at_human_gate_without_llm(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path)
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
+    strategy = build_strategy_from_spec(
+        {
+            "strategy_type": "approval",
+            "default_action": {"type": "approval"},
+            "rules": [
+                {
+                    "rule_id": "low-score-reject",
+                    "priority": 10,
+                    "condition": {
+                        "op": "compare",
+                        "field": "score",
+                        "operator": "<",
+                        "value": 500,
+                    },
+                    "action": {
+                        "type": "reject",
+                        "reason_code": "low-score",
+                    },
+                }
+            ],
+        },
+        description="Candidate Lab local adoption",
+    )
+    StrategyRepository(client.app.state.settings.db_path).create_strategy(
+        task_id,
+        strategy,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: _BombLLM(),
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "提交本地采纳复核",
+            "strategy_request": {
+                "request_kind": "strategy_lifecycle",
+                "operation": "adopt",
+                "strategy_type": "approval",
+                "strategy_id": strategy.id,
+                "adoption_reason": "已复核独立验证、影响测算和报告证据，同意本地采纳",
+            },
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = [
+        item
+        for item in client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+        if item["template_id"] != "strategy_sample_design"
+    ]
+    assert [item["template_id"] for item in plans] == [
+        "stored_strategy_adoption"
+    ]
+    assert plans[0]["status"] == "awaiting_confirm"
+    assert plans[0]["steps"][0]["status"] == "done"
+    assert plans[0]["steps"][1]["status"] == "awaiting_confirm"
+    assert all(
+        step["status"] == "pending"
+        for step in plans[0]["steps"][2:]
+    )
+    meta = StrategyRepository(
+        client.app.state.settings.db_path
+    ).get_strategy_meta(strategy.id)
+    assert meta is not None
+    assert meta["asset_status"] == "draft"
 
 
 def test_sample_design_v2_manual_request_accepts_flat_cross_column_selector() -> None:

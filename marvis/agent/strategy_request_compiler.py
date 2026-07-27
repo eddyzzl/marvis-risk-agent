@@ -79,6 +79,8 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "voting_candidate_search",
     "voting_candidate_build_from_search",
     "voting_candidate_build",
+    "cross_matrix_candidate_search",
+    "cross_matrix_candidate_build_from_search",
     "cross_matrix_analysis",
     "cross_matrix_cell_selection",
     "strategy_pool_add_candidate",
@@ -639,6 +641,109 @@ _CROSS_MATRIX_FOLLOW_UP_RE = re.compile(
     r"(?![A-Za-z0-9_]))",
     re.IGNORECASE,
 )
+_CROSS_SEARCH_ID_RE = re.compile(r"^cross-search-[0-9a-f]{32}$")
+_CROSS_SEARCH_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])cross-search-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_CROSS_PAIR_ID_RE = re.compile(r"^cross-pair-[0-9a-f]{32}$")
+_CROSS_PAIR_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])cross-pair-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_CROSS_SEARCH_INTENT_RE = re.compile(
+    r"(?:搜索|查找|寻找|检索|枚举|筛选|比较)"
+    r"[^，,；;。\n]{0,64}(?:Cross|交叉)(?:\s*Matrix|矩阵)?"
+    r"[^，,；;。\n]{0,32}(?:组合|候选|特征对|pair)?|"
+    r"(?:Cross|交叉)(?:\s*Matrix|矩阵)?"
+    r"[^，,；;。\n]{0,48}(?:组合|候选|特征对|pair)"
+    r"[^，,；;。\n]{0,32}(?:搜索|查找|检索|枚举|筛选|比较)|"
+    r"(?<![A-Za-z0-9_])(?:search|find|enumerate|screen|compare)"
+    r"[^;.!?\n]{0,64}cross(?:\s+matrix)?(?:\s+(?:candidate|feature))?"
+    r"(?:\s+pairs?)?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_SELECTION_INTENT_RE = re.compile(
+    r"(?:构建|物化|生成|创建)[^；;。\n]{0,80}"
+    r"(?:Cross|交叉|搜索(?:结果|证据)|组合|候选)|"
+    r"(?:Cross|交叉|搜索(?:结果|证据)|组合)"
+    r"[^；;。\n]{0,80}(?:构建|物化|生成|创建)|"
+    r"(?<![A-Za-z0-9_])(?:build|materialize|create|generate)"
+    r"[^;.!?\n]{0,80}(?:cross|search\s+(?:result|evidence)|candidate)|"
+    r"(?<![A-Za-z0-9_])(?:cross|search\s+(?:result|evidence))"
+    r"[^;.!?\n]{0,80}(?:build|materialize|create|generate)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_FEATURES_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:features?|feature[_\s-]*list|特征(?:列表)?)"
+    r"\s*(?:=|:|：|为)\s*\[(?P<value>[^\]\n]{1,1000})\]",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_MAX_PAIRS_RE = re.compile(
+    r"(?<![A-Za-z0-9_])max[_\s-]*pairs?\s*(?:=|:|：|为)?\s*"
+    r"(?P<value>\d{1,3})(?![A-Za-z0-9_])|"
+    r"最多\s*(?:评估|搜索|比较|枚举)?\s*(?P<zh_value>\d{1,3})\s*"
+    r"(?:个|组)?(?:组合|特征对|pairs?)",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:x_method|y_method|axis_methods?|methods?|"
+    r"source_artifact_id|expected_artifact_content_hash|"
+    r"expected_candidate_id|expected_evidence_hash|dataset_id|target_col|"
+    r"candidate_asset|asset_hash|evidence_hash|pair_id|rank|winner|champion)"
+    r"\s*(?:=|:|：)|"
+    r"(?:轴|分箱)\s*(?:方法|method)\s*(?:=|:|：|为)|"
+    r"(?:工件|资产|证据|数据集|目标列)\s*(?:ID|id|hash|哈希)\s*(?:=|:|：|为)",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_SELECTION_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:artifact_id|artifact_hash|asset_id|asset_hash|"
+    r"content_hash|source_artifact_id|expected_[a-z0-9_]+|candidate_id|"
+    r"evidence_hash|dataset_id|target_col|x_feature|x_method|y_feature|"
+    r"y_method|axis_methods?|features?|max_pairs|rank|winner|champion)"
+    r"\s*(?:=|:|：)|"
+    r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])|"
+    r"(?:工件|资产|证据|数据集|目标列|轴|分箱方法|排名)"
+    r"\s*(?:ID|id|hash|哈希|=|:|：|为)",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_SELECTION_HEURISTIC_RE = re.compile(
+    r"(?:第[一二三四五六七八九十百\d]+名|第一(?:个|名)|最好(?:的)?|"
+    r"最优|最佳|冠军|Top\s*[-#]?\s*\d+|排名|名次|刚才(?:那个|这个|的)?|"
+    r"上述|这个组合|那个组合)|"
+    r"(?<![A-Za-z0-9_])(?:winner|champion|first|best|top\s*[-#]?\s*\d+|"
+    r"rank(?:ing)?|previous|that\s+one|this\s+one)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_RESEARCH_RE = re.compile(
+    r"(?:重新|再次|再|同时)\s*(?:搜索|查找|检索|枚举|筛选|比较)"
+    r"[^，,；;。\n]{0,48}(?:Cross|交叉)|"
+    r"(?<![A-Za-z0-9_])(?:re-?search|search|find|enumerate|screen|compare)"
+    r"[^,;.!?\n]{0,48}(?:again[^,;.!?\n]{0,16})?cross"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_FOLLOW_UP_RE = re.compile(
+    r"(?:构建|物化|生成|创建|选择|选中|入池|加入|放入|写入|纳入|"
+    r"设置动作|应用|采纳|部署|上线|投产|写回|回写)|"
+    r"(?<![A-Za-z0-9_])(?:build|materialize|create|generate|select|choose|"
+    r"add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|set\s+action|apply|"
+    r"adopt|deploy|publish|write[- ]?back)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_SELECTION_FOLLOW_UP_RE = re.compile(
+    r"(?:入池|加入|放入|写入|纳入|修改(?:策略池|规则池|Pool)|设置动作|"
+    r"应用|采纳|部署|上线|投产|写回|回写)|"
+    r"(?<![A-Za-z0-9_])(?:add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|"
+    r"modify\s+(?:the\s+)?(?:strategy\s+)?pool|set\s+action|apply|adopt|"
+    r"deploy|publish|write[- ]?back)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_SEARCH_NEGATION_PREFIX_RE = re.compile(
+    r"(?:不|不要|不用|无需|不需要|先不|暂不|不会|不再|别|禁止)\s*$|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|never|without)\s*$",
+    re.IGNORECASE,
+)
 _CROSS_METHOD_GROUNDING = {
     "equal_frequency": re.compile(
         r"(?:等频|等数量|分位数|quantile|equal[-_\s]*frequency)",
@@ -976,6 +1081,35 @@ _INTERACTIVE_TREE_PRUNE_ACTION_RE = re.compile(
     r"(?<![A-Za-z0-9_])prune_subtree(?![A-Za-z0-9_])|"
     r"(?<![A-Za-z0-9_])(?:prune|remove|delete)\s+"
     r"(?:the\s+)?(?:node|subtree)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_THRESHOLD_ACTION_RE = re.compile(
+    r"(?:调整|调节|修改|更改|设置|设定|改动)"
+    r"[^，,；;。.!?！？\n]{0,180}(?:分裂|切分)?阈值|"
+    r"(?:分裂|切分)?阈值"
+    r"[^，,；;。.!?！？\n]{0,180}(?:调整|调节|修改|更改|设置|设定|改为|改成)|"
+    r"(?<![A-Za-z0-9_])adjust_split_threshold(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:adjust|change|set)\s+(?:the\s+)?"
+    r"(?:split\s+)?threshold(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_THRESHOLD_AMBIGUOUS_RE = re.compile(
+    r"(?:调好一点|调(?:整|节)?一点|优化(?:一下)?|自动(?:调整|调节|优化|选择|"
+    r"推荐)|最佳阈值|最优阈值|最合适阈值|全部节点|所有节点|每个节点)|"
+    r"(?<![A-Za-z0-9_])(?:slightly|best|optimal|automatically\s+"
+    r"(?:adjust|optimi[sz]e|select)|all\s+nodes?|every\s+node)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_THRESHOLD_VALUE_RE = re.compile(
+    r"(?:新\s*)?(?:分裂|切分)?阈值\s*"
+    r"(?:调整|调节|修改|更改|设置|设定|改)?\s*"
+    r"(?:为|成|到|=|:|：)\s*"
+    r"(?P<zh_value>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)|"
+    r"(?<![A-Za-z0-9_])(?:adjust|change|set)\s+(?:the\s+)?"
+    r"(?:new\s+)?(?:split\s+)?threshold\s+(?:to|=|:)\s*"
+    r"(?P<en_value>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    r"(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 _INTERACTIVE_TREE_AMBIGUOUS_NODE_RE = re.compile(
@@ -3828,6 +3962,18 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "voting_candidate_build":
             normalized = _validate_voting_candidate_build_inputs(raw_inputs)
+        elif workflow == "cross_matrix_candidate_search":
+            normalized = _validate_cross_matrix_candidate_search_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
+        elif workflow == "cross_matrix_candidate_build_from_search":
+            normalized = (
+                _validate_cross_matrix_candidate_build_from_search_inputs(
+                    raw_inputs
+                )
+            )
         elif workflow == "cross_matrix_analysis":
             normalized = _validate_cross_matrix_workflow_inputs(
                 raw_inputs,
@@ -5738,14 +5884,20 @@ def _validate_automatic_tree_leaf_materialization_inputs(
 def _validate_interactive_tree_revision_inputs(
     inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Validate only the explicit immutable prune command.
+    """Validate one explicit immutable edit over a visible split pointer.
 
     Artifact rows, hashes, topology, frontier, conditions, metrics, dataset and
     SampleDesign bindings are platform-owned and cannot enter the draft.
     """
 
     workflow = "interactive_tree_revision"
-    allowed = {"source_tree_id", "node_id", "operation", "reason"}
+    allowed = {
+        "source_tree_id",
+        "node_id",
+        "operation",
+        "threshold",
+        "reason",
+    }
     _reject_workflow_fields(inputs, allowed, workflow=workflow)
     missing = sorted({"source_tree_id", "node_id", "operation"} - set(inputs))
     if missing:
@@ -5773,15 +5925,40 @@ def _validate_interactive_tree_revision_inputs(
         inputs["operation"],
         name=f"{workflow} operation",
     )
-    if operation != "prune_subtree":
+    if operation not in {"prune_subtree", "adjust_split_threshold"}:
         raise _DraftValidationError(
-            f"{workflow} operation 只允许 prune_subtree。"
+            f"{workflow} operation 只允许 prune_subtree 或 "
+            "adjust_split_threshold。"
+        )
+    has_threshold = "threshold" in inputs
+    if operation == "adjust_split_threshold" and not has_threshold:
+        raise _DraftValidationError(
+            f"{workflow} adjust_split_threshold 必须提供 threshold。"
+        )
+    if operation == "prune_subtree" and has_threshold:
+        raise _DraftValidationError(
+            f"{workflow} prune_subtree 不能提供 threshold。"
         )
     normalized: dict[str, Any] = {
         "source_tree_id": source_tree_id,
         "node_id": node_id,
         "operation": operation,
     }
+    if has_threshold:
+        threshold = inputs["threshold"]
+        if (
+            isinstance(threshold, bool)
+            or not isinstance(threshold, int | float)
+            or not math.isfinite(float(threshold))
+        ):
+            raise _DraftValidationError(
+                f"{workflow} threshold 必须是 finite number。"
+            )
+        if isinstance(threshold, int) and abs(threshold) > 2**53 - 1:
+            raise _DraftValidationError(
+                f"{workflow} threshold 超出精确 JSON number 范围。"
+            )
+        normalized["threshold"] = float(threshold)
     if "reason" in inputs:
         reason = inputs["reason"]
         if reason is None:
@@ -6147,6 +6324,89 @@ def _validate_voting_candidate_build_from_search_inputs(
             )
         normalized["strategy_type"] = strategy_type
     return normalized
+
+
+def _validate_cross_matrix_candidate_search_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    """Validate only explicit feature names and the bounded pair budget."""
+
+    workflow = "cross_matrix_candidate_search"
+    allowed = {"features", "max_pairs"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted(allowed - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    raw_features = inputs["features"]
+    if (
+        not isinstance(raw_features, Sequence)
+        or isinstance(raw_features, str | bytes | bytearray)
+        or not 2 <= len(raw_features) <= 20
+    ):
+        raise _DraftValidationError(
+            f"{workflow} features 必须是 2 到 20 个明确字段的数组。"
+        )
+    features = [
+        _workflow_column(
+            value,
+            name=f"{workflow} features",
+            whitelist=whitelist,
+        )
+        for value in raw_features
+    ]
+    if len(set(features)) != len(features):
+        raise _DraftValidationError(f"{workflow} features 不能包含重复字段。")
+    if target_col is not None and target_col in features:
+        raise _DraftValidationError(
+            f"{workflow} features 不能包含当前目标列「{target_col}」。"
+        )
+    max_pairs = inputs["max_pairs"]
+    if (
+        isinstance(max_pairs, bool)
+        or not isinstance(max_pairs, int)
+        or not 1 <= max_pairs <= 190
+    ):
+        raise _DraftValidationError(
+            f"{workflow} max_pairs 必须是 1 到 190 的整数。"
+        )
+    return {"features": features, "max_pairs": max_pairs}
+
+
+def _validate_cross_matrix_candidate_build_from_search_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, str]:
+    """Validate only the two exact authenticated search pointers."""
+
+    workflow = "cross_matrix_candidate_build_from_search"
+    allowed = {"search_id", "pair_id"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted(allowed - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    search_id = _required_text(
+        inputs["search_id"],
+        name=f"{workflow} search_id",
+    )
+    pair_id = _required_text(
+        inputs["pair_id"],
+        name=f"{workflow} pair_id",
+    )
+    if _CROSS_SEARCH_ID_RE.fullmatch(search_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} search_id 必须是完整的 cross-search ID。"
+        )
+    if _CROSS_PAIR_ID_RE.fullmatch(pair_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} pair_id 必须是完整的 cross-pair ID。"
+        )
+    return {"search_id": search_id, "pair_id": pair_id}
 
 
 def _validate_voting_candidate_search_inputs(
@@ -7021,9 +7281,11 @@ def _validate_strategy_pool_validation_inputs(
         inputs["strategy_type"],
         name=f"{workflow} strategy_type",
     )
-    if strategy_type not in {"approval", "reject"}:
+    if strategy_type not in STRATEGY_TYPES:
         raise _DraftValidationError(
-            f"{workflow} strategy_type 只能是 approval 或 reject。"
+            f"{workflow} strategy_type 只能是："
+            + "、".join(STRATEGY_TYPES)
+            + "。"
         )
     partition = _required_text(
         inputs["partition"],
@@ -7330,6 +7592,65 @@ def _utterance_targets_voting_candidate_search(utterance: str) -> bool:
         and _VOTING_SUBJECT_RE.search(utterance) is not None
         and _VOTING_SEARCH_INTENT_RE.search(utterance) is not None
     )
+
+
+def _utterance_targets_cross_candidate_search(utterance: str) -> bool:
+    """Reserve bounded Cross feature-pair search before explicit matrix build."""
+
+    return (
+        not _utterance_targets_cross_search_selection(utterance)
+        and _CROSS_SEARCH_INTENT_RE.search(utterance) is not None
+    )
+
+
+def _utterance_targets_cross_search_selection(utterance: str) -> bool:
+    """Reserve exact search-pair materialization before search/build routes."""
+
+    return (
+        _CROSS_SEARCH_ID_TOKEN_RE.search(utterance) is not None
+        and _CROSS_PAIR_ID_TOKEN_RE.search(utterance) is not None
+        and _CROSS_SEARCH_SELECTION_INTENT_RE.search(utterance) is not None
+    )
+
+
+def _cross_search_has_positive_follow_up(utterance: str) -> bool:
+    """Ignore explicit negative disclaimers while rejecting chained actions."""
+
+    return _cross_search_pattern_has_positive(
+        utterance,
+        _CROSS_SEARCH_FOLLOW_UP_RE,
+    )
+
+
+def _cross_search_pattern_has_positive(
+    utterance: str,
+    pattern: re.Pattern[str],
+) -> bool:
+    for match in pattern.finditer(utterance):
+        prefix = utterance[max(0, match.start() - 20) : match.start()]
+        local_start = max(
+            prefix.rfind(separator)
+            for separator in ("，", ",", "；", ";", "。", ".", "!", "！", "?", "？")
+        )
+        if _CROSS_SEARCH_NEGATION_PREFIX_RE.search(
+            prefix[local_start + 1 :]
+        ) is None:
+            return True
+    return False
+
+
+def _cross_search_selection_has_positive_research(utterance: str) -> bool:
+    """Search-like substrings inside exact pointer ids are not new commands."""
+
+    scrubbed = _CROSS_SEARCH_ID_TOKEN_RE.sub(
+        lambda match: " " * len(match.group(0)),
+        utterance,
+    )
+    scrubbed = _CROSS_PAIR_ID_TOKEN_RE.sub(
+        lambda match: " " * len(match.group(0)),
+        scrubbed,
+    )
+    return _CROSS_SEARCH_RESEARCH_RE.search(scrubbed) is not None
 
 
 def _utterance_targets_voting_search_selection(utterance: str) -> bool:
@@ -8765,6 +9086,35 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if (
+        _utterance_targets_cross_search_selection(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow
+            == "cross_matrix_candidate_build_from_search"
+        )
+    ):
+        return _clarification(
+            "原话明确提供 Cross search_id 与 pair_id 并要求精确构建候选，"
+            "只能编译为 cross_matrix_candidate_build_from_search；"
+            "不能重新搜索、按排名选择或改路由到其他 Workflow。",
+            code="cross_search_selection_workflow_required",
+            fields=("workflow",),
+        )
+    if (
+        _utterance_targets_cross_candidate_search(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow == "cross_matrix_candidate_search"
+        )
+    ):
+        return _clarification(
+            "原话明确要求搜索 Cross Matrix 特征组合，只能编译为 "
+            "cross_matrix_candidate_search；不能改路由为显式双轴构建、"
+            "通用策略生命周期或其他 Workflow。",
+            code="cross_candidate_search_workflow_required",
+            fields=("workflow",),
+        )
+    if (
         _utterance_targets_cross_matrix_cell_selection(utterance)
         and not (
             isinstance(draft, StandardWorkflowRequestDraft)
@@ -8783,7 +9133,12 @@ def _ground_refinement_request(
         and not (
             isinstance(draft, StandardWorkflowRequestDraft)
             and draft.workflow
-            in {"cross_matrix_analysis", "cross_matrix_cell_selection"}
+            in {
+                "cross_matrix_analysis",
+                "cross_matrix_cell_selection",
+                "cross_matrix_candidate_search",
+                "cross_matrix_candidate_build_from_search",
+            }
         )
     ):
         return _clarification(
@@ -8898,6 +9253,17 @@ def _ground_refinement_request(
         return _ground_voting_candidate_build_from_search(utterance, result)
     if draft.workflow == "voting_candidate_build":
         return _ground_voting_candidate_build(utterance, result)
+    if draft.workflow == "cross_matrix_candidate_search":
+        return _ground_cross_matrix_candidate_search(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
+    if draft.workflow == "cross_matrix_candidate_build_from_search":
+        return _ground_cross_matrix_candidate_build_from_search(
+            utterance,
+            result,
+        )
     if draft.workflow == "cross_matrix_cell_selection":
         return _ground_cross_matrix_cell_selection(utterance, result)
     if draft.workflow == "cross_matrix_analysis":
@@ -10813,6 +11179,172 @@ def _sample_design_scalar_text(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _ground_cross_matrix_candidate_search(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Prove the bounded feature universe and pair budget came from this turn."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if not _utterance_targets_cross_candidate_search(utterance):
+        return _clarification(
+            "请明确要求搜索 Cross Matrix 特征组合，并在当前请求中提供 "
+            "features=[...] 与 max_pairs。",
+            code="cross_search_intent_required",
+            fields=("search_intent",),
+        )
+    if (
+        re.search(
+            r"(?:不要|不用|无需|先不|暂不|取消|停止)"
+            r"[^，,；;。\n]{0,32}(?:搜索|查找|检索|枚举|筛选|比较)|"
+            r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|cancel|stop)"
+            r"[^,;.!?\n]{0,32}(?:search|find|enumerate|screen|compare)",
+            utterance,
+            re.IGNORECASE,
+        )
+        is not None
+        or _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
+        or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "Cross Matrix 自动组合搜索必须是当前轮立即执行的肯定式命令；"
+            "问句、否定、假设、历史/未来描述或句尾撤销不会启动搜索。",
+            code="cross_search_positive_command_required",
+            fields=("search_intent",),
+        )
+    if _cross_search_has_positive_follow_up(utterance):
+        return _clarification(
+            "本轮只搜索 Cross Matrix 特征组合；构建或选择候选、入池、"
+            "应用、采纳和部署必须另发请求。",
+            code="cross_search_single_step_required",
+            fields=("next_action",),
+        )
+    if _CROSS_SEARCH_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "Cross 自动搜索只接受 features 与 max_pairs；轴方法、候选资产、"
+            "artifact/hash、pair/rank/winner 均由平台恢复或计算，不能注入。",
+            code="cross_search_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+
+    bindings = tuple(_CROSS_SEARCH_FEATURES_RE.finditer(utterance))
+    if len(bindings) != 1:
+        return _clarification(
+            "请且只请用 features=[字段1, 字段2, ...] 明确给出 2 到 20 个"
+            "候选字段；平台不会从上下文补全或替你选字段。",
+            code="cross_search_controls_not_grounded",
+            fields=("features",),
+        )
+    raw_tokens = re.split(r"[,，]", bindings[0].group("value"))
+    observed_features = [
+        token.strip().strip("'\"`")
+        for token in raw_tokens
+        if token.strip()
+    ]
+    expected_features = list(inputs["features"])
+    if (
+        len(observed_features) != len(expected_features)
+        or observed_features != expected_features
+        or len(set(observed_features)) != len(observed_features)
+        or any(feature not in whitelist for feature in observed_features)
+    ):
+        return _clarification(
+            "features 必须逐字等于当前命令中唯一列表里的 2 到 20 个互不重复"
+            "白名单字段；模型不得补写、删减、改序或使用目标列。",
+            code="cross_search_controls_not_grounded",
+            fields=("features",),
+        )
+
+    observed_max = {
+        int(match.group("value") or match.group("zh_value"))
+        for match in _CROSS_SEARCH_MAX_PAIRS_RE.finditer(utterance)
+    }
+    if observed_max != {int(inputs["max_pairs"])}:
+        return _clarification(
+            "max_pairs 必须在当前命令中明确且唯一写为 1 到 190 的整数；"
+            "平台不会让模型补默认预算。",
+            code="cross_search_controls_not_grounded",
+            fields=("max_pairs",),
+        )
+    return result
+
+
+def _ground_cross_matrix_candidate_build_from_search(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Ground one exact search/pair pointer pair in an independent turn."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if not _utterance_targets_cross_search_selection(utterance):
+        return _clarification(
+            "请在后续独立请求中提供一个完整 Cross search_id 和一个完整 "
+            "pair_id，并明确要求构建候选。",
+            code="cross_search_selection_intent_required",
+            fields=("build_intent", "search_id", "pair_id"),
+        )
+    if (
+        _CROSS_MATRIX_NEGATED_BUILD_RE.search(utterance) is not None
+        or _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
+        or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "Cross 搜索结果构建必须是当前轮立即执行的肯定式单步命令；"
+            "问句、否定、假设、历史/未来描述或句尾撤销不会构建候选。",
+            code="cross_search_selection_positive_command_required",
+            fields=("build_intent",),
+        )
+    if (
+        _cross_search_selection_has_positive_research(utterance)
+        or _cross_search_pattern_has_positive(
+            utterance,
+            _CROSS_SEARCH_SELECTION_FOLLOW_UP_RE,
+        )
+    ):
+        return _clarification(
+            "本轮只能从精确 search_id/pair_id 构建一个 Cross 候选；"
+            "重新搜索、入池、设置动作、应用、采纳、部署或写回必须另发请求。",
+            code="cross_search_selection_single_step_required",
+            fields=("next_action",),
+        )
+    if _CROSS_SEARCH_SELECTION_HEURISTIC_RE.search(utterance) is not None:
+        return _clarification(
+            "请逐字点名完整 search_id 与 pair_id；即使同时提供 pointer，"
+            "平台也不会消费第一名、最好、冠军、Top N、排名或‘刚才那个’。",
+            code="cross_search_selection_explicit_ids_required",
+            fields=("search_id", "pair_id"),
+        )
+    if _CROSS_SEARCH_SELECTION_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "Cross 搜索结果构建只接受 search_id 与 pair_id；artifact/hash、"
+            "轴字段和方法、asset、rank/winner 均由平台重新认证和恢复。",
+            code="cross_search_selection_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+    search_ids = tuple(
+        match.group(0)
+        for match in _CROSS_SEARCH_ID_TOKEN_RE.finditer(utterance)
+    )
+    pair_ids = tuple(
+        match.group(0)
+        for match in _CROSS_PAIR_ID_TOKEN_RE.finditer(utterance)
+    )
+    if search_ids != (inputs["search_id"],) or pair_ids != (inputs["pair_id"],):
+        return _clarification(
+            "Cross 搜索结果构建必须逐字提供且只提供一个完整 search_id 与"
+            "一个完整 pair_id；平台不会补全、替换、按排名选择或消费代词。",
+            code="cross_search_selection_controls_not_grounded",
+            fields=("search_id", "pair_id"),
+        )
+    return result
 
 
 def _ground_voting_candidate_search(
@@ -12792,11 +13324,15 @@ def _ground_interactive_tree_revision(
     utterance: str,
     result: StrategyRequestCompilation,
 ) -> StrategyRequestCompilation:
-    """Require one current, explicit, single-step prune over exact IDs."""
+    """Ground one current edit over exact tree, split and threshold controls."""
 
     draft = result.draft
     assert isinstance(draft, StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
+    threshold_action = (
+        _INTERACTIVE_TREE_THRESHOLD_ACTION_RE.search(utterance) is not None
+    )
+    prune_action = _INTERACTIVE_TREE_PRUNE_ACTION_RE.search(utterance) is not None
     if _INTERACTIVE_TREE_AMBIGUOUS_NODE_RE.search(utterance) is not None:
         return _clarification(
             "请从认证树拓扑中明确复制一个当前可见的完整 split node ID；平台不会"
@@ -12804,15 +13340,32 @@ def _ground_interactive_tree_revision(
             code="interactive_tree_revision_node_selection_ambiguous",
             fields=("node_id",),
         )
+    if _INTERACTIVE_TREE_THRESHOLD_AMBIGUOUS_RE.search(utterance) is not None:
+        fields = (
+            ("node_id", "threshold")
+            if re.search(
+                r"(?:全部节点|所有节点|每个节点|all\s+nodes?|every\s+node)",
+                utterance,
+                re.IGNORECASE,
+            )
+            else ("threshold",)
+        )
+        return _clarification(
+            "阈值调整必须点名一个当前可见 split node 并给出一个有限的新阈值；"
+            "平台不会按“调好一点”“最佳阈值”“自动优化”或“全部节点”"
+            "替用户搜索、推荐或批量修改。",
+            code="interactive_tree_revision_threshold_ambiguous",
+            fields=fields,
+        )
     if (
         _INTERACTIVE_TREE_NEGATED_OR_NONCURRENT_RE.search(utterance) is not None
-        or _INTERACTIVE_TREE_PRUNE_ACTION_RE.search(utterance) is None
+        or not (prune_action or threshold_action)
     ):
         return _clarification(
-            "原话必须是当前、肯定的一次修剪命令；问句、否定、假设、未来或"
+            "原话必须是当前、肯定的一次修剪或阈值调整命令；问句、否定、假设、未来或"
             "历史描述不会创建交互树修订。",
             code="interactive_tree_revision_intent_negated",
-            fields=("prune_intent",),
+            fields=("edit_intent",),
         )
     if _INTERACTIVE_TREE_PLATFORM_CONTROL_RE.search(utterance) is not None:
         return _clarification(
@@ -12821,7 +13374,10 @@ def _ground_interactive_tree_revision(
             code="interactive_tree_revision_platform_controls_forbidden",
             fields=("platform_bindings",),
         )
-    if any(
+    if (
+        prune_action
+        and threshold_action
+        or any(
         pattern.search(utterance) is not None
         for pattern in (
             _AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE,
@@ -12829,17 +13385,22 @@ def _ground_interactive_tree_revision(
             _AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE,
             _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
         )
-    ) or re.search(
+        )
+        or re.search(
         r"(?:生成报告|出报告|应用整棵树|继续自动分裂|自动继续|"
+        r"物化[^，,；;。\n]{0,24}(?:前沿|frontier)|"
         r"(?<![A-Za-z0-9_])(?:generate\s+(?:a\s+)?report|apply\s+tree|"
         r"apply\s+(?:it|the\s+tree)\s+to\s+(?:the\s+)?dataset|"
+        r"materiali[sz]e\s+(?:the\s+)?frontier|"
         r"auto[- ]?continue)(?![A-Za-z0-9_]))",
         utterance,
         re.IGNORECASE,
+        )
     ):
         return _clarification(
-            "本轮只允许一次 prune_subtree；入池、业务动作、整树应用、继续"
-            "分裂、报告、采纳、部署或写回必须拆成后续请求。",
+            "本轮只允许一次 prune_subtree 或 adjust_split_threshold；"
+            "前沿物化、入池、业务动作、整树应用、继续分裂、报告、采纳、"
+            "部署或写回必须拆成后续请求。",
             code="interactive_tree_revision_single_step_required",
             fields=("next_action",),
         )
@@ -12863,17 +13424,39 @@ def _ground_interactive_tree_revision(
             code="interactive_tree_revision_explicit_ids_required",
             fields=tuple(missing_or_ambiguous),
         )
+    threshold_values = _interactive_tree_threshold_values(utterance)
+    expected_operation = (
+        "adjust_split_threshold" if threshold_action else "prune_subtree"
+    )
+    if expected_operation == "adjust_split_threshold" and len(threshold_values) != 1:
+        return _clarification(
+            "阈值调整必须在同一条命令中明确且只给出一个有限的新 threshold "
+            "数值；平台不会从描述、指标或历史树中推断。",
+            code="interactive_tree_revision_explicit_threshold_required",
+            fields=("threshold",),
+        )
+
     ungrounded: list[str] = []
     if source_ids != {inputs["source_tree_id"]}:
         ungrounded.append("source_tree_id")
     if node_ids != {inputs["node_id"]}:
         ungrounded.append("node_id")
-    if inputs["operation"] != "prune_subtree":
+    if inputs["operation"] != expected_operation:
         ungrounded.append("operation")
+    if expected_operation == "adjust_split_threshold":
+        supplied_threshold = inputs.get("threshold")
+        if (
+            isinstance(supplied_threshold, bool)
+            or not isinstance(supplied_threshold, int | float)
+            or float(supplied_threshold) != threshold_values[0]
+        ):
+            ungrounded.append("threshold")
+    elif "threshold" in inputs:
+        ungrounded.append("threshold")
     if ungrounded:
         return _clarification(
-            "模型草案中的来源树、节点或操作与用户原话不一致；平台不会替换、"
-            "补全、猜测或改选节点。",
+            "模型草案中的来源树、节点、操作或新阈值与用户原话不一致；"
+            "平台不会替换、补全、猜测、优化或改选控制值。",
             code="interactive_tree_revision_controls_not_grounded",
             fields=tuple(ungrounded),
         )
@@ -12892,6 +13475,19 @@ def _ground_interactive_tree_revision(
             fields=("reason",),
         )
     return result
+
+
+def _interactive_tree_threshold_values(utterance: str) -> tuple[float, ...]:
+    values: list[float] = []
+    for match in _INTERACTIVE_TREE_THRESHOLD_VALUE_RE.finditer(utterance):
+        token = match.group("zh_value") or match.group("en_value")
+        try:
+            value = float(token)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    return tuple(values)
 
 
 def utterance_targets_interactive_tree_frontier_group_materialization(
@@ -15823,6 +16419,28 @@ def _standard_workflow_confirmation_text(
         ]
         if "reason" in inputs:
             details.append(f"用户原话选择说明：{inputs['reason']}")
+    elif draft.workflow == "cross_matrix_candidate_search":
+        details = [
+            "已识别为〔Cross Matrix 自动组合搜索 Workflow〕",
+            "显式候选字段：" + "、".join(inputs["features"]),
+            f"确定性评估预算：最多 {inputs['max_pairs']} 个特征对",
+            "平台将在计划创建时绑定最新精确单变量候选证据，并仅使用其"
+            " risk/development 样本；每个字段的轴方法由受控 Tool 从父证据中"
+            "选择最高排名的可用方法",
+            "本步骤只发布聚合搜索证据；不会构建候选或选择候选，不会入池、"
+            "应用、采纳或部署",
+        ]
+    elif draft.workflow == "cross_matrix_candidate_build_from_search":
+        details = [
+            "已识别为〔Cross 搜索结果精确构建 Workflow〕",
+            f"搜索证据 pointer：{inputs['search_id']}",
+            f"特征对 pointer：{inputs['pair_id']}",
+            "平台将在计划开始前重新认证完整搜索证据、父候选、数据与"
+            " risk/development 样本，并重新计算精确 Cross 资产",
+            "不会采用排名、最好或冠军等启发式选择；本步骤只构建一个 "
+            "development/backtested/unvalidated Cross 候选",
+            "不会加入或修改 Pool，不会设置动作、应用、采纳或部署",
+        ]
     elif draft.workflow == "cross_matrix_analysis":
         details = [
             "已识别为〔二维 Cross Matrix 候选分析 Workflow〕",
@@ -15943,18 +16561,25 @@ def _standard_workflow_confirmation_text(
         if "selection_reason" in inputs:
             details.append(f"用户原话选择说明：{inputs['selection_reason']}")
     elif draft.workflow == "interactive_tree_revision":
+        operation = inputs["operation"]
         details = [
-            "已识别为〔交互式树修剪修订 Workflow〕",
+            (
+                "已识别为〔交互式树阈值调整修订 Workflow〕"
+                if operation == "adjust_split_threshold"
+                else "已识别为〔交互式树修剪修订 Workflow〕"
+            ),
             f"来源树 pointer：{inputs['source_tree_id']}",
             f"精确 split node pointer：{inputs['node_id']}",
-            "操作：prune_subtree",
+            f"操作：{operation}",
             "平台将恢复并认证完整自动树、父 revision、数据集、workspace 与"
             "SampleDesign，并在 development 样本逐行重放新 frontier",
-            "每次修剪发布一个不可变 revision；不会修改原树，也不会加入 "
+            "每次编辑发布一个不可变 revision；不会修改原树，也不会加入 "
             "Strategy Pool；不会采纳或部署，也不会设置业务动作或写回",
         ]
+        if operation == "adjust_split_threshold":
+            details.insert(4, f"用户明确的新阈值：{inputs['threshold']}")
         if "reason" in inputs and inputs["reason"] is not None:
-            details.append(f"用户原话修剪说明：{inputs['reason']}")
+            details.append(f"用户原话编辑说明：{inputs['reason']}")
     elif draft.workflow == "interactive_tree_frontier_group_materialization":
         details = [
             "已识别为〔交互树前沿显式 OR 分组物化 Workflow〕",
@@ -16132,8 +16757,9 @@ def _standard_workflow_confirmation_text(
             "平台将在计划创建时恢复当前非空 Pool、精确且成熟的 "
             "StrategySampleDesign V2 membership/bundle、数据/目标/语义与"
             " requirements，并由确定性 Tool 重新认证",
-            "结果是 independent replay evidence，只展示实际分区的动作、风险、"
-            "金额和逐月证据；不声称 PSI、稳定性或漂移",
+            "结果是 independent replay evidence：审批/拒绝展示动作、风险、"
+            "金额和逐月证据，额度/定价/分群保留原生数值或分群分布；"
+            "不声称 PSI、稳定性或漂移",
             "本步骤不会修改 Pool，不创建策略，也不晋级、不采纳、不部署",
         ]
     elif draft.workflow == "strategy_pool_stability":
@@ -16753,11 +17379,14 @@ def _user_prompt(
         "对于 interactive_tree_revision，只能逐字抄录用户当前肯定命令中唯一完整的"
         " source_tree_id（candidate-asset- 或 interactive-tree-revision- 后接 32 位"
         "小写十六进制）、唯一完整的 split node_id（node- 后接 20 位小写十六进制）、"
-        "固定 operation=prune_subtree，以及用户显式标注时逐字一致的 reason。不得输出"
+        "唯一 operation=prune_subtree 或 adjust_split_threshold，以及用户显式标注时"
+        "逐字一致的 reason。adjust_split_threshold 还必须逐字抄录用户明确给出的唯一"
+        "有限数值 threshold；prune_subtree 必须省略 threshold。“调好一点”“最佳阈值”"
+        "“自动优化”“全部节点”等模糊、推荐或批量修改请求必须 clarification。不得输出"
         "artifact/hash、父链、tree/frontier/condition/metrics、dataset/workspace/"
         "SampleDesign 或重放结果，这些均由平台恢复。不得按最好、风险最高、不稳定或"
-        "代词替用户选节点，也不得同轮串联入池、业务动作、自动继续、整树应用、报告、"
-        "采纳、部署或写回。"
+        "代词替用户选节点，也不得同轮串联另一种树编辑、前沿物化、入池、业务动作、"
+        "自动继续、整树应用、报告、采纳、部署或写回。"
         "对于 interactive_tree_frontier_group_materialization，只能逐字抄录用户"
         "当前肯定命令中唯一完整的 revision_id（interactive-tree-revision- 后接 "
         "32 位小写十六进制）、2 到 50 个互不重复的完整 source_node_ids（node- "
@@ -16808,6 +17437,20 @@ def _user_prompt(
         "基准、指标或结果；这些值由平台在 preflight 恢复。代词、多个 pointer、"
         "问句、否定、历史/未来/假设描述，或同轮串联入池、删改、重排、编译、写回、"
         "报告、采纳、部署时必须 clarification。"
+        "对于 cross_matrix_candidate_search，只能逐字抄录用户唯一 "
+        "features=[...] 列表中的 2 到 20 个白名单字段和明确的 1..190 "
+        "max_pairs；两者都必须显式提供。不得填写轴方法、source artifact/"
+        "candidate/evidence hash、dataset/target/sample、candidate asset、"
+        "pair/rank/winner/champion、指标或结果。平台绑定精确父单变量证据和"
+        " risk/development 样本，并由 Tool 为每个字段选择父证据中最高排名"
+        "的可用方法。本步骤只搜索，不构建、不选择、不入池、不应用、不采纳、"
+        "不部署；同轮后续动作必须 clarification。"
+        "对于 cross_matrix_candidate_build_from_search，只能逐字抄录当前"
+        "请求中唯一完整的 cross-search ID 与唯一完整的 cross-pair ID。不得"
+        "输出 artifact/hash、轴字段/方法、asset fingerprint、rank/winner/"
+        "champion、指标或结果，也不得按第一名、最好、Top N、刚才那个或代词"
+        "选择。它必须是后续独立的单步构建请求；同轮重新搜索、入池、设置动作、"
+        "应用、采纳、部署或写回必须 clarification。"
         "对于 cross_matrix_analysis，只能抄录两个明确轴字段、各自方法及用户明确给出的"
         "单变量分析参数；不得输出平台数据绑定、目标列、预算、边界、cell、condition、"
         "指标、artifact/asset/effect/rule id、动作或推荐。它只构建二维矩阵证据，不能"
@@ -16864,13 +17507,14 @@ def _user_prompt(
         "使用唯一确认的语义角色；没有角色则 unavailable，多个角色则澄清，Agent 不得猜列。"
         "limit/pricing/segmentation、否定/问句/历史/仅报告或同轮修改/采纳/部署必须澄清。"
         "对于 strategy_pool_validation，只能逐字抄录用户当前肯定命令中唯一"
-        "明确的 approval/reject strategy_type 和 validation/oot partition。"
+        "明确的五类 strategy_type 和 validation/oot partition。"
         "Pool ref/revision/hash/artifact、SampleDesign membership/bundle/ref、"
         "dataset/workspace/target、requirements、population、comparison_mode、"
         "指标、月份、状态与结果全部禁止填写，由平台在计划创建和 Tool 执行时恢复。"
-        "development、limit/pricing/segmentation、缺少或多个类型/分区、问句、"
+        "development、缺少或多个类型/分区、问句、"
         "否定、历史/未来/假设，或同轮修改 Pool、应用、报告、晋级、采纳、部署"
-        "必须 clarification。它只发布 independent replay evidence，不得声称 "
+        "必须 clarification。它只发布 native typed independent replay evidence，"
+        "不得声称 "
         "PSI、stability 或 drift，也不会修改 Pool、创建、晋级、采纳或部署策略。"
         "对于 strategy_pool_apply，只能抄录用户当前肯定命令中唯一明确的五类 "
         "strategy_type，以及用户以“输出前缀/output_prefix/output prefix/prefix”"
