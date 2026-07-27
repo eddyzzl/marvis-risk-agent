@@ -272,6 +272,9 @@ from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignRef,
     load_strategy_sample_design_execution_binding,
 )
+from marvis.packs.strategy.sample_design_execution import (
+    load_strategy_risk_development_execution_binding,
+)
 from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
     SAMPLE_DESIGN_ORIGIN_TOOL,
@@ -3206,6 +3209,9 @@ def _run_validated_strategy_request(
                     task,
                     context=context,
                     drop_nan_labels=bool(drop_nan_labels),
+                    allow_native_risk_development=(
+                        draft.workflow == "univariate_candidate_analysis"
+                    ),
                     weight_col=(
                         workflow_inputs.get("sample_weight_col")
                         if draft.workflow == "automatic_tree_candidate_build"
@@ -8624,6 +8630,7 @@ def _latest_matching_strategy_sample_design_ref(
     *,
     context,
     drop_nan_labels: bool,
+    allow_native_risk_development: bool = False,
     month_col: str | None = None,
     weight_col: str | None = None,
     loan_amount_col: str | None = None,
@@ -8653,6 +8660,7 @@ def _latest_matching_strategy_sample_design_ref(
     matches: list[Mapping] = []
     latest_legacy_position = -1
     latest_native_position = -1
+    latest_native_authenticated = None
     latest_invalid_native_position = -1
     latest_invalid_native_cause: Exception | None = None
     artifact_repository = TaskArtifactRepository(runtime.settings.db_path)
@@ -8695,6 +8703,7 @@ def _latest_matching_strategy_sample_design_ref(
                 continue
             if relation == "current":
                 latest_native_position = position
+                latest_native_authenticated = authenticated
             continue
         provenance = artifact.get("provenance")
         if (
@@ -8712,11 +8721,24 @@ def _latest_matching_strategy_sample_design_ref(
             continue
         matches.append(artifact)
         latest_legacy_position = position
-    latest_blocking_native_position = max(
+    latest_valid_position = max(
+        latest_legacy_position,
         latest_native_position,
-        latest_invalid_native_position,
     )
-    if latest_blocking_native_position > latest_legacy_position:
+    latest_blocking_native_position = (
+        latest_invalid_native_position
+        if allow_native_risk_development
+        else max(
+            latest_native_position,
+            latest_invalid_native_position,
+        )
+    )
+    blocking_boundary = (
+        latest_valid_position
+        if allow_native_risk_development
+        else latest_legacy_position
+    )
+    if latest_blocking_native_position > blocking_boundary:
         error = _StrategyV2EvidenceSetupError(
             "strategy_sample_design_v2_native_source_unsupported",
             "当前执行口径的最新相关 StrategySampleDesign V2 来自原生"
@@ -8731,27 +8753,54 @@ def _latest_matching_strategy_sample_design_ref(
         ):
             raise error from latest_invalid_native_cause
         raise error
-    if not matches:
+    select_native = (
+        allow_native_risk_development
+        and latest_native_position > latest_legacy_position
+    )
+    if not select_native and not matches:
         raise _StrategySampleDesignRequiredError(
             "当前活动数据和标签口径没有可执行的成熟策略样本设计。"
             "请先用自然语言说明坏样本值、表现窗、观察窗、成熟度及可选切分，"
             "让 MARVIS 固化样本设计。"
         )
 
-    artifact = matches[-1]
-    provenance = artifact["provenance"]
-    reference = {
-        "artifact_id": artifact.get("id"),
-        "artifact_content_hash": artifact.get("content_hash"),
-        "sample_design_id": provenance.get("sample_design_id"),
-        "sample_design_content_hash": provenance.get(
-            "sample_design_content_hash"
-        ),
-        "partition": "development",
-    }
+    if select_native:
+        if latest_native_authenticated is None:
+            raise StrategySetupError(
+                "当前原生 StrategySampleDesign V2 选择状态不完整，"
+                "请重新固化样本设计后再执行。"
+            )
+        reference = {
+            "artifact_id": latest_native_authenticated.artifact_id,
+            "artifact_content_hash": (
+                latest_native_authenticated.artifact_content_hash
+            ),
+            "sample_design_id": latest_native_authenticated.provenance[
+                "sample_design_id"
+            ],
+            "sample_design_content_hash": (
+                latest_native_authenticated.provenance[
+                    "sample_design_content_hash"
+                ]
+            ),
+            "partition": "risk/development",
+        }
+    else:
+        artifact = matches[-1]
+        provenance = artifact["provenance"]
+        reference = {
+            "artifact_id": artifact.get("id"),
+            "artifact_content_hash": artifact.get("content_hash"),
+            "sample_design_id": provenance.get("sample_design_id"),
+            "sample_design_content_hash": provenance.get(
+                "sample_design_content_hash"
+            ),
+            "partition": "development",
+        }
     backend = DataBackend(runtime.settings.datasets_dir)
     read_runtime = SimpleNamespace(
         settings=runtime.settings,
+        backend=backend,
         registry=DatasetRegistry(
             DatasetRepository(runtime.settings.db_path),
             backend,
@@ -8760,7 +8809,12 @@ def _latest_matching_strategy_sample_design_ref(
         task_artifacts=TaskArtifactRepository(runtime.settings.db_path),
     )
     try:
-        binding = load_strategy_sample_design_execution_binding(
+        loader = (
+            load_strategy_risk_development_execution_binding
+            if allow_native_risk_development
+            else load_strategy_sample_design_execution_binding
+        )
+        binding = loader(
             read_runtime,
             task_id=task.id,
             sample_design_ref=reference,

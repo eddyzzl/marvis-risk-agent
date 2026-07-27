@@ -116,6 +116,33 @@ def _sample_v2_utterance(
     )
 
 
+def _parallel_population_sample_v2_inputs() -> dict:
+    inputs = _sample_v2_inputs(relationship="parallel_time_cohorts")
+    inputs["approval_population"]["inclusion"] = {
+        "match": "all",
+        "conditions": [
+            {"column": "approval_flag", "operator": "eq", "value": 1}
+        ],
+    }
+    inputs["risk_population"]["inclusion"] = {
+        "match": "all",
+        "conditions": [
+            {"column": "risk_flag", "operator": "eq", "value": 1}
+        ],
+    }
+    return inputs
+
+
+def _parallel_population_sample_v2_utterance() -> str:
+    return _sample_v2_utterance(
+        relationship="parallel_time_cohorts"
+    ).replace(
+        "审批总体无纳排条件；风险总体无纳排条件；",
+        "审批总体纳入 approval_flag 等于 1，无排除条件；"
+        "风险总体纳入 risk_flag 等于 1，无排除条件；",
+    )
+
+
 def _univariate_payload(*, feature: str = "legacy_score", method: str = "equal_width") -> dict:
     return {
         "request_kind": "standard_workflow",
@@ -128,6 +155,20 @@ def _univariate_payload(*, feature: str = "legacy_score", method: str = "equal_w
             "loan_amount_col": "loan_amount",
             "overdue_amount_col": "overdue_amount",
             "sentinel_values": [],
+        },
+    }
+
+
+def _automatic_tree_payload() -> dict:
+    return {
+        "request_kind": "standard_workflow",
+        "workflow": "automatic_tree_candidate_build",
+        "workflow_inputs": {
+            "features": ["legacy_score"],
+            "max_depth": 2,
+            "min_leaf_count": 2,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
         },
     }
 
@@ -201,38 +242,100 @@ def _register_workspace_sample(
     *,
     nan_label: bool = False,
     target_col: str | None = "bad",
+    parallel_populations: bool = False,
 ):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    bad: list[object] = [0, 1, 0, 1, 0, 1]
+    if parallel_populations:
+        sample_roles = [
+            role
+            for role in ("dev", "valid", "oot")
+            for _ in range(6)
+        ]
+        population_pattern = [
+            "approval_only_a",
+            "approval_only_b",
+            "risk_only",
+            "both_a",
+            "both_b",
+            "both_c",
+        ]
+        population = population_pattern * 3
+        approval_flag = [1, 1, 0, 1, 1, 1] * 3
+        risk_flag = [0, 0, 1, 1, 1, 1] * 3
+        bad: list[object] = [0, 1, 0, 0, 1, 1] * 3
+        apply_dates = [
+            f"2026-{month:02d}-{day:02d}"
+            for month in (1, 2, 3)
+            for day in range(1, 7)
+        ]
+        apply_months = [
+            f"2026{month:02d}"
+            for month in (1, 2, 3)
+            for _ in range(6)
+        ]
+        legacy_score = [
+            float(month * 100 + offset)
+            for month in range(3)
+            for offset in (10, 20, 100, 200, 300, 400)
+        ]
+        customer_ids = [
+            f"customer-{index:02d}" for index in range(len(sample_roles))
+        ]
+        loan_amount = [
+            float(100 + index * 10) for index in range(len(sample_roles))
+        ]
+        overdue_amount = [
+            float((index % 4) * 5) for index in range(len(sample_roles))
+        ]
+    else:
+        sample_roles = ["dev", "dev", "valid", "valid", "oot", "oot"]
+        population = None
+        approval_flag = None
+        risk_flag = None
+        bad = [0, 1, 0, 1, 0, 1]
+        apply_dates = [
+            "2026-01-01",
+            "2026-01-10",
+            "2026-02-01",
+            "2026-02-10",
+            "2026-03-01",
+            "2026-03-10",
+        ]
+        apply_months = [
+            "202601",
+            "202601",
+            "202602",
+            "202602",
+            "202603",
+            "202603",
+        ]
+        legacy_score = [100.0, 200.0, 120.0, 220.0, 140.0, 240.0]
+        customer_ids = ["a", "b", "c", "d", "e", "f"]
+        loan_amount = [100.0, 200.0, 150.0, 180.0, 300.0, 250.0]
+        overdue_amount = [0.0, 20.0, 0.0, 10.0, 0.0, 30.0]
     if nan_label:
         bad[1] = None
-    frame = pd.DataFrame(
-        {
-            "sample_role": ["dev", "dev", "valid", "valid", "oot", "oot"],
-            "customer_id": ["a", "b", "c", "d", "e", "f"],
-            "apply_date": [
-                "2026-01-01",
-                "2026-01-10",
-                "2026-02-01",
-                "2026-02-10",
-                "2026-03-01",
-                "2026-03-10",
-            ],
-            "apply_month": [
-                "202601",
-                "202601",
-                "202602",
-                "202602",
-                "202603",
-                "202603",
-            ],
-            "legacy_score": [100.0, 200.0, 120.0, 220.0, 140.0, 240.0],
-            "weight": [1.0] * 6,
-            "loan_amount": [100.0, 200.0, 150.0, 180.0, 300.0, 250.0],
-            "overdue_amount": [0.0, 20.0, 0.0, 10.0, 0.0, 30.0],
-            "bad": bad,
-        }
-    )
+    row_count = len(sample_roles)
+    frame_data = {
+        "sample_role": sample_roles,
+        "customer_id": customer_ids,
+        "apply_date": apply_dates,
+        "apply_month": apply_months,
+        "legacy_score": legacy_score,
+        "weight": [1.0] * row_count,
+        "loan_amount": loan_amount,
+        "overdue_amount": overdue_amount,
+        "bad": bad,
+    }
+    if parallel_populations:
+        frame_data.update(
+            {
+                "population": population,
+                "approval_flag": approval_flag,
+                "risk_flag": risk_flag,
+            }
+        )
+    frame = pd.DataFrame(frame_data)
     source = tmp_path / f"{task_id}.parquet"
     frame.to_parquet(source, index=False)
     settings = client.app.state.settings
@@ -262,6 +365,15 @@ def _register_workspace_sample(
             "weight": "weight",
             "loan_amount": "loan_amount",
             "overdue_amount": "overdue_amount",
+            **(
+                {
+                    "population": "segment",
+                    "approval_flag": "segment",
+                    "risk_flag": "segment",
+                }
+                if parallel_populations
+                else {}
+            ),
             **({"bad": "target"} if target_col is not None else {}),
         },
     )
@@ -472,6 +584,159 @@ def test_parallel_sample_v2_manual_and_natural_requests_share_native_tool(
         == "risk/development"
     )
     assert len(llm.calls) == 1
+
+
+@pytest.mark.parametrize("request_source", ["natural_language", "manual_ui"])
+def test_native_parallel_sample_drives_univariate_on_exact_risk_development_rows(
+    tmp_path: Path,
+    monkeypatch,
+    request_source: str,
+) -> None:
+    client = TestClient(create_app(tmp_path / request_source / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path / request_source)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path / request_source,
+        parallel_populations=True,
+    )
+    sample_request = {
+        "request_kind": "standard_workflow",
+        "workflow": "strategy_sample_design_v2",
+        "workflow_inputs": _parallel_population_sample_v2_inputs(),
+    }
+    univariate_request = _univariate_payload()
+    llm = (
+        _SequencedStrategyLLM(sample_request, univariate_request)
+        if request_source == "natural_language"
+        else _SequencedStrategyLLM()
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    sample_body = {"content": _parallel_population_sample_v2_utterance()}
+    candidate_body = {
+        "content": (
+            "对 legacy_score 用 equal_width 做单变量分析，目标箱数 3，"
+            "最小箱占比 2%，放款金额列 loan_amount，"
+            "逾期金额列 overdue_amount，不设置哨兵值"
+        )
+    }
+    if request_source == "manual_ui":
+        sample_body["strategy_request"] = sample_request
+        candidate_body["strategy_request"] = univariate_request
+
+    sample_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=sample_body,
+    )
+    candidate_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=candidate_body,
+    )
+
+    assert sample_response.status_code == 202, sample_response.text
+    assert candidate_response.status_code == 202, candidate_response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "strategy_univariate_candidate_analysis",
+    ], json.dumps(candidate_response.json()["messages"][-1], ensure_ascii=False)
+    assert all(plan["status"] == "done" for plan in plans)
+
+    sample_plan = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    candidate_plan = client.app.state.plan_repo.load_plan(plans[1]["id"])
+    sample_output = client.app.state.plan_repo.load_step_output(
+        sample_plan.steps[0].id
+    )
+    assert sample_output["membership"]["counts"]["approval"]["development"] == 5
+    assert sample_output["membership"]["counts"]["risk"]["development"] == 4
+
+    native_bundle = next(
+        record
+        for record in TaskArtifactRepository(
+            client.app.state.settings.db_path
+        ).list_for_task(task_id)
+        if record["kind"] == "strategy_sample_design_v2_json"
+        and record["origin_tool"]
+        == "strategy.materialize_sample_design_v2_native"
+    )
+    expected_ref = {
+        "artifact_id": native_bundle["id"],
+        "artifact_content_hash": native_bundle["content_hash"],
+        "sample_design_id": native_bundle["provenance"]["sample_design_id"],
+        "sample_design_content_hash": native_bundle["provenance"][
+            "sample_design_content_hash"
+        ],
+        "partition": "risk/development",
+    }
+    assert candidate_plan.steps[0].inputs["sample_design_ref"] == expected_ref
+    assert set(candidate_plan.steps[0].inputs["sample_design_ref"]) == {
+        "artifact_id",
+        "artifact_content_hash",
+        "sample_design_id",
+        "sample_design_content_hash",
+        "partition",
+    }
+    candidate_output = client.app.state.plan_repo.load_step_output(
+        candidate_plan.steps[0].id
+    )
+    evidence = candidate_output["candidate_evidence"]
+    assert evidence["generation"]["parameters"]["sample_design_ref"] == expected_ref
+    assert evidence["analysis"]["row_count"] == 4
+    assert len(llm.calls) == (2 if request_source == "natural_language" else 0)
+
+
+def test_native_sample_remains_blocked_for_automatic_tree_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+    )
+    llm = _SequencedStrategyLLM()
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+    sample_request = {
+        "request_kind": "standard_workflow",
+        "workflow": "strategy_sample_design_v2",
+        "workflow_inputs": _parallel_population_sample_v2_inputs(),
+    }
+    sample_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "人工界面原生固化平行总体样本",
+            "strategy_request": sample_request,
+        },
+    )
+    tree_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "人工界面用 legacy_score 构建自动决策树候选",
+            "strategy_request": _automatic_tree_payload(),
+        },
+    )
+
+    assert sample_response.status_code == 202, sample_response.text
+    assert tree_response.status_code == 202, tree_response.text
+    assert (
+        tree_response.json()["code"]
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native"
+    ]
+    assert len(llm.calls) == 0
 
 
 def test_fresh_sample_v2_requires_workspace_before_compiler_llm(

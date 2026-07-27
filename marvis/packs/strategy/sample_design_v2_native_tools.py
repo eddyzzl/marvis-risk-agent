@@ -517,6 +517,114 @@ def _load_native_live_binding(
     )
 
 
+def _load_historical_native_binding(
+    runtime,
+    *,
+    task_id: str,
+    request: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> NativeSampleDesignV2LiveBinding:
+    """Recover immutable native source evidence without workspace head."""
+
+    if source["task_id"] != task_id:
+        raise StrategyError(
+            "native sample-design V2 historical task binding changed"
+        )
+    expected_request_source = {
+        "dataset_id": request["dataset_id"],
+        "dataset_content_hash": request[
+            "expected_dataset_content_hash"
+        ],
+        "workspace_revision": request["workspace_revision"],
+        "workspace_generation": request["workspace_generation"],
+        "semantic_mapping_hash": request["semantic_mapping_hash"],
+        "target_col": request["target_col"],
+        "target_bad_value": request["target_bad_value"],
+        "drop_nan_labels": request["drop_nan_labels"],
+    }
+    for field, expected in expected_request_source.items():
+        if source[field] != expected:
+            raise StrategyError(
+                "native sample-design V2 historical request "
+                f"{field} changed"
+            )
+    try:
+        dataset = runtime.registry.get(source["dataset_id"])
+        path = Path(
+            runtime.registry.resolve_verified_path(source["dataset_id"])
+        )
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        DatasetContentDriftError,
+    ) as exc:
+        raise StrategyError(
+            "native sample-design V2 historical dataset is unavailable "
+            "or drifted"
+        ) from exc
+    _require_native_static_source_preflight(
+        row_count=int(dataset.row_count),
+        dataset_path=path,
+    )
+    if (
+        str(dataset.task_id) != task_id
+        or str(dataset.id) != source["dataset_id"]
+        or str(dataset.source_path) != source["dataset_source_path"]
+        or not common._matches_hash(
+            dataset.content_hash,
+            source["dataset_content_hash"],
+        )
+        or not hmac.compare_digest(
+            sha256_file(path),
+            source["dataset_content_hash"],
+        )
+    ):
+        raise StrategyError(
+            "native sample-design V2 historical dataset binding changed"
+        )
+    with runtime.task_artifacts.transaction() as conn:
+        metadata_hash = common._dataset_metadata_hash_on_connection(
+            conn,
+            task_id=task_id,
+            dataset_id=str(dataset.id),
+            expected_content_hash=str(dataset.content_hash),
+        )
+    if not hmac.compare_digest(
+        metadata_hash,
+        source["dataset_registry_metadata_hash"],
+    ):
+        raise StrategyError(
+            "native sample-design V2 historical dataset metadata changed"
+        )
+    columns = tuple(str(column.name) for column in dataset.columns)
+    if source["target_col"] not in columns:
+        raise StrategyError(
+            "native sample-design V2 historical target column is missing"
+        )
+    time_field = request["field_bindings"]["time_field"]
+    return NativeSampleDesignV2LiveBinding(
+        task_id=task_id,
+        dataset_id=str(dataset.id),
+        dataset_content_hash=str(dataset.content_hash),
+        dataset_source_path=str(dataset.source_path),
+        dataset_path=path,
+        dataset_registry_metadata_hash=metadata_hash,
+        row_count=int(dataset.row_count),
+        columns=columns,
+        workspace_revision=source["workspace_revision"],
+        workspace_generation=source["workspace_generation"],
+        semantic_mapping_hash=source["semantic_mapping_hash"],
+        semantic_field_roles=(
+            () if time_field is None else ((str(time_field), "date"),)
+        ),
+        target_col=source["target_col"],
+        target_bad_value=source["target_bad_value"],
+        drop_nan_labels=source["drop_nan_labels"],
+    )
+
+
 def _predicate_columns(value: object) -> set[str]:
     columns: set[str] = set()
     if isinstance(value, Mapping):
@@ -947,6 +1055,65 @@ def _require_native_live_binding_on_connection(
     ):
         raise StrategyError(
             "native sample-design V2 dataset bytes changed before registration"
+        )
+
+
+def _require_historical_native_binding_on_connection(
+    conn,
+    binding: NativeSampleDesignV2LiveBinding,
+) -> None:
+    """Recheck immutable dataset registry state without workspace head."""
+
+    if not isinstance(binding, NativeSampleDesignV2LiveBinding):
+        raise StrategyError(
+            "native sample-design V2 historical binding is invalid"
+        )
+    metadata_hash = common._dataset_metadata_hash_on_connection(
+        conn,
+        task_id=binding.task_id,
+        dataset_id=binding.dataset_id,
+        expected_content_hash=binding.dataset_content_hash,
+    )
+    if not hmac.compare_digest(
+        metadata_hash,
+        binding.dataset_registry_metadata_hash,
+    ):
+        raise StrategyError(
+            "native sample-design V2 historical dataset metadata changed"
+        )
+    dataset = conn.execute(
+        """
+        SELECT task_id, source_path, content_hash
+          FROM datasets
+         WHERE task_id = ? AND id = ?
+        """,
+        (binding.task_id, binding.dataset_id),
+    ).fetchone()
+    if (
+        dataset is None
+        or str(dataset["task_id"]) != binding.task_id
+        or str(dataset["source_path"]) != binding.dataset_source_path
+        or not hmac.compare_digest(
+            str(dataset["content_hash"]),
+            binding.dataset_content_hash,
+        )
+    ):
+        raise StrategyError(
+            "native sample-design V2 historical dataset binding changed"
+        )
+    try:
+        dataset_hash = sha256_file(binding.dataset_path)
+    except OSError as exc:
+        raise StrategyError(
+            "native sample-design V2 historical dataset bytes "
+            "are unavailable"
+        ) from exc
+    if not hmac.compare_digest(
+        dataset_hash,
+        binding.dataset_content_hash,
+    ):
+        raise StrategyError(
+            "native sample-design V2 historical dataset bytes changed"
         )
 
 
@@ -1726,6 +1893,73 @@ def load_native_strategy_sample_design_v2_artifacts(
 ) -> StrategySampleDesignV2NativeArtifactBinding:
     """Load and deterministically replay an active native V2 artifact pair."""
 
+    return _load_native_strategy_sample_design_v2_artifacts(
+        runtime,
+        task_id=task_id,
+        membership_artifact_id=membership_artifact_id,
+        expected_membership_artifact_content_hash=(
+            expected_membership_artifact_content_hash
+        ),
+        bundle_artifact_id=bundle_artifact_id,
+        expected_bundle_artifact_content_hash=(
+            expected_bundle_artifact_content_hash
+        ),
+        expected_bundle_id=expected_bundle_id,
+        expected_sample_design_id=expected_sample_design_id,
+        expected_sample_design_content_hash=(
+            expected_sample_design_content_hash
+        ),
+        require_current_workspace=True,
+    )
+
+
+def load_historical_native_strategy_sample_design_v2_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    membership_artifact_id: str,
+    expected_membership_artifact_content_hash: str,
+    bundle_artifact_id: str,
+    expected_bundle_artifact_content_hash: str,
+    expected_bundle_id: str,
+    expected_sample_design_id: str,
+    expected_sample_design_content_hash: str,
+) -> StrategySampleDesignV2NativeArtifactBinding:
+    """Replay immutable native V2 evidence without requiring workspace head."""
+
+    return _load_native_strategy_sample_design_v2_artifacts(
+        runtime,
+        task_id=task_id,
+        membership_artifact_id=membership_artifact_id,
+        expected_membership_artifact_content_hash=(
+            expected_membership_artifact_content_hash
+        ),
+        bundle_artifact_id=bundle_artifact_id,
+        expected_bundle_artifact_content_hash=(
+            expected_bundle_artifact_content_hash
+        ),
+        expected_bundle_id=expected_bundle_id,
+        expected_sample_design_id=expected_sample_design_id,
+        expected_sample_design_content_hash=(
+            expected_sample_design_content_hash
+        ),
+        require_current_workspace=False,
+    )
+
+
+def _load_native_strategy_sample_design_v2_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    membership_artifact_id: str,
+    expected_membership_artifact_content_hash: str,
+    bundle_artifact_id: str,
+    expected_bundle_artifact_content_hash: str,
+    expected_bundle_id: str,
+    expected_sample_design_id: str,
+    expected_sample_design_content_hash: str,
+    require_current_workspace: bool,
+) -> StrategySampleDesignV2NativeArtifactBinding:
     try:
         normalized_task = common._text(task_id, "task_id")
         membership_aid = common._hash(
@@ -1876,10 +2110,19 @@ def load_native_strategy_sample_design_v2_artifacts(
             bundle_file_hash=bundle_file_hash,
         )
         request = _validate_native_inputs(bundle_provenance["request"])
-        binding = _load_native_live_binding(
-            runtime,
-            task_id=normalized_task,
-            request=request,
+        binding = (
+            _load_native_live_binding(
+                runtime,
+                task_id=normalized_task,
+                request=request,
+            )
+            if require_current_workspace
+            else _load_historical_native_binding(
+                runtime,
+                task_id=normalized_task,
+                request=request,
+                source=bundle_provenance,
+            )
         )
         normalized_request = common._normalize_request_against_columns(
             request,
@@ -1952,11 +2195,24 @@ def load_native_strategy_sample_design_v2_artifacts(
             bundle_provenance,
             binding=binding,
         )
-        _require_native_live_binding(
-            runtime,
-            binding=binding,
-            request=normalized_request,
-        )
+        if require_current_workspace:
+            _require_native_live_binding(
+                runtime,
+                binding=binding,
+                request=normalized_request,
+            )
+        else:
+            historical = _load_historical_native_binding(
+                runtime,
+                task_id=normalized_task,
+                request=normalized_request,
+                source=bundle_provenance,
+            )
+            if historical != binding:
+                raise StrategyError(
+                    "native sample-design V2 historical source changed "
+                    "during replay"
+                )
         if not hmac.compare_digest(
             sha256_file(binding.dataset_path),
             binding.dataset_content_hash,
@@ -1991,6 +2247,32 @@ def require_native_strategy_sample_design_v2_artifact_binding_on_connection(
 ) -> None:
     """Re-authenticate native evidence while a downstream writer holds a lock."""
 
+    _require_native_strategy_sample_design_v2_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_workspace=True,
+    )
+
+
+def require_historical_native_strategy_sample_design_v2_artifact_binding_on_connection(
+    conn,
+    binding: StrategySampleDesignV2NativeArtifactBinding,
+) -> None:
+    """Re-authenticate immutable native evidence without workspace head."""
+
+    _require_native_strategy_sample_design_v2_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_workspace=False,
+    )
+
+
+def _require_native_strategy_sample_design_v2_artifact_binding_on_connection(
+    conn,
+    binding: StrategySampleDesignV2NativeArtifactBinding,
+    *,
+    require_current_workspace: bool,
+) -> None:
     if not isinstance(
         binding,
         StrategySampleDesignV2NativeArtifactBinding,
@@ -2008,10 +2290,16 @@ def require_native_strategy_sample_design_v2_artifact_binding_on_connection(
         raise StrategyError(
             "native sample-design V2 membership filename changed"
         )
-    _require_native_live_binding_on_connection(
-        conn,
-        binding.source_binding,
-    )
+    if require_current_workspace:
+        _require_native_live_binding_on_connection(
+            conn,
+            binding.source_binding,
+        )
+    else:
+        _require_historical_native_binding_on_connection(
+            conn,
+            binding.source_binding,
+        )
     membership_raw = encode_sample_membership(
         task_id=binding.membership["header"]["task_id"],
         dataset_id=(
@@ -2293,8 +2581,10 @@ __all__ = [
     "SAMPLE_DESIGN_V2_NATIVE_TOOL_SCHEMA_VERSION",
     "StrategySampleDesignV2NativeArtifactBinding",
     "authenticate_native_strategy_sample_design_v2_bundle_record",
+    "load_historical_native_strategy_sample_design_v2_artifacts",
     "load_native_strategy_sample_design_v2_artifacts",
     "native_sample_design_v2_membership_registry_identity_hash",
+    "require_historical_native_strategy_sample_design_v2_artifact_binding_on_connection",
     "require_native_strategy_sample_design_v2_artifact_binding_on_connection",
     "run_materialize_sample_design_v2_native",
     "validate_materialize_sample_design_v2_native_tool_output",

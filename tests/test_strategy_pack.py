@@ -1593,7 +1593,6 @@ def test_sample_bound_tool_manifests_use_one_exact_reference_schema(tmp_path):
     }
     by_name = {tool.name: tool for tool in manifest.tools}
     required_input_tools = {
-        "analyze_univariate_candidates",
         "build_automatic_tree_candidate",
         "measure_pool_impact",
         "design_strategy_candidate",
@@ -1607,6 +1606,31 @@ def test_sample_bound_tool_manifests_use_one_exact_reference_schema(tmp_path):
         schema = by_name[name].input_schema
         assert "sample_design_ref" in schema["required"], name
         assert schema["properties"]["sample_design_ref"] == exact_ref, name
+
+    risk_development_ref = {
+        **exact_ref,
+        "properties": {
+            **exact_ref["properties"],
+            "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"],
+            },
+        },
+    }
+    univariate_schema = by_name["analyze_univariate_candidates"].input_schema
+    assert "sample_design_ref" in univariate_schema["required"]
+    assert (
+        univariate_schema["properties"]["sample_design_ref"]
+        == risk_development_ref
+    )
+    legacy_v2_schema = by_name["materialize_sample_design_v2"].input_schema
+    assert legacy_v2_schema["properties"]["legacy_sample_design_ref"] == {
+        "$ref": "#/$defs/legacy_sample_design_ref"
+    }
+    legacy_v2_ref = legacy_v2_schema["$defs"]["legacy_sample_design_ref"]
+    assert legacy_v2_ref["properties"]["partition"] == {"const": "development"}
+    assert legacy_v2_ref["required"] == exact_ref["required"]
+    assert legacy_v2_ref["additionalProperties"] is False
 
     # The generic backtest retains a direct legacy compatibility entrypoint,
     # but every V2 Workflow requires the slot and its runtime shape is still exact.

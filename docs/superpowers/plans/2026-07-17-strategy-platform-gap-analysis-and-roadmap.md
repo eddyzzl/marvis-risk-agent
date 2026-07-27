@@ -498,6 +498,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再做完整认证；缺 provenance、错 hash、错路径或其他无法证明无关的损坏证据均失败关闭，不回退旧 V1 样本。已认证且明确属于其他 dataset/workspace/target 的原生样本可以跳过。仍依赖 V1 `StrategySampleDesignExecutionBinding` 的单变量、树、Cross、Pool、ImpactCube、独立验证与报告消费者目前返回稳定的 `strategy_sample_design_v2_native_source_unsupported`，不能误用 approval 总体或悄悄降级；后续纵切必须把这些消费者迁移到原生 `risk/development` 物理 membership 后，才可宣称双人群策略开发主链完成。本段覆盖上段“风险/通过率双样本待办”的旧状态；渠道/客群产品化纳排、历史回溯打分、泄漏/选择偏差检测、`CurrentProjectSnapshot` 与历史资料映射仍在 V2 Phase 2 内待续。
 
+**原生风险开发执行绑定与单变量消费纵切（已完成，2026-07-25）**：新增来源无关的 `StrategyRiskDevelopmentExecutionBinding`，对旧 V1 `partition=development` 完整委托既有实现，保持 source ref、token、frame 与 hash 身份；对原生 V2 则要求 bundle kind/origin 与 `partition=risk/development` 精确匹配，认证 membership/bundle/source identity 后直接消费持久化风险开发 mask。平台不会重新解释 predicate，也不会把 approval mask 叠加到 risk mask；双总体筛选列、切分列与目标列统一从自动候选特征中排除。current loader 绑定当前 DataWorkspace，historical loader 不依赖 workspace head，但仍要求原 dataset registry 路径、元数据和文件 bytes 可重放；两类 binding 都在下游 artifact 写入锁内重新认证。自然语言 Agent 与 Candidate Lab Manual 单变量入口只在该 Workflow 上选择最新原生 ref，真实平行 cohort 的 approval/risk development 件数不同也会只分析物理 `risk/development` 行；原生五字段 ref 原样进入 candidate evidence、source token 与 artifact provenance。Automatic Tree、Cross/refinement、Voting、Pool、稳定性、ImpactCube、独立验证和报告尚未迁移，manifest 与 Agent selector 不做全局放宽，继续稳定阻断。
+
 交付：
 
 1. 策略任务创建、列表、加载、删除、显式保存、dirty 切换保护和分析状态恢复；
@@ -758,7 +760,7 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 28. 受控填充、删列、转换、派生、过滤、重命名和历史；
 29. 隔离自定义派生 Tool 与资源/权限护栏；
 30. 字段语义、中英文/节点映射和风险方向；
-31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出（描述分析、`StrategySampleDesign`、版本化指标、下游成熟 development 强绑定及原生 approval/risk 双人群物理样本底座已完成；原生样本的单变量/树/Pool/影响/验证/报告消费迁移、产品化纳排/泄漏检测、`CurrentProjectSnapshot` 与历史资料映射待续）。
+31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出（描述分析、`StrategySampleDesign`、版本化指标、下游成熟 development 强绑定、原生 approval/risk 双人群物理样本底座及单变量消费迁移已完成；原生样本的树/Cross/refinement/Voting/Pool/稳定性/影响/验证/报告消费迁移、产品化纳排/泄漏检测、`CurrentProjectSnapshot` 与历史资料映射待续）。
 
 ### Phase 3：Candidate Lab
 

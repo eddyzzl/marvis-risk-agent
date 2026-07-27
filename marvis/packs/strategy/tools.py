@@ -135,6 +135,13 @@ from marvis.packs.strategy.sample_design_binding import (
     require_strategy_sample_design_execution_binding_on_connection,
     revalidate_strategy_sample_design_execution_binding,
 )
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+    bind_strategy_risk_development_frame,
+    load_strategy_risk_development_execution_binding,
+    require_strategy_risk_development_execution_binding_on_connection,
+    revalidate_strategy_risk_development_execution_binding,
+)
 from marvis.packs.strategy.sample_design_tools import (
     load_strategy_sample_design_artifact,
     run_materialize_sample_design,
@@ -623,7 +630,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         raise StrategyError(
             "loan_amount_col and overdue_amount_col must be different columns"
         )
-    sample_binding = load_strategy_sample_design_execution_binding(
+    sample_binding = load_strategy_risk_development_execution_binding(
         runtime,
         task_id=task_id,
         sample_design_ref=inputs["sample_design_ref"],
@@ -655,7 +662,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         methods=methods,
         sentinel_count=len(requested_sentinels),
         row_count=sample_binding.development_population_count,
-        sample_split_col=sample_binding.split_column,
+        sample_excluded_columns=sample_binding.excluded_feature_columns,
     )
     features = _resolve_univariate_features(
         inputs.get("features"),
@@ -663,7 +670,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         target_col=target_col,
         loan_amount_col=loan_amount_col,
         overdue_amount_col=overdue_amount_col,
-        sample_split_col=sample_binding.split_column,
+        sample_excluded_columns=sample_binding.excluded_feature_columns,
         field_roles=resolved_roles,
     )
     required_columns = {
@@ -674,7 +681,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
             for column in (
                 loan_amount_col,
                 overdue_amount_col,
-                sample_binding.split_column,
+                *sample_binding.partition_columns,
             )
             if column is not None
         ),
@@ -690,7 +697,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         raise StrategyError(
             "source dataset changed while univariate analysis was loading"
         )
-    frame = bind_strategy_development_frame(frame, binding=sample_binding)
+    frame = bind_strategy_risk_development_frame(frame, binding=sample_binding)
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame,
         target_col,
@@ -4930,7 +4937,7 @@ def _resolve_univariate_features(
     target_col: str,
     loan_amount_col: str | None,
     overdue_amount_col: str | None,
-    sample_split_col: str | None,
+    sample_excluded_columns: Sequence[str],
     field_roles: Mapping[str, str],
 ) -> list[str]:
     if raw_features is None:
@@ -4951,9 +4958,14 @@ def _resolve_univariate_features(
         raise StrategyError("unknown feature columns: " + ", ".join(missing))
     if target_col in requested:
         raise StrategyError("target cannot also be a univariate feature")
-    if sample_split_col is not None and sample_split_col in requested:
+    governed_exclusions = {
+        str(column) for column in sample_excluded_columns if str(column)
+    }
+    governed_requested = sorted(set(requested) & governed_exclusions)
+    if governed_requested:
         raise StrategyError(
-            "sample-design split column cannot be a univariate feature"
+            "sample-design partition or population columns cannot be univariate "
+            "features: " + ", ".join(governed_requested)
         )
     forbidden = sorted(
         feature
@@ -4970,14 +4982,13 @@ def _resolve_univariate_features(
     else:
         excluded_columns = {
             target_col,
+            *governed_exclusions,
             *(
                 column
                 for column in (loan_amount_col, overdue_amount_col)
                 if column is not None
             ),
         }
-        if sample_split_col is not None:
-            excluded_columns.add(sample_split_col)
         features = [
             str(column)
             for column in columns
@@ -5173,7 +5184,7 @@ def _preflight_univariate_work_budget(
     methods: tuple[str, ...],
     sentinel_count: int,
     row_count: int | None = None,
-    sample_split_col: str | None = None,
+    sample_excluded_columns: Sequence[str] = (),
 ) -> None:
     row_count = int(binding.dataset.row_count if row_count is None else row_count)
     if not 1 <= row_count <= _UNIVARIATE_MAX_ROWS:
@@ -5192,11 +5203,15 @@ def _preflight_univariate_work_budget(
         explicitly_excluded = {
             target_col,
             *(
+                str(column)
+                for column in sample_excluded_columns
+                if str(column)
+            ),
+            *(
                 value
                 for value in (
                     inputs.get("loan_amount_col"),
                     inputs.get("overdue_amount_col"),
-                    sample_split_col,
                 )
                 if isinstance(value, str) and value
             ),
@@ -5506,7 +5521,7 @@ def _write_univariate_candidate_artifacts(
     *,
     task_id: str,
     binding: _UnivariateDatasetBinding,
-    sample_design_binding: StrategySampleDesignExecutionBinding,
+    sample_design_binding: StrategyRiskDevelopmentExecutionBinding,
     candidate_evidence: Mapping[str, Any],
     generation_parameters: Mapping[str, Any],
     bundle: Mapping[str, bytes],
@@ -5545,7 +5560,7 @@ def _write_univariate_candidate_artifacts(
         raise StrategyError(
             "univariate candidate analysis schema binding is inconsistent"
         )
-    revalidate_strategy_sample_design_execution_binding(
+    revalidate_strategy_risk_development_execution_binding(
         runtime,
         sample_design_binding,
     )
@@ -5584,7 +5599,7 @@ def _write_univariate_candidate_artifacts(
                     task_id=task_id,
                     binding=binding,
                 )
-                require_strategy_sample_design_execution_binding_on_connection(
+                require_strategy_risk_development_execution_binding_on_connection(
                     conn,
                     sample_design_binding,
                 )

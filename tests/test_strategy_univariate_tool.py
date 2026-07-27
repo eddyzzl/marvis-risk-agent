@@ -25,6 +25,12 @@ from marvis.files import sha256_file
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
 from marvis.plugins.contracts import ToolContext
 from marvis.plugins.errors import SchemaValidationError
 from marvis.plugins.loader import load_builtin_packs, load_manifest
@@ -89,6 +95,20 @@ def _runtime(
     bad_one_labels = [0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1]
     frame_data = {
         "customer_id": [f"C{index:03d}" for index in range(12)],
+        "apply_date": [
+            "2026-01-01",
+            "2026-01-02",
+            "2026-01-03",
+            "2026-01-04",
+            "2026-01-05",
+            "2026-01-06",
+            "2026-01-07",
+            "2026-01-08",
+            "2026-02-01",
+            "2026-02-02",
+            "2026-03-01",
+            "2026-03-02",
+        ],
         "score": [-9999, 100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600],
         "constant": [7] * 12,
         "segment": ["UNKNOWN", "A", "A", "B", "B", "C"] * 2,
@@ -123,6 +143,7 @@ def _runtime(
         target_col="bad",
         field_roles={
             "customer_id": "id",
+            "apply_date": "date",
             "score": "score",
             "constant": "date",
             "segment": "categorical",
@@ -246,6 +267,118 @@ def _materialize_sample_design_ref(
         "sample_design_id": output["sample_design_id"],
         "sample_design_content_hash": output["content_hash"],
         "partition": "development",
+    }
+
+
+def _eq(column: str, value: object) -> dict:
+    return {
+        "op": "eq",
+        "left": {"column": column},
+        "right": {"literal": value},
+    }
+
+
+def _any_of(*predicates: dict) -> dict:
+    return {"op": "or", "args": list(predicates)}
+
+
+def _materialize_native_sample_design_ref(
+    settings,
+    task,
+    dataset,
+    workspace,
+    mapping,
+    *,
+    target_bad_value: int,
+) -> dict[str, str]:
+    output = strategy_tools.tool_materialize_sample_design_v2_native(
+        {
+            "source_mode": "native_active_dataset",
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": target_bad_value,
+            "drop_nan_labels": False,
+            "relationship": "parallel_time_cohorts",
+            "scope": "strategy_development",
+            "approval_population": {
+                "inclusion": _any_of(_eq("segment", "A"), _eq("segment", "B")),
+                "exclusion": None,
+            },
+            "risk_population": {
+                "inclusion": _any_of(_eq("segment", "B"), _eq("segment", "C")),
+                "exclusion": None,
+            },
+            "partitioning": {
+                "method": "predicate_ast",
+                "selectors": {
+                    "development": _eq("sample_split", "dev"),
+                    "validation": _eq("sample_split", "valid"),
+                    "oot": _eq("sample_split", "oot"),
+                },
+            },
+            "maturity": {
+                "status": "confirmed_matured",
+                "performance_window_days": 30,
+                "cutoff_date": "2026-04-30",
+                "reason": None,
+            },
+            "performance_window": {"status": "provided", "days": 30},
+            "observation_window": {
+                "status": "provided",
+                "start": "2026-01-01",
+                "end": "2026-04-30",
+            },
+            "field_bindings": {
+                "entity_field": "customer_id",
+                "time_field": "apply_date",
+                "group_field": "segment",
+                "month_field": None,
+                "weight_field": None,
+                "loan_amount_field": "loan_amount",
+                "overdue_amount_field": "overdue_amount",
+            },
+            "historical_score": {
+                "status": "unavailable",
+                "column": None,
+                "direction": None,
+                "reason": "not supplied for this candidate analysis",
+            },
+            "policy": {
+                "minimum_partition_count": 1,
+                "minimum_bad_count": 1,
+                "minimum_label_coverage": 1.0,
+                "minimum_historical_score_coverage": 0.0,
+                "maximum_group_coverage_gap": 1.0,
+                "diagnostic_severities": {
+                    "entity_overlap": "warn",
+                    "temporal_oot": "warn",
+                    "risk_outside_approval": "warn",
+                    "maturity": "fail",
+                    "label_coverage": "fail",
+                    "historical_score_coverage": "warn",
+                    "group_coverage_gap": "warn",
+                    "sufficiency": "fail",
+                },
+            },
+        },
+        _tool_context(settings, task),
+    )
+    bundle_record = next(
+        record
+        for record in TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+        if record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    return {
+        "artifact_id": bundle_record["id"],
+        "artifact_content_hash": bundle_record["content_hash"],
+        "sample_design_id": output["sample_design_id"],
+        "sample_design_content_hash": output["sample_design_content_hash"],
+        "partition": "risk/development",
     }
 
 
@@ -584,6 +717,205 @@ def test_univariate_tool_filters_development_and_normalizes_reverse_bad_label(
     assert first["generation"]["parameters"]["sample_design_ref"] != (
         reversed_polarity["generation"]["parameters"]["sample_design_ref"]
     )
+
+
+def test_univariate_tool_consumes_exact_native_risk_development_membership(
+    tmp_path: Path,
+) -> None:
+    (
+        settings,
+        runner,
+        _registry,
+        task,
+        _other,
+        dataset,
+        workspace,
+        mapping,
+        _legacy_sample_design_ref,
+    ) = _runtime(tmp_path, target_bad_value=0, with_split=True)
+    native_ref = _materialize_native_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=0,
+    )
+
+    output = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            **_inputs(dataset, workspace, mapping, native_ref),
+            "features": [],
+            "methods": ["manual"],
+            "manual_breakpoints": {"score": [225, 275]},
+        },
+        _tool_context(settings, task),
+    )
+    invoked = runner.invoke(
+        ToolRef("strategy", "analyze_univariate_candidates"),
+        {
+            **_inputs(dataset, workspace, mapping, native_ref),
+            "features": [],
+            "methods": ["manual"],
+            "manual_breakpoints": {"score": [225, 275]},
+        },
+        task_id=task.id,
+    )
+    assert invoked.ok, invoked.error
+    assert invoked.output == output
+
+    evidence = output["candidate_evidence"]
+    analysis = evidence["analysis"]
+    assert analysis["row_count"] == 3
+    assert analysis["target_definition"] == {"good": 0, "bad": 1}
+    assert [item["feature"] for item in analysis["features"]] == ["score"]
+    method = analysis["features"][0]["methods"][0]
+    regular_bins = [
+        item for item in method["bins"] if item["kind"] == "numeric_interval"
+    ]
+    # risk/development owns source rows 3, 4, 5 (scores 200, 250, 300).
+    # The approval-only A rows are absent, the risk-only C row is retained, and
+    # native bad=0 is normalized to the deterministic analysis bad=1 contract.
+    assert [item["count"] for item in regular_bins] == [1, 1, 1]
+    assert [item["bad"] for item in regular_bins] == [1, 0, 1]
+    assert [item["good"] for item in regular_bins] == [0, 1, 0]
+    assert evidence["generation"]["parameters"]["sample_design_ref"] == native_ref
+    sample_source_token = next(
+        source_ref
+        for source_ref in evidence["source_refs"]
+        if source_ref.startswith("strategy-sample-design:")
+    )
+    assert json.loads(
+        sample_source_token.removeprefix("strategy-sample-design:")
+    ) == {
+        "kind": "strategy_sample_design_v2",
+        **native_ref,
+    }
+
+    records = _candidate_artifacts(settings, task)
+    assert len(records) == 2
+    assert all(
+        record["provenance"]["generation_parameters"]["sample_design_ref"]
+        == native_ref
+        for record in records
+    )
+
+    json_artifact = next(
+        item for item in output["artifacts"] if item["kind"] == "strategy_candidate_json"
+    )
+    source_bin_id = regular_bins[0]["id"]
+    with pytest.raises(
+        StrategyError,
+        match="sample_design_ref\\.partition must be development",
+    ):
+        strategy_tools.tool_refine_univariate_candidate(
+            {
+                "source_artifact_id": json_artifact["artifact_id"],
+                "expected_artifact_content_hash": json_artifact["content_hash"],
+                "expected_candidate_id": output["candidate_id"],
+                "expected_evidence_hash": output["evidence_hash"],
+                "feature": "score",
+                "method": "manual",
+                "merge_groups": [],
+                "selection": {"source_bin_ids": [source_bin_id]},
+                "selection_reason": "native refinement awaits its own migration",
+            },
+            _tool_context(settings, task),
+        )
+    assert not any(
+        record["kind"] == "strategy_candidate_asset_json"
+        for record in TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    )
+
+
+def test_univariate_tool_rejects_forged_native_partition(tmp_path: Path) -> None:
+    (
+        settings,
+        _runner,
+        _registry,
+        task,
+        _other,
+        dataset,
+        workspace,
+        mapping,
+        _legacy_sample_design_ref,
+    ) = _runtime(tmp_path, target_bad_value=0, with_split=True)
+    native_ref = _materialize_native_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=0,
+    )
+
+    with pytest.raises(StrategyError):
+        strategy_tools.tool_analyze_univariate_candidates(
+            _inputs(
+                dataset,
+                workspace,
+                mapping,
+                {**native_ref, "partition": "development"},
+            ),
+            _tool_context(settings, task),
+        )
+    assert _candidate_artifacts(settings, task) == []
+
+
+@pytest.mark.parametrize(
+    ("column", "forged_value"),
+    [
+        ("kind", "strategy_sample_design_v2_forged"),
+        ("origin_tool", "strategy.forged_sample_design"),
+    ],
+)
+def test_univariate_tool_rejects_forged_native_bundle_registry_identity(
+    tmp_path: Path,
+    column: str,
+    forged_value: str,
+) -> None:
+    (
+        settings,
+        _runner,
+        _registry,
+        task,
+        _other,
+        dataset,
+        workspace,
+        mapping,
+        _legacy_sample_design_ref,
+    ) = _runtime(tmp_path, target_bad_value=0, with_split=True)
+    native_ref = _materialize_native_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=0,
+    )
+    repository = TaskArtifactRepository(settings.db_path)
+    source = repository.get_for_task(task.id, native_ref["artifact_id"])
+    assert source is not None
+    forged_path = tmp_path / f"forged-native-{column}.json"
+    forged_path.write_bytes(Path(source["path"]).read_bytes())
+    forged = repository.register(
+        task_id=task.id,
+        kind=(forged_value if column == "kind" else source["kind"]),
+        path=str(forged_path),
+        content_hash=source["content_hash"],
+        origin_tool=(
+            forged_value if column == "origin_tool" else source["origin_tool"]
+        ),
+        provenance=source["provenance"],
+    )
+    forged_ref = {**native_ref, "artifact_id": forged["id"]}
+
+    with pytest.raises(StrategyError):
+        strategy_tools.tool_analyze_univariate_candidates(
+            _inputs(dataset, workspace, mapping, forged_ref),
+            _tool_context(settings, task),
+        )
+    assert _candidate_artifacts(settings, task) == []
 
 
 def test_univariate_tool_resets_duplicate_source_index_after_partition_binding(
