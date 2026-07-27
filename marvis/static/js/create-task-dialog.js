@@ -412,6 +412,8 @@ export function createCreateTaskDialogController({
     }
     const taskType = $("taskType")?.value || activeTaskType || defaultTaskType;
     const definition = taskTypeDefinition(taskType);
+    const allowDeferredMaterials = Boolean(definition.deferredMaterials)
+      && selectedRunMode === "agent";
     const payload = {
       task_type: taskType,
       model_name: $("modelName").value.trim(),
@@ -478,7 +480,7 @@ export function createCreateTaskDialogController({
     }
     if (materialSourceController.mode() === "upload") {
       const files = materialSourceController.selectedFiles();
-      if (files.length === 0) {
+      if (files.length === 0 && !allowDeferredMaterials) {
         setCreateStatus("请先选择要上传的材料文件。", "error");
         return null;
       }
@@ -489,24 +491,26 @@ export function createCreateTaskDialogController({
         );
         return null;
       }
-      // UX-12: percentage only kicks in once there is something worth showing a
-      // number for (>10MB total) — for a handful of small files the plain
-      // "正在上传材料..." text is enough and a jumpy 0%→100% readout would be
-      // noise, not signal.
-      const totalBytes = files.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
-      const showPercent = totalBytes > MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES;
-      setCreateStatus(`正在上传材料...${showPercent ? " (0%)" : ""}`, "busy");
-      const upload = await uploadMaterialFiles(files, {
-        onProgress: showPercent
-          ? (loaded, total) => {
-              const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
-              setCreateStatus(`正在上传材料...共 ${files.length} 个文件 (${percent}%)`, "busy");
-            }
-          : undefined,
-      });
-      payload.source_dir = upload.source_dir;
+      if (files.length > 0) {
+        // UX-12: percentage only kicks in once there is something worth showing a
+        // number for (>10MB total) — for a handful of small files the plain
+        // "正在上传材料..." text is enough and a jumpy 0%→100% readout would be
+        // noise, not signal.
+        const totalBytes = files.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+        const showPercent = totalBytes > MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES;
+        setCreateStatus(`正在上传材料...${showPercent ? " (0%)" : ""}`, "busy");
+        const upload = await uploadMaterialFiles(files, {
+          onProgress: showPercent
+            ? (loaded, total) => {
+                const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+                setCreateStatus(`正在上传材料...共 ${files.length} 个文件 (${percent}%)`, "busy");
+              }
+            : undefined,
+        });
+        payload.source_dir = upload.source_dir;
+      }
     }
-    if (!payload.model_name || !payload.validator || !payload.source_dir) {
+    if (!payload.model_name || !payload.validator || (!payload.source_dir && !allowDeferredMaterials)) {
       setCreateStatus(
         definition.reportFields ? "请先填写模型名称、验证人员和材料目录。" : "请先填写任务名称、负责人和材料目录。",
         "error",

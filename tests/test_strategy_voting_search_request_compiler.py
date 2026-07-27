@@ -166,7 +166,7 @@ def test_voting_search_compiles_explicit_include_exclude_and_constraint() -> Non
 
     assert result.draft is not None
     assert result.draft.to_dict() == payload
-    assert llm.calls[0]["prompt_version"] == 50
+    assert llm.calls[0]["prompt_version"] == 51
     assert "voting_candidate_search" in llm.calls[0]["system_prompt"]
 
 

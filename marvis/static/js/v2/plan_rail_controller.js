@@ -573,6 +573,7 @@ export function createPlanRailController({
     const isDriverReport = (
       ref.tool === "generate_model_report"
       || ref.tool === "generate_feature_report"
+      || ref.tool === "generate_risk_analysis_report"
     );
     const isStrategyReport = ref.tool === "build_report_bundle_v2";
     const isReportDone = (isDriverReport || isStrategyReport)
@@ -896,7 +897,11 @@ export function createPlanRailController({
     return steps.find((step) => {
       const ref = step?.tool_ref || {};
       const tool = ref.tool;
-      return (tool === "generate_model_report" || tool === "generate_feature_report")
+      return (
+        tool === "generate_model_report"
+        || tool === "generate_feature_report"
+        || tool === "generate_risk_analysis_report"
+      )
         && (step?.status || "pending") === "done";
     }) || null;
   }
@@ -1146,7 +1151,7 @@ export function createPlanRailController({
         '<section class="plan-driver-action-card" data-driver-action="report-download">',
         '<header class="plan-driver-action-head">',
         '<span class="plan-driver-action-pill">报告已就绪</span>',
-        '<span class="plan-driver-action-title">模型开发报告已生成，可下载查看。</span>',
+        '<span class="plan-driver-action-title">分析报告已生成，可下载查看。</span>',
         "</header>",
         '<button type="button" class="button compact secondary plan-step-download" data-driver-report-download="1">下载报告</button>',
         "</section>",

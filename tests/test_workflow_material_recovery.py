@@ -114,6 +114,26 @@ def _task_payload(*, source: Path, task_type: str, run_mode: str) -> dict:
     return payload
 
 
+def _start_until_material_scan(
+    client: TestClient,
+    task_id: str,
+    task_type: str,
+):
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    if task_type != "vintage" or started.json().get("status") == "error":
+        return started
+    selected = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "标准 Vintage"},
+    )
+    if selected.json().get("status") == "error":
+        return selected
+    return client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "材料已上传"},
+    )
+
+
 @pytest.mark.parametrize(
     "task_type",
     ["data_join", "feature_analysis", "modeling", "strategy", "vintage"],
@@ -132,7 +152,11 @@ def test_workflow_recovers_xlsx_content_with_csv_suffix_and_explains_it(
     )
     assert created.status_code == 200, created.text
 
-    started = client.post(f"/api/tasks/{created.json()['id']}/agent/start", json={})
+    started = _start_until_material_scan(
+        client,
+        created.json()["id"],
+        task_type,
+    )
 
     assert started.status_code == 202, started.text
     assert started.json()["status"] != "error"
@@ -171,7 +195,7 @@ def test_workflow_csv_parse_failure_is_structured_and_marks_driver_job_failed(
     )
     task_id = created.json()["id"]
 
-    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    started = _start_until_material_scan(client, task_id, task_type)
 
     assert started.status_code == 202, started.text
     assert started.json()["status"] == "error"
@@ -245,7 +269,7 @@ def test_agent_can_chat_after_material_failure_and_only_explicit_retry_reruns(
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
 
-    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    started = _start_until_material_scan(client, task_id, task_type)
     assert started.status_code == 202, started.text
     assert started.json()["status"] == "error"
     initial_errors = [

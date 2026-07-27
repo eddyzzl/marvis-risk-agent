@@ -639,11 +639,28 @@ def test_vintage_agent_start_builds_plan_and_returns_curve(client, tmp_path):
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert started.status_code == 202, started.text
-    assert any("开始 Vintage 风险分析" in message["content"] for message in started.json()["messages"])
+    assert "你想分析什么" in started.json()["messages"][-1]["content"]
 
-    confirmed = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
-    assert confirmed.status_code == 202, confirmed.text
-    done = confirmed.json()["messages"][-1]
+    selected = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "标准 Vintage"},
+    )
+    assert selected.status_code == 202, selected.text
+    assert "必需列：cohort" in selected.json()["messages"][-1]["content"]
+
+    continued = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "材料已上传"},
+    )
+    assert continued.status_code == 202, continued.text
+    assert "执行计划" in continued.json()["messages"][-1]["content"]
+
+    executed = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "开始"},
+    )
+    assert executed.status_code == 202, executed.text
+    done = executed.json()["messages"][-1]
     # A1: the vintage kernel always accumulates the bad column across MOBs; on a
     # snapshot/ever-bad flag that silently double-counts. The strategy vintage tool now
     # refuses to guess the cumulation basis, so an undeclared label_semantics halts at a

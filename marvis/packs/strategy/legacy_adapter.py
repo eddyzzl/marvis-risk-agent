@@ -30,6 +30,7 @@ _COMPARISON_OPERATORS: tuple[tuple[type[ast.cmpop], str], ...] = (
 
 _LEGACY_ACTION_TYPES = {
     "approve": "approval",
+    "decline": "reject",
     "reject": "reject",
     "review": "review",
     "limit": "limit",

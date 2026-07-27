@@ -1404,6 +1404,32 @@ def test_vintage_template_threads_label_semantics_and_drop_nan_labels(tmp_path):
     assert step.inputs["drop_nan_labels"] is False
 
 
+def test_risk_analysis_report_template_runs_terminal_report_tool(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("risk_analysis_report"),
+        {
+            "analysis_kind": "vtg_terminal",
+            "dataset_id": "dataset-1",
+            "column_map": {
+                "product": "product",
+                "cohort": "cohort",
+            },
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("risk_analysis", "generate_risk_analysis_report")
+    ]
+    assert plan.steps[0].inputs["analysis_kind"] == "vtg_terminal"
+    assert plan.steps[0].inputs["column_map"]["product"] == "product"
+
+
 def test_monitoring_run_template_chains_score_then_monitor_as_decision_point(tmp_path):
     """MONITORING_RUN records deterministic alert evidence without a local gate."""
     load_builtin_templates()

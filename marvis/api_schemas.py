@@ -114,7 +114,10 @@ class CreateTaskRequest(BaseModel):
     model_name: str
     model_version: str = ""
     validator: str
-    source_dir: str
+    # Agent risk-analysis tasks can be created before materials exist; the
+    # backend allocates a task-scoped intake directory for that one flow. Other
+    # task types still reject an empty source_dir at the router boundary.
+    source_dir: str = ""
     algorithm: str = ""
     target_col: str = "y"
     score_col: str = "pred"

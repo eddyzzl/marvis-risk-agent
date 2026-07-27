@@ -52,6 +52,10 @@ from marvis.agent.portfolio_setup import (
     build_states_gate_state,
     parse_states_reply,
 )
+from marvis.agent.risk_analysis_setup import (
+    advance_risk_analysis_setup,
+    latest_risk_analysis_intake,
+)
 from marvis.agent.strategy_setup import (
     STRATEGY_INTENT_FULL_DEVELOPMENT,
     STRATEGY_INTENT_LIMIT_PRICING,
@@ -89,7 +93,7 @@ from marvis.agent.strategy_request_compiler import (
     utterance_targets_strategy_sample_design,
     validate_strategy_request,
 )
-from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
+from marvis.agent.vintage_setup import VintageSetupError
 from marvis.agent.workflow_error_diagnostics import (
     build_workflow_error_diagnostic,
     failure_envelope_for_diagnostic,
@@ -394,6 +398,19 @@ _STRATEGY_SAMPLE_BOUND_TOOLS = frozenset(
         "tradeoff_view",
     }
 )
+_STRATEGY_SAMPLE_DESIGN_REQUIRED_FIELDS = (
+    "target_bad_value",
+    "drop_nan_labels",
+    "relationship",
+    "approval_population",
+    "risk_population",
+    "partitioning",
+    "maturity",
+    "performance_window",
+    "observation_window",
+    "field_bindings",
+    "historical_score",
+)
 
 
 @dataclass(frozen=True)
@@ -445,10 +462,10 @@ class _TurnHandlerSpec:
     format_user_display: Callable[[str], str]
     # join/modeling pass settings=/task= into append_driver_messages (so a
     # terminal "done" message can trigger MEM-1 memory capture). S2: strategy
-    # now also passes them (strategy_experience capture on adoption); feature/
-    # vintage still don't have an extractor wired, but ARCH-4 found they were
-    # never passed kwargs at all -- fixed alongside strategy so all five types
-    # are parameterized the same way instead of silently diverging.
+    # now also passes them (strategy_experience capture on adoption); vintage
+    # uses the same path for its bounded risk_analysis_experience envelope.
+    # Feature currently has no terminal extractor, but keeping all workflow
+    # specs parameterized the same way avoids silent divergence.
     pass_memory_kwargs: bool
     # Optional per-type success_criteria builder threaded into start_kwargs
     # (mirrors _modeling_success_criteria); None means this type never injects
@@ -683,19 +700,7 @@ def _run_driver_turn(
             task,
             code="strategy_sample_design_required",
             message=str(exc),
-            fields=(
-                "target_bad_value",
-                "drop_nan_labels",
-                "relationship",
-                "approval_population",
-                "risk_population",
-                "partitioning",
-                "maturity",
-                "performance_window",
-                "observation_window",
-                "field_bindings",
-                "historical_score",
-            ),
+            fields=_STRATEGY_SAMPLE_DESIGN_REQUIRED_FIELDS,
         )
     except spec.setup_error_types as exc:
         return append_workflow_error(repo, task, spec, exc, setup_error=True)
@@ -1011,13 +1016,23 @@ def _run_strategy_setup(
             constraints.append(f"通过率 ≥ {proposal.min_approval_rate:.2%}")
         slots = proposal.template_slots()
         context = _strategy_dataset_context(runtime, task, require_target=True)
-        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
-            runtime,
-            task,
-            context=context,
-            drop_nan_labels=False,
-            allow_native_risk_development=True,
-        )
+        try:
+            slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+                runtime,
+                task,
+                context=context,
+                drop_nan_labels=False,
+                allow_native_risk_development=True,
+            )
+        except _StrategySampleDesignRequiredError as exc:
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_sample_design_required",
+                message=str(exc),
+                fields=_STRATEGY_SAMPLE_DESIGN_REQUIRED_FIELDS,
+                ingest_notices=notices,
+            )
         repo.add_agent_message(
             task.id,
             role="assistant",
@@ -1052,13 +1067,23 @@ def _run_strategy_setup(
     bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
     slots = proposal.template_slots()
     context = _strategy_dataset_context(runtime, task, require_target=True)
-    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
-        runtime,
-        task,
-        context=context,
-        drop_nan_labels=False,
-        allow_native_risk_development=True,
-    )
+    try:
+        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=False,
+            allow_native_risk_development=True,
+        )
+    except _StrategySampleDesignRequiredError as exc:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_sample_design_required",
+            message=str(exc),
+            fields=_STRATEGY_SAMPLE_DESIGN_REQUIRED_FIELDS,
+            ingest_notices=notices,
+        )
     repo.add_agent_message(
         task.id,
         role="assistant",
@@ -1289,27 +1314,29 @@ def _run_vintage_setup(
     user_text: str | None,
 ) -> dict | tuple:
     backend, registry = _modeling_data_runtime(runtime.settings)
-    proposal = build_vintage_proposal(
+    decision = advance_risk_analysis_setup(
         registry,
         backend,
         task.id,
         task.source_dir,
+        user_text=user_text,
+        conversation=repo.list_agent_messages(task.id),
         target_col=getattr(task, "target_col", "") or None,
         time_col=getattr(task, "time_col", "") or None,
     )
     notices = registry.consume_ingest_notices(task.id)
+    metadata = dict(decision.metadata)
+    metadata["ingest_notices"] = notices
     repo.add_agent_message(
         task.id,
         role="assistant",
         stage="chat",
-        content=(
-            f"开始 Vintage 风险分析:样本 `{proposal.dataset_name}`，"
-            f"cohort `{proposal.cohort_col}`，MOB `{proposal.mob_col}`，坏账列 `{proposal.bad_col}`。"
-            f"{_ingest_notice_text(notices)}"
-        ),
-        metadata={"intent": "vintage", "ingest_notices": notices},
+        content=f"{decision.content}{_ingest_notice_text(notices)}",
+        metadata=metadata,
     )
-    return (proposal.template_id, proposal.template_slots(), {})
+    if decision.template_id is None:
+        return join_turn_response(repo, task.id)
+    return (decision.template_id, dict(decision.slots or {}), {})
 
 
 def _portfolio_success_criteria(task: TaskRecord) -> list[dict] | None:
@@ -12087,8 +12114,14 @@ def _strategy_request_clarification_response(
     code: str,
     message: str,
     fields: tuple[str, ...] | list[str] = (),
+    ingest_notices: list[dict] | None = None,
 ) -> dict:
     normalized_fields = list(dict.fromkeys(str(field) for field in fields))
+    normalized_notices = [
+        dict(notice)
+        for notice in (ingest_notices or [])
+        if isinstance(notice, dict)
+    ]
     metadata = {
         "intent": "strategy_request",
         "kind": "clarification",
@@ -12096,11 +12129,13 @@ def _strategy_request_clarification_response(
     }
     if normalized_fields:
         metadata["fields"] = normalized_fields
+    if normalized_notices:
+        metadata["ingest_notices"] = normalized_notices
     repo.add_agent_message(
         task.id,
         role="assistant",
         stage="chat",
-        content=message,
+        content=f"{message}{_ingest_notice_text(normalized_notices)}",
         metadata=metadata,
     )
     response = {
@@ -12111,6 +12146,8 @@ def _strategy_request_clarification_response(
     }
     if normalized_fields:
         response["fields"] = normalized_fields
+    if normalized_notices:
+        response["ingest_notices"] = normalized_notices
     return response
 
 
@@ -12691,6 +12728,14 @@ def _maybe_handle_adhoc_turn(
     """Return a turn response when this turn is an ad-hoc 问数 interaction, else
     None so the caller falls through to the normal type dispatch."""
     conversation = repo.list_agent_messages(task.id)
+    # Risk analysis owns the conversation while its ask-goal/material contract
+    # is open. A perfectly natural answer such as “可以做收益测算吗？” contains a
+    # question mark, but is an intake selection rather than an ad-hoc slice
+    # query. Let the vintage/risk setup state machine consume it.
+    if task.task_type == TASK_TYPE_VINTAGE:
+        risk_intake = latest_risk_analysis_intake(conversation)
+        if risk_intake is not None and risk_intake.get("phase") != "ready":
+            return None
     pending = _latest_adhoc_pending(conversation)
     if pending is not None:
         # Round B: a 口径确认门 is open. Only a confirm runs it; anything else

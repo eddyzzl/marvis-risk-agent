@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 import shutil
+import uuid
 
 from fastapi import APIRouter, Request, Response
 from marvis.errors import conflict, not_found, unprocessable
@@ -20,6 +21,7 @@ from marvis.api_task_payloads import list_task_payloads, task_payload
 from marvis.db import TaskRepository
 from marvis.domain import (
     TASK_TYPE_STRATEGY,
+    TASK_TYPE_VINTAGE,
     StrategyProfitInput,
     StrategyTaskInput,
     TaskCreate,
@@ -92,40 +94,55 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         raise unprocessable("oot_ks_min 必须是 0 到 1 之间的数字。")
     if payload.strategy_input is not None and payload.task_type != TASK_TYPE_STRATEGY:
         raise unprocessable("strategy_input 只能用于 strategy 类型任务。")
-    # Normalize source_dir once at write time so pipeline.py and /scan agree on
-    # the canonical absolute path.
-    normalized_source_dir = str(
-        normalize_source_dir(payload.source_dir, request.app.state.settings)
-    )
+    # Risk-analysis intake is intentionally conversation-first: an Agent task
+    # may exist before the user has uploaded any data. Give that task a safe,
+    # empty workspace-owned material directory instead of letting Path("")
+    # resolve to the server cwd. Every other flow keeps the existing material
+    # requirement.
+    source_dir_path = _create_source_dir(payload, request.app.state.settings)
+    normalized_source_dir = str(source_dir_path)
+    created_intake_dir = not str(payload.source_dir or "").strip()
     repo = _repo(request)
-    task = repo.create_task(
-        TaskCreate(
-            task_type=payload.task_type,
-            model_name=payload.model_name,
-            model_version=payload.model_version,
-            validator=payload.validator,
-            source_dir=normalized_source_dir,
-            algorithm=algorithm,
-            run_mode=payload.run_mode,
-            target_col=payload.target_col,
-            score_col=payload.score_col,
-            split_col=payload.split_col,
-            time_col=payload.time_col,
-            feature_columns=payload.feature_columns,
-            target_type=normalized_target_type(payload.target_type),
-            recipes=payload.recipes,
-            sample_weight_col=str(payload.sample_weight_col or "").strip(),
-            oot_ks_min=payload.oot_ks_min,
-            strategy_input=_strategy_task_input(payload),
-            metrics=payload.metrics,
-            capability_tier=normalized_capability_tier(payload.capability_tier),
-            notebook_path=payload.notebook_path,
-            sample_path=payload.sample_path,
-            pmml_path=payload.pmml_path,
-            dictionary_path=payload.dictionary_path,
-            report_values=payload.report_values,
+    try:
+        task = repo.create_task(
+            TaskCreate(
+                task_type=payload.task_type,
+                model_name=payload.model_name,
+                model_version=payload.model_version,
+                validator=payload.validator,
+                source_dir=normalized_source_dir,
+                algorithm=algorithm,
+                run_mode=payload.run_mode,
+                target_col=payload.target_col,
+                score_col=payload.score_col,
+                split_col=payload.split_col,
+                time_col=payload.time_col,
+                feature_columns=payload.feature_columns,
+                target_type=normalized_target_type(payload.target_type),
+                recipes=payload.recipes,
+                sample_weight_col=str(payload.sample_weight_col or "").strip(),
+                oot_ks_min=payload.oot_ks_min,
+                strategy_input=_strategy_task_input(payload),
+                metrics=payload.metrics,
+                capability_tier=normalized_capability_tier(payload.capability_tier),
+                notebook_path=payload.notebook_path,
+                sample_path=payload.sample_path,
+                pmml_path=payload.pmml_path,
+                dictionary_path=payload.dictionary_path,
+                report_values=payload.report_values,
+            )
         )
-    )
+    except Exception:
+        if created_intake_dir:
+            try:
+                source_dir_path.rmdir()
+            except OSError as exc:
+                logger.warning(
+                    "failed to clean unclaimed risk intake dir %s: %s",
+                    source_dir_path,
+                    exc,
+                )
+        raise
     dispatch_platform_hook(
         getattr(request.app.state, "hook_dispatcher", None),
         "task.created",
@@ -133,6 +150,21 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         task_id=task.id,
     )
     return task_payload(repo, task, request.app.state.settings.tasks_dir)
+
+
+def _create_source_dir(payload: CreateTaskRequest, settings) -> Path:
+    raw = str(payload.source_dir or "").strip()
+    if raw:
+        return normalize_source_dir(raw, settings)
+    if payload.task_type != TASK_TYPE_VINTAGE or payload.run_mode != "agent":
+        raise unprocessable("source_dir is required")
+    intake_dir = (
+        Path(settings.workspace).resolve()
+        / "material_uploads"
+        / f"risk-intake-{uuid.uuid4().hex}"
+    )
+    intake_dir.mkdir(parents=True, exist_ok=False)
+    return normalize_source_dir(str(intake_dir), settings)
 
 
 def _strategy_task_input(payload: CreateTaskRequest) -> StrategyTaskInput | None:
@@ -187,12 +219,17 @@ def purge_preview(task_id: str, request: Request) -> dict:
 @router.delete("/tasks/{task_id}", status_code=204)
 def delete_task(task_id: str, request: Request) -> None:
     repo = _repo(request)
-    get_task_or_404(repo, task_id)
+    task = get_task_or_404(repo, task_id)
     reject_if_task_has_active_job(repo, task_id)
 
     settings = request.app.state.settings
     task_dir = _lexical_child_path(settings.tasks_dir, task_id)
     datasets_root = getattr(settings, "datasets_dir", None)
+    owned_intake_dir = _unshared_task_owned_risk_intake_dir(
+        repo,
+        task,
+        settings,
+    )
 
     def validate_dataset_source_path(relative_path: str) -> None:
         if datasets_root is not None:
@@ -247,6 +284,45 @@ def delete_task(task_id: str, request: Request) -> None:
                 shutil.rmtree(task_datasets_dir)
         except OSError as exc:
             logger.warning("datasets dir cleanup failed for %s: %s", task_id, exc)
+    if owned_intake_dir is not None:
+        try:
+            if owned_intake_dir.is_symlink():
+                owned_intake_dir.unlink()
+            elif owned_intake_dir.exists():
+                shutil.rmtree(owned_intake_dir)
+        except OSError as exc:
+            logger.warning("risk intake dir cleanup failed for %s: %s", task_id, exc)
+
+
+def _unshared_task_owned_risk_intake_dir(repo, task, settings) -> Path | None:
+    if task.task_type != TASK_TYPE_VINTAGE:
+        return None
+    uploads_root = (Path(settings.workspace).resolve() / "material_uploads").resolve()
+    source = Path(str(task.source_dir or "")).absolute()
+    try:
+        source_parent = source.parent.resolve()
+    except OSError:
+        return None
+    if (
+        source_parent != uploads_root
+        or not source.name.startswith("risk-intake-")
+    ):
+        return None
+    resolved = None if source.is_symlink() else source.resolve()
+    if resolved is not None and resolved.parent != uploads_root:
+        return None
+    for other in repo.list_tasks():
+        if other.id == task.id:
+            continue
+        other_source = Path(str(other.source_dir or "")).absolute()
+        if other_source == source:
+            return None
+        try:
+            if resolved is not None and other_source.resolve() == resolved:
+                return None
+        except OSError:
+            continue
+    return source
 
 
 def _lexical_child_path(root: Path, relative_path: str) -> Path:

@@ -361,6 +361,11 @@ _STRATEGY_TYPES = frozenset(
     {"approval", "reject", "limit", "pricing", "segmentation"}
 )
 _MAX_INPUT_BYTES = 1024 * 1024
+# Report publication revalidates all governed sources and verifies four output
+# files while holding the writer lock. The connection-wide 5s default remains
+# appropriate for ordinary operations, but is too short for a second identical
+# report writer on a loaded runner. Keep this operation-specific wait bounded.
+_REPORT_PUBLICATION_BUSY_TIMEOUT_MS = 30_000
 
 _BOUNDARY_ERRORS = (
     ArtifactTransactionError,
@@ -939,7 +944,7 @@ def _publish_report(
     result: dict[str, Any] | None = None
     try:
         with runtime.task_artifacts.transaction() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            _begin_report_publication(conn)
             try:
                 _revalidate_sources(
                     conn,
@@ -1020,6 +1025,11 @@ def _publish_report(
     if result is None:
         raise StrategyError("strategy report publication returned no result")
     return result
+
+
+def _begin_report_publication(conn: sqlite3.Connection) -> None:
+    conn.execute(f"PRAGMA busy_timeout={_REPORT_PUBLICATION_BUSY_TIMEOUT_MS}")
+    conn.execute("BEGIN IMMEDIATE")
 
 
 def _prepare_outputs_under_lock(

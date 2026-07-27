@@ -279,7 +279,12 @@ class GovernanceService:
             raise ApprovalBindingError(
                 f"effect target input is missing: {target_policy.id_input}"
             )
-        meta = self._strategies.get_strategy_meta(target_id)
+        try:
+            meta = self._strategies.get_strategy_meta(target_id)
+        except (TypeError, ValueError) as exc:
+            raise ApprovalBindingError(
+                "strategy target metadata is invalid"
+            ) from exc
         if meta is None:
             raise ApprovalBindingError(f"strategy target not found: {target_id}")
         target_task_id = str(meta.get("task_id") or "")
@@ -301,8 +306,14 @@ class GovernanceService:
                 "strategy target lifecycle state is invalid"
             ) from exc
         strategy_type = str(meta.get("strategy_type") or "")
+        try:
+            strategy_items = self._strategies.list_meta_for_task(target_task_id)
+        except (TypeError, ValueError) as exc:
+            raise ApprovalBindingError(
+                "strategy lifecycle inventory is invalid"
+            ) from exc
         champion_ids: list[str] = []
-        for item in self._strategies.list_meta_for_task(target_task_id):
+        for item in strategy_items:
             if str(item.get("strategy_type") or "") != strategy_type:
                 continue
             try:
@@ -316,7 +327,12 @@ class GovernanceService:
             if adopted:
                 champion_ids.append(str(item["id"]))
         champion_ids.sort()
-        strategy_spec_hash = self._strategies.get_strategy_spec_hash(target_id)
+        try:
+            strategy_spec_hash = self._strategies.get_strategy_spec_hash(target_id)
+        except (TypeError, ValueError) as exc:
+            raise ApprovalBindingError(
+                "strategy target definition is invalid"
+            ) from exc
         if not strategy_spec_hash:
             raise ApprovalBindingError(
                 f"strategy target definition not found: {target_id}"

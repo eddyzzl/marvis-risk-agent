@@ -1414,6 +1414,9 @@ def test_create_dialog_auto_fills_removed_report_values():
 def test_create_dialog_uses_visual_run_mode_cards():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
+    run_mode_start = index_html.index('class="run-mode-cards"')
+    run_mode_end = index_html.index("</section>", run_mode_start)
+    run_mode_markup = index_html[run_mode_start:run_mode_end]
 
     assert 'class="run-mode-cards"' in index_html
     assert 'class="run-mode-card selected-tone-amber"' in index_html
@@ -1430,8 +1433,8 @@ def test_create_dialog_uses_visual_run_mode_cards():
     assert 'value="agent"' in index_html
     assert 'name="runMode" type="radio" value="manual" checked' not in index_html
     assert 'name="runMode" type="radio" value="agent" disabled' not in index_html
-    assert "预留" not in index_html
-    assert "后续" not in index_html
+    assert "预留" not in run_mode_markup
+    assert "后续" not in run_mode_markup
     assert 'class="mode-choice"' not in index_html
 
     assert ".run-mode-cards {" in styles_css
@@ -1504,10 +1507,10 @@ def test_create_dialog_updates_run_mode_copy_by_task_type():
             "识别评分列和目标列，生成候选规则，在回测前确认并查看收益权衡",
             "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
         ],
-        "vintage": [
-            "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
-            "Agent 识别 Vintage 字段，计算曲线并解释 cohort 风险变化",
-        ],
+            "vintage": [
+                "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
+                "Agent 先访谈分析目标，再校验材料字段，计算并生成可下载报表与重点结论",
+            ],
     }
     for task_type, copy_items in expected_copy.items():
         task_start = definitions.index(f"  {task_type}: {{")
@@ -1812,6 +1815,28 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
     # busy state (no separate progress-bar component).
     assert "MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES" in create_dialog_js
     assert "onProgress: showPercent" in create_body
+
+
+def test_risk_analysis_can_defer_materials_and_upload_from_composer():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    task_types_js = _read_static("js/task-types.js")
+
+    assert "deferredMaterials: true" in task_types_js
+    assert "allowDeferredMaterials" in create_dialog_js
+    assert "files.length === 0 && !allowDeferredMaterials" in create_dialog_js
+    assert "(!payload.source_dir && !allowDeferredMaterials)" in create_dialog_js
+    assert 'id="riskMaterialUploadInput"' in index_html
+    assert 'id="riskMaterialUploadButton"' in index_html
+    assert 'accept=".csv,.xlsx,.xlsm,.parquet"' in index_html
+    assert 'import { uploadDataset } from "./js/v2/api_v2.js";' in app_js
+    assert "function selectedTaskIsRiskAnalysisAgent" in app_js
+    assert "async function uploadRiskAnalysisMaterials" in app_js
+    assert 'await uploadDataset(taskId, file, { role: "sample" });' in app_js
+    assert "请检查表结构和字段是否满足要求" in app_js
+    assert '$("riskMaterialUploadButton").onclick' in app_js
+    assert '$("riskMaterialUploadInput").addEventListener("change"' in app_js
 
 
 def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
@@ -6391,9 +6416,11 @@ def test_agent_mode_creation_routes_non_validation_tasks_to_conversation_compose
     assert 'const isValidationTask = (task.task_type || createTaskDialog.activeTaskType() || defaultTaskType) === "validation";' in create_scan_body
     assert "const activeDialogTaskType = createTaskDialog.activeTaskType();" in agent_branch
     assert "const definition = taskTypeDefinition(task.task_type || activeDialogTaskType);" in agent_branch
-    # Non-validation agent tasks route to the inline conversation composer:
-    # createTask() already seeded it via prefillAgentTaskInstruction, so the
-    # branch only focuses the composer (the V2 plan dialog is retired).
+    # Risk analysis starts its deterministic intake immediately; other
+    # non-validation Agent tasks still route to the inline composer.
+    assert 'if (!isValidationTask && task.task_type === "vintage")' in agent_branch
+    assert "await dispatchDriverStart(taskId);" in agent_branch
+    assert "请先告诉 Agent 要分析什么" in agent_branch
     assert "if (!isValidationTask && definition.initialGoal)" in agent_branch
     assert '$("agentComposerInput")?.focus?.();' in agent_branch
     assert "已填入建议目标，确认后发送即可。" in agent_branch
@@ -6452,16 +6479,17 @@ def test_agent_task_creation_prefills_conversation_composer_with_goal():
     assert "input.value = definition.initialGoal;" in helper_body
     assert "autoGrowComposerInput();" in helper_body
     assert "updateAgentSendDisabled();" in helper_body
-    assert "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据" in task_types_js
+    assert "先创建任务并说明要分析什么" in task_types_js
     for goal in (
         'initialGoal: "开始数据处理"',
         'initialGoal: "开始特征分析"',
-        'initialGoal: "开始风险分析"',
         'initialGoal: "开始建模"',
         'initialGoal: "开始模型验证"',
         'initialGoal: "开始策略开发"',
     ):
         assert goal in task_types_js
+    assert "deferredMaterials: true" in task_types_js
+    assert 'initialGoal: ""' in task_types_js
     assert "请基于当前任务材料" not in task_types_js
     assert "先识别 cohort、MOB 和坏账标签字段" not in task_types_js
     assert "计算资产 Vintage 曲线并给出风险观察" not in task_types_js
@@ -6469,6 +6497,8 @@ def test_agent_task_creation_prefills_conversation_composer_with_goal():
 
     # createTask() invokes the prefill once the task is created.
     assert "prefillAgentTaskInstruction(task);" in app_js
+    assert 'task.task_type === "vintage"' in app_js
+    assert "await dispatchDriverStart(taskId);" in app_js
     # The retired V2 workspace composer helpers are gone.
     assert "function seedV2GoalComposer" not in app_js
     assert "function openV2WorkspaceWithGoal" not in app_js
@@ -6519,6 +6549,7 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
             "    return { id: `task-${createApiCalls}`, run_mode: 'agent' };",
             "  },",
             "};",
+            "const strategyCandidateLabController = { selectTask() { return Promise.resolve(); } };",
             "function taskTypeDefinition() { return { initialGoal: '', label: '建模' }; }",
             "const defaultTaskType = 'modeling';",
             "function prefillAgentTaskInstruction() {}",
@@ -7932,6 +7963,12 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert '<option value="active">启用</option>' in status_filter
     assert '<option value="deleted">已删除</option>' in index_html
     assert '<option value="rejected">已拒绝</option>' in index_html
+    for memory_type in (
+        "join_experience",
+        "strategy_experience",
+        "risk_analysis_experience",
+    ):
+        assert f'<option value="{memory_type}">' in index_html
     assert 'data-agent-memory-action="inspect"' in memory_panel_js
     assert 'data-agent-memory-action="disable"' in memory_panel_js
     assert 'data-agent-memory-action="enable"' in memory_panel_js

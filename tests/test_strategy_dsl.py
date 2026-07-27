@@ -493,6 +493,15 @@ def test_value_actions_preserve_legacy_row_output_alias(
     assert action.to_dict()["output_value"] == output_value
 
 
+def test_structured_output_value_does_not_require_hashability() -> None:
+    action = StrategyAction(
+        type="approval", output_value={"action": "approve", "reason": "policy"}
+    )
+
+    assert action.value == "approve"
+    assert action.output_value == {"action": "approve", "reason": "policy"}
+
+
 @pytest.mark.parametrize(
     ("action_type", "value", "message"),
     [

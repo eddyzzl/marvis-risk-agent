@@ -29,11 +29,18 @@ from typing import Any
 from marvis.agent_memory.extractors import (
     extract_join_experience,
     extract_model_experience,
+    extract_risk_analysis_experience,
     extract_strategy_experience,
 )
 from marvis.agent_memory.retrieval import MemoryQuery, compare_model_experience, retrieve_with_distillations
 from marvis.agent_memory.store import AgentMemoryStore
-from marvis.domain import TASK_TYPE_DATA_JOIN, TASK_TYPE_MODELING, TASK_TYPE_STRATEGY, TaskRecord
+from marvis.domain import (
+    TASK_TYPE_DATA_JOIN,
+    TASK_TYPE_MODELING,
+    TASK_TYPE_STRATEGY,
+    TASK_TYPE_VINTAGE,
+    TaskRecord,
+)
 from marvis.memory_policy import load_memory_policy
 from marvis.packs.strategy.backtest_compat import approval_backtest_projection
 from marvis.packs.strategy.errors import StrategyError
@@ -96,6 +103,8 @@ def capture_agent_memory_for_driver_done(
             _capture_join_experience(settings, task, done_message_content, done_message_metadata)
         elif task.task_type == TASK_TYPE_STRATEGY:
             _capture_strategy_experience(settings, task)
+        elif task.task_type == TASK_TYPE_VINTAGE:
+            _capture_risk_analysis_experience(settings, task, done_message_metadata)
     except Exception:
         # Memory capture is best-effort; never fail the user-facing turn over it.
         return
@@ -209,6 +218,26 @@ def _capture_strategy_experience(settings, task: TaskRecord) -> None:
         "scope": f"strategy:{strategy.strategy_type}:{task.model_name or task.id}",
     }
     candidate = extract_strategy_experience(result)
+    if candidate is None:
+        return
+    store = AgentMemoryStore(settings.db_path)
+    store.create(candidate, task_id=task.id)
+
+
+def _capture_risk_analysis_experience(
+    settings,
+    task: TaskRecord,
+    metadata: dict[str, Any] | None,
+) -> None:
+    report = (metadata or {}).get("risk_analysis_report")
+    if not isinstance(report, dict) or not report:
+        return
+    result = dict(report)
+    # Provenance is owned by the terminal task, never by a user-controlled
+    # report field. Overwrite both aliases before governed extraction.
+    result["task_id"] = task.id
+    result["source_task_id"] = task.id
+    candidate = extract_risk_analysis_experience(result)
     if candidate is None:
         return
     store = AgentMemoryStore(settings.db_path)

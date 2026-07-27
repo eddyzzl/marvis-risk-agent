@@ -157,6 +157,19 @@ class DistillationEngine:
                     str(payload.get("channel") or ""),
                 ]
             )
+        if category == "risk_analysis_experience":
+            product_scope = payload.get("product_scope")
+            if isinstance(product_scope, list):
+                scope = ",".join(sorted(str(item) for item in product_scope))
+            else:
+                scope = str(product_scope or "general")
+            return ":".join(
+                [
+                    "risk_analysis_experience",
+                    str(payload.get("analysis_kind") or "general"),
+                    scope,
+                ]
+            )
         if category == "task_experience":
             return f"task_experience:{payload.get('status') or payload.get('failure_type') or 'general'}"
         if category == "user_preference":
@@ -229,6 +242,11 @@ class DistillationEngine:
             }
         if category == "model_experience":
             return _merge_model_experience(payloads, _distinct_task_support(members))
+        if category == "risk_analysis_experience":
+            return _merge_risk_analysis_experience(
+                payloads,
+                _distinct_task_support(members),
+            )
         if category == "user_preference":
             return {
                 "statements": sorted({str(payload.get("preference")) for payload in payloads if payload.get("preference")}),
@@ -298,6 +316,58 @@ def _merge_model_experience(payloads: list[dict[str, Any]], support: int) -> dic
     return result
 
 
+def _merge_risk_analysis_experience(
+    payloads: list[dict[str, Any]],
+    support: int,
+) -> dict[str, Any]:
+    products: list[str] = []
+    periods: list[str] = []
+    assumptions: list[str] = []
+    key_points: list[str] = []
+    red_flags: list[str] = []
+    source_task_ids: list[str] = []
+    report_files: list[str] = []
+    headline_metrics: dict[str, Any] = {}
+    column_map: dict[str, str] = {}
+    for payload in payloads:
+        scope = payload.get("product_scope")
+        if isinstance(scope, list):
+            products.extend(str(item) for item in scope)
+        else:
+            products.append(str(scope or ""))
+        periods.append(str(payload.get("as_of_period") or ""))
+        assumptions.extend(str(item) for item in payload.get("assumptions") or [])
+        key_points.extend(str(item) for item in payload.get("key_points") or [])
+        red_flags.extend(str(item) for item in payload.get("red_flags") or [])
+        source_task_ids.append(str(payload.get("source_task_id") or ""))
+        report_files.append(str(payload.get("report_file") or ""))
+        for name, value in (payload.get("headline_metrics") or {}).items():
+            if len(headline_metrics) >= 16:
+                break
+            headline_metrics.setdefault(str(name), value)
+        for canonical, source in (payload.get("column_map") or {}).items():
+            if len(column_map) >= 32:
+                break
+            column_map.setdefault(str(canonical), str(source))
+    return {
+        "analysis_kind": _first_present(payloads, "analysis_kind"),
+        "product_scope": _unique_text_values(products, limit=12),
+        "as_of_periods": _unique_text_values(periods, limit=12),
+        "headline_metrics": headline_metrics,
+        "assumptions": _unique_text_values(assumptions, limit=12),
+        "key_points": _unique_text_values(key_points, limit=12),
+        "red_flags": _unique_text_values(red_flags, limit=12),
+        "column_map": column_map,
+        "report_files": _unique_text_values(report_files, limit=12),
+        "source_task_ids": _unique_text_values(source_task_ids, limit=20),
+        "support": support,
+    }
+
+
+def _unique_text_values(values: list[str], *, limit: int) -> list[str]:
+    return sorted({value for value in values if value})[:limit]
+
+
 def _numeric_metric_values(payloads: list[dict[str, Any]], metric: str) -> list[float]:
     values = []
     for payload in payloads:
@@ -323,6 +393,13 @@ def _template_summary(category: str, structured: dict) -> str:
     if category == "model_experience":
         model = structured.get("model_name") or "历史模型"
         return f"模型经验：{model} 在相近范围内已有 {structured.get('support', 0)} 条历史记录。"
+    if category == "risk_analysis_experience":
+        analysis_kind = structured.get("analysis_kind") or "风险"
+        products = "、".join((structured.get("product_scope") or [])[:3]) or "相关产品"
+        return (
+            f"风险分析经验：{products}的{analysis_kind}分析已有"
+            f" {structured.get('support', 0)} 条历史记录。"
+        )
     if category == "user_preference":
         statements = structured.get("statements") or []
         return "用户偏好经验：" + ("；".join(statements[:3]) if statements else "有重复偏好记录。")
@@ -340,7 +417,7 @@ def _first_present(payloads: list[dict[str, Any]], key: str) -> Any:
 
 
 def _entry_id(entry: Any) -> str:
-    return str(entry.get("id") if isinstance(entry, dict) else getattr(entry, "id"))
+    return str(entry.get("id") if isinstance(entry, dict) else entry.id)
 
 
 def _entry_source_task_id(entry: Any) -> str | None:
@@ -356,16 +433,16 @@ def _distinct_task_support(members: list[Any]) -> int:
 
 
 def _entry_category(entry: Any) -> str:
-    return str(entry.get("memory_type") if isinstance(entry, dict) else getattr(entry, "memory_type"))
+    return str(entry.get("memory_type") if isinstance(entry, dict) else entry.memory_type)
 
 
 def _entry_payload(entry: Any) -> dict[str, Any]:
-    payload = entry.get("payload") if isinstance(entry, dict) else getattr(entry, "payload")
+    payload = entry.get("payload") if isinstance(entry, dict) else entry.payload
     return payload if isinstance(payload, dict) else {}
 
 
 def _entry_summary(entry: Any) -> str:
-    return str(entry.get("summary") if isinstance(entry, dict) else getattr(entry, "summary"))
+    return str(entry.get("summary") if isinstance(entry, dict) else entry.summary)
 
 
 def _now_iso() -> str:

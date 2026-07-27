@@ -58,6 +58,7 @@ import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
+import { uploadDataset } from "./js/v2/api_v2.js";
 import {
   handleAdoptionConfirmClick as handleAdoptionConfirmClickController,
   renderAdoptionGate,
@@ -2703,6 +2704,18 @@ function selectedTaskIsAgentMode(task = selectedTask) {
   return task?.run_mode === "agent";
 }
 
+function selectedTaskIsRiskAnalysisAgent(task = selectedTask) {
+  return task?.run_mode === "agent" && task?.task_type === "vintage";
+}
+
+function syncRiskMaterialUploadControl() {
+  const button = $("riskMaterialUploadButton");
+  if (!button) return;
+  const visible = selectedTaskIsRiskAnalysisAgent();
+  button.classList.toggle("hidden", !visible);
+  button.disabled = !visible || taskBusyAction(selectedTaskId) === "agent";
+}
+
 function updateWorkspaceGreeting(now = new Date()) {
   updateWorkspaceGreetingView({ now, getElementById: $ });
 }
@@ -4918,6 +4931,7 @@ function renderAgentConversation() {
   composer?.classList.toggle("hidden", !isAgent);
   composer?.setAttribute("aria-hidden", isAgent ? "false" : "true");
   workspace?.classList.toggle("agent-composer-active", isAgent);
+  syncRiskMaterialUploadControl();
   renderAgentAcceptanceModePreference();
   renderAgentModelOptions();
   renderAgentEffortPreference();
@@ -6256,6 +6270,34 @@ async function startAgentValidation() {
   await waitForAgentValidation(taskId);
 }
 
+async function uploadRiskAnalysisMaterials(files) {
+  const taskId = requireTaskId(selectedTaskId, "上传风险分析材料");
+  if (!selectedTaskIsRiskAnalysisAgent()) {
+    throw new Error("当前任务不是 Agent 风险分析任务。");
+  }
+  const selectedFiles = Array.from(files || []);
+  if (!selectedFiles.length) return;
+  const uploadButton = $("riskMaterialUploadButton");
+  if (uploadButton) uploadButton.disabled = true;
+  setAgentComposerNotice(`正在上传 ${selectedFiles.length} 个材料文件...`);
+  try {
+    for (const file of selectedFiles) {
+      await uploadDataset(taskId, file, { role: "sample" });
+    }
+    const names = selectedFiles.map((file) => file.name).join("、");
+    const input = $("agentComposerInput");
+    input.value = `已上传材料：${names}。请检查表结构和字段是否满足要求，并继续分析。`;
+    autoGrowComposerInput();
+    updateAgentSendDisabled();
+    setAgentComposerNotice(`已上传 ${selectedFiles.length} 个文件，正在校验字段...`);
+    await startAgentValidation();
+  } finally {
+    if (uploadButton) uploadButton.disabled = false;
+    const picker = $("riskMaterialUploadInput");
+    if (picker) picker.value = "";
+  }
+}
+
 async function dispatchAgentValidation(taskId = selectedTaskId) {
   const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "Agent 初始化");
   const modelId = $("agentModelSelect").value || "";
@@ -6441,6 +6483,12 @@ async function createTaskAndScan() {
       setBusy(null, "", taskId);
       await loadAgentMessages(taskId);
       renderAll();
+      if (!isValidationTask && task.task_type === "vintage") {
+        await dispatchDriverStart(taskId);
+        renderAll();
+        setActionStatus("风险分析任务已创建，请先告诉 Agent 要分析什么。", "success");
+        return;
+      }
       if (!isValidationTask && definition.initialGoal) {
         // createTask() already seeded the conversation composer via
         // prefillAgentTaskInstruction; just focus it (the V2 plan dialog is retired).
@@ -7134,6 +7182,18 @@ for (const id of agentComposerSelectIds) {
     if (event.key === "Escape") event.currentTarget.blur();
   });
 }
+$("riskMaterialUploadButton").onclick = () => {
+  if (!selectedTaskIsRiskAnalysisAgent() || taskBusyAction(selectedTaskId) === "agent") return;
+  $("riskMaterialUploadInput")?.click();
+};
+$("riskMaterialUploadInput").addEventListener("change", (event) => {
+  const files = event.currentTarget.files;
+  if (!files?.length) return;
+  runAction(
+    () => uploadRiskAnalysisMaterials(files),
+    { actionId: "agent", busyText: "正在上传并校验风险分析材料..." },
+  );
+});
 $("sendAgentMessageButton").onclick = () => {
   if (agentSendIsStopMode()) {
     runAction(stopAgentValidation, { actionId: "agent", busyText: "Agent 正在停止..." });

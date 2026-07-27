@@ -35,7 +35,7 @@ _LOCKED_HASHES = {
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
     "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
-    "STRATEGY_REQUEST_COMPILER_SYS": (50, "ea9b6bee031f8817"),
+    "STRATEGY_REQUEST_COMPILER_SYS": (51, "c9f6b9551c8e265c"),
 }
 
 
@@ -75,7 +75,7 @@ def test_prompt_version_snapshot_covers_all_prompts():
 
 
 def test_strategy_compiler_prompt_owns_pool_materialization_contract():
-    assert STRATEGY_REQUEST_COMPILER_SYS.version == 50
+    assert STRATEGY_REQUEST_COMPILER_SYS.version == 51
     assert "strategy_pool_materialize" in STRATEGY_REQUEST_COMPILER_SYS.text
     assert "draft Strategy" in STRATEGY_REQUEST_COMPILER_SYS.text
     assert "不采纳、不部署" in STRATEGY_REQUEST_COMPILER_SYS.text

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -373,15 +375,20 @@ def test_issued_effect_approval_is_fenced_by_live_binding_drift(tmp_path, drift)
             )
     else:
         with connect(app.state.settings.db_path) as conn:
+            row = conn.execute(
+                "SELECT dsl_json FROM strategies WHERE id = 'strategy-1'"
+            ).fetchone()
+            payload = json.loads(row["dsl_json"])
+            payload["rules"][0]["condition"]["value"] = 701
             conn.execute(
-                "UPDATE strategies SET description = 'changed after approval' "
-                "WHERE id = 'strategy-1'"
+                "UPDATE strategies SET dsl_json = ? WHERE id = 'strategy-1'",
+                (json.dumps(payload, separators=(",", ":")),),
             )
 
     plan = app.state.plan_repo.load_plan("plan-1")
     step = next(item for item in plan.steps if item.id == "step-adopt")
     manifest, tool = app.state.tool_registry.resolve_with_manifest(step.tool_ref)
-    if drift in {"revision", "target"}:
+    if drift in {"revision", "target", "strategy_spec"}:
         with pytest.raises(ApprovalBindingError):
             app.state.governance_service.resolve_binding(
                 task_id=plan.task_id,

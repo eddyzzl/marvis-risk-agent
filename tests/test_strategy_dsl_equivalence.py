@@ -120,6 +120,19 @@ def test_legacy_decisions_map_to_typed_actions(
     assert converted.action.stop is True
 
 
+def test_legacy_decline_maps_to_reject_and_preserves_row_output() -> None:
+    converted = legacy_rule_to_dsl(
+        StrategyRule(condition="score < 700", decision="decline", value=None),
+        priority=10,
+        ordinal=0,
+    )
+
+    assert converted.action.type == "reject"
+    assert converted.action.value == "reject"
+    assert converted.action.output_value == "decline"
+    assert converted.action.decision_value == "decline"
+
+
 def test_generated_legacy_rule_ids_are_stable_and_content_sensitive() -> None:
     rule = StrategyRule(condition="score >= 700", decision="approve", value=None)
     first = legacy_rule_to_dsl(rule, priority=10, ordinal=0)

@@ -7488,6 +7488,45 @@ body[data-theme="dark"] .agent-composer {
   min-width: 0;
 }
 
+.agent-attach {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.agent-attach.hidden {
+  display: none;
+}
+
+.agent-attach svg {
+  width: 18px;
+  height: 18px;
+}
+
+.agent-attach:hover:not(:disabled) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.agent-attach:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.agent-attach:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .agent-composer-chip {
   position: relative;
   display: inline-flex;

@@ -21,6 +21,15 @@ from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.state_machine import ConflictError
 
 
+_STRATEGY_SAMPLE_DESIGN_REF = {
+    "artifact_id": "a" * 64,
+    "artifact_content_hash": "b" * 64,
+    "sample_design_id": "strategy-sample-design-" + "c" * 24,
+    "sample_design_content_hash": "d" * 64,
+    "partition": "development",
+}
+
+
 class FakeIntentRouter:
     def __init__(self, kind="template"):
         self.kind = kind
@@ -868,6 +877,7 @@ def test_create_app_can_create_strategy_analysis_plan_from_goal(tmp_path):
             "slots": {
                 "dataset_id": "dataset-1",
                 "target_col": "bad_flag",
+                "sample_design_ref": _STRATEGY_SAMPLE_DESIGN_REF,
                 "score_col": "score",
                 "strategy_type": "approval",
                 "rules": [{"condition": "score < 600", "decision": "reject"}],
@@ -884,7 +894,7 @@ def test_create_app_can_create_strategy_analysis_plan_from_goal(tmp_path):
         "backtest_strategy",
         "tradeoff_view",
     ]
-    assert [step["title"] for step in plan["steps"] if step["needs_confirmation"]] == ["回测策略"]
+    assert not any(step["needs_confirmation"] for step in plan["steps"])
     assert [step["title"] for step in plan["steps"] if step["decision_point"]] == ["回测策略"]
 
 
@@ -941,7 +951,9 @@ def test_create_app_can_create_strategy_development_plan_with_business_contract(
             "slots": {
                 "dataset_id": "dataset-1",
                 "target_col": "bad_flag",
+                "sample_design_ref": _STRATEGY_SAMPLE_DESIGN_REF,
                 "score_col": "score",
+                "strategy_type": "approval",
                 "objective": "max_approval",
                 "max_bad_rate": 0.05,
             },
@@ -989,7 +1001,9 @@ def test_create_plan_holds_task_job_lock_against_strategy_input_continuation(tmp
                 "slots": {
                     "dataset_id": "dataset-1",
                     "target_col": "bad_flag",
+                    "sample_design_ref": _STRATEGY_SAMPLE_DESIGN_REF,
                     "score_col": "score",
+                    "strategy_type": "approval",
                     "objective": "max_approval",
                     "max_bad_rate": 0.05,
                 },
@@ -1036,7 +1050,9 @@ def test_strategy_development_generic_plan_rejects_missing_business_contract(tmp
             "slots": {
                 "dataset_id": "dataset-1",
                 "target_col": "bad_flag",
+                "sample_design_ref": _STRATEGY_SAMPLE_DESIGN_REF,
                 "score_col": "score",
+                "strategy_type": "approval",
             },
         },
     )
@@ -1063,7 +1079,9 @@ def test_strategy_development_generic_profit_plan_rejects_incomplete_inputs(tmp_
             "slots": {
                 "dataset_id": "dataset-1",
                 "target_col": "bad_flag",
+                "sample_design_ref": _STRATEGY_SAMPLE_DESIGN_REF,
                 "score_col": "score",
+                "strategy_type": "approval",
                 "objective": "max_profit",
                 "max_bad_rate": 0.05,
             },
@@ -1098,7 +1116,9 @@ def test_strategy_development_generic_plan_rejects_out_of_range_contract(tmp_pat
             "slots": {
                 "dataset_id": "dataset-1",
                 "target_col": "bad_flag",
+                "sample_design_ref": _STRATEGY_SAMPLE_DESIGN_REF,
                 "score_col": "score",
+                "strategy_type": "approval",
                 "objective": "max_profit",
                 "max_bad_rate": 1.2,
                 "min_approval_rate": -0.1,

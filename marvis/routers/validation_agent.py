@@ -48,7 +48,12 @@ from marvis.api_schemas import (
     StrategyTaskInputRequest,
 )
 from marvis.api_task_helpers import get_task_or_404, reject_if_task_has_active_job
-from marvis.domain import TASK_TYPE_STRATEGY, StrategyProfitInput, StrategyTaskInput
+from marvis.domain import (
+    TASK_TYPE_STRATEGY,
+    TASK_TYPE_VINTAGE,
+    StrategyProfitInput,
+    StrategyTaskInput,
+)
 
 
 router = APIRouter(prefix="/api", tags=["validation-agent"])
@@ -158,7 +163,19 @@ def start_agent_task(
     require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
     require_wired_agent_task_type(task, WIRED_AGENT_TASK_TYPES)
     if task.task_type in DRIVER_AGENT_TASK_TYPES:
-        agent_client = resolve_driver_agent_client(request, task, payload)
+        # The first risk-analysis turn is a deterministic intake question and
+        # must be visible immediately after task creation, even before any
+        # material (or model call) exists. Later turns keep the normal Agent
+        # contract and resolve the configured LLM before a plan is driven.
+        is_initial_risk_intake = (
+            task.task_type == TASK_TYPE_VINTAGE
+            and not repo.list_agent_messages(task.id, limit=1)
+        )
+        agent_client = (
+            None
+            if is_initial_risk_intake
+            else resolve_driver_agent_client(request, task, payload)
+        )
         return dispatch_driver_turn(
             request,
             repo,

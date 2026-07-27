@@ -4353,6 +4353,33 @@ VINTAGE_ANALYSIS = WorkflowTemplate(
     source="builtin",
 )
 
+
+RISK_ANALYSIS_REPORT = WorkflowTemplate(
+    id="risk_analysis_report",
+    title="风险与收益测算报告",
+    goal_patterns=("VTG终值", "年化不良", "收益测算", "risk analysis report"),
+    slots=(
+        SlotSpec("analysis_kind", True, "task_context", "vtg_terminal or profitability"),
+        SlotSpec("dataset_id", True, "task_context", "Registered canonical input dataset"),
+        SlotSpec("column_map", True, "task_context", "Canonical-to-source column mapping"),
+    ),
+    steps=(
+        StepTemplate(
+            title="生成风险分析报告",
+            tool_ref=ToolRef("risk_analysis", "generate_risk_analysis_report"),
+            inputs_template={
+                "analysis_kind": "{slot:analysis_kind}",
+                "dataset_id": "{slot:dataset_id}",
+                "column_map": "{slot:column_map}",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "report_path"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
 SLICE_AGGREGATE = WorkflowTemplate(
     # S6 ad-hoc 问数 entry: a single deterministic group-by aggregate over a
     # ready dataset. The LLM only produced a validated SliceSpec (INV-1); the

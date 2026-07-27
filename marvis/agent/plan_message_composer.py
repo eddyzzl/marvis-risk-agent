@@ -163,6 +163,25 @@ class PlanMessageComposer:
                     parts.append(text)
         meta = {"plan_id": plan.id, "run_seq": run_seq, "tables": tables}
         if terminal is not None and output is not None:
+            if terminal.tool_ref.tool == "generate_risk_analysis_report":
+                # Keep a bounded, deterministic envelope for governed memory
+                # capture. Raw rows never enter conversation metadata.
+                allowed = (
+                    "analysis_kind",
+                    "product_scope",
+                    "as_of_period",
+                    "report_path",
+                    "headline_metrics",
+                    "key_points",
+                    "red_flags",
+                    "assumptions",
+                    "source_row_count",
+                    "row_count",
+                    "column_map",
+                )
+                meta["risk_analysis_report"] = {
+                    key: output[key] for key in allowed if key in output
+                }
             report_output, report_step = self._report_dependency_output(plan, terminal)
             delivery = build_model_delivery_payload(
                 output,
