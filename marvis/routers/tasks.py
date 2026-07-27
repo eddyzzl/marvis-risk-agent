@@ -277,6 +277,21 @@ def delete_task(task_id: str, request: Request) -> None:
                     exc,
                 )
         task_datasets_dir = datasets_root / task_id
+        # Original-upload identity sidecars are task-local metadata used to
+        # reconcile retries exactly. They are never shared through parquet
+        # content-hash deduplication, so removing only this controlled child is
+        # safe after the task's dataset rows have been purged.
+        try:
+            source_identity_dir = _lexical_child_path(
+                datasets_root,
+                f"{task_id}/.source-identities",
+            )
+            if source_identity_dir.is_symlink():
+                source_identity_dir.unlink()
+            elif source_identity_dir.is_dir():
+                shutil.rmtree(source_identity_dir)
+        except (OSError, PermissionError) as exc:
+            logger.warning("source identity cleanup failed for %s: %s", task_id, exc)
         try:
             if task_datasets_dir.is_symlink():
                 task_datasets_dir.unlink()

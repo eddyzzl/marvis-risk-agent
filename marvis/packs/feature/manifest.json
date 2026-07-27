@@ -1,6 +1,6 @@
 {
   "name": "feature",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "display_name": "Feature Engineering Pack",
   "description": "Deterministic feature metrics, binning, encoding, transformation, and derivation tools.",
   "module": "marvis.packs.feature.tools",
@@ -18,6 +18,26 @@
           "bins": {"type": "integer", "minimum": 1},
           "compare_dataset_id": {"type": "string", "minLength": 1},
           "metrics": {"type": "array", "items": {"type": "string"}},
+          "meaning_directions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "business_meaning": {"type": "string"},
+                "expected_direction": {"type": "string", "enum": ["positive", "negative", "u_shape", "uncertain"]},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                "rationale": {"type": "string"},
+                "judgement_source": {"type": "string"},
+                "model": {"type": "string"},
+                "prompt_name": {"type": "string"},
+                "prompt_version": {"type": "integer", "minimum": 1}
+              },
+              "required": ["business_meaning", "expected_direction", "confidence", "rationale", "judgement_source", "model", "prompt_name", "prompt_version"],
+              "additionalProperties": false
+            }
+          },
+          "time_col": {"type": "string"},
+          "split_col": {"type": "string"},
           "corr_threshold": {"type": "number"},
           "drop_nan_labels": {"type": "boolean"}
         },
@@ -29,10 +49,11 @@
         "properties": {
           "dataset_id": {"type": "string"},
           "metrics": {"type": "array", "items": {"type": "object"}},
+          "selected_metrics": {"type": "array", "items": {"type": "string"}},
           "collinear": {"type": ["object", "null"]},
           "nan_labels_dropped": {"type": "integer", "minimum": 0}
         },
-        "required": ["dataset_id", "metrics", "collinear"],
+        "required": ["dataset_id", "metrics", "selected_metrics", "collinear"],
         "additionalProperties": false
       },
       "determinism": "deterministic",
@@ -43,13 +64,48 @@
       "memory_limit_mb": 4096
     },
     {
+      "name": "analyze_feature_bins",
+      "summary": "Optionally compute get_eval_table-style bin details for user-selected features.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 0},
+          "target_col": {"type": "string", "minLength": 1},
+          "bins": {"type": "integer", "minimum": 3, "maximum": 20},
+          "drop_nan_labels": {"type": "boolean"}
+        },
+        "required": ["dataset_id", "features", "target_col", "bins"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string"},
+          "selected_features": {"type": "array", "items": {"type": "string"}},
+          "requested_bins": {"type": "integer", "minimum": 3, "maximum": 20},
+          "binning": {"type": "array", "items": {"type": "object"}},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0}
+        },
+        "required": ["dataset_id", "selected_features", "requested_bins", "binning", "nan_labels_dropped"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_analyze_feature_bins",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "generate_feature_report",
       "summary": "Write the per-feature metrics into a downloadable Excel feature-analysis report (form A).",
       "input_schema": {
         "type": "object",
         "properties": {
           "metrics": {"type": "array", "items": {"type": "object"}},
-          "collinear": {"type": ["object", "null"]}
+          "collinear": {"type": ["object", "null"]},
+          "binning": {"type": "array", "items": {"type": "object"}}
         },
         "required": ["metrics"],
         "additionalProperties": false
@@ -60,7 +116,8 @@
           "report_path": {"type": "string"},
           "feature_count": {"type": "integer", "minimum": 0},
           "metrics": {"type": "array", "items": {"type": "object"}},
-          "collinear": {"type": "object"}
+          "collinear": {"type": "object"},
+          "binning": {"type": "array", "items": {"type": "object"}}
         },
         "required": ["report_path", "feature_count"],
         "additionalProperties": false
@@ -83,6 +140,7 @@
           "target_col": {"type": "string", "minLength": 1},
           "target_type": {"type": "string"},
           "split_col": {"type": "string", "minLength": 1},
+          "sample_weight_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "leakage_ks": {"type": "number"},
           "max_missing_rate": {"type": "number"},

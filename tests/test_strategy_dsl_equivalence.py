@@ -100,6 +100,7 @@ def test_legacy_condition_adapter_preserves_parenthesized_and_or_ast() -> None:
     [
         ("approve", None, "approval", "approve"),
         ("reject", None, "reject", "reject"),
+        ("decline", None, "reject", "reject"),
         ("review", None, "review", "review"),
         ("limit", 5000, "limit", 5000),
         ("price", 0.12, "pricing", 0.12),
@@ -118,6 +119,8 @@ def test_legacy_decisions_map_to_typed_actions(
     assert converted.action.type == action_type
     assert converted.action.value == action_value
     assert converted.action.stop is True
+    if decision == "decline":
+        assert converted.action.output_value == "decline"
 
 
 def test_legacy_decline_maps_to_reject_and_preserves_row_output() -> None:

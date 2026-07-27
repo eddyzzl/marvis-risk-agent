@@ -42,13 +42,51 @@ _SUSPECTED_OUTPUT = re.compile(
     re.IGNORECASE,
 )
 
-# FS-4 watch-band: pooled-dev KS below the hard ``leakage_ks`` gate but at or above this
+# Name semantics that prove a field is unavailable at application/scoring time.
+# These are hard exclusions *before* KS/IV: a future outcome is leakage even when
+# its sampled univariate KS happens to be low.  Keep the patterns deliberately
+# narrow so ordinary pre-loan features containing ``mob`` (for example
+# ``mob_bureau_query_count`` or ``mobility_score``) are not caught.
+_SEMANTIC_TARGET_LEAKAGE = (
+    (
+        re.compile(r"(?:^|_)mob\d+_(?:ever|dpd)_?\d+(?:_|$)", re.IGNORECASE),
+        "贷后 MOB/DPD 表现字段，申请/评分时点不可得",
+    ),
+    (
+        re.compile(r"(?:^|_)fpd_?\d+(?:_|$)", re.IGNORECASE),
+        "贷后 FPD 表现字段，申请/评分时点不可得",
+    ),
+    (
+        re.compile(r"(?:^|_)(?:label|target)(?:_|$)", re.IGNORECASE),
+        "标签或标签派生字段",
+    ),
+    (
+        re.compile(r"(?:^|_)(?:is_bad|bad_flag|default_flag)(?:_|$)", re.IGNORECASE),
+        "违约结果/坏样本标记字段",
+    ),
+)
+
+# Strong technical row/entity identifiers.  This is a name-contract, not a
+# high-cardinality heuristic: legitimate continuous variables are never removed
+# merely because they contain many distinct values.  Optional ``_x``/``_y``
+# covers identifiers duplicated by a dataframe JOIN (the production symptom was
+# ``appl_seq_x``); suffixes alone are intentionally insufficient to trigger it.
+_IDENTITY_OR_ROW_KEY = re.compile(
+    r"^(?:(?:appl|apply|application)_?seq(?:uence)?|"
+    r"(?:row|record)_?(?:id|key|no|num|number|seq|sequence)|"
+    r"(?:id|uid|uuid|idcard|id_card|cust_id|customer_id|user_id|"
+    r"order_id|order_no|loan_id|loan_no|apply_id|application_id|"
+    r"phone|phone_no|mobile|mobile_no))(?:_[xy])?$",
+    re.IGNORECASE,
+)
+
+# FS-4 watch-band: train-fit KS below the hard ``leakage_ks`` gate but at or above this
 # floor is strong enough to be conditional/partial leakage (a field that only leaks in
 # part of the population or is a non-linear near-copy of the label), so it is surfaced for
 # confirmation instead of passing silently as a high-ranked feature.
 LEAKAGE_WATCH_LOW = 0.30
 # FS-4 split-shift: a per-feature |ks_train - ks_test| above this flags a migration-type
-# leak (weak in-sample, anomalously strong in a later split) that the pooled KS averages away.
+# leak (weak in-sample, anomalously strong in a later split) that train-fit KS alone misses.
 SPLIT_SHIFT_THRESHOLD = 0.15
 # FS-4/FS-6 default non-holdout split labels used to derive the train vs test masks for
 # per-split KS. A dataset whose split_col carries none of these yields no per-split flags.
@@ -60,6 +98,19 @@ _TEST_VALUES = ("test",)
 # bar (0.15) already used for the FS-4 split-shift band. Neither constant touches ranking.
 _LOW_COVERAGE = 0.50
 _NOTABLE_KS = 0.15
+# A 500-column default materialized almost the entire production modeling table
+# (750k rows) in one Pandas frame and exceeded the worker's 4 GB RSS limit.  Keep
+# the public override, but make the default genuinely memory-bounded.
+DEFAULT_SCREEN_BATCH_SIZE = 16
+
+# A low-cardinality value that deterministically identifies the same target class
+# in two deterministic train-only halves is a stronger leakage signal than aggregate
+# train KS. In the real failure ``union_flag=1`` selected one label-construction
+# branch but covered only a small share of all bads. Requiring both an absolute
+# count and a per-half share avoids hard-blocking tiny pure groups by chance.
+DETERMINISTIC_SUBGROUP_MAX_UNIQUE = 20
+DETERMINISTIC_SUBGROUP_MIN_COUNT = 100
+DETERMINISTIC_SUBGROUP_MIN_SHARE = 0.001
 
 
 @dataclass(frozen=True)
@@ -68,8 +119,13 @@ class ScreenResult:
     """Clean, usable features ordered by descending univariate KS: (feature, ks)."""
     selected: tuple[str, ...]
     """Proposed candidate set (top_k of ``ranked``) — for the user to confirm."""
-    leakage: tuple[tuple[str, float, str], ...]
-    """Hard leakage flags (KS >= leakage_ks): (feature, ks, reason)."""
+    leakage: tuple[tuple[str, float | None, str], ...]
+    """Hard leakage flags: (feature, ks-or-None, reason).
+
+    Name-proven semantic/temporal leakage is rejected before the column is read,
+    so its KS is intentionally ``None``; statistically detected leakage keeps its
+    measured KS.  Consumers must present the reason in both cases.
+    """
     suspected: tuple[tuple[str, float, str], ...]
     """Soft flags (name looks like a model output/score): (feature, ks, reason)."""
     unusable: tuple[tuple[str, str], ...]
@@ -84,10 +140,10 @@ class ScreenResult:
     split_shift: tuple[tuple[str, float, str], ...] = ()
     """FS-4 split-shift suspicions: features whose |ks_train - ks_test| exceeds
     ``SPLIT_SHIFT_THRESHOLD`` — a migration-type / conditional-leakage signal (a field
-    backfilled or redefined over time) that the pooled-dev KS gate cannot see. Purely
+    backfilled or redefined over time) that the train-fit KS gate cannot see. Purely
     informational: (feature, |ks_train - ks_test|, reason)."""
     leakage_watch: tuple[tuple[str, float, str], ...] = ()
-    """FS-4 watch-band: features whose pooled-dev KS lands in [LEAKAGE_WATCH_LOW, leakage_ks)
+    """FS-4 watch-band: features whose train-fit KS lands in [LEAKAGE_WATCH_LOW, leakage_ks)
     — strong-but-below the hard leakage gate, surfaced for confirmation rather than blocked:
     (feature, ks, reason)."""
     ks_decay_watch: tuple[tuple[str, float, str], ...] = ()
@@ -119,6 +175,52 @@ def _dev_mask(
     split = frame[split_col].astype("string")
     held = split.isin(list(holdout_values)).to_numpy(na_value=False)
     return ~held
+
+
+def _fit_mask(
+    frame: pd.DataFrame,
+    split_col: str | None,
+    holdout_values: tuple[str, ...],
+    fit_values: tuple[str, ...] = _TRAIN_VALUES,
+) -> np.ndarray:
+    """Rows allowed to decide the candidate universe.
+
+    When the standard ``train`` split exists, every automatic screening
+    decision is fitted on train only.  Test remains available to the separate
+    diagnostic masks below, while OOT remains available to distribution-only
+    PSI.  Non-standard datasets without a train label retain the legacy
+    exclude-holdout fallback instead of silently producing an empty screen.
+    """
+    if split_col and split_col in frame.columns:
+        split = frame[split_col].astype("string")
+        fit = split.isin(list(fit_values)).to_numpy(na_value=False)
+        if fit.any():
+            return fit
+    return _dev_mask(frame, split_col, holdout_values)
+
+
+def _internal_fit_halves(
+    values: np.ndarray,
+    fit_mask: np.ndarray,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Deterministic train-only halves with each finite value represented in both.
+
+    Alternating the whole frame can accidentally align a binary value with row
+    parity. Alternating within each value group keeps the repeated-subgroup test
+    independent of source ordering without consulting test/OOT labels.
+    """
+    fit_indices = np.flatnonzero(fit_mask & np.isfinite(values))
+    if fit_indices.size < 2:
+        return None, None
+    first = np.zeros(fit_mask.size, dtype=bool)
+    second = np.zeros(fit_mask.size, dtype=bool)
+    for value in np.unique(values[fit_indices]):
+        indices = fit_indices[values[fit_indices] == value]
+        first[indices[::2]] = True
+        second[indices[1::2]] = True
+    if not first.any() or not second.any():
+        return None, None
+    return first, second
 
 
 def _split_value_masks(
@@ -161,6 +263,149 @@ def _holdout_value_masks(
     return train_mask, holdout_mask
 
 
+def _semantic_leakage_reason(column: str) -> str | None:
+    """Return the hard-exclusion reason for an unambiguously post-outcome name."""
+    for pattern, detail in _SEMANTIC_TARGET_LEAKAGE:
+        if pattern.search(str(column)):
+            return (
+                "semantic/temporal target leakage（语义/时序目标泄漏）："
+                f"{detail}"
+            )
+    return None
+
+
+def _partition_screen_features(
+    features: list[str],
+    *,
+    target_col: str,
+    split_col: str | None,
+    sample_weight_col: str | None,
+) -> tuple[
+    list[str],
+    list[str],
+    list[tuple[str, float | None, str]],
+    list[tuple[str, str]],
+]:
+    """Separate candidates from deterministic hard exclusions.
+
+    Returns ``(all_names, candidates, leakage, unusable)``.  This runs for
+    explicit and inferred feature lists alike, closing the old bypass where a
+    caller-supplied list could re-introduce target/control/identity columns.
+    """
+    all_names = [str(item) for item in dict.fromkeys(features) if str(item).strip()]
+    candidates: list[str] = []
+    leakage: list[tuple[str, float | None, str]] = []
+    unusable: list[tuple[str, str]] = []
+    target = str(target_col)
+    split = str(split_col or "")
+    weight = str(sample_weight_col or "")
+    for column in all_names:
+        if column == target:
+            leakage.append((
+                column,
+                None,
+                "semantic target leakage: protected target column cannot be a model feature",
+            ))
+            continue
+        if split and column == split:
+            unusable.append((
+                column,
+                "protected split column: workflow control field is not a model feature",
+            ))
+            continue
+        if weight and column == weight:
+            unusable.append((
+                column,
+                "protected sample-weight column: fit control is not a model feature",
+            ))
+            continue
+        leakage_reason = _semantic_leakage_reason(column)
+        if leakage_reason:
+            leakage.append((column, None, leakage_reason))
+            continue
+        if _IDENTITY_OR_ROW_KEY.fullmatch(column):
+            unusable.append((
+                column,
+                "identity/row key: application/entity sequence identifier; excluded by "
+                "name contract (not by high cardinality)",
+            ))
+            continue
+        candidates.append(column)
+    return all_names, candidates, leakage, unusable
+
+
+def _leakage_sort_key(item: tuple[str, float | None, str]) -> tuple[int, float]:
+    """Name-proven hard exclusions first, then statistical flags by KS."""
+    _feature, ks, _reason = item
+    return (1 if ks is None else 0, float(ks or 0.0))
+
+
+def _deterministic_outcome_subgroup(
+    train_values: np.ndarray,
+    train_target: np.ndarray,
+    test_values: np.ndarray,
+    test_target: np.ndarray,
+    *,
+    max_unique: int = DETERMINISTIC_SUBGROUP_MAX_UNIQUE,
+    min_count: int = DETERMINISTIC_SUBGROUP_MIN_COUNT,
+    min_share: float = DETERMINISTIC_SUBGROUP_MIN_SHARE,
+) -> tuple[float, int, int, int] | None:
+    """Return a repeated pure target subgroup, or ``None`` when evidence is weak.
+
+    This deliberately requires a usable train *and* test split.  A pure group in
+    only one split, or a small pure group in both, remains eligible because it may
+    be an ordinary sampling accident.  The caller already computed the feature's
+    dev-cardinality; this helper independently caps cardinality so it is safe when
+    reused directly.
+    """
+
+    def _usable_pairs(
+        values: np.ndarray,
+        target: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        values_arr = np.asarray(values, dtype=float)
+        target_arr = np.asarray(target, dtype=float)
+        finite = np.isfinite(values_arr) & np.isfinite(target_arr)
+        values_arr = values_arr[finite]
+        target_arr = target_arr[finite]
+        binary = np.isin(target_arr, (0.0, 1.0))
+        values_arr = values_arr[binary]
+        target_arr = target_arr[binary]
+        if values_arr.size == 0 or np.unique(target_arr).size != 2:
+            return None
+        return values_arr, target_arr
+
+    train = _usable_pairs(train_values, train_target)
+    test = _usable_pairs(test_values, test_target)
+    if train is None or test is None:
+        return None
+    train_x, train_y = train
+    test_x, test_y = test
+    combined_unique = np.union1d(np.unique(train_x), np.unique(test_x))
+    if combined_unique.size > max_unique:
+        return None
+
+    min_train = max(int(min_count), int(np.ceil(min_share * train_x.size)))
+    min_test = max(int(min_count), int(np.ceil(min_share * test_x.size)))
+    common_values = np.intersect1d(np.unique(train_x), np.unique(test_x))
+    for value in common_values:
+        train_group = train_y[train_x == value]
+        test_group = test_y[test_x == value]
+        if train_group.size < min_train or test_group.size < min_test:
+            continue
+        train_class = int(train_group[0])
+        test_class = int(test_group[0])
+        if train_class != test_class:
+            continue
+        if np.all(train_group == train_class) and np.all(test_group == test_class):
+            return float(value), train_class, int(train_group.size), int(test_group.size)
+    return None
+
+
+def _format_subgroup_value(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
 def screen_features(
     backend,
     dataset_path: Path,
@@ -168,23 +413,28 @@ def screen_features(
     features: list[str],
     target_col: str,
     split_col: str | None = None,
+    sample_weight_col: str | None = None,
     holdout_values: tuple[str, ...] = ("oot",),
     leakage_ks: float = 0.40,
     max_missing_rate: float = 0.95,
     min_unique: int = 2,
     top_k: int | None = None,
-    batch_size: int = 500,
+    batch_size: int = DEFAULT_SCREEN_BATCH_SIZE,
     max_ks_decay: float | None = None,
     max_feature_psi: float | None = None,
     drop_nan_labels: bool = False,
 ) -> ScreenResult:
     """Screen ``features`` against ``target_col`` and propose a clean candidate set.
 
-    - ``leakage_ks``: any single feature with univariate KS >= this on the dev rows
+    - ``leakage_ks``: any single feature with univariate KS >= this on train-fit rows
       is flagged as suspected leakage (a well-built multivariate credit model rarely
       exceeds ~0.35 KS, so a *single* column above ~0.40 is almost always the label
       or a near-duplicate of it).
-    - ``holdout_values``: split labels (in ``split_col``) excluded from screening.
+    - When a standard ``train`` split is present, all automatic candidate
+      decisions are fitted on train only. ``holdout_values`` remains the
+      distribution-stability comparison set (normally OOT); test labels are
+      used only for diagnostic fields such as ``ks_test`` and never for
+      ranking, hard gates, ``top_k`` or IV.
     - ``top_k``: size of the proposed candidate set (default: all clean features).
     - ``max_ks_decay`` (FS-6): when a train/test split exists, ``scores`` always carries
       per-feature ``ks_train``/``ks_test``/``ks_decay`` (test KS ÷ train KS). Default
@@ -204,19 +454,22 @@ def screen_features(
       ``nan_labels_dropped`` records how many the core excludes (INV-1/INV-2 confirmation gate,
       same pattern as compute_feature_metrics/bin_feature).
     """
-    feats = [f for f in dict.fromkeys(features) if f != target_col]
+    all_feature_names, feats, hard_leakage, hard_unusable = _partition_screen_features(
+        features,
+        target_col=target_col,
+        split_col=split_col,
+        sample_weight_col=sample_weight_col,
+    )
     base_cols = [target_col] + ([split_col] if split_col else [])
     base = backend.read_frame(dataset_path, columns=base_cols)
     target = base[target_col].to_numpy(dtype=float)
-    dev = _dev_mask(base, split_col, holdout_values)
-    # D13: stop-vs-proceed gate BEFORE any label-consuming stat. Every KS/IV/split-shift
-    # runs on the DEV rows only (holdout/OOT is excluded from screening), so the gate is
-    # applied to the dev subframe: a fully-unlabeled OOT (legitimate scoring-only split,
-    # like resolve_modeling_splits allows) never trips it, while NaN labels among the rows
-    # that actually decide ranking/leakage/top_k do. The deterministic core
+    dev = _fit_mask(base, split_col, holdout_values)
+    # D13: stop-vs-proceed gate BEFORE any fit-label statistic. Ranking, hard leakage
+    # gates and IV run on train-fit rows only, so a fully-unlabeled test/OOT never trips
+    # it, while NaN labels among rows that decide ranking/leakage/top_k do. The core
     # (_finite_binary_pairs) already excludes NaN-label rows from every KS/IV; this only
     # decides raise-vs-proceed and audits the drop count. base is NOT mutated — per-column
-    # missing_rate/coverage keep their full-dev-row semantics.
+    # missing_rate/coverage keep their full train-fit-row semantics.
     nan_labels_dropped = require_labels_confirmed(
         base.loc[dev], target_col, drop_nan_labels=drop_nan_labels, scope="screen"
     )
@@ -232,9 +485,9 @@ def screen_features(
     psi_edges_by_col: dict[str, np.ndarray] = {}
 
     scores: dict[str, dict[str, float | None]] = {}
-    leakage: list[tuple[str, float, str]] = []
+    leakage: list[tuple[str, float | None, str]] = list(hard_leakage)
     suspected: list[tuple[str, float, str]] = []
-    unusable: list[tuple[str, str]] = []
+    unusable: list[tuple[str, str]] = list(hard_unusable)
     clean: list[tuple[str, float]] = []
     sentinel_columns: dict[str, list[tuple[float, float]]] = {}
     split_shift: list[tuple[str, float, str]] = []
@@ -307,11 +560,41 @@ def screen_features(
                     except Exception:
                         psi_split = None
                 scores[col]["psi_split"] = psi_split
+            deterministic_subgroup = None
+            fit_a_mask = fit_b_mask = None
+            if (
+                unique <= DETERMINISTIC_SUBGROUP_MAX_UNIQUE
+            ):
+                fit_a_mask, fit_b_mask = _internal_fit_halves(values, dev)
+            if fit_a_mask is not None and fit_b_mask is not None:
+                deterministic_subgroup = _deterministic_outcome_subgroup(
+                    values[fit_a_mask],
+                    target[fit_a_mask],
+                    values[fit_b_mask],
+                    target[fit_b_mask],
+                    min_count=max(1, DETERMINISTIC_SUBGROUP_MIN_COUNT // 2),
+                )
+            if deterministic_subgroup is not None:
+                group_value, target_class, fit_a_count, fit_b_count = deterministic_subgroup
+                scores[col]["deterministic_outcome_value"] = group_value
+                scores[col]["deterministic_outcome_target"] = float(target_class)
+                scores[col]["deterministic_outcome_fit_a_count"] = float(fit_a_count)
+                scores[col]["deterministic_outcome_fit_b_count"] = float(fit_b_count)
+                leakage.append((
+                    col,
+                    ks,
+                    "deterministic outcome subgroup leakage: value "
+                    f"{_format_subgroup_value(group_value)} implies target={target_class} "
+                    f"in train fold A {fit_a_count} rows and train fold B {fit_b_count} rows "
+                    "(100% pure in both train-only folds); likely a target-construction alias or "
+                    "post-outcome field",
+                ))
+                continue
             if ks >= leakage_ks:
                 leakage.append((col, ks, f"univariate KS {ks:.3f} >= {leakage_ks} — suspected target leakage"))
                 continue
             # FS-4 split-shift: a big train/test KS gap on a below-gate feature is a
-            # migration-type / conditional-leakage signal the pooled KS averages away.
+            # migration-type / conditional-leakage signal the train-fit KS misses.
             if ks_train is not None and ks_test is not None:
                 delta = abs(ks_train - ks_test)
                 if delta > SPLIT_SHIFT_THRESHOLD:
@@ -377,11 +660,11 @@ def screen_features(
     return ScreenResult(
         ranked=ranked,
         selected=selected,
-        leakage=tuple(sorted(leakage, key=lambda z: z[1], reverse=True)),
+        leakage=tuple(sorted(leakage, key=_leakage_sort_key, reverse=True)),
         suspected=tuple(suspected),
         unusable=tuple(unusable),
         scores=scores,
-        n_screened=len(scores) + len(unusable),
+        n_screened=len(all_feature_names),
         sentinel_columns=sentinel_columns,
         split_shift=tuple(sorted(split_shift, key=lambda z: z[1], reverse=True)),
         leakage_watch=tuple(sorted(leakage_watch, key=lambda z: z[1], reverse=True)),
@@ -412,16 +695,20 @@ def screen_features_non_binary(
     target_col: str,
     target_type: str = "continuous",
     split_col: str | None = None,
+    sample_weight_col: str | None = None,
     holdout_values: tuple[str, ...] = ("oot",),
     max_missing_rate: float = 0.95,
     min_unique: int = 2,
     top_k: int | None = None,
+    batch_size: int = DEFAULT_SCREEN_BATCH_SIZE,
+    drop_nan_labels: bool = False,
 ) -> ScreenResult:
     """Screen regression/multiclass candidates without binary KS leakage math.
 
-    Eligibility still uses the same dev-row contract as binary screening: OOT or
-    other holdout rows must not decide whether a feature is usable. ``ranked``
-    contains every clean feature, while ``selected`` applies ``top_k``.
+    Eligibility and target association use train only whenever a standard train
+    split is present. Test/OOT therefore cannot decide usability, ranking or
+    ``top_k``. ``ranked`` contains every clean feature, while ``selected``
+    applies ``top_k``.
 
     FS-10: previously every clean feature was kept in *input order* (no association
     with the target at all), so ``top_k`` amounted to picking whichever columns
@@ -432,24 +719,33 @@ def screen_features_non_binary(
     for non-binary, unchanged, so existing binary-shaped consumers are unaffected).
     Both are deterministic (no model, closed-form formulas already used elsewhere).
     """
-    feats = [f for f in dict.fromkeys(features) if f != target_col]
+    all_feature_names, feats, hard_leakage, hard_unusable = _partition_screen_features(
+        features,
+        target_col=target_col,
+        split_col=split_col,
+        sample_weight_col=sample_weight_col,
+    )
     base_cols = [target_col] + ([split_col] if split_col else [])
-    base = backend.read_frame(dataset_path, columns=base_cols) if (split_col or feats) else None
-    dev = _dev_mask(base, split_col, holdout_values) if base is not None else None
-    target_dev = None
-    if base is not None:
-        target_dev = base[target_col].to_numpy(dtype=float)
-        if dev is not None:
-            target_dev = target_dev[dev]
+    base = backend.read_frame(dataset_path, columns=base_cols)
+    dev = _fit_mask(base, split_col, holdout_values)
+    nan_labels_dropped = require_labels_confirmed(
+        base.loc[dev],
+        target_col,
+        drop_nan_labels=drop_nan_labels,
+        scope="screen",
+    )
+    target_dev = base[target_col].to_numpy(dtype=float)[dev]
 
     scores: dict[str, dict[str, float | None]] = {}
-    unusable: list[tuple[str, str]] = []
+    unusable: list[tuple[str, str]] = list(hard_unusable)
     clean: list[tuple[str, None]] = []
-    if feats:
-        frame = backend.read_frame(dataset_path, columns=feats)
-        for col in feats:
+    width = max(1, int(batch_size))
+    for start in range(0, len(feats), width):
+        batch = feats[start : start + width]
+        frame = backend.read_frame(dataset_path, columns=batch)
+        for col in batch:
             values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
-            v_dev = values if dev is None else values[dev]
+            v_dev = values[dev]
             finite = np.isfinite(v_dev)
             missing_rate = float(1.0 - finite.mean()) if v_dev.size else 1.0
             unique = int(np.unique(v_dev[finite]).size)
@@ -472,11 +768,12 @@ def screen_features_non_binary(
     return ScreenResult(
         ranked=ranked,
         selected=selected,
-        leakage=(),
+        leakage=tuple(sorted(hard_leakage, key=_leakage_sort_key, reverse=True)),
         suspected=(),
         unusable=tuple(unusable),
         scores=scores,
-        n_screened=len(feats),
+        n_screened=len(all_feature_names),
+        nan_labels_dropped=nan_labels_dropped,
     )
 
 
@@ -491,8 +788,17 @@ def _non_binary_assoc_score(
     it) or too few finite pairs to form a correlation/AUC."""
     if target is None:
         return None
+    values = np.asarray(values, dtype=float)
+    target = np.asarray(target, dtype=float)
+    if values.shape != target.shape:
+        return None
+    labelled = np.isfinite(target)
+    values = values[labelled]
+    target = target[labelled]
+    if target.size == 0:
+        return None
     if str(target_type) == "multiclass":
-        classes = np.unique(target[np.isfinite(target)])
+        classes = np.unique(target)
         if classes.size < 2:
             return None
         aucs = [
@@ -514,4 +820,10 @@ def _assoc_sort_key(assoc_score: float | None) -> float:
     return assoc_score if assoc_score is not None else float("-inf")
 
 
-__all__ = ["ScreenResult", "screen_features", "screen_features_non_binary", "sentinel_screen_notice"]
+__all__ = [
+    "DEFAULT_SCREEN_BATCH_SIZE",
+    "ScreenResult",
+    "screen_features",
+    "screen_features_non_binary",
+    "sentinel_screen_notice",
+]

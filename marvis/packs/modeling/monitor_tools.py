@@ -9,7 +9,13 @@ from marvis.packs.modeling.errors import ModelingError
 from marvis.validation.binning import bin_distribution, compute_psi
 
 from marvis.packs.modeling._common import _effective_seed, _optional_float, _optional_str, _unique_columns
-from marvis.packs.modeling._runtime import _artifact, _artifact_base_dir, _runtime
+from marvis.packs.modeling._runtime import (
+    _artifact_base_dir,
+    _runtime,
+    _task_artifact,
+    _task_dataset,
+    _task_experiment,
+)
 from marvis.packs.modeling.delivery_tools import _monitoring_check_status
 from marvis.packs.modeling.scoring import _ModelArtifactScorer
 
@@ -32,28 +38,80 @@ def tool_score_dataset(inputs: dict, ctx) -> dict:
     re-inferred) and a ``modeling.dataset.scored`` audit entry.
     """
     runtime = _runtime(ctx)
-    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
-    artifact = _artifact(runtime, experiment.artifact_id)
+    artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
 
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     dataset_path = runtime.registry.resolve_path(dataset.id)
     frame = runtime.backend.read_frame(dataset_path)
     row_count = int(len(frame))
 
-    score_col = str(inputs.get("output_col") or "model_score").strip() or "model_score"
+    target_type = str(
+        getattr(experiment.config, "target_type", "binary") or "binary"
+    )
     scorer = _ModelArtifactScorer(artifact, base_dir=base_dir, replay_preprocessing=True)
-    scores = scorer.score(frame)
-    frame[score_col] = scores
-    score_missing_rate = float(np.mean(~np.isfinite(np.asarray(scores, dtype=float)))) if row_count else 0.0
+    prediction_col = None
+    probability_columns: list[dict] = []
+    if target_type == "multiclass":
+        classes = list((artifact.params or {}).get("classes") or [])
+        probability_names = [
+            f"model_probability_{index}" for index in range(len(classes))
+        ]
+        prediction_col = (
+            str(inputs.get("output_col") or "predicted_class").strip()
+            or "predicted_class"
+        )
+        _assert_scoring_output_columns_available(
+            frame,
+            [*probability_names, prediction_col],
+        )
+        probabilities = scorer.predict_proba(frame)
+        for index, class_value in enumerate(classes):
+            column = probability_names[index]
+            frame[column] = probabilities[:, index]
+            probability_columns.append({
+                "class": class_value,
+                "column": column,
+            })
+        predicted_index = np.argmax(probabilities, axis=1)
+        frame[prediction_col] = [
+            classes[int(index)] for index in predicted_index
+        ]
+        score_col = prediction_col
+        score_missing_rate = (
+            float(np.mean(~np.isfinite(probabilities))) if row_count else 0.0
+        )
+    else:
+        default_output_col = (
+            "model_prediction" if target_type == "continuous" else "model_score"
+        )
+        score_col = (
+            str(inputs.get("output_col") or default_output_col).strip()
+            or default_output_col
+        )
+        _assert_scoring_output_columns_available(frame, [score_col])
+        scores = scorer.score(frame)
+        frame[score_col] = scores
+        prediction_col = score_col if target_type == "continuous" else None
+        score_missing_rate = (
+            float(np.mean(~np.isfinite(np.asarray(scores, dtype=float))))
+            if row_count
+            else 0.0
+        )
 
     points_col = None
     points_missing_rate = None
     scorecard_points = scorer.scorecard_points(frame)
     if scorecard_points is not None:
         points_col = str(inputs.get("points_col") or "scorecard_points").strip() or "scorecard_points"
+        _assert_scoring_output_columns_available(
+            frame,
+            [points_col],
+            generated_columns=[score_col],
+        )
         frame[points_col] = scorecard_points
         points_missing_rate = (
             float(np.mean(~np.isfinite(np.asarray(scorecard_points, dtype=float)))) if row_count else 0.0
@@ -75,6 +133,9 @@ def tool_score_dataset(inputs: dict, ctx) -> dict:
                     "experiment_id": experiment.id,
                     "artifact_id": artifact.id,
                     "score_col": score_col,
+                    "target_type": target_type,
+                    "prediction_col": prediction_col,
+                    "probability_columns": probability_columns,
                     "points_col": points_col,
                     "score_direction": artifact.score_direction,
                     "points_direction": artifact.points_direction,
@@ -103,6 +164,9 @@ def tool_score_dataset(inputs: dict, ctx) -> dict:
         "experiment_id": experiment.id,
         "artifact_id": artifact.id,
         "score_col": score_col,
+        "target_type": target_type,
+        "prediction_col": prediction_col,
+        "probability_columns": probability_columns,
         "points_col": points_col,
         "score_direction": artifact.score_direction,
         "points_direction": artifact.points_direction,
@@ -110,6 +174,35 @@ def tool_score_dataset(inputs: dict, ctx) -> dict:
         "score_missing_rate": score_missing_rate,
         "points_missing_rate": points_missing_rate,
     }
+
+
+def _assert_scoring_output_columns_available(
+    frame: pd.DataFrame,
+    requested: list[str],
+    *,
+    generated_columns: list[str] | None = None,
+) -> None:
+    """Reject destructive or ambiguous score-column names before mutating data."""
+
+    normalized = [str(column).strip() for column in requested if str(column).strip()]
+    duplicates = sorted({
+        column for column in normalized if normalized.count(column) > 1
+    })
+    generated = {
+        str(column).strip()
+        for column in (generated_columns or [])
+        if str(column).strip()
+    }
+    collisions = sorted(
+        set(normalized).intersection(str(column) for column in frame.columns)
+        | set(normalized).intersection(generated)
+    )
+    if duplicates or collisions:
+        details = sorted(set(duplicates) | set(collisions))
+        raise ModelingError(
+            "score output columns must be unique and must not overwrite source "
+            f"or generated columns: {', '.join(details)}"
+        )
 
 
 #: S1b/DOM-3: monitor_run's own threshold defaults (distinct from
@@ -223,10 +316,10 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
     distribution -- the caller must retrain or supply an explicit baseline.
     """
     runtime = _runtime(ctx)
-    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
-    artifact = _artifact(runtime, experiment.artifact_id)
+    artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
     baseline = artifact.baseline_distributions
     if not baseline:
         raise ModelingError(
@@ -245,7 +338,7 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
     target_col = _optional_str(inputs.get("target_col"))
 
     if scored_dataset_id:
-        dataset = runtime.registry.get(scored_dataset_id)
+        dataset = _task_dataset(runtime, ctx, scored_dataset_id)
         dataset_path = runtime.registry.resolve_path(dataset.id)
         # LT-6: monitor_run only ever reads score_col/feature_list/target_col off this
         # frame (never writes it back), so project instead of pulling the full modeling
@@ -265,7 +358,7 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
             )
         scores = pd.to_numeric(frame[score_col], errors="coerce").to_numpy(dtype=float)
     else:
-        dataset = runtime.registry.get(str(dataset_id))
+        dataset = _task_dataset(runtime, ctx, dataset_id)
         dataset_path = runtime.registry.resolve_path(dataset.id)
         # LT-6: NOT column-projected, unlike the scored_dataset_id branch above --
         # replay_preprocessing=True means the preprocessing chain may reference raw

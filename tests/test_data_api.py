@@ -156,6 +156,9 @@ def test_data_routes_are_served_from_dedicated_router():
     assert routes[
         ("/api/tasks/{task_id}/datasets/{dataset_id}/preview", ("GET",))
     ] == "marvis.routers.data"
+    assert routes[
+        ("/api/tasks/{task_id}/datasets/{dataset_id}/download", ("GET",))
+    ] == "marvis.routers.data"
     assert routes[("/api/datasets/{dataset_id}/preview", ("GET",))] == "marvis.routers.data"
     assert routes[("/api/tasks/{task_id}/joins/propose", ("POST",))] == "marvis.routers.data"
     assert routes[("/api/joins/{join_plan_id}", ("GET",))] == "marvis.routers.data"
@@ -301,8 +304,8 @@ def test_dataset_preview_masks_names_and_long_card_values(tmp_path):
     payload = preview.json()
     dumped = json.dumps(payload, ensure_ascii=False)
     profiles = {profile["name"]: profile for profile in payload["column_profiles"]}
-    # customer_name is now detected as the 'name' identity element (join key §4) — still
-    # masked as an opaque token (PII), never surfaced raw.
+    # Names remain usable as identity semantics while samples and preview rows
+    # stay opaque; long identifiers retain only bounded edge characters.
     assert profiles["customer_name"]["semantic_role"] == "name"
     assert profiles["customer_name"]["sample_values"][0].startswith("value:")
     assert payload["rows"][0]["customer_name"].startswith("value:")

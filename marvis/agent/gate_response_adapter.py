@@ -8,7 +8,10 @@ gates whose dependency outputs can actually be recomputed.
 from __future__ import annotations
 
 from marvis.agent.adjust_specs import (
+    has_feature_binning_adjust,
+    has_special_value_adjust,
     has_modeling_setup_adjust,
+    has_join_key_adjust,
     has_screen_adjust,
     has_select_adjust,
     has_split_adjust,
@@ -47,6 +50,9 @@ def validate_gate_control(
     modeling_setup_adjust = has_modeling_setup_adjust(adjust_params)
     tuning_adjust = has_tuning_adjust(adjust_params)
     split_adjust = has_split_adjust(adjust_params)
+    join_key_adjust = has_join_key_adjust(adjust_params)
+    feature_binning_adjust = has_feature_binning_adjust(adjust_params)
+    special_value_adjust = has_special_value_adjust(adjust_params)
     adoption_reason_adjust = bool(
         isinstance(adjust_params, dict)
         and _ADOPTION_REASON_PARAM in adjust_params
@@ -74,6 +80,9 @@ def validate_gate_control(
         and not split_adjust
         and not adoption_reason_adjust
         and not monitoring_adjust
+        and not join_key_adjust
+        and not feature_binning_adjust
+        and not special_value_adjust
     ):
         return
     if gate is None:
@@ -115,6 +124,14 @@ def validate_gate_control(
             raise GateControlValidationError(
                 f"不支持的去重策略: {', '.join(invalid)}；请使用 first 或 last。"
             )
+    if join_key_adjust and not gate_depends_on_tool(plan, gate, "propose_join"):
+        raise GateControlValidationError("拼接键控件只适用于拼接诊断确认步骤。")
+    if feature_binning_adjust and gate.tool_ref.tool != "analyze_feature_bins":
+        raise GateControlValidationError("分箱控件只适用于可选分箱分析步骤。")
+    if special_value_adjust and (
+        gate.tool_ref is None or gate.tool_ref.tool != "resolve_special_values"
+    ):
+        raise GateControlValidationError("特殊值治理控件只适用于特殊值治理步骤。")
     if modeling_setup_adjust and not gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
         raise GateControlValidationError("该控件只适用于建模规格确认步骤。")
     if split_adjust and not gate_depends_on_tool(plan, gate, "make_split"):

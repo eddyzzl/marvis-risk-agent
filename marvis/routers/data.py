@@ -18,6 +18,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.responses import FileResponse
 from marvis.errors import (
     bad_request,
     conflict,
@@ -786,6 +787,34 @@ def preview_task_dataset(
 @router.get("/datasets/{dataset_id}/preview")
 def preview_dataset(dataset_id: str, request: Request, rows: int = 50) -> dict:
     return _dataset_preview_payload(dataset_id, request, rows)
+
+
+@router.get("/tasks/{task_id}/datasets/{dataset_id}/download")
+def download_task_dataset(
+    task_id: str,
+    dataset_id: str,
+    request: Request,
+) -> FileResponse:
+    """Download the exact registered dataset artifact produced by a workflow."""
+    _require_task(request, task_id)
+    _repo_data, _backend, registry, _join_engine = _data_runtime(request)
+    try:
+        dataset = registry.get(dataset_id)
+    except KeyError as exc:
+        raise not_found("dataset not found") from exc
+    if dataset.task_id != task_id:
+        raise not_found("dataset not found")
+    try:
+        path = registry.resolve_verified_path(dataset_id)
+    except KeyError as exc:
+        raise not_found("dataset not found") from exc
+    except DatasetContentDriftError as exc:
+        raise conflict(str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=path.name,
+    )
 
 
 @router.post("/tasks/{task_id}/joins/propose", status_code=201)

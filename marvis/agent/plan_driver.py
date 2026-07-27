@@ -20,6 +20,12 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from marvis.agent.adjust_specs import (
+    adjust_param_error,
+    has_feature_binning_adjust,
+    has_special_value_adjust,
+    normalize_adjust_params,
+)
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_execution_adapter import GateExecutionAdapter
 from marvis.agent.gate_param_schema import gate_param_schema
@@ -35,11 +41,13 @@ from marvis.agent.gates.adapters import (
 )
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_message_composer import PlanMessageComposer
+from marvis.agent.plan_utils import find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.governance.errors import AuthorizationError
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.state_machine import ConflictError
 from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 
 # A reply counts as confirmation of the current gate only when, after stripping
@@ -77,6 +85,16 @@ _QUESTION = re.compile(
 _NEGATED_CONFIRM = re.compile(
     r"(先别|别执行|别继续|别开始|不要|不用|不需要|不执行|不继续|先不|暂不|暂停|停止|取消|"
     r"不开始|不确认|不可以|hold on|do\s*not|don't|dont|not\s+(start|continue|proceed|go)|stop|cancel|wait)",
+    re.IGNORECASE,
+)
+_EXPLICIT_CONFIRM_STATEMENT = re.compile(
+    r"^(?:我\s*)?确认(?:无误|当前(?:结果|方案|设置|规格)|上述(?:结果|方案|设置|规格))?"
+    r"(?:[\s，,。.!！；;:：]|$)",
+    re.IGNORECASE,
+)
+_CONFIRM_STATEMENT_BLOCKER = re.compile(
+    r"(?:但|但是|不过|然而|如果|假如|除非|改成|修改|调整|去掉|删除|增加|新增|换成|切换|"
+    r"不要|别|暂停|停止|取消|先不|暂不|等一下|稍后|重新)",
     re.IGNORECASE,
 )
 _STRIP_PUNCT = re.compile(
@@ -125,6 +143,14 @@ def is_confirm(text: str) -> bool:
         return False
     if direct_confirm:
         return True
+    # Agent mode accepts a human's explicit confirmation sentence, not only a
+    # one-token reply.  Keep this deliberately narrower than semantic intent:
+    # the sentence must begin with "确认" (or "我确认"), and any contrast,
+    # condition, cancellation, or parameter-adjustment wording still routes to
+    # the instruction parser instead of releasing the gate.
+    explicit = _EXPLICIT_CONFIRM_STATEMENT.match(raw.strip())
+    if explicit and not _CONFIRM_STATEMENT_BLOCKER.search(raw[explicit.end():]):
+        return True
     return bool(_CONFIRM_FULLMATCH.fullmatch(compact))
 
 
@@ -170,6 +196,7 @@ class PlanDriver:
         llm_client=None,
         governance_service=None,
         local_principal=None,
+        cancellation_check=None,
     ):
         self._repo = plan_repo
         self._executor = executor
@@ -180,6 +207,7 @@ class PlanDriver:
         self._llm = llm_client
         self._governance = governance_service
         self._principal = local_principal
+        self._cancellation_check = cancellation_check
         artifact_repo = (
             TaskArtifactRepository(self._repo.db_path)
             if getattr(self._repo, "db_path", None) is not None
@@ -322,6 +350,54 @@ class PlanDriver:
                 input_updates={"adoption_reason": adoption_reason},
             )
             return self._run_and_handle(plan_id, run_seq=run_seq)
+        if has_feature_binning_adjust(adjust_params) and gate is not None:
+            if not is_confirm(user_text):
+                raise DriverError("提交分箱设置时必须同时确认。")
+            params = {
+                "features": list((adjust_params or {}).get("features") or []),
+                "bins": (adjust_params or {}).get("bins", 10),
+            }
+            error = adjust_param_error(params) or self._feature_binning_adjust_error(
+                plan, gate, params["features"]
+            )
+            if error:
+                raise DriverError(error)
+            self._confirm_gate(
+                plan,
+                gate,
+                reason=(
+                    f"人工选择 {len(params['features'])} 个特征进行 {int(params['bins'])} 箱分析"
+                    if params["features"]
+                    else "人工选择跳过可选分箱分析"
+                ),
+                input_updates={"features": params["features"], "bins": int(params["bins"])},
+            )
+            return self._run_and_handle(plan_id, run_seq=run_seq)
+        if has_special_value_adjust(adjust_params) and gate is not None:
+            if not is_confirm(user_text):
+                raise DriverError("提交特殊值治理策略时必须同时确认。")
+            raw_decisions = (adjust_params or {}).get("decisions")
+            error = adjust_param_error({"decisions": raw_decisions})
+            if error:
+                raise DriverError(error)
+            decisions = dict(raw_decisions)
+            error = self._special_value_adjust_error(
+                plan,
+                gate,
+                decisions,
+                selection=selection,
+            )
+            if error:
+                raise DriverError(error)
+            if selection is not None:
+                self._gate_execution.apply_screen_selection(plan, gate, selection)
+            self._confirm_gate(
+                plan,
+                gate,
+                reason="人工确认特殊值治理策略",
+                input_updates={"decisions": decisions},
+            )
+            return self._run_and_handle(plan_id, run_seq=run_seq)
         if adjust_params and gate is not None:
             return self._gate_execution.apply_adjust(plan, gate, adjust_params, run_seq)
         if is_confirm(user_text):
@@ -344,6 +420,16 @@ class PlanDriver:
                     ],
                 )
             if gate is not None:
+                if gate.tool_ref is not None and gate.tool_ref.tool == "resolve_special_values":
+                    raw_decisions = (gate.inputs or {}).get("decisions")
+                    decision_error = self._special_value_adjust_error(
+                        plan,
+                        gate,
+                        dict(raw_decisions) if isinstance(raw_decisions, dict) else {},
+                        selection=selection,
+                    )
+                    if decision_error:
+                        raise DriverError(decision_error)
                 if selection is not None:
                     self._gate_execution.apply_screen_selection(plan, gate, selection)
                 if _is_adoption_gate(gate):
@@ -426,6 +512,288 @@ class PlanDriver:
         ):
             raise DriverError("AUTO 不得操作或确认强制人工业务决策节点，请由人工继续。")
         return self._gate_execution.apply_replan(plan, gate, goal, run_seq)
+
+    def retry_failed_step(
+        self,
+        plan_id: str,
+        step_id: str,
+        *,
+        run_seq: int = 0,
+        inputs: dict | None = None,
+        preserve_target_confirmation: bool = False,
+    ) -> DriverTurn:
+        """Resume the same plan from its failed step, preserving prior outputs."""
+
+        plan = self._repo.load_plan(plan_id)
+        failed_step = find_step(plan, step_id)
+        if failed_step is None:
+            raise DriverError("失败步骤不存在，请刷新任务后重试。")
+        retry_inputs = normalize_adjust_params({**(failed_step.inputs or {}), **(inputs or {})})
+        # Persisted template inputs may keep recipes as a ``$ref:...`` until
+        # execution resolves the upstream configure-tuning output.  Validate
+        # concrete recipe lists (including legacy aliases), but do not treat a
+        # valid unresolved reference as a malformed user adjustment.
+        if isinstance(retry_inputs.get("recipes"), list):
+            recipe_error = adjust_param_error({"recipes": retry_inputs["recipes"]})
+            if recipe_error:
+                raise DriverError(recipe_error)
+        elif "recipes" in (inputs or {}) and not str(retry_inputs.get("recipes") or "").startswith(
+            "$ref:"
+        ):
+            recipe_error = adjust_param_error({"recipes": retry_inputs.get("recipes")})
+            if recipe_error:
+                raise DriverError(recipe_error)
+        inputs_unchanged = retry_inputs == dict(failed_step.inputs or {})
+        was_confirmed = self._repo.is_step_confirmed(step_id)
+        reauthorize_governed_target = bool(
+            preserve_target_confirmation
+            and was_confirmed
+            and inputs_unchanged
+            and self._governance is not None
+            and self._principal is not None
+            and self._requires_governed_human_decision(failed_step)
+        )
+        self._repo.retry_failed_step(
+            plan_id,
+            step_id,
+            inputs=retry_inputs,
+            # A governed step needs a fresh immutable decision bound to the
+            # current manifest/input/evidence hashes.  Keeping only the old
+            # ``confirmed`` bit can leave execution with no live governance
+            # context after a restart or platform fix.  Non-governed gates may
+            # still reuse the prior bit when the repository proves inputs are
+            # unchanged.
+            preserve_target_confirmation=(
+                preserve_target_confirmation and not reauthorize_governed_target
+            ),
+        )
+        if reauthorize_governed_target:
+            paused = self._run_and_handle(plan_id, run_seq=run_seq)
+            paused_plan = self._repo.load_plan(plan_id)
+            gate = self._awaiting_step(paused_plan)
+            if paused.status != PlanStatus.AWAITING_CONFIRM.value or gate is None:
+                return paused
+            if gate.id != step_id:
+                raise DriverError("失败步骤重试时待确认节点已变化，请刷新后重试。")
+            self._confirm_gate(
+                paused_plan,
+                gate,
+                reason=f"人工明确授权从失败步骤重试：{failed_step.title}",
+            )
+        return self._run_and_handle(plan_id, run_seq=run_seq)
+
+    def rollback_failed_plan_to_feature_screen(
+        self,
+        plan_id: str,
+        failed_step_id: str,
+        *,
+        excluded_features: list[str],
+        run_seq: int = 0,
+    ) -> DriverTurn:
+        """Revise the feature universe and resume the same plan from screening.
+
+        This path is deliberately distinct from a failed-step retry.  It keeps
+        the completed split/spec prefix, replaces the screen step's feature
+        input with a concrete filtered list, and atomically invalidates that
+        step plus every transitive descendant.  The screen gate is then shown
+        again for fresh human confirmation.
+        """
+
+        plan = self._repo.load_plan(plan_id)
+        if plan.status != PlanStatus.FAILED:
+            raise DriverError("当前计划不是失败状态，不能执行上游回退。")
+        failed_step = find_step(plan, failed_step_id)
+        if failed_step is None or failed_step.status != StepStatus.FAILED:
+            raise DriverError("当前失败步骤已变化，请刷新后重试。")
+
+        ancestor_ids = _ancestor_step_ids(plan, failed_step_id)
+        roots = [
+            step
+            for step in plan.steps
+            if step.id in ancestor_ids
+            and step.tool_ref.plugin == "modeling"
+            and step.tool_ref.tool == "screen_features"
+        ]
+        if len(roots) != 1:
+            raise DriverError("无法唯一定位已完成的模型特征筛选步骤，计划未修改。")
+        root = roots[0]
+        if root.status != StepStatus.DONE or not root.output_ref:
+            raise DriverError("特征筛选步骤尚未完成，不能作为安全回退点。")
+        if not root.needs_confirmation:
+            raise DriverError("特征筛选步骤缺少人工确认门，拒绝自动回退。")
+
+        normalized_exclusions: list[str] = []
+        for item in excluded_features:
+            name = str(item).strip()
+            if name and name not in normalized_exclusions:
+                normalized_exclusions.append(name)
+        if not normalized_exclusions:
+            raise DriverError("必须明确至少一个要排除的特征，计划未修改。")
+
+        current_features = _resolve_revision_input(self._repo, (root.inputs or {}).get("features"))
+        if not isinstance(current_features, list):
+            current_features = _latest_ancestor_feature_cols(
+                self._repo,
+                plan,
+                ancestor_ids,
+                before_index=root.index,
+            )
+        feature_universe = _normalized_feature_list(current_features)
+        if not feature_universe:
+            raise DriverError("无法从已完成的建模规格解析特征集合，计划未修改。")
+
+        protected_names = {
+            str(value).strip()
+            for value in (
+                _resolve_revision_input(self._repo, (root.inputs or {}).get("target_col")),
+                _resolve_revision_input(self._repo, (root.inputs or {}).get("split_col")),
+            )
+            if isinstance(value, str) and str(value).strip()
+        }
+        protected = [name for name in normalized_exclusions if name in protected_names]
+        if protected:
+            raise DriverError(
+                "目标列或切分列不能作为普通特征排除：" + "、".join(protected) + "。"
+            )
+        unknown = [name for name in normalized_exclusions if name not in feature_universe]
+        if unknown:
+            raise DriverError(
+                "以下列不在当前已确认的特征集合中，计划未修改：" + "、".join(unknown) + "。"
+            )
+        excluded_set = set(normalized_exclusions)
+        remaining = [name for name in feature_universe if name not in excluded_set]
+        if not remaining:
+            raise DriverError("排除后特征集合为空，计划未修改。")
+
+        revised_inputs = {**(root.inputs or {}), "features": remaining}
+        try:
+            self._repo.rollback_failed_plan_from_step(
+                plan_id,
+                root.id,
+                failed_step_id,
+                root_inputs=revised_inputs,
+                excluded_features=normalized_exclusions,
+                expected_plan_revision=int(plan.replan_count),
+                expected_root_output_ref=str(root.output_ref),
+            )
+        except (ConflictError, KeyError, ValueError) as exc:
+            raise DriverError(f"计划状态已变化，未执行上游回退：{exc}") from exc
+        return self._run_and_handle(plan_id, run_seq=run_seq)
+
+    def rollback_failed_plan_to_tuning_config(
+        self,
+        plan_id: str,
+        failed_step_id: str,
+        *,
+        default_n_trials: int | None,
+        n_trials_by_recipe: dict[str, int],
+        run_seq: int = 0,
+    ) -> DriverTurn:
+        """Revise tuning budgets without invalidating split or feature work.
+
+        The completed ``configure_tuning`` ancestor is the only truthful
+        rollback root: changing the failed tune step directly would leave the
+        configuration card showing stale budgets, while changing modeling spec
+        would unnecessarily invalidate feature screening.  The repository
+        resets configuration and every descendant atomically; execution then
+        pauses at the fresh configuration confirmation gate before any trial is
+        run.
+        """
+
+        plan = self._repo.load_plan(plan_id)
+        if plan.status != PlanStatus.FAILED:
+            raise DriverError("当前计划不是失败状态，不能修改调参预算。")
+        failed_step = find_step(plan, failed_step_id)
+        if failed_step is None or failed_step.status != StepStatus.FAILED:
+            raise DriverError("当前失败步骤已变化，请刷新后重试。")
+
+        ancestor_ids = _ancestor_step_ids(plan, failed_step_id)
+        roots = [
+            step
+            for step in plan.steps
+            if step.id in ancestor_ids
+            and step.tool_ref.plugin == "modeling"
+            and step.tool_ref.tool == "configure_tuning"
+        ]
+        if len(roots) != 1:
+            raise DriverError("无法唯一定位已完成的配置调参步骤，计划未修改。")
+        root = roots[0]
+        if root.status != StepStatus.DONE or not root.output_ref:
+            raise DriverError("配置调参步骤尚未完成，不能作为安全回退点。")
+        if not root.needs_confirmation:
+            raise DriverError("配置调参步骤缺少人工确认门，拒绝自动修改。")
+
+        try:
+            current_output = self._repo.load_step_output(root.id)
+        except KeyError as exc:
+            raise DriverError("配置调参输出不存在，计划未修改。") from exc
+        recipes = _normalized_feature_list(current_output.get("recipes"))
+        if not recipes:
+            resolved_recipes = _resolve_revision_input(
+                self._repo, (root.inputs or {}).get("recipes")
+            )
+            recipes = _normalized_feature_list(resolved_recipes)
+        if not recipes:
+            raise DriverError("无法从已完成配置解析候选算法，计划未修改。")
+
+        requested: dict[str, int] = {}
+        for raw_recipe, raw_count in dict(n_trials_by_recipe or {}).items():
+            recipe = str(raw_recipe).strip()
+            if (
+                not recipe
+                or isinstance(raw_count, bool)
+                or not isinstance(raw_count, int)
+                or raw_count < 1
+                or raw_count > 200
+            ):
+                raise DriverError("每种算法的调参预算必须是 1 到 200 的整数。")
+            requested[recipe] = raw_count
+        if default_n_trials is not None:
+            if (
+                isinstance(default_n_trials, bool)
+                or not isinstance(default_n_trials, int)
+                or default_n_trials < 1
+                or default_n_trials > 200
+            ):
+                raise DriverError("统一调参预算必须是 1 到 200 的整数。")
+            for recipe in recipes:
+                requested.setdefault(recipe, default_n_trials)
+        if not requested:
+            raise DriverError("必须明确新的调参预算，计划未修改。")
+        unknown = [recipe for recipe in requested if recipe not in recipes]
+        if unknown:
+            raise DriverError(
+                "以下算法不在当前配置中，计划未修改：" + "、".join(unknown) + "。"
+            )
+
+        current_budgets = current_output.get("n_trials_by_recipe")
+        revised_budgets = {
+            recipe: int(
+                (current_budgets or {}).get(
+                    recipe,
+                    current_output.get("n_trials") or 1,
+                )
+            )
+            for recipe in recipes
+        }
+        revised_budgets.update(requested)
+        revised_inputs = {
+            **(root.inputs or {}),
+            "n_trials_by_recipe": revised_budgets,
+        }
+        try:
+            self._repo.rollback_failed_plan_from_step(
+                plan_id,
+                root.id,
+                failed_step_id,
+                root_inputs=revised_inputs,
+                tuning_budgets=revised_budgets,
+                expected_plan_revision=int(plan.replan_count),
+                expected_root_output_ref=str(root.output_ref),
+            )
+        except (ConflictError, KeyError, ValueError) as exc:
+            raise DriverError(f"计划状态已变化，未修改调参预算：{exc}") from exc
+        return self._run_and_handle(plan_id, run_seq=run_seq)
 
     def _handle_instruction(self, plan, gate, user_text, run_seq) -> DriverTurn:
         """Route a non-confirm reply. Manual mode (no LLM) shows the canned hint;
@@ -543,7 +911,13 @@ class PlanDriver:
 
     # -- core loop ------------------------------------------------------------
     def _run_and_handle(self, plan_id, *, run_seq) -> DriverTurn:
-        result = self._executor.run(plan_id)
+        if self._cancellation_check is None:
+            result = self._executor.run(plan_id)
+        else:
+            result = self._executor.run(
+                plan_id,
+                cancellation_check=self._cancellation_check,
+            )
         plan = self._repo.load_plan(plan_id)
         status = result.status
         if status == PlanStatus.AWAITING_CONFIRM:
@@ -553,6 +927,12 @@ class PlanDriver:
             return DriverTurn(plan_id, status.value, [self._composer.done_message(plan, run_seq=run_seq)])
         if status == PlanStatus.REVIEW:
             return DriverTurn(plan_id, status.value, [self._composer.review_message(plan, run_seq=run_seq)])
+        if status == PlanStatus.CANCELLED:
+            return DriverTurn(
+                plan_id,
+                status.value,
+                [self._composer.cancelled_message(plan, run_seq=run_seq)],
+            )
         return DriverTurn(plan_id, status.value, [self._composer.failed_message(plan, run_seq=run_seq)])
 
     @staticmethod
@@ -574,6 +954,87 @@ class PlanDriver:
         lives here: e.g. the rule-set adapter reads its own mine_rules dependency's
         candidate count off this context, so the driver stays free of it."""
         return GateReplyContext(plan=plan, gate=gate, load_output=self._safe_output)
+
+    def _feature_binning_adjust_error(
+        self,
+        plan: Plan,
+        gate: PlanStep,
+        features: list,
+    ) -> str | None:
+        allowed: set[str] = set()
+        for dep_id in gate.depends_on or []:
+            dep = find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "compute_feature_metrics":
+                continue
+            output = self._safe_output(dep.id)
+            for metric in (output.get("metrics") or []) if isinstance(output, dict) else []:
+                if isinstance(metric, dict) and str(metric.get("feature") or "").strip():
+                    allowed.add(str(metric["feature"]).strip())
+        unknown = sorted({str(item).strip() for item in features} - allowed)
+        if unknown:
+            return f"分箱特征不在本次单变量分析结果中: {', '.join(unknown)}。"
+        return None
+
+    def _special_value_adjust_error(
+        self,
+        plan: Plan,
+        gate: PlanStep,
+        decisions: dict,
+        *,
+        selection=None,
+    ) -> str | None:
+        """Validate complete decisions against persisted screen evidence.
+
+        This runs before mutating either the screen selection or the gate input,
+        so a stale/partial UI submission cannot leave half-applied state.
+        """
+        selected: list[str] = []
+        sentinel_columns: dict[str, object] = {}
+        screen_found = False
+        for dep_id in gate.depends_on or []:
+            dep = find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "screen_features":
+                continue
+            screen_found = True
+            output = self._safe_output(dep.id)
+            if not isinstance(output, dict):
+                return "缺少特征筛选输出，无法确认特殊值治理策略。"
+            raw_selected = output.get("selected")
+            if not isinstance(raw_selected, list):
+                return "特征筛选输出缺少有效的已选特征列表，无法确认特殊值治理策略。"
+            selected = [
+                str(item).strip()
+                for item in (
+                    selection if selection is not None else raw_selected
+                )
+                if str(item).strip()
+            ]
+            raw_columns = output.get("sentinel_columns")
+            if not isinstance(raw_columns, dict):
+                return "特征筛选输出缺少有效的特殊值检测证据，无法确认治理策略。"
+            sentinel_columns = dict(raw_columns)
+            break
+        if not screen_found:
+            return "特殊值治理步骤未绑定特征筛选证据，无法确认。"
+        relevant = [
+            column
+            for column in selected
+            if column in sentinel_columns and sentinel_columns.get(column)
+        ]
+        if not relevant:
+            return None
+        decision_names = {str(column) for column in decisions}
+        missing = [column for column in relevant if column not in decision_names]
+        if missing:
+            return (
+                "以下已选特征检测到特殊值，必须逐列选择转空、保留或删除后再继续："
+                + "、".join(missing)
+                + "。"
+            )
+        unrelated = sorted(decision_names - set(relevant))
+        if unrelated:
+            return "治理决策包含当前未选或未检测到特殊值的特征：" + "、".join(unrelated) + "。"
+        return adjust_param_error({"decisions": decisions})
 
     def _apply_monitoring_disposition(
         self,
@@ -645,6 +1106,81 @@ class PlanDriver:
         if callable(latest_error_kind):
             return latest_error_kind(step_id)
         return None
+def _ancestor_step_ids(plan: Plan, step_id: str) -> set[str]:
+    by_id = {step.id: step for step in plan.steps}
+    result: set[str] = set()
+    pending = list((by_id.get(step_id).depends_on or []) if by_id.get(step_id) else [])
+    while pending:
+        candidate = str(pending.pop())
+        if candidate in result:
+            continue
+        result.add(candidate)
+        parent = by_id.get(candidate)
+        if parent is not None:
+            pending.extend(parent.depends_on or [])
+    return result
+
+
+def _resolve_revision_input(repo, value):
+    if not (isinstance(value, str) and value.startswith("$ref:")):
+        return list(value) if isinstance(value, list) else value
+    match = re.fullmatch(r"\$ref:(?P<step>.+?)\.output(?:\.(?P<field>.+))?", value)
+    if match is None:
+        return None
+    try:
+        current = repo.load_step_output(match.group("step"))
+    except KeyError:
+        return None
+    field = match.group("field")
+    if not field:
+        return current
+    for part in field.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _latest_ancestor_feature_cols(
+    repo,
+    plan: Plan,
+    ancestor_ids: set[str],
+    *,
+    before_index: int,
+):
+    candidates = sorted(
+        (
+            step
+            for step in plan.steps
+            if step.id in ancestor_ids and step.index < before_index and step.output_ref
+        ),
+        key=lambda step: (step.index, step.id),
+        reverse=True,
+    )
+    for step in candidates:
+        try:
+            output = repo.load_step_output(step.id)
+        except KeyError:
+            continue
+        feature_cols = output.get("feature_cols") if isinstance(output, dict) else None
+        if isinstance(feature_cols, list):
+            return feature_cols
+    return None
+
+
+def _normalized_feature_list(value) -> list[str]:
+    if not isinstance(value, list) or not value:
+        return []
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return []
+        name = item.strip()
+        if name not in result:
+            result.append(name)
+    return result
+
+
 __all__ = [
     "CONFIRMATION_SOURCE_AUTO",
     "CONFIRMATION_SOURCE_HUMAN",

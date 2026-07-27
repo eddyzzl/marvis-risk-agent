@@ -37,7 +37,9 @@ def test_memory_types_cover_v1_1_foundation_categories():
         "field_convention",
         "validation_pitfall",
         "task_experience",
-        "model_experience",
+            "model_experience",
+            # V2 feature-analysis completion capture (recommended/risky features).
+            "feature_experience",
         # MEM-1: V2 data_join plan-completion capture (join match rate / row scale).
         "join_experience",
         # S2: V2 strategy-adoption plan-completion capture (cutoff/approval/bad

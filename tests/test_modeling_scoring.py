@@ -290,3 +290,207 @@ def test_score_dataset_writes_scorecard_points_column(tmp_path):
     scored_frame = settings_backend.read_frame(registry.resolve_path(scored.output["result_dataset_id"]))
     assert "scorecard_points" in scored_frame.columns
     assert scored_frame["scorecard_points"].notna().all()
+
+
+@pytest.mark.parametrize(
+    ("recipe", "params"),
+    [
+        ("xgb_regressor", {"num_boost_round": 5, "max_depth": 3}),
+        ("lr_regressor", {"alpha": 1.0}),
+        (
+            "mlp_regressor",
+            {"max_iter": 60, "hidden_layer_sizes": [8], "early_stopping": False},
+        ),
+    ],
+)
+def test_score_dataset_writes_regression_prediction_without_fake_risk_direction(
+    tmp_path,
+    recipe,
+    params,
+):
+    runner, _pr, registry, backend, _settings, task = _runtime(tmp_path)
+    rows = 160
+    x1 = np.array([((i * 37) % 101) / 100 for i in range(rows)])
+    x2 = np.array([((i * 17) % 89) / 100 for i in range(rows)])
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": x2,
+        "income": 3500.0 + 2100.0 * x1 + 500.0 * x2,
+        "split": ["train"] * 90 + ["test"] * 45 + ["oot"] * 25,
+    })
+    path = tmp_path / f"{recipe}.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": dataset.id,
+            "recipes": [recipe],
+            "features": ["x1", "x2"],
+            "target_col": "income",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {recipe: params},
+            "seed": 23,
+            "target_type": "continuous",
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    scoring_path = tmp_path / f"{recipe}_new.parquet"
+    frame[["x1", "x2"]].head(12).to_parquet(scoring_path, index=False)
+    scoring_dataset = registry.register_existing(
+        scoring_path,
+        task_id=task.id,
+        role="scoring_input",
+    )
+    scored = runner.invoke(
+        ToolRef("modeling", "score_dataset"),
+        {
+            "experiment_id": trained.output["best_experiment_id"],
+            "dataset_id": scoring_dataset.id,
+        },
+        task_id=task.id,
+    )
+
+    assert scored.ok is True, scored.error
+    assert scored.output["target_type"] == "continuous"
+    assert scored.output["score_col"] == "model_prediction"
+    assert scored.output["prediction_col"] == "model_prediction"
+    assert scored.output["probability_columns"] == []
+    assert scored.output["score_direction"] is None
+    output = backend.read_frame(
+        registry.resolve_path(scored.output["result_dataset_id"])
+    )
+    assert output["model_prediction"].notna().all()
+
+
+@pytest.mark.parametrize(
+    ("recipe", "params"),
+    [
+        ("xgb_multiclass", {"num_boost_round": 5, "max_depth": 3}),
+        ("lr_multiclass", {"max_iter": 80}),
+        (
+            "mlp_multiclass",
+            {"max_iter": 80, "hidden_layer_sizes": [8], "early_stopping": False},
+        ),
+    ],
+)
+def test_score_dataset_writes_all_multiclass_probabilities_and_prediction(
+    tmp_path,
+    recipe,
+    params,
+):
+    runner, _pr, registry, backend, _settings, task = _runtime(tmp_path)
+    rows = 210
+    x1 = np.array([((i * 37) % 101) / 100 for i in range(rows)])
+    x2 = np.array([((i * 17) % 89) / 100 for i in range(rows)])
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": x2,
+        "grade": np.where(x1 < 0.33, "A", np.where(x1 < 0.67, "B", "C")),
+        "split": ["train"] * 120 + ["test"] * 55 + ["oot"] * 35,
+    })
+    path = tmp_path / f"{recipe}.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": dataset.id,
+            "recipes": [recipe],
+            "features": ["x1", "x2"],
+            "target_col": "grade",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {recipe: params},
+            "seed": 23,
+            "target_type": "multiclass",
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    scoring_path = tmp_path / f"{recipe}_new.parquet"
+    frame[["x1", "x2"]].head(12).to_parquet(scoring_path, index=False)
+    scoring_dataset = registry.register_existing(
+        scoring_path,
+        task_id=task.id,
+        role="scoring_input",
+    )
+    scored = runner.invoke(
+        ToolRef("modeling", "score_dataset"),
+        {
+            "experiment_id": trained.output["best_experiment_id"],
+            "dataset_id": scoring_dataset.id,
+        },
+        task_id=task.id,
+    )
+
+    assert scored.ok is True, scored.error
+    assert scored.output["target_type"] == "multiclass"
+    assert scored.output["score_col"] == "predicted_class"
+    assert scored.output["prediction_col"] == "predicted_class"
+    assert scored.output["score_direction"] is None
+    mappings = scored.output["probability_columns"]
+    assert [row["class"] for row in mappings] == ["A", "B", "C"]
+    output = backend.read_frame(
+        registry.resolve_path(scored.output["result_dataset_id"])
+    )
+    probability_columns = [row["column"] for row in mappings]
+    assert output[probability_columns].sum(axis=1).to_numpy() == pytest.approx(
+        np.ones(len(output))
+    )
+    assert set(output["predicted_class"]) <= {"A", "B", "C"}
+
+
+def test_score_dataset_rejects_multiclass_prediction_probability_collision(tmp_path):
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    rows = 150
+    x1 = np.array([((i * 37) % 101) / 100 for i in range(rows)])
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "grade": np.where(x1 < 0.33, "A", np.where(x1 < 0.67, "B", "C")),
+        "split": ["train"] * 90 + ["test"] * 35 + ["oot"] * 25,
+    })
+    path = tmp_path / "multiclass_collision.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": dataset.id,
+            "recipes": ["lr_multiclass"],
+            "features": ["x1", "x2"],
+            "target_col": "grade",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"lr_multiclass": {"max_iter": 80}},
+            "seed": 23,
+            "target_type": "multiclass",
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    scoring_path = tmp_path / "multiclass_collision_new.parquet"
+    frame[["x1", "x2"]].head(12).to_parquet(scoring_path, index=False)
+    scoring_dataset = registry.register_existing(
+        scoring_path,
+        task_id=task.id,
+        role="scoring_input",
+    )
+
+    scored = runner.invoke(
+        ToolRef("modeling", "score_dataset"),
+        {
+            "experiment_id": trained.output["best_experiment_id"],
+            "dataset_id": scoring_dataset.id,
+            "output_col": "model_probability_0",
+        },
+        task_id=task.id,
+    )
+
+    assert scored.ok is False
+    assert "must be unique" in str(scored.error)

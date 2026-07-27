@@ -18,6 +18,7 @@ from __future__ import annotations
 from marvis.agent.adjust_specs import (
     NONNEGATIVE_INT_ADJUST_PARAMS,
     POSITIVE_INT_ADJUST_PARAMS,
+    SUPPORTED_MODELING_RECIPES,
     UNIT_INTERVAL_ADJUST_PARAMS,
 )
 from marvis.agent.plan_utils import find_step
@@ -26,6 +27,7 @@ from marvis.orchestrator.contracts import Plan, PlanStep
 _UNIT_INTERVAL_BOUNDS = {"min": 0, "max": 1}
 _POSITIVE_INT_BOUNDS = {"min": 1}
 _NONNEGATIVE_INT_BOUNDS = {"min": 0}
+_MODELING_RECIPE_ENUM = tuple(sorted(SUPPORTED_MODELING_RECIPES))
 
 
 def gate_param_schema(
@@ -36,11 +38,11 @@ def gate_param_schema(
 ) -> list[dict]:
     """Adjustable-parameter summary for ``gate``'s dependency step(s).
 
-    Returns a list of ``{"name", "type", "current", "bounds"}`` dicts (bounds
-    omitted when unknown), one per input key across every dependency step —
-    exactly the key set ``GateExecutionAdapter.apply_adjust`` matches ``params``
-    against. Deterministic ordering (dependency order, then input-key sort) so
-    prompts stay stable across otherwise-identical calls."""
+    Returns a list of ``{"name", "type", "current", "bounds", "enum"}`` dicts
+    (bounds/enum omitted when unknown), one per input key across every dependency
+    step — exactly the key set ``GateExecutionAdapter.apply_adjust`` matches
+    ``params`` against. Deterministic ordering (dependency order, then input-key
+    sort) so prompts stay stable across otherwise-identical calls."""
     if gate is None:
         return []
     # A tool-specific gate adapter is the authoritative allowlist. In
@@ -66,9 +68,19 @@ def gate_param_schema(
             seen.add(key)
             value = dep.inputs[key]
             entry = {"name": key, "type": _type_name(value), "current": value}
-            bounds = _bounds_for(key)
-            if bounds:
-                entry["bounds"] = bounds
+            enum = _enum_for(key)
+            if enum:
+                # ``enum`` is the machine-readable contract.  Keep the same
+                # values under ``bounds`` as well because the instruction
+                # router already renders that field into the LLM prompt.  This
+                # means the router sees canonical recipe identifiers instead
+                # of having to invent abbreviations such as ``cat``.
+                entry["enum"] = enum
+                entry["bounds"] = {"enum": enum}
+            else:
+                bounds = _bounds_for(key)
+                if bounds:
+                    entry["bounds"] = bounds
             schema.append(entry)
     return schema
 
@@ -135,6 +147,12 @@ def _bounds_for(key: str) -> dict | None:
         return dict(_POSITIVE_INT_BOUNDS)
     if key in NONNEGATIVE_INT_ADJUST_PARAMS:
         return dict(_NONNEGATIVE_INT_BOUNDS)
+    return None
+
+
+def _enum_for(key: str) -> list[str] | None:
+    if key == "recipes":
+        return list(_MODELING_RECIPE_ENUM)
     return None
 
 

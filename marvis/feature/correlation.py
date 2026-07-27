@@ -12,22 +12,21 @@ def correlation_matrix(
     *,
     method: str = "pearson",
 ) -> np.ndarray:
-    matrix = np.eye(len(features), dtype=float)
-    for i, left in enumerate(features):
-        for j, right in enumerate(features):
-            if i == j:
-                continue
-            if method == "spearman":
-                corr = safe_correlation(
-                    df[left].rank().to_numpy(dtype=float),
-                    df[right].rank().to_numpy(dtype=float),
-                )
-            else:
-                corr = safe_correlation(
-                    df[left].to_numpy(dtype=float),
-                    df[right].to_numpy(dtype=float),
-                )
-            matrix[i, j] = corr
+    if not features:
+        return np.eye(0, dtype=float)
+    # pandas performs the pairwise-complete Pearson/Spearman kernel in compiled code.
+    # The former Python double loop repeatedly converted the same columns and called
+    # np.corrcoef O(p²) times; 200 columns x 300k rows could not finish inside the
+    # governed tool timeout even though the calculation itself is valid.
+    normalized_method = "spearman" if method == "spearman" else "pearson"
+    matrix = df.loc[:, features].corr(
+        method=normalized_method,
+        min_periods=2,
+    ).to_numpy(dtype=float, copy=True)
+    # Keep the historical contract: undefined constant/all-null correlations are 0,
+    # while every diagonal is 1 (including a constant column).
+    np.nan_to_num(matrix, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    np.fill_diagonal(matrix, 1.0)
     return matrix
 
 

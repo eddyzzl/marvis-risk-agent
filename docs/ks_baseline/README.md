@@ -16,6 +16,24 @@ There are two ways to run it:
 > end-to-end in a sandbox with no external data. The real KS gate is the
 > public-dataset path below.
 
+## Current gate status
+
+Run the machine-readable readiness check before claiming T4-2 complete:
+
+```bash
+python scripts/ks_baseline.py --status
+```
+
+Exit code `0` means both public files **and** both reviewed ground-truth
+baselines exist. Exit code `2` means T4-2 is blocked and the JSON output names
+every missing input plus the exact next commands.
+
+As of 2026-07-24, a read-only search of this worktree (including `workspace/`)
+and the local data-staging locations used for this verification found neither
+`cs-training.csv` nor `application_train.csv`. `baselines.json` therefore
+intentionally retains `null` public baselines. This is an explicit closure
+blocker, not a reason to substitute synthetic KS.
+
 ---
 
 ## The pass/fail contract
@@ -94,19 +112,29 @@ After a careful, human-tuned run you consider the reference, record its KS as th
 ground truth:
 
 ```bash
-python scripts/ks_baseline.py --dataset give_me_some_credit --record
+python scripts/ks_baseline.py \
+  --dataset give_me_some_credit \
+  --input /absolute/path/to/cs-training.csv \
+  --params-json @/absolute/path/to/reviewed-lgb-params.json \
+  --record \
+  --tuned-by "risk-modeling-team" \
+  --tuning-note "one-round reference reviewed against notebook XYZ"
 ```
 
-This writes `baseline_ks` for that dataset into `baselines.json`. Commit that
-number (and fill in the `provenance` block: seed, split, who tuned it) so the
-baseline is a reviewable ground truth, per the plan's risk table.
+`--record` refuses an anonymous run. It requires `--tuned-by` and
+`--tuning-note`, then writes the observed KS together with the raw-file SHA-256,
+row/feature counts, seed, split, recipe, exact parameters, reviewer and
+timestamp. Review that diff before committing it. An agent-generated number
+without this provenance is not a ground truth.
 
 ### Check the agent against the baseline
 
 Once a baseline exists:
 
 ```bash
-python scripts/ks_baseline.py --dataset give_me_some_credit
+python scripts/ks_baseline.py \
+  --dataset give_me_some_credit \
+  --input /absolute/path/to/cs-training.csv
 ```
 
 Exit codes: `0` = PASS, `1` = FAIL (agent KS below the floor), `2` = no baseline

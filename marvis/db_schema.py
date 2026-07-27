@@ -186,7 +186,13 @@ _MIGRATION_TABLES = frozenset({
 # byte-for-byte; the separate ledger additionally binds the physical Pool
 # artifact, requirements, design/effect/DSL hashes, Strategy row, and its single
 # creation audit without enriching or rewriting that DSL.
-SCHEMA_VERSION = 22
+#
+# _migration_023_step_run_progress persists best-effort progress for long-running
+# workflow steps without changing the immutable final step-run result.
+#
+# _migration_024_explicit_feature_metrics distinguishes omitted feature metrics
+# from an explicitly empty selection while preserving historical default behavior.
+SCHEMA_VERSION = 24
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -3539,6 +3545,50 @@ def _migration_022_strategy_pool_materializations(
         END
         """
     )
+def _migration_023_step_run_progress(conn: sqlite3.Connection) -> None:
+    """Persist latest best-effort progress for long-running plan steps."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plan_step_runs'"
+    ).fetchone()
+    if table is None:
+        return
+    _ensure_column(
+        conn,
+        table="plan_step_runs",
+        column="progress_json",
+        definition="TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        table="plan_step_runs",
+        column="progress_updated_at",
+        definition="TEXT",
+    )
+
+
+def _migration_024_explicit_feature_metrics(conn: sqlite3.Connection) -> None:
+    """Distinguish omitted metrics from an explicitly empty selection.
+
+    Earlier databases already have ``metrics_json`` but cannot tell whether
+    ``[]`` meant "use workflow defaults" or "calculate no optional metrics".
+    Historical rows retain the former meaning through the zero default; new
+    repository inserts set this flag to one for every explicit selection,
+    including ``[]``.
+    """
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+    ).fetchone()
+    if table is None:
+        return
+    _ensure_column(
+        conn,
+        table="tasks",
+        column="metrics_configured",
+        definition="INTEGER NOT NULL DEFAULT 0",
+    )
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -3569,6 +3619,8 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (20, _migration_020_strategy_report_revisions),
     (21, _migration_021_strategy_report_docx),
     (22, _migration_022_strategy_pool_materializations),
+    (23, _migration_023_step_run_progress),
+    (24, _migration_024_explicit_feature_metrics),
 ]
 
 

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from hashlib import sha256
 from pathlib import Path
@@ -25,6 +27,13 @@ EXCEL_SAMPLE_KEYWORDS = (
     "data",
     "modeling",
 )
+
+# Folders supplied to data/feature/model workflows contain tabular inputs. A
+# plain-named workbook such as ``vars.xlsx`` is therefore a data table even
+# though the broader validation-material classifier intentionally leaves an
+# arbitrary workbook UNKNOWN (it might be a report in a validation package).
+DATA_WORKFLOW_SUFFIXES = frozenset({".csv", ".parquet", ".feather", ".xlsx", ".xlsm"})
+_DATA_WORKFLOW_UNKNOWN_SUFFIXES = frozenset({".xlsx", ".xlsm"})
 
 
 def classify_file(path: Path) -> FileRole:
@@ -115,6 +124,21 @@ def scan_source_dir(
             )
         )
     return artifacts
+
+
+def scan_data_workflow_dir(source_dir: Path) -> list[FileArtifact]:
+    """Return every supported table supplied to a data/feature/model workflow."""
+
+    artifacts = scan_source_dir(
+        source_dir,
+        include_unknown_suffixes=_DATA_WORKFLOW_UNKNOWN_SUFFIXES,
+    )
+    return [
+        artifact
+        for artifact in artifacts
+        if Path(artifact.path).suffix.lower() in DATA_WORKFLOW_SUFFIXES
+        and artifact.role in {FileRole.SAMPLE, FileRole.UNKNOWN}
+    ]
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:

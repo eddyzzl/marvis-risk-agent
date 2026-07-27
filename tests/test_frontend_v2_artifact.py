@@ -39,10 +39,78 @@ def test_dataset_table_html_escapes_columns_profiles_and_rows():
         assert.equal(html.includes("<script>"), false);
         assert.equal(html.includes("<bad>"), false);
         assert.ok(html.includes("score&lt;script&gt;"));
-        assert.ok(html.includes("feature&lt;img&gt;"));
-        assert.ok(html.includes("25.0%"));
+        assert.ok(html.includes("类型：未识别"));
+        assert.ok(html.includes("语义角色：feature&lt;img&gt;"));
+        assert.ok(html.includes("缺失率：25.0%"));
         assert.ok(html.includes("&lt;bad&gt;"));
-        assert.ok(html.includes("dataset-truncated"));
+        assert.equal(html.includes("dataset-truncated"), false);
+        assert.equal(html.includes('class="dataset-column-role"'), false);
+        assert.equal(html.includes('class="dataset-column-null"'), false);
+        assert.ok(html.includes('class="dataset-column-tooltip"'));
+        assert.ok(html.includes('class="dataset-preview-table"'));
+        assert.ok(html.includes('data-dataset-column-index="1"'));
+        """
+    )
+
+
+def test_dataset_preview_styles_support_metadata_tooltip_and_crosshair_hover():
+    shared_css = (ROOT / "marvis/static/styles.css").read_text(encoding="utf-8")
+    workbench_css = (ROOT / "marvis/static/css/v2-workbench.css").read_text(encoding="utf-8")
+
+    assert ".dataset-column-info:hover + .dataset-column-tooltip" in shared_css
+    assert ".dataset-column-info:focus-visible + .dataset-column-tooltip" in shared_css
+    assert "tbody tr:nth-child(even) td" in workbench_css
+    assert ".dataset-preview .is-column-hovered" in workbench_css
+    assert "tbody tr:hover td.is-column-hovered" in workbench_css
+
+
+def test_dataset_preview_pointer_handlers_highlight_and_clear_a_column():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          handleDatasetTablePointerOut,
+          handleDatasetTablePointerOver,
+        } from "./marvis/static/js/v2/artifact_view.js";
+
+        const makeClassList = () => {
+          const values = new Set();
+          return {
+            add(value) { values.add(value); },
+            remove(value) { values.delete(value); },
+            contains(value) { return values.has(value); },
+          };
+        };
+        const table = {
+          cells: [],
+          querySelectorAll(selector) {
+            if (selector === ".is-column-hovered") {
+              return this.cells.filter((cell) => cell.classList.contains("is-column-hovered"));
+            }
+            const match = selector.match(/data-dataset-column-index="(\\d+)"/);
+            return this.cells.filter((cell) => cell.index === match?.[1]);
+          },
+          contains(target) { return this.cells.includes(target); },
+        };
+        const makeCell = (index) => ({
+          index: String(index),
+          classList: makeClassList(),
+          getAttribute(name) { return name === "data-dataset-column-index" ? this.index : null; },
+          closest(selector) {
+            if (selector === "[data-dataset-column-index]") return this;
+            if (selector === ".dataset-preview-table") return table;
+            return null;
+          },
+        });
+        table.cells = [makeCell(0), makeCell(1), makeCell(0), makeCell(1)];
+
+        assert.equal(handleDatasetTablePointerOver({ target: table.cells[1] }), true);
+        assert.deepEqual(
+          table.cells.map((cell) => cell.classList.contains("is-column-hovered")),
+          [false, true, false, true],
+        );
+        assert.equal(handleDatasetTablePointerOut({ target: table.cells[1], relatedTarget: null }), true);
+        assert.equal(table.cells.some((cell) => cell.classList.contains("is-column-hovered")), false);
         """
     )
 
@@ -152,5 +220,43 @@ def test_artifact_ref_html_handles_value_metrics_and_file_refs_safely():
         assert.ok(image.includes("data-artifact-image"));
         assert.ok(image.includes("<img"));
         assert.ok(image.includes("/api/artifacts/chart%3Cscript%3E.png"));
+        """
+    )
+
+
+def test_dedup_conflict_picker_uses_cards_and_explains_protected_values():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderDedupPicker } from "./marvis/static/js/v2/join_gate_controller.js";
+
+        const html = renderDedupPicker({
+          id: "gate-1",
+          metadata: {
+            step_id: "step-1",
+            dedup: {
+              strategies: ["first", "last"],
+              features: [{
+                feature_id: "ds-1",
+                feature_name: "vars.csv",
+                conflict_keys: 2,
+                conflict_columns: ["idcard_md5", "x6"],
+                examples: [{
+                  key: "date=2026-01-01, mobile=a",
+                  values: { idcard_md5: ["[REDACTED]"], x6: [1, 13] },
+                }],
+              }],
+            },
+          },
+        });
+
+        assert.ok(html.includes('class="dedup-feature-card"'));
+        assert.equal(html.includes('class="dedup-table"'), false);
+        assert.ok(html.includes("vars.csv"));
+        assert.ok(html.includes("敏感字段，示例值已保护"));
+        assert.equal(html.includes("idcard_md5 两行分别为 [REDACTED]"), false);
+        assert.ok(html.includes("x6"));
+        assert.ok(html.includes("1"));
+        assert.ok(html.includes("13"));
         """
     )

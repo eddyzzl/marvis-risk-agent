@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
@@ -360,6 +361,38 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     assert any(status.section == "product_list" and not status.available for status in statuses)
 
 
+def test_render_model_report_escapes_formula_like_labels(tmp_path):
+    output = tmp_path / "model_report_formula_safe.xlsx"
+    render_model_report(
+        ModelReportPayload(
+            project_meta={
+                "=HYPERLINK(\"https://example.invalid\",\"open\")": "@SUM(1,1)"
+            },
+            dataset_split=[],
+            stability=[],
+            sample_analysis=[],
+            vintage=None,
+            feature_importance=[
+                {
+                    "feature": "+cmd|' /C calc'!A0",
+                    "importance": 0.7,
+                }
+            ],
+        ),
+        output,
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    summary = workbook["汇总"]
+    assert summary["A3"].data_type == "s"
+    assert str(summary["A3"].value).startswith("'")
+    assert summary["B3"].data_type == "s"
+    assert str(summary["B3"].value).startswith("'")
+    feature_sheet = workbook["特征重要性"]
+    assert feature_sheet["A2"].data_type == "s"
+    assert str(feature_sheet["A2"].value).startswith("'")
+
+
 def test_model_report_labels_higher_risk_score_band_as_reject_side(tmp_path):
     output = tmp_path / "model_report.xlsx"
     render_model_report(
@@ -483,6 +516,93 @@ def test_non_binary_model_report_keeps_fixed_sheets_and_adds_metrics(tmp_path):
     assert workbook["Vintage"]["B1"].value == "非二分类不适用"
     assert workbook["模型指标"]["A2"].value == "RMSE"
     assert workbook["样本分析"]["A1"].value == "n/a"
+
+
+def test_multiclass_model_report_adds_per_class_detail(tmp_path):
+    from marvis.packs.modeling.contracts import Experiment, ModelMetrics
+
+    config = TrainConfig(
+        dataset_id="ds",
+        features=("x1", "x2"),
+        target_col="grade",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=23,
+        early_stopping_rounds=None,
+        recipe_id="lr_multiclass",
+        target_type="multiclass",
+    )
+    metrics = ModelMetrics(
+        train_ks=None,
+        test_ks=None,
+        oot_ks=None,
+        train_auc=None,
+        test_auc=None,
+        oot_auc=None,
+        psi_test_vs_train=None,
+        psi_oot_vs_train=None,
+        overfit_train_test_gap=0.01,
+        overfit_train_oot_gap=0.02,
+        overfit_flag=False,
+        train_macro_auc=0.91,
+        test_macro_auc=0.85,
+        oot_macro_auc=0.82,
+        train_logloss=0.31,
+        test_logloss=0.42,
+        oot_logloss=0.48,
+        train_accuracy=0.84,
+        test_accuracy=0.78,
+        oot_accuracy=0.75,
+    )
+    experiment = Experiment(
+        id="exp",
+        task_id="task",
+        recipe_id="lr_multiclass",
+        config=config,
+        metrics=metrics,
+        artifact_id="artifact",
+        status="succeeded",
+        created_at="now",
+    )
+    artifact = ModelArtifact(
+        id="artifact",
+        experiment_id="exp",
+        algorithm="lr_multiclass",
+        model_path="model.joblib",
+        pmml_path=None,
+        feature_list=("x1", "x2"),
+        params={
+            "classes": ["A", "B", "C"],
+            "per_class": {
+                "train": {
+                    "A": {"recall": 0.9, "precision": 0.8, "support": 40},
+                    "B": {"recall": 0.8, "precision": 0.75, "support": 35},
+                },
+                "test": {"A": {"recall": 0.7, "precision": 0.65, "support": 12}},
+                "oot": None,
+            },
+        },
+        woe_maps=None,
+        created_at="now",
+    )
+    out = tmp_path / "multiclass.xlsx"
+
+    render_minimal_model_report(experiment, out, artifact=artifact)
+
+    workbook = load_workbook(out)
+    assert "多分类明细" in workbook.sheetnames
+    detail = workbook["多分类明细"]
+    assert [detail.cell(row=1, column=index).value for index in range(1, 6)] == [
+        "数据集",
+        "类别",
+        "召回率",
+        "精确率",
+        "样本数",
+    ]
+    assert detail["A2"].value == "train"
+    assert detail["B2"].value == "A"
+    assert detail["E2"].value == 40
 
 
 def test_render_model_report_summary_lists_unique_products_from_feature_dictionary(tmp_path):
@@ -951,6 +1071,157 @@ def _train_report_experiment(runner, task, dataset, recipe, params):
     return trained.output["experiment_id"]
 
 
+def test_generate_model_report_projects_scored_dataset_to_report_columns(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    experiment_id = _train_report_experiment(runner, task, dataset, "lr", {"max_iter": 200})
+    dataset_path = (settings.datasets_dir / dataset.source_path).resolve()
+    source_frame = pd.read_parquet(dataset_path)
+    source_frame["unused_wide_payload"] = "not-needed-by-model-or-report"
+    source_frame.to_parquet(dataset_path, index=False)
+
+    original_read_frame = DataBackend.read_frame
+    original_compact_reader = DataBackend.read_compact_numeric_frame
+    source_reads: list[tuple[str, ...] | None] = []
+    compact_reads: list[tuple[tuple[str, ...], tuple[str, ...], int]] = []
+
+    def tracking_read_frame(self, path, *, columns=None, nrows=None):
+        if Path(path).resolve() == dataset_path:
+            source_reads.append(None if columns is None else tuple(columns))
+        return original_read_frame(self, path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(DataBackend, "read_frame", tracking_read_frame)
+
+    def tracking_compact_reader(
+        self,
+        path,
+        *,
+        numeric_columns,
+        other_columns=(),
+        batch_size=16,
+    ):
+        if Path(path).resolve() == dataset_path:
+            compact_reads.append((
+                tuple(numeric_columns),
+                tuple(other_columns),
+                int(batch_size),
+            ))
+        return original_compact_reader(
+            self,
+            path,
+            numeric_columns=numeric_columns,
+            other_columns=other_columns,
+            batch_size=batch_size,
+        )
+
+    monkeypatch.setattr(DataBackend, "read_compact_numeric_frame", tracking_compact_reader)
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+
+    report = modeling_tools.tool_generate_model_report(
+        {
+            "experiment_id": experiment_id,
+            "dataset_id": dataset.id,
+            "business_columns": {
+                "loan_month_col": "loan_month",
+                "interest_rate_col": "rate",
+                "loan_amount_col": "amount",
+                "term_col": "term",
+                "drawdown_amount_col": "drawdown",
+                "credit_limit_col": "limit",
+                "mob_observe_cols": ["mob1", "mob2", "mob3"],
+            },
+        },
+        ctx,
+    )
+
+    assert source_reads
+    assert all(columns is not None for columns in source_reads)
+    assert compact_reads
+    numeric_columns, other_columns, batch_size = compact_reads[0]
+    assert numeric_columns == ("x1", "x2")
+    assert {"y", "split", "loan_month", "mob1", "mob2", "mob3"} <= set(other_columns)
+    assert batch_size == 16
+    assert Path(report["report_path"]).exists()
+    scored_path = settings.tasks_dir / task.id / "outputs" / "model_report_scored.parquet"
+    scored_frame = pd.read_parquet(scored_path)
+    assert scored_frame["x1"].dtype == np.float32
+    assert scored_frame["x2"].dtype == np.float32
+    assert set(scored_frame.columns) == {
+        "x1",
+        "x2",
+        "y",
+        "split",
+        "loan_month",
+        "rate",
+        "amount",
+        "term",
+        "drawdown",
+        "limit",
+        "mob1",
+        "mob2",
+        "mob3",
+        modeling_tools.MODEL_REPORT_SCORE_COL,
+    }
+    assert "unused_wide_payload" not in scored_frame.columns
+
+
+def test_univariate_report_does_not_boolean_slice_the_wide_frame():
+    class NoWideBooleanSlice(pd.DataFrame):
+        @property
+        def _constructor(self):
+            return NoWideBooleanSlice
+
+        def __getitem__(self, key):
+            if isinstance(key, (pd.Series, np.ndarray, list, tuple)):
+                values = np.asarray(key)
+                if values.dtype == bool and values.shape == (len(self),):
+                    raise AssertionError("univariate report copied the full wide frame")
+            return super().__getitem__(key)
+
+    frame = NoWideBooleanSlice({
+        "x1": np.linspace(0.0, 1.0, 60),
+        "x2": np.linspace(1.0, 0.0, 60),
+        "y": [0, 1] * 30,
+        "split": ["train"] * 30 + ["test"] * 20 + ["oot"] * 10,
+    })
+    artifact = ModelArtifact(
+        id="artifact",
+        experiment_id="experiment",
+        algorithm="lr",
+        model_path="model.joblib",
+        pmml_path=None,
+        feature_list=("x1", "x2"),
+        params={},
+        woe_maps=None,
+        created_at="now",
+    )
+    config = TrainConfig(
+        dataset_id="dataset",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=23,
+        early_stopping_rounds=None,
+    )
+    runtime = SimpleNamespace(
+        backend=SimpleNamespace(read_frame=lambda *_args, **_kwargs: frame)
+    )
+
+    rows = modeling_tools._univariate_rows(runtime, Path("unused"), artifact, config)
+
+    assert len(rows) == 6
+    assert {row["feature"] for row in rows} == {"x1", "x2"}
+
+
 def test_generate_scorecard_report_keeps_pd_and_points_separate(tmp_path):
     runner, settings, task, dataset = _report_runner(tmp_path)
     experiment_id = _train_report_experiment(
@@ -1092,6 +1363,9 @@ def test_generate_model_reports_fans_out_one_xlsx_per_experiment(tmp_path):
     assert {report["recipe"] for report in reports} == {"lr", "lgb"}
     # report_path mirrors the first report for download-endpoint compatibility
     assert result.output["report_path"] == reports[0]["report_path"]
+    assert isinstance(result.output["section_status"], list)
+    assert isinstance(result.output["scorecard_table"], list)
+    assert isinstance(result.output["score_bands"], list)
 
     paths = [report["report_path"] for report in reports]
     assert paths[0] != paths[1]
@@ -1120,6 +1394,289 @@ def test_generate_model_reports_rejects_empty_experiment_ids(tmp_path):
 
     assert result.ok is False
     assert "experiment_ids" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "experiment_input"),
+    [
+        ("generate_model_report", lambda experiment_id: {"experiment_id": experiment_id}),
+        ("generate_model_reports", lambda experiment_id: {"experiment_ids": [experiment_id]}),
+    ],
+)
+def test_model_report_tools_reject_cross_task_experiments(
+    tmp_path,
+    tool_name,
+    experiment_input,
+):
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    experiment_id = _train_report_experiment(
+        runner,
+        task,
+        dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+    other_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="其他任务",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "other-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    inputs = {
+        **experiment_input(experiment_id),
+        "dataset_id": dataset.id,
+    }
+
+    result = runner.invoke(
+        ToolRef("modeling", tool_name),
+        inputs,
+        task_id=other_task.id,
+    )
+
+    assert result.ok is False
+    assert "experiment does not belong to the active task" in str(result.error)
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "compare_experiments",
+        "select_experiment",
+        "score_dataset",
+        "monitor_run",
+        "export_pmml",
+        "handoff_to_validation",
+        "post_training_action",
+        "calibrate_model",
+    ],
+)
+def test_modeling_tools_reject_cross_task_model_references(tmp_path, tool_name):
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    experiment_id = _train_report_experiment(
+        runner,
+        task,
+        dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+    experiment = ExperimentStore(settings.db_path).get(experiment_id)
+    assert experiment.artifact_id
+    other_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="跨任务引用拦截",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "other-model-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    inputs_by_tool = {
+        "compare_experiments": {"experiment_ids": [experiment_id]},
+        "select_experiment": {
+            "experiment_ids": [experiment_id],
+            "refit_on_train_plus_test": False,
+        },
+        "score_dataset": {
+            "experiment_id": experiment_id,
+            "dataset_id": dataset.id,
+        },
+        "monitor_run": {
+            "experiment_id": experiment_id,
+            "dataset_id": dataset.id,
+        },
+        "export_pmml": {"artifact_id": experiment.artifact_id},
+        "handoff_to_validation": {
+            "experiment_id": experiment_id,
+            "sample_dataset_id": dataset.id,
+        },
+        "post_training_action": {
+            "experiment_id": experiment_id,
+            "actions": ["export_pmml"],
+        },
+        "calibrate_model": {
+            "artifact_id": experiment.artifact_id,
+            "dataset_id": dataset.id,
+        },
+    }
+
+    result = runner.invoke(
+        ToolRef("modeling", tool_name),
+        inputs_by_tool[tool_name],
+        task_id=other_task.id,
+    )
+
+    assert result.ok is False
+    assert "does not belong to the active task" in str(result.error)
+
+
+def test_post_training_action_rejects_cross_task_champion_reference(tmp_path):
+    runner, settings, first_task, first_dataset = _report_runner(tmp_path)
+    first_experiment = _train_report_experiment(
+        runner,
+        first_task,
+        first_dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+    second_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="第二个建模任务",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "second-model-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    second_dataset = registry.register_existing(
+        registry.resolve_path(first_dataset.id),
+        task_id=second_task.id,
+        role="modeling_sample",
+    )
+    second_experiment = _train_report_experiment(
+        runner,
+        second_task,
+        second_dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": second_experiment,
+            "actions": ["export_pmml"],
+            "champion_reference": {"experiment_id": first_experiment},
+        },
+        task_id=second_task.id,
+    )
+
+    assert result.ok is False
+    assert "experiment does not belong to the active task" in str(result.error)
+
+
+def test_post_training_action_rejects_cross_task_challenger_dataset(tmp_path):
+    runner, settings, _first_task, first_dataset = _report_runner(tmp_path)
+    second_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="挑战者样本隔离",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "challenger-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    second_dataset = registry.register_existing(
+        registry.resolve_path(first_dataset.id),
+        task_id=second_task.id,
+        role="modeling_sample",
+    )
+    second_experiment = _train_report_experiment(
+        runner,
+        second_task,
+        second_dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": second_experiment,
+            "sample_dataset_id": first_dataset.id,
+            "actions": ["create_challenger_backtest"],
+        },
+        task_id=second_task.id,
+    )
+
+    assert result.ok is False
+    assert "dataset does not belong to the active task" in str(result.error)
+
+
+def test_generate_model_report_rejects_cross_task_dataset(tmp_path):
+    runner, settings, _first_task, first_dataset = _report_runner(tmp_path)
+    second_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="第二个报告任务",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "second-source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    source_path = registry.resolve_path(first_dataset.id)
+    second_dataset = registry.register_existing(
+        source_path,
+        task_id=second_task.id,
+        role="modeling_sample",
+    )
+    second_experiment = _train_report_experiment(
+        runner,
+        second_task,
+        second_dataset,
+        "lr",
+        {"max_iter": 200},
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "generate_model_report"),
+        {
+            "experiment_id": second_experiment,
+            "dataset_id": first_dataset.id,
+        },
+        task_id=second_task.id,
+    )
+
+    assert result.ok is False
+    assert "dataset does not belong to the active task" in str(result.error)
+
+
+def test_report_filename_is_unique_for_versions_of_the_same_recipe():
+    from marvis.packs.modeling.report_tools import _report_filename
+
+    first = _report_filename("lgb", "experiment_aaaaaaaaaaaaaaaa")
+    second = _report_filename("lgb", "experiment_bbbbbbbbbbbbbbbb")
+
+    assert first != second
+    assert first.startswith("model_report_lgb_")
+    assert second.startswith("model_report_lgb_")
 
 
 def test_generate_model_report_fails_when_artifact_and_score_column_are_missing(tmp_path):
@@ -1154,6 +1711,8 @@ def test_generate_model_report_fails_when_artifact_and_score_column_are_missing(
     assert result.error_detail["experiment_id"] == experiment_id
     assert result.error_detail["dataset_id"] == dataset.id
     assert "score" in str(result.error)
+
+
 def _score_band_runtime(tmp_path, frame: pd.DataFrame):
     path = tmp_path / "score_band_sample.parquet"
     frame.to_parquet(path, index=False)

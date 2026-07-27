@@ -385,6 +385,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "available_columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -432,6 +438,9 @@
           "split_col": {
             "type": "string",
             "minLength": 1
+          },
+          "sample_weight_col": {
+            "type": "string"
           },
           "holdout_values": {
             "type": "array",
@@ -597,7 +606,9 @@
           "leakage",
           "suspected",
           "unusable",
-          "scores"
+          "scores",
+          "sentinel_columns",
+          "sentinel_notice"
         ],
         "additionalProperties": false
       },
@@ -607,6 +618,131 @@
       "entrypoint": "tool_screen_features",
       "side_effects": [
         "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "resolve_special_values",
+      "summary": "Typed high-risk gate for sentinel/special values detected during feature screening. Every selected affected column must be explicitly masked to missing with a real replayable derived dataset, retained with a confirmed reason and fingerprint, or dropped before refinement and training.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "sentinel_columns": {
+            "type": "object"
+          },
+          "decisions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "mask",
+                    "retain",
+                    "drop"
+                  ]
+                },
+                "values": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "uniqueItems": true
+                },
+                "confirmed": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "seed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "features",
+          "sentinel_columns"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "selected": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "governance": {
+            "type": "object"
+          },
+          "policy_fingerprint": {
+            "type": "string"
+          },
+          "masked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "retained": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dropped": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "selected",
+          "governance",
+          "policy_fingerprint",
+          "masked",
+          "retained",
+          "dropped"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 3600,
+      "failure_policy": "fail",
+      "entrypoint": "tool_resolve_special_values",
+      "side_effects": [
+        "read:dataset",
+        "write:dataset"
       ],
       "memory_limit_mb": 4096
     },
@@ -689,6 +825,9 @@
           },
           "sign_check": {
             "type": "boolean"
+          },
+          "seed": {
+            "type": "integer"
           }
         },
         "required": [
@@ -794,7 +933,13 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
+                "xgb_regressor",
+                "lr_regressor",
+                "mlp_regressor",
                 "lgb_multiclass",
+                "xgb_multiclass",
+                "lr_multiclass",
+                "mlp_multiclass",
                 "ensemble"
               ]
             },
@@ -970,6 +1115,24 @@
           "sample_weight_col": {
             "type": "string"
           },
+          "valid_group_cols": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            ],
+            "description": "Optional identity/group columns kept together in validation folds; platform control only, never an estimator feature or hyperparameter."
+          },
           "n_trials": {
             "type": "integer",
             "minimum": 1
@@ -992,7 +1155,13 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
+                "xgb_regressor",
+                "lr_regressor",
+                "mlp_regressor",
                 "lgb_multiclass",
+                "xgb_multiclass",
+                "lr_multiclass",
+                "mlp_multiclass",
                 "ensemble"
               ]
             },
@@ -1122,7 +1291,31 @@
           "sample_weight_col": {
             "type": "string"
           },
+          "valid_group_cols": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            ],
+            "description": "Optional identity/group columns kept together in validation folds; platform control only, never an estimator feature or hyperparameter."
+          },
           "params": {
+            "type": "object"
+          },
+          "sentinel_columns": {
+            "type": "object"
+          },
+          "special_value_governance": {
             "type": "object"
           },
           "n_trials": {
@@ -1146,6 +1339,11 @@
           "drop_nan_labels": {
             "type": "boolean"
           },
+          "force_recompute": {
+            "type": "boolean",
+            "default": false,
+            "description": "Ignore valid per-recipe tuning checkpoints for this run and atomically replace them with newly computed results."
+          },
           "recipes": {
             "type": "array",
             "items": {
@@ -1158,7 +1356,13 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
+                "xgb_regressor",
+                "lr_regressor",
+                "mlp_regressor",
                 "lgb_multiclass",
+                "xgb_multiclass",
+                "lr_multiclass",
+                "mlp_multiclass",
                 "ensemble"
               ]
             },
@@ -1223,11 +1427,13 @@
         "additionalProperties": false
       },
       "determinism": "stochastic",
-      "timeout_seconds": 1800,
+      "timeout_seconds": 130500,
       "failure_policy": "fail",
       "entrypoint": "tool_tune_hyperparameters",
       "side_effects": [
-        "read:dataset"
+        "read:dataset",
+        "read:artifacts",
+        "write:artifact"
       ],
       "memory_limit_mb": 4096
     },
@@ -1251,7 +1457,13 @@
               "scorecard",
               "mlp",
               "lgb_regressor",
+              "xgb_regressor",
+              "lr_regressor",
+              "mlp_regressor",
               "lgb_multiclass",
+              "xgb_multiclass",
+              "lr_multiclass",
+              "mlp_multiclass",
               "ensemble"
             ]
           },
@@ -1277,8 +1489,32 @@
           "params": {
             "type": "object"
           },
+          "sentinel_columns": {
+            "type": "object"
+          },
+          "special_value_governance": {
+            "type": "object"
+          },
           "sample_weight_col": {
             "type": "string"
+          },
+          "valid_group_cols": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            ],
+            "description": "Optional identity/group columns kept together in validation folds; platform control only, never an estimator feature or hyperparameter."
           },
           "monotone_constraints": {},
           "seed": {
@@ -1288,12 +1524,24 @@
             "type": "string",
             "minLength": 1
           },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
+          },
           "early_stopping_rounds": {
             "type": "integer",
             "minimum": 1
           },
           "drop_nan_labels": {
             "type": "boolean"
+          },
+          "target_type": {
+            "type": "string",
+            "enum": [
+              "binary",
+              "continuous",
+              "multiclass"
+            ]
           }
         },
         "required": [
@@ -1339,7 +1587,7 @@
         "additionalProperties": false
       },
       "determinism": "stochastic",
-      "timeout_seconds": 180,
+      "timeout_seconds": 43200,
       "failure_policy": "fail",
       "entrypoint": "tool_train_model",
       "side_effects": [
@@ -2093,7 +2341,13 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
+                "xgb_regressor",
+                "lr_regressor",
+                "mlp_regressor",
                 "lgb_multiclass",
+                "xgb_multiclass",
+                "lr_multiclass",
+                "mlp_multiclass",
                 "ensemble"
               ]
             },
@@ -2121,8 +2375,32 @@
           "params": {
             "type": "object"
           },
+          "sentinel_columns": {
+            "type": "object"
+          },
+          "special_value_governance": {
+            "type": "object"
+          },
           "sample_weight_col": {
             "type": "string"
+          },
+          "valid_group_cols": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            ],
+            "description": "Optional identity/group columns kept together in validation folds; platform control only, never an estimator feature or hyperparameter."
           },
           "monotone_constraints": {},
           "seed": {
@@ -2199,7 +2477,7 @@
         "additionalProperties": false
       },
       "determinism": "stochastic",
-      "timeout_seconds": 600,
+      "timeout_seconds": 43200,
       "failure_policy": "fail",
       "entrypoint": "tool_train_models",
       "side_effects": [
@@ -2447,7 +2725,7 @@
         "additionalProperties": false
       },
       "determinism": "deterministic",
-      "timeout_seconds": 60,
+      "timeout_seconds": 43200,
       "failure_policy": "fail",
       "entrypoint": "tool_select_experiment",
       "side_effects": [
@@ -2616,7 +2894,7 @@
         "additionalProperties": false
       },
       "determinism": "deterministic",
-      "timeout_seconds": 120,
+      "timeout_seconds": 3600,
       "failure_policy": "fail",
       "entrypoint": "tool_calibrate_model",
       "side_effects": [
@@ -2940,7 +3218,7 @@
         "additionalProperties": false
       },
       "determinism": "deterministic",
-      "timeout_seconds": 120,
+      "timeout_seconds": 3600,
       "failure_policy": "fail",
       "entrypoint": "tool_post_training_action",
       "side_effects": [
@@ -3029,7 +3307,7 @@
         "additionalProperties": false
       },
       "determinism": "stochastic",
-      "timeout_seconds": 120,
+      "timeout_seconds": 3600,
       "failure_policy": "fail",
       "entrypoint": "tool_generate_model_report",
       "side_effects": [
@@ -3110,16 +3388,31 @@
           },
           "report_path": {
             "type": "string"
+          },
+          "section_status": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "scorecard_table": {
+            "type": "array"
+          },
+          "score_bands": {
+            "type": "array"
           }
         },
         "required": [
           "reports",
-          "report_path"
+          "report_path",
+          "section_status",
+          "scorecard_table",
+          "score_bands"
         ],
         "additionalProperties": false
       },
       "determinism": "stochastic",
-      "timeout_seconds": 600,
+      "timeout_seconds": 43200,
       "failure_policy": "fail",
       "entrypoint": "tool_generate_model_reports",
       "side_effects": [
@@ -3132,7 +3425,7 @@
     },
     {
       "name": "score_dataset",
-      "summary": "Apply a trained model artifact to a new dataset, producing a PD (+ points, for scorecards) column and registering the result as a derived, direction-tagged dataset.",
+      "summary": "Apply a trained model artifact to a new dataset. Binary models produce PD (+ points for scorecards), regression models produce a prediction, and multiclass models produce one probability per class plus the predicted class.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3177,6 +3470,37 @@
           "score_col": {
             "type": "string"
           },
+          "target_type": {
+            "type": "string",
+            "enum": [
+              "binary",
+              "continuous",
+              "multiclass"
+            ]
+          },
+          "prediction_col": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "probability_columns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "class": {},
+                "column": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "class",
+                "column"
+              ],
+              "additionalProperties": false
+            }
+          },
           "points_col": {
             "type": [
               "string",
@@ -3213,6 +3537,9 @@
           "experiment_id",
           "artifact_id",
           "score_col",
+          "target_type",
+          "prediction_col",
+          "probability_columns",
           "score_direction",
           "row_count",
           "score_missing_rate"
@@ -3406,10 +3733,12 @@
     "read:model",
     "write:model",
     "read:experiment",
+    "read:artifacts",
     "write:experiment",
     "write:artifact",
     "write:task",
     "write:report",
+    "write:artifact",
     "llm"
   ]
 }

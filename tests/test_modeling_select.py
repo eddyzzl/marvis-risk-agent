@@ -7,6 +7,93 @@ from marvis.feature.errors import FitRequiresSplitError
 from marvis.packs.modeling.select import SelectionResult, select_features
 
 
+def test_select_features_reads_wide_candidates_in_memory_bounded_batches(tmp_path, monkeypatch):
+    rows = 120
+    feature_names = [f"f{index}" for index in range(48)]
+    target = np.array(([0, 1] * (rows // 2)))
+    frame = pd.DataFrame(
+        {
+            **{
+                name: target.astype(float) + (index + 1) * np.linspace(0, 0.01, rows)
+                for index, name in enumerate(feature_names)
+            },
+            "y": target,
+            "split": ["train"] * 60 + ["test"] * 30 + ["oot"] * 30,
+        }
+    )
+    path = tmp_path / "wide_select.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    original_read_frame = DataBackend.read_frame
+    requested_widths: list[int] = []
+
+    def counting_read_frame(self, call_path, *, columns=None, nrows=None):
+        if columns is not None:
+            requested_widths.append(len(columns))
+        return original_read_frame(self, call_path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(DataBackend, "read_frame", counting_read_frame)
+
+    result = select_features(
+        backend,
+        path,
+        features=feature_names,
+        target_col="y",
+        split_col="split",
+        iv_min=0.0,
+        corr_max=1.1,
+        vif_max=1_000_000,
+        top_k=8,
+    )
+
+    assert result.fit_rows == 60
+    assert requested_widths
+    assert max(requested_widths) <= 16
+
+
+def test_select_features_caps_multivariate_rows_and_skips_disabled_vif(tmp_path, monkeypatch):
+    rows = 120
+    rng = np.random.RandomState(17)
+    feature_names = [f"f{index}" for index in range(6)]
+    frame = pd.DataFrame({
+        **{name: rng.normal(size=rows) for name in feature_names},
+        "y": np.array([0, 1] * (rows // 2)),
+        "split": ["train"] * 80 + ["test"] * 20 + ["oot"] * 20,
+    })
+    path = tmp_path / "multivariate_sample.parquet"
+    frame.to_parquet(path, index=False)
+    correlation_rows: list[int] = []
+
+    def recording_correlation(sample, features, *, method="pearson"):
+        del method
+        correlation_rows.append(len(sample))
+        return np.eye(len(features), dtype=float)
+
+    def forbidden_vif(*_args, **_kwargs):
+        raise AssertionError("vif_max=1e9 is the documented disabled configuration")
+
+    monkeypatch.setattr(
+        "marvis.packs.modeling.select.correlation_matrix",
+        recording_correlation,
+    )
+    monkeypatch.setattr("marvis.packs.modeling.select.vif", forbidden_vif)
+
+    result = select_features(
+        DataBackend(tmp_path),
+        path,
+        features=feature_names,
+        target_col="y",
+        split_col="split",
+        iv_min=0.0,
+        corr_max=0.95,
+        vif_max=1e9,
+        multivariate_sample_rows=25,
+    )
+
+    assert correlation_rows == [25]
+    assert any("25/80" in warning for warning in result.warnings)
+
+
 def test_select_features_drops_low_iv_and_applies_top_k(tmp_path):
     rows = 200
     target = np.array([0, 1] * (rows // 2))

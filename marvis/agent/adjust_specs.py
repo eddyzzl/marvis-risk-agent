@@ -21,6 +21,66 @@ SELECT_ADJUST_PARAMS = frozenset({"iv_min", "corr_max"})
 # make_split was run with (test_size / oot_by_time / oot_size / random_oot / group_cols
 # / rules; see marvis/packs/modeling/prepare.py::_make_split).
 SPLIT_ADJUST_PARAMS = frozenset({"split_config"})
+JOIN_KEY_ADJUST_PARAMS = frozenset({"key_overrides"})
+FEATURE_BINNING_ADJUST_PARAMS = frozenset({"features", "bins"})
+SPECIAL_VALUE_ADJUST_PARAMS = frozenset({"decisions"})
+SUPPORTED_MODELING_RECIPES = frozenset(
+    {
+        "lgb",
+        "xgb",
+        "catboost",
+        "lr",
+        "scorecard",
+        "mlp",
+        "lgb_regressor",
+        "xgb_regressor",
+        "lr_regressor",
+        "mlp_regressor",
+        "lgb_multiclass",
+        "xgb_multiclass",
+        "lr_multiclass",
+        "mlp_multiclass",
+        "ensemble",
+    }
+)
+
+_MODELING_RECIPE_ALIASES = {
+    "cat": "catboost",
+    "cat_boost": "catboost",
+    "cat-boost": "catboost",
+    "xgboost": "xgb",
+    "xg_boost": "xgb",
+    "xg-boost": "xgb",
+    "lightgbm": "lgb",
+    "light_gbm": "lgb",
+    "light-gbm": "lgb",
+    "logistic": "lr",
+    "logistic_regression": "lr",
+    "logistic-regression": "lr",
+}
+
+
+def normalize_adjust_params(params: dict | None) -> dict:
+    """Canonicalize safe aliases emitted by either the UI or an LLM router.
+
+    Structured gate input is still validated after normalization.  This keeps
+    common product names such as ``CatBoost`` and the shorthand ``cat`` from
+    reaching a tool schema as invalid recipe identifiers, while unknown names
+    remain untouched so validation can reject them before any step is reset.
+    """
+
+    normalized = dict(params or {})
+    recipes = normalized.get("recipes")
+    if isinstance(recipes, list):
+        clean: list[object] = []
+        for recipe in recipes:
+            if not isinstance(recipe, str):
+                clean.append(recipe)
+                continue
+            token = recipe.strip().lower().replace(" ", "_")
+            clean.append(_MODELING_RECIPE_ALIASES.get(token, token))
+        normalized["recipes"] = clean
+    return normalized
 
 
 def has_screen_adjust(params: dict | None) -> bool:
@@ -65,6 +125,24 @@ def has_select_adjust(params: dict | None) -> bool:
     )
 
 
+def has_join_key_adjust(params: dict | None) -> bool:
+    return bool(isinstance(params, dict) and "key_overrides" in params)
+
+
+def has_feature_binning_adjust(params: dict | None) -> bool:
+    return bool(
+        isinstance(params, dict)
+        and (set(str(key) for key in params) & FEATURE_BINNING_ADJUST_PARAMS)
+    )
+
+
+def has_special_value_adjust(params: dict | None) -> bool:
+    return bool(
+        isinstance(params, dict)
+        and (set(str(key) for key in params) & SPECIAL_VALUE_ADJUST_PARAMS)
+    )
+
+
 def adjust_param_error(params: dict | None) -> str | None:
     for key, value in (params or {}).items():
         if key == "target_type":
@@ -76,6 +154,10 @@ def adjust_param_error(params: dict | None) -> str | None:
             clean = [str(item).strip() for item in value if str(item).strip()]
             if len(clean) != len(value) or any(len(item) > 64 or "\x00" in item for item in clean):
                 return "recipes 包含无效算法名，未重算。"
+            unknown = [item for item in clean if item not in SUPPORTED_MODELING_RECIPES]
+            if unknown:
+                supported = "、".join(sorted(SUPPORTED_MODELING_RECIPES))
+                return f"不支持算法 {', '.join(unknown)}；可选算法为 {supported}，未重算。"
         if key in UNIT_INTERVAL_ADJUST_PARAMS or key in SELECT_ADJUST_PARAMS:
             number = _finite_number(value)
             if number is None or number < 0 or number > 1:
@@ -100,6 +182,66 @@ def adjust_param_error(params: dict | None) -> str | None:
             error = _split_config_error(value)
             if error:
                 return error
+        if key in JOIN_KEY_ADJUST_PARAMS:
+            if not isinstance(value, dict) or not value:
+                return "key_overrides 必须包含至少一张特征表的拼接键选择，未重算。"
+            for feature_id, columns in value.items():
+                if not isinstance(feature_id, str) or not feature_id.strip() or "\x00" in feature_id:
+                    return "key_overrides 包含无效特征表编号，未重算。"
+                if not isinstance(columns, list) or not columns:
+                    return f"特征表 {feature_id} 至少选择一个拼接键，未重算。"
+                clean = [str(column).strip() for column in columns]
+                if any(not column or len(column) > 128 or "\x00" in column for column in clean):
+                    return f"特征表 {feature_id} 包含无效拼接键，未重算。"
+                if len(set(clean)) != len(clean):
+                    return f"特征表 {feature_id} 的拼接键不能重复，未重算。"
+        if key == "features":
+            if not isinstance(value, list):
+                return "features 必须是特征名列表，未执行分箱。"
+            clean = [str(item).strip() for item in value]
+            if any(not item or len(item) > 128 or "\x00" in item for item in clean):
+                return "features 包含无效特征名，未执行分箱。"
+            if len(set(clean)) != len(clean):
+                return "features 不能包含重复特征，未执行分箱。"
+        if key == "bins":
+            number = _finite_number(value)
+            if number is None or int(number) != number or number < 3 or number > 20:
+                return "bins 必须是 3 到 20 之间的整数，未执行分箱。"
+        if key == "decisions":
+            if not isinstance(value, dict):
+                return "decisions 必须是按特征列组织的特殊值治理决策，未执行。"
+            for raw_column, raw_decision in value.items():
+                if not isinstance(raw_column, str):
+                    return "decisions 包含无效特征名，未执行。"
+                column = raw_column.strip()
+                if not column or len(column) > 128 or "\x00" in column:
+                    return "decisions 包含无效特征名，未执行。"
+                if not isinstance(raw_decision, dict):
+                    return f"特征 {column} 的治理决策必须是对象，未执行。"
+                unexpected = sorted(
+                    str(field)
+                    for field in set(raw_decision)
+                    - {"action", "values", "confirmed", "reason"}
+                )
+                if unexpected:
+                    return (
+                        f"特征 {column} 的治理决策包含不支持字段 "
+                        f"{', '.join(unexpected)}，未执行。"
+                    )
+                action = str(raw_decision.get("action") or "").strip().lower()
+                if action not in {"mask", "retain", "drop"}:
+                    return f"特征 {column} 的 action 必须是 mask、retain 或 drop，未执行。"
+                values = raw_decision.get("values")
+                if values is not None:
+                    if not isinstance(values, list) or not values:
+                        return f"特征 {column} 的 values 必须是非空数字列表，未执行。"
+                    if any(_finite_number(item) is None for item in values):
+                        return f"特征 {column} 的 values 包含非有限数字，未执行。"
+                if action == "retain":
+                    if raw_decision.get("confirmed") is not True:
+                        return f"保留特征 {column} 的特殊值需要显式确认，未执行。"
+                    if not str(raw_decision.get("reason") or "").strip():
+                        return f"保留特征 {column} 的特殊值需要填写理由，未执行。"
     return None
 
 
@@ -138,7 +280,11 @@ def _finite_number(value) -> float | None:
 
 __all__ = [
     "adjust_param_error",
+    "normalize_adjust_params",
     "has_modeling_setup_adjust",
+    "has_join_key_adjust",
+    "has_feature_binning_adjust",
+    "has_special_value_adjust",
     "has_sample_weight_adjust",
     "has_screen_adjust",
     "has_select_adjust",

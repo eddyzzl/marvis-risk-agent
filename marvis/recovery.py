@@ -9,7 +9,7 @@ from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
     TaskStatus,
 )
-from marvis.orchestrator.contracts import PlanStatus
+from marvis.orchestrator.contracts import PlanStatus, StepStatus
 from marvis.orchestrator.errors import PlanNotFoundError
 from marvis.orchestrator.plan_recovery import PlanStepRecovery
 from marvis.pipeline import METRICS_STAGE_FAILURE_PREFIX
@@ -30,6 +30,15 @@ ORPHAN_RECLAIM_STATUSES = frozenset(
         TaskStatus.COMPUTING_METRICS,
     }
 )
+
+_WORKFLOW_NAMES = {
+    "data_join": "数据处理",
+    "feature_analysis": "特征分析",
+    "modeling": "模型开发",
+    "strategy": "策略分析",
+    "vintage": "Vintage 风险分析",
+    "portfolio": "组合分析",
+}
 
 
 def last_completed_step(task_dir: Path) -> str | None:
@@ -231,7 +240,11 @@ def _finalize_interrupted_agent_messages(
             continue
         metadata["streaming"] = False
         metadata["interrupted_by_restart"] = True
-        next_content = _interrupted_agent_content(str(content or ""))
+        if metadata.get("kind") == "tool_progress":
+            metadata["status"] = "interrupted"
+            next_content = _interrupted_tool_progress_content(str(content or ""))
+        else:
+            next_content = _interrupted_agent_content(str(content or ""))
         conn.execute(
             """
             UPDATE agent_messages
@@ -291,6 +304,12 @@ def _interrupted_agent_content(content: str) -> str:
     return content.rstrip() + "\n\n（服务器重启，Agent 输出在此处中断。已保留当前已写入内容。）"
 
 
+def _interrupted_tool_progress_content(content: str) -> str:
+    if not content.strip():
+        return "模型调参因服务器重启中断，已保留最后进度。"
+    return content.rstrip() + "\n\n（服务器重启，调参已中断；已保留最后进度。）"
+
+
 def _load_metadata(value: str | None) -> dict:
     try:
         payload = json.loads(value or "{}")
@@ -336,15 +355,41 @@ def reclaim_running_plans(
             continue
         reclaimed += 1
     if reclaimed:
-        logger.info("startup recovery reclaimed %d running plan(s) as failed", reclaimed)
+        logger.info("startup recovery reconciled %d running plan(s)", reclaimed)
     return reclaimed
 
 
 def _reclaim_one_running_plan(plan_repo, step_recovery, task_repo, plan) -> None:
     step_recovery.recover_inflight_steps(plan)
-    plan_repo.set_plan_status(plan.id, PlanStatus.FAILED)
+    statuses = {step.status for step in plan.steps}
+    resumed_at_confirmation = (
+        StepStatus.AWAITING_CONFIRM in statuses
+        and not statuses.intersection(
+            {StepStatus.RUNNING, StepStatus.CHECKING, StepStatus.FAILED}
+        )
+    )
+    plan_repo.set_plan_status(
+        plan.id,
+        PlanStatus.AWAITING_CONFIRM if resumed_at_confirmation else PlanStatus.FAILED,
+    )
+    recovered_plan = plan_repo.load_plan(plan.id)
+    failed_steps = [
+        step for step in recovered_plan.steps if step.status == StepStatus.FAILED
+    ]
+    failed_step = failed_steps[0] if len(failed_steps) == 1 else None
+    task = task_repo.get_task(plan.task_id)
+    with connect(task_repo.db_path) as conn:
+        _finalize_interrupted_agent_messages(conn, [plan.task_id])
     _fail_orphan_task_jobs(task_repo, plan.task_id)
-    _add_plan_restart_notice(task_repo, plan.task_id, plan.id)
+    _add_plan_restart_notice(
+        task_repo,
+        plan.task_id,
+        plan.id,
+        resumed_at_confirmation=resumed_at_confirmation,
+        run_mode=task.run_mode,
+        workflow=task.task_type,
+        failed_step=failed_step,
+    )
 
 
 def _fail_orphan_task_jobs(task_repo, task_id: str) -> None:
@@ -377,7 +422,47 @@ def _fail_orphan_task_jobs(task_repo, task_id: str) -> None:
             )
 
 
-def _add_plan_restart_notice(task_repo, task_id: str, plan_id: str) -> None:
+def _add_plan_restart_notice(
+    task_repo,
+    task_id: str,
+    plan_id: str,
+    *,
+    resumed_at_confirmation: bool = False,
+    run_mode: str = "manual",
+    workflow: str = "",
+    failed_step=None,
+) -> None:
+    stage = "chat" if resumed_at_confirmation else "failure"
+    if resumed_at_confirmation:
+        content = "服务已重启，执行进度和中间产物已保留；计划已恢复到当前确认节点，等待你的确认后继续。"
+    elif run_mode == "agent":
+        step_title = str(getattr(failed_step, "title", "") or "当前")
+        content = (
+            f"服务已重启，计划已暂停在“{step_title}”步骤；中间产物已保留。"
+            "请回复“重试当前步骤”，Agent 将从失败步骤继续，不会重跑已完成步骤。"
+        )
+    else:
+        content = "服务已重启，计划已暂停在当前步骤；中间产物已保留，可在中间信息流中重试失败步骤。"
+
+    metadata = {
+        "plan_interrupted_by_restart": True,
+        "plan_resumed_at_confirmation": resumed_at_confirmation,
+        "plan_id": plan_id,
+        "streaming": False,
+    }
+    if not resumed_at_confirmation and failed_step is not None:
+        diagnostic, failure_envelope = _restart_failure_payload(
+            plan_id=plan_id,
+            workflow=workflow,
+            failed_step=failed_step,
+        )
+        metadata.update(
+            {
+                "error": True,
+                "error_diagnostic": diagnostic,
+                "failure_envelope": failure_envelope,
+            }
+        )
     with connect(task_repo.db_path) as conn:
         existing = conn.execute(
             """
@@ -395,21 +480,58 @@ def _add_plan_restart_notice(task_repo, task_id: str, plan_id: str) -> None:
             """
             INSERT INTO agent_messages
             (id, task_id, role, stage, content, created_at, metadata_json)
-            VALUES (?, ?, 'assistant', 'failure', ?, ?, ?)
+            VALUES (?, ?, 'assistant', ?, ?, ?, ?)
             """,
             (
                 uuid.uuid4().hex,
                 task_id,
-                "服务已重启，计划已暂停在当前步骤；中间产物已保留，可点击『重试步骤』从失败步继续。",
+                stage,
+                content,
                 _now(),
-                json.dumps(
-                    {
-                        "plan_interrupted_by_restart": True,
-                        "plan_id": plan_id,
-                        "streaming": False,
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
+                json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
             ),
         )
+
+
+def _restart_failure_payload(*, plan_id: str, workflow: str, failed_step) -> tuple[dict, dict]:
+    step_title = str(getattr(failed_step, "title", "") or "当前步骤")
+    step_id = str(getattr(failed_step, "id", "") or "")
+    error = str(getattr(failed_step, "error", "") or "ServerRestart")
+    workflow_name = _WORKFLOW_NAMES.get(workflow, "工作流")
+    summary = f"服务重启中断了“{step_title}”步骤，已完成步骤和中间产物均已保留。"
+    diagnostic = {
+        "schema_version": "workflow_error.v1",
+        "workflow": workflow,
+        "code": "server_restart_interrupted",
+        "phase": "execution",
+        "title": f"{workflow_name}执行中断",
+        "summary": summary,
+        "cause": "MARVIS 服务在该步骤执行期间重启；源材料没有被修改。",
+        "location": step_title,
+        "evidence": [
+            {"label": "计划", "value": plan_id},
+            {"label": "失败步骤", "value": step_id},
+        ],
+        "actions": ["回复“重试当前步骤”，从该失败步骤继续。"],
+        "agent_prompt": "请回复“重试当前步骤”，Agent 将复用已完成步骤和中间产物继续执行。",
+        "recovery_actions": [
+            {"label": "重试当前步骤", "command": "重试当前步骤"}
+        ],
+        "retryable": True,
+        "auto_recoverable": True,
+        "impact": "失败步骤之后的依赖步骤尚未执行。",
+        "exception_type": "ServerRestart",
+        "technical_detail": f"ServerRestart: {error}",
+    }
+    failure_envelope = {
+        "schema_version": "failure.v1",
+        "failed_step_id": step_id,
+        "error_kind": "ServerRestart",
+        "message": summary,
+        "retryable": True,
+        "editable_input_schema": {},
+        "suggested_actions": ["retry"],
+        "downstream_reset": "dependent_steps",
+        "downstream_reset_steps": [],
+    }
+    return diagnostic, failure_envelope

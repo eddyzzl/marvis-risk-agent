@@ -50,10 +50,11 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         # determinism; tune.py defaults to full-core parallelism for search speed).
         "n_jobs": DEFAULT_TRAIN_NUM_THREADS,
         "deterministic": True,
-        # TUNE-6: pins the row/col-wise split so deterministic=True's guarantee
-        # actually holds (LightGBM's documented determinism contract requires it).
-        "force_row_wise": True,
+        # Pin the histogram strategy for deterministic output.  Column-wise
+        # avoids LightGBM's doubled Dataset memory cost on wide production data.
+        "force_col_wise": True,
     }
+    params.pop("force_row_wise", None)
     params = resolve_auto_scale_pos_weight(params, train, config)
     constraints = normalized_monotone_constraints(config)
     params.pop("monotone_constraints", None)

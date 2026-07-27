@@ -112,12 +112,15 @@ def test_delete_task_removes_dataset_files_and_writes_delete_audit(tmp_path):
     task = _create_task(client)
     dataset = _upload_dataset(client, task["id"], pd.DataFrame({"acct_id": ["A1", "B2"]}))
     dataset_path = settings.datasets_dir / dataset["source_path"]
+    source_identity_dir = settings.datasets_dir / task["id"] / ".source-identities"
     assert dataset_path.exists()
+    assert list(source_identity_dir.glob("*.json"))
 
     response = client.delete(f"/api/tasks/{task['id']}")
 
     assert response.status_code == 204
     assert not dataset_path.exists()
+    assert not source_identity_dir.exists()
     assert not (settings.tasks_dir / task["id"]).exists()
 
     from marvis.repositories.audit import _list_audit_rows

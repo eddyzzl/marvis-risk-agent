@@ -350,8 +350,11 @@ class StrategyAction:
             )
             if (
                 action_type in self._DEFAULT_VALUES
-                and isinstance(output_value, str)
-                and output_value in set(self._DEFAULT_VALUES.values())
+                # ``output_value`` is a canonical JSON value and may therefore
+                # be a list or object.  Tuple membership uses equality instead
+                # of hashing, so structured output values remain valid while
+                # typed fixed-action contradictions are still rejected.
+                and output_value in tuple(self._DEFAULT_VALUES.values())
                 and output_value != value
             ):
                 raise StrategyError(

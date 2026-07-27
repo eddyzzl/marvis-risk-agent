@@ -35,6 +35,8 @@ def test_workflow_error_card_is_structured_accessible_and_escaped() -> None:
           location: "sample.csv:10<11",
           evidence: [{ label: "预期列数<th>", value: "1 & 实际 2<td>" }],
           actions: ["检查第 10 行<li>", "统一分隔符 & 保存"],
+          agent_prompt: "是否由 Agent 继续？",
+          recovery_actions: [{ label: "由 Agent 重试", command: "重试当前步骤" }],
           technical_detail: "Error tokenizing data\\n<trace>",
           retryable: true,
         });
@@ -47,6 +49,8 @@ def test_workflow_error_card_is_structured_accessible_and_escaped() -> None:
         assert.ok(html.includes("出错位置"));
         assert.ok(html.includes("workflow-error-card__facts"));
         assert.ok(html.includes('<ol class="workflow-error-card__actions">'));
+        assert.ok(html.includes('data-workflow-recovery-command="重试当前步骤"'));
+        assert.ok(html.includes("是否由 Agent 继续？"));
         assert.ok(html.includes('<details class="workflow-error-card__technical">'));
         assert.ok(html.includes("技术信息"));
         assert.ok(html.includes("csv&lt;code&gt;&quot;"));

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import numpy as np
 import pandas as pd
@@ -19,13 +20,21 @@ from marvis.validation.stress_test import run_stress_test
 from pathlib import Path
 
 from marvis.packs.modeling._common import MODEL_REPORT_SCORE_COL, SCORECARD_POINTS_COL, _NUMBER_TOKEN_RE, _allowed_number_tokens, _business_columns, _jsonable, _number_token_allowed, _optional_str, _ratio, _section_available, _unique_columns
-from marvis.packs.modeling._runtime import _Runtime, _artifact, _artifact_model_base_dir, _cached_dataset_runtime, _runtime
+from marvis.packs.modeling._runtime import (
+    _Runtime,
+    _artifact_model_base_dir,
+    _cached_dataset_runtime,
+    _runtime,
+    _task_artifact,
+    _task_dataset,
+    _task_experiment,
+)
 from marvis.packs.modeling.scoring import _ModelArtifactScorer, _artifact_calibration_rows
 
 
 def tool_generate_model_report(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     report_path = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs" / "model_report.xlsx"
     return _generate_model_report_for(runtime, ctx, experiment, inputs, report_path)
 
@@ -41,19 +50,29 @@ def tool_generate_model_reports(inputs: dict, ctx) -> dict:
         raise ModelingError("experiment_ids must not be empty")
     outputs_dir = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs"
     reports: list[dict] = []
+    primary_output: dict | None = None
     for experiment_id in experiment_ids:
-        experiment = runtime.experiments.get(experiment_id)
+        experiment = _task_experiment(runtime, ctx, experiment_id)
         recipe = str(experiment.recipe_id)
         report_path = outputs_dir / _report_filename(recipe, experiment_id)
         generated = _generate_model_report_for(runtime, ctx, experiment, inputs, report_path)
+        if primary_output is None:
+            primary_output = generated
         reports.append({
             "experiment_id": experiment_id,
             "recipe": recipe,
             "report_path": generated["report_path"],
         })
+    primary_output = primary_output or {}
     return {
         "reports": reports,
         "report_path": reports[0]["report_path"] if reports else "",
+        # Backward-compatible primary-report detail for existing renderers and
+        # business-material consumers. ``reports`` remains the authoritative
+        # multi-version delivery list.
+        "section_status": primary_output.get("section_status") or [],
+        "scorecard_table": primary_output.get("scorecard_table") or [],
+        "score_bands": primary_output.get("score_bands") or [],
     }
 
 
@@ -62,11 +81,25 @@ _REPORT_FILENAME_UNSAFE_RE = re.compile(r"[^0-9A-Za-z_-]+")
 
 def _report_filename(recipe: str, experiment_id: str) -> str:
     safe_recipe = _REPORT_FILENAME_UNSAFE_RE.sub("_", recipe).strip("_") or "model"
-    safe_id = _REPORT_FILENAME_UNSAFE_RE.sub("_", experiment_id)[:8]
-    return f"model_report_{safe_recipe}_{safe_id}.xlsx"
+    # Experiment ids all share the ``experiment_`` prefix.  Truncating from the
+    # left therefore made every report for the same recipe resolve to the same
+    # path and the last version silently overwrote the earlier ones.  A stable
+    # digest keeps paths compact while preserving version identity.
+    digest = hashlib.sha256(str(experiment_id).encode("utf-8")).hexdigest()[:12]
+    return f"model_report_{safe_recipe}_{digest}.xlsx"
 
 
 def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict, report_path: Path) -> dict:
+    """Render a report using artifacts owned by the active task only."""
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
+    dictionary_id = str(inputs.get("feature_dictionary_id") or "").strip()
+    if dictionary_id:
+        _task_dataset(runtime, ctx, dictionary_id)
+    artifact = (
+        _task_artifact(runtime, ctx, experiment.artifact_id)
+        if experiment.artifact_id
+        else None
+    )
     # The full report is binary-credit-specific (bad-rate / Vintage / OOT bins / stress).
     # For a non-binary target (regression / multiclass) write a compact metrics report so
     # the flow finishes with a downloadable artifact instead of crashing on binary-only math.
@@ -80,7 +113,11 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         uow = ArtifactUnitOfWork()
         staged_report = uow.stage_file(report_path.parent, report_path.name)
         try:
-            render_minimal_model_report(experiment, staged_report.path)
+            render_minimal_model_report(
+                experiment,
+                staged_report.path,
+                artifact=artifact,
+            )
             _finalize_model_report_write(
                 runtime,
                 uow,
@@ -97,8 +134,6 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
             "scorecard_table": [],
             "score_bands": [],
         }
-    artifact = _artifact(runtime, experiment.artifact_id) if experiment.artifact_id else None
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
     dataset_path = runtime.registry.resolve_path(dataset.id)
     business = _business_columns(inputs.get("business_columns") or {})
     statuses = resolve_report_sections(
@@ -130,6 +165,7 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         dataset_path,
         artifact,
         experiment.config,
+        business=business,
         task_id=ctx.task_id,
         experiment_id=experiment.id,
         dataset_id=dataset.id,
@@ -634,24 +670,40 @@ def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: Tr
         return []
     frame = runtime.backend.read_frame(dataset_path, columns=[*artifact.feature_list, config.target_col, config.split_col])
     train_value = config.split_values.get("train")
-    train_frame = frame[frame[config.split_col] == train_value] if train_value is not None else frame.iloc[0:0]
+    split_values = frame[config.split_col].to_numpy(copy=False)
+    target_values = pd.to_numeric(frame[config.target_col], errors="coerce").to_numpy(dtype=float)
+    split_masks = {
+        split_name: split_values == split_value
+        for split_name, split_value in config.split_values.items()
+    }
+    train_mask = (
+        split_masks.get("train")
+        if train_value is not None
+        else np.zeros(len(frame), dtype=bool)
+    )
     rows = []
     for feature in artifact.feature_list:
-        train_values = pd.to_numeric(train_frame[feature], errors="coerce").to_numpy(dtype=float) if not train_frame.empty else np.array([])
+        feature_values = pd.to_numeric(frame[feature], errors="coerce").to_numpy(dtype=float)
+        train_values = (
+            feature_values[train_mask]
+            if train_mask is not None and np.any(train_mask)
+            else np.array([])
+        )
         psi_edges = equal_frequency_edges(train_values, DEFAULT_IV_BINS) if train_values.size else None
-        for split_name, split_value in config.split_values.items():
-            split_frame = frame[frame[config.split_col] == split_value]
-            if split_frame.empty:
+        for split_name in config.split_values:
+            split_mask = split_masks[split_name]
+            split_count = int(np.sum(split_mask))
+            if split_count == 0:
                 continue
-            split_values_arr = pd.to_numeric(split_frame[feature], errors="coerce").to_numpy(dtype=float)
+            split_values_arr = feature_values[split_mask]
             psi = None
             if psi_edges is not None and split_name != "train":
                 try:
                     psi = feature_psi(train_values, split_values_arr, psi_edges)
                 except Exception:
                     psi = None
-            target_series = pd.to_numeric(split_frame[config.target_col], errors="coerce")
-            if target_series.notna().sum() == 0:
+            split_target = target_values[split_mask]
+            if int(np.sum(np.isfinite(split_target))) == 0:
                 # Scoring-only split (no labels): skip label-dependent metrics, but PSI
                 # (no labels required) still gets reported for this split.
                 rows.append({
@@ -660,7 +712,7 @@ def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: Tr
                     "iv": None,
                     "ks": None,
                     "auc": None,
-                    "sample_count": int(len(split_frame)),
+                    "sample_count": split_count,
                     "coverage": None,
                     "missing_rate": None,
                     "unique_count": None,
@@ -669,7 +721,7 @@ def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: Tr
                 continue
             metrics = feature_metrics(
                 split_values_arr,
-                target_series.to_numpy(dtype=float),
+                split_target,
                 feature=feature,
             )
             rows.append({
@@ -678,7 +730,7 @@ def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: Tr
                 "iv": metrics.iv,
                 "ks": metrics.ks,
                 "auc": metrics.auc,
-                "sample_count": int(len(split_frame)),
+                "sample_count": split_count,
                 "coverage": 1.0 - metrics.missing_rate,
                 "missing_rate": metrics.missing_rate,
                 "unique_count": metrics.unique_count,
@@ -729,6 +781,7 @@ def _report_scored_dataset(
     artifact: ModelArtifact | None,
     config: TrainConfig,
     *,
+    business: BusinessColumns,
     task_id: str,
     experiment_id: str,
     dataset_id: str,
@@ -748,7 +801,31 @@ def _report_scored_dataset(
         # formal report (DOM-10) — fail loudly instead.
         raise ReportScoreMissingError(experiment_id=experiment_id, dataset_id=dataset_id)
 
-    frame = runtime.backend.read_frame(dataset_path)
+    scoring_columns = _report_scoring_columns(
+        artifact,
+        config,
+        business,
+        include_input_score=has_input_score,
+    )
+    compact_reader = getattr(runtime.backend, "read_compact_numeric_frame", None)
+    if callable(compact_reader):
+        feature_columns = list(artifact.feature_list)
+        feature_set = set(feature_columns)
+        frame = compact_reader(
+            dataset_path,
+            numeric_columns=feature_columns,
+            other_columns=[
+                column
+                for column in scoring_columns
+                if column not in feature_set
+            ],
+            batch_size=16,
+        )
+    else:
+        frame = runtime.backend.read_frame(
+            dataset_path,
+            columns=scoring_columns,
+        )
     scorer = _ModelArtifactScorer(artifact, base_dir=_artifact_model_base_dir(runtime, artifact))
     score_col = "score" if has_input_score else MODEL_REPORT_SCORE_COL
     if not has_input_score:
@@ -767,6 +844,28 @@ def _report_scored_dataset(
     except Exception:
         staged_artifact.rollback()
         raise
+
+
+def _report_scoring_columns(
+    artifact: ModelArtifact,
+    config: TrainConfig,
+    business: BusinessColumns,
+    *,
+    include_input_score: bool,
+) -> list[str]:
+    return _unique_columns([
+        *artifact.feature_list,
+        config.target_col,
+        config.split_col,
+        "score" if include_input_score else None,
+        business.loan_month_col,
+        business.interest_rate_col,
+        business.loan_amount_col,
+        business.term_col,
+        business.drawdown_amount_col,
+        business.credit_limit_col,
+        *business.mob_observe_cols,
+    ])
 
 
 def _stress_feature_categories(feature_dictionary: dict, feature_list: tuple[str, ...]) -> dict[str, list[str]]:

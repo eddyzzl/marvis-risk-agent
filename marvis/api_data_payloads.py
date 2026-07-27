@@ -89,11 +89,17 @@ def dataset_preview_profiles(dataset) -> list[dict]:
 
 
 def masked_preview_records(frame: pd.DataFrame, dataset) -> list[dict]:
-    role_by_column = {column.name: column.semantic_role for column in dataset.columns}
+    role_by_column = {
+        column.name: column.semantic_role
+        for column in dataset.columns
+    }
     rows = []
     for record in _nan_safe_records(frame):
         rows.append({
-            str(column): _mask_preview_value(value, role_by_column.get(str(column)))
+            str(column): _mask_preview_value(
+                value,
+                role_by_column.get(str(column)),
+            )
             for column, value in record.items()
         })
     return rows
@@ -115,7 +121,10 @@ def _mask_preview_value(value, semantic_role: str | None):
         return _mask_preview_text(value, keep_start=4, keep_end=4)
     if semantic_role in {"categorical", "name"}:
         return _preview_token(value)
-    if semantic_role not in {"amount", "date", "score", "target"} and _looks_like_sensitive_preview_identifier(value):
+    if (
+        semantic_role not in {"amount", "date", "score", "target"}
+        and _looks_like_sensitive_preview_identifier(value)
+    ):
         return _mask_preview_text(value, keep_start=4, keep_end=4)
     return value
 

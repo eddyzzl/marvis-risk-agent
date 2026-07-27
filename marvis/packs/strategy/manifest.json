@@ -1482,6 +1482,13 @@
             "type": "integer",
             "minimum": 0
           },
+          "label_semantics": {
+            "type": "string",
+            "enum": [
+              "incremental",
+              "snapshot"
+            ]
+          },
           "warnings": {
             "type": "array",
             "items": {
@@ -1495,6 +1502,7 @@
           "curves",
           "counts",
           "summary",
+          "label_semantics",
           "nan_labels_dropped",
           "warnings"
         ],

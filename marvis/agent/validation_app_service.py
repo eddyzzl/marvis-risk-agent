@@ -75,6 +75,10 @@ from marvis.agent.validation_service import (
     raise_if_agent_cancelled,
 )
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN, DriverError
+from marvis.job_cancellation import (
+    register_job_cancellation,
+    unregister_job_cancellation,
+)
 from marvis.agent_memory.api_support import (
     agent_memory_context_from_store,
     audit_agent_memory_use_from_store,
@@ -269,6 +273,7 @@ def dispatch_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    ui_action: str | None = None,
     strategy_input: StrategyTaskInput | None = None,
     strategy_request: Mapping[str, object] | None = None,
     recovery_model_id: str | None = None,
@@ -291,14 +296,16 @@ def dispatch_driver_turn(
     synchronous (it mirrors the synchronous HTTP request, not a BackgroundTasks
     job) — it exists purely as the concurrency lock + observability record
     (REL-6), so ``GET /api/tasks`` shows ``active_job_kind == "driver"`` for the
-    duration of the turn. A hung driver turn is out of scope here (REL-5 covers
-    job heartbeat/watchdog + a cancel endpoint separately)."""
+    duration of the turn. The registered cancellation token also lets an Agent
+    stop message interrupt the current executor/tool subprocess cooperatively;
+    the driver then closes its job as cancelled instead of failed/succeeded."""
     try:
         job_id = repo_.start_job(task.id, _DRIVER_JOB_KIND)
     except ConflictError as exc:
         raise conflict(_DRIVER_JOB_BUSY_DETAIL) from exc
     if repo_.mark_job_running(job_id) is False:
         raise conflict(_DRIVER_JOB_BUSY_DETAIL)
+    cancel_token = register_job_cancellation(job_id)
     try:
         if strategy_input is not None:
             if task.task_type != TASK_TYPE_STRATEGY:
@@ -323,6 +330,8 @@ def dispatch_driver_turn(
                 model_id=recovery_model_id,
                 effort=recovery_effort,
             ),
+            hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
+            cancellation_check=cancel_token.raise_if_cancelled,
         )
         result = dispatch_plan_driver_turn(
             runtime, repo_, task, user_text=user_text, agent_client=agent_client,
@@ -330,6 +339,7 @@ def dispatch_driver_turn(
             dedup_strategies=dedup_strategies, adjust_params=adjust_params,
             expected_step_id=expected_step_id,
             strategy_request=strategy_request,
+            ui_action=ui_action,
             confirmation_source=CONFIRMATION_SOURCE_HUMAN,
             recovery_bypass=(
                 strategy_input is not None or strategy_request is not None
@@ -342,7 +352,15 @@ def dispatch_driver_turn(
         repo_.finish_job(job_id, status="failed", error_name=exc.__class__.__name__, error_value=str(exc))
         raise
     else:
-        if result.get("status") == "error":
+        latest_plans = request.app.state.plan_repo.list_plans_for_task(task.id)
+        plan_cancelled = bool(
+            latest_plans
+            and getattr(latest_plans[-1].status, "value", latest_plans[-1].status)
+            == PlanStatus.CANCELLED.value
+        )
+        if cancel_token.is_cancelled() or plan_cancelled:
+            repo_.finish_job(job_id, status="cancelled")
+        elif result.get("status") == "error":
             messages = result.get("messages") or []
             metadata = (messages[-1].get("metadata") or {}) if messages else {}
             diagnostic = metadata.get("error_diagnostic") or {}
@@ -358,6 +376,8 @@ def dispatch_driver_turn(
         else:
             repo_.finish_job(job_id, status="succeeded")
         return result
+    finally:
+        unregister_job_cancellation(job_id, cancel_token)
 
 
 def _driver_recovery_responder(

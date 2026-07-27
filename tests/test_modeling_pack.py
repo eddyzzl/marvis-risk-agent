@@ -88,6 +88,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     evidence_train_tool = next(
         tool for tool in manifest.tools if tool.name == "train_model_with_evidence_v2"
     )
+    train_models_tool = next(tool for tool in manifest.tools if tool.name == "train_models")
     choose_tool = next(tool for tool in manifest.tools if tool.name == "choose_modeling_spec")
     configure_tool = next(tool for tool in manifest.tools if tool.name == "configure_tuning")
     tune_tool = next(tool for tool in manifest.tools if tool.name == "tune_hyperparameters")
@@ -96,9 +97,14 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     handoff_tool = next(tool for tool in manifest.tools if tool.name == "handoff_to_validation")
     post_training_tool = next(tool for tool in manifest.tools if tool.name == "post_training_action")
     reject_tool = next(tool for tool in manifest.tools if tool.name == "reject_inference")
+    screen_tool = next(tool for tool in manifest.tools if tool.name == "screen_features")
+    resolve_special_values_tool = next(
+        tool for tool in manifest.tools if tool.name == "resolve_special_values"
+    )
     select_tool = next(tool for tool in manifest.tools if tool.name == "select_features")
     select_experiment_tool = next(tool for tool in manifest.tools if tool.name == "select_experiment")
     report_tool = next(tool for tool in manifest.tools if tool.name == "generate_model_report")
+    reports_tool = next(tool for tool in manifest.tools if tool.name == "generate_model_reports")
 
     assert tool_names == {
         "check_data_quality",
@@ -107,6 +113,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "prepare_modeling_frame",
         "make_split",
         "screen_features",
+        "resolve_special_values",
         "select_features",
         "choose_modeling_spec",
         "configure_tuning",
@@ -158,11 +165,48 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert {"write:model", "write:experiment", "write:task"} <= set(
         evidence_train_tool.side_effects
     )
+    assert "eval_metric" in train_tool.input_schema["properties"]
     assert choose_tool.determinism == "deterministic"
     assert "metric_policy" in choose_tool.output_schema["required"]
+    assert "sample_weight_col" in screen_tool.input_schema["properties"]
+    assert {"sentinel_columns", "sentinel_notice"} <= set(
+        screen_tool.output_schema["required"]
+    )
+    assert resolve_special_values_tool.determinism == "deterministic"
+    assert {"read:dataset", "write:dataset"} <= set(
+        resolve_special_values_tool.side_effects
+    )
+    assert (
+        resolve_special_values_tool.input_schema["properties"]["decisions"][
+            "additionalProperties"
+        ]["properties"]["action"]["enum"]
+        == ["mask", "retain", "drop"]
+    )
     assert "params" in configure_tool.input_schema["properties"]
     assert "params" in configure_tool.output_schema["required"]
     assert "params" in tune_tool.input_schema["properties"]
+    # Full-data, multi-recipe searches are deliberately multi-hour jobs.  The
+    # current 120-trial workload can exceed six hours, and completed algorithms
+    # now persist task-scoped checkpoints during that longer window.
+    assert tune_tool.timeout_seconds >= 12 * 60 * 60
+    # A full-data comparison trains every selected recipe serially.  Production
+    # datasets can legitimately exceed the generic ten-minute tool ceiling even
+    # when each learner is making steady progress.
+    assert train_models_tool.timeout_seconds >= 12 * 60 * 60
+    # Champion selection defaults to a final train+test refit.  That is another
+    # full learner fit, not a metadata-only comparison, so it must inherit a
+    # training-grade wall-clock budget rather than the generic 60-second limit.
+    assert select_experiment_tool.timeout_seconds >= 12 * 60 * 60
+    # A model report computes per-split univariate metrics for every selected
+    # feature.  On a production-size dataset this is a real analytical workload,
+    # not a short metadata render, so it needs more than the generic two-minute
+    # ceiling even after its memory footprint is bounded.
+    assert report_tool.timeout_seconds >= 60 * 60
+    assert reports_tool.timeout_seconds >= 12 * 60 * 60
+    assert post_training_tool.timeout_seconds >= 60 * 60
+    assert "write:artifact" in tune_tool.side_effects
+    assert "read:artifacts" in tune_tool.side_effects
+    assert tune_tool.input_schema["properties"]["force_recompute"]["default"] is False
     assert "oot_stability_penalty" not in tune_tool.input_schema["properties"]
     assert "OOT metrics are reported but not used" in tune_tool.summary
     assert calibrate_tool.determinism == "deterministic"
@@ -1507,9 +1551,74 @@ def test_configure_tuning_preserves_manual_controls_and_enables_every_recipe():
     )
     assert multi["tune_enabled"] is True
     assert multi["n_trials_by_recipe"] == {
-        "lgb": 40, "xgb": 40, "catboost": 40, "lr": 12, "scorecard": 12, "mlp": 12,
+        "lgb": 1, "xgb": 1, "catboost": 1, "lr": 1, "scorecard": 1, "mlp": 1,
     }
-    assert multi["total_n_trials"] == 40 + 40 + 40 + 12 + 12 + 12
+    assert multi["total_n_trials"] == 6
+
+    for target_type, recipes in (
+        (
+            "continuous",
+            ["lgb_regressor", "xgb_regressor", "lr_regressor", "mlp_regressor"],
+        ),
+        (
+            "multiclass",
+            ["lgb_multiclass", "xgb_multiclass", "lr_multiclass", "mlp_multiclass"],
+        ),
+    ):
+        configured = tool_configure_tuning(
+            {
+                "recipe": recipes[0],
+                "recipes": recipes,
+                "target_type": target_type,
+                "seed": 13,
+            },
+            SimpleNamespace(seed=None),
+        )
+        assert configured["tune_enabled"] is True
+        assert configured["n_trials_by_recipe"] == {
+            recipe: 1 for recipe in recipes
+        }
+        assert configured["total_n_trials"] == len(recipes)
+        assert "不参与调参" not in configured["reason"]
+
+
+def test_modeling_workflow_one_trial_override_reaches_every_recipe():
+    """The interactive modeling workflow deliberately supplies ``n_trials=1``.
+
+    Normal workflow runs exercise tuning once per candidate, while callers may
+    still explicitly expand the reusable tool's budget.
+    """
+    from marvis.packs.modeling.tools import (
+        tool_choose_modeling_spec,
+        tool_configure_tuning,
+    )
+
+    chosen = tool_choose_modeling_spec(
+        {
+            "target_col": "y",
+            "features": ["x1", "x2"],
+            "recipes": ["lgb", "xgb", "lr"],
+            "target_type": "binary",
+            "n_trials": 1,
+            "seed": 23,
+        },
+        SimpleNamespace(seed=None),
+    )
+    assert chosen["n_trials"] == 1
+    assert chosen["n_trials_by_recipe"] == {"lgb": 1, "xgb": 1, "lr": 1}
+
+    configured = tool_configure_tuning(
+        {
+            "recipe": chosen["recipe"],
+            "recipes": chosen["recipes"],
+            "target_type": chosen["target_type"],
+            "n_trials_by_recipe": chosen["n_trials_by_recipe"],
+            "seed": chosen["seed"],
+        },
+        SimpleNamespace(seed=None),
+    )
+    assert configured["n_trials_by_recipe"] == {"lgb": 1, "xgb": 1, "lr": 1}
+    assert configured["total_n_trials"] == 3
 
 
 def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
@@ -1549,6 +1658,123 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["target_type"] == "binary"
     assert out["selection_metric"] == "test_ks(overfit-penalized)"
     assert out["failed"] == []
+
+
+def test_train_models_reuses_completed_recipes_after_interrupted_batch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A retry after the aggregate worker dies must not retrain recipes whose
+    exact task/config artifact was already committed before the interruption."""
+    _runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+    inputs = {
+        "dataset_id": dataset.id,
+        "recipes": ["lgb", "lr"],
+        "features": ["x1", "x2"],
+        "target_col": "y",
+        "split_col": "split",
+        "split_values": {"train": "train", "test": "test", "oot": "oot"},
+        "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+        "seed": 23,
+    }
+    real_train_recipe = modeling_train_tools._train_recipe
+
+    def interrupted_after_lgb(recipe, backend, dataset_path, config, *, out_dir):
+        if recipe == "lr":
+            raise RuntimeError("synthetic aggregate interruption")
+        return real_train_recipe(
+            recipe,
+            backend,
+            dataset_path,
+            config,
+            out_dir=out_dir,
+        )
+
+    monkeypatch.setattr(
+        modeling_train_tools,
+        "_train_recipe",
+        interrupted_after_lgb,
+    )
+    partial = modeling_tools.tool_train_models(inputs, ctx)
+    first_lgb = next(
+        row for row in partial["experiments"] if row["recipe"] == "lgb"
+    )
+    assert [row["recipe"] for row in partial["failed"]] == ["lr"]
+
+    retrained: list[str] = []
+
+    def record_retry(recipe, backend, dataset_path, config, *, out_dir):
+        retrained.append(recipe)
+        return real_train_recipe(
+            recipe,
+            backend,
+            dataset_path,
+            config,
+            out_dir=out_dir,
+        )
+
+    monkeypatch.setattr(modeling_train_tools, "_train_recipe", record_retry)
+    resumed = modeling_tools.tool_train_models(inputs, ctx)
+
+    assert retrained == ["lr"]
+    assert {row["recipe"] for row in resumed["experiments"]} == {"lgb", "lr"}
+    resumed_lgb = next(
+        row for row in resumed["experiments"] if row["recipe"] == "lgb"
+    )
+    assert resumed_lgb["experiment_id"] == first_lgb["experiment_id"]
+    trained_lgb = [
+        experiment
+        for experiment in ExperimentStore(settings.db_path).list_for_task(task.id)
+        if experiment.recipe_id == "lgb" and experiment.status == "trained"
+    ]
+    assert [experiment.id for experiment in trained_lgb] == [
+        first_lgb["experiment_id"]
+    ]
+
+
+def test_train_models_all_cache_hits_do_not_reload_wide_dataset(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A fully completed retry should return persisted evidence without a data reload."""
+
+    _runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+    inputs = {
+        "dataset_id": dataset.id,
+        "recipes": ["lr"],
+        "features": ["x1", "x2"],
+        "target_col": "y",
+        "split_col": "split",
+        "split_values": {"train": "train", "test": "test", "oot": "oot"},
+        "seed": 23,
+    }
+    first = modeling_tools.tool_train_models(inputs, ctx)
+
+    monkeypatch.setattr(
+        modeling_train_tools.TrainingDataset,
+        "load_compact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("completed retry must not reload the dataset")
+        ),
+    )
+    resumed = modeling_tools.tool_train_models(inputs, ctx)
+
+    assert resumed["experiment_ids"] == first["experiment_ids"]
+    assert resumed["failed"] == []
 
 
 def test_train_models_wires_scenario_eval_metric_into_champion_selection(tmp_path):
@@ -2066,6 +2292,89 @@ def test_select_experiment_refit_attach_failure_rolls_back_unattached_artifact_f
     )
     assert retried.ok is True, retried.error
     assert retried.output["refit"]["applied"] is True
+
+
+def test_select_experiment_refit_releases_projected_frame_before_training(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+):
+    """PERF-11: champion refit must not retain the projected source frame while
+    the scratch parquet is re-read for training.
+
+    On a 750k x 187 modeling sample, keeping both ``frame`` and its historical
+    full ``frame.copy()`` alive until model.fit pushed the governed worker above
+    4 GB RSS.  Observe the public select_experiment boundary and require the
+    projected frame to be collectable before the refit recipe starts, while also
+    checking that the scratch split still means train U test with a deterministic
+    5% refit holdout and an untouched OOT population.
+    """
+    import gc
+    import weakref
+
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    source_path = registry.resolve_path(dataset.id)
+    projected_frame_refs = []
+    original_read_frame = DataBackend.read_frame
+
+    def tracked_read_frame(self, path, *, columns=None, nrows=None):
+        frame = original_read_frame(self, path, columns=columns, nrows=nrows)
+        if Path(path) == source_path and columns is not None:
+            projected_frame_refs.append(weakref.ref(frame))
+        return frame
+
+    real_train_recipe = modeling_train_tools._train_recipe
+    training_observed = []
+
+    def assert_source_released_then_train(recipe, backend, dataset_path, config, *, out_dir):
+        gc.collect()
+        assert len(projected_frame_refs) == 1
+        assert projected_frame_refs[0]() is None
+        scratch = pd.read_parquet(dataset_path)
+        assert scratch["split"].value_counts().to_dict() == {
+            "__refit_train__": 190,
+            "oot": 40,
+            "__refit_holdout__": 10,
+        }
+        training_observed.append(True)
+        return real_train_recipe(recipe, backend, dataset_path, config, out_dir=out_dir)
+
+    monkeypatch.setattr(DataBackend, "read_frame", tracked_read_frame)
+    monkeypatch.setattr(modeling_train_tools, "_train_recipe", assert_source_released_then_train)
+
+    from marvis.packs.modeling import select_tools as modeling_select_tools
+
+    selected = modeling_select_tools.tool_select_experiment(
+        {
+            "experiment_ids": [trained.output["experiment_id"]],
+            "selected_experiment_id": trained.output["experiment_id"],
+            "target_type": "binary",
+        },
+        SimpleNamespace(
+            workspace=settings.workspace,
+            datasets_root=settings.datasets_dir,
+            task_id=task.id,
+            seed=None,
+        ),
+    )
+
+    assert selected["refit"]["applied"] is True
+    assert training_observed == [True]
 
 
 @pytest.mark.slow
@@ -2640,16 +2949,24 @@ def test_pick_best_experiment_is_target_type_aware():
         {"experiment_id": "reg-b", "recipe": "lgb_regressor", "metrics": {"oot_rmse": 1.8, "test_rmse": 2.2}},
     ]
     best, metric = _pick_best_experiment(regression, target_type="continuous")
-    assert best["experiment_id"] == "reg-b"
-    assert metric == "oot_rmse"
+    assert best["experiment_id"] == "reg-a"
+    assert metric == "test_rmse"
 
     multiclass = [
-        {"experiment_id": "mc-a", "recipe": "lgb_multiclass", "metrics": {"oot_macro_auc": 0.71}},
-        {"experiment_id": "mc-b", "recipe": "lgb_multiclass", "metrics": {"oot_macro_auc": 0.82}},
+        {
+            "experiment_id": "mc-a",
+            "recipe": "lgb_multiclass",
+            "metrics": {"test_macro_auc": 0.84, "oot_macro_auc": 0.71},
+        },
+        {
+            "experiment_id": "mc-b",
+            "recipe": "lgb_multiclass",
+            "metrics": {"test_macro_auc": 0.76, "oot_macro_auc": 0.92},
+        },
     ]
     best, metric = _pick_best_experiment(multiclass, target_type="multiclass")
-    assert best["experiment_id"] == "mc-b"
-    assert metric == "oot_macro_auc"
+    assert best["experiment_id"] == "mc-a"
+    assert metric == "test_macro_auc"
 
 
 def test_pick_best_experiment_binary_selects_by_test_ks_not_oot_ks():
@@ -3455,6 +3772,48 @@ def test_continuous_screen_drops_constant_and_all_missing(tmp_path):
     assert [row[0] for row in capped.output["ranked"]] == ["good1", "good2"]
 
 
+def test_modeling_screen_payload_surfaces_semantic_leakage_and_identity_reasons(tmp_path):
+    """Tool-level contract: the gate receives the name-proven hard exclusions and their
+    reasons, including controls that arrive in an explicit feature list."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    rows = 200
+    rng = np.random.RandomState(23)
+    frame = pd.DataFrame({
+        "mob3_ever30": rng.permutation(np.arange(rows, dtype=float)),
+        "appl_seq_x": np.arange(rows, dtype=float),
+        "sample_weight": np.where(np.arange(rows) % 4 == 0, 2.0, 1.0),
+        "safe": rng.normal(size=rows),
+        "y": np.array(([0, 1] * (rows // 2)), dtype=float),
+        "split": ["train"] * 120 + ["test"] * 80,
+    })
+    path = tmp_path / "semantic_leakage_screen.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+
+    screened = runner.invoke(
+        ToolRef("modeling", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": [
+                "mob3_ever30", "appl_seq_x", "sample_weight", "safe",
+            ],
+            "target_col": "y",
+            "split_col": "split",
+            "sample_weight_col": "sample_weight",
+            "target_type": "binary",
+        },
+        task_id=task.id,
+    )
+
+    assert screened.ok is True, screened.error
+    leakage = {row[0]: row[2] for row in screened.output["leakage"]}
+    unusable = {row[0]: row[1] for row in screened.output["unusable"]}
+    assert "semantic/temporal target leakage" in leakage["mob3_ever30"]
+    assert "identity/row key" in unusable["appl_seq_x"]
+    assert "protected sample-weight column" in unusable["sample_weight"]
+    assert screened.output["selected"] == ["safe"]
+
+
 def test_continuous_screen_uses_dev_rows_for_usability_stats(tmp_path):
     runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
     frame = pd.DataFrame({
@@ -3506,7 +3865,7 @@ def test_continuous_screen_then_train_models_regression_end_to_end(tmp_path):
     assert screened.ok is True, screened.error
     assert set(screened.output["selected"]) == {"x1", "x2"}
     assert screened.output["leakage"] == []
-    assert screened.output["note"] == "非二分类目标：跳过泄漏KS筛选，已剔除常量/高缺失列"
+    assert screened.output["note"] == "非二分类目标：跳过统计型泄漏KS筛选；语义/时序泄漏与控制列仍硬剔除"
 
     trained = runner.invoke(
         ToolRef("modeling", "train_models"),
@@ -3992,6 +4351,11 @@ def test_modeling_screen_features_gate_raises_without_confirmation(tmp_path):
             "features": ["x1", "x2"],
             "target_col": "y",
             "split_col": "split",
+            # Optional workflow slots are serialized as an empty string when
+            # the user has not selected a sample-weight column.  The pack
+            # boundary must normalize that value to ``None`` instead of
+            # rejecting the step before the tool can run.
+            "sample_weight_col": "",
             "drop_nan_labels": True,
         },
         task_id=task.id,

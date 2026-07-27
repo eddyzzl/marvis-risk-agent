@@ -554,8 +554,129 @@ def test_reclaim_running_plans_pauses_plan_and_marks_step_interrupted(tmp_path):
     last = messages[-1]
     assert last["metadata"]["plan_interrupted_by_restart"] is True
     assert last["metadata"]["plan_id"] == "plan-1"
+    assert last["metadata"]["error"] is True
+    assert last["metadata"]["error_diagnostic"] == {
+        "schema_version": "workflow_error.v1",
+        "workflow": TASK_TYPE_DATA_JOIN,
+        "code": "server_restart_interrupted",
+        "phase": "execution",
+        "title": "数据处理执行中断",
+        "summary": "服务重启中断了“join it”步骤，已完成步骤和中间产物均已保留。",
+        "cause": "MARVIS 服务在该步骤执行期间重启；源材料没有被修改。",
+        "location": "join it",
+        "evidence": [
+            {"label": "计划", "value": "plan-1"},
+            {"label": "失败步骤", "value": "step-1"},
+        ],
+        "actions": ["回复“重试当前步骤”，从该失败步骤继续。"],
+        "agent_prompt": "请回复“重试当前步骤”，Agent 将复用已完成步骤和中间产物继续执行。",
+        "recovery_actions": [
+            {"label": "重试当前步骤", "command": "重试当前步骤"}
+        ],
+        "retryable": True,
+        "auto_recoverable": True,
+        "impact": "失败步骤之后的依赖步骤尚未执行。",
+        "exception_type": "ServerRestart",
+        "technical_detail": (
+            "ServerRestart: interrupted during running before output was persisted; "
+            "explicit retry required"
+        ),
+    }
+    assert last["metadata"]["failure_envelope"] == {
+        "schema_version": "failure.v1",
+        "failed_step_id": "step-1",
+        "error_kind": "ServerRestart",
+        "message": "服务重启中断了“join it”步骤，已完成步骤和中间产物均已保留。",
+        "retryable": True,
+        "editable_input_schema": {},
+        "suggested_actions": ["retry"],
+        "downstream_reset": "dependent_steps",
+        "downstream_reset_steps": [],
+    }
     assert "服务已重启" in last["content"]
     assert "计划已暂停" in last["content"]
+    assert "回复“重试当前步骤”" in last["content"]
+    assert "点击" not in last["content"]
+
+
+def test_reclaim_running_plan_finalizes_tool_progress_message_in_place(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task_repo = TaskRepository(db_path)
+    task = _driver_task(task_repo, tmp_path)
+    plan_repo = PlanRepository(db_path)
+    plan_repo.create_plan(
+        _running_plan_with_step(task.id, step_status=StepStatus.RUNNING)
+    )
+    progress = {
+        "kind": "model_tuning",
+        "algorithm": "xgb",
+        "trial": 9,
+        "trial_total": 40,
+    }
+    message = task_repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content="模型调参正在执行：xgb，当前轮次 9/40。",
+        metadata={
+            "kind": "tool_progress",
+            "plan_id": "plan-1",
+            "step_id": "step-1",
+            "run_id": "run-1",
+            "status": "running",
+            "streaming": True,
+            "progress": progress,
+        },
+    )
+
+    reclaimed = reclaim_running_plans(
+        plan_repo,
+        _reviewer(),
+        None,
+        HarnessState(plan_repo),
+        task_repo,
+    )
+
+    assert reclaimed == 1
+    messages = {item["id"]: item for item in task_repo.list_agent_messages(task.id)}
+    recovered = messages[message["id"]]
+    assert recovered["metadata"]["streaming"] is False
+    assert recovered["metadata"]["status"] == "interrupted"
+    assert recovered["metadata"]["interrupted_by_restart"] is True
+    assert recovered["metadata"]["progress"] == progress
+    assert "调参已中断" in recovered["content"]
+
+
+def test_reclaim_running_plan_preserves_awaiting_confirmation_boundary(tmp_path):
+    """A restart can land after the step became awaiting_confirm but before the
+    plan-level status write.  Recovery must finish that transition, not create
+    the contradictory FAILED-plan / awaiting-step state."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task_repo = TaskRepository(db_path)
+    task = _driver_task(task_repo, tmp_path)
+    plan_repo = PlanRepository(db_path)
+    plan_repo.create_plan(
+        _running_plan_with_step(task.id, step_status=StepStatus.AWAITING_CONFIRM)
+    )
+
+    reclaimed = reclaim_running_plans(
+        plan_repo,
+        _reviewer(),
+        None,
+        HarnessState(plan_repo),
+        task_repo,
+    )
+
+    assert reclaimed == 1
+    plan = plan_repo.load_plan("plan-1")
+    assert plan.status == PlanStatus.AWAITING_CONFIRM
+    assert plan.steps[0].status == StepStatus.AWAITING_CONFIRM
+    messages = task_repo.list_agent_messages(task.id)
+    assert messages[-1]["metadata"]["plan_resumed_at_confirmation"] is True
+    assert "等待你的确认" in messages[-1]["content"]
+    assert "重试步骤" not in messages[-1]["content"]
 
 
 def test_reclaim_running_plans_is_idempotent_across_two_startups(tmp_path):

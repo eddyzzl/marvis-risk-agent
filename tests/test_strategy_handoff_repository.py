@@ -51,7 +51,11 @@ def _profile(name: str) -> ColumnProfile:
     )
 
 
-def _task_payload(*, name: str = "approval champion") -> TaskCreate:
+def _task_payload(
+    *,
+    name: str = "approval champion",
+    metrics: tuple[str, ...] | None = ("psi",),
+) -> TaskCreate:
     return TaskCreate(
         task_type=TASK_TYPE_STRATEGY,
         model_name=name,
@@ -80,7 +84,7 @@ def _task_payload(*, name: str = "approval champion") -> TaskCreate:
                 term_months=12,
             ),
         ),
-        metrics=["psi"],
+        metrics=None if metrics is None else list(metrics),
         capability_tier="balanced",
         notebook_path="/must/not/copy.ipynb",
         sample_path="/must/not/copy.parquet",
@@ -192,7 +196,12 @@ def _seed_monitoring_evidence(
         )
 
 
-def _fixture(tmp_path: Path, *, run_check_level: str | None = None) -> dict:
+def _fixture(
+    tmp_path: Path,
+    *,
+    run_check_level: str | None = None,
+    metrics: tuple[str, ...] | None = ("psi",),
+) -> dict:
     db_path = tmp_path / "marvis.sqlite"
     datasets_root = tmp_path / "datasets"
     source_path = datasets_root / "content" / "monitoring.parquet"
@@ -203,7 +212,7 @@ def _fixture(tmp_path: Path, *, run_check_level: str | None = None) -> dict:
     init_db(db_path)
 
     task_repo = TaskRepository(db_path)
-    source_task = task_repo.create_task(_task_payload())
+    source_task = task_repo.create_task(_task_payload(metrics=metrics))
     parent = _parent_strategy()
     strategy_repo = StrategyRepository(db_path)
     strategy_repo.create_strategy(source_task.id, parent)
@@ -275,12 +284,13 @@ def test_new_version_from_on_connection_targets_new_task_and_preserves_dsl(
         "task_id": target_task.id,
         "strategy_type": "approval",
         "version": 2,
-            "status": "draft",
-            "asset_status": "draft",
+        "status": "draft",
+        "asset_status": "draft",
         "adopted_at": None,
         "adoption_reason": None,
         "parent_strategy_id": fx["parent"].id,
         "created_at": "2026-07-18T02:00:00+00:00",
+        "description": "adopted approval champion",
     }
     assert child.spec is not None
     assert child.spec.rules == fx["parent"].spec.rules
@@ -291,7 +301,9 @@ def test_new_version_from_on_connection_targets_new_task_and_preserves_dsl(
     assert stored["rules"][0]["condition"]["op"] == "and"
 
 
-def test_existing_new_version_from_keeps_max_version_compatibility(tmp_path: Path) -> None:
+def test_existing_new_version_from_keeps_max_version_compatibility(
+    tmp_path: Path,
+) -> None:
     fx = _fixture(tmp_path)
     repo: StrategyRepository = fx["strategy_repo"]
     first = repo.new_version_from(
@@ -378,6 +390,27 @@ def test_red_monitoring_handoff_creates_governed_child_task_dataset_and_strategy
     assert "rows" not in detail
 
 
+def test_red_monitoring_handoff_preserves_unconfigured_metrics(
+    tmp_path: Path,
+) -> None:
+    fx = _fixture(tmp_path, metrics=None)
+    repo = StrategyHandoffRepository(fx["db_path"], fx["datasets_root"])
+
+    repo.create_new_version_from_red_run(
+        source_task_id=fx["source_task"].id,
+        parent_strategy_id=fx["parent"].id,
+        monitoring_run_id="run-red",
+        new_task_id="task-child",
+        new_strategy_id="strategy-child",
+        new_dataset_id="dataset-child",
+        actor="risk-owner",
+        created_at="2026-07-18T02:00:00+00:00",
+    )
+
+    child_task = fx["task_repo"].get_task("task-child")
+    assert child_task.metrics is None
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -404,9 +437,7 @@ def test_handoff_fails_closed_for_stale_or_cross_task_evidence(
         source_task_id = fx["task_repo"].create_task(_task_payload(name="foreign")).id
     elif mutation == "non_red":
         with connect(fx["db_path"]) as conn:
-            conn.execute(
-                "DELETE FROM strategy_monitoring_runs WHERE id = 'run-red'"
-            )
+            conn.execute("DELETE FROM strategy_monitoring_runs WHERE id = 'run-red'")
         _seed_monitoring_evidence(
             fx["db_path"],
             strategy_id=fx["parent"].id,
@@ -494,17 +525,26 @@ def test_handoff_rejects_replay_of_same_monitoring_run(tmp_path: Path) -> None:
         )
 
     with connect(fx["db_path"]) as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM audit WHERE kind = ? AND target_ref = ?",
-            ("strategy.monitoring.new_version_handoff", "run-red"),
-        ).fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) FROM strategies WHERE parent_strategy_id = ?",
-            (fx["parent"].id,),
-        ).fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE id = ?", (first["new_task_id"],)
-        ).fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM audit WHERE kind = ? AND target_ref = ?",
+                ("strategy.monitoring.new_version_handoff", "run-red"),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM strategies WHERE parent_strategy_id = ?",
+                (fx["parent"].id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE id = ?", (first["new_task_id"],)
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_handoff_rolls_back_task_dataset_strategy_and_audit_on_failure(
@@ -530,15 +570,27 @@ def test_handoff_rolls_back_task_dataset_strategy_and_audit_on_failure(
         )
 
     with connect(fx["db_path"]) as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE id = 'task-rolled-back'"
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM datasets WHERE id = 'dataset-rolled-back'"
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM strategies WHERE id = 'strategy-rolled-back'"
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM audit WHERE target_ref = 'run-red'"
-        ).fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE id = 'task-rolled-back'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM datasets WHERE id = 'dataset-rolled-back'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM strategies WHERE id = 'strategy-rolled-back'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM audit WHERE target_ref = 'run-red'"
+            ).fetchone()[0]
+            == 0
+        )

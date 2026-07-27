@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import date, datetime, time
 from typing import Any
 
 import pandas as pd
@@ -53,6 +54,11 @@ DATE_NAMES = (
 TARGET_NAMES = (
     "target",
     "label",
+    # Established business labels.  Keep these explicit: the bare ``y`` rule
+    # below intentionally must not turn pandas join suffixes such as
+    # ``raw_feature_y`` into targets.
+    "long_y",
+    "fission_y",
     "y",
     "bad",
     "is_bad",
@@ -132,16 +138,26 @@ def infer_dataset_schema(df: pd.DataFrame, *, seed: int = 0) -> list[ColumnProfi
 
 
 def detect_target_column(profiles: list[ColumnProfile], df: pd.DataFrame) -> str | None:
-    candidates = [profile.name for profile in profiles if profile.semantic_role == "target"]
-    if candidates:
-        return candidates[0]
-    for profile in profiles:
-        if not _name_matches(profile.name, TARGET_NAMES):
-            continue
-        values = {_binary_value(value) for value in df[profile.name].dropna().unique()}
-        if values and values <= {0, 1}:
-            return profile.name
-    return None
+    semantic_candidates = [
+        profile.name
+        for profile in profiles
+        if profile.semantic_role == "target"
+        and profile.name in df.columns
+        and _is_effective_binary(df[profile.name])
+    ]
+    # Multiple valid label columns are different business definitions, not an
+    # ordering problem.  Leave the choice to the C1 semantics gate instead of
+    # silently selecting whichever happened to appear first in a wide table.
+    if semantic_candidates:
+        return semantic_candidates[0] if len(semantic_candidates) == 1 else None
+    fallback_candidates = [
+        profile.name
+        for profile in profiles
+        if _name_matches(profile.name, TARGET_NAMES)
+        and profile.name in df.columns
+        and _is_effective_binary(df[profile.name])
+    ]
+    return fallback_candidates[0] if len(fallback_candidates) == 1 else None
 
 
 def _name_matches(name: str, keywords: tuple[str, ...]) -> bool:
@@ -150,7 +166,9 @@ def _name_matches(name: str, keywords: tuple[str, ...]) -> bool:
     for keyword in keywords:
         normalized_keyword = _normalize_name(keyword)
         if normalized_keyword == "y":
-            if normalized == "y" or "y" in tokens:
+            # A one-letter label is meaningful only as the complete column
+            # name.  ``*_y`` is pandas' ordinary right-side join suffix.
+            if normalized == "y":
                 return True
             continue
         if normalized_keyword in tokens or normalized_keyword in normalized:
@@ -175,7 +193,30 @@ def _desensitize(value: Any, role: str) -> object:
         return _token_text(value)
     if role not in {"amount", "date", "score", "target"} and _looks_like_sensitive_identifier(value):
         return _mask_text(value, keep_start=4, keep_end=4)
-    return value
+    return _json_safe_sample_value(value)
+
+
+def _json_safe_sample_value(value: Any) -> object:
+    """Keep profile samples faithful while making the persisted contract JSON-safe."""
+
+    if value is None or value is pd.NaT:
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, pd.Timedelta):
+        return value.isoformat()
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    # NumPy scalar values expose ``item``; converting them here also prevents
+    # the same persistence failure for int64/float32 profile examples.
+    item = getattr(value, "item", None)
+    if callable(item):
+        converted = item()
+        if converted is not value:
+            return _json_safe_sample_value(converted)
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def _mask_text(value: Any, *, keep_start: int, keep_end: int) -> str:
@@ -221,6 +262,20 @@ def _binary_value(value: Any) -> int | None:
     if number == 1:
         return 1
     return None
+
+
+def _is_effective_binary(series: pd.Series) -> bool:
+    """True only when non-null values contain both, and only, binary classes."""
+
+    normalized: set[int] = set()
+    for value in series.dropna().unique():
+        binary = _binary_value(value)
+        if binary is None:
+            return False
+        normalized.add(binary)
+        if len(normalized) > 2:
+            return False
+    return normalized == {0, 1}
 
 
 __all__ = [

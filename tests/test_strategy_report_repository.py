@@ -268,12 +268,12 @@ def test_migration_021_remains_registered_in_current_schema_and_builds_guarded_r
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 22
+    assert version == db_schema_module.SCHEMA_VERSION == 24
     assert (
         21,
         db_schema_module._migration_021_strategy_report_docx,
     ) in db_schema_module._MIGRATIONS
-    assert db_schema_module._MIGRATIONS[-1] == (
+    assert db_schema_module._MIGRATIONS[-3] == (
         22,
         db_schema_module._migration_022_strategy_pool_materializations,
     )
@@ -323,7 +323,10 @@ def test_migration_021_preserves_and_revalidates_legacy_three_output_revision(
             "SELECT * FROM strategy_report_revisions WHERE report_id = ?",
             (bundle["report_id"],),
         ).fetchone()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0]
+            == db_schema_module.SCHEMA_VERSION
+        )
     assert row["docx_artifact_id"] is None
     assert row["docx_artifact_hash"] is None
 

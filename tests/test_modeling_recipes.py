@@ -1,9 +1,12 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+import marvis.packs.modeling.recipes.lgb_multiclass as lgb_multiclass_recipe
+import marvis.packs.modeling.recipes.lgb_regressor as lgb_regressor_recipe
 from marvis.agent.modeling_setup import build_modeling_proposal
 from marvis.data.backend import DataBackend
 from marvis.data.errors import NanLabelNotConfirmedError
@@ -18,6 +21,7 @@ from marvis.packs.modeling.recipes.common import (
     cat_feature_indices,
     compute_model_metrics,
     compute_multiclass_metrics,
+    normalize_multiclass_probabilities,
     resolve_auto_scale_pos_weight,
     sample_weight_values,
     split_modeling_frame,
@@ -27,11 +31,24 @@ from marvis.packs.modeling.recipes.lgb import train_lgb
 from marvis.packs.modeling.recipes.lgb_multiclass import train_lgb_multiclass
 from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
+from marvis.packs.modeling.recipes.lr_multiclass import train_lr_multiclass
+from marvis.packs.modeling.recipes.lr_regressor import train_lr_regressor
 from marvis.packs.modeling.recipes.mlp import train_mlp
+from marvis.packs.modeling.recipes.mlp_multiclass import train_mlp_multiclass
+from marvis.packs.modeling.recipes.mlp_regressor import train_mlp_regressor
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
+from marvis.packs.modeling.recipes.xgb_multiclass import train_xgb_multiclass
+from marvis.packs.modeling.recipes.xgb_regressor import train_xgb_regressor
 from marvis.packs.modeling.tools import _ModelArtifactScorer
-from marvis.packs.modeling.tune import _lgb_base_params, _trial_score, tune_hyperparameters
+from marvis.packs.modeling.tune import (
+    _base_params_without_controls,
+    _cv_folds,
+    _lgb_base_params,
+    _trial_score,
+    tune_hyperparameters,
+)
+from marvis.packs.modeling.training_dataset import TrainingDataset
 from marvis.settings import build_settings
 
 
@@ -52,12 +69,53 @@ def test_recipe_registry_exposes_builtin_classification_and_regression_recipes()
     recipes = list_recipes()
 
     assert [recipe.id for recipe in recipes] == [
-        "lgb", "xgb", "catboost", "lr", "scorecard", "lgb_regressor", "mlp", "lgb_multiclass", "ensemble",
+        "lgb",
+        "xgb",
+        "catboost",
+        "lr",
+        "scorecard",
+        "lgb_regressor",
+        "xgb_regressor",
+        "lr_regressor",
+        "mlp_regressor",
+        "mlp",
+        "lgb_multiclass",
+        "xgb_multiclass",
+        "lr_multiclass",
+        "mlp_multiclass",
+        "ensemble",
     ]
     assert get_recipe("catboost").algorithm == "catboost"
     assert get_recipe("scorecard").requires_woe is True
     assert get_recipe("lgb_regressor").algorithm == "lgb_regressor"
     assert get_recipe("lgb_multiclass").algorithm == "lgb_multiclass"
+    assert get_recipe("xgb_regressor").algorithm == "xgb_regressor"
+    assert get_recipe("lr_multiclass").algorithm == "lr_multiclass"
+
+
+def test_tuning_base_params_never_forward_platform_group_controls_to_estimators():
+    raw = {
+        "learning_rate": 0.07,
+        "valid_group_cols": ["customer_id", "account_id"],
+        "sample_weight_col": "weight",
+    }
+
+    assert _lgb_base_params(raw, pos_weight_hint=2.0) == {"learning_rate": 0.07}
+    assert _base_params_without_controls(raw) == {"learning_rate": 0.07}
+
+
+def test_modeling_manifest_accepts_normalized_group_controls_across_training_tools():
+    manifest_path = Path(__file__).parents[1] / "marvis" / "packs" / "modeling" / "manifest.json"
+    tools = {
+        item["name"]: item
+        for item in json.loads(manifest_path.read_text(encoding="utf-8"))["tools"]
+    }
+
+    for name in ("configure_tuning", "tune_hyperparameters", "train_model", "train_models"):
+        schema = tools[name]["input_schema"]["properties"]["valid_group_cols"]
+        assert schema["oneOf"][0]["type"] == "string"
+        assert schema["oneOf"][1]["type"] == "array"
+        assert schema["oneOf"][1]["uniqueItems"] is True
     assert get_recipe("lgb_multiclass").requires_woe is False
     assert get_recipe("lr").algorithm == "lr"
     assert get_recipe("ensemble").algorithm == "ensemble"
@@ -568,7 +626,24 @@ def test_train_catboost_uses_native_categorical_features_without_float_coercion(
         early_stopping_rounds=None,
     )
 
-    result = train_catboost(backend, path, config, out_dir=tmp_path / "catboost_native")
+    compact = TrainingDataset.load_compact(
+        backend,
+        path,
+        features=config.features,
+        target_col=config.target_col,
+        split_col=config.split_col,
+    )
+    assert compact.frame["chan"].dtype == frame["chan"].dtype
+    assert compact.frame["x1"].dtype == np.dtype("float32")
+
+    # Exercise the exact compact backend adapter used by the production
+    # ``train_models`` loop, rather than only the direct full-frame recipe path.
+    result = train_catboost(
+        compact.backend_adapter(backend),
+        path,
+        config,
+        out_dir=tmp_path / "catboost_native",
+    )
 
     assert (tmp_path / "catboost_native" / result.artifact.model_path).exists()
     assert result.artifact.algorithm == "catboost"
@@ -793,6 +868,40 @@ def test_tune_hyperparameters_is_deterministic_across_runs(tmp_path):
     assert first.best_metrics == second.best_metrics
 
 
+def test_tune_progress_callback_is_monotonic_and_result_neutral(tmp_path):
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_progress.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    kwargs = _tune_kwargs(recipe="lr", n_trials=4, coarse_fraction=0.5)
+
+    baseline = tune_hyperparameters(backend, path, **kwargs)
+    events = []
+    observed = tune_hyperparameters(
+        backend,
+        path,
+        **kwargs,
+        progress_callback=events.append,
+    )
+
+    assert observed == baseline
+    assert [event["trial"] for event in events] == [1, 2, 3, 4]
+    assert [event["stage"] for event in events] == ["coarse", "coarse", "fine", "fine"]
+    assert all(event["trial_total"] == 4 for event in events)
+    assert all(event["algorithm"] == "lr" for event in events)
+
+    def broken_callback(_event):
+        raise RuntimeError("display unavailable")
+
+    with_broken_callback = tune_hyperparameters(
+        backend,
+        path,
+        **kwargs,
+        progress_callback=broken_callback,
+    )
+    assert with_broken_callback == baseline
+
+
 def test_tune_hyperparameters_normalizes_dict_monotone_constraints_for_lgb(tmp_path):
     """TUNE-7: a dict-form monotone_constraints (the same shape train_lgb accepts
     via recipes.common.normalized_monotone_constraints) must not crash
@@ -901,7 +1010,8 @@ def test_tune_hyperparameters_records_deterministic_flag_per_recipe(tmp_path):
     assert lgb_result.best_metrics["deterministic"] is False
     assert all(trial["deterministic"] is False for trial in lgb_result.trials)
     assert lgb_result.trials[0]["params"]["num_threads"] == DEFAULT_TUNE_NUM_THREADS
-    assert lgb_result.trials[0]["params"]["force_row_wise"] is True
+    assert lgb_result.trials[0]["params"]["force_col_wise"] is True
+    assert "force_row_wise" not in lgb_result.trials[0]["params"]
 
     lr_result = tune_hyperparameters(backend, path, **_tune_kwargs(recipe="lr", n_trials=3))
     assert lr_result.best_metrics["deterministic"] is True
@@ -1012,8 +1122,8 @@ def test_tune_hyperparameters_lambda_sampling_spans_multiple_orders_of_magnitude
 
 def test_tune_hyperparameters_default_n_trials_resolves_per_recipe():
     """TUNE-1: n_trials defaults to None and resolves via DEFAULT_TRIAL_BUDGET
-    per recipe (lgb keeps its historical 40; lr/scorecard/mlp get a smaller
-    12-trial budget, tree challengers xgb/catboost also get 40)."""
+    per recipe. Product default is one real trial for every target family;
+    callers may explicitly widen the search."""
     import inspect
 
     from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET
@@ -1021,9 +1131,109 @@ def test_tune_hyperparameters_default_n_trials_resolves_per_recipe():
     sig = inspect.signature(tune_hyperparameters)
     assert sig.parameters["n_trials"].default is None
     assert sig.parameters["recipe"].default == "lgb"
-    assert DEFAULT_TRIAL_BUDGET == {
-        "lgb": 40, "xgb": 40, "catboost": 40, "lr": 12, "scorecard": 12, "mlp": 12,
+    assert set(DEFAULT_TRIAL_BUDGET) == {
+        "lgb", "xgb", "catboost", "lr", "scorecard", "mlp",
+        "lgb_regressor", "xgb_regressor", "lr_regressor", "mlp_regressor",
+        "lgb_multiclass", "xgb_multiclass", "lr_multiclass", "mlp_multiclass",
     }
+    assert set(DEFAULT_TRIAL_BUDGET.values()) == {1}
+
+
+@pytest.mark.parametrize(
+    ("recipe", "base_params"),
+    [
+        ("lgb_regressor", {"num_boost_round": 8}),
+        ("xgb_regressor", {"num_boost_round": 8}),
+        ("lr_regressor", {}),
+        ("mlp_regressor", {"max_iter": 40, "hidden_layer_sizes": [8]}),
+    ],
+)
+def test_regression_recipes_run_one_real_loss_tuning_trial(
+    tmp_path,
+    recipe,
+    base_params,
+):
+    rows = 150
+    x1 = np.asarray([((index * 37) % 101) / 100 for index in range(rows)])
+    x2 = np.asarray([((index * 17) % 89) / 100 for index in range(rows)])
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": x2,
+        "amount": 1000.0 + 700.0 * x1 - 240.0 * x2 + 30.0 * np.sin(x1 * 6),
+        "split": ["train"] * 90 + ["test"] * 35 + ["oot"] * 25,
+    })
+    path = tmp_path / f"{recipe}_tune.parquet"
+    frame.to_parquet(path, index=False)
+
+    result = tune_hyperparameters(
+        DataBackend(tmp_path),
+        path,
+        features=["x1", "x2"],
+        target_col="amount",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        recipe=recipe,
+        seed=23,
+        early_stopping_rounds=3,
+        max_boost_round=8,
+        base_params=base_params,
+    )
+
+    assert result.n_trials == 1
+    assert len(result.trials) == 1
+    assert result.best_metrics["selection_metric"] == "test_rmse(overfit-penalized)"
+    assert result.best_metrics["test_rmse"] >= 0.0
+    assert result.trials[0]["search_stage"] == "coarse"
+    assert "score" in result.trials[0]
+
+
+@pytest.mark.parametrize(
+    ("recipe", "base_params"),
+    [
+        ("lgb_multiclass", {"num_boost_round": 8}),
+        ("xgb_multiclass", {"num_boost_round": 8}),
+        ("lr_multiclass", {"max_iter": 80}),
+        ("mlp_multiclass", {"max_iter": 40, "hidden_layer_sizes": [8]}),
+    ],
+)
+def test_multiclass_recipes_run_one_real_loss_tuning_trial(
+    tmp_path,
+    recipe,
+    base_params,
+):
+    rows = 180
+    x1 = np.asarray([((index * 37) % 101) / 100 for index in range(rows)])
+    x2 = np.asarray([((index * 17) % 89) / 100 for index in range(rows)])
+    grade = np.where(x1 < 0.33, "low", np.where(x1 < 0.67, "medium", "high"))
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": x2,
+        "grade": grade,
+        "split": ["train"] * 105 + ["test"] * 45 + ["oot"] * 30,
+    })
+    path = tmp_path / f"{recipe}_tune.parquet"
+    frame.to_parquet(path, index=False)
+
+    result = tune_hyperparameters(
+        DataBackend(tmp_path),
+        path,
+        features=["x1", "x2"],
+        target_col="grade",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        recipe=recipe,
+        seed=23,
+        early_stopping_rounds=3,
+        max_boost_round=8,
+        base_params=base_params,
+    )
+
+    assert result.n_trials == 1
+    assert len(result.trials) == 1
+    assert result.best_metrics["selection_metric"] == "test_logloss(overfit-penalized)"
+    assert result.best_metrics["test_logloss"] >= 0.0
+    assert result.trials[0]["search_stage"] == "coarse"
+    assert "score" in result.trials[0]
 
 
 def test_tune_hyperparameters_cv_folds_none_matches_single_split_default(tmp_path):
@@ -1043,6 +1253,23 @@ def test_tune_hyperparameters_cv_folds_rejects_values_below_two(tmp_path):
 
     with pytest.raises(ModelingError, match="cv_folds"):
         tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=2, cv_folds=1))
+
+
+def test_tuning_cv_rejects_more_folds_than_distinct_groups():
+    frame = pd.DataFrame(
+        {
+            "account_id": [101, 101, 202, 202],
+            "feature": [0.1, 0.2, 0.3, 0.4],
+        }
+    )
+
+    with pytest.raises(ModelingError, match="available_groups=2"):
+        _cv_folds(
+            frame,
+            cv_folds=3,
+            seed=11,
+            group_cols=["account_id"],
+        )
 
 
 def test_tune_hyperparameters_cv_folds_is_deterministic_and_reports_fold_spread(tmp_path):
@@ -1268,6 +1495,7 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
         "x1": [((i * 37) % 101) / 100 for i in range(rows)],
         "x2": [((i * 17) % 89) / 100 for i in range(rows)],
         "income": [3500 + (((i * 37) % 101) * 38) + (((i * 17) % 89) * 9) for i in range(rows)],
+        "row_weight": [1.0 + (i % 3) for i in range(rows)],
         "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
     })
     path = tmp_path / "income_sample.parquet"
@@ -1278,7 +1506,18 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
         target_col="income",
         split_col="split",
         split_values={"train": "train", "test": "test", "oot": "oot"},
-        params={"num_boost_round": 8, "learning_rate": 0.1, "num_leaves": 4},
+        params={
+            "num_boost_round": 8,
+            "learning_rate": 0.1,
+            "num_leaves": 4,
+            "sample_weight_col": "row_weight",
+            "preprocessing_steps": [
+                {"kind": "sentinel", "columns": ["x1"], "params": {"x1": [-999.0]}}
+            ],
+            "special_value_governance": {
+                "x1": {"action": "mask", "fingerprint": "sha256:test"}
+            },
+        },
         seed=47,
         early_stopping_rounds=None,
         recipe_id="lgb_regressor",
@@ -1293,8 +1532,11 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
 
     assert (tmp_path / "income_a" / first.artifact.model_path).exists()
     assert first.artifact.algorithm == "lgb_regressor"
-    assert first.artifact.score_direction == "higher_is_riskier"
+    assert first.artifact.score_direction is None
     assert first.artifact.points_direction is None
+    assert first.artifact.params["sample_weight_col"] == "row_weight"
+    assert first.artifact.params["preprocessing_steps"][0]["kind"] == "sentinel"
+    assert first.artifact.params["special_value_governance"]["x1"]["action"] == "mask"
     assert first.metrics.train_ks is None
     assert first.metrics.test_auc is None
     assert first.metrics.test_rmse is not None
@@ -1305,13 +1547,78 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
     assert [item[0] for item in first.feature_importance] == ["x1", "x2"]
 
 
+def test_lgb_regressor_early_stopping_never_uses_test_rows(
+    tmp_path,
+    monkeypatch,
+):
+    rows = 80
+    frame = pd.DataFrame({
+        "x1": np.linspace(0.0, 1.0, rows),
+        "income": np.linspace(1000.0, 5000.0, rows),
+        "split": ["train"] * 50 + ["test"] * 15 + ["oot"] * 15,
+    })
+    path = tmp_path / "regression_early_stop.parquet"
+    frame.to_parquet(path, index=False)
+    captured = {}
+
+    class FakeBooster:
+        def predict(self, data):
+            return np.zeros(len(data), dtype=float)
+
+        def save_model(self, output_path):
+            Path(output_path).write_text("fake lgb regressor", encoding="utf-8")
+
+        def feature_importance(self, *, importance_type):
+            assert importance_type == "gain"
+            return np.zeros(1, dtype=float)
+
+    def fake_train(_params, dtrain, *, valid_sets, **_kwargs):
+        captured["fit"] = set(dtrain.data.index)
+        captured["valid"] = set(valid_sets[0].data.index)
+        return FakeBooster()
+
+    monkeypatch.setattr(lgb_regressor_recipe.lgb, "train", fake_train)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1",),
+        target_col="income",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 8},
+        seed=47,
+        early_stopping_rounds=3,
+        recipe_id="lgb_regressor",
+        target_type="continuous",
+    )
+
+    lgb_regressor_recipe.train_lgb_regressor(
+        DataBackend(tmp_path),
+        path,
+        config,
+        out_dir=tmp_path / "regression_early_stop_artifact",
+    )
+
+    train_rows = set(range(50))
+    test_rows = set(range(50, 65))
+    assert captured["fit"] | captured["valid"] == train_rows
+    assert captured["fit"].isdisjoint(captured["valid"])
+    assert captured["valid"]
+    assert captured["valid"].isdisjoint(test_rows)
+
+
 def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tmp_path):
     rows = 300
-    grade = [0 if ((i * 37) % 101) < 33 else (1 if ((i * 37) % 101) < 67 else 2) for i in range(rows)]
+    grade = [
+        "low"
+        if ((i * 37) % 101) < 33
+        else ("medium" if ((i * 37) % 101) < 67 else "high")
+        for i in range(rows)
+    ]
     frame = pd.DataFrame({
         "x1": [((i * 37) % 101) / 100 for i in range(rows)],
         "x2": [((i * 17) % 89) / 100 for i in range(rows)],
         "grade": grade,
+        "row_weight": [1.0 + (i % 2) for i in range(rows)],
         "split": ["train"] * 180 + ["test"] * 70 + ["oot"] * 50,
     })
     path = tmp_path / "grade_sample.parquet"
@@ -1322,7 +1629,18 @@ def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tm
         target_col="grade",
         split_col="split",
         split_values={"train": "train", "test": "test", "oot": "oot"},
-        params={"num_boost_round": 10, "learning_rate": 0.2, "num_leaves": 8},
+        params={
+            "num_boost_round": 10,
+            "learning_rate": 0.2,
+            "num_leaves": 8,
+            "sample_weight_col": "row_weight",
+            "preprocessing_steps": [
+                {"kind": "sentinel", "columns": ["x1"], "params": {"x1": [-999.0]}}
+            ],
+            "special_value_governance": {
+                "x1": {"action": "mask", "fingerprint": "sha256:test"}
+            },
+        },
         seed=47,
         early_stopping_rounds=None,
         recipe_id="lgb_multiclass",
@@ -1335,9 +1653,12 @@ def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tm
 
     assert (tmp_path / "grade_a" / first.artifact.model_path).exists()
     assert first.artifact.algorithm == "lgb_multiclass"
-    assert first.artifact.score_direction == "higher_is_riskier"
+    assert first.artifact.score_direction is None
     assert first.artifact.points_direction is None
-    assert first.artifact.params["classes"] == [0, 1, 2]
+    assert first.artifact.params["classes"] == ["high", "low", "medium"]
+    assert first.artifact.params["sample_weight_col"] == "row_weight"
+    assert first.artifact.params["preprocessing_steps"][0]["kind"] == "sentinel"
+    assert first.artifact.params["special_value_governance"]["x1"]["action"] == "mask"
     # multiclass metrics are populated; binary / regression fields stay None
     assert first.metrics.test_macro_auc is not None
     assert 0.0 <= first.metrics.test_accuracy <= 1.0
@@ -1352,7 +1673,243 @@ def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tm
     assert [item[0] for item in first.feature_importance] == ["x1", "x2"]
     # artifact params (including per_class detail) are strict-JSON serialisable
     json.dumps(first.artifact.params, allow_nan=False)
+
+
+def test_lgb_multiclass_early_stopping_never_uses_test_rows(
+    tmp_path,
+    monkeypatch,
+):
+    rows = 120
+    classes = ("low", "medium", "high")
+    frame = pd.DataFrame({
+        "x1": np.linspace(0.0, 1.0, rows),
+        "grade": [classes[index % len(classes)] for index in range(rows)],
+        "split": ["train"] * 75 + ["test"] * 24 + ["oot"] * 21,
+    })
+    path = tmp_path / "multiclass_early_stop.parquet"
+    frame.to_parquet(path, index=False)
+    captured = {}
+
+    class FakeBooster:
+        def predict(self, data):
+            return np.full((len(data), len(classes)), 1.0 / len(classes))
+
+        def save_model(self, output_path):
+            Path(output_path).write_text("fake lgb multiclass", encoding="utf-8")
+
+        def feature_importance(self, *, importance_type):
+            assert importance_type == "gain"
+            return np.zeros(1, dtype=float)
+
+    def fake_train(_params, dtrain, *, valid_sets, **_kwargs):
+        captured["fit"] = set(dtrain.data.index)
+        captured["valid"] = set(valid_sets[0].data.index)
+        return FakeBooster()
+
+    monkeypatch.setattr(lgb_multiclass_recipe.lgb, "train", fake_train)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1",),
+        target_col="grade",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 8},
+        seed=47,
+        early_stopping_rounds=3,
+        recipe_id="lgb_multiclass",
+        target_type="multiclass",
+    )
+
+    lgb_multiclass_recipe.train_lgb_multiclass(
+        DataBackend(tmp_path),
+        path,
+        config,
+        out_dir=tmp_path / "multiclass_early_stop_artifact",
+    )
+
+    train_rows = set(range(75))
+    test_rows = set(range(75, 99))
+    assert captured["fit"] | captured["valid"] == train_rows
+    assert captured["fit"].isdisjoint(captured["valid"])
+    assert captured["valid"]
+    assert captured["valid"].isdisjoint(test_rows)
+
+
+def test_train_lgb_multiclass_rejects_class_absent_from_train(tmp_path):
+    frame = pd.DataFrame({
+        "x1": [float(i % 11) for i in range(90)],
+        "grade": (
+            ["low", "high"] * 30
+            + ["low", "medium"] * 10
+            + ["low", "high"] * 5
+        ),
+        "split": ["train"] * 60 + ["test"] * 20 + ["oot"] * 10,
+    })
+    path = tmp_path / "unknown_multiclass.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1",),
+        target_col="grade",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 2},
+        seed=47,
+        early_stopping_rounds=None,
+        recipe_id="lgb_multiclass",
+        target_type="multiclass",
+    )
+
+    with pytest.raises(ModelingError, match="class absent from train"):
+        train_lgb_multiclass(
+            DataBackend(tmp_path),
+            path,
+            config,
+            out_dir=tmp_path / "unknown_multiclass_artifact",
+        )
     assert get_recipe("lgb_multiclass").algorithm == "lgb_multiclass"
+
+
+@pytest.mark.parametrize(
+    ("recipe_id", "trainer", "params"),
+    [
+        (
+            "xgb_regressor",
+            train_xgb_regressor,
+            {"num_boost_round": 8, "learning_rate": 0.1, "max_depth": 3},
+        ),
+        ("lr_regressor", train_lr_regressor, {"alpha": 1.0}),
+        (
+            "mlp_regressor",
+            train_mlp_regressor,
+            {"hidden_layer_sizes": [8], "max_iter": 80, "early_stopping": False},
+        ),
+    ],
+)
+def test_regression_recipe_matrix_trains_scores_and_persists(
+    tmp_path,
+    recipe_id,
+    trainer,
+    params,
+):
+    rows = 180
+    x1 = np.array([((i * 37) % 101) / 100 for i in range(rows)])
+    x2 = np.array([((i * 17) % 89) / 100 for i in range(rows)])
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": x2,
+        "income": 3500.0 + 2100.0 * x1 + 500.0 * x2,
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / f"{recipe_id}.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-regression",
+        features=("x1", "x2"),
+        target_col="income",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params=params,
+        seed=47,
+        early_stopping_rounds=None,
+        recipe_id=recipe_id,
+        target_type="continuous",
+        eval_metric="rmse_mae",
+    )
+
+    result = trainer(
+        DataBackend(tmp_path),
+        path,
+        config,
+        out_dir=tmp_path / f"artifact_{recipe_id}",
+    )
+
+    assert result.artifact.algorithm == recipe_id
+    assert result.artifact.score_direction is None
+    assert (tmp_path / f"artifact_{recipe_id}" / result.artifact.model_path).is_file()
+    assert result.metrics.test_rmse is not None
+    assert result.metrics.test_mae is not None
+    assert result.metrics.test_r2 is not None
+    assert result.metrics.test_ks is None
+    scorer = _ModelArtifactScorer(
+        result.artifact,
+        base_dir=tmp_path / f"artifact_{recipe_id}",
+    )
+    predictions = scorer.score(frame.head(7))
+    assert len(predictions) == 7
+    assert np.isfinite(np.asarray(predictions, dtype=float)).all()
+
+
+@pytest.mark.parametrize(
+    ("recipe_id", "trainer", "params"),
+    [
+        (
+            "xgb_multiclass",
+            train_xgb_multiclass,
+            {"num_boost_round": 8, "learning_rate": 0.1, "max_depth": 3},
+        ),
+        ("lr_multiclass", train_lr_multiclass, {"max_iter": 150}),
+        (
+            "mlp_multiclass",
+            train_mlp_multiclass,
+            {"hidden_layer_sizes": [8], "max_iter": 100, "early_stopping": False},
+        ),
+    ],
+)
+def test_multiclass_recipe_matrix_trains_scores_and_persists(
+    tmp_path,
+    recipe_id,
+    trainer,
+    params,
+):
+    rows = 240
+    x1 = np.array([((i * 37) % 101) / 100 for i in range(rows)])
+    x2 = np.array([((i * 17) % 89) / 100 for i in range(rows)])
+    grade = np.where(x1 < 0.33, "A", np.where(x1 < 0.67, "B", "C"))
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": x2,
+        "grade": grade,
+        "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
+    })
+    path = tmp_path / f"{recipe_id}.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-multiclass",
+        features=("x1", "x2"),
+        target_col="grade",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params=params,
+        seed=47,
+        early_stopping_rounds=None,
+        recipe_id=recipe_id,
+        target_type="multiclass",
+        eval_metric="macro_auc_logloss",
+    )
+
+    result = trainer(
+        DataBackend(tmp_path),
+        path,
+        config,
+        out_dir=tmp_path / f"artifact_{recipe_id}",
+    )
+
+    assert result.artifact.algorithm == recipe_id
+    assert result.artifact.score_direction is None
+    assert result.artifact.params["classes"] == ["A", "B", "C"]
+    assert (tmp_path / f"artifact_{recipe_id}" / result.artifact.model_path).is_file()
+    assert result.metrics.test_macro_auc is not None
+    assert result.metrics.test_logloss is not None
+    assert result.metrics.test_accuracy is not None
+    assert result.metrics.test_ks is None
+    scorer = _ModelArtifactScorer(
+        result.artifact,
+        base_dir=tmp_path / f"artifact_{recipe_id}",
+    )
+    probabilities = scorer.predict_proba(frame.head(7))
+    assert probabilities.shape == (7, 3)
+    assert np.allclose(probabilities.sum(axis=1), 1.0)
 
 
 def test_compute_multiclass_metrics_is_reasonable_and_json_safe():
@@ -1375,6 +1932,28 @@ def test_compute_multiclass_metrics_is_reasonable_and_json_safe():
     assert metrics["per_class"]["1"]["support"] == 3
     # strict JSON (no NaN/inf tokens)
     json.dumps(metrics, allow_nan=False)
+
+
+def test_normalize_multiclass_probabilities_repairs_drift_and_rejects_bad_rows():
+    normalized = normalize_multiclass_probabilities(
+        [[0.2, 0.3, 0.4999998], [0.1, 0.2, 0.7000001]],
+        expected_rows=2,
+        expected_classes=3,
+    )
+    assert normalized.sum(axis=1) == pytest.approx(np.ones(2))
+
+    with pytest.raises(ModelingError, match="outside"):
+        normalize_multiclass_probabilities(
+            [[-0.2, 0.4, 0.8]],
+            expected_rows=1,
+            expected_classes=3,
+        )
+    with pytest.raises(ModelingError, match="empty row"):
+        normalize_multiclass_probabilities(
+            [[0.0, 0.0, 0.0]],
+            expected_rows=1,
+            expected_classes=3,
+        )
 
 
 def test_compute_multiclass_metrics_degenerates_safely_for_single_class():

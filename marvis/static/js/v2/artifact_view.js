@@ -94,30 +94,58 @@ export function datasetTableHtml(preview = {}) {
     ? preview.columns
     : Object.keys(preview.rows?.[0] || {});
   const profiles = profileByName(preview);
-  const header = columns.map((column) => {
+  const header = columns.map((column, columnIndex) => {
     const profile = profiles.get(String(column)) || {};
-    return `<th>
+    const dtype = profile.dtype || "未识别";
+    const semanticRole = profile.semantic_role || "未识别";
+    const meta = `类型：${dtype}；语义角色：${semanticRole}；缺失率：${pct(profile.null_rate)}`;
+    return `<th scope="col" data-dataset-column-index="${columnIndex}">
       <span class="dataset-column-name">${escapeHtml(column)}</span>
-      <span class="dataset-column-role">${escapeHtml(profile.semantic_role || "")}</span>
-      <span class="dataset-column-null">${pct(profile.null_rate)}</span>
+      <span class="dataset-column-info" tabindex="0" aria-label="${escapeHtml(meta)}" title="${escapeHtml(meta)}">i</span>
+      <span class="dataset-column-tooltip" role="tooltip">${escapeHtml(meta)}</span>
     </th>`;
   }).join("");
   const rows = (preview.rows || []).map((row) => {
     const cells = columns
-      .map((column) => `<td>${escapeHtml(cellText(row?.[column]))}</td>`)
+      .map((column, columnIndex) => `<td data-dataset-column-index="${columnIndex}">${escapeHtml(cellText(row?.[column]))}</td>`)
       .join("");
     return `<tr>${cells}</tr>`;
   }).join("");
-  const truncated = preview.truncated
-    ? '<div class="dataset-truncated">预览已截断</div>'
-    : "";
   return `<section class="dataset-preview">
-    ${truncated}
-    <table>
+    <table class="dataset-preview-table">
       <thead><tr>${header}</tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </section>`;
+}
+
+function datasetPreviewTable(target) {
+  return closest(target, ".dataset-preview-table");
+}
+
+function clearDatasetColumnHighlight(table) {
+  for (const cell of table?.querySelectorAll?.(".is-column-hovered") || []) {
+    cell.classList.remove("is-column-hovered");
+  }
+}
+
+export function handleDatasetTablePointerOver(event) {
+  const cell = closest(event?.target, "[data-dataset-column-index]");
+  const table = datasetPreviewTable(cell);
+  if (!cell || !table) return false;
+  clearDatasetColumnHighlight(table);
+  const columnIndex = cell.getAttribute("data-dataset-column-index");
+  for (const columnCell of table.querySelectorAll(`[data-dataset-column-index="${columnIndex}"]`)) {
+    columnCell.classList.add("is-column-hovered");
+  }
+  return true;
+}
+
+export function handleDatasetTablePointerOut(event) {
+  const table = datasetPreviewTable(event?.target);
+  if (!table || table.contains?.(event?.relatedTarget)) return false;
+  clearDatasetColumnHighlight(table);
+  return true;
 }
 
 export function metricsHtml(metrics = {}) {

@@ -395,6 +395,7 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
         "curves": _jsonable(curve.curves),
         "counts": _jsonable(curve.counts),
         "summary": vintage_summary(curve, ref_mob=int(inputs.get("ref_mob", 6))),
+        "label_semantics": label_semantics,
         "nan_labels_dropped": nan_labels_dropped,
         "warnings": list(curve.warnings),
     }

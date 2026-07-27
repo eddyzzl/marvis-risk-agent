@@ -6,8 +6,6 @@ from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
-
-from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.artifact import (
     persist_model_meta,
     points_direction_for_algorithm,
@@ -18,11 +16,20 @@ from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainRes
 from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
+    artifact_params,
+    carve_early_stop_fold_for_config,
     compute_multiclass_model_metrics,
     model_params,
     pop_boost_rounds,
+    sample_weight_values,
     split_modeling_frame,
     training_frame_columns,
+)
+from marvis.packs.modeling.recipes.nonbinary_common import (
+    encode_multiclass_target,
+    resolve_multiclass_classes,
+    resolve_multiclass_splits,
+    strict_json_classes,
 )
 
 
@@ -38,11 +45,10 @@ def train_lgb_multiclass(backend, dataset_path, config: TrainConfig, *, out_dir:
         dataset_path, columns=training_frame_columns(backend, dataset_path, config)
     )
     train, test, oot = split_modeling_frame(frame, config)
-    train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
+    train, test, oot, oot_has_labels, audit = resolve_multiclass_splits(
         train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
     )
-    classes = _resolve_classes(train[config.target_col])
-    class_to_index = {cls: idx for idx, cls in enumerate(classes)}
+    classes = resolve_multiclass_classes(train[config.target_col])
 
     params = {
         **get_recipe("lgb_multiclass").default_params,
@@ -59,13 +65,22 @@ def train_lgb_multiclass(backend, dataset_path, config: TrainConfig, *, out_dir:
         "verbosity": -1,
     }
     num_boost_round = pop_boost_rounds(params, default=50)
+    fit_train = train
+    if config.early_stopping_rounds:
+        # Keep the formal test split out of round-count selection.  Metrics below
+        # still evaluate the untouched test set exactly once.
+        fit_train, valid = carve_early_stop_fold_for_config(train, config)
+    else:
+        valid = test
     dtrain = lgb.Dataset(
-        train[list(config.features)],
-        label=_encode_labels(train[config.target_col], class_to_index),
+        fit_train[list(config.features)],
+        label=encode_multiclass_target(fit_train[config.target_col], classes),
+        weight=sample_weight_values(fit_train, config),
     )
     dvalid = lgb.Dataset(
-        test[list(config.features)],
-        label=_encode_labels(test[config.target_col], class_to_index),
+        valid[list(config.features)],
+        label=encode_multiclass_target(valid[config.target_col], classes),
+        weight=sample_weight_values(valid, config),
         reference=dtrain,
     )
     callbacks = []
@@ -112,35 +127,13 @@ def train_lgb_multiclass(backend, dataset_path, config: TrainConfig, *, out_dir:
     )
 
 
-def _resolve_classes(target) -> tuple:
-    """Sorted distinct training-target classes (deterministic column order)."""
-    values = [value for value in target.tolist() if value is not None and not _is_nan(value)]
-    return tuple(sorted(set(values)))
-
-
-def _is_nan(value) -> bool:
-    return isinstance(value, float) and value != value
-
-
-def _encode_labels(target, class_to_index: dict) -> np.ndarray:
-    return np.array([class_to_index[value] for value in target.tolist()], dtype=int)
-
-
 def _jsonable_params(params: dict, classes: tuple) -> dict:
     """Serialise params so tuples become lists and class labels are JSON-safe."""
     cleaned: dict = {}
     for key, value in params.items():
         cleaned[str(key)] = list(value) if isinstance(value, tuple) else value
-    cleaned["classes"] = [_jsonable_scalar(cls) for cls in classes]
+    cleaned["classes"] = strict_json_classes(classes)
     return cleaned
-
-
-def _jsonable_scalar(value):
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.floating):
-        return float(value)
-    return value
 
 
 def _save_lgb_multiclass_model(
@@ -155,7 +148,7 @@ def _save_lgb_multiclass_model(
     artifact_id = f"artifact_{uuid.uuid4().hex}"
     model_path = f"{artifact_id}.txt"
     write_artifact_file(out_dir, model_path, model.save_model)
-    stored_params = _jsonable_params(params, classes)
+    stored_params = artifact_params(_jsonable_params(params, classes), config)
     stored_params["per_class"] = per_class
     artifact = ModelArtifact(
         id=artifact_id,

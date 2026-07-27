@@ -35,6 +35,7 @@ DATA_JOIN = WorkflowTemplate(
             inputs_template={
                 "anchor_id": "{slot:anchor_id}",
                 "feature_ids": "{slot:feature_ids}",
+                "key_overrides": {},
             },
             depends_on_titles=(),
             post_checks=(PostCheck("nonempty", {"field": "join_plan_id"}),),

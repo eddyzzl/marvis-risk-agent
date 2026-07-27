@@ -87,16 +87,28 @@ def _seed_legacy_v15_pool(tmp_path: Path):
             conn.commit()
 
     tasks = TaskRepository(db_path)
-    task = tasks.create_task(
-        TaskCreate(
-            model_name="legacy-candidate-pool",
-            model_version="v1",
-            validator="qa",
-            source_dir=str(tmp_path / "legacy-source"),
-            task_type="strategy",
-            target_col="bad",
+    task_id = "legacy-candidate-pool-task"
+    timestamp = "2026-07-19T00:00:00+00:00"
+    # Seed the historical schema with its own SQL contract. Using today's
+    # repository writer against a v15 table would require columns that did not
+    # exist yet and would stop testing the real migration boundary.
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(
+                id, task_type, model_name, model_version, validator, source_dir,
+                target_col, status, status_message, created_at, updated_at
+            ) VALUES (?, 'strategy', 'legacy-candidate-pool', 'v1', 'qa', ?,
+                      'bad', 'created', '', ?, ?)
+            """,
+            (
+                task_id,
+                str(tmp_path / "legacy-source"),
+                timestamp,
+                timestamp,
+            ),
         )
-    )
+    task = tasks.get_task(task_id)
     artifacts = TaskArtifactRepository(db_path)
     source_bytes = b'{"schema_version":"legacy-candidate-asset-fixture.v1"}'
     source_path = tmp_path / task.id / "legacy-candidate.json"
@@ -208,7 +220,6 @@ def _seed_legacy_v15_pool(tmp_path: Path):
     old_absent_hash = (
         "9024538661b531de814a43e87e932bf39b4b87522525f7a7afea1bf5bf8968ee"
     )
-    timestamp = "2026-07-19T00:00:00+00:00"
     with connect(db_path) as conn:
         conn.execute(
             """

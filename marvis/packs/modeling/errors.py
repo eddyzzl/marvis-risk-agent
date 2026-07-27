@@ -33,4 +33,46 @@ class ReportScoreMissingError(ModelingError):
         }
 
 
-__all__ = ["ModelingError", "ReportScoreMissingError"]
+class SpecialValueDecisionRequiredError(ModelingError):
+    """Raised when detected special values lack a complete, explicit policy.
+
+    The error is deliberately typed so Agent/manual UIs can render the exact
+    columns, detected values and allowed actions as a human-in-the-loop gate.
+    AUTO mode cannot turn this into an implicit confirmation: the workflow must
+    be resumed with a concrete decision for every affected selected feature.
+    """
+
+    def __init__(
+        self,
+        *,
+        columns: list[str],
+        sentinel_columns: dict,
+        problems: dict[str, str] | None = None,
+    ) -> None:
+        self.columns = [str(column) for column in columns]
+        self.sentinel_columns = dict(sentinel_columns)
+        self.problems = dict(problems or {})
+        preview = "、".join(self.columns[:12])
+        suffix = f" 等 {len(self.columns)} 列" if len(self.columns) > 12 else ""
+        super().__init__(
+            "检测到需要治理的哨兵/特殊值，但决策尚未完整确认："
+            f"{preview}{suffix}。请逐列选择 mask（转为空值）、retain（保留并说明原因）"
+            "或 drop（剔除特征）；retain 必须由用户明确确认。"
+        )
+
+    def to_detail(self) -> dict:
+        return {
+            "kind": ErrorKind.SPECIAL_VALUE_DECISION_REQUIRED,
+            "columns": list(self.columns),
+            "sentinel_columns": dict(self.sentinel_columns),
+            "problems": dict(self.problems),
+            "allowed_actions": ["mask", "retain", "drop"],
+            "human_confirmation_required_for": ["retain"],
+        }
+
+
+__all__ = [
+    "ModelingError",
+    "ReportScoreMissingError",
+    "SpecialValueDecisionRequiredError",
+]

@@ -29,6 +29,19 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _normalized_workflow_status(
+    plan_status: str,
+    *,
+    has_failed_step: bool,
+) -> str:
+    if has_failed_step:
+        return PlanStatus.FAILED.value
+    normalized = str(plan_status or "").strip().lower()
+    if normalized == PlanStatus.CONFIRMED.value:
+        return PlanStatus.RUNNING.value
+    return normalized
+
+
 class PlanRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -155,6 +168,62 @@ class PlanRepository:
         if row is None:
             return None
         return {"plan_id": str(row["id"]), "status": str(row["status"])}
+
+    def latest_workflow_statuses_for_tasks(
+        self,
+        task_ids: list[str],
+    ) -> dict[str, str]:
+        """Return each task's normalized latest-plan execution state in one query.
+
+        Task rows intentionally keep their own lifecycle status (driver tasks often
+        remain ``created``), so list/detail API callers need a separate workflow
+        projection. A failed step wins over the plan row status because recovery
+        can park a failed plan at ``awaiting_confirm`` while asking the user what to
+        do next; presenting that as a healthy confirmation gate is stale state.
+        """
+
+        normalized_task_ids = list(dict.fromkeys(
+            str(task_id).strip()
+            for task_id in task_ids
+            if str(task_id).strip()
+        ))
+        if not normalized_task_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in normalized_task_ids)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                WITH ranked_plans AS (
+                    SELECT id,
+                           task_id,
+                           status,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY task_id
+                               ORDER BY created_at DESC, id DESC
+                           ) AS plan_rank
+                      FROM plans
+                     WHERE task_id IN ({placeholders})
+                )
+                SELECT ranked.task_id,
+                       ranked.status,
+                       EXISTS (
+                           SELECT 1
+                             FROM plan_steps
+                            WHERE plan_steps.plan_id = ranked.id
+                              AND plan_steps.status = ?
+                       ) AS has_failed_step
+                  FROM ranked_plans AS ranked
+                 WHERE ranked.plan_rank = 1
+                """,
+                (*normalized_task_ids, StepStatus.FAILED.value),
+            ).fetchall()
+        return {
+            str(row["task_id"]): _normalized_workflow_status(
+                str(row["status"]),
+                has_failed_step=bool(row["has_failed_step"]),
+            )
+            for row in rows
+        }
 
     def list_plans_by_status(self, status: PlanStatus) -> list[Plan]:
         """Plans currently in ``status`` across every task, oldest first. Used
@@ -377,8 +446,19 @@ class PlanRepository:
         step_id: str,
         *,
         inputs: dict | None = None,
+        preserve_target_confirmation: bool = False,
     ) -> list[str]:
-        """Explicitly retry a failed step and every downstream dependent step."""
+        """Explicitly retry an interrupted step and every downstream dependent step.
+
+        A caller may preserve the target's prior confirmation only when the
+        same step was already confirmed before it failed and the replacement
+        inputs are structurally identical. This supports an explicit human
+        retry of the same governed action without carrying authorization over
+        to changed parameters. A user-cancelled plan is also recoverable here:
+        its interrupted step is persisted as ``failed`` while prior successful
+        outputs and step-run evidence remain untouched. Downstream
+        confirmations are always cleared.
+        """
         with connect(self.db_path) as conn:
             plan_row = conn.execute(
                 "SELECT status FROM plans WHERE id = ?",
@@ -386,12 +466,16 @@ class PlanRepository:
             ).fetchone()
             if plan_row is None:
                 raise PlanNotFoundError(plan_id)
-            if str(plan_row["status"]) != PlanStatus.FAILED.value:
+            source_plan_status = str(plan_row["status"])
+            if source_plan_status not in {
+                PlanStatus.FAILED.value,
+                PlanStatus.CANCELLED.value,
+            }:
                 raise ConflictError(f"plan is not failed: {plan_row['status']}")
 
             step_rows = conn.execute(
                 """
-                SELECT id, idx, depends_on_json, status
+                SELECT id, idx, depends_on_json, status, confirmed, inputs_json
                   FROM plan_steps
                  WHERE plan_id = ?
                  ORDER BY idx, id
@@ -404,6 +488,13 @@ class PlanRepository:
                 raise KeyError(step_id)
             if str(target["status"]) != StepStatus.FAILED.value:
                 raise ConflictError(f"step is not failed: {target['status']}")
+            previous_inputs = _load_json_object_unchecked(target["inputs_json"])
+            inputs_unchanged = inputs is None or inputs == previous_inputs
+            confirmation_preserved = bool(
+                preserve_target_confirmation
+                and int(target["confirmed"] or 0)
+                and inputs_unchanged
+            )
 
             reset_ids = {step_id}
             changed = True
@@ -422,7 +513,212 @@ class PlanRepository:
                 str(row["id"]) for row in step_rows if str(row["id"]) in reset_ids
             ]
             for reset_id in ordered_reset_ids:
+                reset_confirmation = int(
+                    reset_id == step_id and confirmation_preserved
+                )
                 if reset_id == step_id and inputs is not None:
+                    conn.execute(
+                        """
+                        UPDATE plan_steps
+                           SET inputs_json = ?,
+                               status = 'pending',
+                               confirmed = ?,
+                               sub_agent_id = NULL,
+                               output_ref = NULL,
+                               review_json = '[]',
+                               error = NULL
+                         WHERE id = ?
+                        """,
+                        (_dump_json_any(inputs), reset_confirmation, reset_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE plan_steps
+                           SET status = 'pending',
+                               confirmed = ?,
+                               sub_agent_id = NULL,
+                               output_ref = NULL,
+                               review_json = '[]',
+                               error = NULL
+                         WHERE id = ?
+                        """,
+                        (reset_confirmation, reset_id),
+                    )
+
+            cursor = conn.execute(
+                "UPDATE plans SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (PlanStatus.RUNNING.value, _now(), plan_id, source_plan_status),
+            )
+            if cursor.rowcount == 0:
+                raise ConflictError(f"plan {plan_id} changed while retrying step")
+            _write_audit_row(
+                conn,
+                kind="plan.step.retry",
+                target_ref=step_id,
+                outcome="succeeded",
+                detail={
+                    "plan_id": plan_id,
+                    "reset_step_ids": ordered_reset_ids,
+                    "inputs_replaced": inputs is not None,
+                    "inputs_unchanged": inputs_unchanged,
+                    "confirmation_preserved": confirmation_preserved,
+                    "from_plan_status": source_plan_status,
+                },
+            )
+            return ordered_reset_ids
+
+    def rollback_failed_plan_from_step(
+        self,
+        plan_id: str,
+        root_step_id: str,
+        failed_step_id: str,
+        *,
+        root_inputs: dict,
+        excluded_features: list[str] | None = None,
+        tuning_budgets: dict[str, int] | None = None,
+        expected_plan_revision: int,
+        expected_root_output_ref: str,
+    ) -> list[str]:
+        """Atomically revise a completed ancestor and invalidate its descendants.
+
+        Unlike ``retry_failed_step``, this is an upstream revision: the root's
+        inputs changed, so its old output, confirmation, reviews, sub-agent and
+        every transitive downstream result/decision must be invalidated.  The
+        completed prefix remains untouched and the plan revision increments so
+        prior governance decisions cannot authorize the revised execution.
+        """
+
+        normalized_exclusions = [
+            str(item).strip() for item in (excluded_features or []) if str(item).strip()
+        ]
+        normalized_budgets: dict[str, int] = {}
+        for raw_recipe, raw_count in (tuning_budgets or {}).items():
+            recipe = str(raw_recipe).strip()
+            if (
+                not recipe
+                or isinstance(raw_count, bool)
+                or not isinstance(raw_count, int)
+                or raw_count < 1
+                or raw_count > 200
+            ):
+                raise ValueError("tuning_budgets must contain 1..200 integer trials")
+            normalized_budgets[recipe] = raw_count
+        if bool(normalized_exclusions) == bool(normalized_budgets):
+            raise ValueError("exactly one upstream revision kind is required")
+
+        if normalized_exclusions:
+            revised_features = (
+                root_inputs.get("features") if isinstance(root_inputs, dict) else None
+            )
+            if (
+                not isinstance(revised_features, list)
+                or not revised_features
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    for item in revised_features
+                )
+            ):
+                raise ValueError("revised root inputs must contain a non-empty feature list")
+            expected_tool = "screen_features"
+            revision_kind = "feature_exclusion"
+            revision_reason = "exclude_features_and_rerun"
+            revision_instruction = "exclude: " + ", ".join(normalized_exclusions)
+            revision_detail = {
+                "excluded_features": normalized_exclusions,
+                "remaining_feature_count": len(revised_features),
+            }
+        else:
+            revised_budgets = (
+                root_inputs.get("n_trials_by_recipe")
+                if isinstance(root_inputs, dict)
+                else None
+            )
+            if revised_budgets != normalized_budgets:
+                raise ValueError(
+                    "revised root inputs must contain the concrete tuning budget"
+                )
+            expected_tool = "configure_tuning"
+            revision_kind = "tuning_budget"
+            revision_reason = "revise_tuning_budget"
+            revision_instruction = "n_trials_by_recipe: " + ", ".join(
+                f"{recipe}={count}"
+                for recipe, count in sorted(normalized_budgets.items())
+            )
+            revision_detail = {"n_trials_by_recipe": normalized_budgets}
+
+        with connect(self.db_path) as conn:
+            # Serialize the validation and mutation. A concurrent retry/replan
+            # must win or lose as a whole; it may never leave a half-reset DAG.
+            conn.execute("BEGIN IMMEDIATE")
+            plan_row = conn.execute(
+                "SELECT status, replan_count, loop_events_json FROM plans WHERE id = ?",
+                (plan_id,),
+            ).fetchone()
+            if plan_row is None:
+                raise PlanNotFoundError(plan_id)
+            if str(plan_row["status"]) != PlanStatus.FAILED.value:
+                raise ConflictError(f"plan is not failed: {plan_row['status']}")
+            current_revision = int(plan_row["replan_count"] or 0)
+            if current_revision != int(expected_plan_revision):
+                raise ConflictError(
+                    f"plan revision changed: expected {expected_plan_revision}, "
+                    f"found {current_revision}"
+                )
+
+            step_rows = conn.execute(
+                """
+                SELECT id, idx, tool_plugin, tool_name, depends_on_json, status,
+                       output_ref
+                  FROM plan_steps
+                 WHERE plan_id = ?
+                 ORDER BY idx, id
+                """,
+                (plan_id,),
+            ).fetchall()
+            rows_by_id = {str(row["id"]): row for row in step_rows}
+            root = rows_by_id.get(root_step_id)
+            failed = rows_by_id.get(failed_step_id)
+            if root is None:
+                raise KeyError(root_step_id)
+            if failed is None:
+                raise KeyError(failed_step_id)
+            if (
+                str(root["tool_plugin"]) != "modeling"
+                or str(root["tool_name"]) != expected_tool
+            ):
+                raise ConflictError(
+                    f"rollback root is not the modeling {expected_tool} step"
+                )
+            if str(root["status"]) != StepStatus.DONE.value:
+                raise ConflictError(f"rollback root is not completed: {root['status']}")
+            if str(root["output_ref"] or "") != str(expected_root_output_ref or ""):
+                raise ConflictError("rollback root output changed before revision")
+            if str(failed["status"]) != StepStatus.FAILED.value:
+                raise ConflictError(f"target step is not failed: {failed['status']}")
+
+            reset_ids = {root_step_id}
+            changed = True
+            while changed:
+                changed = False
+                for row in step_rows:
+                    row_id = str(row["id"])
+                    if row_id in reset_ids:
+                        continue
+                    depends_on = {
+                        str(item) for item in _load_json_array(row["depends_on_json"])
+                    }
+                    if depends_on.intersection(reset_ids):
+                        reset_ids.add(row_id)
+                        changed = True
+            if failed_step_id not in reset_ids or failed_step_id == root_step_id:
+                raise ConflictError("rollback root is not an ancestor of the failed step")
+
+            ordered_reset_ids = [
+                str(row["id"]) for row in step_rows if str(row["id"]) in reset_ids
+            ]
+            for reset_id in ordered_reset_ids:
+                if reset_id == root_step_id:
                     conn.execute(
                         """
                         UPDATE plan_steps
@@ -435,7 +731,7 @@ class PlanRepository:
                                error = NULL
                          WHERE id = ?
                         """,
-                        (_dump_json_any(inputs), reset_id),
+                        (_dump_json_any(root_inputs), reset_id),
                     )
                 else:
                     conn.execute(
@@ -452,21 +748,53 @@ class PlanRepository:
                         (reset_id,),
                     )
 
+            next_revision = current_revision + 1
+            loop_events = _load_json_array(plan_row["loop_events_json"])
+            _append_normalized_loop_event(
+                loop_events,
+                {
+                    "type": "upstream_revision",
+                    "reason": revision_reason,
+                    "trigger_step_id": root_step_id,
+                    "instruction": revision_instruction,
+                },
+            )
             cursor = conn.execute(
-                "UPDATE plans SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
-                (PlanStatus.RUNNING.value, _now(), plan_id, PlanStatus.FAILED.value),
+                """
+                UPDATE plans
+                   SET status = ?,
+                       replan_count = ?,
+                       loop_events_json = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                   AND status = ?
+                   AND replan_count = ?
+                """,
+                (
+                    PlanStatus.RUNNING.value,
+                    next_revision,
+                    _dump_json_any(loop_events),
+                    _now(),
+                    plan_id,
+                    PlanStatus.FAILED.value,
+                    current_revision,
+                ),
             )
             if cursor.rowcount == 0:
-                raise ConflictError(f"plan {plan_id} changed while retrying step")
+                raise ConflictError(f"plan {plan_id} changed while rolling back")
             _write_audit_row(
                 conn,
-                kind="plan.step.retry",
-                target_ref=step_id,
+                kind="plan.step.rollback",
+                target_ref=root_step_id,
                 outcome="succeeded",
                 detail={
                     "plan_id": plan_id,
+                    "failed_step_id": failed_step_id,
                     "reset_step_ids": ordered_reset_ids,
-                    "inputs_replaced": inputs is not None,
+                    "revision_kind": revision_kind,
+                    **revision_detail,
+                    "plan_revision_before": current_revision,
+                    "plan_revision_after": next_revision,
                 },
             )
             return ordered_reset_ids
@@ -563,6 +891,32 @@ class PlanRepository:
             if cursor.rowcount == 0:
                 raise KeyError(run_id)
 
+    def update_step_run_progress(self, run_id: str, progress: dict) -> bool:
+        """Store the latest progress snapshot while a run is still active.
+
+        Late watcher events are expected around process completion, so a
+        finished/missing run returns ``False`` instead of raising or reopening
+        its lifecycle.
+        """
+
+        if not isinstance(progress, dict):
+            return False
+        safe_progress = redact_value(progress).value
+        if not isinstance(safe_progress, dict):
+            return False
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE plan_step_runs
+                   SET progress_json = ?,
+                       progress_updated_at = ?
+                 WHERE id = ?
+                   AND status = 'running'
+                """,
+                (_dump_json_any(safe_progress), _now(), run_id),
+            )
+        return cursor.rowcount == 1
+
     def list_step_runs(self, step_id: str) -> list[dict]:
         with connect(self.db_path) as conn:
             rows = conn.execute(
@@ -579,6 +933,7 @@ class PlanRepository:
             item = dict(row)
             item["input"] = _load_json_object_unchecked(item.pop("input_json", "{}"))
             item["side_effects"] = _load_json_array(item.pop("side_effects_json", "[]"))
+            item["progress"] = _load_json_object_unchecked(item.pop("progress_json", "{}"))
             result.append(item)
         return result
 
@@ -616,6 +971,7 @@ class PlanRepository:
             item = dict(row)
             item["input"] = _load_json_object_unchecked(item.pop("input_json", "{}"))
             item["side_effects"] = _load_json_array(item.pop("side_effects_json", "[]"))
+            item["progress"] = _load_json_object_unchecked(item.pop("progress_json", "{}"))
             result.append(item)
         return result
 

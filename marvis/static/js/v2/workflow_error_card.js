@@ -71,6 +71,27 @@ function diagnosticTechnicalHtml(diagnostic) {
   ].join("");
 }
 
+function diagnosticRecoveryHtml(diagnostic) {
+  const prompt = cleanText(diagnostic.agent_prompt);
+  const actions = Array.isArray(diagnostic.recovery_actions)
+    ? diagnostic.recovery_actions.filter(isRecord)
+    : [];
+  if (!prompt && !actions.length) return "";
+  return [
+    '<div class="workflow-error-card__recovery">',
+    prompt ? `<p>${escapeHtml(prompt)}</p>` : "",
+    actions.length ? '<div class="workflow-error-card__recovery-actions">' : "",
+    ...actions.map((action) => {
+      const label = cleanText(action.label) || "继续处理";
+      const command = cleanText(action.command);
+      if (!command) return "";
+      return `<button type="button" class="button compact primary" data-workflow-recovery-command="${escapeHtml(command)}">${escapeHtml(label)}</button>`;
+    }),
+    actions.length ? "</div>" : "",
+    "</div>",
+  ].join("");
+}
+
 export function hasWorkflowErrorDiagnostic(metadata = {}) {
   return isRecord(metadata?.error_diagnostic);
 }
@@ -109,6 +130,7 @@ export function workflowErrorDiagnosticHtml(diagnostic) {
       : "",
     diagnosticFactsHtml(diagnostic),
     diagnosticActionsHtml(diagnostic.actions),
+    diagnosticRecoveryHtml(diagnostic),
     diagnosticTechnicalHtml(diagnostic),
     "</section>",
   ].join("");

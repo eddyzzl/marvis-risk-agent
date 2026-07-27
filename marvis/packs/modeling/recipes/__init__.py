@@ -86,6 +86,35 @@ def _register_builtin_recipes() -> None:
             requires_woe=False,
         ),
         ModelRecipe(
+            id="xgb_regressor",
+            algorithm="xgb_regressor",
+            default_params={
+                "objective": "reg:squarederror",
+                "eval_metric": "rmse",
+            },
+            param_space={},
+            requires_woe=False,
+        ),
+        ModelRecipe(
+            id="lr_regressor",
+            algorithm="lr_regressor",
+            default_params={"alpha": 1.0},
+            param_space={},
+            requires_woe=False,
+        ),
+        ModelRecipe(
+            id="mlp_regressor",
+            algorithm="mlp_regressor",
+            default_params={
+                "hidden_layer_sizes": [32, 16],
+                "max_iter": 300,
+                "alpha": 1e-4,
+                "early_stopping": False,
+            },
+            param_space={},
+            requires_woe=False,
+        ),
+        ModelRecipe(
             id="mlp",
             algorithm="mlp",
             default_params={
@@ -105,6 +134,38 @@ def _register_builtin_recipes() -> None:
                 "learning_rate": 0.1,
                 "num_leaves": 15,
                 "verbosity": -1,
+            },
+            param_space={},
+            requires_woe=False,
+        ),
+        ModelRecipe(
+            id="xgb_multiclass",
+            algorithm="xgb_multiclass",
+            default_params={
+                "objective": "multi:softprob",
+                "eval_metric": "mlogloss",
+            },
+            param_space={},
+            requires_woe=False,
+        ),
+        ModelRecipe(
+            id="lr_multiclass",
+            algorithm="lr_multiclass",
+            default_params={
+                "max_iter": 1000,
+                "solver": "lbfgs",
+            },
+            param_space={},
+            requires_woe=False,
+        ),
+        ModelRecipe(
+            id="mlp_multiclass",
+            algorithm="mlp_multiclass",
+            default_params={
+                "hidden_layer_sizes": [32, 16],
+                "max_iter": 300,
+                "alpha": 1e-4,
+                "early_stopping": False,
             },
             param_space={},
             requires_woe=False,

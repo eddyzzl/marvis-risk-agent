@@ -10,11 +10,11 @@ a computed number) and INV-1 (all metrics still come from the platform tools):
   * write side  — when a V2 modeling/join plan reaches DONE, capture the
     champion experiment / join execution result into agent_memory so future
     tasks of the same kind have a historical anchor (MEM-1 write direction).
-  * read side   — at AUTO-mode gate decisions, look up top-3 same-scope
-    historical experiments and render a small read-only reference section
-    that gets appended to the gate prompt (MEM-1 read direction), and at
-    modeling slot-detection time, use field_convention memories as a pure
-    ordering hint for detected target/split columns (MEM-4).
+  * read side   — at meaningful workflow milestones, look up top-3 historical
+    results and render a small read-only reference section for both NORMAL and
+    AUTO modes (MEM-1 read direction), and at modeling slot-detection time, use
+    field_convention memories as a pure ordering hint for detected target/split
+    columns (MEM-4).
 
 Every entry point here degrades silently to a no-op on any failure (missing
 memory policy file, unreadable store, malformed metadata, ...): memory is a
@@ -27,15 +27,19 @@ import re
 from typing import Any
 
 from marvis.agent_memory.extractors import (
+    extract_feature_experience,
     extract_join_experience,
     extract_model_experience,
     extract_risk_analysis_experience,
     extract_strategy_experience,
 )
+from marvis.agent_memory.distillation import render_structured_distillation_summary
+from marvis.agent_memory.api_support import dispatch_memory_after_save
 from marvis.agent_memory.retrieval import MemoryQuery, compare_model_experience, retrieve_with_distillations
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
+    TASK_TYPE_FEATURE_ANALYSIS,
     TASK_TYPE_MODELING,
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VINTAGE,
@@ -81,7 +85,8 @@ def capture_agent_memory_for_driver_done(
     *,
     done_message_content: str = "",
     done_message_metadata: dict[str, Any] | None,
-) -> None:
+    hook_dispatcher=None,
+) -> list[dict[str, Any]]:
     """Write a V2 plan's terminal result into agent memory (MEM-1 write side).
 
     Called once a driver turn's assistant message is the ``done`` message.
@@ -95,24 +100,43 @@ def capture_agent_memory_for_driver_done(
     same as the existing V1.1 capture path (pipeline.py).
     """
     if not load_memory_policy(settings.workspace).auto_distill:
-        return
+        return []
+    entries = []
     try:
         if task.task_type == TASK_TYPE_MODELING:
-            _capture_model_experience(settings, task, done_message_metadata)
+            entries.append(_capture_model_experience(settings, task, done_message_metadata))
         elif task.task_type == TASK_TYPE_DATA_JOIN:
-            _capture_join_experience(settings, task, done_message_content, done_message_metadata)
+            entries.append(_capture_join_experience(settings, task, done_message_content, done_message_metadata))
+        elif task.task_type == TASK_TYPE_FEATURE_ANALYSIS:
+            entries.append(_capture_feature_experience(settings, task, done_message_metadata))
         elif task.task_type == TASK_TYPE_STRATEGY:
-            _capture_strategy_experience(settings, task)
+            entries.append(_capture_strategy_experience(settings, task))
         elif task.task_type == TASK_TYPE_VINTAGE:
-            _capture_risk_analysis_experience(settings, task, done_message_metadata)
+            entries.append(_capture_risk_analysis_experience(settings, task, done_message_metadata))
     except Exception:
         # Memory capture is best-effort; never fail the user-facing turn over it.
-        return
+        return []
+    receipts = []
+    for entry in entries:
+        if entry is None or entry.status != "active":
+            continue
+        dispatch_memory_after_save(
+            hook_dispatcher,
+            task_id=task.id,
+            memory_type=entry.memory_type,
+        )
+        receipts.append({
+            "id": entry.id,
+            "memory_type": entry.memory_type,
+            "summary": entry.summary,
+            "status": entry.status,
+        })
+    return receipts
 
 
 def _capture_model_experience(
     settings, task: TaskRecord, metadata: dict[str, Any] | None
-) -> None:
+) -> Any | None:
     delivery = (metadata or {}).get("model_delivery")
     if not isinstance(delivery, dict) or not delivery:
         return
@@ -138,27 +162,27 @@ def _capture_model_experience(
     }
     candidate = extract_model_experience(result)
     if candidate is None:
-        return
+        return None
     store = AgentMemoryStore(settings.db_path)
-    store.create(candidate, task_id=task.id)
+    return store.create(candidate, task_id=task.id)
 
 
 def _capture_join_experience(
     settings, task: TaskRecord, content: str, metadata: dict[str, Any] | None
-) -> None:
+) -> Any | None:
     per_table = _join_per_table_from_tables(metadata)
     if not per_table:
-        return
+        return None
     match_rates = [
         float(row.get("match_rate"))
         for row in per_table
         if isinstance(row, dict) and isinstance(row.get("match_rate"), (int, float))
     ]
     if not match_rates:
-        return
+        return None
     anchor_rows, joined_rows = _join_row_counts_from_content(content)
     if anchor_rows is None or joined_rows is None:
-        return
+        return None
     result = {
         "task_id": task.id,
         "source_task_id": task.id,
@@ -170,12 +194,117 @@ def _capture_join_experience(
     }
     candidate = extract_join_experience(result)
     if candidate is None:
-        return
+        return None
     store = AgentMemoryStore(settings.db_path)
-    store.create(candidate, task_id=task.id)
+    return store.create(candidate, task_id=task.id)
 
 
-def _capture_strategy_experience(settings, task: TaskRecord) -> None:
+def _capture_feature_experience(
+    settings, task: TaskRecord, metadata: dict[str, Any] | None
+) -> Any | None:
+    tables = (metadata or {}).get("tables") if isinstance(metadata, dict) else []
+    advice = next(
+        (
+            table for table in (tables or [])
+            if isinstance(table, dict) and table.get("title") == "Agent 特征建议"
+        ),
+        None,
+    )
+    if advice is None:
+        return None
+    columns = [str(item) for item in (advice.get("columns") or [])]
+    try:
+        feature_idx = columns.index("特征")
+        recommendation_idx = columns.index("Agent建议")
+    except ValueError:
+        return None
+    state_idx = columns.index("建议状态") if "建议状态" in columns else -1
+    confidence_idx = columns.index("证据置信度") if "证据置信度" in columns else -1
+    evidence_idx = columns.index("支持指标") if "支持指标" in columns else -1
+    recommended: list[str] = []
+    avoid: list[str] = []
+    recommendation_evidence: dict[str, dict[str, str]] = {}
+    actionable_confidences: list[str] = []
+    adverse_tokens = ("不推荐", "剔除", "慎用", "谨慎", "不建议", "不可用")
+    positive_states = frozenset({"recommended", "candidate"})
+    negative_states = frozenset({"not_recommended", "caution"})
+    for source_row in advice.get("rows") or []:
+        if not isinstance(source_row, (list, tuple)):
+            continue
+        row = list(source_row)
+        if max(feature_idx, recommendation_idx) >= len(row):
+            continue
+        feature = str(row[feature_idx] or "").strip()
+        recommendation = str(row[recommendation_idx] or "").strip()
+        if not feature:
+            continue
+        state = (
+            str(row[state_idx] or "").strip().lower()
+            if 0 <= state_idx < len(row)
+            else ""
+        )
+        if state in negative_states or (
+            not state and any(token in recommendation for token in adverse_tokens)
+        ):
+            avoid.append(feature)
+        elif state in positive_states or (
+            not state and recommendation in {"推荐", "候选"}
+        ):
+            recommended.append(feature)
+        else:
+            # "待评估"/unevaluated is intentionally neutral: insufficient
+            # evidence must not become a reusable recommendation.
+            continue
+        confidence = (
+            str(row[confidence_idx] or "").strip().lower()
+            if 0 <= confidence_idx < len(row)
+            else ""
+        )
+        evidence = (
+            str(row[evidence_idx] or "").strip()
+            if 0 <= evidence_idx < len(row)
+            else ""
+        )
+        actionable_confidences.append(confidence)
+        if evidence and evidence != "-":
+            recommendation_evidence[feature] = {
+                "state": state or recommendation,
+                "confidence": confidence or "unknown",
+                "metrics": evidence,
+            }
+    actionable_features = set(recommended) | set(avoid)
+    if not actionable_features:
+        return None
+    recommendation_confidence = (
+        "high"
+        if actionable_confidences
+        and set(recommendation_evidence) == actionable_features
+        and all(value == "high" for value in actionable_confidences)
+        else "medium"
+        if recommended or avoid
+        else "low"
+    )
+    result = {
+        "task_id": task.id,
+        "source_task_id": task.id,
+        "feature_count": len(advice.get("rows") or []),
+        "recommended_features": list(dict.fromkeys(recommended)),
+        "avoid_features": list(dict.fromkeys(avoid)),
+        "recommendation_confidence": recommendation_confidence,
+        "recommendation_evidence": recommendation_evidence,
+        "target_col": task.target_col,
+        # Group by analytical target instead of the user-entered task name.
+        # Equivalent analyses should consolidate even when operators give the
+        # tasks different display names.
+        "scope": f"feature:target={task.target_col or 'unknown'}",
+    }
+    candidate = extract_feature_experience(result)
+    if candidate is None:
+        return None
+    return AgentMemoryStore(settings.db_path).create(candidate, task_id=task.id)
+
+
+def _capture_strategy_experience(settings, task: TaskRecord) -> Any | None:
     """S2: strategy_experience capture, sourced straight from persisted results
     (INV-1: no recompute) rather than parsed from the terminal message -- the
     STRATEGY_DEVELOPMENT template's terminal step is render_strategy_doc, not
@@ -191,24 +320,24 @@ def _capture_strategy_experience(settings, task: TaskRecord) -> None:
         if meta.get("asset_status") == ASSET_STATUS_ADOPTED_LOCAL
     ]
     if not adopted:
-        return
+        return None
     latest = max(adopted, key=lambda meta: (meta.get("adopted_at") or "", meta.get("created_at") or ""))
     strategy = strategies.get_strategy(latest["id"])
     backtests = strategies.list_backtests(latest["id"])
     if strategy is None or not backtests:
-        return
+        return None
     # The existing strategy_experience memory contract is deliberately approval
     # specific.  Limit, pricing and segmentation backtests carry different typed
     # metrics; skipping them is safer than inventing approval-rate aliases.
     if strategy.strategy_type not in {"approval", "reject"}:
-        return
+        return None
     backtest = backtests[-1]
     memory_metrics = _approval_backtest_memory_metrics(
         backtest,
         strategy_type=strategy.strategy_type,
     )
     if memory_metrics is None:
-        return
+        return None
     result = {
         "task_id": task.id,
         "source_task_id": task.id,
@@ -219,16 +348,16 @@ def _capture_strategy_experience(settings, task: TaskRecord) -> None:
     }
     candidate = extract_strategy_experience(result)
     if candidate is None:
-        return
+        return None
     store = AgentMemoryStore(settings.db_path)
-    store.create(candidate, task_id=task.id)
+    return store.create(candidate, task_id=task.id)
 
 
 def _capture_risk_analysis_experience(
     settings,
     task: TaskRecord,
     metadata: dict[str, Any] | None,
-) -> None:
+) -> Any:
     report = (metadata or {}).get("risk_analysis_report")
     if not isinstance(report, dict) or not report:
         return
@@ -241,7 +370,7 @@ def _capture_risk_analysis_experience(
     if candidate is None:
         return
     store = AgentMemoryStore(settings.db_path)
-    store.create(candidate, task_id=task.id)
+    return store.create(candidate, task_id=task.id)
 
 
 def _approval_backtest_memory_metrics(
@@ -375,14 +504,19 @@ def build_memory_anchor(
         return None
     if not load_memory_policy(settings.workspace).reference_cross_task:
         return None
+    scope = _modeling_scope(task, meta)
     try:
         store = AgentMemoryStore(settings.db_path)
-        history = store.list_entries(memory_type="model_experience", limit=200)
+        history = [
+            entry
+            for entry in store.list_entries(memory_type="model_experience", limit=200)
+            if str(entry.source_task_id or "") != task.id
+            and str(entry.payload.get("scope") or "") == scope
+        ]
     except Exception:
         return None
     if not history:
         return None
-    scope = _modeling_scope(task, meta)
     current_payload = {"scope": scope, "model_name": _gate_recipe(meta)}
     try:
         comparison = compare_model_experience(current_payload, history, limit=MEMORY_ANCHOR_MAX_ENTRIES)
@@ -410,6 +544,174 @@ def build_memory_anchor(
     if not lines:
         return None
     return {"lines": lines, "references": references}
+
+
+def build_workflow_memory_context(
+    settings,
+    task: TaskRecord,
+    *,
+    limit: int = 3,
+) -> dict[str, Any] | None:
+    """Return visible same-workflow memory for Agent interpretation.
+
+    Unlike ``build_memory_anchor`` this covers data join, feature analysis and
+    modeling in both NORMAL and AUTO modes.  The context is explanation-only;
+    callers must never feed it back into deterministic tool inputs.
+    """
+    if not load_memory_policy(settings.workspace).reference_cross_task:
+        return None
+    category = {
+        TASK_TYPE_DATA_JOIN: "join_experience",
+        TASK_TYPE_FEATURE_ANALYSIS: "feature_experience",
+        TASK_TYPE_MODELING: "model_experience",
+        TASK_TYPE_STRATEGY: "strategy_experience",
+    }.get(task.task_type)
+    if category is None:
+        return None
+    expected_scope = _workflow_memory_scope(task, category)
+    if expected_scope is None:
+        # A missing analytical target/model scope is not permission to mix
+        # unrelated task histories. Stay silent until the current scope is
+        # known rather than falling back to category-wide memories.
+        return None
+    try:
+        store = AgentMemoryStore(settings.db_path)
+        distillations = [
+            item
+            for item in store.list_distillations(category=category, limit=200)
+            if _distillation_scope_matches(category, expected_scope, item)
+            and _distillation_is_actionable(category, item)
+        ][:limit]
+        entries = [
+            entry
+            for entry in store.list_entries(memory_type=category, limit=200)
+            if str(entry.source_task_id or "") != task.id
+            and str(entry.confidence or "").lower() != "low"
+            and _memory_scope_matches(
+                category,
+                expected_scope,
+                str(entry.payload.get("scope") or ""),
+            )
+        ][:limit]
+    except Exception:
+        return None
+    memories: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
+    lines: list[str] = []
+    for item in distillations:
+        if item.confidence == "low":
+            continue
+        source_summary = (
+            render_structured_distillation_summary(category, item.structured)
+            if category == "feature_experience"
+            else item.distilled_summary
+        )
+        summary = _sanitize_anchor_value(source_summary, max_chars=180)
+        if not summary:
+            continue
+        memories.append({
+            "id": item.id,
+            "kind": "distillation",
+            "summary": summary,
+            "confidence": item.confidence,
+            "scope": expected_scope,
+        })
+        references.append({
+            "id": item.id,
+            "kind": "distillation",
+            "scope": expected_scope,
+            "use_reason": "workflow_insight",
+        })
+        lines.append(f"同口径记忆沉淀（{expected_scope}，{item.confidence}）：{summary}")
+        if len(memories) >= limit:
+            break
+    remaining = max(0, limit - len(memories))
+    selected_entries = entries[:remaining]
+    if selected_entries:
+        try:
+            found = store.record_retrievals(
+                [entry.id for entry in selected_entries],
+                task_id=task.id,
+            )
+        except Exception:
+            found = set()
+        for entry in selected_entries:
+            if entry.id not in found:
+                continue
+            summary = _sanitize_anchor_value(entry.summary, max_chars=180)
+            memories.append({
+                "id": entry.id,
+                "kind": "raw",
+                "summary": summary,
+                "confidence": entry.confidence,
+                "source_task_id": entry.source_task_id,
+                "scope": expected_scope,
+            })
+            references.append({
+                "id": entry.id,
+                "kind": "raw",
+                "scope": expected_scope,
+                "use_reason": "workflow_insight",
+            })
+            lines.append(
+                f"同口径历史任务 {entry.source_task_id}"
+                f"（{expected_scope}，{entry.confidence}）：{summary}"
+            )
+    if not memories:
+        return None
+    return {"category": category, "lines": lines, "memories": memories, "references": references}
+
+
+def _workflow_memory_scope(task: TaskRecord, category: str) -> str | None:
+    model_name = str(task.model_name or "").strip()
+    if category == "feature_experience":
+        target_col = str(task.target_col or "").strip()
+        return f"feature:target={target_col}" if target_col else None
+    if category == "join_experience":
+        return f"data_join:{model_name}" if model_name else None
+    if category == "model_experience":
+        return _modeling_scope(task, None) if model_name else None
+    if category == "strategy_experience":
+        # Strategy type is decided inside the workflow. The task's governed
+        # model name is the common boundary available before that decision.
+        return f":{model_name}" if model_name else None
+    return None
+
+
+def _memory_scope_matches(category: str, expected: str, actual: str) -> bool:
+    if not actual:
+        return False
+    if category == "strategy_experience":
+        return actual.endswith(expected)
+    return actual == expected
+
+
+def _distillation_scope_matches(category: str, expected: str, item: Any) -> bool:
+    structured = item.structured if isinstance(item.structured, dict) else {}
+    scopes = structured.get("scopes")
+    if isinstance(scopes, list) and any(
+        _memory_scope_matches(category, expected, str(scope or ""))
+        for scope in scopes
+    ):
+        return True
+    scope_key = str(item.scope_key or "")
+    if category == "strategy_experience":
+        return scope_key.endswith(expected)
+    return scope_key == f"{category}:{expected}"
+
+
+def _distillation_is_actionable(category: str, item: Any) -> bool:
+    if category != "feature_experience":
+        return True
+    structured = item.structured if isinstance(item.structured, dict) else {}
+    return any(
+        structured.get(field)
+        for field in (
+            "recommended_features",
+            "avoid_features",
+            "inconsistent_features",
+        )
+    )
 
 
 def _gate_delivery_tool(meta: dict[str, Any]) -> str:
@@ -522,6 +824,7 @@ __all__ = [
     "MEMORY_ANCHOR_MAX_ENTRIES",
     "MEMORY_ANCHOR_MAX_LINE_CHARS",
     "build_memory_anchor",
+    "build_workflow_memory_context",
     "capture_agent_memory_for_driver_done",
     "fetch_field_convention_hints",
 ]

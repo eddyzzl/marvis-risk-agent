@@ -36,6 +36,7 @@ trial semantics -- no behaviour change for existing single-recipe callers.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Callable
 
@@ -47,10 +48,21 @@ from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift, weig
 from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS, DEFAULT_TUNE_NUM_THREADS
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.recipes.common import (
+    VALID_GROUP_COLS_PARAM_KEY,
+    _group_ids,
     carve_early_stop_fold,
     cat_feature_indices,
+    model_params,
     normalize_monotone_constraints_value,
 )
+from marvis.packs.modeling.recipes.nonbinary_common import (
+    encode_multiclass_target,
+    resolve_multiclass_classes,
+    resolve_multiclass_splits,
+)
+from marvis.packs.modeling.training_dataset import TrainingDataset
+
+logger = logging.getLogger(__name__)
 
 # Reference learning rate used to scale the per-trial boost-round ceiling: lower
 # sampled learning rates get proportionally more rounds (early stopping still
@@ -131,17 +143,46 @@ _MLP_LOG_SPACE_BOUNDS: dict[str, tuple[float, float]] = {
 _MLP_CHOICE_SPACE: dict[str, tuple] = {
     "hidden_layer_sizes": ((16,), (32,), (64,), (32, 16), (64, 32), (64, 32, 16)),
 }
+_RIDGE_LOG_SPACE_BOUNDS: dict[str, tuple[float, float]] = {
+    "alpha": (1e-4, 100.0),
+}
+
+_REGRESSION_TUNING_RECIPES = frozenset({
+    "lgb_regressor",
+    "xgb_regressor",
+    "lr_regressor",
+    "mlp_regressor",
+})
+_MULTICLASS_TUNING_RECIPES = frozenset({
+    "lgb_multiclass",
+    "xgb_multiclass",
+    "lr_multiclass",
+    "mlp_multiclass",
+})
+_NONBINARY_TUNING_RECIPES = (
+    _REGRESSION_TUNING_RECIPES | _MULTICLASS_TUNING_RECIPES
+)
 
 #: Per-recipe default tuning budget (trial count) used when the caller does not
 #: pass an explicit n_trials -- tree recipes get a full two-stage budget, the
 #: small-space families (lr/scorecard/mlp) get a much smaller one (TUNE-1/SEL-2).
 DEFAULT_TRIAL_BUDGET: dict[str, int] = {
-    "lgb": 40,
-    "xgb": 40,
-    "catboost": 40,
-    "lr": 12,
-    "scorecard": 12,
-    "mlp": 12,
+    # Product default: one real trial per selected recipe.  Explicit callers
+    # can still widen any recipe through n_trials/n_trials_by_recipe.
+    "lgb": 1,
+    "xgb": 1,
+    "catboost": 1,
+    "lr": 1,
+    "scorecard": 1,
+    "mlp": 1,
+    "lgb_regressor": 1,
+    "xgb_regressor": 1,
+    "lr_regressor": 1,
+    "mlp_regressor": 1,
+    "lgb_multiclass": 1,
+    "xgb_multiclass": 1,
+    "lr_multiclass": 1,
+    "mlp_multiclass": 1,
 }
 
 #: Tree recipes that early-stop against a carved validation fold instead of the
@@ -158,17 +199,34 @@ _EARLY_STOPPED_TREE_RECIPES = frozenset({"lgb", "xgb", "catboost"})
 #: _run_lgb_trial). Recorded per trial/best_metrics as "deterministic" so a
 #: caller auditing cross-machine reproducibility doesn't have to know this
 #: per-recipe contract by heart.
-_CROSS_MACHINE_DETERMINISTIC_RECIPES = frozenset({"xgb", "catboost", "lr", "scorecard", "mlp"})
-
+_CROSS_MACHINE_DETERMINISTIC_RECIPES = frozenset({
+    "xgb",
+    "catboost",
+    "lr",
+    "scorecard",
+    "mlp",
+    "xgb_regressor",
+    "lr_regressor",
+    "mlp_regressor",
+    "xgb_multiclass",
+    "lr_multiclass",
+    "mlp_multiclass",
+})
 
 def _group_cols_from_params(params: dict | None) -> list[str] | None:
     """Optional group/identity column(s) for the early-stopping valid-fold carve,
     read from the caller-supplied base_params (mirrors
     ``recipes.common.VALID_GROUP_COLS_PARAM_KEY``); absent by default."""
-    raw = dict(params or {}).get("valid_group_cols")
+    raw = dict(params or {}).get(VALID_GROUP_COLS_PARAM_KEY)
     if not raw:
         return None
-    return raw if isinstance(raw, list) else [raw]
+    values = raw if isinstance(raw, list) else [raw]
+    normalized = [
+        value
+        for value in dict.fromkeys(str(item).strip() for item in values)
+        if value
+    ]
+    return normalized or None
 
 
 # ==========================================================================
@@ -187,12 +245,13 @@ def _cv_folds(
     row/group assigned to exactly one fold). Deterministic given ``seed``."""
     rng = np.random.RandomState(_valid_fold_seed_for_cv(seed))
     resolved_group_cols = [str(col) for col in (group_cols or []) if str(col) in frame.columns]
-    groups = (
-        frame.groupby(resolved_group_cols, sort=False).ngroup().to_numpy()
-        if resolved_group_cols
-        else np.arange(len(frame))
-    )
+    groups = _group_ids(frame, resolved_group_cols)
     unique_groups = np.unique(groups)
+    if unique_groups.size < cv_folds:
+        raise ModelingError(
+            "cv_folds requires at least one distinct training group per fold: "
+            f"requested={cv_folds}, available_groups={unique_groups.size}"
+        )
     rng.shuffle(unique_groups)
     fold_of_group = {int(group): index % cv_folds for index, group in enumerate(unique_groups)}
     fold_ids = np.array([fold_of_group[int(g)] for g in groups])
@@ -444,11 +503,10 @@ def _boost_round_ceiling(learning_rate: float, max_boost_round: int) -> int:
 
 
 def _lgb_base_params(params: dict | None, *, pos_weight_hint: float) -> dict:
-    blocked = {"sample_weight_col", "sample_weight_column", "weight_col"}
     out = {
         str(key): value
-        for key, value in dict(params or {}).items()
-        if str(key) not in blocked and value not in (None, "")
+        for key, value in model_params(params).items()
+        if value not in (None, "")
     }
     if str(out.get("scale_pos_weight") or "").strip().lower() == "auto":
         out["scale_pos_weight"] = float(pos_weight_hint)
@@ -485,15 +543,21 @@ def _run_lgb_trial(
     # path's DEFAULT_TRAIN_NUM_THREADS) instead of a bare literal. Deliberately
     # NOT forced to match train_lgb's single-threaded default -- a multi-hour,
     # multi-recipe two-stage search benefits far more from full-core parallelism
-    # than a single train_model call does. force_row_wise pins the row/col-wise
-    # split so deterministic=True's guarantee actually holds (LightGBM's
-    # determinism contract requires it); without it, deterministic=True alone
-    # does not guarantee bit-identical trees even at a fixed thread count.
+    # than a single train_model call does. force_col_wise pins the row/col-wise
+    # split so deterministic=True's guarantee actually holds while avoiding
+    # LightGBM's documented doubled Dataset memory cost for force_row_wise on
+    # wide, full-data searches.
+    params.pop("force_row_wise", None)
     params.update({
         "seed": seed,
         "num_threads": DEFAULT_TUNE_NUM_THREADS,
         "deterministic": True,
-        "force_row_wise": True,
+        "force_col_wise": True,
+        # The shared Dataset frees its raw matrix after first construction.
+        # Disable feature pre-filtering so later trials may safely explore a
+        # lower min_child_samples/min_data_in_leaf without requiring that raw
+        # matrix to be retained and reconstructed.
+        "feature_pre_filter": False,
     })
     round_ceiling = _boost_round_ceiling(params["learning_rate"], trial_max_boost_round)
     booster = lgb.train(
@@ -1081,6 +1145,663 @@ def _run_mlp_trial(
     )
 
 
+def _ridge_sample_coarse(
+    rng: np.random.RandomState,
+    _pos_weight_hint: float,
+) -> dict:
+    low, high = _RIDGE_LOG_SPACE_BOUNDS["alpha"]
+    return {"alpha": _round_log_sample(rng, low, high)}
+
+
+def _ridge_sample_fine(
+    rng: np.random.RandomState,
+    _pos_weight_hint: float,
+    anchor: dict,
+) -> dict:
+    low, high = _RIDGE_LOG_SPACE_BOUNDS["alpha"]
+    return {
+        "alpha": _round_log_sample(
+            rng,
+            low,
+            high,
+            center=float(anchor["alpha"]),
+            shrink=_FINE_LOG_SHRINK,
+        )
+    }
+
+
+def _lgb_nonbinary_sample_coarse(
+    rng: np.random.RandomState,
+    pos_weight_hint: float,
+) -> dict:
+    params = _sample_coarse_params(rng, pos_weight_hint)
+    for key in ("objective", "metric", "scale_pos_weight"):
+        params.pop(key, None)
+    return params
+
+
+def _lgb_nonbinary_sample_fine(
+    rng: np.random.RandomState,
+    pos_weight_hint: float,
+    anchor: dict,
+) -> dict:
+    # The shared binary sampler expects scale_pos_weight in its anchor.  Supply
+    # a throwaway value, then strip every target-family-specific control.
+    params = _sample_fine_params(
+        rng,
+        pos_weight_hint,
+        {**anchor, "scale_pos_weight": 1.0},
+    )
+    for key in ("objective", "metric", "scale_pos_weight"):
+        params.pop(key, None)
+    return params
+
+
+def _xgb_nonbinary_sample_coarse(
+    rng: np.random.RandomState,
+    pos_weight_hint: float,
+) -> dict:
+    params = _xgb_sample_coarse(rng, pos_weight_hint)
+    params.pop("scale_pos_weight", None)
+    return params
+
+
+def _xgb_nonbinary_sample_fine(
+    rng: np.random.RandomState,
+    pos_weight_hint: float,
+    anchor: dict,
+) -> dict:
+    params = _xgb_sample_fine(
+        rng,
+        pos_weight_hint,
+        {**anchor, "scale_pos_weight": 1.0},
+    )
+    params.pop("scale_pos_weight", None)
+    return params
+
+
+def _nonbinary_samplers(recipe: str) -> tuple[Callable, Callable]:
+    if recipe.startswith("lgb_"):
+        return _lgb_nonbinary_sample_coarse, _lgb_nonbinary_sample_fine
+    if recipe.startswith("xgb_"):
+        return _xgb_nonbinary_sample_coarse, _xgb_nonbinary_sample_fine
+    if recipe == "lr_regressor":
+        return _ridge_sample_coarse, _ridge_sample_fine
+    if recipe == "lr_multiclass":
+        return _lr_sample_coarse, _lr_sample_fine
+    if recipe.startswith("mlp_"):
+        return _mlp_sample_coarse, _mlp_sample_fine
+    raise ModelingError(f"tune_hyperparameters does not support recipe: {recipe}")
+
+
+def _tune_nonbinary_hyperparameters(
+    backend,
+    dataset_path: Path,
+    *,
+    features: list[str],
+    target_col: str,
+    split_col: str,
+    split_values: dict,
+    recipe: str,
+    n_trials: int | None,
+    seed: int,
+    early_stopping_rounds: int,
+    max_boost_round: int,
+    overfit_penalty: float,
+    sample_weight_col: str,
+    base_params: dict | None,
+    drop_nan_labels: bool,
+    coarse_fraction: float,
+    cv_folds: int | None,
+    progress_callback: Callable[[dict], None] | None,
+) -> TuneResult:
+    """Minimal production tuning for regression and multiclass recipes.
+
+    Every trial is fit on train (tree learners early-stop on a fold carved only
+    from train) and selected solely on the in-time test loss.  OOT metrics are
+    calculated for the report but never enter ``score``.
+    """
+
+    if cv_folds is not None:
+        raise ModelingError(
+            "cv_folds is not yet supported for regression/multiclass tuning; "
+            "use the governed train/test split"
+        )
+    feats = [feature for feature in dict.fromkeys(features) if feature != target_col]
+    if not feats:
+        raise ModelingError("features must contain at least one predictor")
+    weight_col = str(sample_weight_col or "").strip()
+    group_cols = _group_cols_from_params(base_params) or []
+    compact_features = [feature for feature in feats if feature not in group_cols]
+    frame = TrainingDataset.load_compact(
+        backend,
+        dataset_path,
+        features=compact_features,
+        target_col=target_col,
+        split_col=split_col,
+        extra_columns=[
+            *([weight_col] if weight_col else []),
+            *group_cols,
+        ],
+    ).frame
+    train, test, oot = _split(frame, split_col, split_values)
+    del frame
+    if recipe in _MULTICLASS_TUNING_RECIPES:
+        train, test, oot, oot_has_labels, audit = resolve_multiclass_splits(
+            train,
+            test,
+            oot,
+            target_col=target_col,
+            drop_nan_labels=drop_nan_labels,
+        )
+        classes = resolve_multiclass_classes(train[target_col])
+    else:
+        train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
+            train,
+            test,
+            oot,
+            target_col=target_col,
+            drop_nan_labels=drop_nan_labels,
+        )
+        classes = None
+
+    wtr = _sample_weight(train, weight_col)
+    wte = _sample_weight(test, weight_col)
+    woot = _sample_weight(oot, weight_col) if oot is not None and weight_col else None
+    fit_train, valid = train, test
+    if recipe.startswith(("lgb_", "xgb_")):
+        fit_train, valid = carve_early_stop_fold(
+            train,
+            seed=seed,
+            group_cols=group_cols,
+        )
+    fixed_params = _base_params_without_controls(base_params)
+    coarse_sampler, fine_sampler = _nonbinary_samplers(recipe)
+
+    def run_trial(sampled: dict, stage: str) -> dict:
+        return _run_nonbinary_trial(
+            recipe,
+            sampled,
+            stage,
+            fixed_params=fixed_params,
+            seed=seed,
+            train=train,
+            test=test,
+            oot=oot,
+            fit_train=fit_train,
+            valid=valid,
+            feats=feats,
+            target_col=target_col,
+            classes=classes,
+            early_stopping_rounds=early_stopping_rounds,
+            max_boost_round=max_boost_round,
+            overfit_penalty=overfit_penalty,
+            oot_has_labels=oot_has_labels,
+            wtr=wtr,
+            wte=wte,
+            woot=woot,
+            wfit=_sample_weight(fit_train, weight_col),
+            wvalid=_sample_weight(valid, weight_col),
+        )
+
+    total_trials = max(
+        1,
+        int(n_trials)
+        if n_trials is not None
+        else DEFAULT_TRIAL_BUDGET[recipe],
+    )
+    n_coarse = min(
+        total_trials,
+        max(1, round(total_trials * coarse_fraction)),
+    )
+    n_fine = total_trials - n_coarse
+    coarse_rng = np.random.RandomState(seed)
+    fine_rng = np.random.RandomState(seed + 1)
+    trials: list[dict] = []
+    best: dict | None = None
+    best_coarse: dict | None = None
+    for _ in range(n_coarse):
+        sampled = coarse_sampler(coarse_rng, 1.0)
+        record = run_trial(sampled, "coarse")
+        record["_sampled"] = sampled
+        trials.append(record)
+        if best is None or float(record["score"]) > float(best["score"]):
+            best = record
+        if best_coarse is None or float(record["score"]) > float(best_coarse["score"]):
+            best_coarse = record
+        _report_trial_progress(
+            progress_callback,
+            recipe=recipe,
+            record=record,
+            best=best,
+            trial=len(trials),
+            trial_total=total_trials,
+        )
+    anchor = dict((best_coarse or best or {})["_sampled"])
+    for _ in range(n_fine):
+        sampled = fine_sampler(fine_rng, 1.0, anchor)
+        record = run_trial(sampled, "fine")
+        record["_sampled"] = sampled
+        trials.append(record)
+        if best is None or float(record["score"]) > float(best["score"]):
+            best = record
+        _report_trial_progress(
+            progress_callback,
+            recipe=recipe,
+            record=record,
+            best=best,
+            trial=len(trials),
+            trial_total=total_trials,
+        )
+    assert best is not None
+    deterministic = recipe in _CROSS_MACHINE_DETERMINISTIC_RECIPES
+    for record in trials:
+        record.pop("_sampled", None)
+        record["deterministic"] = deterministic
+    best_metrics = {
+        key: value
+        for key, value in best.items()
+        if key not in {
+            "params",
+            "score",
+            "search_stage",
+            "best_iteration",
+            "_sampled",
+        }
+    }
+    best_metrics["selection_score"] = best["score"]
+    best_metrics["selection_metric"] = best["selection_metric"]
+    best_metrics["deterministic"] = deterministic
+    return TuneResult(
+        best_params=dict(best["params"]),
+        best_metrics=best_metrics,
+        trials=tuple(trials),
+        n_trials=total_trials,
+        nan_labels_dropped=int(audit["total_dropped"]),
+        recipe=recipe,
+    )
+
+
+def _run_nonbinary_trial(
+    recipe: str,
+    sampled: dict,
+    stage: str,
+    *,
+    fixed_params: dict,
+    seed: int,
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    oot: pd.DataFrame | None,
+    fit_train: pd.DataFrame,
+    valid: pd.DataFrame,
+    feats: list[str],
+    target_col: str,
+    classes: tuple | None,
+    early_stopping_rounds: int,
+    max_boost_round: int,
+    overfit_penalty: float,
+    oot_has_labels: bool,
+    wtr: np.ndarray | None,
+    wte: np.ndarray | None,
+    woot: np.ndarray | None,
+    wfit: np.ndarray | None,
+    wvalid: np.ndarray | None,
+) -> dict:
+    params = {**sampled, **fixed_params}
+    best_iteration = None
+    if recipe.startswith("lgb_"):
+        import lightgbm as lgb
+
+        rounds = int(params.pop("num_boost_round", max_boost_round))
+        params.pop("scale_pos_weight", None)
+        params.update({
+            "objective": (
+                "regression"
+                if recipe in _REGRESSION_TUNING_RECIPES
+                else "multiclass"
+            ),
+            "metric": (
+                "rmse"
+                if recipe in _REGRESSION_TUNING_RECIPES
+                else "multi_logloss"
+            ),
+            "seed": seed,
+            "num_threads": DEFAULT_TUNE_NUM_THREADS,
+            "deterministic": True,
+            "force_col_wise": True,
+            "feature_pre_filter": False,
+            "verbosity": -1,
+        })
+        if classes is not None:
+            params["num_class"] = len(classes)
+            fit_labels = encode_multiclass_target(fit_train[target_col], classes)
+            valid_labels = encode_multiclass_target(valid[target_col], classes)
+        else:
+            fit_labels = fit_train[target_col].to_numpy(dtype=float)
+            valid_labels = valid[target_col].to_numpy(dtype=float)
+        dtrain = lgb.Dataset(
+            fit_train[feats],
+            label=fit_labels,
+            weight=wfit,
+            free_raw_data=True,
+        )
+        dvalid = lgb.Dataset(
+            valid[feats],
+            label=valid_labels,
+            weight=wvalid,
+            reference=dtrain,
+            free_raw_data=True,
+        )
+        callbacks = [
+            lgb.early_stopping(early_stopping_rounds, verbose=False)
+        ]
+        model = lgb.train(
+            params,
+            dtrain,
+            num_boost_round=rounds,
+            valid_sets=[dvalid],
+            callbacks=callbacks,
+        )
+        best_iteration = int(model.best_iteration or rounds)
+        predict = lambda data: np.asarray(  # noqa: E731
+            model.predict(data[feats], num_iteration=best_iteration),
+            dtype=float,
+        )
+        stored_params = {**params, "num_boost_round": best_iteration}
+    elif recipe.startswith("xgb_"):
+        import xgboost as xgb
+
+        rounds = int(
+            params.pop(
+                "num_boost_round",
+                params.pop("n_estimators", max_boost_round),
+            )
+        )
+        for key in ("objective", "eval_metric", "num_class", "scale_pos_weight"):
+            params.pop(key, None)
+        common = {
+            **params,
+            "random_state": seed,
+            "n_jobs": DEFAULT_TRAIN_NUM_THREADS,
+            "n_estimators": rounds,
+            "early_stopping_rounds": early_stopping_rounds,
+        }
+        if classes is None:
+            common.update({
+                "objective": "reg:squarederror",
+                "eval_metric": "rmse",
+            })
+            model = xgb.XGBRegressor(**common)
+            fit_labels = fit_train[target_col].to_numpy(dtype=float)
+            valid_labels = valid[target_col].to_numpy(dtype=float)
+            predict = lambda data: np.asarray(model.predict(data[feats]), dtype=float)  # noqa: E731
+        else:
+            common.update({
+                "objective": "multi:softprob",
+                "eval_metric": "mlogloss",
+                "num_class": len(classes),
+            })
+            model = xgb.XGBClassifier(**common)
+            fit_labels = encode_multiclass_target(fit_train[target_col], classes)
+            valid_labels = encode_multiclass_target(valid[target_col], classes)
+            predict = lambda data: np.asarray(model.predict_proba(data[feats]), dtype=float)  # noqa: E731
+        model.fit(
+            fit_train[feats],
+            fit_labels,
+            sample_weight=wfit,
+            eval_set=[(valid[feats], valid_labels)],
+            sample_weight_eval_set=[wvalid] if wvalid is not None else None,
+            verbose=False,
+        )
+        best_iteration = int(getattr(model, "best_iteration", rounds - 1)) + 1
+        stored_params = {
+            **common,
+            "num_boost_round": best_iteration,
+        }
+        stored_params.pop("n_estimators", None)
+    elif recipe == "lr_regressor":
+        from sklearn.impute import SimpleImputer
+        from sklearn.linear_model import Ridge
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        params.pop("C", None)
+        model = Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+            ("regressor", Ridge(**params)),
+        ])
+        model.fit(
+            train[feats],
+            train[target_col].to_numpy(dtype=float),
+            regressor__sample_weight=wtr,
+        )
+        predict = lambda data: np.asarray(model.predict(data[feats]), dtype=float)  # noqa: E731
+        stored_params = dict(params)
+    elif recipe == "lr_multiclass":
+        from sklearn.impute import SimpleImputer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        params = {
+            "max_iter": 1000,
+            "solver": "lbfgs",
+            **params,
+            "random_state": seed,
+        }
+        model = Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+            ("lr", LogisticRegression(**params)),
+        ])
+        model.fit(
+            train[feats],
+            encode_multiclass_target(train[target_col], classes or ()),
+            lr__sample_weight=wtr,
+        )
+        predict = lambda data: np.asarray(model.predict_proba(data[feats]), dtype=float)  # noqa: E731
+        stored_params = dict(params)
+    elif recipe.startswith("mlp_"):
+        from sklearn.impute import SimpleImputer
+        from sklearn.neural_network import MLPClassifier, MLPRegressor
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        params = {
+            "max_iter": 300,
+            "early_stopping": False,
+            **params,
+            "random_state": seed,
+        }
+        params["hidden_layer_sizes"] = tuple(
+            params.get("hidden_layer_sizes") or (32, 16)
+        )
+        estimator = (
+            MLPRegressor(**params)
+            if classes is None
+            else MLPClassifier(**params)
+        )
+        model = Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+            ("mlp", estimator),
+        ])
+        labels = (
+            train[target_col].to_numpy(dtype=float)
+            if classes is None
+            else encode_multiclass_target(train[target_col], classes)
+        )
+        model.fit(train[feats], labels, mlp__sample_weight=wtr)
+        predict = (
+            (lambda data: np.asarray(model.predict(data[feats]), dtype=float))
+            if classes is None
+            else (
+                lambda data: np.asarray(
+                    model.predict_proba(data[feats]),
+                    dtype=float,
+                )
+            )
+        )
+        stored_params = {
+            **params,
+            "hidden_layer_sizes": list(params["hidden_layer_sizes"]),
+        }
+    else:
+        raise ModelingError(f"tune_hyperparameters does not support recipe: {recipe}")
+
+    if classes is None:
+        record = _score_regression_trial(
+            params=stored_params,
+            predict=predict,
+            train=train,
+            test=test,
+            oot=oot,
+            target_col=target_col,
+            stage=stage,
+            overfit_penalty=overfit_penalty,
+            oot_has_labels=oot_has_labels,
+            wtr=wtr,
+            wte=wte,
+            woot=woot,
+        )
+    else:
+        record = _score_multiclass_trial(
+            params=stored_params,
+            predict=predict,
+            train=train,
+            test=test,
+            oot=oot,
+            target_col=target_col,
+            classes=classes,
+            stage=stage,
+            overfit_penalty=overfit_penalty,
+            oot_has_labels=oot_has_labels,
+            wtr=wtr,
+            wte=wte,
+            woot=woot,
+        )
+    if best_iteration is not None:
+        record["best_iteration"] = best_iteration
+    return record
+
+
+def _score_regression_trial(
+    *,
+    params: dict,
+    predict: Callable[[pd.DataFrame], np.ndarray],
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    oot: pd.DataFrame | None,
+    target_col: str,
+    stage: str,
+    overfit_penalty: float,
+    oot_has_labels: bool,
+    wtr: np.ndarray | None,
+    wte: np.ndarray | None,
+    woot: np.ndarray | None,
+) -> dict:
+    def metrics(frame: pd.DataFrame, weights: np.ndarray | None) -> tuple[float, float]:
+        labels = frame[target_col].to_numpy(dtype=float)
+        predictions = np.asarray(predict(frame), dtype=float)
+        rmse = float(np.sqrt(np.average((predictions - labels) ** 2, weights=weights)))
+        mae = float(np.average(np.abs(predictions - labels), weights=weights))
+        return rmse, mae
+
+    train_rmse, train_mae = metrics(train, wtr)
+    test_rmse, test_mae = metrics(test, wte)
+    oot_rmse = oot_mae = None
+    if oot is not None and oot_has_labels:
+        oot_rmse, oot_mae = metrics(oot, woot)
+    overfit_gap = max(0.0, test_rmse - train_rmse)
+    return {
+        "params": params,
+        "train_rmse": train_rmse,
+        "test_rmse": test_rmse,
+        "oot_rmse": oot_rmse,
+        "train_mae": train_mae,
+        "test_mae": test_mae,
+        "oot_mae": oot_mae,
+        "overfit_gap": test_rmse - train_rmse,
+        "score": -(test_rmse + overfit_penalty * overfit_gap),
+        "selection_metric": "test_rmse(overfit-penalized)",
+        "search_stage": stage,
+    }
+
+
+def _score_multiclass_trial(
+    *,
+    params: dict,
+    predict: Callable[[pd.DataFrame], np.ndarray],
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    oot: pd.DataFrame | None,
+    target_col: str,
+    classes: tuple,
+    stage: str,
+    overfit_penalty: float,
+    oot_has_labels: bool,
+    wtr: np.ndarray | None,
+    wte: np.ndarray | None,
+    woot: np.ndarray | None,
+) -> dict:
+    from sklearn.metrics import log_loss, roc_auc_score
+
+    labels_range = np.arange(len(classes), dtype=int)
+
+    def metrics(
+        frame: pd.DataFrame,
+        weights: np.ndarray | None,
+    ) -> tuple[float, float | None]:
+        labels = encode_multiclass_target(frame[target_col], classes)
+        probabilities = np.asarray(predict(frame), dtype=float)
+        probabilities = np.clip(probabilities, 1e-15, None)
+        row_sums = probabilities.sum(axis=1, keepdims=True)
+        probabilities = probabilities / np.where(row_sums > 0.0, row_sums, 1.0)
+        loss = float(
+            log_loss(
+                labels,
+                probabilities,
+                labels=labels_range,
+                sample_weight=weights,
+            )
+        )
+        try:
+            macro_auc = float(
+                roc_auc_score(
+                    labels,
+                    probabilities,
+                    labels=labels_range,
+                    multi_class="ovr",
+                    average="macro",
+                    sample_weight=weights,
+                )
+            )
+        except ValueError:
+            macro_auc = None
+        return loss, macro_auc
+
+    train_loss, train_auc = metrics(train, wtr)
+    test_loss, test_auc = metrics(test, wte)
+    oot_loss = oot_auc = None
+    if oot is not None and oot_has_labels:
+        oot_loss, oot_auc = metrics(oot, woot)
+    overfit_gap = max(0.0, test_loss - train_loss)
+    return {
+        "params": params,
+        "train_logloss": train_loss,
+        "test_logloss": test_loss,
+        "oot_logloss": oot_loss,
+        "train_macro_auc": train_auc,
+        "test_macro_auc": test_auc,
+        "oot_macro_auc": oot_auc,
+        "overfit_gap": test_loss - train_loss,
+        "score": -(test_loss + overfit_penalty * overfit_gap),
+        "selection_metric": "test_logloss(overfit-penalized)",
+        "search_stage": stage,
+    }
+
+
 def tune_hyperparameters(
     backend,
     dataset_path: Path,
@@ -1100,6 +1821,7 @@ def tune_hyperparameters(
     drop_nan_labels: bool = False,
     coarse_fraction: float = 0.6,
     cv_folds: int | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> TuneResult:
     """Deterministic two-stage random search for ``recipe``; selects by test KS
     minus in-time overfit penalty. ``recipe`` defaults to ``"lgb"`` and its search
@@ -1117,15 +1839,17 @@ def tune_hyperparameters(
     single split; recommended for small datasets where a single split's KS is
     noisy.
 
-    Supported recipes: ``lgb``, ``xgb``, ``catboost`` (tree recipes, early-stopped
+    Supported recipes: binary ``lgb``, ``xgb``, ``catboost`` (tree recipes, early-stopped
     against the test split, so ``num_boost_round``/``iterations`` in the returned
     ``best_params`` reflects the trial's resolved best iteration); ``lr``,
     ``scorecard`` (small space: regularization strength ``C``, plus bin
     granularity for scorecard); ``mlp`` (small space: ``alpha``,
-    ``learning_rate_init``, ``hidden_layer_sizes``).
+    ``learning_rate_init``, ``hidden_layer_sizes``); and the
+    ``lgb/xgb/lr/mlp`` regression and multiclass variants with target-appropriate
+    RMSE or multiclass log-loss objectives.
 
     ``n_trials`` defaults to the recipe's entry in ``DEFAULT_TRIAL_BUDGET`` when
-    omitted (40 for tree recipes, 12 for lr/scorecard/mlp).
+    omitted (one real trial per recipe by product default).
 
     Stage 1 ("coarse") spends ``round(n_trials * coarse_fraction)`` trials
     sampling the full space at random. Stage 2 ("fine") spends the remaining
@@ -1141,14 +1865,48 @@ def tune_hyperparameters(
     recipe = str(recipe or "lgb")
     if recipe not in DEFAULT_TRIAL_BUDGET:
         raise ModelingError(f"tune_hyperparameters does not support recipe: {recipe}")
+    if recipe in _NONBINARY_TUNING_RECIPES:
+        return _tune_nonbinary_hyperparameters(
+            backend,
+            dataset_path,
+            features=features,
+            target_col=target_col,
+            split_col=split_col,
+            split_values=split_values,
+            recipe=recipe,
+            n_trials=n_trials,
+            seed=seed,
+            early_stopping_rounds=early_stopping_rounds,
+            max_boost_round=max_boost_round,
+            overfit_penalty=overfit_penalty,
+            sample_weight_col=sample_weight_col,
+            base_params=base_params,
+            drop_nan_labels=drop_nan_labels,
+            coarse_fraction=coarse_fraction,
+            cv_folds=cv_folds,
+            progress_callback=progress_callback,
+        )
     resolved_n_trials = int(n_trials) if n_trials is not None else DEFAULT_TRIAL_BUDGET[recipe]
 
     feats = [f for f in dict.fromkeys(features) if f != target_col]
     weight_col = str(sample_weight_col or "").strip()
     extra_cols = [weight_col] if weight_col else []
-    cols = feats + [target_col, split_col] + extra_cols
-    frame = backend.read_frame(dataset_path, columns=cols)
+    group_cols = _group_cols_from_params(base_params) or []
+    # Identity/group controls may also be selected model features.  Keep them
+    # outside the compact float32 block so 64-bit identifiers do not collapse
+    # (for example adjacent values above 2**53); the column remains present and
+    # can still be used both by the model and the group-aware validation carve.
+    compact_features = [feature for feature in feats if feature not in group_cols]
+    frame = TrainingDataset.load_compact(
+        backend,
+        dataset_path,
+        features=compact_features,
+        target_col=target_col,
+        split_col=split_col,
+        extra_columns=[*extra_cols, *group_cols],
+    ).frame
     train, test, oot = _split(frame, split_col, split_values)
+    del frame
     train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
         train, test, oot, target_col=target_col, drop_nan_labels=drop_nan_labels,
     )
@@ -1171,7 +1929,7 @@ def tune_hyperparameters(
     # they keep fitting/scoring against the full train/test split unchanged.
     if recipe in _EARLY_STOPPED_TREE_RECIPES:
         fit_train, valid = carve_early_stop_fold(
-            train, seed=seed, group_cols=_group_cols_from_params(base_params),
+            train, seed=seed, group_cols=group_cols,
         )
         yfit = fit_train[target_col].to_numpy(dtype=float)
         yva = valid[target_col].to_numpy(dtype=float)
@@ -1209,7 +1967,7 @@ def tune_hyperparameters(
             max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
             oot_has_labels=oot_has_labels, base_params=base_params,
             pos_weight_hint=pos_weight_hint,
-            group_cols=_group_cols_from_params(base_params),
+            group_cols=group_cols,
         )
 
     total_trials = max(1, resolved_n_trials)
@@ -1232,6 +1990,14 @@ def tune_hyperparameters(
             best = record
         if best_coarse is None or record["score"] > best_coarse["score"]:
             best_coarse = record
+        _report_trial_progress(
+            progress_callback,
+            recipe=recipe,
+            record=record,
+            best=best,
+            trial=len(trials),
+            trial_total=total_trials,
+        )
 
     anchor = (best_coarse or best)["_sampled"]
     for _ in range(n_fine):
@@ -1241,6 +2007,14 @@ def tune_hyperparameters(
         trials.append(record)
         if record["score"] > best["score"]:
             best = record
+        _report_trial_progress(
+            progress_callback,
+            recipe=recipe,
+            record=record,
+            best=best,
+            trial=len(trials),
+            trial_total=total_trials,
+        )
 
     assert best is not None
     # TUNE-6: explicit deterministic marker per trial (and mirrored onto
@@ -1288,6 +2062,55 @@ def tune_hyperparameters(
     )
 
 
+def _report_trial_progress(
+    callback: Callable[[dict], None] | None,
+    *,
+    recipe: str,
+    record: dict,
+    best: dict,
+    trial: int,
+    trial_total: int,
+) -> None:
+    """Publish a detached scalar snapshot without affecting the search.
+
+    Progress is observability only: it must never share the mutable trial/best
+    dictionaries with a caller, and a broken UI/persistence callback must not
+    change trial ordering, RNG state, best selection, or the returned result.
+    """
+
+    if callback is None:
+        return
+    payload = {
+        "kind": "model_tuning",
+        "algorithm": str(recipe),
+        "trial": int(trial),
+        "trial_total": int(trial_total),
+        "stage": str(record.get("search_stage") or ""),
+        "selection_score": _progress_number(record.get("score")),
+        "test_ks": _progress_number(record.get("test_ks")),
+        "test_rmse": _progress_number(record.get("test_rmse")),
+        "test_logloss": _progress_number(record.get("test_logloss")),
+        "selection_metric": record.get("selection_metric"),
+        "best_selection_score": _progress_number(best.get("score")),
+        "best_test_ks": _progress_number(best.get("test_ks")),
+        "best_test_rmse": _progress_number(best.get("test_rmse")),
+        "best_test_logloss": _progress_number(best.get("test_logloss")),
+    }
+    try:
+        callback(payload)
+    except Exception:
+        logger.warning("model tuning progress callback failed", exc_info=True)
+
+
+def _progress_number(value) -> int | float | None:
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        number = float(value)
+        if not np.isfinite(number):
+            return None
+        return int(number) if number.is_integer() else number
+    return None
+
+
 def _recipe_search_hooks(
     recipe: str,
     *,
@@ -1326,8 +2149,8 @@ def _recipe_search_hooks(
         fixed_params = _normalize_lgb_monotone_constraints(fixed_params, feats)
         trial_max_boost_round = int(fixed_params.pop("num_boost_round", max_boost_round))
         # SEL-4/TUNE-3: early stopping watches the carved valid fold, not test.
-        dtrain = lgb.Dataset(fit_train[feats], label=yfit, weight=wfit, free_raw_data=False)
-        dvalid = lgb.Dataset(valid[feats], label=yva, weight=wva, reference=dtrain, free_raw_data=False)
+        dtrain = lgb.Dataset(fit_train[feats], label=yfit, weight=wfit, free_raw_data=True)
+        dvalid = lgb.Dataset(valid[feats], label=yva, weight=wva, reference=dtrain, free_raw_data=True)
 
         def runner(params: dict, stage: str) -> dict:
             return _run_lgb_trial(
@@ -1441,11 +2264,10 @@ def _recipe_search_hooks(
 
 
 def _base_params_without_controls(params: dict | None) -> dict:
-    blocked = {"sample_weight_col", "sample_weight_column", "weight_col"}
     return {
         str(key): value
-        for key, value in dict(params or {}).items()
-        if str(key) not in blocked and value not in (None, "")
+        for key, value in model_params(params).items()
+        if value not in (None, "")
     }
 
 

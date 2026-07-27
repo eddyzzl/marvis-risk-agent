@@ -22,6 +22,7 @@ FEATURE_ANALYSIS = WorkflowTemplate(
         SlotSpec("target_col", True, "task_context", "Binary target column"),
         SlotSpec("features", True, "task_context", "Candidate feature columns"),
         SlotSpec("metrics", False, "task_context", "Selected optional metrics (e.g. vif)"),
+        SlotSpec("meaning_directions", False, "task_context", "Bounded Agent semantic direction decisions"),
     ),
     steps=(
         StepTemplate(
@@ -32,10 +33,25 @@ FEATURE_ANALYSIS = WorkflowTemplate(
                 "features": "{slot:features}",
                 "target_col": "{slot:target_col}",
                 "metrics": "{slot:metrics}",
+                "meaning_directions": "{slot:meaning_directions}",
                 "bins": 10,
             },
             depends_on_titles=(),
             post_checks=(PostCheck("nonempty", {"field": "metrics"}),),
+            phase="特征分析",
+        ),
+        StepTemplate(
+            title="可选分箱分析",
+            tool_ref=ToolRef("feature", "analyze_feature_bins"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "features": [],
+                "target_col": "{slot:target_col}",
+                "bins": 10,
+            },
+            depends_on_titles=("特征指标",),
+            post_checks=(),
+            needs_confirmation=True,
             phase="特征分析",
         ),
         StepTemplate(
@@ -44,8 +60,9 @@ FEATURE_ANALYSIS = WorkflowTemplate(
             inputs_template={
                 "metrics": "$ref:特征指标.output.metrics",
                 "collinear": "$ref:特征指标.output.collinear",
+                "binning": "$ref:可选分箱分析.output.binning",
             },
-            depends_on_titles=("特征指标",),
+            depends_on_titles=("特征指标", "可选分箱分析"),
             post_checks=(PostCheck("nonempty", {"field": "report_path"}),),
             phase="特征分析",
         ),
@@ -64,6 +81,7 @@ FEATURE_ANALYSIS_WITH_JOIN = WorkflowTemplate(
         SlotSpec("target_col", True, "task_context", "Target column on the anchor/joined sample"),
         SlotSpec("features", False, "task_context", "Candidate features; empty means infer after join"),
         SlotSpec("metrics", False, "task_context", "Selected optional metrics"),
+        SlotSpec("meaning_directions", False, "task_context", "Bounded Agent semantic direction decisions"),
         SlotSpec("dedup_strategies", False, "task_context", "Optional per-feature dedup strategy map"),
     ),
     steps=(
@@ -73,6 +91,7 @@ FEATURE_ANALYSIS_WITH_JOIN = WorkflowTemplate(
             inputs_template={
                 "anchor_id": "{slot:anchor_id}",
                 "feature_ids": "{slot:feature_ids}",
+                "key_overrides": {},
             },
             depends_on_titles=(),
             post_checks=(PostCheck("nonempty", {"field": "join_plan_id"}),),
@@ -107,10 +126,25 @@ FEATURE_ANALYSIS_WITH_JOIN = WorkflowTemplate(
                 "features": "{slot:features}",
                 "target_col": "{slot:target_col}",
                 "metrics": "{slot:metrics}",
+                "meaning_directions": "{slot:meaning_directions}",
                 "bins": 10,
             },
             depends_on_titles=("执行拼接",),
             post_checks=(PostCheck("nonempty", {"field": "metrics"}),),
+            phase="特征分析",
+        ),
+        StepTemplate(
+            title="可选分箱分析",
+            tool_ref=ToolRef("feature", "analyze_feature_bins"),
+            inputs_template={
+                "dataset_id": "$ref:执行拼接.output.result_dataset_id",
+                "features": [],
+                "target_col": "{slot:target_col}",
+                "bins": 10,
+            },
+            depends_on_titles=("执行拼接", "特征指标"),
+            post_checks=(),
+            needs_confirmation=True,
             phase="特征分析",
         ),
         StepTemplate(
@@ -119,8 +153,9 @@ FEATURE_ANALYSIS_WITH_JOIN = WorkflowTemplate(
             inputs_template={
                 "metrics": "$ref:特征指标.output.metrics",
                 "collinear": "$ref:特征指标.output.collinear",
+                "binning": "$ref:可选分箱分析.output.binning",
             },
-            depends_on_titles=("特征指标",),
+            depends_on_titles=("特征指标", "可选分箱分析"),
             post_checks=(PostCheck("nonempty", {"field": "report_path"}),),
             phase="特征分析",
         ),

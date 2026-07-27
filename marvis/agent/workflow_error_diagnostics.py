@@ -25,7 +25,9 @@ def build_workflow_error_diagnostic(
     setup_error: bool = False,
 ) -> dict:
     workflow_name = _WORKFLOW_NAMES.get(workflow, "工作流")
-    if isinstance(exc, CsvParseError):
+    if _is_metadata_serialization_failure(exc):
+        diagnostic = _metadata_serialization_diagnostic(workflow_name)
+    elif isinstance(exc, CsvParseError):
         diagnostic = _csv_parse_diagnostic(workflow, workflow_name, exc)
     elif isinstance(exc, FileNotFoundError):
         filename = Path(str(getattr(exc, "filename", "") or "")).name or "材料文件"
@@ -101,6 +103,97 @@ def build_workflow_error_diagnostic(
         "technical_detail": technical,
         **diagnostic,
     }
+
+
+def enrich_workflow_error_diagnostic(diagnostic: dict) -> dict:
+    """Upgrade persisted generic failures when a safe current diagnosis exists."""
+
+    result = dict(diagnostic or {})
+    if _is_parquet_column_alias_detail(result.get("technical_detail")) or (
+        _is_parquet_column_alias_detail(result.get("cause"))
+    ):
+        result.update(_parquet_column_alias_diagnostic())
+    elif (
+        str(result.get("code") or "") == "workflow_execution_failed"
+        and _is_metadata_serialization_detail(result.get("technical_detail"))
+    ):
+        workflow_name = _WORKFLOW_NAMES.get(str(result.get("workflow") or ""), "工作流")
+        result.update(_metadata_serialization_diagnostic(workflow_name))
+    return result
+
+
+def _parquet_column_alias_diagnostic() -> dict:
+    return {
+        "code": "platform_parquet_column_alias_failed",
+        "phase": "execution",
+        "title": "切分样本需要重新执行",
+        "summary": "数据已读取，但平台在按规范列名提取建模字段时中断。",
+        "cause": (
+            "源 Parquet 含空列名；平台将其规范为 C0 后，列裁剪仍使用了读取前的原始名称。"
+            "这是平台列名适配问题，不是目标列、切分设置或材料内容错误。"
+        ),
+        "location": "切分样本 · Parquet 列裁剪",
+        "evidence": [
+            {"label": "规范列名", "value": "C0"},
+            {"label": "责任归属", "value": "平台 Parquet 读取逻辑"},
+        ],
+        "actions": [
+            "无需修改或重新上传材料，由 Agent 使用当前数据重试切分样本。",
+            "平台会统一使用规范后的列名完成字段裁剪。",
+        ],
+        "agent_prompt": "这是平台可自动恢复的问题，是否由 Agent 重试当前步骤？",
+        "recovery_actions": [
+            {"label": "由 Agent 重试当前步骤", "command": "请帮我解决并重试"},
+        ],
+        "retryable": True,
+        "auto_recoverable": True,
+        "error_kind": "platform_parquet_schema",
+        "impact": "切分步骤未产出结果；后续建模步骤尚未执行。",
+    }
+
+
+def _metadata_serialization_diagnostic(workflow_name: str) -> dict:
+    return {
+        "code": "platform_metadata_serialization_failed",
+        "phase": "prepare",
+        "title": f"{workflow_name}准备步骤需要重新执行",
+        "summary": "数据已成功读取，但平台在保存日期字段画像时中断，后续步骤尚未开始。",
+        "cause": (
+            "平台在保存日期字段画像时未先把 Timestamp 转成 JSON 可保存的日期文本；"
+            "材料本身没有损坏。"
+        ),
+        "location": "数据集字段画像持久化",
+        "evidence": [
+            {"label": "异常值类型", "value": "Timestamp"},
+            {"label": "责任归属", "value": "平台数据准备逻辑"},
+        ],
+        "actions": [
+            "无需修改或重新上传材料，平台会把日期值规范化为 ISO 日期文本。",
+            "由 Agent 使用当前材料重新执行准备步骤。",
+        ],
+        "agent_prompt": "这是平台可自动恢复的问题，是否由 Agent 直接重新执行？",
+        "recovery_actions": [
+            {"label": "由 Agent 重新执行", "command": "请帮我解决并重试"},
+        ],
+        "retryable": True,
+        "auto_recoverable": True,
+        "error_kind": "platform_serialization",
+        "impact": "数据未损坏；模型准备步骤尚未生成执行计划。",
+    }
+
+
+def _is_metadata_serialization_failure(exc: Exception) -> bool:
+    return isinstance(exc, TypeError) and _is_metadata_serialization_detail(str(exc))
+
+
+def _is_metadata_serialization_detail(detail: object) -> bool:
+    text = str(detail or "").lower()
+    return "timestamp" in text and "not json serializable" in text
+
+
+def _is_parquet_column_alias_detail(detail: object) -> bool:
+    text = str(detail or "").lower()
+    return "no match for fieldref.name(c0)" in text
 
 
 def failure_envelope_for_diagnostic(diagnostic: dict) -> dict:
@@ -201,6 +294,7 @@ def _safe_message(exc: Exception) -> str:
 
 __all__ = [
     "build_workflow_error_diagnostic",
+    "enrich_workflow_error_diagnostic",
     "failure_envelope_for_diagnostic",
     "workflow_error_content",
 ]

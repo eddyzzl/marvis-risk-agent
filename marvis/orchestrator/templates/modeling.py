@@ -83,6 +83,7 @@ STANDARD_MODELING = WorkflowTemplate(
                 "features": "{slot:feature_cols}",
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
+                "seed": "{slot:seed}",
             },
             depends_on_titles=("准备建模样本",),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
@@ -201,6 +202,7 @@ MODELING = WorkflowTemplate(
         SlotSpec("sample_weight_candidates", False, "task_context", "Detected sample-weight candidate columns"),
         SlotSpec("sample_weight_diagnostics", False, "task_context", "Sample-weight quality diagnostics"),
         SlotSpec("tuning_params", False, "task_context", "Optional fixed tuning/training params chosen by the user or agent"),
+        SlotSpec("special_value_decisions", False, "user", "Per-column mask, retain, or drop decisions for detected special values"),
         SlotSpec("passthrough_cols", False, "task_context", "Non-feature columns to preserve in the modeling frame"),
         SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
@@ -237,7 +239,11 @@ MODELING = WorkflowTemplate(
                 "sample_weight_col": "{slot:sample_weight_col}",
                 "sample_weight_candidates": "{slot:sample_weight_candidates}",
                 "sample_weight_diagnostics": "{slot:sample_weight_diagnostics}",
-                "n_trials": 40,
+                # Product default is one trial per recipe: enough to exercise the
+                # complete tuning/checkpoint path in the normal workflow without
+                # turning a smoke run into a long search.  Users may still widen
+                # the budget explicitly at the later tuning control.
+                "n_trials": 1,
                 "params": "{slot:tuning_params}",
                 "seed": "{slot:seed}",
             },
@@ -246,7 +252,10 @@ MODELING = WorkflowTemplate(
                 PostCheck("nonempty", {"field": "recipe"}),
                 PostCheck("nonempty", {"field": "recipes"}),
             ),
-            phase="建模",
+            # This step defines the feature universe and target type consumed by
+            # the following screen, so it belongs to feature preparation in the
+            # execution rail rather than the later tuning/training phase.
+            phase="特征",
         ),
         StepTemplate(
             title="特征筛选",
@@ -255,8 +264,9 @@ MODELING = WorkflowTemplate(
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "features": "$ref:选择建模规格.output.feature_cols",
                 "target_col": "{slot:target_col}",
-                "split_col": "{slot:split_col}",
-                "holdout_values": "{slot:holdout_values}",
+                "split_col": "$ref:切分样本.output.split_col",
+                "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
+                "holdout_values": "$ref:切分样本.output.holdout_values",
                 "target_type": "$ref:选择建模规格.output.target_type",
                 "leakage_ks": 0.4,
                 "max_missing_rate": 0.95,
@@ -268,9 +278,34 @@ MODELING = WorkflowTemplate(
                 "top_k": 200,
             },
             depends_on_titles=("切分样本", "选择建模规格"),
-            post_checks=(PostCheck("nonempty", {"field": "selected"}),),
+            # Empty recommendations are a reviewable data-quality result. The
+            # next gate still renders every metric/reason so the user can repair
+            # the join or adjust thresholds instead of receiving a system error.
+            post_checks=(),
             # G1 门:确认切分(train/test/oot 计数、按月/渠道分布)后再筛特征
             #(执行器暂停在本步前,驱动展示"切分样本"产出的样本分析)
+            needs_confirmation=True,
+            phase="特征",
+        ),
+        StepTemplate(
+            title="治理特殊值",
+            tool_ref=ToolRef("modeling", "resolve_special_values"),
+            inputs_template={
+                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "features": "$ref:特征筛选.output.selected",
+                "sentinel_columns": "$ref:特征筛选.output.sentinel_columns",
+                "decisions": "{slot:special_value_decisions}",
+                "seed": "$ref:选择建模规格.output.seed",
+            },
+            depends_on_titles=("切分样本", "选择建模规格", "特征筛选"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "result_dataset_id"}),
+                PostCheck("nonempty", {"field": "selected"}),
+            ),
+            # Special-value policy is a real pre-execution HITL gate.  The
+            # preceding screen result is rendered here and the selected
+            # mask/retain/drop decisions are written atomically onto this step
+            # before it is allowed to run.
             needs_confirmation=True,
             phase="特征",
         ),
@@ -286,15 +321,17 @@ MODELING = WorkflowTemplate(
             title="精选特征",
             tool_ref=ToolRef("modeling", "select_features"),
             inputs_template={
-                "dataset_id": "$ref:切分样本.output.result_dataset_id",
-                "features": "$ref:特征筛选.output.selected",
+                "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
+                "features": "$ref:治理特殊值.output.selected",
                 "target_col": "{slot:target_col}",
-                "split_col": "{slot:split_col}",
+                "split_col": "$ref:切分样本.output.split_col",
                 # FS-2/D11: selection must fit TRAIN ONLY. Do NOT forward the screen's
                 # ['oot'] holdout slot here — let select_features apply its own
                 # ('test','oot') default so IV/corr/VIF/top_k never see test-split
-                # labels. The holdout_values slot drives only the 特征筛选 screen above.
+                # labels. The screen core also fits train-only; this holdout output is
+                # retained there solely for OOT distribution-stability diagnostics.
                 "target_type": "$ref:选择建模规格.output.target_type",
+                "seed": "$ref:选择建模规格.output.seed",
                 "space": "raw",
                 "iv_min": 0.02,
                 "corr_max": 0.95,
@@ -304,7 +341,7 @@ MODELING = WorkflowTemplate(
                 # (e.g. 10.0) via adjust/template override to opt in.
                 "vif_max": 1e9,
             },
-            depends_on_titles=("切分样本", "特征筛选", "选择建模规格"),
+            depends_on_titles=("切分样本", "特征筛选", "治理特殊值", "选择建模规格"),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
             # 门:确认精选后的特征漏斗(进/出特征数、IV 底线与相关去冗余各自淘汰数)后再配置调参
             #(执行器暂停在本步前,驱动展示"特征筛选"产出;确认后才进入调参配置)
@@ -334,23 +371,25 @@ MODELING = WorkflowTemplate(
             title="调参",
             tool_ref=ToolRef("modeling", "tune_hyperparameters"),
             inputs_template={
-                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "features": "$ref:精选特征.output.selected",
                 "target_col": "{slot:target_col}",
-                "split_col": "{slot:split_col}",
-                "split_values": "{slot:split_values}",
+                "split_col": "$ref:切分样本.output.split_col",
+                "split_values": "$ref:切分样本.output.split_values",
                 "recipe": "$ref:配置调参.output.recipe",
                 "recipes": "$ref:配置调参.output.recipes",
                 "sample_weight_col": "$ref:配置调参.output.sample_weight_col",
                 "seed": "$ref:配置调参.output.seed",
                 "params": "$ref:配置调参.output.params",
+                "sentinel_columns": "$ref:特征筛选.output.sentinel_columns",
+                "special_value_governance": "$ref:治理特殊值.output.governance",
                 # Bounded two-stage random search per recipe so the synchronous
                 # driver turn stays responsive; users can request a wider search
                 # later (G3). Every BINARY_MODELING_RECIPES family now tunes
                 # (TUNE-1/SEL-2) — each with its own budget from n_trials_by_recipe.
                 "n_trials_by_recipe": "$ref:配置调参.output.n_trials_by_recipe",
             },
-            depends_on_titles=("切分样本", "精选特征", "配置调参"),
+            depends_on_titles=("切分样本", "特征筛选", "治理特殊值", "精选特征", "配置调参"),
             # best_params must be present + a dict: single recipe -> flat params
             # dict (possibly empty for a non-tunable family); multiple recipes ->
             # a dict keyed by recipe id, each value itself the tuned params dict.
@@ -367,18 +406,20 @@ MODELING = WorkflowTemplate(
             title="训练模型",
             tool_ref=ToolRef("modeling", "train_models"),
             inputs_template={
-                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "recipes": "$ref:选择建模规格.output.recipes",
                 "features": "$ref:精选特征.output.selected",
                 "target_col": "{slot:target_col}",
-                "split_col": "{slot:split_col}",
-                "split_values": "{slot:split_values}",
+                "split_col": "$ref:切分样本.output.split_col",
+                "split_values": "$ref:切分样本.output.split_values",
                 "params": "$ref:调参.output.best_params",
                 "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
                 "seed": "$ref:选择建模规格.output.seed",
                 "target_type": "$ref:选择建模规格.output.target_type",
+                "sentinel_columns": "$ref:特征筛选.output.sentinel_columns",
+                "special_value_governance": "$ref:治理特殊值.output.governance",
             },
-            depends_on_titles=("切分样本", "选择建模规格", "精选特征", "调参"),
+            depends_on_titles=("切分样本", "特征筛选", "治理特殊值", "选择建模规格", "精选特征", "调参"),
             post_checks=(PostCheck("nonempty", {"field": "best_experiment_id"}),),
             phase="建模",
         ),
@@ -408,20 +449,22 @@ MODELING = WorkflowTemplate(
         ),
         StepTemplate(
             title="生成模型开发报告",
-            tool_ref=ToolRef("modeling", "generate_model_report"),
+            tool_ref=ToolRef("modeling", "generate_model_reports"),
             inputs_template={
-                "experiment_id": "$ref:选择实验.output.selected_experiment_id",
-                "dataset_id": "{slot:dataset_id}",
+                # Preserve every trained version as a first-class report; the
+                # selected experiment remains the sole delivery Champion.
+                "experiment_ids": "$ref:训练模型.output.experiment_ids",
+                "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "business_columns": "{slot:business_columns}",
                 "feature_dictionary_id": "{slot:feature_dictionary_id}",
                 "project_meta": "{slot:project_meta}",
             },
             # depends on 调参 too so the model gate shows the trials leaderboard (G4)
             # alongside the trained-model metrics before the report is finalized.
-            depends_on_titles=("切分样本", "调参", "训练模型", "选择实验"),
+            depends_on_titles=("治理特殊值", "调参", "训练模型", "选择实验"),
             post_checks=(
                 PostCheck("nonempty", {"field": "report_path"}),
-                PostCheck("nonempty", {"field": "section_status"}),
+                PostCheck("nonempty", {"field": "reports"}),
             ),
             # 门:确认训练指标/trials 后再定稿报告(执行器暂停在本步前,驱动展示 train+compare)
             needs_confirmation=True,
@@ -432,12 +475,12 @@ MODELING = WorkflowTemplate(
             tool_ref=ToolRef("modeling", "post_training_action"),
             inputs_template={
                 "experiment_id": "$ref:选择实验.output.selected_experiment_id",
-                "sample_dataset_id": "{slot:dataset_id}",
+                "sample_dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
                 "selection_policy_decision": "$ref:选择实验.output.policy_decision",
                 "champion_reference": "{slot:champion_reference}",
             },
-            depends_on_titles=("选择实验", "生成模型开发报告"),
+            depends_on_titles=("治理特殊值", "选择实验", "生成模型开发报告"),
             post_checks=(
                 PostCheck("nonempty", {"field": "artifact_id"}),
                 PostCheck("nonempty", {"field": "actions"}),
@@ -472,6 +515,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
         SlotSpec("sample_weight_candidates", False, "task_context", "Detected sample-weight candidate columns"),
         SlotSpec("sample_weight_diagnostics", False, "task_context", "Sample-weight quality diagnostics"),
         SlotSpec("tuning_params", False, "task_context", "Optional fixed tuning/training params chosen by the user or agent"),
+        SlotSpec("special_value_decisions", False, "user", "Per-column mask, retain, or drop decisions for detected special values"),
         SlotSpec("passthrough_cols", False, "task_context", "Non-feature columns to preserve in the modeling frame"),
         SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
@@ -487,6 +531,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             inputs_template={
                 "anchor_id": "{slot:anchor_id}",
                 "feature_ids": "{slot:feature_ids}",
+                "key_overrides": {},
             },
             depends_on_titles=(),
             post_checks=(PostCheck("nonempty", {"field": "join_plan_id"}),),
@@ -541,7 +586,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "sample_weight_col": "{slot:sample_weight_col}",
                 "sample_weight_candidates": "{slot:sample_weight_candidates}",
                 "sample_weight_diagnostics": "{slot:sample_weight_diagnostics}",
-                "n_trials": 40,
+                "n_trials": 1,
                 "params": "{slot:tuning_params}",
                 "seed": "{slot:seed}",
             },
@@ -550,7 +595,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 PostCheck("nonempty", {"field": "recipe"}),
                 PostCheck("nonempty", {"field": "recipes"}),
             ),
-            phase="建模",
+            phase="特征",
         ),
         StepTemplate(
             title="特征筛选",
@@ -560,6 +605,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "features": "$ref:选择建模规格.output.feature_cols",
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
+                "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
                 "holdout_values": "$ref:切分样本.output.holdout_values",
                 "target_type": "$ref:选择建模规格.output.target_type",
                 "leakage_ks": 0.4,
@@ -568,7 +614,25 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "top_k": 200,
             },
             depends_on_titles=("切分样本", "选择建模规格"),
-            post_checks=(PostCheck("nonempty", {"field": "selected"}),),
+            post_checks=(),
+            needs_confirmation=True,
+            phase="特征",
+        ),
+        StepTemplate(
+            title="治理特殊值",
+            tool_ref=ToolRef("modeling", "resolve_special_values"),
+            inputs_template={
+                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "features": "$ref:特征筛选.output.selected",
+                "sentinel_columns": "$ref:特征筛选.output.sentinel_columns",
+                "decisions": "{slot:special_value_decisions}",
+                "seed": "$ref:选择建模规格.output.seed",
+            },
+            depends_on_titles=("切分样本", "选择建模规格", "特征筛选"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "result_dataset_id"}),
+                PostCheck("nonempty", {"field": "selected"}),
+            ),
             needs_confirmation=True,
             phase="特征",
         ),
@@ -577,22 +641,24 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             title="精选特征",
             tool_ref=ToolRef("modeling", "select_features"),
             inputs_template={
-                "dataset_id": "$ref:切分样本.output.result_dataset_id",
-                "features": "$ref:特征筛选.output.selected",
+                "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
+                "features": "$ref:治理特殊值.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 # FS-2/D11: selection must fit TRAIN ONLY. Do NOT forward make_split's
                 # ['oot'] holdout into select — let select_features apply its own
                 # ('test','oot') default so IV/corr/VIF/top_k never see test-split
-                # labels. That holdout output still drives the 特征筛选 screen above.
+                # labels. The screen core also fits train-only; that holdout output is
+                # retained there solely for OOT distribution-stability diagnostics.
                 "target_type": "$ref:选择建模规格.output.target_type",
+                "seed": "$ref:选择建模规格.output.seed",
                 "space": "raw",
                 "iv_min": 0.02,
                 "corr_max": 0.95,
                 # VIF off by default — see MODELING template for rationale.
                 "vif_max": 1e9,
             },
-            depends_on_titles=("切分样本", "特征筛选", "选择建模规格"),
+            depends_on_titles=("切分样本", "特征筛选", "治理特殊值", "选择建模规格"),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
             needs_confirmation=True,
             phase="特征",
@@ -620,7 +686,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             title="调参",
             tool_ref=ToolRef("modeling", "tune_hyperparameters"),
             inputs_template={
-                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "features": "$ref:精选特征.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
@@ -630,9 +696,17 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "sample_weight_col": "$ref:配置调参.output.sample_weight_col",
                 "seed": "$ref:配置调参.output.seed",
                 "params": "$ref:配置调参.output.params",
+                "sentinel_columns": "$ref:特征筛选.output.sentinel_columns",
+                "special_value_governance": "$ref:治理特殊值.output.governance",
                 "n_trials_by_recipe": "$ref:配置调参.output.n_trials_by_recipe",
             },
-            depends_on_titles=("切分样本", "精选特征", "配置调参"),
+            depends_on_titles=(
+                "切分样本",
+                "特征筛选",
+                "治理特殊值",
+                "精选特征",
+                "配置调参",
+            ),
             post_checks=(PostCheck("schema", {
                 "type": "object",
                 "properties": {"best_params": {"type": "object"}},
@@ -645,7 +719,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             title="训练模型",
             tool_ref=ToolRef("modeling", "train_models"),
             inputs_template={
-                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "recipes": "$ref:选择建模规格.output.recipes",
                 "features": "$ref:精选特征.output.selected",
                 "target_col": "{slot:target_col}",
@@ -655,8 +729,17 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
                 "seed": "$ref:选择建模规格.output.seed",
                 "target_type": "$ref:选择建模规格.output.target_type",
+                "sentinel_columns": "$ref:特征筛选.output.sentinel_columns",
+                "special_value_governance": "$ref:治理特殊值.output.governance",
             },
-            depends_on_titles=("切分样本", "选择建模规格", "精选特征", "调参"),
+            depends_on_titles=(
+                "切分样本",
+                "特征筛选",
+                "治理特殊值",
+                "选择建模规格",
+                "精选特征",
+                "调参",
+            ),
             post_checks=(PostCheck("nonempty", {"field": "best_experiment_id"}),),
             phase="建模",
         ),
@@ -686,18 +769,18 @@ MODELING_WITH_JOIN = WorkflowTemplate(
         ),
         StepTemplate(
             title="生成模型开发报告",
-            tool_ref=ToolRef("modeling", "generate_model_report"),
+            tool_ref=ToolRef("modeling", "generate_model_reports"),
             inputs_template={
-                "experiment_id": "$ref:选择实验.output.selected_experiment_id",
-                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "experiment_ids": "$ref:训练模型.output.experiment_ids",
+                "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "business_columns": "{slot:business_columns}",
                 "feature_dictionary_id": "{slot:feature_dictionary_id}",
                 "project_meta": "{slot:project_meta}",
             },
-            depends_on_titles=("切分样本", "调参", "训练模型", "选择实验"),
+            depends_on_titles=("治理特殊值", "调参", "训练模型", "选择实验"),
             post_checks=(
                 PostCheck("nonempty", {"field": "report_path"}),
-                PostCheck("nonempty", {"field": "section_status"}),
+                PostCheck("nonempty", {"field": "reports"}),
             ),
             needs_confirmation=True,
             phase="报告",
@@ -707,12 +790,12 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             tool_ref=ToolRef("modeling", "post_training_action"),
             inputs_template={
                 "experiment_id": "$ref:选择实验.output.selected_experiment_id",
-                "sample_dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "sample_dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
                 "selection_policy_decision": "$ref:选择实验.output.policy_decision",
                 "champion_reference": "{slot:champion_reference}",
             },
-            depends_on_titles=("切分样本", "选择实验", "生成模型开发报告"),
+            depends_on_titles=("治理特殊值", "选择实验", "生成模型开发报告"),
             post_checks=(
                 PostCheck("nonempty", {"field": "artifact_id"}),
                 PostCheck("nonempty", {"field": "actions"}),

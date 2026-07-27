@@ -11,6 +11,11 @@ from marvis.agent.service import (
     is_stop_validation_intent,
     summarize_stage,
 )
+from marvis.agent.plan_message_composer import PlanMessageComposer
+from marvis.agent.workflow_error_diagnostics import (
+    enrich_workflow_error_diagnostic,
+    failure_envelope_for_diagnostic,
+)
 from marvis.agent.strategy_setup import strategy_development_clarification
 from marvis.agent.turn_handlers import DRIVER_AGENT_TASK_TYPES
 from marvis.agent.validation_app_service import (
@@ -139,6 +144,8 @@ def get_agent_messages(
     cursor_found = bool(after_id and repo.has_agent_message(task_id, after_id))
     query_limit = bounded_limit + 1 if bounded_limit is not None else None
     messages = repo.list_agent_messages(task_id, after_id=after_id, limit=query_limit)
+    _enrich_historical_result_download(request, task_id, messages)
+    _enrich_historical_workflow_errors(messages)
     has_more = False
     if bounded_limit is not None and len(messages) > bounded_limit:
         has_more = True
@@ -148,6 +155,78 @@ def get_agent_messages(
         "incremental": cursor_found,
         "has_more": has_more,
         "limit": bounded_limit,
+    }
+
+
+def _enrich_historical_workflow_errors(messages: list[dict]) -> None:
+    """Upgrade old generic failure cards without rewriting their audit records."""
+
+    for message in messages:
+        metadata = message.get("metadata") or {}
+        diagnostic = metadata.get("error_diagnostic")
+        if not isinstance(diagnostic, dict):
+            continue
+        enriched = enrich_workflow_error_diagnostic(diagnostic)
+        if enriched == diagnostic:
+            continue
+        generated_envelope = failure_envelope_for_diagnostic(enriched)
+        existing_envelope = metadata.get("failure_envelope")
+        if isinstance(existing_envelope, dict):
+            generated_envelope.update(existing_envelope)
+            generated_envelope.update(
+                {
+                    "error_kind": enriched.get("error_kind", generated_envelope["error_kind"]),
+                    "message": enriched.get("summary", generated_envelope["message"]),
+                    "retryable": bool(enriched.get("retryable", True)),
+                    "suggested_actions": list(enriched.get("actions") or []),
+                }
+            )
+        message["metadata"] = {
+            **metadata,
+            "error_diagnostic": enriched,
+            "failure_envelope": generated_envelope,
+        }
+
+
+def _enrich_historical_result_download(
+    request: Request,
+    task_id: str,
+    messages: list[dict],
+) -> None:
+    """Attach a transient download contract to old successful driver messages.
+
+    Older tasks persisted the result dataset only inside plan-step output.  The
+    audit message remains untouched; the API response is enriched on read so a
+    reload receives the same download action as a newly completed task.
+    """
+    completion = next(
+        (
+            message
+            for message in reversed(messages)
+            if message.get("role") == "assistant"
+            and "计划已全部完成" in str(message.get("content") or "")
+            and not (message.get("metadata") or {}).get("result_dataset")
+        ),
+        None,
+    )
+    if completion is None:
+        return
+    plans = request.app.state.plan_repo.list_plans_for_task(task_id)
+    if not plans:
+        return
+    composer = PlanMessageComposer(load_output=request.app.state.plan_repo.load_step_output)
+    dataset_id = composer.latest_result_dataset_id(plans[-1])
+    if not dataset_id:
+        return
+    completion["metadata"] = {
+        **(completion.get("metadata") or {}),
+        "result_dataset": {
+            "dataset_id": dataset_id,
+            "download_url": (
+                f"/api/tasks/{task_id}/datasets/{dataset_id}/download"
+            ),
+            "recovered_from_plan": True,
+        },
     }
 
 
@@ -224,6 +303,7 @@ def post_agent_message(
                 ("dedup_strategies", payload.dedup_strategies),
                 ("adjust_params", payload.adjust_params),
                 ("expected_step_id", payload.expected_step_id),
+                ("ui_action", payload.ui_action),
             )
             if value is not None
         ]
@@ -235,6 +315,19 @@ def post_agent_message(
             )
         if is_stop_validation_intent(content):
             raise unprocessable("停止指令不能与 strategy_request 同时提交。")
+    allowed_ui_actions = {
+        "confirm_roles",
+        "confirm_dedup",
+        "apply_join_keys",
+        "confirm_features",
+        "confirm_feature_binning",
+        "apply_modeling_setup",
+        "confirm_adoption",
+        "confirm_gate",
+        "start_plan",
+    }
+    if payload.ui_action is not None and payload.ui_action not in allowed_ui_actions:
+        raise unprocessable("invalid ui_action")
     strategy_input = _domain_strategy_input(payload.strategy_input)
     if strategy_input is not None and is_stop_validation_intent(content):
         raise unprocessable("停止指令不能与 strategy_input 同时提交。")
@@ -274,6 +367,7 @@ def post_agent_message(
             dedup_strategies=payload.dedup_strategies,
             adjust_params=payload.adjust_params,
             expected_step_id=payload.expected_step_id,
+            ui_action=payload.ui_action,
             strategy_input=strategy_input,
             strategy_request=(
                 None

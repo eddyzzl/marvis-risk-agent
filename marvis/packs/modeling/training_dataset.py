@@ -24,6 +24,44 @@ class TrainingDataset:
         resolved = Path(path)
         return cls(path=resolved, frame=backend.read_frame(resolved))
 
+    @classmethod
+    def load_compact(
+        cls,
+        backend,
+        path: Path,
+        *,
+        features: Sequence[str],
+        target_col: str,
+        split_col: str,
+        extra_columns: Sequence[str] = (),
+        batch_size: int = 16,
+    ) -> "TrainingDataset":
+        """Load only model inputs, with wide numeric features stored as float32."""
+
+        resolved = Path(path)
+        feature_columns = list(dict.fromkeys(str(column) for column in features))
+        other_columns = list(dict.fromkeys([
+            str(target_col),
+            str(split_col),
+            *(str(column) for column in extra_columns if str(column)),
+        ]))
+        compact_reader = getattr(backend, "read_compact_numeric_frame", None)
+        if callable(compact_reader):
+            frame = compact_reader(
+                resolved,
+                numeric_columns=feature_columns,
+                other_columns=other_columns,
+                batch_size=batch_size,
+            )
+        else:
+            # Compatibility for test/custom backends. Production DataBackend takes
+            # the bounded float32 path above.
+            frame = backend.read_frame(
+                resolved,
+                columns=list(dict.fromkeys([*feature_columns, *other_columns])),
+            )
+        return cls(path=resolved, frame=frame)
+
     def backend_adapter(self, fallback_backend):
         return _TrainingDatasetBackend(self, fallback_backend)
 

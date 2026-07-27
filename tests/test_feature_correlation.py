@@ -33,6 +33,26 @@ def test_correlation_matrix_and_collinear_pairs():
     assert ("x1", "x3", -1.0) in pairs
 
 
+def test_correlation_matrix_uses_vectorized_dataframe_path(monkeypatch):
+    """Wide correlation must not invoke the Python pair-by-pair implementation."""
+
+    def fail_pairwise(*_args, **_kwargs):
+        raise AssertionError("correlation_matrix must not loop through safe_correlation")
+
+    monkeypatch.setattr("marvis.feature.correlation.safe_correlation", fail_pairwise)
+    frame = pd.DataFrame({
+        "x1": [1.0, 2.0, np.nan, 4.0],
+        "x2": [2.0, 4.0, 6.0, 8.0],
+        "constant": [1.0, 1.0, 1.0, 1.0],
+    })
+
+    matrix = correlation_matrix(frame, ["x1", "x2", "constant"])
+
+    assert matrix[0, 1] == pytest.approx(1.0)
+    assert matrix[0, 2] == 0.0
+    assert np.diag(matrix).tolist() == [1.0, 1.0, 1.0]
+
+
 def test_vif_and_correlation_report_shape():
     # >= max(30, 2*features) complete rows so the FS-8 insufficient-sample guard passes.
     n = 40

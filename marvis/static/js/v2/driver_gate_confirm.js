@@ -24,6 +24,9 @@ function gateHasStructuredWidget(message) {
     || meta.screen
     || meta.modeling_setup
     || meta.dedup
+    || meta.join_keys
+    || meta.feature_binning
+    || meta.special_values
     || meta.editable_input_schema?.properties?.adoption_reason
   );
 }
@@ -40,6 +43,7 @@ const GATE_CONFIRM_LABELS = {
   select_features: "确认所选特征",
   train_model: "确认并开始训练",
   tune_hyperparameters: "确认并开始调参",
+  resolve_special_values: "确认治理策略并继续",
   adopt_strategy: "填写理由并采纳",
 };
 
@@ -55,7 +59,7 @@ export function renderDriverGateButton(message, options = {}) {
     ? ` data-expected-step-id="${escapeHtml(expectedStepId)}"`
     : "";
   const label = gateConfirmLabel(options.gateStepTool || "");
-  return '<div class="driver-gate-actions">'
+  return '<div class="driver-gate-actions gate-action-bar">'
     + `<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1"${expectedAttr}>${escapeHtml(label)}</button>`
     + "</div>";
 }
@@ -72,6 +76,7 @@ function driverConfirmContext(context = {}) {
     pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
     resetFetchThrottle: context.resetFetchThrottle || (() => {}),
     renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
+    setDriverExecutionBusy: context.setDriverExecutionBusy || (() => {}),
   };
 }
 
@@ -85,12 +90,14 @@ export async function submitDriverConfirm(button, context = {}) {
   const {
     taskId, api, setActionStatus, setAgentMessages, renderAgentConversation,
     pollAgentMessagesUntilSettled, resetFetchThrottle, renderWorkflowStepper,
+    setDriverExecutionBusy,
   } = driverConfirmContext(context);
   if (!taskId || typeof api !== "function") return;
   const expectedStepId = button?.getAttribute?.("data-expected-step-id") || "";
-  const body = { content: "确认" };
+  const body = { content: "确认", ui_action: expectedStepId ? "confirm_gate" : "start_plan" };
   if (expectedStepId) body.expected_step_id = expectedStepId;
   button.disabled = true;
+  setDriverExecutionBusy(true, taskId);
   setActionStatus("正在执行下一步…", "busy");
   let planRailTimer = null;
   if (typeof setInterval === "function") {
@@ -114,6 +121,7 @@ export async function submitDriverConfirm(button, context = {}) {
     setActionStatus(error?.message || "确认失败", "error");
   } finally {
     if (planRailTimer !== null) clearInterval(planRailTimer);
+    setDriverExecutionBusy(false, taskId);
     resetFetchThrottle(taskId);
     renderWorkflowStepper({ force: true });
   }

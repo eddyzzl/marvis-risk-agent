@@ -32,7 +32,13 @@ SUPPORTED_MODELING_RECIPES = frozenset({
     "scorecard",
     "mlp",
     "lgb_regressor",
+    "xgb_regressor",
+    "lr_regressor",
+    "mlp_regressor",
     "lgb_multiclass",
+    "xgb_multiclass",
+    "lr_multiclass",
+    "mlp_multiclass",
     # SEL-6: seed-bagging ensemble -- deliberately NOT in BINARY_MODELING_RECIPES
     # (never joins the default multi-algorithm arena / tuning budget), an
     # explicit opt-in participant only.
@@ -43,10 +49,20 @@ SUPPORTED_MODELING_RECIPES = frozenset({
 BINARY_MODELING_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp"})
 
 
-CONTINUOUS_MODELING_RECIPES = frozenset({"lgb_regressor"})
+CONTINUOUS_MODELING_RECIPES = frozenset({
+    "lgb_regressor",
+    "xgb_regressor",
+    "lr_regressor",
+    "mlp_regressor",
+})
 
 
-MULTICLASS_MODELING_RECIPES = frozenset({"lgb_multiclass"})
+MULTICLASS_MODELING_RECIPES = frozenset({
+    "lgb_multiclass",
+    "xgb_multiclass",
+    "lr_multiclass",
+    "mlp_multiclass",
+})
 
 
 def _positive_int_or_none(value) -> int | None:
@@ -169,6 +185,12 @@ def _training_control_params(inputs: dict, params: dict | None = None) -> dict:
         if value not in (None, ""):
             controls["sample_weight_col"] = str(value).strip()
             break
+    raw_group_cols = inputs.get("valid_group_cols", params.get("valid_group_cols"))
+    if raw_group_cols not in (None, ""):
+        group_values = raw_group_cols if isinstance(raw_group_cols, list) else [raw_group_cols]
+        valid_group_cols = _unique_strings(group_values)
+        if valid_group_cols:
+            controls["valid_group_cols"] = valid_group_cols
     constraints = inputs.get(
         "monotone_constraints",
         inputs.get(

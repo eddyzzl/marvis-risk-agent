@@ -412,6 +412,13 @@ def test_task_owned_dataset_preview_masks_rows_and_enforces_ownership(tmp_path):
     cross_task = client.get(
         f"/api/tasks/{other_task.id}/datasets/{dataset['id']}/preview?rows=1"
     )
+    download = client.get(
+        f"/api/tasks/{task.id}/datasets/{dataset['id']}/download"
+    )
+    cross_task_download = client.get(
+        f"/api/tasks/{other_task.id}/datasets/{dataset['id']}/download"
+    )
+    unscoped_download = client.get(f"/api/datasets/{dataset['id']}/download")
 
     assert preview.status_code == 200
     assert preview.json() == legacy.json()
@@ -421,6 +428,11 @@ def test_task_owned_dataset_preview_masks_rows_and_enforces_ownership(tmp_path):
     assert too_many.status_code == 422
     assert cross_task.status_code == 404
     assert cross_task.json()["detail"] == "dataset not found"
+    assert download.status_code == 200
+    assert download.content
+    assert cross_task_download.status_code == 404
+    assert cross_task_download.json()["detail"] == "dataset not found"
+    assert unscoped_download.status_code == 404
 
 
 def test_workspace_and_preview_fail_closed_after_registered_file_drift(tmp_path):
@@ -451,8 +463,11 @@ def test_workspace_and_preview_fail_closed_after_registered_file_drift(tmp_path)
         f"/api/tasks/{task.id}/datasets/{dataset['id']}/preview?rows=1"
     )
     legacy_preview = client.get(f"/api/datasets/{dataset['id']}/preview?rows=1")
+    task_download = client.get(
+        f"/api/tasks/{task.id}/datasets/{dataset['id']}/download"
+    )
 
-    for response in (workspace, update, task_preview, legacy_preview):
+    for response in (workspace, update, task_preview, legacy_preview, task_download):
         assert response.status_code == 409
         assert "failed integrity verification" in response.json()["detail"]
 

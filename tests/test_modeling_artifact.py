@@ -6,7 +6,9 @@ import xgboost as xgb
 from pypmml import Model
 from sklearn.linear_model import LogisticRegression
 
+from marvis.data.backend import DataBackend
 from marvis.feature.contracts import WOEResult
+from marvis.packs.modeling import artifact as artifact_module
 from marvis.packs.modeling.artifact import export_pmml, load_model, save_model, write_artifact_file
 from marvis.packs.modeling.errors import ModelingError
 
@@ -60,6 +62,29 @@ def test_save_and_load_lgb_and_xgb_models(tmp_path):
 
     assert isinstance(load_model(lgb_artifact, base_dir=tmp_path), lgb.Booster)
     assert isinstance(load_model(xgb_artifact, base_dir=tmp_path), xgb.Booster)
+
+
+def test_pmml_parquet_schema_sample_is_bounded(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / "wide_sample.parquet"
+    pd.DataFrame({
+        "x1": range(250),
+        "x2": range(250, 500),
+        "unused": ["payload"] * 250,
+    }).to_parquet(path, index=False)
+    original_read_frame = DataBackend.read_frame
+    calls = []
+
+    def tracking_read_frame(self, selected_path, *, columns=None, nrows=None):
+        calls.append((tuple(columns or ()), nrows))
+        return original_read_frame(self, selected_path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(DataBackend, "read_frame", tracking_read_frame)
+
+    sample = artifact_module._read_schema_sample(path, ["x1", "x2"])
+
+    assert calls == [(("x1", "x2"), 100)]
+    assert list(sample.columns) == ["x1", "x2"]
+    assert len(sample) == 100
 
 
 @pytest.mark.pmml_runtime

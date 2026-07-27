@@ -42,6 +42,23 @@ def test_normalize_effort_falls_back_to_high():
     assert normalize_effort("") == "high"
 
 
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("请停止当前模型调参", True),
+        ("cancel", True),
+        ("不要停止", False),
+        ("先别取消当前动作", False),
+        ("为什么停止了？", False),
+        ("继续执行", False),
+    ],
+)
+def test_stop_intent_requires_an_explicit_non_negated_command(content, expected):
+    from marvis.agent.service import is_stop_validation_intent
+
+    assert is_stop_validation_intent(content) is expected
+
+
 def test_validation_agent_job_loop_lives_outside_api_module():
     from marvis import api
     from marvis.agent import validation_runner
@@ -3433,6 +3450,82 @@ def test_agent_stop_endpoint_requests_active_agent_cancellation_without_user_mes
     assert messages[0]["content"] == "已停止当前动作，请问有什么指示？"
     assert messages[0]["metadata"]["intent"] == "stop"
     assert messages[0]["metadata"]["cancel_requested"] is True
+
+
+def test_agent_stop_cancels_active_driver_job_token(tmp_path, monkeypatch):
+    from marvis.job_cancellation import (
+        register_job_cancellation,
+        unregister_job_cancellation,
+    )
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.request_notebook_cancellation",
+        lambda _task_id: True,
+    )
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    job_id = repo.start_job(task_id, "driver")
+    repo.mark_job_running(job_id)
+    token = register_job_cancellation(job_id)
+    try:
+        response = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json={"content": "请停止当前模型调参"},
+        )
+
+        assert response.status_code == 202, response.text
+        assert response.json()["status"] == "cancel_requested"
+        assert token.is_cancelled() is True
+        assert repo.get_job(job_id)["status"] == "running"
+    finally:
+        unregister_job_cancellation(job_id, token)
+        repo.finish_job(job_id, status="cancelled")
+
+
+def test_driver_turn_registers_cancellation_token_and_finishes_job_cancelled(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent import validation_app_service as service
+    from marvis.job_cancellation import JobCancelled, request_job_cancellation
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    observed = {}
+
+    def cancel_inside_turn(runtime, _repo, task, **_kwargs):
+        job = repo.get_latest_job(task.id)
+        observed["job_id"] = job["id"]
+        observed["job_kind"] = job["kind"]
+        observed["cancel_bound"] = request_job_cancellation(job["id"])
+        with pytest.raises(JobCancelled):
+            runtime.cancellation_check()
+        return {"task_id": task.id, "status": "message_saved", "messages": []}
+
+    monkeypatch.setattr(service, "dispatch_plan_driver_turn", cancel_inside_turn)
+    monkeypatch.setattr(service, "driver_llm_client", lambda *_args, **_kwargs: None)
+    request = SimpleNamespace(
+        app=client.app,
+        state=SimpleNamespace(local_principal=None),
+    )
+
+    result = service.dispatch_driver_turn(
+        request,
+        repo,
+        repo.get_task(task_id),
+        user_text="确认",
+        agent_client=None,
+    )
+
+    assert result["status"] == "message_saved"
+    assert observed == {
+        "job_id": observed["job_id"],
+        "job_kind": "driver",
+        "cancel_bound": True,
+    }
+    assert repo.get_job(observed["job_id"])["status"] == "cancelled"
 
 
 def test_agent_stop_marks_scanned_task_stopped_without_failure(tmp_path, monkeypatch):

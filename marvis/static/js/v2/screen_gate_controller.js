@@ -66,6 +66,12 @@ function defaultState() {
     page: 1,
     checkedOverrides: new Map(),
     leakageReason: "",
+    ranges: {
+      ks_min: 0,
+      iv_min: 0,
+      missing_max: 1,
+      psi_max: 10,
+    },
   };
 }
 
@@ -104,7 +110,7 @@ function buildRows(screen, interactive) {
   const tuple = (item) => (Array.isArray(item) ? item : [item]);
   const rows = [];
   const seen = new Set();
-  const pushRow = (feature, ks, category) => {
+  const pushRow = (feature, ks, category, reason = "") => {
     const name = String(feature);
     if (seen.has(name)) return;
     seen.add(name);
@@ -119,17 +125,22 @@ function buildRows(screen, interactive) {
       coverage: stats.coverage === undefined ? null : stats.coverage,
       ksDecay: stats.ks_decay === undefined ? null : stats.ks_decay,
       psiSplit: stats.psi_split === undefined ? null : stats.psi_split,
+      recommended: selectedSet.has(name),
       checked: selectedSet.has(name),
       disabled: category === "unusable" || !interactive, // constant/sparse: no signal to select; also disabled when read-only
       isWatch: watchSet.has(name),
       isCategorical: categoricalSet.has(name),
       businessName: dictionary[name] || "",
+      reason: String(reason || ""),
     });
   };
   for (const feature of screen.selected || []) pushRow(feature, undefined, "keep");
-  for (const item of screen.leakage || []) pushRow(tuple(item)[0], tuple(item)[1], "leakage");
-  for (const item of screen.suspected || []) pushRow(tuple(item)[0], tuple(item)[1], "suspected");
-  for (const item of screen.unusable || []) pushRow(tuple(item)[0], null, "unusable");
+  // Keep every ranked candidate visible. `selected` is the Agent's recommended
+  // subset, not the complete set the user is allowed to review.
+  for (const item of screen.ranked || []) pushRow(tuple(item)[0], tuple(item)[1], "keep");
+  for (const item of screen.leakage || []) pushRow(tuple(item)[0], tuple(item)[1], "leakage", tuple(item)[2]);
+  for (const item of screen.suspected || []) pushRow(tuple(item)[0], tuple(item)[1], "suspected", tuple(item)[2]);
+  for (const item of screen.unusable || []) pushRow(tuple(item)[0], null, "unusable", tuple(item)[1]);
   return rows;
 }
 
@@ -170,9 +181,15 @@ function applyCheckedOverrides(rows, overrides) {
 
 function filterRows(rows, state) {
   const query = state.query.trim().toLowerCase();
+  const ranges = state.ranges || {};
   return rows.filter((row) => {
     if (query && !row.name.toLowerCase().includes(query)) return false;
-    return matchesChip(row, state.chip);
+    if (!matchesChip(row, state.chip)) return false;
+    if (row.ks !== null && Number(row.ks) < Number(ranges.ks_min ?? 0)) return false;
+    if (row.iv !== null && Number(row.iv) < Number(ranges.iv_min ?? 0)) return false;
+    if (row.missingRate !== null && Number(row.missingRate) > Number(ranges.missing_max ?? 1)) return false;
+    if (row.psiSplit !== null && Number(row.psiSplit) > Number(ranges.psi_max ?? 10)) return false;
+    return true;
   });
 }
 
@@ -261,8 +278,36 @@ function renderRow(row, fractions, index, hasDictionary) {
       <td class="screen-num">${escapeHtml(screenPct(row.coverage))}</td>
       <td class="screen-num">${escapeHtml(screenNum(row.ksDecay))}</td>
       <td class="screen-num">${escapeHtml(screenNum(row.psiSplit))}</td>
+      <td class="screen-recommendation">${recommendationBadge(row)}</td>
       <td>${badges[row.category] || ""}${row.isWatch ? '<span class="screen-badge watch">watch</span>' : ""}</td>
+      <td class="screen-exclusion-reason" title="${escapeHtml(row.reason)}">${row.reason ? escapeHtml(row.reason) : "—"}</td>
     </tr>`;
+}
+
+function recommendationBadge(row) {
+  if (row.recommended) return '<span class="screen-agent-badge recommended">Agent 推荐</span>';
+  if (row.category === "unusable") return '<span class="screen-agent-badge blocked">不可选</span>';
+  if (row.category === "leakage") return '<span class="screen-agent-badge blocked">不推荐</span>';
+  if (row.category === "suspected") return '<span class="screen-agent-badge review">谨慎</span>';
+  return '<span class="screen-agent-badge optional">可选</span>';
+}
+
+function metricRangeHtml(state, disabledAttr) {
+  const ranges = state.ranges || {};
+  const controls = [
+    ["ks_min", "最低 KS", 0, 1, 0.01, Number(ranges.ks_min ?? 0)],
+    ["iv_min", "最低 IV", 0, 2, 0.01, Number(ranges.iv_min ?? 0)],
+    ["missing_max", "最高缺失率", 0, 1, 0.01, Number(ranges.missing_max ?? 1)],
+    ["psi_max", "最高 PSI", 0, 10, 0.01, Number(ranges.psi_max ?? 10)],
+  ];
+  const inputs = controls.map(([key, label, min, max, step, value]) => `<label class="screen-range-control">
+      <span>${escapeHtml(label)} <output>${escapeHtml(value.toFixed(2))}</output></span>
+      <input type="range" min="${min}" max="${max}" step="${step}" value="${escapeHtml(String(value))}" data-screen-range="${escapeHtml(key)}"${disabledAttr}>
+    </label>`).join("");
+  return `<aside class="screen-metric-filters" aria-label="指标范围筛选">
+    <div class="screen-filter-heading"><strong>指标范围筛选</strong><small>仅改变当前表格范围；可再勾选或“全选可见”</small></div>
+    ${inputs}
+  </aside>`;
 }
 
 function paginationHtml(page, totalPages) {
@@ -359,6 +404,7 @@ export function renderScreenGateTable(message, options = {}) {
     <span class="screen-summary-item screen-selected-count">已选 ${selectedCount}/${built.allRows.length}</span>
   </div>`;
   const bulkHtml = `<div class="screen-bulk-actions" data-screen-bulk-group="${escapeHtml(messageId)}">
+    <button type="button" class="button compact primary screen-agent-recommend" data-screen-agent-recommend="${escapeHtml(messageId)}"${interactive ? "" : " disabled"}>应用 Agent 推荐</button>
     <button type="button" class="button compact secondary screen-bulk-select-visible" data-screen-bulk="select_visible"${interactive ? "" : " disabled"}>全选可见</button>
     <button type="button" class="button compact secondary screen-bulk-clear-visible" data-screen-bulk="clear_visible"${interactive ? "" : " disabled"}>清空可见</button>
     <button type="button" class="button compact secondary screen-bulk-invert-visible" data-screen-bulk="invert_visible"${interactive ? "" : " disabled"}>反选可见</button>
@@ -368,20 +414,29 @@ export function renderScreenGateTable(message, options = {}) {
       <textarea class="screen-leakage-reason-input" rows="2" placeholder="说明为何仍需强选该列（例如：已核实非未来信息、口径已确认）">${escapeHtml(state.leakageReason)}</textarea>
     </label>
   </div>` : "";
+  const recommendationNotice = built.allRows.some((row) => row.recommended)
+    ? '<div class="screen-recommendation-note">已按 Agent 推荐结果预勾选；你可以逐项增删，或用左侧指标范围缩小候选。</div>'
+    : '<div class="screen-recommendation-note is-empty"><strong>Agent 未推荐任何特征。</strong> 当前候选均触发不可用或风险规则，请先检查拼接结果、数据缺失或调整计算阈值后重算。</div>';
   return `<div class="screen-table-wrap" data-screen-form="${escapeHtml(messageId)}" data-screen-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-screen-readonly="true"'}>
     ${thresholdControls}
-    ${toolbarHtml}
-    ${summaryHtml}
-    ${bulkHtml}
-    <div class="screen-table-scroll">
-      <table class="screen-table">
-        <thead><tr><th>选</th>${sortableHeader("特征", "name", state)}${hasDictionary ? "<th>业务含义</th>" : ""}${sortableHeader("KS", "ks", state)}${sortableHeader("IV", "iv", state)}${sortableHeader("缺失率", "missing_rate", state)}${sortableHeader("覆盖率", "coverage", state)}${sortableHeader("KS衰减", "ks_decay", state)}${sortableHeader("PSI", "psi_split", state)}<th>类别</th></tr></thead>
-        <tbody>${rowsHtml || `<tr class="screen-empty-row"><td colspan="${hasDictionary ? 10 : 9}">没有匹配的特征</td></tr>`}</tbody>
-      </table>
+    ${recommendationNotice}
+    <div class="screen-selection-layout">
+      ${metricRangeHtml(state, disabledAttr)}
+      <div class="screen-selection-main">
+        ${toolbarHtml}
+        ${summaryHtml}
+        ${bulkHtml}
+        <div class="screen-table-scroll">
+          <table class="screen-table">
+            <thead><tr><th>选</th>${sortableHeader("特征", "name", state)}${hasDictionary ? "<th>业务含义</th>" : ""}${sortableHeader("KS", "ks", state)}${sortableHeader("IV", "iv", state)}${sortableHeader("缺失率", "missing_rate", state)}${sortableHeader("覆盖率", "coverage", state)}${sortableHeader("KS衰减", "ks_decay", state)}${sortableHeader("PSI", "psi_split", state)}<th>Agent 建议</th><th>类别</th><th>排除/风险原因</th></tr></thead>
+            <tbody>${rowsHtml || `<tr class="screen-empty-row"><td colspan="${hasDictionary ? 12 : 11}">当前指标范围内没有匹配特征</td></tr>`}</tbody>
+          </table>
+        </div>
+        ${paginationHtml(page, totalPages)}
+      </div>
     </div>
-    ${paginationHtml(page, totalPages)}
     ${leakageReasonHtml}
-    <div class="screen-table-foot">
+    <div class="screen-table-foot gate-action-bar">
       <span class="screen-note">${escapeHtml(note)}</span>
       <button type="button" class="button compact primary screen-confirm"${interactive ? ` data-screen-confirm="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "确认所选特征" : "历史结果"}</button>
     </div>
@@ -445,6 +500,46 @@ export function handleScreenSearchInput(event, context = {}) {
   const state = getState(messageId);
   captureCheckedState(wrap, state);
   state.query = input.value || "";
+  state.page = 1;
+  rerenderWrap(wrap, message, { interactive: wrap.dataset.screenReadonly !== "true" }, context);
+  return true;
+}
+
+export function handleScreenMetricFilterInput(event, context = {}) {
+  const input = event.target?.closest?.("[data-screen-range]");
+  if (!input) return false;
+  const wrap = input.closest(".screen-table-wrap");
+  if (!wrap) return false;
+  const messageId = wrap.dataset.screenForm || "";
+  const message = findMessage(messageId, context);
+  if (!message) return false;
+  const state = getState(messageId);
+  captureCheckedState(wrap, state);
+  const key = input.getAttribute("data-screen-range");
+  const value = Number(input.value);
+  if (!key || !Number.isFinite(value)) return false;
+  state.ranges[key] = value;
+  state.page = 1;
+  rerenderWrap(wrap, message, { interactive: wrap.dataset.screenReadonly !== "true" }, context);
+  return true;
+}
+
+export function handleScreenAgentRecommendClick(event, context = {}) {
+  const button = event.target?.closest?.("[data-screen-agent-recommend]");
+  if (!button) return false;
+  event.preventDefault();
+  const wrap = button.closest(".screen-table-wrap");
+  if (!wrap) return false;
+  const messageId = wrap.dataset.screenForm || "";
+  const message = findMessage(messageId, context);
+  if (!message) return false;
+  const state = getState(messageId);
+  captureCheckedState(wrap, state);
+  state.checkedOverrides.clear();
+  for (const row of buildRows(message.metadata.screen, true)) {
+    state.checkedOverrides.set(row.name, row.recommended && !row.disabled);
+  }
+  state.chip = "all";
   state.page = 1;
   rerenderWrap(wrap, message, { interactive: wrap.dataset.screenReadonly !== "true" }, context);
   return true;
@@ -719,6 +814,7 @@ export async function submitScreenSelection(button, rawContext = {}) {
         method: "POST",
         body: JSON.stringify({
           content,
+          ui_action: "confirm_features",
           selection,
           expected_step_id: expectedStepId,
           acceptance_mode: acceptanceMode,

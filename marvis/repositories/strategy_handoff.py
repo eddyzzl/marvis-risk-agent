@@ -102,9 +102,7 @@ class StrategyHandoffRepository:
                 "a caller-owned BEGIN IMMEDIATE transaction"
             )
         source_id = _required_identifier(source_task_id, field="source_task_id")
-        parent_id = _required_identifier(
-            parent_strategy_id, field="parent_strategy_id"
-        )
+        parent_id = _required_identifier(parent_strategy_id, field="parent_strategy_id")
         run_id = _required_identifier(monitoring_run_id, field="monitoring_run_id")
         task_id = _optional_identifier(new_task_id) or uuid.uuid4().hex
         strategy_id = _optional_identifier(new_strategy_id) or uuid.uuid4().hex
@@ -200,7 +198,9 @@ class StrategyHandoffRepository:
         if plan is None or str(plan["strategy_id"]) != parent_id:
             raise ConflictError("monitoring plan does not belong to parent strategy")
         if int(plan["strategy_version"]) != parent_version:
-            raise ConflictError("monitoring plan does not bind the parent strategy version")
+            raise ConflictError(
+                "monitoring plan does not bind the parent strategy version"
+            )
         _validate_plan_payload_integrity(plan)
         latest_plan = conn.execute(
             """
@@ -285,7 +285,9 @@ class StrategyHandoffRepository:
             sample_weight_col=source_task.sample_weight_col,
             oot_ks_min=source_task.oot_ks_min,
             strategy_input=strategy_input,
-            metrics=list(source_task.metrics),
+            metrics=(
+                None if source_task.metrics is None else list(source_task.metrics)
+            ),
             capability_tier=source_task.capability_tier,
             # Material paths and report values are deliberately not inherited:
             # they are task-local artifacts, not safe strategy metadata.
@@ -332,7 +334,9 @@ class StrategyHandoffRepository:
         ):
             raise ConflictError("new strategy version was not created as a draft")
         if int(child_meta["version"]) != parent_version + 1:
-            raise ConflictError("new strategy version does not follow its parent version")
+            raise ConflictError(
+                "new strategy version does not follow its parent version"
+            )
 
         result = {
             "source_task_id": source_id,
@@ -404,7 +408,9 @@ def _validate_run_result_integrity(row: sqlite3.Row) -> None:
         raise ConflictError("monitoring run result must be a JSON object")
     canonical = _canonical_json(result)
     stored_hash = _required_sha256(row["result_hash"], field="monitoring result_hash")
-    if not hmac.compare_digest(hashlib.sha256(canonical.encode()).hexdigest(), stored_hash):
+    if not hmac.compare_digest(
+        hashlib.sha256(canonical.encode()).hexdigest(), stored_hash
+    ):
         raise ConflictError("monitoring run result hash is invalid")
     try:
         validate_monitoring_run_result(
@@ -427,7 +433,9 @@ def _validate_plan_payload_integrity(row: sqlite3.Row) -> None:
         raise ConflictError("monitoring plan payload must be a JSON object")
     canonical = _canonical_json(payload)
     stored_hash = _required_sha256(row["payload_hash"], field="monitoring payload_hash")
-    if not hmac.compare_digest(hashlib.sha256(canonical.encode()).hexdigest(), stored_hash):
+    if not hmac.compare_digest(
+        hashlib.sha256(canonical.encode()).hexdigest(), stored_hash
+    ):
         raise ConflictError("monitoring plan payload hash is invalid")
 
 

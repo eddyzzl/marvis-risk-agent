@@ -34,8 +34,16 @@ from marvis.packs.modeling.artifact import (
         ("scorecard", "higher_is_riskier", "higher_is_better"),
         ("catboost", "higher_is_riskier", None),
         ("mlp", "higher_is_riskier", None),
-        ("lgb_regressor", "higher_is_riskier", None),
-        ("lgb_multiclass", "higher_is_riskier", None),
+        # Regression predictions and multiclass probability vectors do not
+        # have a universal one-dimensional credit-risk direction.
+        ("lgb_regressor", None, None),
+        ("xgb_regressor", None, None),
+        ("lr_regressor", None, None),
+        ("mlp_regressor", None, None),
+        ("lgb_multiclass", None, None),
+        ("xgb_multiclass", None, None),
+        ("lr_multiclass", None, None),
+        ("mlp_multiclass", None, None),
         ("ensemble", "higher_is_riskier", None),
     ],
 )

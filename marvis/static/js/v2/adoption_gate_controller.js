@@ -29,7 +29,9 @@ export function renderAdoptionGate(message, options = {}) {
     `<textarea data-adoption-reason rows="3" maxlength="1000" placeholder="说明业务目标、验证证据和批准依据"${disabled}></textarea>`,
     "</label>",
     '<p class="adoption-gate-note">理由会与当前策略版本、回测结果和审计记录绑定，不能使用“待确认”或 TODO 占位。</p>',
+    '<div class="adoption-gate-actions gate-action-bar">',
     `<button type="button" class="button compact primary adoption-confirm" data-adoption-confirm="1"${disabled}>填写理由并采纳</button>`,
+    '</div>',
     "</div>",
   ].join("");
 }
@@ -74,6 +76,7 @@ export async function submitAdoption(button, context = {}) {
       method: "POST",
       body: JSON.stringify({
         content: "确认采纳",
+        ui_action: "confirm_adoption",
         adjust_params: { adoption_reason: reason },
         expected_step_id: expectedStepId,
       }),

@@ -158,6 +158,10 @@ from marvis.packs.modeling.feature_tools import (  # noqa: F401
     tool_screen_features,
     tool_select_features,
 )
+from marvis.packs.modeling.special_value_tools import (  # noqa: F401
+    SPECIAL_VALUE_POLICY_VERSION,
+    tool_resolve_special_values,
+)
 from marvis.packs.modeling.prepare_tools import (  # noqa: F401
     _GROUP_COLUMN_HINTS,
     _detect_group_columns,

@@ -18,9 +18,10 @@
     }
   },
   "give_me_some_credit": {
+    "status": "blocked_missing_dataset_and_baseline",
     "baseline_ks": null,
     "recipe": "lgb",
-    "note": "PLACEHOLDER — fill in after the one-off human-tuned baseline experiment. Drop the Kaggle 'Give Me Some Credit' cs-training.csv into datasets/give_me_some_credit/ and run scripts/ks_baseline.py --record to capture the tuned KS as ground truth here. Target column: SeriousDlqin2yrs.",
+    "note": "BLOCKED — 2026-07-24 read-only search found no cs-training.csv in the worktree/workspace or configured local data-staging locations. Do not substitute the synthetic anchor. Supply the licensed file and run the traceable --record command in docs/ks_baseline/README.md. Target: SeriousDlqin2yrs.",
     "provenance": {
       "dataset": "Kaggle: GiveMeSomeCredit (cs-training.csv)",
       "target_col": "SeriousDlqin2yrs",
@@ -31,9 +32,10 @@
     }
   },
   "home_credit": {
+    "status": "blocked_missing_dataset_and_baseline",
     "baseline_ks": null,
     "recipe": "lgb",
-    "note": "PLACEHOLDER — fill in after the one-off human-tuned baseline experiment. Drop the Kaggle 'Home Credit Default Risk' application_train.csv into datasets/home_credit/ and run scripts/ks_baseline.py --record to capture the tuned KS as ground truth here. Target column: TARGET.",
+    "note": "BLOCKED — 2026-07-24 read-only search found no application_train.csv in the worktree/workspace or configured local data-staging locations. Do not substitute the synthetic anchor. Supply the licensed file and run the traceable --record command in docs/ks_baseline/README.md. Target: TARGET.",
     "provenance": {
       "dataset": "Kaggle: Home Credit Default Risk (application_train.csv)",
       "target_col": "TARGET",

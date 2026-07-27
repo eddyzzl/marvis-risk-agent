@@ -17,6 +17,7 @@ from marvis.notebook_cancellation import (
     clear_pending_notebook_cancellation,
     request_notebook_cancellation,
 )
+from marvis.job_cancellation import request_job_cancellation
 from marvis.notebooks import close_live_notebook_session
 from marvis.pipeline import NOTEBOOK_STAGE_FAILURE_PREFIX, REPORT_STAGE_FAILURE_PREFIX
 
@@ -102,7 +103,7 @@ def agent_rerun_stage_reached(task: TaskRecord, stage: str) -> bool:
 
 
 def agent_has_cancellable_work(repo: TaskRepository, task_id: str) -> bool:
-    if repo.get_active_job_kind(task_id) == "agent":
+    if repo.get_active_job_kind(task_id) in {"agent", "driver"}:
         return True
     return any(
         message.get("role") == "assistant"
@@ -138,6 +139,7 @@ def handle_agent_stop_message_with_callbacks(
     *,
     request_agent_cancellation_fn,
     request_notebook_cancellation_fn,
+    request_job_cancellation_fn=request_job_cancellation,
 ) -> dict:
     if not agent_has_cancellable_work(repo, task.id):
         message = repo.add_agent_message(
@@ -153,14 +155,18 @@ def handle_agent_stop_message_with_callbacks(
             "message": message["content"],
             "messages": repo.list_agent_messages(task.id),
         }
-    active_job = repo.get_latest_job(task.id, kind="agent")
+    active_job = repo.get_latest_job(task.id)
     active_job_id = (
         str(active_job["id"])
         if active_job is not None
         and active_job.get("status") in {"queued", "running"}
         else None
     )
-    request_agent_cancellation_fn(task.id, job_id=active_job_id)
+    active_job_kind = str(active_job.get("kind") or "") if active_job is not None else ""
+    if active_job_kind == "driver" and active_job_id is not None:
+        request_job_cancellation_fn(active_job_id)
+    else:
+        request_agent_cancellation_fn(task.id, job_id=active_job_id)
     request_notebook_cancellation_fn(task.id)
     mark_agent_cancelled(repo, task.id)
     if agent_has_stop_ack_message(repo, task.id):

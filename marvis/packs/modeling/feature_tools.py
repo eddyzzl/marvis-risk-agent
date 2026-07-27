@@ -2,18 +2,28 @@ from __future__ import annotations
 
 from marvis.data.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.feature.candidates import excluded_categorical_columns, suspected_categorical_columns
-from marvis.feature.screen import screen_features, screen_features_non_binary, sentinel_screen_notice
+from marvis.feature.screen import (
+    DEFAULT_SCREEN_BATCH_SIZE,
+    screen_features,
+    screen_features_non_binary,
+    sentinel_screen_notice,
+)
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.select import select_features
 from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET
 
 from marvis.packs.modeling._common import PMML_SUPPORTED_ALGORITHMS, _disabled_algorithms, _effective_seed, _eligible_algorithms, _jsonable, _metric_policy_for_target_type, _normalize_modeling_target_type, _normalize_recipe_list, _optional_int, _optional_str, _target_type_from_recipes, _training_params, _unique_strings
-from marvis.packs.modeling._runtime import _Runtime, _resolve_feature_cols, _runtime
+from marvis.packs.modeling._runtime import (
+    _Runtime,
+    _resolve_feature_cols,
+    _runtime,
+    _task_dataset,
+)
 
 
 def tool_select_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     features = _resolve_feature_cols(
         runtime,
         dataset.id,
@@ -62,7 +72,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     if str(inputs.get("target_type", "binary")) != "binary":
         return _screen_features_non_binary(inputs, ctx)
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     requested_features = inputs.get("features") or []
     features = _resolve_feature_cols(
         runtime,
@@ -91,11 +101,12 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         features=features,
         target_col=str(inputs["target_col"]),
         split_col=_optional_str(inputs.get("split_col")),
+        sample_weight_col=_optional_str(inputs.get("sample_weight_col")),
         holdout_values=tuple(str(v) for v in holdout) if holdout else ("oot",),
         leakage_ks=float(inputs.get("leakage_ks", 0.40)),
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
         top_k=_optional_int(inputs.get("top_k")),
-        batch_size=int(inputs.get("batch_size", 500)),
+        batch_size=int(inputs.get("batch_size", DEFAULT_SCREEN_BATCH_SIZE)),
         max_ks_decay=float(inputs["max_ks_decay"]) if inputs.get("max_ks_decay") is not None else None,
         max_feature_psi=float(inputs["max_feature_psi"]) if inputs.get("max_feature_psi") is not None else None,
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
@@ -110,6 +121,15 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "n_screened": result.n_screened,
         "nan_labels_dropped": result.nan_labels_dropped,
         "excluded_categorical": excluded_categorical,
+        # Stable output contract for downstream governance.  Empty means no
+        # suspected sentinel was observed; non-empty must be explicitly
+        # governed before tuning/training.
+        "sentinel_columns": _jsonable(result.sentinel_columns) or {},
+        "sentinel_notice": (
+            sentinel_screen_notice(result.sentinel_columns)
+            if result.sentinel_columns
+            else ""
+        ),
     }
     if suspected_categorical:
         payload["suspected_categorical"] = suspected_categorical
@@ -121,9 +141,6 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         payload["ks_decay_watch"] = [[feature, decay, reason] for feature, decay, reason in result.ks_decay_watch]
     if result.psi_watch:
         payload["psi_watch"] = [[feature, psi, reason] for feature, psi, reason in result.psi_watch]
-    if result.sentinel_columns:
-        payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
-        payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)
     dictionary = _screen_dictionary(runtime, ctx)
     if dictionary:
         payload["dictionary"] = dictionary
@@ -192,7 +209,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
     constant (unique_count<=1) or mostly-missing (missing_rate>=max_missing_rate) — and the
     rest are kept as selected (ks=None)."""
     runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     features = _resolve_feature_cols(
         runtime,
         dataset.id,
@@ -208,6 +225,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         target_col=str(inputs["target_col"]),
         target_type=str(inputs.get("target_type") or "continuous"),
         split_col=_optional_str(inputs.get("split_col")),
+        sample_weight_col=_optional_str(inputs.get("sample_weight_col")),
         holdout_values=tuple(str(v) for v in holdout) if holdout else ("oot",),
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
         top_k=_optional_int(inputs.get("top_k")),
@@ -215,12 +233,16 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
     payload = {
         "selected": list(result.selected),
         "ranked": [[feature, ks] for feature, ks in result.ranked],
-        "leakage": [],
+        "leakage": [
+            [feature, ks, reason] for feature, ks, reason in result.leakage
+        ],
         "suspected": [],
         "unusable": [[feature, reason] for feature, reason in result.unusable],
         "scores": _jsonable(result.scores),
         "n_screened": result.n_screened,
-        "note": "非二分类目标：跳过泄漏KS筛选，已剔除常量/高缺失列",
+        "note": "非二分类目标：跳过统计型泄漏KS筛选；语义/时序泄漏与控制列仍硬剔除",
+        "sentinel_columns": {},
+        "sentinel_notice": "",
     }
     dictionary = _screen_dictionary(runtime, ctx)
     if dictionary:
@@ -262,15 +284,15 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
     if cv_folds is not None and cv_folds < 2:
         raise ModelingError("cv_folds must be at least 2")
     # Per-recipe tuning budget (TUNE-1/SEL-2): every recipe gets its own trial
-    # count from DEFAULT_TRIAL_BUDGET (tree recipes 40, lr/scorecard/mlp 12) so a
+    # count from DEFAULT_TRIAL_BUDGET (one real trial per recipe by default) so a
     # multi-algorithm comparison tunes every candidate, not just lgb. An explicit
     # `n_trials` override applies uniformly to every recipe in the request (the
     # single-recipe case behaves exactly like before: one scalar budget).
     n_trials_by_recipe = {
-        item: (n_trials_override if n_trials_override is not None else DEFAULT_TRIAL_BUDGET.get(item, 40))
+        item: (n_trials_override if n_trials_override is not None else DEFAULT_TRIAL_BUDGET.get(item, 1))
         for item in recipes
     }
-    n_trials = n_trials_by_recipe.get(primary_recipe, 40)
+    n_trials = n_trials_by_recipe.get(primary_recipe, 1)
     params = _training_params(inputs)
     if sample_weight_col:
         params["sample_weight_col"] = sample_weight_col

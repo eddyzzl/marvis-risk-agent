@@ -114,6 +114,49 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
     assert revision == 0
 
 
+def test_feature_metrics_preserve_omitted_empty_and_selected_states(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    omitted = repo.create_task(_task_create(task_type="feature_analysis"))
+    explicit_empty = repo.create_task(
+        _task_create(task_type="feature_analysis", metrics=[])
+    )
+    selected = repo.create_task(
+        _task_create(task_type="feature_analysis", metrics=["iv", "vif"])
+    )
+
+    assert repo.get_task(omitted.id).metrics is None
+    assert repo.get_task(explicit_empty.id).metrics == []
+    assert repo.get_task(selected.id).metrics == ["iv", "vif"]
+    with connect(db_path) as conn:
+        states = {
+            str(row["id"]): int(row["metrics_configured"])
+            for row in conn.execute(
+                "SELECT id, metrics_configured FROM tasks WHERE id IN (?, ?, ?)",
+                (omitted.id, explicit_empty.id, selected.id),
+            )
+        }
+    assert states == {
+        omitted.id: 0,
+        explicit_empty.id: 1,
+        selected.id: 1,
+    }
+
+
+def test_create_task_request_distinguishes_omitted_and_explicit_empty_metrics():
+    base = {
+        "model_name": "特征分析",
+        "validator": "qa",
+        "source_dir": "/tmp/source",
+        "task_type": "feature_analysis",
+    }
+
+    assert CreateTaskRequest.model_validate(base).metrics is None
+    assert CreateTaskRequest.model_validate({**base, "metrics": []}).metrics == []
+
+
 def test_create_and_get_task_round_trips_strategy_input(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -1635,6 +1678,37 @@ def test_init_db_migration_009_rejects_canonical_drift_without_stamping(tmp_path
         ).fetchone()
     assert version == 8
     assert tuple(row) == ("draft", "adopted_local")
+
+
+def test_init_db_migration_024_adds_metrics_configured_to_version23_database(tmp_path):
+    db_path = tmp_path / "legacy_v23.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                metrics_json TEXT NOT NULL DEFAULT '[]'
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO tasks(id, metrics_json) VALUES ('legacy-task', '[]')"
+        )
+        conn.execute("PRAGMA user_version = 23")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+        row = conn.execute(
+            "SELECT metrics_json, metrics_configured FROM tasks WHERE id = 'legacy-task'"
+        ).fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert "metrics_configured" in columns
+    assert json.loads(row["metrics_json"]) == []
+    assert row["metrics_configured"] == 0
 
 
 def test_init_db_is_idempotent_across_repeated_calls(tmp_path):

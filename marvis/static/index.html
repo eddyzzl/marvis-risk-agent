@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <meta id="appThemeColor" name="theme-color" content="#ffffff" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="MARVIS" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -306,8 +307,32 @@
                 <span>回归 (LightGBM)</span>
               </label>
               <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="xgb_regressor" data-recipe-family="continuous" />
+                <span>回归 (XGBoost)</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="lr_regressor" data-recipe-family="continuous" />
+                <span>回归 (线性模型)</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="mlp_regressor" data-recipe-family="continuous" />
+                <span>回归 (MLP/DNN)</span>
+              </label>
+              <label class="algorithm-choice">
                 <input type="checkbox" name="modelAlgorithm" value="lgb_multiclass" data-recipe-family="multiclass" />
                 <span>多分类 (LightGBM)</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="xgb_multiclass" data-recipe-family="multiclass" />
+                <span>多分类 (XGBoost)</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="lr_multiclass" data-recipe-family="multiclass" />
+                <span>多分类 (线性模型)</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="mlp_multiclass" data-recipe-family="multiclass" />
+                <span>多分类 (MLP/DNN)</span>
               </label>
             </div>
             <div class="wide-field sample-weight-create">
@@ -338,9 +363,41 @@
             </div>
           </section>
           <section id="createTaskMetricField" class="task-form-section" hidden>
-            <h3>可选指标</h3>
-            <p class="dialog-subtitle">基础指标（IV/KS/AUC/缺失率/lift）默认计算；勾选项才额外计算。</p>
+            <h3>分析指标</h3>
+            <p class="dialog-subtitle">每项独立选择，只有勾选的指标才会计算。默认选择 IV、KS、AUC 与覆盖/质量指标。</p>
             <div id="featureMetricChoices" class="algorithm-choices" role="group" aria-label="可选特征指标">
+              <label class="algorithm-choice">
+                <input type="checkbox" name="featureMetric" value="iv" checked />
+                <span>IV</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="featureMetric" value="ks" checked />
+                <span>KS</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="featureMetric" value="auc" checked />
+                <span>AUC</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="featureMetric" value="coverage" checked />
+                <span>覆盖率 / 缺失率 / 单一值率 / 零值率</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="featureMetric" value="psi_month_first" />
+                <span>月度 PSI · 首月基准</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="featureMetric" value="psi_month_last" />
+                <span>月度 PSI · 末月基准</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="featureMetric" value="psi_month_previous" />
+                <span>月度 PSI · 逐月环比</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="featureMetric" value="psi_split" />
+                <span>Train / Test / OOT PSI</span>
+              </label>
               <label class="algorithm-choice">
                 <input type="checkbox" name="featureMetric" value="vif" />
                 <span>共线性 / VIF</span>
@@ -352,6 +409,10 @@
               <label class="algorithm-choice">
                 <input type="checkbox" name="featureMetric" value="importance" />
                 <span>特征重要性（LGB）</span>
+              </label>
+              <label class="algorithm-choice" title="仅 Agent 模式且已上传数据字典时计算">
+                <input type="checkbox" name="featureMetric" value="meaning_consistency" disabled />
+                <span>含义正负向一致性 · Agent + 数据字典</span>
               </label>
             </div>
           </section>
@@ -798,6 +859,18 @@
             </section>
           </div>
         </section>
+      </div>
+    </dialog>
+
+    <dialog id="c1DatasetPreviewDialog" class="task-dialog c1-dataset-preview-dialog" aria-labelledby="c1DatasetPreviewTitle">
+      <div class="task-dialog-panel c1-dataset-preview-panel">
+        <header class="dialog-head">
+          <h2 id="c1DatasetPreviewTitle">数据文件 · 前 10 行</h2>
+          <button class="button compact secondary dialog-close-button" type="button" data-c1-preview-close aria-label="关闭" title="关闭">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </header>
+        <div id="c1DatasetPreviewBody" class="c1-dataset-preview-body"></div>
       </div>
     </dialog>
 
@@ -1288,12 +1361,12 @@
                     </button>
                   </div>
                 </div>
-                <p
-                  id="actionErrorDetail"
-                  class="action-error-detail"
-                >暂无报错</p>
                 <div class="task-hero-details" id="taskHeroDetails">
                   <div class="task-hero-details-inner">
+                    <p
+                      id="actionErrorDetail"
+                      class="action-error-detail"
+                    >暂无报错</p>
                     <p id="currentTaskSubtitle" class="workspace-subtitle">
                       创建任务或从左侧选择已有任务
                     </p>
@@ -3218,13 +3291,6 @@
               <h3>验证步骤</h3>
             </header>
             <nav id="workflowStepper" class="workflow-stepper" aria-label="验证流程"></nav>
-            <section id="artifactPanel" class="artifact-panel hidden" hidden aria-label="输出预览">
-              <header class="artifact-panel-head">
-                <h4>输出预览</h4>
-                <button type="button" class="artifact-panel-close" data-artifact-panel-close="1" aria-label="关闭输出预览">关闭</button>
-              </header>
-              <div id="artifactPanelBody" class="artifact-panel-body"></div>
-            </section>
           </section>
         </div>
       </main>

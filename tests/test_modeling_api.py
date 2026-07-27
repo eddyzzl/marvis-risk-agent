@@ -2,9 +2,10 @@
 
 task_type='modeling' is routed to the plan-conversation driver (NOT the retired
 ModelingSession prototype): leakage-aware screen -> [confirm features] -> tune +
-train -> [confirm model] -> model-development report. No LLM is configured — this
-is the no-LLM manual scenario, confirming each gate with the "确认" content.
-This test runs real screening/tuning/training, so it is slow.
+train -> [confirm model] -> model-development report. Most tests exercise the
+no-LLM manual scenario; the governed Agent-mode test installs a non-network gate
+client and uses natural-language confirmations through the full multi-file flow.
+These tests run real screening/tuning/training, so they are slow.
 """
 
 from __future__ import annotations
@@ -148,14 +149,15 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "确认「开始」后按计划执行" in overview["content"]
+    assert "手动模式请点击「开始执行」" in overview["content"]
+    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
 
     # turn 1 — 开始: make the split + G2 spec, pause before feature screening
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     assert resp.status_code == 202, resp.text
     split_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert split_gate["metadata"].get("kind") == "gate"
-    assert "样本切分完成" in split_gate["content"]
+    assert "样本切分预览已生成" in split_gate["content"]
     assert "建模规格已生成" in split_gate["content"]
 
     # turn 2 — confirm the split: screen features, pause at the confirm-features gate
@@ -419,7 +421,7 @@ def test_modeling_business_materials_flow_into_report_and_delivery(client: TestC
 
     plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
     split_step = next(step for step in plan.steps if step.title == "切分样本")
-    report_step = next(step for step in plan.steps if step.tool_ref == ToolRef("modeling", "generate_model_report"))
+    report_step = next(step for step in plan.steps if step.tool_ref == ToolRef("modeling", "generate_model_reports"))
     delivery_step = next(step for step in plan.steps if step.tool_ref == ToolRef("modeling", "post_training_action"))
     assert report_step.inputs["business_columns"] == {
         "loan_month_col": "loan_month",
@@ -502,7 +504,7 @@ def test_modeling_business_materials_without_split_survive_auto_split(client: Te
 
     plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
     split_step = next(step for step in plan.steps if step.title == "切分样本")
-    report_step = next(step for step in plan.steps if step.tool_ref == ToolRef("modeling", "generate_model_report"))
+    report_step = next(step for step in plan.steps if step.tool_ref == ToolRef("modeling", "generate_model_reports"))
     for column in ["loan_month", "rate", "amount", "term", "drawdown", "limit", "mob1", "mob2", "mob3"]:
         assert column in split_step.inputs["passthrough_cols"]
     assert report_step.inputs["business_columns"]["loan_month_col"] == "loan_month"
@@ -512,7 +514,7 @@ def test_modeling_business_materials_without_split_survive_auto_split(client: Te
     split_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert split_gate["metadata"].get("kind") == "gate"
     assert not split_gate["metadata"].get("error")
-    assert "样本切分完成" in split_gate["content"]
+    assert "样本切分预览已生成" in split_gate["content"]
     # SEL-1: OOT is real (time-extrapolated from loan_month), not fabricated/missing —
     # confirmed by counts on the derived split, all sourced from the latest month.
     plan = client.app.state.plan_repo.load_plan(plan.id)
@@ -762,7 +764,8 @@ def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClien
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "确认「开始」后按计划执行" in overview["content"]
+    assert "手动模式请点击「开始执行」" in overview["content"]
+    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     assert plans and plans[-1].template_id == "modeling_with_join"
     plan = plans[-1]
@@ -777,11 +780,198 @@ def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClien
     assert resp.status_code == 202, resp.text
     split_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert split_gate["metadata"].get("kind") == "gate"
-    assert "样本切分完成" in split_gate["content"]
+    assert "样本切分预览已生成" in split_gate["content"]
     plan = client.app.state.plan_repo.load_plan(plan.id)
     split_step = next(step for step in plan.steps if step.title == "切分样本")
     split_output = client.app.state.plan_repo.load_step_output(split_step.id)
     assert "extra_score" in split_output["feature_cols"]
+
+
+@pytest.mark.slow
+def test_modeling_agent_natural_language_completes_multi_file_delivery(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Agent mode turns natural-language instructions into the full governed flow.
+
+    The gate client is deliberately local and is not asked to auto-approve any
+    business gate. This verifies the product contract from natural-language
+    confirmation through JOIN, FEATURE, training, report, and delivery without
+    depending on an external model or network service.
+    """
+
+    class _NoNetworkGateClient:
+        def complete(self, *_args, **_kwargs):
+            raise AssertionError("NORMAL mode must not auto-approve governed gates")
+
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: _NoNetworkGateClient(),
+    )
+
+    src = _business_material_dir(tmp_path, n=360)
+    pd.DataFrame({
+        "cust_id": np.arange(360),
+        "extra_score": np.linspace(0.0, 1.0, 360),
+    }).to_parquet(src / "feature_table.parquet")
+    response = client.post("/api/tasks", json={
+        "model_name": "Agent 多表完整建模",
+        "model_version": "agent-e2e",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "agent",
+        "recipes": ["lr"],
+    })
+    assert response.status_code == 200, response.text
+    task_id = response.json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert c1["metadata"]["join_c1"]["anchor_id"]
+    assert c1["metadata"]["join_c1"]["feature_ids"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "我确认无误，请按推荐的样本主表和特征表继续。"},
+    )
+    assert response.status_code == 202, response.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans and plans[-1].template_id == "modeling_with_join"
+    plan_id = plans[-1].id
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "请开始建模吧。"},
+    )
+    assert response.status_code == 202, response.text
+
+    for _ in range(14):
+        plan = client.app.state.plan_repo.load_plan(plan_id)
+        if plan.status.value in {"done", "failed", "cancelled", "review"}:
+            break
+        latest = _last_assistant(
+            client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+        )
+        assert not latest["metadata"].get("error"), latest["content"]
+        response = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json={"content": "我确认当前结果，请继续下一步。"},
+        )
+        assert response.status_code == 202, response.text
+
+    plan = client.app.state.plan_repo.load_plan(plan_id)
+    assert plan.status.value == "done"
+    outputs = {
+        step.tool_ref.tool: client.app.state.plan_repo.load_step_output(step.id)
+        for step in plan.steps
+        if step.tool_ref is not None
+    }
+    for tool_name in (
+        "execute_join",
+        "screen_features",
+        "select_features",
+        "train_models",
+        "generate_model_reports",
+        "post_training_action",
+    ):
+        assert outputs[tool_name], tool_name
+
+    split_output = outputs["make_split"]
+    assert "extra_score" in split_output["feature_cols"]
+    report_output = outputs["generate_model_reports"]
+    assert Path(report_output["report_path"]).is_file()
+    assert report_output["reports"]
+    delivery_output = outputs["post_training_action"]
+    assert Path(delivery_output["approval_package_markdown_path"]).is_file()
+    assert Path(delivery_output["model_card_markdown_path"]).is_file()
+    assert (
+        delivery_output["model_card"]["delivery"]["validation_handoff_status"]
+        == "succeeded"
+    )
+    done = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert "计划已全部完成" in done["content"]
+
+
+def test_modeling_c1_plain_named_excel_is_included_in_three_file_proposal(
+    client: TestClient, tmp_path: Path
+):
+    src = _sample_dir(tmp_path, n=40)
+    pd.DataFrame({"cust_id": np.arange(40), "external_score": np.arange(40)}).to_parquet(
+        src / "feature_table.parquet"
+    )
+    pd.DataFrame({"cust_id": np.arange(40), "bureau_score": np.arange(40)}).to_excel(
+        src / "vars.xlsx", index=False
+    )
+    task_id = client.post("/api/tasks", json={
+        "model_name": "三文件建模",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+    }).json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert len(c1["metadata"]["join_c1"]["files"]) == 3
+
+
+def test_modeling_single_file_ambiguous_targets_accepts_agent_language_choice(
+    client: TestClient, tmp_path: Path
+):
+    src = tmp_path / "single_ambiguous_target"
+    src.mkdir()
+    n = 120
+    pd.DataFrame(
+        {
+            "signal": np.linspace(-1, 1, n),
+            "label_sqandzy": [0, 1] * (n // 2),
+            "label_sqandzy_new": [1, 0] * (n // 2),
+            "split_tag": ["train"] * 72 + ["test"] * 24 + ["oot"] * 24,
+        }
+    ).to_parquet(src / "sample.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "单表多目标确认",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        # The no-LLM test fixture uses manual mode, but the same C1 parser is
+        # shared by Agent mode; send the exact natural-language utterance here.
+        "run_mode": "manual",
+    }).json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    state = c1["metadata"]["join_c1"]
+    assert state["target_col"] is None
+    assert state["files"][0]["target_candidates"] == [
+        "label_sqandzy",
+        "label_sqandzy_new",
+    ]
+    assert not client.app.state.plan_repo.list_plans_for_task(task_id)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "目标列使用 label_sqandzy_new，切分列沿用 split_tag，继续。"},
+    )
+    assert response.status_code == 202, response.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans
+    split_step = next(step for step in plans[-1].steps if step.title == "切分样本")
+    assert split_step.inputs["target_col"] == "label_sqandzy_new"
+    assert split_step.inputs["split_col"] == "split_tag"
 
 
 @pytest.mark.slow

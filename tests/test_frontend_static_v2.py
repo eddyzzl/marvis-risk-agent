@@ -97,7 +97,7 @@ def test_agent_message_polling_uses_incremental_cursor_when_safe():
     assert "if (payload.incremental)" in app_js
 
 
-def test_v2_plan_rail_fetch_errors_are_visible_and_retryable():
+def test_v2_plan_rail_fetch_errors_are_visible_without_rail_controls():
     app_js = _read_static("app.js")
     plan_js = _read_static("js/v2/plan_rail_controller.js")
 
@@ -106,10 +106,10 @@ def test_v2_plan_rail_fetch_errors_are_visible_and_retryable():
     assert "const v2PlanFetchErrors = new Map()" in plan_js
     assert "if (!response.ok) throw new Error(`HTTP ${response.status}`)" in plan_js
     assert "计划读取失败" in plan_js
-    assert "当前显示的是上次缓存的计划" in plan_js
-    assert "const fetchErrorBanner = fetchError" in plan_js
-    assert "return fetchErrorBanner + headerBadge + eventStrip + subAgentRows + phasesHtml + startControl;" in plan_js
-    assert "data-plan-rail-retry" in plan_js
+    assert "当前显示的是上次缓存的计划" not in plan_js
+    assert "const fetchErrorBanner = fetchError" not in plan_js
+    assert "return planRailPhaseRows(plan).map((row) => planPhaseHtml(row)).join" in plan_js
+    assert "data-plan-rail-retry" not in plan_js
     assert "function retryFetch" in plan_js
 
 
@@ -207,6 +207,23 @@ def _agent_report_messages_for_display(messages: list[dict]) -> list[dict]:
         text=True,
     )
     return json.loads(result.stdout)
+
+
+def test_button_confirmation_audit_message_is_hidden_from_visible_conversation():
+    messages = [
+        {"id": "gate", "role": "assistant", "content": "请确认"},
+        {
+            "id": "audit-confirm",
+            "role": "user",
+            "content": "确认",
+            "metadata": {"display_in_timeline": False, "ui_action": "confirm_gate"},
+        },
+        {"id": "ack", "role": "assistant", "content": "收到确认，开始执行拼接。"},
+    ]
+
+    displayed = _agent_report_messages_for_display(messages)
+
+    assert [message["id"] for message in displayed] == ["gate", "ack"]
 
 
 def _render_agent_markdown(markdown: str) -> str:
@@ -346,6 +363,9 @@ def _task_display_status_for(
         [
             f"const statusLabels = {json.dumps({'scanned': '已扫描', 'failed': '失败'}, ensure_ascii=False)};",
             f"const task = {json.dumps(task, ensure_ascii=False)};",
+            "function taskUsesPlanRail() { return false; }",
+            "const planRailController = { statusSnapshot() { return null; } };",
+            "function workflowStatusSnapshot() { return null; }",
             app_js[stopped_start:stopped_end],
             app_js[pill_start:pill_end],
             app_js[label_start:label_end],
@@ -437,93 +457,66 @@ def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actio
     assert 'from "./js/layout-resize.js"' in app_js
 
 
-def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
+def test_plan_rail_preserves_parent_steps_with_pure_status_subtasks():
     plan_js = _read_static("js/v2/plan_rail_controller.js")
     v2_css = _read_static("css/v2-workbench.css")
 
-    # The phase card build is now split: planPhasePlan() groups steps into phases
-    # (and computes phaseNumber), planPhaseHeadHtml() emits the `.step-head`, and
-    # planRailHtml() stitches them. The window spans planPhasePlan .. render({ so
-    # it captures all three plus the keyed reconciler that mirrors the same markup.
-    plan_start = plan_js.index("function planPhasePlan")
-    plan_end = plan_js.index("function render({", plan_start)
-    plan_renderer = plan_js[plan_start:plan_end]
-    # The single-substep markup moved into planSubstepHtml (keyed-reconcile
-    # friendly); planSubstepGroupHtml now wraps it. Span both.
-    substeps_start = plan_js.index("function planSubstepHtml")
-    substeps_end = plan_js.index("function driverHasBlockingError", substeps_start)
-    substeps_renderer = plan_js[substeps_start:substeps_end]
-
-    assert "function planPhaseStatus" in plan_js
-    assert "function planPhaseHint" in plan_js
-    # The editable retry form moved out of the rail into the middle workspace;
-    # the rail now renders only a lightweight entry button (planRetryRailEntryHtml)
-    # and the form itself is planRetryCardHtml, mounted in #planRetryPanel.
-    assert "function planRetryRailEntryHtml" in plan_js
-    assert "function planRetryCardHtml" in plan_js
-    assert "function planRetryControlHtml" not in plan_js
-    assert "function planSubstepGroupHtml" in plan_js
+    assert "export function planRailPhaseRows" in plan_js
+    assert "Number(left?.index)" in plan_js
+    assert "function planPhaseHtml" in plan_js
     assert "function planSubstepHtml" in plan_js
-    assert "function planPhasePlan" in plan_js
-    assert "function planPhaseHeadHtml" in plan_js
-    assert "phaseIndex + 1," in plan_renderer
-    assert 'class="step plan-rail-step' in plan_renderer
-    assert '<span class="step-number">${phaseNumber}</span>' in plan_renderer
-    assert '<strong class="step-title">${escapeHtml(phase)}</strong>' in plan_renderer
-    assert "planSubstepGroupHtml(phaseSteps, phaseNumber)" in plan_renderer
-    assert '<section class="notebook-step-group plan-rail-substeps">' in substeps_renderer
-    assert '<h4>子任务 · ${steps.length}</h4>' in substeps_renderer
-    assert "const subNumber = parentNumber ? `${parentNumber}.${index + 1}` : `${index + 1}`;" in substeps_renderer
-    assert '<span class="notebook-step-no">${escapeHtml(subNumber)}</span>' in substeps_renderer
-    assert '<span class="plan-substep-copy">' in substeps_renderer
-    assert "const description = step.description || step.summary || PLAN_STEP_HINTS" in substeps_renderer
-    assert 'const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";' in substeps_renderer
-    # Rail failed-step branch now yields the lightweight entry, not the form.
-    assert 'const retry = status === "failed" ? planRetryRailEntryHtml(step) : "";' in substeps_renderer
-    assert "planRetryControlHtml" not in substeps_renderer
-    assert "`<strong>${escapeHtml(step.title || \"未命名步骤\")}</strong>`" in substeps_renderer
-    assert "descriptionHtml" in substeps_renderer
-    assert "retry" in substeps_renderer
-    # All interactive controls moved to the middle: the rail substep row no longer
-    # renders a gate confirm button or a report download button. Only status
-    # badges + lightweight locate entries remain.
-    assert "data-driver-confirm" not in substeps_renderer
-    assert "data-driver-report-download" not in substeps_renderer
-    # awaiting_confirm -> "待确认" badge (both modes) + a locate entry in manual mode.
-    assert '<span class="plan-step-await">待确认</span>' in substeps_renderer
-    assert 'data-plan-gate-locate="${escapeHtml(stepId)}"' in substeps_renderer
-    # a done report step -> "报告已就绪" badge + a locate entry to the middle card.
-    assert '<span class="plan-step-ready">报告已就绪</span>' in substeps_renderer
-    assert 'data-plan-report-locate="1"' in substeps_renderer
-    # Rail entry carries data-plan-retry-open (opens the middle panel); the actual
-    # submit button + JSON editor live in the middle-workspace card.
-    assert 'data-plan-retry-open="${escapeHtml(stepId)}"' in plan_js
+    assert "function planPhaseStatus" in plan_js
+    assert "function planSubstepGroupHtml" in plan_js
+    assert "function planRetryCardHtml" in plan_js
+    # No tags, events, sub-agent rows or action entries can leak into the rail.
+    for forbidden in (
+        "planRetryRailEntryHtml",
+        "plan-step-await",
+        "plan-step-running",
+        "plan-step-ready",
+        "plan-rail-replan-badge",
+        "plan-rail-events",
+        "plan-rail-subagents",
+        "plan-rail-start-status",
+        "data-plan-retry-open",
+        "data-plan-rail-intervene",
+    ):
+        assert forbidden not in plan_js
     assert 'data-plan-retry-step="${escapeHtml(stepId)}"' in plan_js
     assert 'class="plan-retry-inputs"' in plan_js
-    assert ': "";' in substeps_renderer
-    assert '<section class="plan-rail-phase"' not in plan_renderer
-    assert "plan-rail-major-number" not in plan_renderer
-    assert "plan-rail-phase-name" not in plan_renderer
-    # Retired singular class name — the current design uses the plural
-    # `.plan-rail-substeps` section (which the keyed reconciler also references),
-    # so match the retired token exactly rather than as a loose substring.
-    assert 'class="plan-rail-substep"' not in plan_renderer
-    assert "let number = 0;" not in plan_renderer
 
     plan_step_rule = _css_rule(v2_css, ".plan-rail-step")
     assert "cursor: default" in plan_step_rule
-
-    plan_substeps_rule = _css_rule(v2_css, ".plan-rail-substeps")
-    assert "margin-top: 6px" in plan_substeps_rule
-    assert ".plan-substep-copy" in v2_css
-    assert "display: grid" in _css_rule(v2_css, ".plan-substep-copy")
-    assert "white-space: nowrap" in _css_rule(v2_css, ".plan-substep-copy small")
     # Middle-workspace retry card is roomy (full width, glass card language).
     assert "width: 100%" in _css_rule(v2_css, ".plan-retry-card")
     assert "backdrop-filter" in _css_rule(v2_css, ".plan-retry-card")
 
     assert ".plan-rail-phase" not in v2_css
     assert ".plan-rail-major-number" not in v2_css
+
+
+def test_plan_rail_phase_rows_keep_modeling_spec_before_feature_screen():
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ planRailPhaseRows }} from {json.dumps(module_url)};",
+            "const rows = planRailPhaseRows({ steps: [",
+            "  { id: 's6', index: 5, phase: '特征', title: '特征筛选', status: 'failed', tool_ref: { tool: 'screen_features' } },",
+            "  { id: 's5', index: 4, phase: '建模', title: '选择建模规格', status: 'done', tool_ref: { tool: 'choose_modeling_spec' } },",
+            "  { id: 's4', index: 3, phase: '特征', title: '切分样本', status: 'done', tool_ref: { tool: 'make_split' } },",
+            "] });",
+            "process.stdout.write(JSON.stringify(rows.map((row) => [row.number, row.phase, row.steps.map((step) => step.title), row.checkerStatus])));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == [
+        [1, "特征", ["切分样本", "选择建模规格", "特征筛选"], "failed"],
+    ]
 
 
 def test_layout_resize_controller_restores_drags_and_persists_widths():
@@ -669,10 +662,9 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     assert "window.setTimeout(() => retryFetch(taskId), 1000)" in retry_body
     assert "[data-plan-retry-step]" in click_body
     assert "void retryPlanStep(planRetryButton);" in click_body
-    assert "[data-plan-rail-retry]" in click_body
-    # Rail's lightweight entry opens the middle retry panel.
-    assert "[data-plan-retry-open]" in click_body
-    assert "openRetryCard(" in click_body
+    assert "[data-plan-rail-retry]" not in click_body
+    assert "[data-plan-retry-open]" not in click_body
+    assert "openRetryCard(" not in click_body
 
 
 def test_plan_retry_uses_manually_edited_json_when_structured_fields_are_present():
@@ -1672,19 +1664,21 @@ assert.equal(
 );
 
 const elements = {
-  materialUploadStatus: { textContent: "" },
+  materialUploadStatus: { textContent: "", title: "" },
 };
 renderMaterialUploadSelection({
   files: [{ name: "sample.parquet", relativePath: "oot/sample.parquet" }],
   getElementById: (id) => elements[id],
 });
 assert.equal(elements.materialUploadStatus.textContent, "已选择 sample.parquet，包含 1 个目录。");
+assert.equal(elements.materialUploadStatus.title, "已选择 sample.parquet，包含 1 个目录。");
 
 renderMaterialUploadSelection({
   files: [],
   getElementById: (id) => elements[id],
 });
 assert.equal(elements.materialUploadStatus.textContent, "请选择文件或文件夹。");
+assert.equal(elements.materialUploadStatus.title, "");
 process.stdout.write("ok");
 """
     result = subprocess.run(
@@ -1695,6 +1689,26 @@ process.stdout.write("ok");
     )
 
     assert result.stdout == "ok"
+
+
+def test_material_upload_long_filename_cannot_expand_task_dialog():
+    styles_css = _read_static("styles.css")
+    containment_rule = _css_rule(
+        styles_css,
+        ".material-source-section,\n.material-source-panel",
+    )
+    assert "min-width: 0" in containment_rule
+    assert "max-width: 100%" in containment_rule
+
+    dropzone_rule = _css_rule(styles_css, ".material-upload-dropzone")
+    assert "overflow: hidden" in dropzone_rule
+
+    status_rule = _css_rule(styles_css, "#materialUploadStatus")
+    assert "min-width: 0" in status_rule
+    assert "max-width: 100%" in status_rule
+    assert "overflow: hidden" in status_rule
+    assert "text-overflow: ellipsis" in status_rule
+    assert "white-space: nowrap" in status_rule
 
 
 def test_validation_material_binding_dialog_is_wired_before_scan():
@@ -1953,22 +1967,86 @@ def test_workbench_uses_middle_output_and_right_step_rail_layout():
     assert "#reportSection {\n  display: none;" not in styles_css
 
 
-def test_plan_rail_artifact_preview_is_wired_to_real_app_shell():
+def test_plan_rail_contains_only_steps_and_progress_not_output_preview():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     plan_js = _read_static("js/v2/plan_rail_controller.js")
-    styles_css = _read_static("styles.css")
 
-    assert 'id="artifactPanel"' in index_html
-    assert 'id="artifactPanelBody"' in index_html
-    assert 'import { attachArtifactHandlers, renderArtifact } from "./artifact_view.js";' in plan_js
-    assert 'function planOutputButtonHtml(step)' in plan_js
-    assert 'data-artifact="${escapeHtml(outputRef)}"' in plan_js
-    assert "attachArtifactHandlers(root, artifactPreviewContainer" in plan_js
-    assert "artifactRenderer(target, artifactRef)" in plan_js
-    assert "planRailController.installArtifactHandlers(document);" in app_js
-    assert ".artifact-panel {" in styles_css
-    assert ".artifact-panel-body" in styles_css
+    assert 'id="artifactPanel"' not in index_html
+    assert 'id="artifactPanelBody"' not in index_html
+    assert 'function planOutputButtonHtml(step)' not in plan_js
+    assert 'data-artifact="${escapeHtml(outputRef)}"' not in plan_js
+    assert "attachArtifactHandlers" not in plan_js
+    assert "artifactPreviewContainer" not in plan_js
+    assert "installArtifactHandlers" not in app_js
+
+
+def test_plan_workflow_status_drives_task_header_from_real_plan_state():
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    data = _run_node_capture_json(
+        "\n".join([
+            f"const {{ planWorkflowStatus }} = await import({json.dumps(module_url)});",
+            "const failed = planWorkflowStatus({ status: 'failed', steps: [{ title: '拼接诊断', status: 'failed', error: 'boom' }] });",
+            "const failedAwaitingRetry = planWorkflowStatus({ status: 'awaiting_confirm', steps: [",
+            "  { title: '调参', status: 'failed', error: 'resource limit' },",
+            "  { title: '训练模型', status: 'pending' },",
+            "] });",
+            "const waiting = planWorkflowStatus({ status: 'awaiting_confirm', steps: [{ title: '执行拼接', status: 'awaiting_confirm' }] });",
+            "const done = planWorkflowStatus({ status: 'done', steps: [] });",
+            "console.log(JSON.stringify({ failed, failedAwaitingRetry, waiting, done }));",
+        ])
+    )
+
+    assert data["failed"]["label"] == "失败"
+    assert data["failed"]["kind"] == "error"
+    assert "拼接诊断" in data["failed"]["detail"]
+    assert data["failedAwaitingRetry"]["label"] == "失败"
+    assert data["failedAwaitingRetry"]["kind"] == "error"
+    assert data["failedAwaitingRetry"]["tone"] == "danger"
+    assert "调参" in data["failedAwaitingRetry"]["detail"]
+    assert data["waiting"]["label"] == "待确认"
+    assert "执行拼接" in data["waiting"]["detail"]
+    assert data["done"]["label"] == "已完成"
+
+
+def test_failed_retry_confirmation_keeps_rail_failure_and_downstream_pending():
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    data = _run_node_capture_json(
+        "\n".join([
+            f"const {{ planRailPhaseRows, planWorkflowStatus }} = await import({json.dumps(module_url)});",
+            "const plan = { status: 'awaiting_confirm', steps: [",
+            "  { id: 'tune', index: 5, phase: '建模', title: '调参', status: 'failed' },",
+            "  { id: 'train', index: 6, phase: '建模', title: '训练模型', status: 'pending' },",
+            "] };",
+            "const snapshot = planWorkflowStatus(plan);",
+            "const rows = planRailPhaseRows(plan);",
+            "console.log(JSON.stringify({",
+            "  snapshot,",
+            "  parent: rows[0].checkerStatus,",
+            "  children: rows[0].steps.map((step) => step.status),",
+            "}));",
+        ])
+    )
+
+    assert data["snapshot"] == {
+        "label": "失败",
+        "message": "计划执行失败。",
+        "kind": "error",
+        "tone": "danger",
+        "detail": "失败步骤：调参。请在中间信息流中查看诊断与恢复方案。",
+    }
+    assert data["parent"] == "failed"
+    assert data["children"] == ["failed", "pending"]
+
+
+def test_waiting_confirmation_uses_matching_task_header_pill():
+    display = _task_display_status_for(
+        {"status": "scanned", "status_message": "等待你的确认。"},
+        action_message="等待你的确认。",
+        action_kind="info",
+    )
+
+    assert display["heroPill"] == {"label": "待确认", "tone": "review"}
 
 
 def test_report_editor_form_and_summary_are_removed_from_frontend():
@@ -3148,6 +3226,42 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     assert "background: var(--accent-soft)" in run_pill_rule
 
 
+def test_task_list_signature_tracks_plan_derived_status():
+    """A recovered driver plan must invalidate the sidebar's render guard.
+
+    Driver task rows display the plan-derived label/tone, while the task record
+    itself commonly remains ``created``.  The list signature therefore has to
+    change when only the cached plan state changes (failed -> running).
+    """
+    app_js = _read_static("app.js")
+    start = app_js.index("function taskListSignature")
+    end = app_js.index("function metricPreviewSignature", start)
+    signature_source = app_js[start:end]
+    script = "\n".join(
+        [
+            "function signatureFromParts(parts) { return JSON.stringify(parts); }",
+            "let taskSearchQuery = '';",
+            "let taskSortMode = 'created_desc';",
+            "let taskGroupMode = 'none';",
+            "let selectedTaskId = 'task-1';",
+            "let derivedLabel = '失败';",
+            "let derivedTone = 'danger';",
+            "function taskStatusLabel() { return derivedLabel; }",
+            "function taskStatusTone() { return derivedTone; }",
+            signature_source,
+            "const task = { id: 'task-1', name: '恢复任务', task_type: 'modeling', status: 'created', updated_at: '2026-07-19T00:00:00Z', active_job_kind: 'driver', validator: 'QA' };",
+            "const failed = taskListSignature([task], 1);",
+            "derivedLabel = '执行中';",
+            "derivedTone = 'run';",
+            "const running = taskListSignature([task], 1);",
+            "console.log(JSON.stringify({ failed, running }));",
+        ]
+    )
+
+    data = _run_node_capture_json(script)
+    assert data["failed"] != data["running"], data
+
+
 def test_task_list_selected_card_has_no_visible_border_or_outline():
     styles_css = _read_static("styles.css")
 
@@ -3712,8 +3826,17 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'data-recipe-family="binary"' in index_html
     # regression + multiclass target types are exposed too, so the UI can drive
     # §8.2/§8.3 tasks, not only binary
-    assert 'value="lgb_regressor"' in index_html
-    assert 'value="lgb_multiclass"' in index_html
+    for recipe in (
+        "lgb_regressor",
+        "xgb_regressor",
+        "lr_regressor",
+        "mlp_regressor",
+        "lgb_multiclass",
+        "xgb_multiclass",
+        "lr_multiclass",
+        "mlp_multiclass",
+    ):
+        assert f'value="{recipe}"' in index_html
     assert 'data-recipe-family="continuous"' in index_html
     assert 'data-recipe-family="multiclass"' in index_html
     assert 'id="modelSampleWeightPolicy"' in index_html
@@ -3722,7 +3845,8 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert "updateSampleWeightCreateState" in create_dialog_js
     assert "algorithmField: true" in task_types_js
     assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in create_dialog_js
-    assert 'payload.target_type = [...families][0] || "binary";' in create_dialog_js
+    assert "const targetType = modelTargetTypeForRecipes(payload.recipes);" in create_dialog_js
+    assert "payload.target_type = targetType;" in create_dialog_js
     assert 'const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";' in create_dialog_js
     assert "请填写样本权重列，或改选不使用样本权重。" in create_dialog_js
     assert "payload.sample_weight_col = sampleWeightCol;" in create_dialog_js
@@ -3730,6 +3854,36 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert "二分类、回归与多分类算法不能混选。" in create_dialog_js
     assert "请至少选择一个建模算法。" in create_dialog_js
     assert 'payload.algorithm = $("modelAlgorithm")' not in app_js
+
+
+def test_modeling_create_dialog_maps_every_non_lgb_recipe_to_payload_target_type():
+    module_url = (STATIC_DIR / "js" / "create-task-dialog.js").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+import {{ modelTargetTypeForRecipes }} from {json.dumps(module_url)};
+
+const expected = {{
+  xgb_regressor: "continuous",
+  lr_regressor: "continuous",
+  mlp_regressor: "continuous",
+  xgb_multiclass: "multiclass",
+  lr_multiclass: "multiclass",
+  mlp_multiclass: "multiclass",
+}};
+for (const [recipe, targetType] of Object.entries(expected)) {{
+  const payload = {{ recipes: [recipe] }};
+  payload.target_type = modelTargetTypeForRecipes(payload.recipes);
+  assert.equal(payload.target_type, targetType, recipe);
+}}
+assert.equal(modelTargetTypeForRecipes(["xgb_regressor", "lr_regressor"]), "continuous");
+assert.equal(modelTargetTypeForRecipes(["xgb_regressor", "xgb_multiclass"]), null);
+"""
+    subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_strategy_and_vintage_welcome_cards_are_enabled():
@@ -3857,22 +4011,32 @@ def test_acceptance_chip_relabels_auto_accept_per_task_type():
 
 
 def test_feature_create_dialog_has_optional_metric_selector():
-    """The feature-analysis create dialog exposes a manual-mode optional-metric
-    multi-select (spec §2: 选了才算), gated via the metricField flag and posted as
-    `payload.metrics`. VIF is the first wired optional metric; empty is valid."""
+    """Every feature metric is an explicit manual-mode choice (spec §2: 选了才算).
+
+    Only IV/KS/AUC/coverage default on; PSI/VIF/lift/importance remain opt-in and
+    meaning consistency clearly advertises its Agent + dictionary gate.
+    """
     index_html = _read_static("index.html")
     create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
 
     assert 'id="createTaskMetricField"' in index_html
     assert 'id="featureMetricChoices"' in index_html
-    assert 'name="featureMetric" value="vif"' in index_html
-    assert 'name="featureMetric" value="head_tail_lift"' in index_html
-    assert 'name="featureMetric" value="importance"' in index_html
-    # no optional metric is pre-checked (base metrics always compute, optional opt-in)
-    assert 'name="featureMetric" value="vif" checked' not in index_html
-    assert 'name="featureMetric" value="head_tail_lift" checked' not in index_html
-    assert 'name="featureMetric" value="importance" checked' not in index_html
+    for metric in ("iv", "ks", "auc", "coverage"):
+        assert f'name="featureMetric" value="{metric}" checked' in index_html
+    for metric in (
+        "psi_month_first",
+        "psi_month_last",
+        "psi_month_previous",
+        "psi_split",
+        "vif",
+        "head_tail_lift",
+        "importance",
+    ):
+        assert f'name="featureMetric" value="{metric}"' in index_html
+        assert f'name="featureMetric" value="{metric}" checked' not in index_html
+    assert 'name="featureMetric" value="meaning_consistency" disabled' in index_html
+    assert "input.checked = Boolean(input.defaultChecked)" in create_dialog_js
     assert "metricField: true" in task_types_js
     assert 'payload.metrics = [...document.querySelectorAll(\'input[name="featureMetric"]:checked\')].map((box) => box.value);' in create_dialog_js
 
@@ -6154,7 +6318,17 @@ def test_stopped_step_checker_has_no_stop_square_mark():
     assert "<rect" not in stopped_branch
 
 
-def test_current_status_error_detail_is_always_visible_and_turns_red_for_failures():
+def test_skipped_step_uses_dash_and_only_skipped_titles_are_struck_out():
+    step_checker_js = _read_static("js/step-checker.js")
+    styles_css = _read_static("styles.css")
+
+    assert '<span class="check-icon skipped" aria-hidden="true">' in step_checker_js
+    assert 'd="M3 8h10"' in step_checker_js
+    assert "text-decoration: line-through" in _css_rule(styles_css, ".step.skipped .step-title")
+    assert "text-decoration" not in _css_rule(styles_css, ".step.succeeded .step-title")
+
+
+def test_current_status_error_detail_is_compact_accessible_and_collapsible():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
@@ -6162,7 +6336,10 @@ def test_current_status_error_detail_is_always_visible_and_turns_red_for_failure
     assert 'id="actionErrorDetail"' in index_html
     assert 'class="action-error-detail"' in index_html
     assert "暂无报错" in index_html
-    assert 'id="actionErrorDetail"\n                  class="action-error-detail"' in index_html
+    hero_start = index_html.index('id="taskHero"')
+    details_start = index_html.index('id="taskHeroDetails"', hero_start)
+    details_end = index_html.index("</header>", details_start)
+    assert 'id="actionErrorDetail"' in index_html[details_start:details_end]
     assert 'role="alert"' not in index_html[index_html.index('id="actionErrorDetail"'):index_html.index('id="taskSnapshot"')]
     assert 'aria-live="assertive"' not in index_html[index_html.index('id="actionErrorDetail"'):index_html.index('id="taskSnapshot"')]
 
@@ -6177,8 +6354,35 @@ def test_current_status_error_detail_is_always_visible_and_turns_red_for_failure
     assert "setActionErrorDetail(describeActionStatus(message, kind, detail), kind)" in status_renderer
     assert "actionErrorDetail" in status_renderer
     describe_body = _slice_function(app_js, "function describeActionStatus")
-    assert 'if (detail && detail !== message) return `${message} · ${detail}`;' in describe_body
+    compact_body = _slice_function(app_js, "function compactActionStatusDetail")
+    assert "compactActionStatusDetail(detail)" in describe_body
     assert 'kind === "error"' not in describe_body
+
+    # The task hero owns only a concise first-line summary. The raw trace stays
+    # in the middle timeline/error card and cannot expand this sticky header.
+    long_detail = "No match for C0: " + "schema-field " * 80 + "\nsecond line"
+    script = "\n".join(
+        [
+            compact_body,
+            describe_body,
+            f"const raw = {json.dumps(long_detail)};",
+            "process.stdout.write(JSON.stringify({",
+            "  compact: compactActionStatusDetail(raw),",
+            "  described: describeActionStatus('任务执行失败。', 'error', raw),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    status_text = json.loads(result.stdout)
+    assert "second line" not in status_text["compact"]
+    assert len(status_text["compact"]) == 180
+    assert status_text["compact"].endswith("…")
+    assert status_text["described"].startswith("任务执行失败。 · No match for C0:")
 
     # failures are signalled by a red status pill, not a red box
     assert "function actionStatusPill" in app_js
@@ -6190,6 +6394,7 @@ def test_current_status_error_detail_is_always_visible_and_turns_red_for_failure
     detail_end = styles_css.index("}", detail_start)
     detail_rule = styles_css[detail_start:detail_end]
     assert "color: var(--text-secondary)" in detail_rule
+    assert "-webkit-line-clamp: 2" in detail_rule
     assert ".action-error-detail.error" in styles_css
 
 
@@ -6389,15 +6594,15 @@ def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     assert "run_mode: selectedRunMode" in create_dialog_js
 
     assert "function selectedTaskIsAgentMode" in app_js
-    # UX-2: the plain gate confirm button now renders in BOTH modes (it used to
-    # short-circuit on isAgentMode, forcing agent-mode gates with no structured
-    # widget through free-text routing only); it still steps aside whenever the
-    # gate carries a structured widget, since that widget owns the primary
-    # confirm action.
-    # UX-10: the button also resolves the gate step's own tool_ref (via
-    # planRailController.planStep) so its copy can state the consequence
-    # (确认并执行拼接/确认所选特征/...) instead of a bare "确认" for every gate.
-    assert "renderDriverGateButton(message, { gateStepTool: step?.tool_ref?.tool || \"\" })" in app_js
+    # Manual mode owns clickable gate actions. Agent mode owns the natural-
+    # language channel and must never render a second one-click continuation.
+    assert "agentGateUsesConversationOnly" in app_js
+    assert "stripGateButtonsHtml" in app_js
+    assert "data-gate-passive-control" in app_js
+    assert "(?![^>]*\\bdata-gate-passive-control\\b)" in app_js
+    plan_rail_js = _read_static("js/v2/plan_rail_controller.js")
+    assert "data-plan-retry-open" not in plan_rail_js
+    assert "if (isAgentMode?.())" in plan_rail_js
     assert 'if (message?.metadata?.kind !== "gate") return "";' in driver_confirm_js
     assert "if (gateHasStructuredWidget(message)) return" in driver_confirm_js
     assert "startAgentValidation" in app_js
@@ -8694,7 +8899,8 @@ def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     keydown_start = app_js.index('$("agentComposerInput").addEventListener("keydown"')
     keydown_end = app_js.index('$("agentComposerInput").addEventListener("input"', keydown_start)
     keydown_handler = app_js[keydown_start:keydown_end]
-    assert "if (agentSendIsStopMode()) return;" in keydown_handler
+    assert "agentComposerStopIntent" in keydown_handler
+    assert "stopAgentValidationByMessage" in keydown_handler
 
     assert '.agent-send[data-agent-send-state="stop"]' in styles_css
     assert ".agent-send-icon-stop" in styles_css
@@ -8709,6 +8915,32 @@ def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
         styles_css, 'body[data-theme="dark"] .agent-send[data-agent-send-state="stop"]:hover:not(:disabled)'
     )
     assert "background: var(--agent-send-stop-bg-hover)" in dark_stop_hover_rule
+
+
+def test_agent_running_composer_only_submits_explicit_stop_intent():
+    app_js = _read_static("app.js")
+    helper = _slice_function(app_js, "function agentComposerStopIntent")
+
+    script = "\n".join(
+        [
+            helper,
+            "process.stdout.write(JSON.stringify([",
+            "  agentComposerStopIntent('停止当前调参'),",
+            "  agentComposerStopIntent('cancel'),",
+            "  agentComposerStopIntent('不要停止'),",
+            "  agentComposerStopIntent('继续执行'),",
+            "  agentComposerStopIntent('为什么停止了？')",
+            "]));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == [True, True, False, False, False]
 
 
 def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status_is_mid_stage():
@@ -8786,7 +9018,7 @@ def test_agent_send_shows_thinking_message_before_network_wait():
 def test_agent_send_polls_streaming_messages_before_network_response_finishes():
     app_js = _read_static("app.js")
     module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
-    helpers_start = app_js.index("async function pollAgentMessagesUntilSettled")
+    helpers_start = app_js.index("function agentMessagePollSignature")
     helpers_end = app_js.index("async function startAgentValidation", helpers_start)
     message_helpers_start = app_js.index("function appendOptimisticAgentUserMessage")
     message_helpers_end = app_js.index("function renderAgentTimeline", message_helpers_start)
@@ -8796,6 +9028,10 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
         [
             f"import {{ agentMessageIsAdvanceIntent }} from {json.dumps(module_url)};",
             "const AGENT_STREAM_POLL_INTERVAL_MS = 1;",
+            "const AGENT_STREAM_POLL_IDLE_INTERVAL_MS = 2;",
+            "const AGENT_STREAM_POLL_LONG_INTERVAL_MS = 3;",
+            "const AGENT_STREAM_POLL_IDLE_AFTER_MS = 2;",
+            "const AGENT_STREAM_POLL_LONG_AFTER_MS = 5;",
             "let selectedTaskId = 'task-1';",
             "let selectedTask = { task_type: 'validation' };",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
@@ -9138,7 +9374,7 @@ def test_agent_assistant_messages_render_markdown_safely():
     assert "export function renderAgentMarkdown" in render_agent_js
     assert "export function renderMarkdownInline" in render_agent_js
     assert "export function renderMarkdownInlineText" in render_agent_js
-    assert 'formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" })' in app_js
+    assert 'formatAgentMessageContent(visibleContent, { markdown: role === "assistant" })' in app_js
     assert 'import { escapeHtml } from "./ui-utils.js";' in render_agent_js
     assert ".agent-markdown" in styles_css
     assert ".agent-markdown ul" in styles_css
@@ -9913,6 +10149,8 @@ def test_writing_artifacts_idle_shows_metrics_complete():
     script = "\n".join(
         [
             "let selectedTask = null;",
+            "function taskPlanWorkflowStatusSnapshot() { return null; }",
+            "function usesPmmlScoringWorkflow() { return false; }",
             stopped_body,
             snapshot_body,
             "const idle = taskActionStatusSnapshot({"
@@ -9985,6 +10223,7 @@ def test_writing_artifacts_status_tone_idle_vs_report_busy():
     script = "\n".join(
         [
             "let selectedTask = null;",
+            "function taskPlanWorkflowStatusSnapshot() { return null; }",
             stopped_body,
             tone_body,
             task_tone_body,
@@ -10625,10 +10864,12 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
 
     ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
     render_metrics_url = (STATIC_DIR / "js" / "render-metrics.js").as_uri()
+    workflow_widgets_url = (STATIC_DIR / "js" / "v2" / "workflow_widgets.js").as_uri()
 
     script = "\n".join(
         [
             f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            f"import {{ renderWorkflowDataWidget }} from {json.dumps(workflow_widgets_url)};",
             "import {"
             " columnFractions, parseNumeric, psiTier, psiTooltipText,"
             f" }} from {json.dumps(render_metrics_url)};",
@@ -10695,94 +10936,33 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
 
 
 
-def test_driver_gate_card_renders_distinct_shell_with_redflags_and_consequence():
-    """VD-2: needs_confirmation gate messages must render as a distinct "gate
-    card" (tone bar + header pill + red-flag checklist + consequence line)
-    rather than an ordinary chat bubble with one extra button. Red flags are
-    read from the backend's already-emitted "\u26a0\ufe0f" markers in both the
-    message text and inline-table cells (no new backend data — INV-1).
-    """
+def test_agent_gate_reply_is_not_wrapped_in_a_large_coloured_card():
+    """Agent prose stays conversational; only nested functional widgets own cards."""
     app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+    start = app_js.index("function agentMessageHtml(")
+    end = app_js.index("\n}\n\nfunction agentThinkingHtml", start)
+    message_renderer = app_js[start:end]
 
-    def slice_fn(signature: str) -> str:
-        start = app_js.index(signature)
-        end = app_js.index("\n}", start)
-        return app_js[start : end + 2]
-
-    src = "\n\n".join(
-        [
-            slice_fn("function shieldGateIconHtml"),
-            slice_fn("function driverGateRedFlags(message)"),
-            slice_fn("function driverGateRedFlagsHtml"),
-            slice_fn("function driverGateConsequenceHtml"),
-            slice_fn("function driverGateCardHeaderHtml"),
-            slice_fn("function driverGateCardHtml"),
-            slice_fn("function agentMessagePlanStep"),
-        ]
-    )
-
-    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
-
-    script = "\n".join(
-        [
-            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
-            "const planRailController = {",
-            "  planStep: (metadata) => (metadata.step_id === 's2'"
-            " ? { id: 's2', title: '拼接执行' } : null),",
-            "  nextStepAfter: (metadata) => (metadata.step_id === 's2'"
-            " ? { id: 's3', title: '训练模型' } : null),",
-            "};",
-            "const selectedTaskId = 'task-A';",
-            src,
-            "const withFlags = {",
-            "  content: '**拼接诊断完成**。\\n\\n⚠️ 检测到**同键值冲突**,请先确认去重策略。',",
-            "  metadata: {",
-            "    kind: 'gate',",
-            "    step_id: 's2',",
-            "    tables: [{ title: '拼接诊断', columns: ['特征表', '膨胀'],"
-            " rows: [['bureau.parquet', '⚠️是']] }],",
-            "  },",
-            "};",
-            "const bodyHtml = '<div class=\"agent-message-content\">body</div>';",
-            "const withFlagsHtml = driverGateCardHtml(withFlags, bodyHtml);",
-            "const cleanHtml = driverGateCardHtml("
-            " { content: '上一步已完成。', metadata: { kind: 'gate', step_id: 's2' } },"
-            " bodyHtml,",
-            ");",
-            "process.stdout.write(JSON.stringify({ withFlagsHtml, cleanHtml }));",
-        ]
-    )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    payload = json.loads(result.stdout)
-    with_flags_html = payload["withFlagsHtml"]
-    clean_html = payload["cleanHtml"]
-
-    # Distinct card shell, not a plain chat bubble.
-    assert 'class="gate-card"' in with_flags_html
-    assert 'data-gate-tone="warn"' in with_flags_html
-    # Header pill + step title, so the gate is locatable at a glance.
-    assert "⏸ 等待确认" in with_flags_html
-    assert "待确认：拼接执行" in with_flags_html
-    # Red-flag checklist section rendered from the "⚠️" markers already in the
-    # message text and table cells.
-    assert "gate-card-redflags" in with_flags_html
-    assert "gate-card-redflags-list" in with_flags_html
-    # Consequence line names the next plan step from plan-rail topology.
-    assert "确认后将执行：训练模型" in with_flags_html
-    # The original message content still renders nested inside the card.
-    assert "agent-message-content" in with_flags_html
-
-    # No red flags in the message/tables -> review tone, no redflags section.
-    assert 'data-gate-tone="review"' in clean_html
-    assert "gate-card-redflags" not in clean_html
+    assert "driverGateCardHtml" not in message_renderer
+    assert "bodyHtml," in message_renderer
+    assert 'class="gate-card"' not in app_js
+    assert ".gate-card {" not in styles_css
 
 
-def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
+def test_retry_controls_follow_the_conversation_in_chronological_order():
+    """Live recovery controls must not mount above the full message history."""
+    app_js = _read_static("app.js")
+    start = app_js.index("function agentPersistentTimelineElementIds()")
+    end = app_js.index("\n}\n\nfunction restoreResultScrollDefaultOrder", start)
+    body = app_js[start:end]
+
+    assert '"planRetryPanel"' in body
+    assert '"planDriverActions"' in body
+    assert body.index('"agentConversationPanel"') < body.index('"planRetryPanel"')
+
+
+def test_agent_mode_gate_mounts_readonly_evidence_without_action_buttons():
     """UX-2: the agent-mode chat timeline must mount the SAME structured gate
     widgets manual mode uses (screening table / dedup picker / modeling setup
     panel / C1 role form) instead of a bare text bubble + confirm button.
@@ -10790,10 +10970,8 @@ def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
     This drives the real agentMessageHtml() (via the full app.js module, same
     harness as the reproducibility tests) so the assertions exercise actual
     production wiring, not a hand-rolled stand-in. Three things are pinned:
-    1. The latest gate's widget renders WITH interactive controls (checkboxes /
-       selects not disabled), using the exact same class names/attributes the
-       manual-mode screen table renders (screen_gate_controller.js authors
-       them; this just confirms agent mode reaches the same renderer).
+    1. The latest gate reuses the same evidence widget but renders it read-only,
+       because Agent mode continues exclusively through natural language.
     2. An OLDER (non-latest) gate message's widget renders read-only
        (disabled inputs, data-screen-readonly="true") — the stale-gate guard.
     3. The free-text composer contract is untouched: agentMessageHtml keeps
@@ -10820,7 +10998,7 @@ def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
             "id": "latest-screen",
             "role": "assistant",
             "stage": "chat",
-            "content": "阈值调整后重新筛选完成。",
+                "content": "阈值调整后重新筛选完成。确认请回复「确认」继续；可直接操作下方控件，或用文字说明要调整的参数。",
             "metadata": {
                 "kind": "gate",
                 "step_id": "gate-new",
@@ -10832,8 +11010,8 @@ def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
     test_driver = "\n".join(
         [
             f"const messages = {json.dumps(messages)};",
-            "const oldHtml = agentMessageHtml(messages[0], 'chat', { isLatestGate: false });",
-            "const latestHtml = agentMessageHtml(messages[1], 'chat', { isLatestGate: true });",
+            "const oldHtml = agentMessageHtml(messages[0], 'chat', { isLatestGate: false, conversationOnly: true });",
+            "const latestHtml = agentMessageHtml(messages[1], 'chat', { isLatestGate: true, conversationOnly: true });",
             "process.stdout.write(JSON.stringify({ oldHtml, latestHtml }));",
         ]
     )
@@ -10848,6 +11026,8 @@ def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
     assert 'class="screen-table-wrap"' in latest_html
     assert 'class="screen-pick"' in old_html
     assert 'class="screen-pick"' in latest_html
+    assert 'class="gate-card"' not in old_html
+    assert 'class="gate-card"' not in latest_html
 
     # The free-text bubble is still rendered alongside the widget in both
     # cases — agent mode's free-text channel is not replaced by the widget.
@@ -10855,15 +11035,18 @@ def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
     assert "agent-message-content" in latest_html
     assert "第一次筛选完成" in old_html
     assert "阈值调整后重新筛选完成" in latest_html
+    assert "可直接操作下方控件" not in latest_html
+    assert "Agent 模式请回复" in latest_html
 
-    # Stale guard: only the LATEST gate is interactive; the older gate's
-    # widget renders as a disabled, read-only snapshot.
+    # Both historical and latest Agent-mode gates are evidence-only. The latest
+    # one advances through the composer, never through a second UI action path.
     assert 'data-screen-readonly="true"' in old_html
-    assert 'data-screen-readonly="true"' not in latest_html
+    assert 'data-screen-readonly="true"' in latest_html
     assert old_html.count(" disabled") > 0
     assert 'data-screen-step-id="gate-new"' in latest_html
-    assert "screen-confirm" in latest_html
-    assert "历史结果" in old_html
+    assert "screen-confirm" not in latest_html
+    assert "<button" not in latest_html
+    assert "历史筛选结果" in old_html
 
     # Gates with a structured widget do NOT also render the plain
     # driver-gate-actions confirm button (the widget owns the primary action).
@@ -10871,11 +11054,10 @@ def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
     assert "driver-gate-actions" not in latest_html
 
 
-def test_agent_mode_gate_without_widget_still_renders_plain_confirm_button():
+def test_agent_mode_plain_gate_uses_natural_language_without_confirm_button():
     """UX-2: a gate message with no structured payload (no screen/dedup/
     modeling_setup/join_c1 — e.g. a plain "上一步已完成，确认继续" step) must
-    still offer SOME one-click affordance in agent mode, not force free text
-    for what used to be the isAgentMode early-return case.
+    use the conversation channel and never offer a parallel click path.
     """
     app_js = _read_static("app.js")
     boot_marker = 'document.addEventListener(\n  "mousedown"'
@@ -10885,22 +11067,43 @@ def test_agent_mode_gate_without_widget_still_renders_plain_confirm_button():
         "id": "plain-gate",
         "role": "assistant",
         "stage": "chat",
-        "content": "上一步已完成。",
+        "content": "上一步已完成。请回复「继续」或说明需要调整的内容。",
         "metadata": {"kind": "gate", "step_id": "gate-plain"},
     }
     test_driver = "\n".join(
         [
             f"const message = {json.dumps(message)};",
-            "const html = agentMessageHtml(message, 'chat', { isLatestGate: true });",
+            "const html = agentMessageHtml(message, 'chat', { isLatestGate: true, conversationOnly: true });",
             "process.stdout.write(JSON.stringify({ html }));",
         ]
     )
     script = _BROWSER_STUBS + "\n" + app_js + "\n" + test_driver
     html = _run_node_capture_json(script)["html"]
 
-    assert "driver-gate-actions" in html
-    assert 'data-driver-confirm="1"' in html
-    assert 'data-expected-step-id="gate-plain"' in html
+    assert "driver-gate-actions" not in html
+    assert 'data-driver-confirm="1"' not in html
+    assert "回复" in html
+    assert "继续" in html
+
+
+def test_manual_mode_gate_strips_chat_instruction_and_keeps_button():
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_manual_analysis.js").as_uri()
+    script = "\n".join(
+        [
+            f'import {{ driverManualAnalysisHtml }} from {json.dumps(module_url)};',
+            "const message = { id: 'm1', role: 'assistant', content: '结果已生成。\\n\\nAgent 模式请回复「继续」或「确认」；如需调整，直接用自然语言说明。', metadata: { kind: 'gate', step_id: 's1' } };",
+            "const html = driverManualAnalysisHtml([message], { renderAgentMarkdown: (x) => x, renderGateConfirm: () => '<button>确认并继续</button>' });",
+            "process.stdout.write(html);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Agent 模式请回复" not in result.stdout
+    assert "确认并继续" in result.stdout
 
 
 def test_agent_mode_widget_submit_payload_matches_manual_mode_controller():
@@ -11053,25 +11256,18 @@ def test_plan_rail_shows_skeleton_only_on_genuine_first_load():
     assert "计划生成中" in payload["secondHtml"]
 
 
-def test_artifact_panel_loading_state_uses_table_skeleton():
-    """VD-3: the gate-table artifact preview's loading placeholder (shown
-    while a JOIN diagnostics / feature metrics / model compare table fetches)
-    must be a table skeleton, not the old plain-text "正在加载输出..." string.
-    """
+def test_right_rail_has_no_artifact_panel_loading_state():
     plan_js = _read_static("js/v2/plan_rail_controller.js")
 
     assert "正在加载输出..." not in plan_js
-    assert "skeletonTableHtml" in plan_js
-    assert 'data-skeleton="artifact"' in plan_js
+    assert "skeletonTableHtml" not in plan_js
+    assert 'data-skeleton="artifact"' not in plan_js
 
 
 
-def test_plan_rail_renders_replan_badge_loop_events_and_subagent_rows():
-    """UX-5: replan/no_progress/sub_agents were fully persisted in the plan
-    payload but the plan rail rendered none of it — verify the rail now shows
-    a "已重规划 N 次" badge, the last-3 loop_events (with an intervene button
-    on no_progress rows), and a "子任务运行中" badge for active sub-agents.
-    """
+def test_plan_rail_omits_replan_events_and_subagent_rows():
+    """The non-validation rail is steps only, even when the plan payload also
+    carries replan history and active sub-agent metadata."""
     module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
     script = "\n".join(
         [
@@ -11122,27 +11318,21 @@ def test_plan_rail_renders_replan_badge_loop_events_and_subagent_rows():
     )
     html = result.stdout
 
-    assert "已重规划 2 次" in html
-    assert "已重规划：步骤执行失败" in html
-    assert "暂无进展：步骤执行失败" in html
-    assert 'data-plan-rail-intervene="1"' in html
-    assert "发消息介入" in html
-    assert "子任务运行中" in html
-    assert "feature &lt;scan&gt;" in html
-    # returned sub-agent is not "active" — only running/spawned rows render.
+    assert "Propose join" in html
+    assert "已重规划" not in html
+    assert "暂无进展" not in html
+    assert "发消息介入" not in html
+    assert "子任务运行中" not in html
+    assert "feature &lt;scan&gt;" not in html
     assert "done scope" not in html
 
 
-def test_plan_rail_omits_event_chrome_when_plan_has_no_events():
-    """UX-5: the common uneventful plan (no replans, no active sub-agents)
-    must not grow any of the new chrome — quiet by default per the review's
-    "克制不喧宾" instruction.
-    """
+def test_plan_rail_has_no_event_chrome_implementation():
     plan_js = _read_static("js/v2/plan_rail_controller.js")
 
-    assert "function loopEventStripHtml(plan)" in plan_js
-    assert "function replanBadgeHtml(plan)" in plan_js
-    assert "function subAgentRowsHtml(plan)" in plan_js
+    assert "function loopEventStripHtml(plan)" not in plan_js
+    assert "function replanBadgeHtml(plan)" not in plan_js
+    assert "function subAgentRowsHtml(plan)" not in plan_js
 
 
 def test_plan_rail_shows_waiting_for_confirmation_not_generating():
@@ -11267,6 +11457,29 @@ def test_gate_confirm_button_states_consequence_by_tool():
     assert ">确认<" in payload["genericHtml"]
 
 
+def test_structured_confirmation_buttons_submit_ui_action_and_share_action_bar():
+    driver_gate_js = _read_static("js/v2/driver_gate_confirm.js")
+    join_gate_js = _read_static("js/v2/join_gate_controller.js")
+    screen_gate_js = _read_static("js/v2/screen_gate_controller.js")
+    modeling_setup_js = _read_static("js/v2/modeling_setup_panel.js")
+    adoption_gate_js = _read_static("js/v2/adoption_gate_controller.js")
+    workbench_css = _read_static("css/v2-workbench.css")
+
+    for source in (driver_gate_js, join_gate_js, screen_gate_js, modeling_setup_js, adoption_gate_js):
+        assert "ui_action" in source
+    for source in (driver_gate_js, join_gate_js, screen_gate_js, modeling_setup_js, adoption_gate_js):
+        assert "gate-action-bar" in source
+    assert ".gate-action-bar" in workbench_css
+
+
+def test_completed_dataset_download_is_rendered_in_center_message_stream():
+    app_js = _read_static("app.js")
+
+    assert "function agentMessageResultDatasetHtml" in app_js
+    assert "data-result-dataset-download" in app_js
+    assert "下载拼接结果" in app_js
+
+
 def test_strategy_create_dialog_captures_governed_business_input():
     """Phase 0A: strategy development must not invent an operating objective."""
     index_html = _read_static("index.html")
@@ -11330,9 +11543,10 @@ def test_adoption_gate_requires_reason_and_submits_gate_bound_payload():
     assert "填写理由并采纳" in payload["html"]
     assert payload["calls"] == [[
         "/api/tasks/task-1/agent/messages",
-        {
-            "content": "确认采纳",
-            "adjust_params": {"adoption_reason": "委员会批准 Q3 本地采纳"},
+            {
+                "content": "确认采纳",
+                "ui_action": "confirm_adoption",
+                "adjust_params": {"adoption_reason": "委员会批准 Q3 本地采纳"},
             "expected_step_id": "adopt-step",
         },
     ]]
@@ -11597,14 +11811,14 @@ def test_strategy_clarification_uses_one_renderer_in_agent_and_manual_modes():
 
 def test_all_rail_interactions_move_to_middle_workspace():
     """所有交互（确认/开始执行/下载报告）都在中间主区进行，右侧 rail 只保留
-    状态徽标 + 轻量定位入口。
+    状态与进度，不再提供会把页面拉回顶部的定位入口。
 
     - 开始执行 (plan validated, manual mode) and 下载报告 (a report step done)
       render as real buttons in the MIDDLE #planDriverActions panel, driven by
       the same document-level handlers (data-driver-confirm /
       data-driver-report-download).
-    - The rail's start slot and report step row carry NO such button — only a
-      status line + a lightweight locate entry (data-plan-*-locate).
+    - The rail's start slot and report step row carry NO such button and NO
+      data-plan-*-locate control.
     """
     plan_js = _read_static("js/v2/plan_rail_controller.js")
     driver_analysis_js = _read_static("js/v2/driver_manual_analysis.js")
@@ -11628,19 +11842,19 @@ def test_all_rail_interactions_move_to_middle_workspace():
                     return source[start : i + 1]
         return source[start:]
 
-    # The rail never emits an interactive confirm/download button anymore — its
-    # HTML builders only carry status badges + locate entries. (The middle
+    # The rail never emits an interactive confirm/download button or text badge.
+    # The middle
     # planDriverActionsHtml / planRetryCardHtml own the real buttons; the plain
     # gate confirm is rendered by driverManualAnalysisHtml via renderGateConfirm.)
     rail_html_builders = "".join(
         _nested(plan_js, sig)
-        for sig in ("function planSubstepHtml", "function planRailHtml", "function reconcilePlanRail")
+        for sig in ("function planSubstepHtml", "function planPhaseHtml", "function planRailHtml", "function reconcilePlanRail")
     )
     assert "data-driver-confirm" not in rail_html_builders
     assert "data-driver-report-download" not in rail_html_builders
-    assert 'data-plan-gate-locate="${escapeHtml(stepId)}"' in rail_html_builders
-    assert 'data-plan-start-locate="1"' in rail_html_builders
-    assert 'data-plan-report-locate="1"' in rail_html_builders
+    assert "data-plan-gate-locate" not in rail_html_builders
+    assert "data-plan-start-locate" not in rail_html_builders
+    assert "data-plan-report-locate" not in rail_html_builders
 
     # The middle driver-actions panel owns the real buttons.
     actions_body = _nested(plan_js, "function planDriverActionsHtml")
@@ -11673,9 +11887,10 @@ def test_all_rail_interactions_move_to_middle_workspace():
             "const elements = { progressRail: { setAttribute() {} }, workflowStepper, planDriverActions };",
             "function $(id) { return elements[id] || null; }",
             "let plan;",
+            "let messages = [];",
             "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
             "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
-            "const controller = createPlanRailController({ $, getSelectedTask: () => ({ task_type: 'modeling' }), getSelectedTaskId: () => 'task-A', getAgentMessages: () => [], isAgentMode: () => false, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "const controller = createPlanRailController({ $, getSelectedTask: () => ({ task_type: 'modeling' }), getSelectedTaskId: () => 'task-A', getAgentMessages: () => messages, isAgentMode: () => false, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
             "const rs = {};",
             "// Plan built but not started -> middle panel shows 开始执行.",
             "plan = { id: 'plan-1', status: 'validated', steps: [",
@@ -11701,6 +11916,12 @@ def test_all_rail_interactions_move_to_middle_workspace():
             "const dlBtn = planDriverActions.querySelector('.plan-step-download');",
             "const railDlBtn = workflowStepper.querySelector('.plan-step-download');",
             "const railReady = workflowStepper.querySelector('.plan-step-ready');",
+            "// The completion message owns the primary report card. Once it is",
+            "// present, the generic plan action must disappear instead of showing",
+            "// a second download entry for the same file.",
+            "messages = [{ role: 'assistant', metadata: { report_download: { download_url: '/api/tasks/task-A/driver-report/download' } } }];",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const duplicateDlBtn = planDriverActions.querySelector('.plan-step-download');",
             "process.stdout.write(JSON.stringify({",
             "  startPanelConfirm: startBtn ? (startBtn.dataset.driverConfirm || '') : null,",
             "  startPanelLabel: startBtn ? startBtn.textContent : '',",
@@ -11711,6 +11932,7 @@ def test_all_rail_interactions_move_to_middle_workspace():
             "  railHasDownloadBtn: railDlBtn != null,",
             "  railHasReadyBadge: railReady != null,",
             "  railReadyText: railReady ? railReady.textContent : '',",
+            "  duplicateReportDownload: duplicateDlBtn != null,",
             "}));",
         ]
     )
@@ -11722,12 +11944,13 @@ def test_all_rail_interactions_move_to_middle_workspace():
     assert data["reportPanelDownload"] == "1", data
     assert "下载报告" in data["reportPanelLabel"]
 
-    # Rail: only status + locate, never an interactive confirm/download button.
+    # Rail: status only, never an interactive or locate button.
     assert data["railHasConfirm"] is False, data
-    assert data["railHasLocate"] is True, data
+    assert data["railHasLocate"] is False, data
     assert data["railHasDownloadBtn"] is False, data
-    assert data["railHasReadyBadge"] is True, data
-    assert "报告已就绪" in data["railReadyText"]
+    assert data["railHasReadyBadge"] is False, data
+    assert data["railReadyText"] == "", data
+    assert data["duplicateReportDownload"] is False, data
 
 
 def test_acceptance_mode_chip_explains_auto_mode_scope():
@@ -11918,6 +12141,26 @@ def test_score_band_chart_renders_nothing_for_empty_bands():
     assert 'class="score-band-bar"' not in html
 
 
+def test_driver_wide_tables_keep_a_local_horizontal_scroll_viewport():
+    """A wide driver table must shrink with the middle timeline and scroll
+    inside its own wrapper instead of expanding the message and being clipped
+    by result-scroll-content's intentional x-axis boundary."""
+    styles_css = _read_static("styles.css")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    assistant_rule = _css_rule(styles_css, ".agent-message.assistant")
+    content_rule = _css_rule(styles_css, ".agent-message.assistant .agent-message-content")
+    tables_rule = _css_rule(v2_css, ".agent-message-tables")
+    inline_rule = _css_rule(v2_css, ".agent-inline-table")
+    scroll_rule = _css_rule(v2_css, ".agent-inline-table-scroll")
+
+    for rule in (assistant_rule, content_rule, tables_rule, inline_rule, scroll_rule):
+        assert "min-width: 0" in rule
+        assert "width: 100%" in rule
+    assert "overflow-x: auto" in scroll_rule
+    assert ".agent-inline-table-scroll::-webkit-scrollbar" in styles_css
+
+
 def test_driver_table_chart_html_mounts_above_table_and_skips_when_absent():
     """Mounting-point contract: driverTableChartHtml must be called with
     table.chart and its output placed before the table markup (chart is an
@@ -11927,7 +12170,8 @@ def test_driver_table_chart_html_mounts_above_table_and_skips_when_absent():
     app_js = _read_static("app.js")
     metric_tables_js = _read_static("js/metric-tables.js")
     tables_fn = _slice_function(app_js, "function agentMessageTablesHtml")
-    chart_before_table = tables_fn.index("chartHtml") < tables_fn.index("agent-inline-table-scroll")
+    widget_call = tables_fn[tables_fn.index("renderWorkflowDataWidget"):]
+    chart_before_table = widget_call.index("chartHtml,") < widget_call.index("tableHtml:")
     assert chart_before_table
 
     kind_body = _slice_function(app_js, "function driverColumnKindFromHeader")
@@ -11940,10 +12184,12 @@ def test_driver_table_chart_html_mounts_above_table_and_skips_when_absent():
 
     ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
     render_metrics_url = (STATIC_DIR / "js" / "render-metrics.js").as_uri()
+    workflow_widgets_url = (STATIC_DIR / "js" / "v2" / "workflow_widgets.js").as_uri()
 
     script = "\n".join(
         [
             f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            f"import {{ renderWorkflowDataWidget }} from {json.dumps(workflow_widgets_url)};",
             "import {"
             " columnFractions, parseNumeric, psiTier, psiTooltipText,"
             f" }} from {json.dumps(render_metrics_url)};",
@@ -12224,11 +12470,7 @@ process.stdout.write(JSON.stringify({
     assert data["shellStillAttached"] is True, data
 
 
-def test_plan_rail_reconciliation_preserves_hovered_step_node_across_poll_ticks():
-    """The plan-rail stepper keys phases by name and substeps by step id. Across
-    two renders of the same plan (only a running substep advances) the phase
-    card, its substeps section, and each substep node object must be preserved
-    (hover survives), while the advancing substep's content updates in place."""
+def test_plan_rail_reconciliation_preserves_parent_and_subtask_nodes_across_poll_ticks():
     module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
     script = _MINI_DOM_JS + "\n" + "\n".join(
         [
@@ -12251,10 +12493,9 @@ def test_plan_rail_reconciliation_preserves_hovered_step_node_across_poll_ticks(
             "controller.render({ force: true, renderSignatures: rs });",
             "await new Promise((r) => setTimeout(r, 20));",
             "controller.render({ force: true, renderSignatures: rs });",
-            "const phaseA = workflowStepper.querySelectorAll(':scope > .plan-rail-step')[0];",
-            "const sectionA = phaseA.querySelector(':scope > .plan-rail-substeps');",
-            "const substepsA = sectionA.querySelectorAll(':scope > .notebook-step');",
-            "const s2NodeA = substepsA[1];",
+            "const phasesA = workflowStepper.querySelectorAll(':scope > .plan-rail-step');",
+            "const sectionA = phasesA[0].querySelector(':scope > .plan-rail-substeps');",
+            "const s2NodeA = sectionA.querySelectorAll(':scope > .notebook-step')[1];",
             "const s2ClassA = s2NodeA.className;",
             "// Advance the plan: s2 running -> done. Clear the fetch throttle and",
             "// await the fetch so the new plan actually lands in the controller cache.",
@@ -12263,16 +12504,14 @@ def test_plan_rail_reconciliation_preserves_hovered_step_node_across_poll_ticks(
             "controller.render({ force: true, renderSignatures: rs });",
             "await new Promise((r) => setTimeout(r, 20));",
             "controller.render({ force: true, renderSignatures: rs });",
-            "const phaseB = workflowStepper.querySelectorAll(':scope > .plan-rail-step')[0];",
-            "const sectionB = phaseB.querySelector(':scope > .plan-rail-substeps');",
-            "const substepsB = sectionB.querySelectorAll(':scope > .notebook-step');",
-            "const s2NodeB = substepsB[1];",
+            "const phasesB = workflowStepper.querySelectorAll(':scope > .plan-rail-step');",
+            "const sectionB = phasesB[0].querySelector(':scope > .plan-rail-substeps');",
+            "const s2NodeB = sectionB.querySelectorAll(':scope > .notebook-step')[1];",
             "process.stdout.write(JSON.stringify({",
-            "  phaseCount: workflowStepper.querySelectorAll(':scope > .plan-rail-step').length,",
-            "  samePhaseNode: phaseA === phaseB,",
-            "  sameSectionNode: sectionA === sectionB,",
-            "  sameSubstepNode: s2NodeA === s2NodeB,",
-            "  substepStillAttached: s2NodeB.parentNode === sectionB,",
+            "  phaseCount: phasesB.length,",
+            "  samePhaseNode: phasesA[0] === phasesB[0],",
+            "  sameStepNode: s2NodeA === s2NodeB,",
+            "  stepStillAttached: s2NodeB.parentNode === sectionB,",
             "  classBefore: s2ClassA,",
             "  classAfter: s2NodeB.className,",
             "  contentAdvancedInPlace: s2ClassA !== s2NodeB.className,",
@@ -12282,15 +12521,93 @@ def test_plan_rail_reconciliation_preserves_hovered_step_node_across_poll_ticks(
 
     data = _run_node_capture_json(script)
     assert data["phaseCount"] == 2, data
-    # Hover targets preserved across the tick.
     assert data["samePhaseNode"] is True, data
-    assert data["sameSectionNode"] is True, data
-    assert data["sameSubstepNode"] is True, data
-    assert data["substepStillAttached"] is True, data
-    # ...and the advancing substep's content actually changed in place.
+    assert data["sameStepNode"] is True, data
+    assert data["stepStillAttached"] is True, data
     assert data["classBefore"] == "notebook-step running", data
     assert data["classAfter"] == "notebook-step succeeded", data
     assert data["contentAdvancedInPlace"] is True, data
+
+
+def test_agent_answer_busy_does_not_promote_a_plan_step_to_running():
+    """A normal Agent question/diagnosis is generation work, not plan execution.
+
+    The generic local ``agent`` busy flag and even the server's generic
+    ``active_job_kind=driver`` lock cover both kinds of turn, so neither may
+    fabricate a running step while the authoritative plan is still pending.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = _MINI_DOM_JS + "\n" + "\n".join(
+        [
+            f"const {{ createPlanRailController }} = await import({json.dumps(module_url)});",
+            "const __doc = makeDocument();",
+            "const workflowStepper = __doc.createElement('div');",
+            "const elements = { progressRail: { setAttribute() {} }, workflowStepper };",
+            "function $(id) { return elements[id] || null; }",
+            "const plan = { id: 'plan-1', status: 'validated', steps: [",
+            "  { id: 's1', index: 0, phase: '数据准备', title: '拼接诊断', status: 'pending', tool_ref: { plugin: 'data_ops', tool: 'propose_join' }, depends_on: [] },",
+            "  { id: 's2', index: 1, phase: '数据准备', title: '确认拼接', status: 'pending', tool_ref: { plugin: 'data_ops', tool: 'confirm_join' }, depends_on: ['s1'] },",
+            "  { id: 's3', index: 2, phase: '特征分析', title: '特征指标', status: 'pending', tool_ref: { plugin: 'modeling', tool: 'screen_features' }, depends_on: ['s2'] },",
+            "] };",
+            "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({ $, stepCheckerHtml: (s) => `<i class=\"check-icon ${s}\"></i>`, getSelectedTask: () => ({ task_type: 'feature_analysis', active_job_kind: 'driver' }), getTaskBusyAction: () => 'agent', getSelectedTaskId: () => 'task-A', getAgentMessages: () => [], isAgentMode: () => true, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "const rs = {};",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const steps = workflowStepper.querySelectorAll(':scope > .plan-rail-step');",
+            "process.stdout.write(JSON.stringify({",
+            "  stepClasses: Array.from(steps).map((node) => node.className),",
+            "  runningIcons: Array.from(workflowStepper.querySelectorAll('.check-icon')).filter((node) => node.className.includes('running')).length,",
+            "}));",
+        ]
+    )
+    data = _run_node_capture_json(script)
+    assert data["stepClasses"] == [
+        "step plan-rail-step pending",
+        "step plan-rail-step pending",
+    ], data
+    assert data["runningIcons"] == 0, data
+
+
+def test_explicit_driver_execute_promotes_only_the_current_plan_step():
+    """A structured execute/confirm/retry action owns a distinct local hint, so
+    it can provide immediate progress feedback before the next plan poll lands."""
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = _MINI_DOM_JS + "\n" + "\n".join(
+        [
+            f"const {{ createPlanRailController }} = await import({json.dumps(module_url)});",
+            "const __doc = makeDocument();",
+            "const workflowStepper = __doc.createElement('div');",
+            "const elements = { progressRail: { setAttribute() {} }, workflowStepper };",
+            "function $(id) { return elements[id] || null; }",
+            "const plan = { id: 'plan-1', status: 'awaiting_confirm', steps: [",
+            "  { id: 's1', index: 0, phase: '数据准备', title: '拼接诊断', status: 'done', tool_ref: { plugin: 'data_ops', tool: 'propose_join' }, depends_on: [] },",
+            "  { id: 's2', index: 1, phase: '数据准备', title: '确认拼接', status: 'awaiting_confirm', tool_ref: { plugin: 'data_ops', tool: 'confirm_join' }, depends_on: ['s1'] },",
+            "  { id: 's3', index: 2, phase: '特征分析', title: '特征指标', status: 'pending', tool_ref: { plugin: 'modeling', tool: 'screen_features' }, depends_on: ['s2'] },",
+            "] };",
+            "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({ $, stepCheckerHtml: (s) => `<i class=\"check-icon ${s}\"></i>`, getSelectedTask: () => ({ task_type: 'feature_analysis', active_job_kind: null }), getTaskBusyAction: () => 'driver_execute', getSelectedTaskId: () => 'task-A', getAgentMessages: () => [], isAgentMode: () => false, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "const rs = {};",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const steps = workflowStepper.querySelectorAll(':scope > .plan-rail-step');",
+            "process.stdout.write(JSON.stringify({",
+            "  stepClasses: Array.from(steps).map((node) => node.className),",
+            "  runningIcons: Array.from(workflowStepper.querySelectorAll('.check-icon')).filter((node) => node.className.includes('running')).length,",
+            "}));",
+        ]
+    )
+    data = _run_node_capture_json(script)
+    assert data["stepClasses"] == [
+        "step plan-rail-step running",
+        "step plan-rail-step pending",
+    ], data
+    # One running parent checker plus one running current-subtask checker.
+    assert data["runningIcons"] == 2, data
 
 
 def test_task_hero_click_collapses_to_title_and_status_only():
@@ -12300,8 +12617,8 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
 
-    # DOM: the current status detail is outside the collapsible wrapper, so the
-    # operator can still see progress or errors while subtitle/meta are folded.
+    # DOM: every detail below the title/status row is inside the collapsible
+    # wrapper, including failure text, so a large error can never defeat collapse.
     hero_start = index_html.index('id="taskHero"')
     hero_markup = index_html[hero_start:index_html.index("</header>", hero_start)]
     assert 'class="task-hero-top-right"' in hero_markup
@@ -12313,20 +12630,19 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     assert 'class="task-hero-details-inner"' in hero_markup
     # The always-visible title row precedes the collapsible details.
     assert hero_markup.index('class="task-hero-top"') < hero_markup.index('id="taskHeroDetails"')
-    # Only subtitle/meta fold away. Both the status pill and its detail stay
-    # outside the wrapper and remain visible.
+    # The status pill stays visible; failure detail, subtitle and meta fold away.
     details_at = hero_markup.index('id="taskHeroDetails"')
-    for hidden_id in ("currentTaskSubtitle", "taskSnapshot"):
+    for hidden_id in ("actionErrorDetail", "currentTaskSubtitle", "taskSnapshot"):
         assert f'id="{hidden_id}"' in hero_markup[details_at:]
     assert 'id="actionStatus"' in hero_markup[:details_at]
-    assert 'id="actionErrorDetail"' in hero_markup[:details_at]
 
     # CSS: grid-rows 1fr<->0fr animates the height; the inner wrapper clips.
     details_rule = _css_rule(styles_css, ".task-hero-details")
     assert "grid-template-rows: 1fr" in details_rule
     assert "transition: grid-template-rows" in details_rule
     inner_rule = _css_rule(styles_css, ".task-hero-details-inner")
-    assert "overflow: hidden" in inner_rule
+    assert "max-height:" in inner_rule
+    assert "overflow-y: auto" in inner_rule
     assert "min-height: 0" in inner_rule
     collapsed_rule = _css_rule(styles_css, ".task-hero.is-collapsed .task-hero-details")
     assert "grid-template-rows: 0fr" in collapsed_rule
@@ -12348,6 +12664,23 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     assert "[data-copy]" in app_js
     assert '$("taskHero")?.addEventListener("click", handleTaskHeroToggle)' in app_js
     assert 'toggle.setAttribute("aria-expanded"' in app_js
+
+
+def test_plan_failure_status_keeps_raw_trace_in_timeline_not_task_hero():
+    controller = _read_static("js/v2/plan_rail_controller.js")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    failed_status = controller[
+        controller.index('if (status === "failed" || failedStep)'):
+    ]
+    failed_status = failed_status[:failed_status.index("if (status ===", 1)]
+    assert "step.error" not in failed_status
+    assert "请在中间信息流中查看诊断与恢复方案" in failed_status
+    assert "function compactActionStatusDetail" in app_js
+    assert "compactActionStatusDetail(detail)" in app_js
+    detail_rule = _css_rule(styles_css, ".action-error-detail")
+    assert "-webkit-line-clamp: 2" in detail_rule
 
 
 def test_agent_composer_bar_is_translucent_glass_like_the_task_hero():

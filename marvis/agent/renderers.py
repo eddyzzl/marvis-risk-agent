@@ -829,6 +829,33 @@ def _render_report(o: dict):
     return text, tables
 
 
+def _render_reports(o: dict):
+    reports = [item for item in (o.get("reports") or []) if isinstance(item, dict)]
+    primary_path = str(o.get("report_path") or "")
+    generated = [item for item in reports if str(item.get("report_path") or "").strip()]
+    text = (
+        f"**模型开发报告已生成**：共 {len(generated)} 份"
+        + (f"，主报告 `{primary_path}`" if primary_path else "")
+        + "。请使用本条结果下方的“下载模型开发报告”按钮。"
+    )
+    tables = []
+    if reports:
+        tables.append({
+            "title": "候选模型报告",
+            "columns": ["实验", "算法", "状态", "报告"],
+            "rows": [
+                [
+                    str(item.get("experiment_id") or ""),
+                    str(item.get("recipe") or ""),
+                    "已生成" if str(item.get("report_path") or "").strip() else "缺失",
+                    str(item.get("report_path") or ""),
+                ]
+                for item in reports
+            ],
+        })
+    return text, tables
+
+
 # VD-4: calibration/score_bands are already produced by generate_model_report
 # (report_tools.py::_artifact_calibration_rows / _score_band_rows) and land in
 # the Excel workbook, but never reached the agent-conversation payload at all
@@ -961,52 +988,282 @@ def _num(value):
 
 
 def _render_feature_metrics(o: dict):
-    metrics = [
-        metric for metric in (o.get("metrics") or []) if isinstance(metric, dict)
-    ]
-    # The risk-aware head/tail lift columns show only when that metric was selected
-    # (absent keys → not computed); base columns are always present.
+    metrics = [metric for metric in (o.get("metrics") or []) if isinstance(metric, dict)]
+    # FEATURE §2: every metric is independently selectable. A missing key means
+    # "not selected", while a present key with ``None`` means "selected but not
+    # computable" and must retain its structured reason.
+    has_iv = any("iv" in metric for metric in metrics)
+    has_ks = any("ks" in metric for metric in metrics)
+    has_auc = any("auc" in metric for metric in metrics)
     has_head_tail = any("lift_head_5" in metric for metric in metrics)
     has_importance = any("importance" in metric for metric in metrics)
-    columns = ["特征", "IV", "KS", "AUC", "PSI", "缺失率", "头部lift"]
-    if has_head_tail:
-        columns += ["头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%"]
+    has_quality = any(
+        any(
+            key in metric
+            for key in (
+                "coverage",
+                "valid_count",
+                "missing_rate",
+                "mode_rate",
+                "zero_rate",
+                "unique_count",
+                "unique_rate",
+            )
+        )
+        for metric in metrics
+    )
+    has_distribution = any(
+        any(key in metric for key in ("mean", "std", "median", "min", "q25", "q75", "max"))
+        for metric in metrics
+    )
+    has_meaning = any(
+        any(
+            key in metric
+            for key in (
+                "business_meaning",
+                "expected_direction",
+                "actual_direction",
+                "meaning_consistency",
+                "meaning_consistency_reason",
+            )
+        )
+        for metric in metrics
+    )
+    columns = ["特征"]
+    metric_keys: list[str] = []
+    if has_iv:
+        columns.append("IV")
+        metric_keys.append("iv")
+    if has_ks:
+        columns.append("KS")
+        metric_keys.append("ks")
+    if has_auc:
+        columns.append("AUC")
+        metric_keys.append("auc")
     if has_importance:
-        columns += ["重要性"]
-    rows = []
-    for metric in metrics:
-        row = [
+        columns.append("重要性")
+        metric_keys.append("importance")
+    rows = [
+        [
             str(metric.get("feature", "?")),
-            _num(metric.get("iv")),
-            _num(metric.get("ks")),
-            _num(metric.get("auc")),
-            _num(metric.get("psi")),
-            _num(metric.get("missing_rate")),
-            _num(metric.get("lift_top_bin")),
+            *[_num(metric.get(key)) for key in metric_keys],
         ]
-        if has_head_tail:
-            row += [
-                _num(metric.get("lift_head_5")),
-                _num(metric.get("lift_head_10")),
-                _num(metric.get("lift_tail_5")),
-                _num(metric.get("lift_tail_10")),
-            ]
-        if has_importance:
-            row += [_num(metric.get("importance"))]
-        rows.append(row)
+        for metric in metrics
+    ]
+    selected_labels = [
+        label
+        for key, label in (
+            ("iv", "IV"),
+            ("ks", "KS"),
+            ("auc", "AUC"),
+            ("coverage", "覆盖/质量"),
+            ("psi", "PSI"),
+            ("psi_month_first", "月度PSI(首月基准)"),
+            ("psi_month_last", "月度PSI(末月基准)"),
+            ("psi_month_previous", "月度PSI(逐月环比)"),
+            ("psi_split", "样本集PSI"),
+            ("vif", "VIF"),
+            ("head_tail_lift", "头尾Lift"),
+            ("importance", "重要性"),
+            ("meaning_consistency", "含义方向一致性"),
+        )
+        if key in set(o.get("selected_metrics") or [])
+    ]
+    selected_text = "、".join(selected_labels) if selected_labels else "本次返回的指标"
     text = (
-        f"**特征分析完成**:{len(rows)} 个特征的指标如下"
-        "（IV/KS/AUC 越高区分力越强；PSI/缺失率越低越稳）。可在右栏下载分析报告。"
+        f"**特征分析完成**:{len(rows)} 个特征，已计算 {selected_text}，并生成 Agent 建议。"
+        "完整指标可通过本条结果下方的按钮下载。"
     )
     tables = []
     if rows:
-        tables.append(
-            {
-                "title": "特征指标",
-                "columns": columns,
-                "rows": rows,
-            }
-        )
+        tables.append({
+            "title": "特征指标",
+            "columns": columns,
+            "rows": rows,
+        })
+        tables.append({
+            "title": "Agent 特征建议",
+            "columns": [
+                "特征",
+                "Agent建议",
+                "推荐原因",
+                "建议状态",
+                "证据置信度",
+                "支持指标",
+            ],
+            "rows": [
+                [
+                    str(metric.get("feature", "?")),
+                    str(metric.get("recommendation") or "待评估"),
+                    str(metric.get("recommendation_reason") or "-"),
+                    str(metric.get("recommendation_state") or "unevaluated"),
+                    str(metric.get("recommendation_confidence") or "none"),
+                    "；".join(
+                        f"{item.get('metric')}={item.get('value')}"
+                        for item in (metric.get("recommendation_evidence") or [])
+                        if isinstance(item, dict) and item.get("metric")
+                    ) or "-",
+                ]
+                for metric in metrics
+            ],
+        })
+        psi_views = [
+            ("psi", "PSI"),
+            ("psi_month_first", "月度PSI(首月基准)"),
+            ("psi_month_last", "月度PSI(末月基准)"),
+            ("psi_month_previous", "月度PSI(逐月环比)"),
+            ("psi_split", "样本集PSI"),
+        ]
+        selected_psi_views = [
+            (key, label)
+            for key, label in psi_views
+            if any(key in metric for metric in metrics)
+        ]
+        if selected_psi_views:
+            psi_columns = ["特征"]
+            for _key, label in selected_psi_views:
+                psi_columns.extend([label, f"{label}说明"])
+            tables.append({
+                "title": "PSI 稳定性",
+                "columns": psi_columns,
+                "rows": [
+                    [
+                        str(metric.get("feature", "?")),
+                        *[
+                            value
+                            for key, _label in selected_psi_views
+                            for value in (
+                                _num(metric.get(key)),
+                                _feature_reason_text(
+                                    metric.get(f"{key}_reason"),
+                                    fallback="已完成计算" if metric.get(key) is not None else "未提供原因",
+                                ),
+                            )
+                        ],
+                    ]
+                    for metric in metrics
+                ],
+            })
+            psi_detail_rows = []
+            for metric in metrics:
+                for key, label in selected_psi_views:
+                    series = metric.get(f"{key}_series")
+                    if not isinstance(series, list):
+                        continue
+                    for point in series:
+                        if not isinstance(point, dict):
+                            continue
+                        psi_detail_rows.append([
+                            str(metric.get("feature", "?")),
+                            label,
+                            str(point.get("base") or ""),
+                            str(point.get("compare") or ""),
+                            _num(point.get("psi")),
+                        ])
+            if psi_detail_rows:
+                tables.append({
+                    "title": "PSI 明细",
+                    "columns": ["特征", "口径", "基准", "对比", "PSI"],
+                    "rows": psi_detail_rows,
+                })
+        if has_quality:
+            tables.append({
+                "title": "数据质量",
+                "columns": ["特征", "有效样本", "覆盖率", "缺失率", "单一值率", "零值率"],
+                "rows": [
+                    [
+                        str(metric.get("feature", "?")),
+                        str(int(metric.get("valid_count") or 0)),
+                        _num(metric.get("coverage")),
+                        _num(metric.get("missing_rate")),
+                        _num(metric.get("mode_rate")),
+                        _num(metric.get("zero_rate")),
+                    ]
+                    for metric in metrics
+                ],
+            })
+            tables.append({
+                "title": "唯一值检查",
+                "columns": ["特征", "唯一值数", "唯一值率"],
+                "rows": [
+                    [
+                        str(metric.get("feature", "?")),
+                        str(int(metric.get("unique_count") or 0)),
+                        _num(metric.get("unique_rate")),
+                    ]
+                    for metric in metrics
+                ],
+            })
+        if has_head_tail:
+            tables.append({
+                "title": "头尾 Lift（风险方向）",
+                "columns": ["特征", "头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%"],
+                "rows": [
+                    [
+                        str(metric.get("feature", "?")),
+                        _num(metric.get("lift_head_5")),
+                        _num(metric.get("lift_head_10")),
+                        _num(metric.get("lift_tail_5")),
+                        _num(metric.get("lift_tail_10")),
+                    ]
+                    for metric in metrics
+                ],
+            })
+            tables.append({
+                "title": "Lift 计算说明",
+                "columns": ["特征", "说明"],
+                "rows": [
+                    [str(metric.get("feature", "?")), str(metric.get("lift_reason") or "已完成计算")]
+                    for metric in metrics
+                ],
+            })
+        if has_distribution:
+            tables.append({
+                "title": "分布统计（中心）",
+                "columns": ["特征", "均值", "标准差", "中位数"],
+                "rows": [
+                    [
+                        str(metric.get("feature", "?")),
+                        _num(metric.get("mean")),
+                        _num(metric.get("std")),
+                        _num(metric.get("median")),
+                    ]
+                    for metric in metrics
+                ],
+            })
+            tables.append({
+                "title": "分布统计（范围）",
+                "columns": ["特征", "最小值", "P25", "P75", "最大值"],
+                "rows": [
+                    [
+                        str(metric.get("feature", "?")),
+                        _num(metric.get("min")),
+                        _num(metric.get("q25")),
+                        _num(metric.get("q75")),
+                        _num(metric.get("max")),
+                    ]
+                    for metric in metrics
+                ],
+            })
+        if has_meaning:
+            tables.append({
+                "title": "含义方向一致性",
+                "columns": ["特征", "业务含义", "预期方向", "实际方向", "结论", "说明"],
+                "rows": [
+                    [
+                        str(metric.get("feature", "?")),
+                        str(metric.get("business_meaning") or "-"),
+                        str(metric.get("expected_direction") or "-"),
+                        str(metric.get("actual_direction") or "-"),
+                        str(metric.get("meaning_consistency") or "n/a"),
+                        _feature_reason_text(
+                            metric.get("meaning_consistency_reason"),
+                            fallback="已完成核对" if metric.get("meaning_consistency") else "未提供原因",
+                        ),
+                    ]
+                    for metric in metrics
+                ],
+            })
     # Optional collinear / VIF section (computed only when the metric was selected).
     collinear = o.get("collinear")
     if isinstance(collinear, dict):
@@ -1035,13 +1292,69 @@ def _render_feature_metrics(o: dict):
     return text, tables
 
 
+def _feature_reason_text(value, *, fallback: str) -> str:
+    if isinstance(value, dict):
+        return str(value.get("message") or value.get("code") or fallback)
+    if value not in (None, ""):
+        return str(value)
+    return fallback
+
+
 def _render_feature_report(o: dict):
     # Reuse the metrics wide table (the tool echoes metrics) and append the report link.
     text, tables = _render_feature_metrics(o)
+    bin_text, bin_tables = _render_feature_bins(o)
+    if bin_text:
+        text += f"\n\n{bin_text}"
+    tables.extend(bin_tables)
     path = o.get("report_path") or ""
     if path:
-        text += f"\n\n**特征分析报告已生成**:`{path}`（可在右栏下载）。"
+        text += f"\n\n**特征分析报告已生成**:`{path}`。请使用本条结果下方的“下载特征分析报告”按钮。"
     return text, tables
+
+
+def _render_feature_bins(o: dict):
+    analyses = [item for item in (o.get("binning") or []) if isinstance(item, dict)]
+    if not analyses:
+        return "已跳过可选分箱分析。", []
+    rows = []
+    for analysis in analyses:
+        feature = str(analysis.get("feature") or "")
+        requested = int(analysis.get("requested_bins") or 0)
+        actual = int(analysis.get("actual_bins") or 0)
+        for item in analysis.get("rows") or []:
+            if not isinstance(item, dict):
+                continue
+            rows.append([
+                feature,
+                requested,
+                int(item.get("bin_index") or 0),
+                int(item.get("risk_rank") or 0),
+                str(item.get("interval") or ""),
+                int(item.get("count") or 0),
+                int(item.get("bad_count") or 0),
+                int(item.get("good_count") or 0),
+                _num(item.get("bad_rate")),
+                _num(item.get("cumulative_bad_rate")),
+                _num(item.get("lift")),
+                _num(item.get("cumulative_lift")),
+                _num(item.get("ks")),
+                _num(item.get("woe")),
+                _num(item.get("iv_contribution")),
+                actual,
+                str(analysis.get("direction") or "unknown"),
+                str(analysis.get("degraded_reason") or ""),
+            ])
+    table = {
+        "title": "分箱分析",
+        "columns": [
+            "特征", "请求箱数", "箱号", "风险排序", "区间", "样本数", "坏样本数", "好样本数",
+            "坏率", "累计坏率", "单箱Lift", "累计Lift", "KS", "WOE", "IV贡献",
+            "实际箱数", "风险方向", "分箱说明",
+        ],
+        "rows": rows,
+    }
+    return f"**分箱分析完成**：已分析 {len(analyses)} 个用户选择的特征。", [table]
 
 
 def _render_build_strategy(o: dict):
@@ -7096,7 +7409,7 @@ def _render_propose_join(o: dict):
     # case _key_label below degrades to the plain column name (no visible change).
     dictionary = o.get("dictionary") if isinstance(o.get("dictionary"), dict) else {}
     rows = []
-    relax_rows = []
+    has_key_alternatives = False
     any_conflict = False
     any_fp_mismatch = False
     any_dtype_mismatch = False
@@ -7120,19 +7433,7 @@ def _render_propose_join(o: dict):
         for alt in diag.get("key_alternatives") or []:
             if not isinstance(alt, dict):
                 continue
-            alt_keys = ", ".join(f"{a}={f}" for a, f in (alt.get("key_pairs") or []))
-            relax_rows.append(
-                [
-                    fname,
-                    _fmt(match_rate) if match_rate is not None else "n/a",
-                    f"减「{alt.get('dropped', '?')}」→ {alt_keys}",
-                    _fmt(alt.get("match_rate"))
-                    if alt.get("match_rate") is not None
-                    else "n/a",
-                    "是" if alt.get("feature_key_unique") else "否",
-                    "⚠️是" if alt.get("fan_out_detected") else "否",
-                ]
-            )
+            has_key_alternatives = True
         # Fingerprint consistency (spec §5 C2 "指纹 raw=md5? ✓/✗"): transform_side == "both"
         # means anchor and feature key share format (both raw or both md5); anything else
         # means one side is raw and the other md5 (键格式不一致), joinable only via a hash
@@ -7196,10 +7497,10 @@ def _render_propose_join(o: dict):
             "\n\n⚠️ 检测到**键类型不一致**（一侧文本、一侧浮点/整型）：可能已发生精度丢失/前导零丢失"
             "导致静默漏配，请确认是否为同一标识后再拼接（需先确认才能执行）。"
         )
-    if relax_rows:
+    if has_key_alternatives:
         text += (
-            "\n\n💡 部分特征表命中率偏低，**减一个识别要素**可提高命中（见下「择键建议」）："
-            "系统只提议、不会自动改键；若减后**膨胀**需配合去重策略。请确认后再选用。"
+            "\n\n💡 检测到拼接键存在多种候选。下方按**每张特征表**分别展示可选键；"
+            "选择后系统会回到当前步骤重新计算命中率、唯一性和膨胀，不会直接执行拼接。"
         )
     # T3-1: dual-path reconciliation red flags. Each feature's match count is computed two
     # independent ways (DuckDB SQL vs pandas); any divergence beyond tolerance is a BLOCKING
@@ -7215,37 +7516,11 @@ def _render_propose_join(o: dict):
             text += f"\n\n🚩 {str(flag.get('message'))}"
     tables = []
     if rows:
-        tables.append(
-            {
-                "title": "拼接诊断（逐特征表）",
-                "columns": [
-                    "特征表",
-                    "匹配键",
-                    "指纹（raw=md5?）",
-                    "键类型",
-                    "命中率",
-                    "键唯一",
-                    "膨胀",
-                    "去重（安全/冲突键）",
-                ],
-                "rows": rows,
-            }
-        )
-    if relax_rows:
-        tables.append(
-            {
-                "title": "择键建议（减要素换更高命中）",
-                "columns": [
-                    "特征表",
-                    "当前命中率",
-                    "建议键",
-                    "减后命中率",
-                    "减后唯一",
-                    "减后膨胀",
-                ],
-                "rows": relax_rows,
-            }
-        )
+        tables.append({
+            "title": "拼接诊断（逐特征表）",
+            "columns": ["特征表", "匹配键", "指纹（raw=md5?）", "键类型", "命中率", "键唯一", "膨胀", "去重（安全/冲突键）"],
+            "rows": rows,
+        })
     # T3: expandable "数字溯源" detail — the two-path match count + the provenance tuple
     # (dataset fingerprint / code version / params digest / seed) behind each feature's
     # headline number, so the displayed number is auditable back to its inputs.
@@ -7296,19 +7571,25 @@ def _join_trust_rows(joins) -> list[list[str]]:
             verdict = "🚩 分歧"
         else:
             verdict = "—"
-        rows.append(
-            [
-                fname,
-                _fmt(primary) if primary is not None else "n/a",
-                _fmt(secondary) if secondary is not None else "n/a",
-                verdict,
-                _short_digest(prov.get("dataset_fingerprint")) if prov else "—",
-                str(prov.get("code_version") or "—") if prov else "—",
-                _short_digest(prov.get("params_digest")) if prov else "—",
-                str(prov.get("seed")) if prov and prov.get("seed") is not None else "—",
-            ]
-        )
+        rows.append([
+            fname,
+            _integer_text(primary) if primary is not None else "n/a",
+            _integer_text(secondary) if secondary is not None else "n/a",
+            verdict,
+            _short_digest(prov.get("dataset_fingerprint")) if prov else "—",
+            str(prov.get("code_version") or "—") if prov else "—",
+            _short_digest(prov.get("params_digest")) if prov else "—",
+            str(prov.get("seed")) if prov and prov.get("seed") is not None else "—",
+        ])
     return rows
+
+
+def _integer_text(value) -> str:
+    """Counts are discrete even when a computation backend returns float scalars."""
+    try:
+        return str(int(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
 
 
 def _short_digest(value) -> str:
@@ -7467,7 +7748,7 @@ def _render_post_training_action(o: dict):
     return text, tables
 
 
-def _render_make_split(o: dict):
+def _render_make_split(o: dict, *, presentation_state: str = "preview"):
     """G1 split gate: surface the train/test/oot counts + per month/channel distribution so
     the user can sanity-check the split (proportions, OOT-by-time, no cross-group leakage)
     before spending compute on screening/training."""
@@ -7478,10 +7759,16 @@ def _render_make_split(o: dict):
         [str(split), int(n), _fmt(n / total) if total else "n/a"]
         for split, n in counts.items()
     ]
-    text = (
-        f"**样本切分完成**:共 {total} 行。请核对 train/test/oot 划分"
-        "（占比是否合理、OOT 是否按时间、分组是否防泄漏）后再继续。"
-    )
+    if presentation_state == "adopted":
+        text = (
+            f"**已采用的样本切分**：共 {total} 行；"
+            "后续特征筛选与训练沿用以下 Train/Test/OOT 方案。"
+        )
+    else:
+        text = (
+            f"**样本切分预览已生成**:共 {total} 行，尚未进入特征筛选或训练。"
+            "请在下方选择是否需要 OOT、切分方式和比例；确认后才会采用该方案继续。"
+        )
     tables = []
     if rows:
         tables.append(
@@ -8385,10 +8672,12 @@ _RENDERERS = {
     "select_experiment": _render_select_experiment,
     "post_training_action": _render_post_training_action,
     "generate_model_report": _render_report,
+    "generate_model_reports": _render_reports,
     "propose_join": _render_propose_join,
     "confirm_join": _render_confirm_join,
     "execute_join": _render_execute_join,
     "compute_feature_metrics": _render_feature_metrics,
+    "analyze_feature_bins": _render_feature_bins,
     "generate_feature_report": _render_feature_report,
     "generate_risk_analysis_report": _render_risk_analysis_report,
     "build_strategy": _render_build_strategy,
@@ -8498,8 +8787,17 @@ def render_tool_output(
     trusted_task_id: str | None = None,
     trusted_inputs: Mapping[str, Any] | None = None,
     trusted_artifacts: Mapping[str, Any] | None = None,
+    presentation_state: str | None = None,
 ):
-    """Render a tool's raw output to (text, tables); falls back to generic."""
+    """Render a tool output, with optional gate-specific presentation context."""
+    if tool == "make_split":
+        try:
+            return _render_make_split(
+                output or {},
+                presentation_state=presentation_state or "preview",
+            )
+        except Exception:
+            return _render_generic(output or {})
     renderer = _RENDERERS.get(tool, _render_generic)
     try:
         if tool == "build_voting_candidate_from_search":

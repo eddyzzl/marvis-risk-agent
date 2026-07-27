@@ -22,6 +22,7 @@ def test_browser_chrome_uses_public_default_branding():
     assert "<title>MARVIS-全能风控智能体</title>" in index_html
     assert '<meta name="color-scheme" content="light dark" />' in index_html
     assert '<meta id="appThemeColor" name="theme-color" content="#ffffff" />' in index_html
+    assert '<meta name="mobile-web-app-capable" content="yes" />' in index_html
     assert '<meta name="apple-mobile-web-app-capable" content="yes" />' in index_html
     assert '<meta name="apple-mobile-web-app-title" content="MARVIS" />' in index_html
     assert '<link id="brandFavicon" rel="icon" type="image/png" media="(prefers-color-scheme: light)" href="static/brand/marvis-favicon.png' in index_html
