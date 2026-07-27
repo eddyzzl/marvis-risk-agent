@@ -38,12 +38,12 @@ from marvis.packs.strategy.candidate_asset import (
 )
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.sample_design_binding import (
-    StrategySampleDesignExecutionBinding,
-    bind_strategy_development_frame,
-    load_strategy_sample_design_execution_binding,
-    require_strategy_sample_design_execution_binding_on_connection,
-    revalidate_strategy_sample_design_execution_binding,
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+    bind_strategy_risk_development_frame,
+    load_historical_strategy_risk_development_execution_binding,
+    require_historical_strategy_risk_development_execution_binding_on_connection,
+    revalidate_historical_strategy_risk_development_execution_binding,
 )
 
 
@@ -199,7 +199,7 @@ def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     )
     identity = evidence["identity"]
     generation_parameters = evidence["generation"]["parameters"]
-    sample_binding = load_strategy_sample_design_execution_binding(
+    sample_binding = load_historical_strategy_risk_development_execution_binding(
         runtime,
         task_id=task_id,
         sample_design_ref=generation_parameters.get("sample_design_ref"),
@@ -213,14 +213,24 @@ def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         loan_amount_col=generation_parameters.get("loan_amount_col"),
         overdue_amount_col=generation_parameters.get("overdue_amount_col"),
     )
-    if (
-        sample_binding.split_column is not None
-        and sample_binding.split_column not in projected_columns
-    ):
-        projected_columns.append(sample_binding.split_column)
+    if feature in sample_binding.excluded_feature_columns:
+        raise StrategyError(
+            "sample-design partition or population columns cannot be refined "
+            "as candidate features"
+        )
+    for column in sample_binding.partition_columns:
+        if column not in dataset.columns:
+            raise StrategyError(
+                "sample-design partition column is missing from the candidate dataset"
+            )
+        if column not in projected_columns:
+            projected_columns.append(column)
     frame = runtime.backend.read_frame(dataset.path, columns=projected_columns)
     _require_dataset_unchanged(runtime, dataset)
-    frame = bind_strategy_development_frame(frame, binding=sample_binding)
+    frame = bind_strategy_risk_development_frame(
+        frame,
+        binding=sample_binding,
+    )
     frame, dropped = resolve_labeled_frame(
         frame,
         target_col,
@@ -241,7 +251,10 @@ def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     # checks run after calculation and once more under the SQLite writer lock.
     _require_source_unchanged(runtime, source)
     _require_dataset_unchanged(runtime, dataset)
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_historical_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     asset = refine_univariate_candidate(
         evidence,
         frame,
@@ -266,7 +279,10 @@ def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     )
     _require_source_unchanged(runtime, source)
     _require_dataset_unchanged(runtime, dataset)
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_historical_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
 
     canonical_asset = canonical_candidate_asset_json(normalized_asset)
     if not isinstance(canonical_asset, str):
@@ -752,11 +768,11 @@ def _write_candidate_asset(
     task_id: str,
     source: _SourceArtifactBinding,
     dataset: _DatasetBinding,
-    sample_design_binding: StrategySampleDesignExecutionBinding,
+    sample_design_binding: StrategyRiskDevelopmentExecutionBinding,
     asset: Mapping[str, Any],
     content: bytes,
 ) -> dict[str, Any]:
-    revalidate_strategy_sample_design_execution_binding(
+    revalidate_historical_strategy_risk_development_execution_binding(
         runtime,
         sample_design_binding,
     )
@@ -796,7 +812,7 @@ def _write_candidate_asset(
             try:
                 _require_source_on_connection(conn, source)
                 _require_dataset_on_connection(conn, dataset)
-                require_strategy_sample_design_execution_binding_on_connection(
+                require_historical_strategy_risk_development_execution_binding_on_connection(
                     conn,
                     sample_design_binding,
                 )

@@ -257,6 +257,23 @@ def test_tree_provenance_mapping_order_does_not_change_selection_hash() -> None:
     assert reordered == original
 
 
+def test_leaf_selection_rejects_unknown_sample_design_partition() -> None:
+    selection = _selection(_asset())
+    selection["tree_artifact"]["provenance"]["sample_design_ref"] = {
+        "artifact_id": HASH_A,
+        "artifact_content_hash": HASH_B,
+        "sample_design_id": "strategy-sample-design-" + ("c" * 24),
+        "sample_design_content_hash": HASH_D,
+        "partition": "shadow/development",
+    }
+
+    with pytest.raises(
+        AutomaticTreeLeafFragmentError,
+        match="sample_design_ref.partition",
+    ):
+        _rehash_selection(selection)
+
+
 def test_every_leaf_is_explicitly_selectable_and_has_distinct_identity() -> None:
     asset = _asset()
     selections = [

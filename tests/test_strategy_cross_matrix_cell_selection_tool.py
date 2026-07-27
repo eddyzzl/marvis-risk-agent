@@ -22,6 +22,7 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from tests.test_strategy_cross_matrix_candidate_tool import (
     _replace_source_with_manual_evidence,
+    _replace_source_with_native_parallel_evidence,
     _setup,
 )
 
@@ -30,9 +31,19 @@ def _fixture(
     tmp_path: Path,
     *,
     manual: bool = False,
+    native: bool = False,
     age_special: str | None = None,
 ) -> SimpleNamespace:
-    base = _setup(tmp_path, age_special=age_special)
+    if manual and native:
+        raise ValueError("manual and native fixture modes are mutually exclusive")
+    base = _setup(
+        tmp_path,
+        age_special=age_special,
+        with_split=native,
+        target_bad_value=(0 if native else 1),
+    )
+    if native:
+        _replace_source_with_native_parallel_evidence(base)
     if manual:
         _replace_source_with_manual_evidence(
             base,
@@ -214,6 +225,81 @@ def test_materialize_single_and_multi_are_canonical_idempotent_and_replayable(
             source_artifact_binding=verified_source.builder_binding(),
         )
         assert fragment["fragment"]["fragment_id"] == output["group_id"]
+
+
+def test_native_matrix_cell_selection_preserves_exact_fragment_lineage(
+    tmp_path: Path,
+) -> None:
+    fx = _fixture(tmp_path, native=True)
+
+    output = selection_tools.run_materialize_cross_matrix_cell_selection(
+        fx.inputs,
+        fx.ctx,
+        fx.runtime,
+    )
+    descriptor = output["artifacts"][0]
+    verified_selection = (
+        selection_tools.load_verified_cross_matrix_cell_selection_artifact(
+            fx.runtime,
+            task_id=fx.task.id,
+            artifact_id=descriptor["artifact_id"],
+            expected_content_hash=descriptor["content_hash"],
+            expected_asset_id=fx.matrix["asset_id"],
+            expected_asset_hash=fx.matrix["asset_hash"],
+        )
+    )
+    verified_source = selection_tools.load_verified_cross_matrix_source_artifact(
+        fx.runtime,
+        task_id=fx.task.id,
+        artifact_id=fx.matrix_artifact["artifact_id"],
+        expected_content_hash=fx.matrix_artifact["content_hash"],
+        expected_asset_id=fx.matrix["asset_id"],
+        expected_asset_hash=fx.matrix["asset_hash"],
+        expected_candidate_id=fx.matrix["candidate_evidence"]["candidate_id"],
+        expected_evidence_hash=fx.matrix["candidate_evidence"]["evidence_hash"],
+    )
+    fragment = cross_matrix_cell_selection_to_verified_candidate_fragment(
+        verified_selection.selection,
+        verified_source.asset,
+        selection_artifact_binding=verified_selection.replay_binding(),
+        source_artifact_binding=verified_source.builder_binding(),
+    )
+
+    native_ref = fx.source["candidate_evidence"]["generation"]["parameters"][
+        "sample_design_ref"
+    ]
+    assert native_ref == fx.sample_design_ref
+    assert native_ref["partition"] == "risk/development"
+    assert fx.matrix["parent"]["candidate_id"] == fx.source["candidate_id"]
+    assert fx.matrix["parent"]["evidence_hash"] == fx.source["evidence_hash"]
+    selected_candidate = verified_selection.selection["source_candidate"]
+    assert selected_candidate["candidate_id"] == fx.matrix[
+        "candidate_evidence"
+    ]["candidate_id"]
+    assert selected_candidate["evidence_hash"] == fx.matrix[
+        "candidate_evidence"
+    ]["evidence_hash"]
+    assert selected_candidate["evidence_identity"] == {
+        key: fx.matrix["sample_identity"][key]
+        for key in (
+            "dataset_id",
+            "dataset_content_hash",
+            "workspace_revision",
+            "workspace_generation",
+            "semantic_mapping_hash",
+            "sample_context_hash",
+        )
+    }
+    assert fragment["fragment"]["fragment_id"] == output["group_id"]
+    assert fragment["evidence"]["evidence_id"] == fx.matrix[
+        "candidate_evidence"
+    ]["candidate_id"]
+    assert fragment["evidence"]["evidence_hash"] == fx.matrix[
+        "candidate_evidence"
+    ]["evidence_hash"]
+    assert fragment["evidence"]["identity"]["sample_context_hash"] == fx.matrix[
+        "sample_identity"
+    ]["sample_context_hash"]
 
 
 def test_materialize_manual_v2_matrix_preserves_exact_source_versions(

@@ -71,13 +71,13 @@ from marvis.packs.strategy.codegen import (
     validate_automatic_tree_duckdb_input_frame,
 )
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.sample_design_binding import (
-    StrategySampleDesignExecutionBinding,
-    StrategySampleDesignRef,
-    bind_strategy_development_frame,
-    load_strategy_sample_design_execution_binding,
-    require_strategy_sample_design_execution_binding_on_connection,
-    revalidate_strategy_sample_design_execution_binding,
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+    StrategyRiskDevelopmentRef,
+    bind_strategy_risk_development_frame,
+    load_strategy_risk_development_execution_binding,
+    require_strategy_risk_development_execution_binding_on_connection,
+    revalidate_strategy_risk_development_execution_binding,
 )
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 
@@ -249,7 +249,7 @@ def run_build_automatic_tree_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         expected_generation=normalized["analysis_generation"],
         expected_semantic_hash=normalized["semantic_mapping_hash"],
     )
-    sample_design = load_strategy_sample_design_execution_binding(
+    sample_design = load_strategy_risk_development_execution_binding(
         runtime,
         task_id=task_id,
         sample_design_ref=normalized["sample_design_ref"],
@@ -275,8 +275,14 @@ def run_build_automatic_tree_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         columns=resolved["projected_columns"],
     )
     _require_binding_live(runtime, task_id=task_id, binding=binding)
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_design)
-    frame = bind_strategy_development_frame(frame, binding=sample_design)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_design,
+    )
+    frame = bind_strategy_risk_development_frame(
+        frame,
+        binding=sample_design,
+    )
     labeled_frame, nan_labels_dropped = resolve_labeled_frame(
         frame,
         normalized["target_col"],
@@ -368,7 +374,10 @@ def run_build_automatic_tree_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         sql_source=sql_source,
     )
     _require_binding_live(runtime, task_id=task_id, binding=binding)
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_design)
+    revalidate_strategy_risk_development_execution_binding(
+        runtime,
+        sample_design,
+    )
     artifacts = _write_artifacts(
         runtime,
         task_id=task_id,
@@ -425,7 +434,7 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
             inputs["semantic_mapping_hash"], "semantic_mapping_hash"
         ),
         "target_col": _required_text(inputs["target_col"], "target_col"),
-        "sample_design_ref": StrategySampleDesignRef.from_value(
+        "sample_design_ref": StrategyRiskDevelopmentRef.from_value(
             inputs["sample_design_ref"]
         ).to_ref_dict(),
         "features": features,
@@ -717,7 +726,7 @@ def _resolve_columns(
     normalized: Mapping[str, Any],
     *,
     binding: _DatasetBinding,
-    sample_design: StrategySampleDesignExecutionBinding,
+    sample_design: StrategyRiskDevelopmentExecutionBinding,
 ) -> dict[str, Any]:
     columns = list(binding.columns)
     available = set(columns)
@@ -743,18 +752,31 @@ def _resolve_columns(
     if missing:
         raise StrategyError("unknown automatic-tree columns: " + ", ".join(missing))
 
+    governed_feature_conflicts = sorted(
+        set(normalized["features"])
+        & set(sample_design.excluded_feature_columns)
+    )
     if (
         sample_design.split_column is not None
-        and sample_design.split_column in normalized["features"]
+        and sample_design.split_column in governed_feature_conflicts
     ):
         raise StrategyError(
             "sample-design split column cannot be an automatic-tree feature"
         )
-    if (
-        sample_design.split_column is not None
-        and sample_design.split_column not in available
-    ):
-        raise StrategyError("sample-design split column is missing from the dataset")
+    if governed_feature_conflicts:
+        raise StrategyError(
+            "sample-design governed target, partition, or population columns "
+            "cannot be automatic-tree features: "
+            + ", ".join(governed_feature_conflicts)
+        )
+    missing_partition_columns = sorted(
+        set(sample_design.partition_columns) - available
+    )
+    if missing_partition_columns:
+        raise StrategyError(
+            "sample-design partition columns are missing from the dataset: "
+            + ", ".join(missing_partition_columns)
+        )
 
     roles = {
         str(column): str(role)
@@ -807,17 +829,17 @@ def _resolve_columns(
         )
         if column is not None and column not in projected
     )
-    if (
-        sample_design.split_column is not None
-        and sample_design.split_column not in projected
-    ):
-        projected.append(sample_design.split_column)
+    projected.extend(
+        column
+        for column in sample_design.partition_columns
+        if column not in projected
+    )
     return {"projected_columns": projected, "field_roles": roles}
 
 
 def _resolve_optional_sample_design_bindings(
     normalized: Mapping[str, Any],
-    sample_design: StrategySampleDesignExecutionBinding,
+    sample_design: StrategyRiskDevelopmentExecutionBinding,
 ) -> dict[str, Any]:
     """Inherit omitted optional columns from the authenticated sample design.
 
@@ -880,7 +902,7 @@ def automatic_tree_sample_context_hash(
             "loan_amount_col": loan_amount_col,
             "overdue_amount_col": overdue_amount_col,
             "registry_metadata_hash": binding.registry_metadata_hash,
-            "sample_design_ref": StrategySampleDesignRef.from_value(
+            "sample_design_ref": StrategyRiskDevelopmentRef.from_value(
                 sample_design_ref
             ).to_ref_dict(),
         },
@@ -1111,7 +1133,7 @@ def _write_artifacts(
     *,
     task_id: str,
     binding: _DatasetBinding,
-    sample_design: StrategySampleDesignExecutionBinding,
+    sample_design: StrategyRiskDevelopmentExecutionBinding,
     asset: Mapping[str, Any],
     delivery_bytes: Mapping[str, bytes],
     equivalence: Mapping[str, Any],
@@ -1198,7 +1220,7 @@ def _write_artifacts(
             conn.execute("BEGIN IMMEDIATE")
             try:
                 _require_binding_on_connection(conn, task_id=task_id, binding=binding)
-                require_strategy_sample_design_execution_binding_on_connection(
+                require_strategy_risk_development_execution_binding_on_connection(
                     conn,
                     sample_design,
                 )

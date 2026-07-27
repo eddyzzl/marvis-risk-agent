@@ -36,7 +36,9 @@ from marvis.packs.strategy.candidate_fragment import (
     build_verified_candidate_fragment,
 )
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 
 
 AUTOMATIC_TREE_LEAF_FRAGMENT_SCHEMA_VERSION = "strategy.automatic-tree-leaf-fragment.v1"
@@ -523,9 +525,22 @@ def _tree_artifact_provenance(value: object) -> dict[str, Any]:
         ),
     }
     if "sample_design_ref" in normalized:
-        result["sample_design_ref"] = StrategySampleDesignRef.from_value(
-            normalized["sample_design_ref"]
-        ).to_ref_dict()
+        try:
+            reference = StrategyRiskDevelopmentRef.from_value(
+                normalized["sample_design_ref"]
+            )
+        except StrategyError as exc:
+            raise AutomaticTreeLeafFragmentError(
+                f"{name}.sample_design_ref is invalid"
+            ) from exc
+        if reference.partition not in {
+            "development",
+            "risk/development",
+        }:
+            raise AutomaticTreeLeafFragmentError(
+                f"{name}.sample_design_ref.partition is invalid"
+            )
+        result["sample_design_ref"] = reference.to_ref_dict()
     return result
 
 

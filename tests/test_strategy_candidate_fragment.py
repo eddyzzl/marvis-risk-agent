@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
 
 import pandas as pd
 import pytest
@@ -29,14 +31,35 @@ HASH_B = "b" * 64
 HASH_C = "c" * 64
 
 
-def _sample_design_ref() -> dict[str, str]:
+def _sample_design_ref(
+    *,
+    partition: str = "development",
+) -> dict[str, str]:
     return {
         "artifact_id": "d" * 64,
         "artifact_content_hash": "e" * 64,
         "sample_design_id": "strategy-sample-design-test",
         "sample_design_content_hash": "f" * 64,
-        "partition": "development",
+        "partition": partition,
     }
+
+
+def _sample_design_source_token(
+    *,
+    kind: str = "strategy_sample_design",
+    reference: dict[str, str] | None = None,
+) -> str:
+    payload = {
+        "kind": kind,
+        **(reference or _sample_design_ref()),
+    }
+    return "strategy-sample-design:" + json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _frame() -> pd.DataFrame:
@@ -48,8 +71,14 @@ def _frame() -> pd.DataFrame:
     )
 
 
-def _evidence() -> dict:
+def _evidence(
+    *,
+    sample_design_ref: dict[str, str] | None = None,
+    sample_design_kind: str = "strategy_sample_design",
+    sample_design_token: str | None = None,
+) -> dict:
     frame = _frame()
+    reference = sample_design_ref or _sample_design_ref()
     analysis = analyze_univariate(
         frame,
         features=["score"],
@@ -73,7 +102,7 @@ def _evidence() -> dict:
             "methods": ["equal_width"],
             "loan_amount_col": None,
             "overdue_amount_col": None,
-            "sample_design_ref": _sample_design_ref(),
+            "sample_design_ref": reference,
         },
         seed=0,
         budget=100_000,
@@ -84,12 +113,27 @@ def _evidence() -> dict:
             MetricObservation("parent.iv", "loan_amount", "unavailable", None),
             MetricObservation("parent.iv", "overdue_amount", "unavailable", None),
         ],
-        source_refs=["dataset:dataset-1", "analysis:univariate-1"],
+        source_refs=[
+            "dataset:dataset-1",
+            "analysis:univariate-1",
+            sample_design_token
+            or _sample_design_source_token(
+                kind=sample_design_kind,
+                reference=reference,
+            ),
+        ],
     )
 
 
-def _asset_and_binding() -> tuple[dict, dict, dict]:
-    evidence = _evidence()
+def _asset_and_binding(
+    *,
+    sample_design_ref: dict[str, str] | None = None,
+    sample_design_kind: str = "strategy_sample_design",
+) -> tuple[dict, dict, dict]:
+    evidence = _evidence(
+        sample_design_ref=sample_design_ref,
+        sample_design_kind=sample_design_kind,
+    )
     source_bin = evidence["analysis"]["features"][0]["methods"][0]["bins"][0]
     asset = refine_univariate_candidate(
         evidence,
@@ -134,6 +178,10 @@ def _asset_and_binding() -> tuple[dict, dict, dict]:
 def test_univariate_adapter_preserves_asset_bytes_and_projects_strict_fragment() -> None:
     asset, binding, evidence = _asset_and_binding()
     before = canonical_candidate_asset_json(asset)
+    assert hashlib.sha256(before.encode("utf-8")).hexdigest() == (
+        "2828f2d494f1b5a18ef09ff290f378e4"
+        "22032c96edbf50fafc3372d7c2bf703c"
+    )
     asset_id = asset["asset_id"]
     asset_hash = asset["asset_hash"]
 
@@ -167,12 +215,30 @@ def test_univariate_adapter_preserves_asset_bytes_and_projects_strict_fragment()
 def test_sample_context_requires_and_hashes_exact_sample_design_ref() -> None:
     evidence = _evidence()
     original_hash = sample_context_hash_from_candidate_evidence(evidence)
+    assert original_hash == (
+        "675e33f6af577aa81bcacf853c2e6f5ee"
+        "7267257c4026debad77c1055d11d5a0"
+    )
+    assert evidence["source_refs"][-1] == (
+        "strategy-sample-design:"
+        '{"artifact_content_hash":"'
+        + "e" * 64
+        + '","artifact_id":"'
+        + "d" * 64
+        + '","kind":"strategy_sample_design","partition":"development",'
+        '"sample_design_content_hash":"'
+        + "f" * 64
+        + '","sample_design_id":"strategy-sample-design-test"}'
+    )
 
     changed = deepcopy(evidence)
     changed["generation"]["parameters"]["sample_design_ref"] = {
         **_sample_design_ref(),
         "sample_design_content_hash": "0" * 64,
     }
+    changed["source_refs"][-1] = _sample_design_source_token(
+        reference=changed["generation"]["parameters"]["sample_design_ref"]
+    )
     changed.pop("candidate_id")
     changed.pop("evidence_hash")
     changed = build_candidate_evidence(
@@ -217,6 +283,125 @@ def test_sample_context_requires_and_hashes_exact_sample_design_ref() -> None:
     )
     with pytest.raises(CandidateFragmentError, match="sample_design_ref"):
         sample_context_hash_from_candidate_evidence(missing)
+
+
+def test_sample_context_accepts_exact_native_risk_development_lineage() -> None:
+    native_ref = _sample_design_ref(partition="risk/development")
+    evidence = _evidence(
+        sample_design_ref=native_ref,
+        sample_design_kind="strategy_sample_design_v2",
+    )
+
+    assert sample_context_hash_from_candidate_evidence(evidence) != (
+        "675e33f6af577aa81bcacf853c2e6f5ee"
+        "7267257c4026debad77c1055d11d5a0"
+    )
+    assert evidence["source_refs"][-1] == _sample_design_source_token(
+        kind="strategy_sample_design_v2",
+        reference=native_ref,
+    )
+
+
+def test_native_univariate_adapter_preserves_asset_bytes_and_projects_fragment() -> None:
+    native_ref = _sample_design_ref(partition="risk/development")
+    asset, binding, evidence = _asset_and_binding(
+        sample_design_ref=native_ref,
+        sample_design_kind="strategy_sample_design_v2",
+    )
+    before = canonical_candidate_asset_json(asset)
+
+    fragment = univariate_asset_to_verified_fragment(
+        asset,
+        source_binding=binding,
+        candidate_evidence=evidence,
+    )
+
+    assert canonical_candidate_asset_json(asset) == before
+    assert fragment["evidence"]["identity"]["sample_context_hash"] == (
+        sample_context_hash_from_candidate_evidence(evidence)
+    )
+    assert validate_verified_candidate_fragment(fragment) == fragment
+
+
+@pytest.mark.parametrize(
+    ("kind", "partition"),
+    [
+        ("strategy_sample_design", "risk/development"),
+        ("strategy_sample_design_v2", "development"),
+        ("strategy_sample_design_v2", "risk/validation"),
+        ("strategy_sample_design_future", "risk/development"),
+    ],
+)
+def test_sample_context_rejects_unknown_or_crossed_sample_lineage(
+    kind: str,
+    partition: str,
+) -> None:
+    reference = _sample_design_ref(partition=partition)
+    evidence = _evidence(
+        sample_design_ref=reference,
+        sample_design_kind=kind,
+    )
+
+    with pytest.raises(CandidateFragmentError, match="sample_design_ref"):
+        sample_context_hash_from_candidate_evidence(evidence)
+
+
+def test_sample_context_rejects_noncanonical_or_duplicate_sample_tokens() -> None:
+    reference = _sample_design_ref()
+    noncanonical = "strategy-sample-design:" + json.dumps(
+        {"kind": "strategy_sample_design", **reference},
+        ensure_ascii=False,
+    )
+    evidence = _evidence(
+        sample_design_ref=reference,
+        sample_design_token=noncanonical,
+    )
+    with pytest.raises(CandidateFragmentError, match="sample_design_ref"):
+        sample_context_hash_from_candidate_evidence(evidence)
+
+    mismatched_reference = {
+        **reference,
+        "sample_design_content_hash": "0" * 64,
+    }
+    mismatched = _evidence(
+        sample_design_ref=reference,
+        sample_design_token=_sample_design_source_token(
+            reference=mismatched_reference,
+        ),
+    )
+    with pytest.raises(CandidateFragmentError, match="sample_design_ref"):
+        sample_context_hash_from_candidate_evidence(mismatched)
+
+    duplicated_source = _evidence()
+    second_token = _sample_design_source_token(
+        kind="strategy_sample_design_v2",
+        reference=_sample_design_ref(partition="risk/development"),
+    )
+    duplicated = build_candidate_evidence(
+        task_id=duplicated_source["identity"]["task_id"],
+        dataset_id=duplicated_source["identity"]["dataset_id"],
+        dataset_content_hash=duplicated_source["identity"][
+            "dataset_content_hash"
+        ],
+        workspace_revision=duplicated_source["identity"]["workspace_revision"],
+        workspace_generation=duplicated_source["identity"][
+            "workspace_generation"
+        ],
+        semantic_mapping_hash=duplicated_source["identity"][
+            "semantic_mapping_hash"
+        ],
+        generation_parameters=duplicated_source["generation"]["parameters"],
+        seed=duplicated_source["generation"]["seed"],
+        budget=duplicated_source["generation"]["budget"],
+        truncated=duplicated_source["generation"]["truncated"],
+        analysis=duplicated_source["analysis"],
+        metrics=duplicated_source["metrics"],
+        source_refs=[*duplicated_source["source_refs"], second_token],
+        red_flags=duplicated_source["red_flags"],
+        producer_version=duplicated_source["producer_version"],
+    )
+    with pytest.raises(CandidateFragmentError, match="sample_design_ref"):
+        sample_context_hash_from_candidate_evidence(duplicated)
 
 
 def test_fragment_hash_and_nested_tampering_fail_closed() -> None:

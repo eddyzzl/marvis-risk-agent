@@ -1593,7 +1593,6 @@ def test_sample_bound_tool_manifests_use_one_exact_reference_schema(tmp_path):
     }
     by_name = {tool.name: tool for tool in manifest.tools}
     required_input_tools = {
-        "build_automatic_tree_candidate",
         "measure_pool_impact",
         "design_strategy_candidate",
         "tradeoff_view",
@@ -1621,6 +1620,17 @@ def test_sample_bound_tool_manifests_use_one_exact_reference_schema(tmp_path):
     assert "sample_design_ref" in univariate_schema["required"]
     assert (
         univariate_schema["properties"]["sample_design_ref"]
+        == risk_development_ref
+    )
+    automatic_tree = by_name["build_automatic_tree_candidate"]
+    assert (
+        automatic_tree.input_schema["properties"]["sample_design_ref"]
+        == risk_development_ref
+    )
+    assert (
+        automatic_tree.output_schema["properties"]["summary"]["properties"][
+            "sample_design_ref"
+        ]
         == risk_development_ref
     )
     legacy_v2_schema = by_name["materialize_sample_design_v2"].input_schema

@@ -346,18 +346,19 @@ def _register_cross_source(
         loan_amount="loan",
         overdue_amount="overdue",
     )
+    sample_design_ref = {
+        "artifact_id": HASH_A,
+        "artifact_content_hash": HASH_B,
+        "sample_design_id": f"strategy-sample-design-cross-{seed}",
+        "sample_design_content_hash": HASH_C,
+        "partition": "development",
+    }
     generation_parameters = {
         "analysis_schema_version": analysis["schema_version"],
         "features": ["age", "score"],
         "methods": ["equal_width"],
         "bin_count": 4,
-        "sample_design_ref": {
-            "artifact_id": HASH_A,
-            "artifact_content_hash": HASH_B,
-            "sample_design_id": f"strategy-sample-design-cross-{seed}",
-            "sample_design_content_hash": HASH_C,
-            "partition": "development",
-        },
+        "sample_design_ref": sample_design_ref,
     }
     evidence = build_candidate_evidence(
         task_id=task_id,
@@ -391,7 +392,20 @@ def _register_cross_source(
                 "value": None,
             },
         ],
-        source_refs=["dataset:dataset-cross-1"],
+        source_refs=[
+            "dataset:dataset-cross-1",
+            "strategy-sample-design:"
+            + json.dumps(
+                {
+                    "kind": "strategy_sample_design",
+                    **sample_design_ref,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+        ],
         producer_version="strategy.univariate-candidate/1",
     )
     content = render_strategy_candidate_bundle(evidence, analysis)["json"]

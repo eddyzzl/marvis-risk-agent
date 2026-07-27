@@ -7,7 +7,9 @@ import hmac
 import json
 
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 
 
 _SOURCE_REF_PREFIX = "strategy-sample-design:"
@@ -39,15 +41,27 @@ def sample_design_ref_from_automatic_tree_source_refs(
         raise StrategyError(
             "automatic-tree sample-design source reference is invalid"
         ) from exc
-    if (
-        not isinstance(payload, Mapping)
-        or payload.get("kind") != "strategy_sample_design"
-    ):
+    if not isinstance(payload, Mapping):
         raise StrategyError("automatic-tree sample-design source reference is invalid")
-    reference = StrategySampleDesignRef.from_value(
+    kind = payload.get("kind")
+    if kind not in {"strategy_sample_design", "strategy_sample_design_v2"}:
+        raise StrategyError(
+            "automatic-tree sample-design source reference is invalid"
+        )
+    reference = StrategyRiskDevelopmentRef.from_value(
         {key: value for key, value in payload.items() if key != "kind"}
     )
-    canonical_payload = {"kind": "strategy_sample_design", **reference.to_ref_dict()}
+    expected_partition = (
+        "development"
+        if kind == "strategy_sample_design"
+        else "risk/development"
+    )
+    if reference.partition != expected_partition:
+        raise StrategyError(
+            "automatic-tree sample-design source kind and partition "
+            "are inconsistent"
+        )
+    canonical_payload = {"kind": kind, **reference.to_ref_dict()}
     canonical_token = _SOURCE_REF_PREFIX + json.dumps(
         canonical_payload,
         ensure_ascii=False,

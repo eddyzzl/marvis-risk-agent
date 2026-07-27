@@ -2199,7 +2199,10 @@
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
               },
-              "partition": {"const": "development"}
+              "partition": {
+                "type": "string",
+                "enum": ["development", "risk/development"]
+              }
             },
             "required": [
               "artifact_id",
@@ -2479,7 +2482,10 @@
                     "type": "string",
                     "pattern": "^[0-9a-f]{64}$"
                   },
-                  "partition": {"const": "development"}
+                  "partition": {
+                    "type": "string",
+                    "enum": ["development", "risk/development"]
+                  }
                 },
                 "required": [
                   "artifact_id",

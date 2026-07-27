@@ -500,6 +500,8 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 
 **原生风险开发执行绑定与单变量消费纵切（已完成，2026-07-25）**：新增来源无关的 `StrategyRiskDevelopmentExecutionBinding`，对旧 V1 `partition=development` 完整委托既有实现，保持 source ref、token、frame 与 hash 身份；对原生 V2 则要求 bundle kind/origin 与 `partition=risk/development` 精确匹配，认证 membership/bundle/source identity 后直接消费持久化风险开发 mask。平台不会重新解释 predicate，也不会把 approval mask 叠加到 risk mask；双总体筛选列、切分列与目标列统一从自动候选特征中排除。current loader 绑定当前 DataWorkspace，historical loader 不依赖 workspace head，但仍要求原 dataset registry 路径、元数据和文件 bytes 可重放；两类 binding 都在下游 artifact 写入锁内重新认证。自然语言 Agent 与 Candidate Lab Manual 单变量入口只在该 Workflow 上选择最新原生 ref，真实平行 cohort 的 approval/risk development 件数不同也会只分析物理 `risk/development` 行；原生五字段 ref 原样进入 candidate evidence、source token 与 artifact provenance。Automatic Tree、Cross/refinement、Voting、Pool、稳定性、ImpactCube、独立验证和报告尚未迁移，manifest 与 Agent selector 不做全局放宽，继续稳定阻断。
 
+**原生 refinement、Automatic Tree 与 Cross 候选链纵切（已完成，2026-07-25）**：单变量 refinement 和 Cross 都改为不可变 parent candidate 的 historical consumer；即使活动 workspace head 后续前进，平台仍按 parent evidence 中的 dataset/hash/workspace/target、原 dataset registry/path/bytes、原生 membership 与 bundle 精确重放，并在计算前后、落盘前和 writer lock 内重新认证，任一 source/artifact 漂移继续失败关闭。Automatic Tree 是直接候选开发请求，使用 current generic binding；它严格消费持久化 risk development mask、归一 `target_bad_value=0`，并可继续物化 exact leaf fragment。三类候选统一禁止目标列、切分列和 approval/risk 人群字段进入 refinement feature、tree feature 或 Cross axis；Cross 可继续物化 cell group，候选 lineage 只接受 canonical `strategy_sample_design + development` 或 `strategy_sample_design_v2 + risk/development` 两种 kind/partition 配对，交叉、未知、非 canonical、重复 token 均拒绝。旧 sample-context hash、source token 与 candidate canonical bytes 由 golden 测试锁定。Agent/Manual 只对这三条已迁移 Workflow 开放 native ref，损坏的最新 evidence 仍不回退旧 V1；Voting、ModelEvidence、Pool、稳定性、影响、验证和报告继续保持待迁移边界。
+
 交付：
 
 1. 策略任务创建、列表、加载、删除、显式保存、dirty 切换保护和分析状态恢复；
@@ -760,17 +762,17 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 28. 受控填充、删列、转换、派生、过滤、重命名和历史；
 29. 隔离自定义派生 Tool 与资源/权限护栏；
 30. 字段语义、中英文/节点映射和风险方向；
-31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出（描述分析、`StrategySampleDesign`、版本化指标、下游成熟 development 强绑定、原生 approval/risk 双人群物理样本底座及单变量消费迁移已完成；原生样本的树/Cross/refinement/Voting/Pool/稳定性/影响/验证/报告消费迁移、产品化纳排/泄漏检测、`CurrentProjectSnapshot` 与历史资料映射待续）。
+31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出（描述分析、`StrategySampleDesign`、版本化指标、下游成熟 development 强绑定、原生 approval/risk 双人群物理样本底座，以及单变量/refinement/Automatic Tree/Cross 消费迁移已完成；原生样本的 Voting/ModelEvidence/Pool/稳定性/影响/验证/报告消费迁移、产品化纳排/泄漏检测、`CurrentProjectSnapshot` 与历史资料映射待续）。
 
 ### Phase 3：Candidate Lab
 
-32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX、证据绑定的选箱/合并、不可变候选资产及其 Strategy Pool 入池已完成；单变量 asset 与其当前 Pool entry 的 development 逐月命中分布/PSI 已完成，其他候选类型、手工入口与 OOT 稳定性待续）；
-33. 加权自动规则树、方向检查、树图和写回（受限完整树、叶选择/入池及自然语言 full-tree apply 已完成；交互展示、代码和列写回待续）；
+32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX、证据绑定的选箱/合并、不可变候选资产及其 Strategy Pool 入池已完成；原生 risk/development 的单变量与 historical refinement 已完成，单变量 asset 与其当前 Pool entry 的 development 逐月命中分布/PSI 已完成；原生 Pool/稳定性消费、其他候选类型和 OOT 稳定性待续）；
+33. 加权自动规则树、方向检查、树图和写回（受限完整树、叶选择/入池及自然语言 full-tree apply 已完成，原生 risk/development 建树与叶物化已接通；原生 Pool/后续消费者、交互展示、代码和列写回待续）；
 34. 交互树节点/候选/手工分裂内核；
 35. 交互树删节点、自动续建、可视化、代码和入池；
 36. 标准 WOE-LR 评分卡 Workbench；
 37. voting 候选、自定义规则、受预算组合和 n-of-k（显式 n-of-k 候选、同样本 lineage 及受治理入池已完成；自动搜索、自定义编辑、代码和列写回待续）；
-38. 2D/3D 自动 cross rules 与 2D matrix/cell（2D matrix、显式 cell group、同样本 lineage 及入池已完成；人工切点、自动搜索、代码和列写回待续）；
+38. 2D/3D 自动 cross rules 与 2D matrix/cell（2D matrix、显式 cell group、同样本 lineage 及入池已完成，原生 risk/development historical Cross 与 cell selection 已接通；原生 Pool/后续消费者、人工切点、自动搜索、代码和列写回待续）；
 39. Candidate artifact、代码、写回列和 report-ready evidence 统一到 DSL。
 
 ### Phase 4：Strategy Pool、回测与交付

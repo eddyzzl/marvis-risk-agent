@@ -648,6 +648,31 @@ def revalidate_strategy_risk_development_execution_binding(
     )
 
 
+def revalidate_historical_strategy_risk_development_execution_binding(
+    runtime,
+    binding: StrategyRiskDevelopmentExecutionBinding,
+) -> StrategyRiskDevelopmentExecutionBinding:
+    """Re-authenticate immutable evidence without requiring workspace head."""
+
+    _require_binding(binding)
+    return load_historical_strategy_risk_development_execution_binding(
+        runtime,
+        task_id=binding.task_id,
+        sample_design_ref=binding.to_ref_dict(),
+        dataset_id=binding.dataset_id,
+        dataset_content_hash=binding.dataset_content_hash,
+        workspace_revision=binding.workspace_revision,
+        workspace_generation=binding.workspace_generation,
+        semantic_mapping_hash=binding.semantic_mapping_hash,
+        target_col=binding.target_col,
+        drop_nan_labels=binding.drop_nan_labels,
+        month_col=binding.month_col,
+        weight_col=binding.weight_col,
+        loan_amount_col=binding.loan_amount_col,
+        overdue_amount_col=binding.overdue_amount_col,
+    )
+
+
 def require_strategy_risk_development_execution_binding_on_connection(
     conn,
     binding: StrategyRiskDevelopmentExecutionBinding,
@@ -845,5 +870,6 @@ __all__ = [
     "load_strategy_risk_development_execution_binding",
     "require_historical_strategy_risk_development_execution_binding_on_connection",
     "require_strategy_risk_development_execution_binding_on_connection",
+    "revalidate_historical_strategy_risk_development_execution_binding",
     "revalidate_strategy_risk_development_execution_binding",
 ]

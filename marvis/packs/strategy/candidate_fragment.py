@@ -27,7 +27,9 @@ from marvis.packs.strategy.candidate_asset import validate_candidate_asset
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.dsl import canonicalize_expression
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentRef,
+)
 
 
 VERIFIED_CANDIDATE_FRAGMENT_SCHEMA_VERSION = (
@@ -42,6 +44,11 @@ _CANDIDATE_STAGE = "development"
 _OBSERVATION_STAGE = "backtested"
 _VALIDATION_STATUS = "unvalidated"
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_SAMPLE_DESIGN_SOURCE_REF_PREFIX = "strategy-sample-design:"
+_SAMPLE_DESIGN_KIND_PARTITIONS = {
+    "strategy_sample_design": "development",
+    "strategy_sample_design_v2": "risk/development",
+}
 _TOP_LEVEL_FIELDS = frozenset(
     {
         "schema_version",
@@ -234,14 +241,10 @@ def sample_context_hash_from_candidate_evidence(
         raise CandidateFragmentError(
             "univariate evidence lacks a complete sample context"
         )
-    try:
-        sample_design_ref = StrategySampleDesignRef.from_value(
-            generation.get("sample_design_ref")
-        ).to_ref_dict()
-    except StrategyError as exc:
-        raise CandidateFragmentError(
-            "univariate evidence lacks a valid sample_design_ref"
-        ) from exc
+    sample_design_ref = _sample_design_ref_from_candidate_evidence(
+        evidence,
+        generation=generation,
+    )
     sample_parameters = {
         key: generation.get(key)
         for key in (
@@ -270,6 +273,81 @@ def sample_context_hash_from_candidate_evidence(
         ),
     }
     return _sha256(_canonical_json(context))
+
+
+def _sample_design_ref_from_candidate_evidence(
+    evidence: Mapping[str, Any],
+    *,
+    generation: Mapping[str, Any],
+) -> dict[str, str]:
+    """Normalize one exact legacy/native development lineage reference."""
+
+    try:
+        reference = StrategyRiskDevelopmentRef.from_value(
+            generation.get("sample_design_ref")
+        )
+    except StrategyError as exc:
+        raise CandidateFragmentError(
+            "univariate evidence lacks a valid sample_design_ref"
+        ) from exc
+    source_tokens = [
+        value
+        for value in evidence["source_refs"]
+        if isinstance(value, str)
+        and value.startswith(_SAMPLE_DESIGN_SOURCE_REF_PREFIX)
+    ]
+    if len(source_tokens) != 1:
+        raise CandidateFragmentError(
+            "univariate evidence sample_design_ref requires exactly one "
+            "canonical source token"
+        )
+    token = source_tokens[0]
+    try:
+        payload = json.loads(
+            token.removeprefix(_SAMPLE_DESIGN_SOURCE_REF_PREFIX)
+        )
+    except json.JSONDecodeError as exc:
+        raise CandidateFragmentError(
+            "univariate evidence sample_design_ref source token is invalid"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise CandidateFragmentError(
+            "univariate evidence sample_design_ref source token is invalid"
+        )
+    kind = payload.get("kind")
+    expected_partition = (
+        _SAMPLE_DESIGN_KIND_PARTITIONS.get(kind)
+        if isinstance(kind, str)
+        else None
+    )
+    if expected_partition is None:
+        raise CandidateFragmentError(
+            "univariate evidence sample_design_ref source kind is unsupported"
+        )
+    try:
+        token_reference = StrategyRiskDevelopmentRef.from_value(
+            {key: value for key, value in payload.items() if key != "kind"}
+        )
+    except StrategyError as exc:
+        raise CandidateFragmentError(
+            "univariate evidence sample_design_ref source token is invalid"
+        ) from exc
+    if (
+        reference.partition != expected_partition
+        or token_reference != reference
+    ):
+        raise CandidateFragmentError(
+            "univariate evidence sample_design_ref kind, partition, and "
+            "generation binding disagree"
+        )
+    canonical_token = _SAMPLE_DESIGN_SOURCE_REF_PREFIX + _canonical_json(
+        {"kind": kind, **reference.to_ref_dict()}
+    )
+    if not hmac.compare_digest(token, canonical_token):
+        raise CandidateFragmentError(
+            "univariate evidence sample_design_ref source token is not canonical"
+        )
+    return reference.to_ref_dict()
 
 
 def univariate_asset_to_verified_fragment(

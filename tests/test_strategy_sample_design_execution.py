@@ -24,6 +24,7 @@ from marvis.packs.strategy.sample_design_execution import (
     load_strategy_risk_development_execution_binding,
     require_historical_strategy_risk_development_execution_binding_on_connection,
     require_strategy_risk_development_execution_binding_on_connection,
+    revalidate_historical_strategy_risk_development_execution_binding,
     revalidate_strategy_risk_development_execution_binding,
 )
 from marvis.packs.strategy.sample_design_binding import (
@@ -406,6 +407,10 @@ def test_historical_native_execution_replays_after_workspace_switch(
     assert binding.to_ref_dict() == fx["sample_ref"]
     assert selected["row_id"].tolist() == ["risk-only", "both"]
     assert selected["bad"].tolist() == [1, 0]
+    assert revalidate_historical_strategy_risk_development_execution_binding(
+        fx["runtime"],
+        binding,
+    ).to_ref_dict() == fx["sample_ref"]
 
 
 def test_native_execution_current_and_historical_writer_lock_revalidation(
@@ -581,6 +586,7 @@ def test_historical_native_execution_rejects_dataset_source_drift(
     drift: str,
 ) -> None:
     fx = _parallel_native_setup(tmp_path / drift)
+    historical = _load_execution(fx, historical=True)
     if drift == "dataset_bytes":
         dataset_path = Path(
             fx["runtime"].registry.resolve_path(fx["dataset"].id)
@@ -602,3 +608,8 @@ def test_historical_native_execution_rejects_dataset_source_drift(
 
     with pytest.raises(StrategyError, match="historical dataset"):
         _load_execution(fx, historical=True)
+    with pytest.raises(StrategyError, match="historical dataset"):
+        revalidate_historical_strategy_risk_development_execution_binding(
+            fx["runtime"],
+            historical,
+        )

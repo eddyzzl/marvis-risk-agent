@@ -3210,7 +3210,13 @@ def _run_validated_strategy_request(
                     context=context,
                     drop_nan_labels=bool(drop_nan_labels),
                     allow_native_risk_development=(
-                        draft.workflow == "univariate_candidate_analysis"
+                        draft.workflow
+                        in {
+                            "univariate_candidate_analysis",
+                            "univariate_candidate_refinement",
+                            "automatic_tree_candidate_build",
+                            "cross_matrix_analysis",
+                        }
                     ),
                     weight_col=(
                         workflow_inputs.get("sample_weight_col")

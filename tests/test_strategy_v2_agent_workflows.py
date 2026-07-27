@@ -173,6 +173,43 @@ def _automatic_tree_payload() -> dict:
     }
 
 
+def _refinement_payload() -> dict:
+    return {
+        "request_kind": "standard_workflow",
+        "workflow": "univariate_candidate_refinement",
+        "workflow_inputs": {
+            "feature": "legacy_score",
+            "method": "equal_width",
+            "bin_count": 3,
+            "min_bin_pct": 0.02,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "selection": {
+                "risk_threshold": {"operator": ">=", "value": 0.5}
+            },
+            "selection_reason": "保留观测坏率达到 50% 的风险箱",
+        },
+    }
+
+
+def _cross_matrix_payload() -> dict:
+    return {
+        "request_kind": "standard_workflow",
+        "workflow": "cross_matrix_analysis",
+        "workflow_inputs": {
+            "x_feature": "legacy_score",
+            "x_method": "equal_width",
+            "y_feature": "age",
+            "y_method": "equal_width",
+            "bin_count": 3,
+            "min_bin_pct": 0.02,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "sentinel_values": [],
+        },
+    }
+
+
 def _model_evidence_payload() -> dict:
     return {
         "request_kind": "standard_workflow",
@@ -278,6 +315,11 @@ def _register_workspace_sample(
             for month in range(3)
             for offset in (10, 20, 100, 200, 300, 400)
         ]
+        age = [
+            float(20 + month * 10 + offset)
+            for month in range(3)
+            for offset in range(6)
+        ]
         customer_ids = [
             f"customer-{index:02d}" for index in range(len(sample_roles))
         ]
@@ -310,6 +352,7 @@ def _register_workspace_sample(
             "202603",
         ]
         legacy_score = [100.0, 200.0, 120.0, 220.0, 140.0, 240.0]
+        age = [21.0, 35.0, 23.0, 37.0, 25.0, 39.0]
         customer_ids = ["a", "b", "c", "d", "e", "f"]
         loan_amount = [100.0, 200.0, 150.0, 180.0, 300.0, 250.0]
         overdue_amount = [0.0, 20.0, 0.0, 10.0, 0.0, 30.0]
@@ -322,6 +365,7 @@ def _register_workspace_sample(
         "apply_date": apply_dates,
         "apply_month": apply_months,
         "legacy_score": legacy_score,
+        "age": age,
         "weight": [1.0] * row_count,
         "loan_amount": loan_amount,
         "overdue_amount": overdue_amount,
@@ -362,6 +406,7 @@ def _register_workspace_sample(
             "apply_date": "date",
             "apply_month": "month",
             "legacy_score": "score",
+            "age": "feature",
             "weight": "weight",
             "loan_amount": "loan_amount",
             "overdue_amount": "overdue_amount",
@@ -689,54 +734,201 @@ def test_native_parallel_sample_drives_univariate_on_exact_risk_development_rows
     assert len(llm.calls) == (2 if request_source == "natural_language" else 0)
 
 
-def test_native_sample_remains_blocked_for_automatic_tree_candidate(
+@pytest.mark.parametrize("request_source", ["natural_language", "manual_ui"])
+def test_native_parallel_sample_drives_automatic_tree_on_risk_development(
     tmp_path: Path,
     monkeypatch,
+    request_source: str,
 ) -> None:
-    client = TestClient(create_app(tmp_path / "workspace"))
-    task_id = _create_strategy_task(client, tmp_path)
+    scoped = tmp_path / request_source
+    client = TestClient(create_app(scoped / "workspace"))
+    task_id = _create_strategy_task(client, scoped)
     _register_workspace_sample(
         client,
         task_id,
-        tmp_path,
+        scoped,
         parallel_populations=True,
-    )
-    llm = _SequencedStrategyLLM()
-    monkeypatch.setattr(
-        "marvis.agent.validation_app_service.driver_llm_client",
-        lambda request, task: llm,
     )
     sample_request = {
         "request_kind": "standard_workflow",
         "workflow": "strategy_sample_design_v2",
         "workflow_inputs": _parallel_population_sample_v2_inputs(),
     }
+    tree_request = _automatic_tree_payload()
+    llm = (
+        _SequencedStrategyLLM(sample_request, tree_request)
+        if request_source == "natural_language"
+        else _SequencedStrategyLLM()
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+    sample_body = {"content": _parallel_population_sample_v2_utterance()}
+    tree_body = {
+        "content": (
+            "用 legacy_score 在原生风险开发样本上构建自动决策树候选，"
+            "最大深度 2，最小叶节点 2，放款金额列 loan_amount，"
+            "逾期金额列 overdue_amount"
+        )
+    }
+    if request_source == "manual_ui":
+        sample_body["strategy_request"] = sample_request
+        tree_body["strategy_request"] = tree_request
     sample_response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={
-            "content": "人工界面原生固化平行总体样本",
-            "strategy_request": sample_request,
-        },
+        json=sample_body,
     )
     tree_response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={
-            "content": "人工界面用 legacy_score 构建自动决策树候选",
-            "strategy_request": _automatic_tree_payload(),
-        },
+        json=tree_body,
     )
 
     assert sample_response.status_code == 202, sample_response.text
     assert tree_response.status_code == 202, tree_response.text
-    assert (
-        tree_response.json()["code"]
-        == "strategy_sample_design_v2_native_source_unsupported"
-    )
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
-        "strategy_sample_design_v2_native"
+        "strategy_sample_design_v2_native",
+        "strategy_automatic_tree_candidate_build",
     ]
-    assert len(llm.calls) == 0
+    assert all(plan["status"] == "done" for plan in plans)
+    sample_plan = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    tree_plan = client.app.state.plan_repo.load_plan(plans[1]["id"])
+    sample_output = client.app.state.plan_repo.load_step_output(
+        sample_plan.steps[0].id
+    )
+    assert sample_output["membership"]["counts"]["approval"]["development"] == 5
+    assert sample_output["membership"]["counts"]["risk"]["development"] == 4
+    native_bundle = next(
+        record
+        for record in TaskArtifactRepository(
+            client.app.state.settings.db_path
+        ).list_for_task(task_id)
+        if record["kind"] == "strategy_sample_design_v2_json"
+        and record["origin_tool"]
+        == "strategy.materialize_sample_design_v2_native"
+    )
+    expected_ref = {
+        "artifact_id": native_bundle["id"],
+        "artifact_content_hash": native_bundle["content_hash"],
+        "sample_design_id": native_bundle["provenance"]["sample_design_id"],
+        "sample_design_content_hash": native_bundle["provenance"][
+            "sample_design_content_hash"
+        ],
+        "partition": "risk/development",
+    }
+    assert tree_plan.steps[0].inputs["sample_design_ref"] == expected_ref
+    tree_output = client.app.state.plan_repo.load_step_output(
+        tree_plan.steps[0].id
+    )
+    assert tree_output["summary"]["sample_design_ref"] == expected_ref
+    assert tree_output["summary"]["training_row_count"] == 4
+    assert len(llm.calls) == (2 if request_source == "natural_language" else 0)
+
+
+@pytest.mark.parametrize(
+    ("workflow_request", "utterance", "template_id"),
+    [
+        (
+            _refinement_payload(),
+            (
+                "对 legacy_score 做等距 3 箱并保留观测坏率大于等于 50% "
+                "的候选箱，最小箱占比 2%，放款金额列 loan_amount，"
+                "逾期金额列 overdue_amount"
+            ),
+            "strategy_univariate_candidate_refinement",
+        ),
+        (
+            _cross_matrix_payload(),
+            (
+                "构建 legacy_score 等距 3 箱乘以 age 等距 3 箱的二维"
+                "交叉矩阵，最小箱占比 2%，放款金额列 loan_amount，"
+                "逾期金额列 overdue_amount"
+            ),
+            "strategy_cross_matrix_analysis",
+        ),
+    ],
+)
+def test_native_parallel_sample_drives_composed_candidate_workflows(
+    tmp_path: Path,
+    monkeypatch,
+    workflow_request: dict,
+    utterance: str,
+    template_id: str,
+) -> None:
+    scoped = tmp_path / template_id
+    client = TestClient(create_app(scoped / "workspace"))
+    task_id = _create_strategy_task(client, scoped)
+    _register_workspace_sample(
+        client,
+        task_id,
+        scoped,
+        parallel_populations=True,
+    )
+    sample_request = {
+        "request_kind": "standard_workflow",
+        "workflow": "strategy_sample_design_v2",
+        "workflow_inputs": _parallel_population_sample_v2_inputs(),
+    }
+    llm = _SequencedStrategyLLM(sample_request, workflow_request)
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    sample_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _parallel_population_sample_v2_utterance()},
+    )
+    workflow_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": utterance},
+    )
+
+    assert sample_response.status_code == 202, sample_response.text
+    assert workflow_response.status_code == 202, workflow_response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        template_id,
+    ], json.dumps(workflow_response.json()["messages"][-1], ensure_ascii=False)
+    assert all(plan["status"] == "done" for plan in plans)
+    sample_plan = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    candidate_plan = client.app.state.plan_repo.load_plan(plans[1]["id"])
+    sample_output = client.app.state.plan_repo.load_step_output(
+        sample_plan.steps[0].id
+    )
+    assert sample_output["membership"]["counts"]["approval"]["development"] == 5
+    assert sample_output["membership"]["counts"]["risk"]["development"] == 4
+    first_output = client.app.state.plan_repo.load_step_output(
+        candidate_plan.steps[0].id
+    )
+    exact_ref = candidate_plan.steps[0].inputs["sample_design_ref"]
+    assert exact_ref["partition"] == "risk/development"
+    assert first_output["candidate_evidence"]["analysis"]["row_count"] == 4
+    assert (
+        first_output["candidate_evidence"]["generation"]["parameters"][
+            "sample_design_ref"
+        ]
+        == exact_ref
+    )
+    second_output = client.app.state.plan_repo.load_step_output(
+        candidate_plan.steps[1].id
+    )
+    assert second_output["parent_candidate_id"] == first_output["candidate_id"]
+    assert second_output["parent_evidence_hash"] == first_output["evidence_hash"]
+    if template_id == "strategy_univariate_candidate_refinement":
+        assert second_output["candidate_asset"]["rule"]["condition"]["op"] in {
+            "compare",
+            "between",
+            "or",
+        }
+        assert second_output["effect"]["selected_count"] > 0
+    else:
+        measurement = second_output["cross_matrix_candidate"]["measurement"]
+        assert measurement["population_count"] == 4
+        assert sum(cell["count"] for cell in measurement["cells"]) == 4
+    assert len(llm.calls) == 2
 
 
 def test_fresh_sample_v2_requires_workspace_before_compiler_llm(

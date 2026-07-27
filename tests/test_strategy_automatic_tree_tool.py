@@ -50,6 +50,12 @@ from marvis.packs.strategy.codegen import (
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_tools import SAMPLE_DESIGN_ARTIFACT_KIND
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
 from marvis.plugins.contracts import ToolContext
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -127,6 +133,9 @@ def _runtime(
         ],
         "ignore_me": [index for index in range(24)],
         "unused_text": [f"unused-{index}" for index in range(24)],
+        "apply_date": [
+            f"2026-01-{index + 1:02d}" for index in range(24)
+        ],
         "bad": (
             bad_one_labels
             if target_bad_value == 1
@@ -159,6 +168,7 @@ def _runtime(
             loan_amount_col: "loan_amount",
             overdue_amount_col: "overdue_amount",
             "ignore_me": "ignore",
+            "apply_date": "date",
             "bad": "target",
             **({"sample_split": "segment"} if with_split else {}),
         },
@@ -278,6 +288,125 @@ def _materialize_sample_design_ref(
         "sample_design_id": output["sample_design_id"],
         "sample_design_content_hash": output["content_hash"],
         "partition": "development",
+    }
+
+
+def _predicate_eq(column: str, value: object) -> dict:
+    return {
+        "op": "eq",
+        "left": {"column": column},
+        "right": {"literal": value},
+    }
+
+
+def _predicate_lt(column: str, value: object) -> dict:
+    return {
+        "op": "lt",
+        "left": {"column": column},
+        "right": {"literal": value},
+    }
+
+
+def _materialize_native_sample_design_ref(
+    settings,
+    task,
+    dataset,
+    workspace,
+    mapping,
+    *,
+    target_bad_value: int,
+) -> dict[str, str]:
+    output = strategy_tools.tool_materialize_sample_design_v2_native(
+        {
+            "source_mode": "native_active_dataset",
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": target_bad_value,
+            "drop_nan_labels": False,
+            "relationship": "parallel_time_cohorts",
+            "scope": "strategy_development",
+            "approval_population": {
+                "inclusion": _predicate_lt("ignore_me", 8),
+                "exclusion": None,
+            },
+            "risk_population": {"inclusion": None, "exclusion": None},
+            "partitioning": {
+                "method": "predicate_ast",
+                "selectors": {
+                    "development": _predicate_eq("sample_split", "dev"),
+                    "validation": _predicate_eq(
+                        "sample_split",
+                        "validation",
+                    ),
+                    "oot": _predicate_eq("sample_split", "oot"),
+                },
+            },
+            "maturity": {
+                "status": "confirmed_matured",
+                "performance_window_days": 30,
+                "cutoff_date": "2026-03-31",
+                "reason": None,
+            },
+            "performance_window": {"status": "provided", "days": 30},
+            "observation_window": {
+                "status": "provided",
+                "start": "2026-01-01",
+                "end": "2026-01-31",
+            },
+            "field_bindings": {
+                "entity_field": "customer_id",
+                "time_field": "apply_date",
+                "group_field": None,
+                "month_field": None,
+                "weight_field": "weight",
+                "loan_amount_field": "loan_amount",
+                "overdue_amount_field": "overdue_amount",
+            },
+            "historical_score": {
+                "status": "not_applicable",
+                "column": None,
+                "direction": None,
+                "reason": "not supplied",
+            },
+            "policy": {
+                "minimum_partition_count": 1,
+                "minimum_bad_count": 1,
+                "minimum_label_coverage": 1.0,
+                "minimum_historical_score_coverage": 0.0,
+                "maximum_group_coverage_gap": 1.0,
+                "diagnostic_severities": {
+                    "entity_overlap": "warn",
+                    "temporal_oot": "warn",
+                    "risk_outside_approval": "warn",
+                    "maturity": "fail",
+                    "label_coverage": "fail",
+                    "historical_score_coverage": "warn",
+                    "group_coverage_gap": "warn",
+                    "sufficiency": "warn",
+                },
+            },
+        },
+        _tool_context(settings, task),
+    )
+    bundle = next(
+        record
+        for record in TaskArtifactRepository(
+            settings.db_path
+        ).list_for_task(task.id)
+        if record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+        and record["provenance"]["bundle_id"] == output["bundle_id"]
+    )
+    return {
+        "artifact_id": bundle["id"],
+        "artifact_content_hash": bundle["content_hash"],
+        "sample_design_id": output["sample_design_id"],
+        "sample_design_content_hash": output["sample_design_content_hash"],
+        "partition": "risk/development",
     }
 
 
@@ -1625,6 +1754,220 @@ def test_automatic_tree_rejects_split_column_as_feature(tmp_path: Path) -> None:
             },
             _tool_context(settings, task),
         )
+
+
+def test_automatic_tree_uses_native_risk_development_and_bad_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path,
+        target_bad_value=0,
+        with_split=True,
+    )
+    native_ref = _materialize_native_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=0,
+    )
+    original = DataBackend.read_frame
+    projections: list[list[str] | None] = []
+
+    def tracked_read(self, path, *, columns=None, nrows=None):
+        projections.append(None if columns is None else list(columns))
+        return original(self, path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(DataBackend, "read_frame", tracked_read)
+    output = strategy_tools.tool_build_automatic_tree_candidate(
+        {
+            **_inputs(dataset, workspace, mapping, native_ref),
+            "features": ["score", "income"],
+        },
+        _tool_context(settings, task),
+    )
+
+    assert output["summary"]["sample_design_ref"] == native_ref
+    assert output["summary"]["training_row_count"] == 16
+    assert output["equivalence"]["source_row_count"] == 16
+    expected_projection = [
+        "income",
+        "score",
+        "weight",
+        "loan_amount",
+        "overdue_amount",
+        "bad",
+        "sample_split",
+    ]
+    assert expected_projection in projections
+    assert sum(
+        leaf["measurements"]["unweighted"]["bad"]
+        for leaf in output["leaf_index"]
+    ) == 12
+    assert sum(
+        leaf["measurements"]["unweighted"]["good"]
+        for leaf in output["leaf_index"]
+    ) == 4
+
+    json_record = _record_by_kind(settings, task)[
+        AUTOMATIC_TREE_ASSET_ARTIFACT_KIND
+    ]
+    canonical_bytes = Path(json_record["path"]).read_bytes()
+    asset = json.loads(canonical_bytes)
+    selected_leaf = build_automatic_tree_leaf_fragment(
+        asset,
+        tree_artifact_binding={
+            "artifact_id": json_record["id"],
+            "task_id": task.id,
+            "kind": json_record["kind"],
+            "artifact_schema_version": (
+                AUTOMATIC_TREE_ASSET_ARTIFACT_SCHEMA_VERSION
+            ),
+            "content_hash": json_record["content_hash"],
+            "origin_tool": json_record["origin_tool"],
+            "path": json_record["path"],
+            "provenance": json_record["provenance"],
+            "canonical_bytes": canonical_bytes,
+        },
+        leaf_id=asset["fragments"][0]["leaf_id"],
+    )
+    assert selected_leaf["tree_artifact"]["provenance"][
+        "sample_design_ref"
+    ] == native_ref
+    leaf_output = strategy_tools.tool_materialize_automatic_tree_leaf_fragment(
+        {
+            "source_artifact_id": json_record["id"],
+            "expected_artifact_content_hash": json_record["content_hash"],
+            "expected_asset_id": asset["asset_id"],
+            "expected_asset_hash": asset["asset_hash"],
+            "expected_tree_result_hash": asset["tree_result"]["result_hash"],
+            "leaf_id": asset["fragments"][0]["leaf_id"],
+        },
+        _tool_context(settings, task),
+    )
+    assert leaf_output["leaf_id"] == asset["fragments"][0]["leaf_id"]
+    assert len(leaf_output["artifacts"]) == 1
+
+
+def test_automatic_tree_toolrunner_accepts_native_risk_development_ref(
+    tmp_path: Path,
+) -> None:
+    settings, runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path,
+        target_bad_value=0,
+        with_split=True,
+    )
+    native_ref = _materialize_native_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=0,
+    )
+
+    invoked = runner.invoke(
+        ToolRef("strategy", "build_automatic_tree_candidate"),
+        {
+            **_inputs(dataset, workspace, mapping, native_ref),
+            "features": ["score", "income"],
+        },
+        task_id=task.id,
+    )
+
+    assert invoked.ok, invoked.error
+    assert invoked.output["summary"]["sample_design_ref"] == native_ref
+    assert invoked.output["summary"]["training_row_count"] == 16
+
+
+@pytest.mark.parametrize(
+    "feature",
+    ["bad", "sample_split", "ignore_me"],
+)
+def test_automatic_tree_rejects_native_governed_sample_columns_as_features(
+    tmp_path: Path,
+    feature: str,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path,
+        with_split=True,
+    )
+    native_ref = _materialize_native_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=1,
+    )
+
+    with pytest.raises(StrategyError, match="sample-design governed"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            {
+                **_inputs(dataset, workspace, mapping, native_ref),
+                "features": [feature],
+                "directions": {feature: "unordered"},
+            },
+            _tool_context(settings, task),
+        )
+    assert _automatic_tree_records(settings, task) == []
+
+
+def test_automatic_tree_sample_design_source_tokens_support_exact_two_modes() -> None:
+    legacy_ref = {
+        "artifact_id": "a" * 64,
+        "artifact_content_hash": "b" * 64,
+        "sample_design_id": "strategy-sample-design-" + ("c" * 24),
+        "sample_design_content_hash": "d" * 64,
+        "partition": "development",
+    }
+    native_ref = {
+        **legacy_ref,
+        "artifact_id": "e" * 64,
+        "artifact_content_hash": "f" * 64,
+        "sample_design_content_hash": "0" * 64,
+        "partition": "risk/development",
+    }
+
+    def token(kind: str, ref: dict[str, str]) -> str:
+        return "strategy-sample-design:" + json.dumps(
+            {"kind": kind, **ref},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    legacy_token = token("strategy_sample_design", legacy_ref)
+    native_token = token("strategy_sample_design_v2", native_ref)
+    assert auto_tools.strategy_sample_design_ref_from_source_refs(
+        [legacy_token]
+    ) == legacy_ref
+    assert auto_tools.strategy_sample_design_ref_from_source_refs(
+        [native_token]
+    ) == native_ref
+    assert legacy_token == (
+        "strategy-sample-design:"
+        '{"artifact_content_hash":"'
+        + ("b" * 64)
+        + '","artifact_id":"'
+        + ("a" * 64)
+        + '","kind":"strategy_sample_design","partition":"development",'
+        '"sample_design_content_hash":"'
+        + ("d" * 64)
+        + '","sample_design_id":"strategy-sample-design-'
+        + ("c" * 24)
+        + '"}'
+    )
+    for crossed in (
+        token("strategy_sample_design", native_ref),
+        token("strategy_sample_design_v2", legacy_ref),
+        token("strategy_unknown", legacy_ref),
+    ):
+        with pytest.raises(StrategyError):
+            auto_tools.strategy_sample_design_ref_from_source_refs([crossed])
 
 
 def test_sample_context_hash_excludes_tree_generation_choices(

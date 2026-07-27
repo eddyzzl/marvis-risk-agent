@@ -479,8 +479,9 @@ def test_refine_sample_binding_deletion_under_lock_rolls_back_everything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = _setup(tmp_path)
-    original_require = (
-        candidate_asset_tools.require_strategy_sample_design_execution_binding_on_connection
+    original_require = getattr(
+        candidate_asset_tools,
+        "require_historical_strategy_risk_development_execution_binding_on_connection",
     )
 
     def delete_then_require(conn, binding):
@@ -492,7 +493,7 @@ def test_refine_sample_binding_deletion_under_lock_rolls_back_everything(
 
     monkeypatch.setattr(
         candidate_asset_tools,
-        "require_strategy_sample_design_execution_binding_on_connection",
+        "require_historical_strategy_risk_development_execution_binding_on_connection",
         delete_then_require,
     )
 

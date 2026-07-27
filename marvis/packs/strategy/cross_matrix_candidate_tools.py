@@ -44,12 +44,12 @@ from marvis.packs.strategy.cross_matrix_candidate import (
 from marvis.packs.strategy.dsl import canonicalize_expression
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.evaluator import evaluate_expression_frame
-from marvis.packs.strategy.sample_design_binding import (
-    StrategySampleDesignExecutionBinding,
-    bind_strategy_development_frame,
-    load_strategy_sample_design_execution_binding,
-    require_strategy_sample_design_execution_binding_on_connection,
-    revalidate_strategy_sample_design_execution_binding,
+from marvis.packs.strategy.sample_design_execution import (
+    StrategyRiskDevelopmentExecutionBinding,
+    bind_strategy_risk_development_frame,
+    load_historical_strategy_risk_development_execution_binding,
+    require_historical_strategy_risk_development_execution_binding_on_connection,
+    revalidate_historical_strategy_risk_development_execution_binding,
 )
 
 
@@ -143,7 +143,7 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     )
     identity = evidence["identity"]
     generation_parameters = evidence["generation"]["parameters"]
-    sample_binding = load_strategy_sample_design_execution_binding(
+    sample_binding = load_historical_strategy_risk_development_execution_binding(
         runtime,
         task_id=task_id,
         sample_design_ref=generation_parameters.get("sample_design_ref"),
@@ -171,6 +171,19 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         method=normalized["y_method"],
         label="y",
     )
+    governed_axes = sorted(
+        {
+            row_axis["feature"],
+            column_axis["feature"],
+        }
+        & set(sample_binding.excluded_feature_columns)
+    )
+    if governed_axes:
+        raise StrategyError(
+            "Cross Matrix axes cannot use target, sample partition, or "
+            "population columns: "
+            + ", ".join(governed_axes)
+        )
     cell_count = len(row_axis["bins"]) * len(column_axis["bins"])
     if cell_count > CROSS_MATRIX_MAX_CELLS:
         raise StrategyError(
@@ -184,18 +197,20 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         row_feature=row_axis["feature"],
         column_feature=column_axis["feature"],
     )
-    if (
-        sample_binding.split_column is not None
-        and sample_binding.split_column not in projection["columns"]
-    ):
-        projection["columns"].append(sample_binding.split_column)
-    # This is deliberately the sole dataset-frame read in this Tool invocation.
+    for column in sample_binding.partition_columns:
+        if column not in projection["columns"]:
+            projection["columns"].append(column)
+    # This is the sole consumer projection read. Native source authentication
+    # separately replays its frozen predicates before exposing this binding.
     frame = runtime.backend.read_frame(dataset.path, columns=projection["columns"])
     population_count = len(frame)
     if population_count != dataset.row_count:
         raise StrategyError("Cross Matrix source dataset row count changed")
     candidate_asset_tools._require_dataset_unchanged(runtime, dataset)
-    frame = bind_strategy_development_frame(frame, binding=sample_binding)
+    frame = bind_strategy_risk_development_frame(
+        frame,
+        binding=sample_binding,
+    )
     labeled = _resolve_exact_labeled_sample(
         frame,
         evidence=evidence,
@@ -206,7 +221,10 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
 
     candidate_asset_tools._require_source_unchanged(runtime, source)
     candidate_asset_tools._require_dataset_unchanged(runtime, dataset)
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_historical_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     target = _binary_target(labeled, projection["target_col"])
     row_index = _replay_axis(
         labeled,
@@ -235,7 +253,10 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
 
     candidate_asset_tools._require_source_unchanged(runtime, source)
     candidate_asset_tools._require_dataset_unchanged(runtime, dataset)
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
+    revalidate_historical_strategy_risk_development_execution_binding(
+        runtime,
+        sample_binding,
+    )
     asset = build_cross_matrix_candidate_asset(
         evidence,
         row_axis={"feature": row_axis["feature"], "method": row_axis["method"]},
@@ -834,7 +855,7 @@ def _persist_asset(
     task_id: str,
     source,
     dataset,
-    sample_design_binding: StrategySampleDesignExecutionBinding,
+    sample_design_binding: StrategyRiskDevelopmentExecutionBinding,
     evidence: Mapping[str, Any],
     asset: Mapping[str, Any],
     row_axis: Mapping[str, Any],
@@ -842,7 +863,10 @@ def _persist_asset(
     cell_count: int,
     content: bytes,
 ) -> dict[str, Any]:
-    revalidate_strategy_sample_design_execution_binding(runtime, sample_design_binding)
+    revalidate_historical_strategy_risk_development_execution_binding(
+        runtime,
+        sample_design_binding,
+    )
     asset_id = _text(asset.get("asset_id"), "Cross Matrix asset_id")
     if _SAFE_ASSET_ID_RE.fullmatch(asset_id) is None:
         raise StrategyError("Cross Matrix asset_id is not safe for persistence")
@@ -904,7 +928,7 @@ def _persist_asset(
             try:
                 candidate_asset_tools._require_source_on_connection(conn, source)
                 candidate_asset_tools._require_dataset_on_connection(conn, dataset)
-                require_strategy_sample_design_execution_binding_on_connection(
+                require_historical_strategy_risk_development_execution_binding_on_connection(
                     conn,
                     sample_design_binding,
                 )

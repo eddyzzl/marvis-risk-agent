@@ -232,7 +232,7 @@ STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
             "sample_design_ref",
             True,
             "task_context",
-            "Exact authenticated StrategySampleDesign development partition",
+            "Exact authenticated governed risk-development sample reference",
         ),
         SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
@@ -496,7 +496,7 @@ STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
             "sample_design_ref",
             True,
             "task_context",
-            "Exact authenticated StrategySampleDesign development partition",
+            "Exact authenticated governed risk-development sample reference",
         ),
         SlotSpec("features", True, "user", "Explicit ordered tree feature fields"),
         SlotSpec(

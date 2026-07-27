@@ -75,6 +75,13 @@ def _evidence(
 ) -> dict:
     resolved_analysis = _analysis() if analysis is None else analysis
     method = resolved_analysis["features"][0]["methods"][0]["method"]
+    sample_design_ref = {
+        "artifact_id": HASH_A,
+        "artifact_content_hash": HASH_B,
+        "sample_design_id": "strategy-sample-design-cross-1",
+        "sample_design_content_hash": HASH_C,
+        "partition": "development",
+    }
     generation_parameters = {
         "analysis_schema_version": (
             generation_analysis_schema_version
@@ -82,13 +89,7 @@ def _evidence(
         ),
         "features": ["age", "score"],
         "methods": [method],
-        "sample_design_ref": {
-            "artifact_id": HASH_A,
-            "artifact_content_hash": HASH_B,
-            "sample_design_id": "strategy-sample-design-cross-1",
-            "sample_design_content_hash": HASH_C,
-            "partition": "development",
-        },
+        "sample_design_ref": sample_design_ref,
     }
     if method == "manual":
         generation_parameters["manual_breakpoints"] = resolved_analysis["parameters"][
@@ -111,7 +112,19 @@ def _evidence(
             {"metric_name": "univariate.iv", "dimension": "loan_amount", "status": "unavailable", "value": None},
             {"metric_name": "univariate.iv", "dimension": "overdue_amount", "status": "unavailable", "value": None},
         ],
-        source_refs=["dataset:dataset-cross-1"],
+        source_refs=[
+            "dataset:dataset-cross-1",
+            "strategy-sample-design:"
+            + json.dumps(
+                {
+                    "kind": "strategy_sample_design",
+                    **sample_design_ref,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ],
         producer_version=producer_version
         or (
             "strategy.univariate-candidate/2"

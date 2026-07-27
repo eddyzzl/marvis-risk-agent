@@ -38,6 +38,12 @@ from marvis.packs.strategy.cross_matrix_candidate_tools import (
     run_build_cross_matrix_candidate,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
 from marvis.plugins.contracts import ToolContext
 from marvis.plugins.errors import SchemaValidationError
 from marvis.plugins.loader import load_builtin_packs
@@ -88,8 +94,24 @@ def _setup(
     normalized_target = [0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1]
     frame_data = {
         "unused": [f"row-{index}" for index in range(12)],
+        "apply_date": [
+            "2026-01-01",
+            "2026-01-02",
+            "2026-01-03",
+            "2026-01-04",
+            "2026-01-05",
+            "2026-01-06",
+            "2026-01-07",
+            "2026-01-08",
+            "2026-02-01",
+            "2026-02-02",
+            "2026-03-01",
+            "2026-03-02",
+        ],
         "age": [20, 22, 24, 26, 40, 42, 44, 46, 60, 62, 64, 66],
         "score": [100, 110, 300, 310, 120, 130, 320, 330, 140, 150, 340, 350],
+        "approval_flag": [1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1],
+        "risk_flag": [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
         "loan_amount": [100, 120, None, 160, 180, 200, 220, 240, 260, 280, 300, 320],
         "overdue_amount": [0, 0, 3, None, 0, 10, 0, 15, 20, 25, 30, 40],
         "bad": (
@@ -128,8 +150,11 @@ def _setup(
     )
     field_roles = {
         "unused": "id",
+        "apply_date": "date",
         "age": "feature",
         "score": "score",
+        "approval_flag": "categorical",
+        "risk_flag": "categorical",
         "bad": "target",
         **({"sample_split": "segment"} if with_split else {}),
     }
@@ -246,10 +271,146 @@ def _setup(
         "ctx": ctx,
         "source": source,
         "dataset": dataset,
+        "workspace": workspace,
+        "mapping": mapping,
         "inputs": inputs,
         "source_inputs": source_inputs,
         "sample_design_ref": sample_design_ref,
     }
+
+
+def _eq(column: str, value: object) -> dict:
+    return {
+        "op": "eq",
+        "left": {"column": column},
+        "right": {"literal": value},
+    }
+
+
+def _replace_source_with_native_parallel_evidence(
+    fixture: dict,
+) -> dict[str, str]:
+    dataset = fixture["dataset"]
+    workspace = fixture["workspace"]
+    mapping = fixture["mapping"]
+    output = strategy_tools.tool_materialize_sample_design_v2_native(
+        {
+            "source_mode": "native_active_dataset",
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": 0,
+            "drop_nan_labels": False,
+            "relationship": "parallel_time_cohorts",
+            "scope": "strategy_development",
+            "approval_population": {
+                "inclusion": _eq("approval_flag", 1),
+                "exclusion": None,
+            },
+            "risk_population": {
+                "inclusion": _eq("risk_flag", 1),
+                "exclusion": None,
+            },
+            "partitioning": {
+                "method": "predicate_ast",
+                "selectors": {
+                    "development": _eq("sample_split", "dev"),
+                    "validation": _eq("sample_split", "validation"),
+                    "oot": _eq("sample_split", "oot"),
+                },
+            },
+            "maturity": {
+                "status": "confirmed_matured",
+                "performance_window_days": 90,
+                "cutoff_date": "2026-06-30",
+                "reason": None,
+            },
+            "performance_window": {"status": "provided", "days": 90},
+            "observation_window": {
+                "status": "provided",
+                "start": "2026-01-01",
+                "end": "2026-06-30",
+            },
+            "field_bindings": {
+                "entity_field": "unused",
+                "time_field": "apply_date",
+                "group_field": None,
+                "month_field": None,
+                "weight_field": None,
+                "loan_amount_field": "loan_amount",
+                "overdue_amount_field": "overdue_amount",
+            },
+            "historical_score": {
+                "status": "unavailable",
+                "column": None,
+                "direction": None,
+                "reason": "not supplied for Cross Matrix development",
+            },
+            "policy": {
+                "minimum_partition_count": 1,
+                "minimum_bad_count": 1,
+                "minimum_label_coverage": 1.0,
+                "minimum_historical_score_coverage": 0.0,
+                "maximum_group_coverage_gap": 1.0,
+                "diagnostic_severities": {
+                    "entity_overlap": "warn",
+                    "temporal_oot": "warn",
+                    "risk_outside_approval": "warn",
+                    "maturity": "fail",
+                    "label_coverage": "fail",
+                    "historical_score_coverage": "warn",
+                    "group_coverage_gap": "warn",
+                    "sufficiency": "fail",
+                },
+            },
+        },
+        fixture["ctx"],
+    )
+    bundle = next(
+        record
+        for record in TaskArtifactRepository(
+            fixture["settings"].db_path
+        ).list_for_task(fixture["task"].id)
+        if record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    )
+    native_ref = {
+        "artifact_id": bundle["id"],
+        "artifact_content_hash": bundle["content_hash"],
+        "sample_design_id": output["sample_design_id"],
+        "sample_design_content_hash": output["sample_design_content_hash"],
+        "partition": "risk/development",
+    }
+    source_inputs = {
+        **fixture["source_inputs"],
+        "sample_design_ref": native_ref,
+    }
+    source = strategy_tools.tool_analyze_univariate_candidates(
+        source_inputs,
+        fixture["ctx"],
+    )
+    source_artifact = next(
+        artifact
+        for artifact in source["artifacts"]
+        if artifact["kind"] == "strategy_candidate_json"
+    )
+    fixture["sample_design_ref"] = native_ref
+    fixture["source_inputs"] = source_inputs
+    fixture["source"] = source
+    fixture["inputs"] = {
+        "source_artifact_id": source_artifact["artifact_id"],
+        "expected_artifact_content_hash": source_artifact["content_hash"],
+        "expected_candidate_id": source["candidate_id"],
+        "expected_evidence_hash": source["evidence_hash"],
+        "x_feature": "age",
+        "x_method": "equal_width",
+        "y_feature": "score",
+        "y_method": "equal_width",
+    }
+    return native_ref
 
 
 def _replace_source_with_manual_evidence(
@@ -703,6 +864,143 @@ def test_cross_matrix_tool_isolates_the_bound_development_partition(
     assert sum(cell["count"] for cell in measurement["cells"]) == 8
 
 
+def test_native_cross_matrix_uses_exact_risk_development_and_parent_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(
+        tmp_path,
+        with_split=True,
+        target_bad_value=0,
+    )
+    native_ref = _replace_source_with_native_parallel_evidence(fixture)
+    runtime = fixture["runtime"]
+    reads: list[list[str] | None] = []
+    original_read = runtime.backend.read_frame
+
+    def tracked_read(path, *, columns=None, nrows=None):
+        reads.append(None if columns is None else list(columns))
+        return original_read(path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(runtime.backend, "read_frame", tracked_read)
+
+    result = run_build_cross_matrix_candidate(
+        fixture["inputs"],
+        fixture["ctx"],
+        runtime,
+    )
+
+    evidence = fixture["source"]["candidate_evidence"]
+    assert evidence["generation"]["parameters"]["sample_design_ref"] == native_ref
+    consumer_projection = [
+        "age",
+        "score",
+        "bad",
+        "loan_amount",
+        "overdue_amount",
+        "sample_split",
+    ]
+    assert reads.count(consumer_projection) == 1
+    assert {"approval_flag", "risk_flag", "sample_split"} <= set(reads[0])
+    assert result["population_count"] == 12
+    assert result["labeled_count"] == 6
+    measurement = result["cross_matrix_candidate"]["measurement"]
+    assert measurement["population_count"] == 6
+    assert (measurement["good"], measurement["bad"]) == (2, 4)
+    assert sum(cell["count"] for cell in measurement["cells"]) == 6
+    assert result["parent_candidate_id"] == evidence["candidate_id"]
+    assert result["parent_evidence_hash"] == evidence["evidence_hash"]
+    assert result["cross_matrix_candidate"]["parent"]["evidence_hash"] == (
+        evidence["evidence_hash"]
+    )
+    record = TaskArtifactRepository(fixture["settings"].db_path).get_for_task(
+        fixture["task"].id,
+        result["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    assert record["provenance"]["parent_candidate_id"] == evidence["candidate_id"]
+    assert record["provenance"]["parent_evidence_hash"] == evidence["evidence_hash"]
+
+
+def test_native_cross_matrix_rejects_governed_axis_fields(tmp_path: Path) -> None:
+    fixture = _setup(
+        tmp_path,
+        with_split=True,
+        target_bad_value=0,
+    )
+    _replace_source_with_native_parallel_evidence(fixture)
+
+    for governed_field in (
+        "bad",
+        "approval_flag",
+        "risk_flag",
+        "sample_split",
+    ):
+        with pytest.raises(
+            StrategyError,
+            match="feature not found|axes cannot use",
+        ):
+            run_build_cross_matrix_candidate(
+                {
+                    **fixture["inputs"],
+                    "x_feature": governed_field,
+                },
+                fixture["ctx"],
+                fixture["runtime"],
+            )
+
+    assert all(
+        record["kind"] != ASSET_ARTIFACT_KIND
+        for record in TaskArtifactRepository(
+            fixture["settings"].db_path
+        ).list_for_task(fixture["task"].id)
+    )
+
+
+def test_native_cross_matrix_replays_parent_after_workspace_head_advances(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(
+        tmp_path,
+        with_split=True,
+        target_bad_value=0,
+    )
+    _replace_source_with_native_parallel_evidence(fixture)
+    replacement_path = tmp_path / "replacement.parquet"
+    pd.DataFrame(
+        {
+            "replacement_id": ["new-1", "new-2"],
+            "replacement_bad": [0, 1],
+        }
+    ).to_parquet(replacement_path, index=False)
+    replacement = fixture["runtime"].registry.register_existing(
+        replacement_path,
+        task_id=fixture["task"].id,
+        role="derived",
+    )
+    DataWorkspaceRepository(fixture["settings"].db_path).save(
+        fixture["task"].id,
+        DataWorkspaceDraft(
+            active_dataset_id=replacement.id,
+            active_dataset_content_hash=replacement.content_hash,
+            semantic_mapping=DataSemanticMapping(),
+        ),
+        expected_revision=fixture["workspace"].revision,
+    )
+
+    result = run_build_cross_matrix_candidate(
+        fixture["inputs"],
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    assert result["dataset_id"] == fixture["dataset"].id
+    assert result["labeled_count"] == 6
+    assert result["cross_matrix_candidate"]["measurement"][
+        "population_count"
+    ] == 6
+
+
 def test_cross_matrix_tool_normalizes_bad_zero_to_the_internal_bad_one_contract(
     tmp_path: Path,
 ) -> None:
@@ -999,13 +1297,21 @@ def test_cross_matrix_atomic_failure_removes_staged_artifact(
     assert not output_dir.exists() or list(output_dir.iterdir()) == []
 
 
+@pytest.mark.parametrize("native", [False, True])
 def test_cross_matrix_sample_binding_deletion_under_lock_rolls_back_everything(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    native: bool,
 ) -> None:
-    fixture = _setup(tmp_path)
+    fixture = _setup(
+        tmp_path,
+        with_split=native,
+        target_bad_value=(0 if native else 1),
+    )
+    if native:
+        _replace_source_with_native_parallel_evidence(fixture)
     original_require = (
-        cross_matrix_candidate_tools.require_strategy_sample_design_execution_binding_on_connection
+        cross_matrix_candidate_tools.require_historical_strategy_risk_development_execution_binding_on_connection
     )
 
     def delete_then_require(conn, binding):
@@ -1017,11 +1323,11 @@ def test_cross_matrix_sample_binding_deletion_under_lock_rolls_back_everything(
 
     monkeypatch.setattr(
         cross_matrix_candidate_tools,
-        "require_strategy_sample_design_execution_binding_on_connection",
+        "require_historical_strategy_risk_development_execution_binding_on_connection",
         delete_then_require,
     )
 
-    with pytest.raises(StrategyError, match="sample-design artifact disappeared"):
+    with pytest.raises(StrategyError, match="artifact"):
         run_build_cross_matrix_candidate(
             fixture["inputs"], fixture["ctx"], fixture["runtime"]
         )

@@ -23,6 +23,7 @@ from marvis.db_schema import connect
 from marvis.domain import TaskCreate
 from marvis.files import sha256_file
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
+from marvis.packs.strategy import candidate_asset_tools
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_v2_native_tools import (
@@ -719,8 +720,9 @@ def test_univariate_tool_filters_development_and_normalizes_reverse_bad_label(
     )
 
 
-def test_univariate_tool_consumes_exact_native_risk_development_membership(
+def test_native_univariate_candidate_refines_exact_risk_development_membership(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (
         settings,
@@ -800,32 +802,71 @@ def test_univariate_tool_consumes_exact_native_risk_development_membership(
         for record in records
     )
 
+    advanced_mapping = DataSemanticMapping(
+        target_col=mapping.target_col,
+        field_roles=mapping.field_roles,
+        business_names={**mapping.business_names, "score": "新工作区风险评分"},
+    )
+    advanced_workspace = DataWorkspaceRepository(settings.db_path).save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+            semantic_mapping=advanced_mapping,
+        ),
+        expected_revision=workspace.revision,
+    )
+    assert advanced_workspace.revision > workspace.revision
+
     json_artifact = next(
         item for item in output["artifacts"] if item["kind"] == "strategy_candidate_json"
     )
     source_bin_id = regular_bins[0]["id"]
-    with pytest.raises(
-        StrategyError,
-        match="sample_design_ref\\.partition must be development",
-    ):
-        strategy_tools.tool_refine_univariate_candidate(
-            {
-                "source_artifact_id": json_artifact["artifact_id"],
-                "expected_artifact_content_hash": json_artifact["content_hash"],
-                "expected_candidate_id": output["candidate_id"],
-                "expected_evidence_hash": output["evidence_hash"],
-                "feature": "score",
-                "method": "manual",
-                "merge_groups": [],
-                "selection": {"source_bin_ids": [source_bin_id]},
-                "selection_reason": "native refinement awaits its own migration",
-            },
-            _tool_context(settings, task),
-        )
-    assert not any(
-        record["kind"] == "strategy_candidate_asset_json"
-        for record in TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    locked_bindings = []
+    original_require = getattr(
+        candidate_asset_tools,
+        "require_historical_strategy_risk_development_execution_binding_on_connection",
     )
+
+    def track_native_binding_under_lock(conn, binding):
+        locked_bindings.append(binding)
+        return original_require(conn, binding)
+
+    monkeypatch.setattr(
+        candidate_asset_tools,
+        "require_historical_strategy_risk_development_execution_binding_on_connection",
+        track_native_binding_under_lock,
+    )
+    refined = strategy_tools.tool_refine_univariate_candidate(
+        {
+            "source_artifact_id": json_artifact["artifact_id"],
+            "expected_artifact_content_hash": json_artifact["content_hash"],
+            "expected_candidate_id": output["candidate_id"],
+            "expected_evidence_hash": output["evidence_hash"],
+            "feature": "score",
+            "method": "manual",
+            "merge_groups": [],
+            "selection": {"source_bin_ids": [source_bin_id]},
+            "selection_reason": "retain the exact first governed risk bin",
+        },
+        _tool_context(settings, task),
+    )
+
+    assert refined["parent_candidate_id"] == output["candidate_id"]
+    assert refined["parent_evidence_hash"] == output["evidence_hash"]
+    assert refined["effect"]["selected_count"] == 1
+    assert refined["effect"]["bad"] == 1
+    assert refined["effect"]["good"] == 0
+    assert refined["effect"]["bad_rate"] == 1.0
+    assert len(locked_bindings) == 1
+    assert locked_bindings[0].source_mode == "native_active_dataset"
+    assert locked_bindings[0].to_ref_dict() == native_ref
+    asset_records = [
+        record
+        for record in TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+        if record["kind"] == "strategy_candidate_asset_json"
+    ]
+    assert len(asset_records) == 1
 
 
 def test_univariate_tool_rejects_forged_native_partition(tmp_path: Path) -> None:
