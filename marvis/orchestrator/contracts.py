@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.manifest import GovernancePolicy, ToolRef
 
 
 class PlanStatus(str, Enum):
@@ -68,6 +68,7 @@ class PlanStep:
     depends_on: list[str]
     post_checks: list[PostCheck]
     needs_confirmation: bool = False
+    policy: GovernancePolicy = field(default_factory=GovernancePolicy)
     decision_point: bool = False
     sub_agent_scope: str | None = None
     granted_tools: list[ToolRef] = field(default_factory=list)
@@ -211,6 +212,7 @@ def _step_to_dict(step: PlanStep) -> dict[str, Any]:
         "depends_on": list(step.depends_on),
         "post_checks": [_post_check_to_dict(check) for check in step.post_checks],
         "needs_confirmation": step.needs_confirmation,
+        "policy": step.policy.to_dict(),
         "decision_point": step.decision_point,
         "sub_agent_scope": step.sub_agent_scope,
         "granted_tools": [_tool_ref_to_dict(ref) for ref in step.granted_tools],
@@ -237,6 +239,7 @@ def _step_from_dict(payload: dict[str, Any]) -> PlanStep:
             for item in payload.get("post_checks") or []
         ],
         needs_confirmation=bool(payload.get("needs_confirmation", False)),
+        policy=GovernancePolicy.from_dict(payload.get("policy")),
         decision_point=bool(payload.get("decision_point", False)),
         sub_agent_scope=_optional_str(payload.get("sub_agent_scope")),
         granted_tools=[

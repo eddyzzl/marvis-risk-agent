@@ -450,6 +450,13 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
     declare human-review risk cannot be auto-confirmed either.
     """
     action = decision.get("action")
+    # Phase 0B: canonical policy is authoritative and is evaluated for every
+    # possible LLM answer.  In particular, even a model-authored ``halt`` or
+    # ``clarify`` cannot smuggle through wording that claims AUTO approved a
+    # business decision or signed a side-effect authorization.
+    mandatory_human_reason = _mandatory_human_gate_reason(envelope)
+    if mandatory_human_reason:
+        return _policy_halt(mandatory_human_reason)
     if action in {"confirm", "adjust", "replan"}:
         gate_risk = _gate_risk_reason(envelope)
         if gate_risk:
@@ -504,6 +511,9 @@ def _auto_confirm_rationale(envelope) -> str:
 
 
 def _gate_risk_reason(envelope) -> str:
+    mandatory_human_reason = _mandatory_human_gate_reason(envelope)
+    if mandatory_human_reason:
+        return mandatory_human_reason
     for flag in getattr(envelope, "risk_flags", ()) or ():
         text = str(flag or "").strip()
         normalized = text.lower().replace(" ", "_")
@@ -522,6 +532,40 @@ def _gate_risk_reason(envelope) -> str:
     reset_count = _reset_step_count(reset_policy)
     if reset_count is not None and reset_count > AUTO_MAX_AUTO_RESET_STEPS:
         return f"当前节点会重置 {reset_count} 个下游步骤，超出 AUTO 自动调整上限。"
+    return ""
+
+
+def _mandatory_human_gate_reason(envelope) -> str:
+    """Return the policy-owned reason AUTO cannot act, independent of heuristics."""
+    legacy_flag = next(
+        (
+            str(flag or "").strip()
+            for flag in (getattr(envelope, "risk_flags", ()) or ())
+            if str(flag or "").strip()
+            and any(
+                token in str(flag or "").strip().lower().replace(" ", "_")
+                for token in AUTO_HIGH_RISK_FLAG_TOKENS
+            )
+        ),
+        "",
+    )
+    legacy_suffix = f" 兼容风险标记:{legacy_flag}。" if legacy_flag else ""
+    effect_authorization = str(
+        getattr(envelope, "effect_authorization", "none") or "none"
+    ).strip().lower()
+    if effect_authorization != "none":
+        return (
+            "当前节点要求人工完成副作用授权，AUTO 无权签署、确认或代替授权。"
+            f"{legacy_suffix}"
+        )
+    human_decision_gate = str(
+        getattr(envelope, "human_decision_gate", "none") or "none"
+    ).strip().lower()
+    if human_decision_gate != "none":
+        return (
+            "当前节点是强制人工业务决策门禁，AUTO 不能代替人工确认。"
+            f"{legacy_suffix}"
+        )
     return ""
 
 

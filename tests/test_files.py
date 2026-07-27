@@ -17,9 +17,11 @@ def test_classify_file_roles():
     assert classify_file(Path("model.ipynb")) == FileRole.NOTEBOOK
     assert classify_file(Path("sample.feather")) == FileRole.SAMPLE
     assert classify_file(Path("model_sample.xlsx")) == FileRole.SAMPLE
+    assert classify_file(Path("model_sample.xls")) == FileRole.SAMPLE
     assert classify_file(Path("data_dictionary.csv")) == FileRole.DATA_DICTIONARY
     assert classify_file(Path("fr_mob6_final.pmml")) == FileRole.MODEL_PMML
     assert classify_file(Path("数据字典.xlsx")) == FileRole.DATA_DICTIONARY
+    assert classify_file(Path("数据字典.xls")) == FileRole.DATA_DICTIONARY
     assert classify_file(Path("~$04_验证数据汇总表.xlsx")) == FileRole.UNKNOWN
     assert classify_file(Path("~$验证文档.docx")) == FileRole.UNKNOWN
 

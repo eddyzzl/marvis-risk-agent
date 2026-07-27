@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import pandas as pd
 
 from marvis.data.errors import ScoreDirectionConflictError
 from marvis.packs.strategy.contracts import Strategy, StrategyRule
+from marvis.packs.strategy.dsl import (
+    StrategySpec,
+    parse_strategy_spec,
+    strategy_spec_hash,
+)
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.evaluator import (
+    evaluate_expression_frame,
+    evaluate_strategy_frame,
+)
+from marvis.packs.strategy.legacy_adapter import (
+    legacy_condition_to_expression,
+    legacy_strategy_to_spec,
+)
 
 
 # S1a: a rule-evaluation consumer has no "declared" score_direction to check against
@@ -20,7 +33,7 @@ _RuleDirectionFlag = Literal["gte_style", "lte_style"]
 
 
 _ALLOWED_DECISIONS = {
-    "approval": {"approve", "reject"},
+    "approval": {"approve", "reject", "review"},
     "limit": {"limit"},
     "pricing": {"price"},
     "reject": {"reject"},
@@ -40,36 +53,164 @@ def build_strategy(
         raise StrategyError(f"unsupported strategy_type: {strategy_type}")
 
     parsed_rules = []
-    for rule in rules:
-        condition = str(rule["condition"])
-        _parse_condition(condition)
-        decision = str(rule["decision"])
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, Mapping):
+            raise StrategyError(f"rule {index} must be an object")
+        if "condition" not in rule or "decision" not in rule:
+            raise StrategyError(f"rule {index} requires condition and decision")
+        raw_condition = rule["condition"]
+        if not isinstance(raw_condition, str) or not raw_condition.strip():
+            raise StrategyError(f"rule {index} condition must be a non-empty string")
+        condition = raw_condition
+        try:
+            legacy_condition_to_expression(condition)
+        except StrategyError as exc:
+            raise StrategyError(f"unsupported condition: {condition}") from exc
+        raw_decision = rule["decision"]
+        if not isinstance(raw_decision, str) or not raw_decision.strip():
+            raise StrategyError(f"rule {index} decision must be a non-empty string")
+        decision = raw_decision.strip()
         value = rule.get("value")
         _validate_decision(strategy_type, decision, value)
+        priority = rule.get("priority")
+        if priority is not None and (
+            not isinstance(priority, int) or isinstance(priority, bool)
+        ):
+            raise StrategyError(f"rule {index} priority must be an integer")
+        rule_id = rule.get("rule_id")
+        if rule_id is not None and (
+            not isinstance(rule_id, str) or not rule_id.strip()
+        ):
+            raise StrategyError(f"rule {index} rule_id must be a non-empty string")
+        reason_code = rule.get("reason_code")
+        if reason_code is not None and (
+            not isinstance(reason_code, str) or not reason_code.strip()
+        ):
+            raise StrategyError(
+                f"rule {index} reason_code must be a non-empty string"
+            )
         parsed_rules.append(
             StrategyRule(
                 condition=condition,
                 decision=decision,
                 value=value,
+                rule_id=(
+                    rule_id.strip() if rule_id is not None else None
+                ),
+                priority=priority,
+                reason_code=(
+                    reason_code.strip() if reason_code is not None else None
+                ),
             )
         )
 
     if score_col:
         _raise_on_inconsistent_rule_directions(parsed_rules, score_col)
 
-    return Strategy(
-        id=_strategy_id(
-            strategy_type=strategy_type,
-            rules=rules,
-            score_col=score_col,
-            default_decision=default_decision,
-            description=description,
-        ),
+    provisional = Strategy(
+        id="",
         strategy_type=strategy_type,
         rules=tuple(parsed_rules),
         score_col=score_col,
         default_decision=default_decision,
         description=description,
+    )
+    spec = legacy_strategy_to_spec(
+        provisional,
+        metadata={"lineage": {"source": "build_strategy"}},
+        duplicate_rule_ids="error",
+    )
+    legacy_by_priority = {
+        (
+            rule.priority
+            if rule.priority is not None
+            else (ordinal + 1) * 10
+        ): rule
+        for ordinal, rule in enumerate(provisional.rules)
+    }
+    normalized_rules = tuple(
+        StrategyRule(
+            condition=legacy.condition,
+            decision=legacy.decision,
+            value=legacy.value,
+            rule_id=typed.rule_id,
+            priority=typed.priority,
+            reason_code=typed.action.reason_code,
+        )
+        for typed in spec.rules
+        for legacy in (legacy_by_priority[typed.priority],)
+    )
+    return Strategy(
+        id=_strategy_id(spec),
+        strategy_type=provisional.strategy_type,
+        rules=normalized_rules,
+        score_col=provisional.score_col,
+        default_decision=provisional.default_decision,
+        description=provisional.description,
+        spec=spec,
+    )
+
+
+def build_strategy_from_spec(
+    spec: StrategySpec | Mapping[str, Any],
+    *,
+    score_col: str | None = None,
+    description: str = "",
+) -> Strategy:
+    """Build a strategy directly from the canonical Strategy DSL.
+
+    ``rules`` remains populated as a compatibility/display projection. Execution,
+    hashing and persistence use ``spec`` as the sole semantic source of truth.
+    """
+
+    parsed = parse_strategy_spec(spec)
+    rendered_rules = tuple(_legacy_rule_projection(rule) for rule in parsed.rules)
+    metadata_description = parsed.metadata.get("description")
+    resolved_description = description or (
+        str(metadata_description) if metadata_description is not None else ""
+    )
+    metadata_score_col = parsed.metadata.get("score_col")
+    resolved_score_col = score_col or (
+        str(metadata_score_col) if metadata_score_col else None
+    )
+    return Strategy(
+        id=_strategy_id(parsed),
+        strategy_type=parsed.strategy_type,
+        rules=rendered_rules,
+        score_col=resolved_score_col,
+        default_decision=parsed.default_action.decision_value,
+        description=resolved_description,
+        spec=parsed,
+    )
+
+
+def _legacy_rule_projection(rule) -> StrategyRule:
+    action = rule.action
+    decision = {
+        "approval": "approve",
+        "reject": "reject",
+        "review": "review",
+        "limit": "limit",
+        "pricing": "price",
+        "segment": "segment",
+    }[action.type]
+    value = (
+        action.value
+        if action.type in {"limit", "pricing", "segment"}
+        else action.output_value
+    )
+    return StrategyRule(
+        condition=json.dumps(
+            rule.condition,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        decision=decision,
+        value=value,
+        rule_id=rule.rule_id,
+        priority=rule.priority,
+        reason_code=action.reason_code,
     )
 
 
@@ -140,6 +281,14 @@ def _rule_direction_flags(
 
 
 def _infer_condition_direction(condition: str, score_col: str) -> _RuleDirectionFlag | None:
+    try:
+        typed = json.loads(condition)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        typed = None
+    if isinstance(typed, Mapping):
+        return _infer_typed_condition_direction(
+            legacy_condition_to_expression(condition), score_col
+        )
     expression = _parse_condition(condition)
     for clause in _flatten_top_level_compares(expression.body):
         if not (isinstance(clause, ast.Compare) and isinstance(clause.left, ast.Name)):
@@ -152,6 +301,28 @@ def _infer_condition_direction(condition: str, score_col: str) -> _RuleDirection
         if isinstance(op, ast.LtE | ast.Lt):
             return "lte_style"
         return None  # Eq/NotEq/In/NotIn carry no direction
+    return None
+
+
+def _infer_typed_condition_direction(
+    expression: Mapping[str, Any], score_col: str
+) -> _RuleDirectionFlag | None:
+    op = expression["op"]
+    if op == "compare" and expression["field"] == score_col:
+        operator = expression["operator"]
+        if operator in {">", ">="}:
+            return "gte_style"
+        if operator in {"<", "<="}:
+            return "lte_style"
+        return None
+    if op in {"and", "or"}:
+        directions = {
+            direction
+            for argument in expression["args"]
+            if (direction := _infer_typed_condition_direction(argument, score_col))
+            is not None
+        }
+        return next(iter(directions)) if len(directions) == 1 else None
     return None
 
 
@@ -169,13 +340,8 @@ def _flatten_top_level_compares(node: ast.AST) -> list[ast.AST]:
 
 
 def apply_strategy(df: pd.DataFrame, strategy: Strategy) -> pd.Series:
-    decisions = pd.Series([strategy.default_decision] * len(df), index=df.index, dtype="object")
-    assigned = pd.Series(False, index=df.index)
-    for rule in strategy.rules:
-        mask = _safe_eval_condition(df, rule.condition) & ~assigned
-        decisions.loc[mask] = rule.value if rule.value is not None else rule.decision
-        assigned |= mask
-    return decisions
+    spec = strategy.spec or legacy_strategy_to_spec(strategy)
+    return evaluate_strategy_frame(df, spec).decisions
 
 
 def evaluate_condition_mask(df: pd.DataFrame, condition: str) -> pd.Series:
@@ -189,7 +355,8 @@ def evaluate_condition_mask(df: pd.DataFrame, condition: str) -> pd.Series:
     same validated ``_safe_eval_condition`` apply_strategy already uses; exposed
     publicly only so mine/evaluate reuse it by import instead of re-implementing.
     """
-    return _safe_eval_condition(df, condition)
+    expression = legacy_condition_to_expression(condition)
+    return evaluate_expression_frame(df, expression)
 
 
 def _safe_eval_condition(df: pd.DataFrame, condition: str) -> pd.Series:
@@ -330,23 +497,15 @@ def _validate_decision(strategy_type: str, decision: str, value) -> None:
         raise StrategyError(f"decision {decision} requires a value")
 
 
-def _strategy_id(
-    *,
-    strategy_type: str,
-    rules: list[dict],
-    score_col: str | None,
-    default_decision,
-    description: str,
-) -> str:
-    payload = {
-        "default_decision": default_decision,
-        "description": description,
-        "rules": rules,
-        "score_col": score_col,
-        "strategy_type": strategy_type,
-    }
-    digest = hashlib.sha256(json.dumps(payload, default=str, sort_keys=True).encode("utf-8")).hexdigest()
+def _strategy_id(spec: StrategySpec | Mapping[str, Any]) -> str:
+    digest = strategy_spec_hash(spec)
     return f"strategy-{digest[:12]}"
 
 
-__all__ = ["apply_strategy", "build_strategy", "evaluate_condition_mask", "infer_strategy_rule_direction"]
+__all__ = [
+    "apply_strategy",
+    "build_strategy",
+    "build_strategy_from_spec",
+    "evaluate_condition_mask",
+    "infer_strategy_rule_direction",
+]

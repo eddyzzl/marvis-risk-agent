@@ -37,6 +37,14 @@ def _clean_actions(values: Any) -> tuple[str, ...]:
     return tuple(actions) or DEFAULT_GATE_ACTIONS
 
 
+def _clean_governance_requirement(value: Any) -> str:
+    """Normalize the additive gate contract while failing closed on bad values."""
+    requirement = _clean_str(value).lower()
+    if requirement in {"", "none"}:
+        return "none"
+    return "required"
+
+
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
@@ -140,6 +148,9 @@ class GateEnvelope:
     controls: tuple[GateControl, ...] = ()
     render_blocks: tuple[GateRenderBlock, ...] = ()
     risk_flags: tuple[str, ...] = ()
+    human_decision_gate: str = "none"
+    effect_authorization: str = "none"
+    policy_hash: str | None = None
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     downstream_reset_policy: dict[str, Any] = field(default_factory=dict)
 
@@ -156,11 +167,15 @@ class GateEnvelope:
             "controls": [control.to_dict() for control in self.controls],
             "render_blocks": [block.to_dict() for block in self.render_blocks],
             "risk_flags": list(self.risk_flags),
+            "human_decision_gate": self.human_decision_gate,
+            "effect_authorization": self.effect_authorization,
             "retry_policy": self.retry_policy.to_dict(),
             "downstream_reset_policy": dict(self.downstream_reset_policy),
         }
         if self.stale_token:
             data["stale_token"] = self.stale_token
+        if self.policy_hash:
+            data["policy_hash"] = self.policy_hash
         return data
 
     @classmethod
@@ -177,6 +192,13 @@ class GateEnvelope:
             controls=controls,
             render_blocks=render_blocks,
             risk_flags=tuple(_clean_str(item) for item in payload.get("risk_flags") or [] if _clean_str(item)),
+            human_decision_gate=_clean_governance_requirement(
+                payload.get("human_decision_gate")
+            ),
+            effect_authorization=_clean_governance_requirement(
+                payload.get("effect_authorization")
+            ),
+            policy_hash=_clean_str(payload.get("policy_hash")) or None,
             retry_policy=RetryPolicy.from_dict(payload.get("retry_policy")),
             downstream_reset_policy=_dict(payload.get("downstream_reset_policy")),
         )
@@ -291,12 +313,7 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
     "confirm_join": ("irreversible_dedup_merge",),
     "propose_join": ("irreversible_dedup_merge",),
     "adopt_strategy": ("irreversible_strategy_approval",),
-    "run_strategy_monitoring": ("strategy_monitoring_alarm_approval",),
-    "render_monitoring_report": ("strategy_monitoring_alarm_approval",),
-    "design_cutoff_bands": ("strategy_direction_approval",),
-    "tradeoff_view": ("strategy_direction_approval",),
-    "compare_strategies": ("strategy_direction_approval",),
-    "vintage_curve": ("strategy_direction_approval",),
+    "apply_monitoring_disposition": ("strategy_monitoring_disposition_approval",),
     # FIN-3 #1: systematic sweep of every needs_confirmation=True gate step across
     # orchestrator/templates/ found seven forced-confirmation source tools with a
     # red-flag checklist or an irreversible/delivery action that were NOT mapped
@@ -313,8 +330,6 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
     "render_reports": ("validation_report_approval",),
     "monitor_run": ("monitoring_run_alarm_approval",),
     "generate_model_report": ("model_report_approval",),
-    "backtest_strategy": ("strategy_direction_approval",),
-    "select_rule_set": ("irreversible_strategy_approval",),
 }
 
 #: step_id substrings for the same forced gates, used when meta carries only a
@@ -322,11 +337,7 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
 #: Production step_ids are opaque "{plan}-step-N" and never match these, so this
 #: only ever fires on gates a caller explicitly named after the forced tool.
 _HIGH_RISK_STEP_ID_TOKENS: dict[str, tuple[str, ...]] = {
-    "tradeoff": ("strategy_direction_approval",),
-    "vintage": ("strategy_direction_approval",),
-    "cutoff": ("strategy_direction_approval",),
     "adopt": ("irreversible_strategy_approval",),
-    "monitor": ("strategy_monitoring_alarm_approval",),
     "post-training": ("model_delivery_handoff_champion",),
     "select-champion": ("champion_model_selection",),
 }
@@ -445,6 +456,13 @@ def infer_gate_envelope(meta: Mapping[str, Any]) -> GateEnvelope:
         controls=tuple(controls),
         render_blocks=tuple(render_blocks),
         risk_flags=_infer_risk_flags(meta),
+        human_decision_gate=_clean_governance_requirement(
+            meta.get("human_decision_gate")
+        ),
+        effect_authorization=_clean_governance_requirement(
+            meta.get("effect_authorization")
+        ),
+        policy_hash=_clean_str(meta.get("policy_hash")) or None,
     )
 
 

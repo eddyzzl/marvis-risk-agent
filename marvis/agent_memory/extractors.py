@@ -62,13 +62,18 @@ def extract_strategy_experience(result: dict[str, Any]) -> MemoryCandidate | Non
     payload = _strategy_experience_payload(result)
     if payload is None:
         return None
+    profit_summary = (
+        f"预期利润{payload['expected_profit']}"
+        if payload["expected_profit"] is not None
+        else "预期利润未计算"
+    )
 
     candidate = MemoryCandidate(
         memory_type="strategy_experience",
         summary=(
             f"{payload['scope']}采纳{payload['strategy_type']}策略，"
             f"{payload['cutoff_summary']}，审批率{payload['approval_rate']}，"
-            f"通过坏率{payload['approved_bad_rate']}，预期利润{payload['expected_profit']}。"
+            f"通过坏率{payload['approved_bad_rate']}，{profit_summary}。"
         ),
         payload=payload,
         source_task_id=str(payload["source_task_id"]),

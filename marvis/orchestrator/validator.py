@@ -55,6 +55,7 @@ class PlanValidator:
         problems.extend(self._check_determinism_checks(plan))
         problems.extend(self._check_subagent_grants(plan))
         problems.extend(self._check_decision_points(plan))
+        problems.extend(self._check_governance_policies(plan))
         return problems
 
     def _check_tools_exist(self, plan: Plan) -> list[str]:
@@ -72,12 +73,21 @@ class PlanValidator:
             tool = self._resolve_step_tool(step)
             if tool is None:
                 continue
+            gate_deferred_keys = {
+                key
+                for key, value in step.inputs.items()
+                if step.needs_confirmation and value is None
+            }
             literal_inputs = {
                 key: value
                 for key, value in step.inputs.items()
-                if not _is_deferred_input(value)
+                if not _is_deferred_input(value) and key not in gate_deferred_keys
             }
-            schema = _relax_required(tool.input_schema, step.inputs)
+            schema = _relax_required(
+                tool.input_schema,
+                step.inputs,
+                extra_deferred_keys=gate_deferred_keys,
+            )
             try:
                 validate_against_schema(literal_inputs, schema, label=f"inputs:{step.id}")
             except SchemaValidationError as exc:
@@ -206,6 +216,63 @@ class PlanValidator:
             if step.decision_point and is_safety_step(step)
         ]
 
+    def _check_governance_policies(self, plan: Plan) -> list[str]:
+        """A plan may strengthen a manifest policy but may never weaken it."""
+
+        problems: list[str] = []
+        for step in plan.steps:
+            tool = self._resolve_step_tool(step)
+            if tool is None:
+                continue
+            required = tool.policy
+            actual = step.policy
+            if (
+                required.human_decision_gate == "required"
+                and actual.human_decision_gate != "required"
+            ):
+                problems.append(
+                    f"step {step.title}: human_decision_gate cannot be lower than tool policy"
+                )
+            if (
+                required.effect_authorization == "required"
+                and actual.effect_authorization != "required"
+            ):
+                problems.append(
+                    f"step {step.title}: effect_authorization cannot be lower than tool policy"
+                )
+            if (
+                required.effect_authorization == "required"
+                and actual.effect_authorization == "required"
+                and actual.effect_target != required.effect_target
+            ):
+                problems.append(
+                    f"step {step.title}: effect_authorization target must match tool policy"
+                )
+            if (
+                actual.human_decision_gate == "required"
+                and not step.needs_confirmation
+            ):
+                problems.append(
+                    f"step {step.title}: human_decision_gate=required needs confirmation"
+                )
+
+            for ref in step.granted_tools:
+                try:
+                    granted = self._tools.resolve(ref)
+                except (PluginNotFoundError, ToolNotFoundError):
+                    continue
+                if granted.policy.effect_authorization == "required":
+                    problems.append(
+                        f"sub-agent step {step.title}: effect-authorized tool "
+                        f"{ref.label()} cannot be granted to a sub-agent"
+                    )
+                elif granted.policy.human_decision_gate == "required":
+                    problems.append(
+                        f"sub-agent step {step.title}: human-decision-gated tool "
+                        f"{ref.label()} cannot be granted to a sub-agent"
+                    )
+        return problems
+
     def _resolve_step_tool(self, step: PlanStep):
         try:
             return self._tools.resolve(step.tool_ref)
@@ -246,16 +313,48 @@ def _is_deferred_input(value) -> bool:
     )
 
 
-def _relax_required(input_schema: dict, step_inputs: dict) -> dict:
+def _relax_required(
+    input_schema: dict,
+    step_inputs: dict,
+    *,
+    extra_deferred_keys: set[str] | None = None,
+) -> dict:
     relaxed = deepcopy(input_schema)
-    required = relaxed.get("required")
-    if not isinstance(required, list):
-        return relaxed
     deferred_keys = {
         key for key, value in step_inputs.items() if _is_deferred_input(value)
     }
-    relaxed["required"] = [key for key in required if key not in deferred_keys]
+    deferred_keys.update(extra_deferred_keys or ())
+    _relax_required_combinators(relaxed, deferred_keys)
     return relaxed
+
+
+def _relax_required_combinators(schema: dict, deferred_keys: set[str]) -> None:
+    """Relax deferred top-level inputs inside JSON-Schema branch combinators.
+
+    Plans may carry a ``$ref`` for one branch of a ``oneOf``. The concrete value
+    is intentionally absent from plan-time literal validation, so every required
+    list governing that same top-level branch must ignore the deferred key. Runtime
+    validation receives resolved inputs and the original manifest schema.
+    """
+
+    required = schema.get("required")
+    if isinstance(required, list):
+        schema["required"] = [
+            key for key in required if key not in deferred_keys
+        ]
+    for combinator in ("oneOf", "anyOf", "allOf"):
+        variants = schema.get(combinator)
+        if isinstance(variants, list):
+            for variant in variants:
+                if isinstance(variant, dict):
+                    _relax_required_combinators(variant, deferred_keys)
+    for conditional in ("if", "then", "else"):
+        branch = schema.get(conditional)
+        if isinstance(branch, dict):
+            _relax_required_combinators(branch, deferred_keys)
+    negated = schema.get("not")
+    if isinstance(negated, dict):
+        _relax_required_combinators(negated, deferred_keys)
 
 
 def _parse_ref(value: str) -> tuple[str, str]:

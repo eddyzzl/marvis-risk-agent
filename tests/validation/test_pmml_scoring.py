@@ -10,15 +10,17 @@ from marvis.validation.pmml_scoring import PmmlScorer, load_pmml_scorer
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "min_lr.pmml"
 
 
+@pytest.mark.pmml_runtime
 def test_load_and_score_matches_manual_sigmoid():
     scorer = load_pmml_scorer(FIXTURE)
     df = pd.DataFrame({"x1": [0.0, 1.0, 2.0], "x2": [0.0, 0.0, 1.0]})
     scores = scorer.score(df)
     expected = [1 / (1 + math.exp(-z)) for z in [0.0, 1.0, 1.0]]
-    for got, want in zip(scores, expected):
+    for got, want in zip(scores, expected, strict=True):
         assert got == pytest.approx(want, abs=1e-6)
 
 
+@pytest.mark.pmml_runtime
 def test_score_handles_missing_columns_with_null():
     """pypmml's null handling for a model without MissingValueTreatment is
     library-defined; this test only asserts the call doesn't crash and

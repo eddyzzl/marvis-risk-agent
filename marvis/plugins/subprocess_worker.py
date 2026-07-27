@@ -134,6 +134,16 @@ def _run_tool(job: dict) -> dict:
         seed=job.get("seed"),
         datasets_root=Path(job["datasets_root"]),
         workspace=Path(job["workspace"]),
+        effect_execution_id=(
+            str(job["effect_execution_id"])
+            if job.get("effect_execution_id") is not None
+            else None
+        ),
+        runtime_generation=(
+            str(job["runtime_generation"])
+            if job.get("runtime_generation") is not None
+            else None
+        ),
     )
     if ctx.seed is not None:
         random.seed(ctx.seed)

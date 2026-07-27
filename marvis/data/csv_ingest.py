@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 
-from marvis.data.errors import DataIngestError
+from marvis.data.errors import CsvParseError, DataIngestError
 
 
 # GAP-1: CSVs exported from Chinese bank data warehouses / legacy Excel are very
@@ -25,6 +26,11 @@ ENCODING_FALLBACK_CHAIN: tuple[str, ...] = ("utf-8-sig", "gb18030", "latin-1")
 # getting rewritten once pandas' default type inference promotes the column to
 # float64 (which happens as soon as the column contains any missing value).
 LONG_ID_DIGIT_THRESHOLD = 15
+_FIELD_COUNT_ERROR_RE = re.compile(
+    r"Expected\s+(?P<expected>\d+)\s+fields?\s+in\s+line\s+"
+    r"(?P<line>\d+),\s+saw\s+(?P<actual>\d+)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,15 @@ def read_csv_with_fallback_encoding(
         except UnicodeDecodeError as exc:
             errors.append(f"{encoding}: {exc}")
             continue
+        except (pd.errors.ParserError, csv.Error) as exc:
+            match = _FIELD_COUNT_ERROR_RE.search(str(exc))
+            raise CsvParseError(
+                path=path,
+                technical_message=str(exc),
+                line_number=int(match.group("line")) if match else None,
+                expected_fields=int(match.group("expected")) if match else None,
+                actual_fields=int(match.group("actual")) if match else None,
+            ) from exc
         return frame, CsvIngestReport(encoding_used=encoding, long_id_columns=long_id_columns)
     raise DataIngestError(
         "无法解析 CSV 文件编码 (tried "

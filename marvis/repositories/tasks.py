@@ -2,13 +2,17 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from marvis.db_schema import connect
 from marvis.domain import (
+    TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
     VALID_TASK_TYPES,
+    StrategyProfitInput,
+    StrategyTaskInput,
     TaskCreate,
     TaskRecord,
     TaskStatus,
@@ -122,6 +126,35 @@ class TaskRepository:
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"Task not found: {task_id}")
+        return self.get_task(task_id)
+
+    def update_strategy_input(
+        self,
+        task_id: str,
+        strategy_input: StrategyTaskInput,
+    ) -> TaskRecord:
+        """Replace a strategy task's governed business contract atomically."""
+
+        if not isinstance(strategy_input, StrategyTaskInput):
+            raise ValueError("strategy_input must be a StrategyTaskInput")
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT task_type FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            if str(row["task_type"]) != TASK_TYPE_STRATEGY:
+                raise ValueError("strategy_input may only be persisted on a strategy task")
+            conn.execute(
+                """
+                UPDATE tasks
+                   SET strategy_input_json = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (_dump_strategy_input(strategy_input), _now(), task_id),
+            )
         return self.get_task(task_id)
 
     def update_material_paths(
@@ -244,6 +277,15 @@ class TaskRepository:
         # CASCADE from tasks (see marvis/db_schema.py); their own children
         # (model_artifacts, backtests, plan_steps/outputs/runs) do cascade once the
         # parent row is removed. jobs/agent_messages already cascade from tasks.
+        # Data workspace, analysis, transform and lineage rows hold dataset
+        # foreign keys. Remove the append-only evidence graph first so an
+        # analyzed/transformed task can be purged without violating those
+        # boundaries; the surrounding transaction restores all rows if any
+        # later purge step fails.
+        conn.execute("DELETE FROM dataset_lineage_edges WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM data_transform_runs WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM data_analysis_runs WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM data_workspaces WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM datasets WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM joins WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM plans WHERE task_id = ?", (task_id,))
@@ -725,7 +767,32 @@ class TaskRepository:
         traceback: str | None = None,
     ) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
+            self.finish_job_on_connection(
+                conn,
+                job_id,
+                status=status,
+                error_name=error_name,
+                error_value=error_value,
+                traceback=traceback,
+            )
+
+    def finish_job_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+        *,
+        status: str,
+        error_name: str | None = None,
+        error_value: str | None = None,
+        traceback: str | None = None,
+        expected_status: str | None = None,
+    ) -> bool:
+        """Finish a job inside a caller-owned artifact/domain transaction."""
+
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if expected_status is None:
+            cursor = conn.execute(
                 """
                 UPDATE jobs
                    SET status = ?,
@@ -738,6 +805,29 @@ class TaskRepository:
                 """,
                 (status, error_name, error_value, traceback, _now(), job_id),
             )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                   SET status = ?,
+                       error_name = ?,
+                       error_value = ?,
+                       traceback = ?,
+                       finished_at = ?
+                 WHERE id = ?
+                   AND status = ?
+                """,
+                (
+                    status,
+                    error_name,
+                    error_value,
+                    traceback,
+                    _now(),
+                    job_id,
+                    expected_status,
+                ),
+            )
+        return cursor.rowcount == 1
 
     def task_has_active_job(self, task_id: str) -> bool:
         with connect(self.db_path) as conn:
@@ -1044,6 +1134,32 @@ class TaskRepository:
             ).fetchall()
         return [_row_to_agent_message(row) for row in rows]
 
+    def get_latest_assistant_message(
+        self,
+        task_id: str,
+    ) -> dict | None:
+        """Return the newest assistant message without loading chat history."""
+
+        with connect(self.db_path) as conn:
+            task_row = conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            row = conn.execute(
+                """
+                SELECT id, task_id, role, stage, content, created_at, metadata_json
+                  FROM agent_messages
+                 WHERE task_id = ?
+                   AND role = 'assistant'
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        return None if row is None else _row_to_agent_message(row)
+
     def has_agent_message(self, task_id: str, message_id: str) -> bool:
         with connect(self.db_path) as conn:
             row = conn.execute(
@@ -1181,6 +1297,8 @@ def _row_to_agent_message(row: sqlite3.Row) -> dict:
 def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
     now = _now()
     task_type = _normalize_task_type(payload.task_type)
+    if payload.strategy_input is not None and task_type != TASK_TYPE_STRATEGY:
+        raise ValueError("strategy_input may only be persisted on a strategy task")
     return TaskRecord(
         id=uuid.uuid4().hex,
         task_type=task_type,
@@ -1199,6 +1317,7 @@ def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
         recipes=list(payload.recipes),
         sample_weight_col=payload.sample_weight_col,
         oot_ks_min=payload.oot_ks_min,
+        strategy_input=payload.strategy_input,
         metrics=list(payload.metrics),
         capability_tier=payload.capability_tier,
         notebook_path=payload.notebook_path,
@@ -1227,12 +1346,12 @@ def _insert_task_record_row(
         (
             id, task_type, validation_workflow_version, model_name, model_version, validator, source_dir,
             algorithm, run_mode, target_col, score_col, split_col,
-            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, metrics_json, capability_tier, notebook_path, sample_path,
+            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, strategy_input_json, metrics_json, capability_tier, notebook_path, sample_path,
             pmml_path, dictionary_path, report_values_json,
             report_values_revision, status, status_message,
             status_reason_code, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.id,
@@ -1253,6 +1372,7 @@ def _insert_task_record_row(
             _dump_json_list(record.recipes),
             record.sample_weight_col,
             record.oot_ks_min,
+            _dump_strategy_input(record.strategy_input),
             _dump_json_list(record.metrics),
             record.capability_tier,
             record.notebook_path,
@@ -1294,6 +1414,9 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         recipes=_load_json_list(row["recipes_json"]),
         sample_weight_col=(row["sample_weight_col"] if "sample_weight_col" in row.keys() else "") or "",
         oot_ks_min=(row["oot_ks_min"] if "oot_ks_min" in row.keys() else None),
+        strategy_input=_load_strategy_input(
+            row["strategy_input_json"] if "strategy_input_json" in row.keys() else None
+        ),
         metrics=_load_json_list(row["metrics_json"]),
         capability_tier=(row["capability_tier"] if "capability_tier" in row.keys() else "") or "",
         notebook_path=row["notebook_path"],
@@ -1390,6 +1513,10 @@ def _task_purge_summary(conn: sqlite3.Connection, task_id: str) -> dict:
         "sub_agents": _count("sub_agents", "parent_task_id"),
         "draft_tools": _count("draft_tools"),
         "draft_runs": _count("draft_runs"),
+        "dataset_lineage_edges": _count("dataset_lineage_edges"),
+        "data_transform_runs": _count("data_transform_runs"),
+        "data_analysis_runs": _count("data_analysis_runs"),
+        "data_workspaces": _count("data_workspaces"),
         "_dataset_source_paths": removable_paths,
     }
 
@@ -1420,6 +1547,14 @@ def _dump_json_dict(values: dict[str, str]) -> str:
     return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
 
 
+def _dump_strategy_input(value: StrategyTaskInput | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, StrategyTaskInput):
+        raise ValueError("strategy_input must be a StrategyTaskInput or None")
+    return json.dumps(asdict(value), ensure_ascii=False, separators=(",", ":"))
+
+
 def _load_json_list(raw: str | None) -> list[str]:
     if not raw:
         return []
@@ -1429,6 +1564,44 @@ def _load_json_list(raw: str | None) -> list[str]:
     ):
         raise ValueError("feature_columns_json must be a JSON array of strings")
     return value
+
+
+def _load_strategy_input(raw: str | None) -> StrategyTaskInput | None:
+    if not raw:
+        return None
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("strategy_input_json must be a JSON object")
+    allowed_keys = {
+        "entry_mode",
+        "strategy_type",
+        "objective",
+        "max_bad_rate",
+        "min_approval_rate",
+        "baseline_strategy_id",
+        "profit",
+    }
+    unknown_keys = sorted(set(value) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            "strategy_input_json contains unknown fields: " + ", ".join(unknown_keys)
+        )
+    profit_payload = value.get("profit")
+    if profit_payload is not None and not isinstance(profit_payload, dict):
+        raise ValueError("strategy_input_json.profit must be a JSON object or null")
+    try:
+        profit = StrategyProfitInput(**profit_payload) if profit_payload is not None else None
+        return StrategyTaskInput(
+            entry_mode=value.get("entry_mode", "strategy_development"),
+            strategy_type=value.get("strategy_type", "approval"),
+            objective=value.get("objective", ""),
+            max_bad_rate=value.get("max_bad_rate"),
+            min_approval_rate=value.get("min_approval_rate"),
+            baseline_strategy_id=value.get("baseline_strategy_id"),
+            profit=profit,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid strategy_input_json: {exc}") from exc
 
 
 def _load_json_dict(raw: str | None) -> dict[str, str]:

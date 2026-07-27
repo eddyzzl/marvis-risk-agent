@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
+import json
 import re
 import sys
 from typing import Any
@@ -10,6 +12,8 @@ from marvis.plugins.errors import ManifestError
 
 DETERMINISM_CHOICES = frozenset({"deterministic", "stochastic"})
 FAILURE_POLICY_CHOICES = frozenset({"fail", "retry", "skip"})
+GOVERNANCE_POLICY_SCHEMA_VERSION = "tool-policy.v1"
+GOVERNANCE_REQUIREMENT_CHOICES = frozenset({"none", "required"})
 PERMISSION_CHOICES = frozenset({
     "llm",
     "network:optional",
@@ -77,6 +81,154 @@ class ToolRef:
 
 
 @dataclass(frozen=True)
+class EffectTargetPolicy:
+    """How a protected tool's state transition is bound and reconciled.
+
+    Phase 0B intentionally supports only targets whose current state can be
+    verified by the platform.  New target kinds must add a repository verifier
+    before a manifest may declare them.
+    """
+
+    kind: str
+    id_input: str
+    expected_statuses: tuple[str, ...]
+    result_status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "id_input": self.id_input,
+            "expected_statuses": list(self.expected_statuses),
+            "result_status": self.result_status,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "EffectTargetPolicy":
+        if not isinstance(value, dict):
+            raise ManifestError("tool policy.effect_target must be an object")
+        kind = _policy_text(value.get("kind"), "effect_target.kind")
+        id_input = _policy_text(value.get("id_input"), "effect_target.id_input")
+        result_status = _policy_text(
+            value.get("result_status"), "effect_target.result_status"
+        )
+        raw_statuses = value.get("expected_statuses")
+        if not isinstance(raw_statuses, list) or not raw_statuses:
+            raise ManifestError(
+                "tool policy.effect_target.expected_statuses must be a non-empty list"
+            )
+        expected_statuses = tuple(
+            _policy_text(item, "effect_target.expected_statuses")
+            for item in raw_statuses
+        )
+        return cls(
+            kind=kind,
+            id_input=id_input,
+            expected_statuses=expected_statuses,
+            result_status=result_status,
+        )
+
+
+@dataclass(frozen=True)
+class GovernancePolicy:
+    """Orthogonal human-decision and side-effect authorization requirements."""
+
+    schema_version: str = GOVERNANCE_POLICY_SCHEMA_VERSION
+    human_decision_gate: str = "none"
+    effect_authorization: str = "none"
+    effect_target: EffectTargetPolicy | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": self.schema_version,
+            "human_decision_gate": self.human_decision_gate,
+            "effect_authorization": self.effect_authorization,
+        }
+        if self.effect_target is not None:
+            payload["effect_target"] = self.effect_target.to_dict()
+        return payload
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "GovernancePolicy":
+        if value in (None, {}):
+            return cls()
+        if not isinstance(value, dict):
+            raise ManifestError("tool policy must be an object")
+        schema_version = str(
+            value.get("schema_version") or GOVERNANCE_POLICY_SCHEMA_VERSION
+        ).strip()
+        if schema_version != GOVERNANCE_POLICY_SCHEMA_VERSION:
+            raise ManifestError(
+                f"tool policy.schema_version must be {GOVERNANCE_POLICY_SCHEMA_VERSION}"
+            )
+        human = str(value.get("human_decision_gate") or "none").strip().lower()
+        effect = str(value.get("effect_authorization") or "none").strip().lower()
+        if human not in GOVERNANCE_REQUIREMENT_CHOICES:
+            raise ManifestError(
+                "tool policy.human_decision_gate must be none or required"
+            )
+        if effect not in GOVERNANCE_REQUIREMENT_CHOICES:
+            raise ManifestError(
+                "tool policy.effect_authorization must be none or required"
+            )
+        target_value = value.get("effect_target")
+        target = (
+            EffectTargetPolicy.from_dict(target_value)
+            if target_value is not None
+            else None
+        )
+        if effect == "required" and human != "required":
+            raise ManifestError(
+                "tool policy.effect_authorization=required also requires "
+                "human_decision_gate=required"
+            )
+        if effect == "required" and target is None:
+            raise ManifestError(
+                "tool policy.effect_authorization=required requires effect_target"
+            )
+        if effect == "none" and target is not None:
+            raise ManifestError(
+                "tool policy.effect_target is only valid when effect_authorization=required"
+            )
+        return cls(
+            schema_version=schema_version,
+            human_decision_gate=human,
+            effect_authorization=effect,
+            effect_target=target,
+        )
+
+
+def merge_governance_policies(*policies: GovernancePolicy) -> GovernancePolicy:
+    """Return the strongest compatible policy; callers can raise, never lower."""
+
+    human = "required" if any(
+        item.human_decision_gate == "required" for item in policies
+    ) else "none"
+    effect = "required" if any(
+        item.effect_authorization == "required" for item in policies
+    ) else "none"
+    targets = [item.effect_target for item in policies if item.effect_target is not None]
+    target = targets[0] if targets else None
+    if any(item != target for item in targets[1:]):
+        raise ManifestError("tool policy.effect_target declarations conflict")
+    if effect == "required" and target is None:
+        raise ManifestError("tool policy.effect_authorization=required requires effect_target")
+    if effect == "required":
+        human = "required"
+    return GovernancePolicy(
+        human_decision_gate=human,
+        effect_authorization=effect,
+        effect_target=target,
+    )
+
+
+def governance_policy_hash(policy: GovernancePolicy) -> str:
+    encoded = json.dumps(
+        policy.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     name: str
     summary: str
@@ -88,6 +240,7 @@ class ToolSpec:
     side_effects: tuple[str, ...]
     entrypoint: str
     memory_limit_mb: int = 2048
+    policy: GovernancePolicy = field(default_factory=GovernancePolicy)
 
 
 @dataclass(frozen=True)
@@ -142,6 +295,7 @@ def parse_manifest(data: dict[str, Any], *, builtin: bool = False) -> PluginMani
     _validate_known_permissions(permissions, label="permissions")
     _validate_tool_permissions(tools, permissions)
     hooks = tuple(_parse_hooks(data.get("hooks", []), seen_tools))
+    _validate_hook_governance(hooks, tools)
     checksum = "" if builtin else str(data.get("checksum") or "")
 
     return PluginManifest(
@@ -179,6 +333,7 @@ def manifest_to_dict(manifest: PluginManifest) -> dict[str, Any]:
                 "side_effects": list(tool.side_effects),
                 "entrypoint": tool.entrypoint,
                 "memory_limit_mb": tool.memory_limit_mb,
+                "policy": tool.policy.to_dict(),
             }
             for tool in manifest.tools
         ],
@@ -216,6 +371,16 @@ def _parse_tool(item: Any, index: int) -> ToolSpec:
     entrypoint = _required_text(item, "entrypoint", context=f"tool {name}")
     side_effects = tuple(_parse_string_list(item.get("side_effects", []), f"tool {name} side_effects"))
     _validate_known_permissions(side_effects, label=f"tool {name} side_effects")
+    policy = GovernancePolicy.from_dict(item.get("policy"))
+    if policy.effect_target is not None:
+        properties = input_schema.get("properties")
+        if (
+            not isinstance(properties, dict)
+            or policy.effect_target.id_input not in properties
+        ):
+            raise ManifestError(
+                f"tool {name} policy.effect_target.id_input must name an input_schema property"
+            )
     return ToolSpec(
         name=name,
         summary=summary,
@@ -227,6 +392,7 @@ def _parse_tool(item: Any, index: int) -> ToolSpec:
         side_effects=side_effects,
         entrypoint=entrypoint,
         memory_limit_mb=memory_limit_mb,
+        policy=policy,
     )
 
 
@@ -259,6 +425,23 @@ def _validate_tool_permissions(tools: list[ToolSpec], permissions: tuple[str, ..
             )
 
 
+def _validate_hook_governance(
+    hooks: tuple[HookSpec, ...],
+    tools: list[ToolSpec],
+) -> None:
+    by_name = {tool.name: tool for tool in tools}
+    for hook in hooks:
+        tool = by_name[hook.tool]
+        if tool.policy.effect_authorization == "required":
+            raise ManifestError(
+                f"effect-authorized tool {tool.name} cannot be registered as a hook"
+            )
+        if tool.policy.human_decision_gate == "required":
+            raise ManifestError(
+                f"human-decision-gated tool {tool.name} cannot be registered as a hook"
+            )
+
+
 def _validate_known_permissions(values: tuple[str, ...], *, label: str) -> None:
     unknown = sorted({value for value in values if value not in PERMISSION_CHOICES})
     if unknown:
@@ -269,6 +452,12 @@ def _required_text(data: dict[str, Any], field: str, *, context: str = "manifest
     value = data.get(field)
     if not isinstance(value, str) or not value.strip():
         raise ManifestError(f"{context}.{field} is required")
+    return value.strip()
+
+
+def _policy_text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ManifestError(f"tool policy.{field} must be a non-empty string")
     return value.strip()
 
 

@@ -6,14 +6,37 @@ import shutil
 import tempfile
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, Response, UploadFile
-from marvis.errors import bad_request, conflict, not_found, payload_too_large, unprocessable
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
+from marvis.errors import (
+    bad_request,
+    conflict,
+    not_found,
+    payload_too_large,
+    precondition_failed,
+    precondition_required,
+    unprocessable,
+)
 
 from marvis.api_data_payloads import (
     dataset_payload,
     dataset_preview_profiles,
     join_plan_payload,
     masked_preview_records,
+)
+from marvis.api_schemas import (
+    DataWorkspaceSnapshotResponse,
+    DataWorkspaceUpdateRequest,
 )
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.api_stage_helpers import start_task_job
@@ -30,6 +53,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.contracts import HASH_ALGO_CANDIDATES, KeyPair
 from marvis.data.errors import (
     DataBackendError,
+    DatasetContentDriftError,
     DataIngestError,
     DatasetTooLargeError,
     DedupRequiredError,
@@ -37,10 +61,28 @@ from marvis.data.errors import (
     InvalidDatasetPathError,
     JoinNotConfirmedError,
 )
-from marvis.data.excel_ingest import ingest_sheet, list_sheets
+from marvis.data.excel_ingest import (
+    detect_excel_container_format,
+    detect_excel_container_format_from_prefix,
+    ingest_sheet,
+    list_sheets,
+    new_excel_artifact_name,
+    require_excel_format,
+)
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
+from marvis.data.workspace import (
+    DataSemanticMapping,
+    DataWorkspaceDraft,
+    DataWorkspaceSnapshot,
+)
 from marvis.db import DatasetRepository, TaskRepository
+from marvis.repositories.data_workspace import (
+    DataWorkspaceDataError,
+    DataWorkspaceDatasetNotFound,
+    DataWorkspaceRepository,
+    DataWorkspaceRevisionConflict,
+)
 
 
 router = APIRouter(prefix="/api", tags=["data"])
@@ -52,8 +94,8 @@ DEDUP_STRATEGIES = {None, "first", "last", "agg_mean", "agg_max"}
 UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 # TST-2 (roadmap-1e): local-path registration only accepts these extensions --
 # an explicit whitelist, not "whatever register_from_upload happens to parse".
-DATASET_PATH_SUFFIXES = {".csv", ".xlsx", ".parquet"}
-_EXCEL_UPLOAD_SUFFIXES = {".xlsx", ".xlsm"}
+DATASET_PATH_SUFFIXES = {".csv", ".xls", ".xlsx", ".xlsm", ".parquet"}
+_EXCEL_UPLOAD_SUFFIXES = {".xls", ".xlsx", ".xlsm"}
 _MATCH_METHODS = frozenset({
     "exact",
     "exact_lower",
@@ -74,6 +116,20 @@ def _max_upload_bytes_for_suffix(settings, suffix: str) -> int:
     if suffix in _EXCEL_UPLOAD_SUFFIXES:
         return settings.max_excel_upload_bytes
     return settings.max_csv_upload_bytes
+
+
+def _verified_excel_format(path: Path, settings) -> str | None:
+    container_format = detect_excel_container_format(path)
+    if container_format is None:
+        return None
+    size_bytes = path.stat().st_size
+    if size_bytes > settings.max_excel_upload_bytes:
+        raise DatasetTooLargeError(
+            reason="检测为 Excel 的文件大小超过上限",
+            limit=settings.max_excel_upload_bytes,
+            actual=size_bytes,
+        )
+    return require_excel_format(path)
 
 
 def _reject_by_content_length(request: Request, max_bytes: int) -> None:
@@ -101,7 +157,13 @@ def _reject_by_content_length(request: Request, max_bytes: int) -> None:
         )
 
 
-def _stream_upload_to_path(file: UploadFile, destination: Path, *, max_bytes: int) -> int:
+def _stream_upload_to_path(
+    file: UploadFile,
+    destination: Path,
+    *,
+    max_bytes: int,
+    max_excel_bytes: int | None = None,
+) -> int:
     """Stream ``file`` to ``destination`` in fixed-size chunks instead of
     ``file.file.read()`` (whole-file-into-memory). Sync read of the underlying
     SpooledTemporaryFile: this endpoint is a plain `def` so FastAPI already
@@ -111,16 +173,28 @@ def _stream_upload_to_path(file: UploadFile, destination: Path, *, max_bytes: in
     or spoofed, see `_reject_by_content_length`).
     """
     total_bytes = 0
+    effective_max_bytes = max_bytes
+    detected_excel = False
     with destination.open("wb") as output:
         while True:
             chunk = file.file.read(UPLOAD_CHUNK_SIZE)
             if not chunk:
                 break
+            if total_bytes == 0 and max_excel_bytes is not None:
+                detected_excel = (
+                    detect_excel_container_format_from_prefix(chunk) is not None
+                )
+                if detected_excel:
+                    effective_max_bytes = min(effective_max_bytes, max_excel_bytes)
             total_bytes += len(chunk)
-            if total_bytes > max_bytes:
+            if total_bytes > effective_max_bytes:
                 raise DatasetTooLargeError(
-                    reason="上传文件大小超过上限",
-                    limit=max_bytes,
+                    reason=(
+                        "检测为 Excel 的上传文件大小超过上限"
+                        if detected_excel
+                        else "上传文件大小超过上限"
+                    ),
+                    limit=effective_max_bytes,
                     actual=total_bytes,
                 )
             output.write(chunk)
@@ -163,21 +237,39 @@ def _resolve_local_dataset_path(raw_path: str) -> Path:
     return resolved
 
 
-def _copy_local_dataset_path(source: Path, destination: Path, *, max_bytes: int) -> int:
+def _copy_local_dataset_path(
+    source: Path,
+    destination: Path,
+    *,
+    max_bytes: int,
+    max_excel_bytes: int | None = None,
+) -> int:
     """Chunked copy (mirrors ``_stream_upload_to_path``) so a large local file
     is never fully buffered in memory, and so it is subject to the same size
     guardrail as an HTTP upload of the same file type."""
     total_bytes = 0
+    effective_max_bytes = max_bytes
+    detected_excel = False
     with source.open("rb") as input_file, destination.open("wb") as output:
         while True:
             chunk = input_file.read(UPLOAD_CHUNK_SIZE)
             if not chunk:
                 break
+            if total_bytes == 0 and max_excel_bytes is not None:
+                detected_excel = (
+                    detect_excel_container_format_from_prefix(chunk) is not None
+                )
+                if detected_excel:
+                    effective_max_bytes = min(effective_max_bytes, max_excel_bytes)
             total_bytes += len(chunk)
-            if total_bytes > max_bytes:
+            if total_bytes > effective_max_bytes:
                 raise DatasetTooLargeError(
-                    reason="本地路径注册文件大小超过上限",
-                    limit=max_bytes,
+                    reason=(
+                        "检测为 Excel 的本地路径文件大小超过上限"
+                        if detected_excel
+                        else "本地路径注册文件大小超过上限"
+                    ),
+                    limit=effective_max_bytes,
                     actual=total_bytes,
                 )
             output.write(chunk)
@@ -200,6 +292,62 @@ def _require_task(request: Request, task_id: str) -> None:
         TaskRepository(request.app.state.settings.db_path).get_task(task_id)
     except KeyError as exc:
         raise not_found("task not found") from exc
+
+
+def _data_workspace_payload(
+    snapshot: DataWorkspaceSnapshot,
+) -> DataWorkspaceSnapshotResponse:
+    mapping = snapshot.semantic_mapping
+    return DataWorkspaceSnapshotResponse(
+        schema_version=snapshot.schema_version,
+        task_id=snapshot.task_id,
+        revision=snapshot.revision,
+        active_dataset_id=snapshot.active_dataset_id,
+        active_dataset_content_hash=snapshot.active_dataset_content_hash,
+        analysis_generation=snapshot.analysis_generation,
+        page=snapshot.page,
+        selected_field=snapshot.selected_field,
+        semantic_mapping={
+            "target_col": mapping.target_col,
+            "field_roles": dict(mapping.field_roles),
+            "business_names": dict(mapping.business_names),
+        },
+        updated_at=snapshot.updated_at,
+    )
+
+
+def _verified_task_dataset(
+    request: Request,
+    *,
+    task_id: str,
+    dataset_id: str,
+):
+    _repo_data, _backend, registry, _join_engine = _data_runtime(request)
+    try:
+        dataset = registry.get(dataset_id)
+    except KeyError as exc:
+        raise not_found("dataset not found") from exc
+    if dataset.task_id != task_id:
+        raise not_found("dataset not found")
+    try:
+        registry.resolve_verified_path(dataset_id)
+    except DatasetContentDriftError as exc:
+        raise conflict(str(exc)) from exc
+    return dataset
+
+
+def _parse_if_match(if_match: str | None) -> int:
+    if if_match is None:
+        raise precondition_required("If-Match header is required")
+    if not if_match.isascii() or not if_match.isdecimal():
+        raise bad_request("If-Match must be a non-negative integer")
+    try:
+        expected_revision = int(if_match)
+    except ValueError as exc:
+        raise bad_request("If-Match must be a non-negative integer") from exc
+    if expected_revision < 0:
+        raise bad_request("If-Match must be a non-negative integer")
+    return expected_revision
 
 
 def _join_async_requested(payload: dict) -> bool:
@@ -262,6 +410,81 @@ def list_task_datasets(task_id: str, request: Request) -> dict:
     }
 
 
+@router.get(
+    "/tasks/{task_id}/data-workspace",
+    response_model=DataWorkspaceSnapshotResponse,
+)
+def get_data_workspace(
+    task_id: str,
+    request: Request,
+) -> DataWorkspaceSnapshotResponse:
+    _require_task(request, task_id)
+    try:
+        snapshot = DataWorkspaceRepository(
+            request.app.state.settings.db_path
+        ).get_or_default(task_id)
+    except DataWorkspaceDatasetNotFound as exc:
+        raise not_found("dataset not found") from exc
+    except KeyError as exc:
+        raise not_found("task not found") from exc
+    if snapshot.active_dataset_id is not None:
+        _verified_task_dataset(
+            request,
+            task_id=task_id,
+            dataset_id=snapshot.active_dataset_id,
+        )
+    return _data_workspace_payload(snapshot)
+
+
+@router.put(
+    "/tasks/{task_id}/data-workspace",
+    response_model=DataWorkspaceSnapshotResponse,
+)
+def update_data_workspace(
+    task_id: str,
+    payload: DataWorkspaceUpdateRequest,
+    request: Request,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+) -> DataWorkspaceSnapshotResponse:
+    _require_task(request, task_id)
+    expected_revision = _parse_if_match(if_match)
+    if payload.active_dataset_id is not None:
+        _verified_task_dataset(
+            request,
+            task_id=task_id,
+            dataset_id=payload.active_dataset_id,
+        )
+    repo = DataWorkspaceRepository(request.app.state.settings.db_path)
+    try:
+        draft = DataWorkspaceDraft(
+            active_dataset_id=payload.active_dataset_id,
+            active_dataset_content_hash=payload.active_dataset_content_hash,
+            page=payload.page,
+            selected_field=payload.selected_field,
+            semantic_mapping=DataSemanticMapping(
+                target_col=payload.semantic_mapping.target_col,
+                field_roles=payload.semantic_mapping.field_roles,
+                business_names=payload.semantic_mapping.business_names,
+            ),
+        )
+        snapshot = repo.save(
+            task_id,
+            draft,
+            expected_revision=expected_revision,
+        )
+    except DataWorkspaceRevisionConflict as exc:
+        raise precondition_failed(str(exc)) from exc
+    except DataWorkspaceDatasetNotFound as exc:
+        raise not_found("dataset not found") from exc
+    except KeyError as exc:
+        raise not_found("task not found") from exc
+    except DataWorkspaceDataError as exc:
+        raise unprocessable(str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise unprocessable(str(exc)) from exc
+    return _data_workspace_payload(snapshot)
+
+
 @router.post("/tasks/{task_id}/datasets/upload", status_code=201)
 def upload_task_dataset(
     task_id: str,
@@ -290,7 +513,12 @@ def upload_task_dataset(
     # byte count is the authoritative size guard; Content-Length above is only
     # a fast pre-check and can be absent or spoofed.
     try:
-        _stream_upload_to_path(file, upload_artifact.path, max_bytes=max_upload_bytes)
+        _stream_upload_to_path(
+            file,
+            upload_artifact.path,
+            max_bytes=max_upload_bytes,
+            max_excel_bytes=settings.max_excel_upload_bytes,
+        )
     except DatasetTooLargeError as exc:
         upload_uow.rollback()
         raise payload_too_large(str(exc)) from exc
@@ -298,7 +526,8 @@ def upload_task_dataset(
     try:
         upload_uow.promote_all()
         suffix = upload_path.suffix.lower()
-        if suffix in {".xlsx", ".xlsm"}:
+        detected_excel_format = _verified_excel_format(upload_path, settings)
+        if detected_excel_format is not None or suffix in _EXCEL_UPLOAD_SUFFIXES:
             sheets = list_sheets(upload_path)
             if sheet:
                 if sheet not in sheets:
@@ -320,7 +549,10 @@ def upload_task_dataset(
                             scratch_dir,
                             max_rows=settings.max_excel_rows,
                         )
-                        artifact = uow.stage_file(out_dir, parquet_path.name)
+                        artifact = uow.stage_file(
+                            out_dir,
+                            new_excel_artifact_name(report.sheet),
+                        )
                         shutil.move(parquet_path, artifact.path)
                         staged_sheets.append((artifact.final_path, report))
                         excel_warnings = []
@@ -429,7 +661,7 @@ def register_task_dataset_from_path(
     if role not in DATASET_ROLES:
         raise unprocessable("invalid dataset role")
     settings = request.app.state.settings
-    repo_data, _backend, registry, _join_engine = _data_runtime(request)
+    _repo_data, _backend, registry, _join_engine = _data_runtime(request)
     try:
         source_path = _resolve_local_dataset_path(str(payload.get("path") or ""))
     except InvalidDatasetPathError as exc:
@@ -443,7 +675,12 @@ def register_task_dataset_from_path(
     )
     max_bytes = _max_upload_bytes_for_suffix(settings, source_path.suffix.lower())
     try:
-        _copy_local_dataset_path(source_path, upload_artifact.path, max_bytes=max_bytes)
+        _copy_local_dataset_path(
+            source_path,
+            upload_artifact.path,
+            max_bytes=max_bytes,
+            max_excel_bytes=settings.max_excel_upload_bytes,
+        )
     except DatasetTooLargeError as exc:
         upload_uow.rollback()
         raise payload_too_large(str(exc)) from exc
@@ -453,6 +690,7 @@ def register_task_dataset_from_path(
     upload_path = upload_artifact.final_path
     try:
         upload_uow.promote_all()
+        _verified_excel_format(upload_path, settings)
         # register_from_upload already gives GAP-7 content-hash dedup / idempotency
         # for free -- registering the same local path twice reuses the existing
         # dataset's parquet instead of duplicating it, exactly like a repeat HTTP
@@ -462,6 +700,18 @@ def register_task_dataset_from_path(
             upload_path,
             role=role,
             max_excel_rows=settings.max_excel_rows,
+            audit_factory=lambda registered: {
+                "kind": "dataset.registered_from_path",
+                "target_ref": registered.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "task_id": task_id,
+                    "dataset_id": registered.id,
+                    "role": registered.role,
+                    "source_path": str(source_path),
+                    "content_hash": registered.content_hash,
+                },
+            },
         )
     except HTTPException:
         upload_uow.rollback()
@@ -476,21 +726,6 @@ def register_task_dataset_from_path(
         upload_uow.rollback()
         raise
     upload_uow.commit()
-    # INV-8: audit every local-path registration, regardless of dedup outcome --
-    # a hard write (not a soft getattr probe): a failure here must be a visible
-    # 500, not a silently-skipped audit trail for a security-sensitive path.
-    repo_data.write_audit(
-        kind="dataset.registered_from_path",
-        target_ref=dataset.id,
-        outcome="succeeded",
-        detail={
-            "task_id": task_id,
-            "dataset_id": dataset.id,
-            "role": dataset.role,
-            "source_path": str(source_path),
-            "content_hash": dataset.content_hash,
-        },
-    )
     dispatch_platform_hook(
         getattr(request.app.state, "hook_dispatcher", None),
         "dataset.registered",
@@ -504,16 +739,28 @@ def register_task_dataset_from_path(
     return {"datasets": [dataset_payload(dataset)]}
 
 
-@router.get("/datasets/{dataset_id}/preview")
-def preview_dataset(dataset_id: str, request: Request, rows: int = 50) -> dict:
+def _dataset_preview_payload(
+    dataset_id: str,
+    request: Request,
+    rows: int,
+    *,
+    task_id: str | None = None,
+) -> dict:
     if rows < 1 or rows > DATASET_PREVIEW_MAX_ROWS:
         raise unprocessable("rows is outside allowed range")
     _repo_data, backend, registry, _join_engine = _data_runtime(request)
     try:
-        path = registry.resolve_path(dataset_id)
         dataset = registry.get(dataset_id)
     except KeyError as exc:
         raise not_found("dataset not found") from exc
+    if task_id is not None and dataset.task_id != task_id:
+        raise not_found("dataset not found")
+    try:
+        path = registry.resolve_verified_path(dataset_id)
+    except KeyError as exc:
+        raise not_found("dataset not found") from exc
+    except DatasetContentDriftError as exc:
+        raise conflict(str(exc)) from exc
     frame = backend.read_frame(path, nrows=rows + 1)
     truncated = len(frame) > rows or dataset.row_count > rows
     frame = frame.head(rows)
@@ -523,6 +770,22 @@ def preview_dataset(dataset_id: str, request: Request, rows: int = 50) -> dict:
         "rows": masked_preview_records(frame, dataset),
         "truncated": truncated,
     }
+
+
+@router.get("/tasks/{task_id}/datasets/{dataset_id}/preview")
+def preview_task_dataset(
+    task_id: str,
+    dataset_id: str,
+    request: Request,
+    rows: int = 50,
+) -> dict:
+    _require_task(request, task_id)
+    return _dataset_preview_payload(dataset_id, request, rows, task_id=task_id)
+
+
+@router.get("/datasets/{dataset_id}/preview")
+def preview_dataset(dataset_id: str, request: Request, rows: int = 50) -> dict:
+    return _dataset_preview_payload(dataset_id, request, rows)
 
 
 @router.post("/tasks/{task_id}/joins/propose", status_code=201)

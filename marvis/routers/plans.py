@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from marvis.errors import conflict, not_found, unprocessable
-from pydantic import BaseModel, Field
+from marvis.governance.errors import AuthorizationError
+from marvis.errors import conflict, forbidden, not_found, unprocessable
+from pydantic import BaseModel, ConfigDict, Field
 
+from marvis.agent.strategy_setup import strategy_development_slot_clarification
 from marvis.db import PlanRepository, TaskRepository
 from marvis.orchestrator.capability import TIERS, resolve_tier, tier_from_settings
 from marvis.agent.gates import build_failure_envelope
@@ -26,6 +28,17 @@ router = APIRouter(prefix="/api", tags=["plans"])
 logger = logging.getLogger(__name__)
 PLAN_JOB_KIND = "plan"
 ACTIVE_JOB_DETAIL = "task already has an active job"
+_TRUSTED_GENERIC_STRATEGY_TEMPLATE_IDS = frozenset(
+    {
+        "strategy_analysis",
+        "strategy_development",
+        "strategy_profit_analysis",
+        "strategy_roll_rate_analysis",
+        "strategy_limit_pricing_analysis",
+        "rule_strategy",
+        "strategy_monitoring",
+    }
+)
 
 
 class CreatePlanRequest(BaseModel):
@@ -42,16 +55,38 @@ class RetryStepRequest(BaseModel):
     inputs: dict | None = None
 
 
+class HumanDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+    reason: str = Field(min_length=1, max_length=4000)
+    expected_plan_revision: int = Field(ge=0)
+
+
 @router.post("/tasks/{task_id}/plans", status_code=201)
 def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict:
     intent_router = request.app.state.intent_router
     planner = request.app.state.planner
     validator = request.app.state.plan_validator
     repo = request.app.state.plan_repo
-    task_context = _task_context(task_id, body)
-    tier = _requested_tier(request, body.tier)
+    db_path = _db_path(request)
+    task_repo = TaskRepository(db_path)
+    try:
+        task_repo.get_task(task_id)
+    except KeyError as exc:
+        raise not_found("task not found") from exc
+
+    # Plan creation participates in the same task-level lease as driver turns and
+    # plan execution.  The lease starts before intent routing and is held through
+    # validation + persistence, so a strategy-input continuation cannot observe
+    # "no plan" and mutate the contract while this request is constructing one.
+    job_id = _start_plan_job(request, task_id)
+    if not task_repo.mark_job_running(job_id):
+        raise conflict(ACTIVE_JOB_DETAIL)
 
     try:
+        task_context = _task_context(task_id, body)
+        tier = _requested_tier(request, body.tier)
         intent = intent_router.route(body.goal, task_context)
         if intent.kind == "template":
             plan = planner.from_template(
@@ -70,19 +105,31 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
                 tier=tier,
                 novel_mode=body.novel_mode,
             )
-    except (KeyError, PlanningError, ValueError) as exc:
-        raise unprocessable(str(exc)) from exc
+        entry_error = _strategy_plan_entry_error(plan)
+        if entry_error is not None:
+            raise unprocessable(entry_error)
 
-    problems = validator.validate(plan)
-    if problems:
-        raise HTTPException(status_code=422, detail={"problems": problems})
+        problems = validator.validate(plan)
+        if problems:
+            raise HTTPException(status_code=422, detail={"problems": problems})
 
-    plan.status = PlanStatus.VALIDATED
-    try:
+        plan.status = PlanStatus.VALIDATED
         repo.create_plan(plan)
+        payload = _plan_payload(request, plan)
+    except HTTPException as exc:
+        _fail_plan_job(db_path, job_id, exc)
+        raise
+    except (KeyError, PlanningError, ValueError) as exc:
+        _fail_plan_job(db_path, job_id, exc)
+        raise unprocessable(str(exc)) from exc
     except sqlite3.IntegrityError as exc:
+        _fail_plan_job(db_path, job_id, exc)
         raise conflict("plan already exists") from exc
-    return _plan_payload(request, plan)
+    except Exception as exc:
+        _fail_plan_job(db_path, job_id, exc)
+        raise
+    task_repo.finish_job(job_id, status="succeeded")
+    return payload
 
 
 @router.get("/capability-tiers")
@@ -187,8 +234,19 @@ def confirm_step(
     background_tasks: BackgroundTasks,
 ) -> dict:
     plan = _load_plan(request, plan_id)
-    if step_id not in {step.id for step in plan.steps}:
+    step = next((item for item in plan.steps if item.id == step_id), None)
+    if step is None:
         raise not_found("step not found")
+    governance_service = getattr(request.app.state, "governance_service", None)
+    if governance_service is not None:
+        try:
+            requires_human_decision = governance_service.requires_human_decision(step)
+        except AuthorizationError as exc:
+            raise conflict(str(exc)) from exc
+        if requires_human_decision:
+            raise conflict(
+                "this step requires the dedicated human decision endpoint"
+            )
     job_id = _start_plan_job(request, plan.task_id)
     try:
         request.app.state.plan_repo.confirm_step(step_id)
@@ -206,6 +264,84 @@ def confirm_step(
         plan_id,
     )
     return {"ok": True, "plan_id": plan_id, "step_id": step_id, "job_id": job_id}
+
+
+@router.post(
+    "/plans/{plan_id}/steps/{step_id}/decisions",
+    status_code=202,
+)
+def decide_step(
+    request: Request,
+    plan_id: str,
+    step_id: str,
+    body: HumanDecisionRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Record an immutable, server-attributed human decision for one gate."""
+
+    plan = _load_plan(request, plan_id)
+    if not any(step.id == step_id for step in plan.steps):
+        raise not_found("step not found")
+    principal = getattr(request.state, "local_principal", None)
+    if principal is None:
+        raise forbidden("a server-issued local session principal is required")
+    service = request.app.state.governance_service
+    if body.decision == "reject":
+        try:
+            grant = service.reject_step(
+                plan_id=plan_id,
+                step_id=step_id,
+                principal=principal,
+                reason=body.reason,
+                expected_plan_revision=body.expected_plan_revision,
+            )
+        except AuthorizationError as exc:
+            raise conflict(str(exc)) from exc
+        return {
+            "ok": True,
+            "decision": "reject",
+            "decision_id": grant.decision.id,
+            "approval_id": None,
+            "principal_id": principal.id,
+            "task_id": plan.task_id,
+            "plan_id": plan_id,
+            "step_id": step_id,
+            "job_id": None,
+        }
+
+    job_id = _start_plan_job(request, plan.task_id)
+    try:
+        grant = service.authorize_step(
+            plan_id=plan_id,
+            step_id=step_id,
+            principal=principal,
+            reason=body.reason,
+            expected_plan_revision=body.expected_plan_revision,
+        )
+    except AuthorizationError as exc:
+        _fail_plan_job(_db_path(request), job_id, exc)
+        raise conflict(str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        _fail_plan_job(_db_path(request), job_id, exc)
+        raise unprocessable(str(exc)) from exc
+    background_tasks.add_task(
+        _run_plan_job,
+        job_id,
+        _db_path(request),
+        request.app.state.plan_executor,
+        plan_id,
+    )
+    return {
+        "ok": True,
+        "decision": "approve",
+        "decision_id": grant.decision.id,
+        "approval_id": None if grant.approval is None else grant.approval.id,
+        "principal_id": principal.id,
+        "task_id": plan.task_id,
+        "plan_id": plan_id,
+        "step_id": step_id,
+        "job_id": job_id,
+    }
 
 
 @router.post("/plans/{plan_id}/steps/{step_id}/retry", status_code=202)
@@ -369,6 +505,82 @@ def _sub_agent_payload(sub) -> dict:
         "status": sub.status.value,
         "result_ref": sub.result_ref,
     }
+
+
+def _strategy_plan_entry_error(plan) -> dict | None:
+    """Fail closed at the generic create-plan boundary for strategy tools.
+
+    This is an entry guard, not the Phase 0B Runner/replan authorization state
+    machine.  It prevents generic/novel/user templates from becoming an alternate
+    route around today's governed built-ins while that broader invariant is built.
+    """
+
+    strategy_steps = [step for step in plan.steps if step.tool_ref.plugin == "strategy"]
+    strategy_grants = [
+        (step, ref)
+        for step in plan.steps
+        for ref in step.granted_tools
+        if ref.plugin == "strategy"
+    ]
+    if not strategy_steps and not strategy_grants:
+        return None
+
+    strategy_tools = sorted(
+        {step.tool_ref.tool for step in strategy_steps}
+        | {ref.tool for _step, ref in strategy_grants}
+    )
+    trusted_template = (
+        plan.source == "template"
+        and plan.template_id in _TRUSTED_GENERIC_STRATEGY_TEMPLATE_IDS
+    )
+    if not trusted_template:
+        return {
+            "code": "strategy_plan_entry_not_allowed",
+            "message": (
+                "generic plan creation only accepts governed built-in strategy templates"
+            ),
+            "plan_source": plan.source,
+            "template_id": plan.template_id,
+            "strategy_tools": strategy_tools,
+            "allowed_template_ids": sorted(_TRUSTED_GENERIC_STRATEGY_TEMPLATE_IDS),
+        }
+
+    granted_adoption_step_ids = {
+        step.id for step, ref in strategy_grants if ref.tool == "adopt_strategy"
+    }
+    ungated_adoption_steps = [
+        step.id
+        for step in plan.steps
+        if (
+            step.tool_ref.plugin == "strategy"
+            and step.tool_ref.tool == "adopt_strategy"
+            and not step.needs_confirmation
+        )
+        or step.id in granted_adoption_step_ids
+    ]
+    if ungated_adoption_steps:
+        return {
+            "code": "strategy_adoption_confirmation_required",
+            "message": "strategy adoption must remain behind an explicit confirmation gate",
+            "template_id": plan.template_id,
+            "step_ids": ungated_adoption_steps,
+        }
+
+    if plan.template_id == "strategy_development":
+        contract_step = next(
+            (
+                step
+                for step in strategy_steps
+                if step.tool_ref.tool in {"tradeoff_view", "design_cutoff_bands"}
+            ),
+            None,
+        )
+        clarification = strategy_development_slot_clarification(
+            {} if contract_step is None else contract_step.inputs
+        )
+        if clarification is not None:
+            return clarification
+    return None
 
 
 def _task_context(task_id: str, body: CreatePlanRequest) -> dict:

@@ -20,6 +20,8 @@ from marvis.agent.plan_driver import PlanDriver
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, PlanRepository, init_db
+from marvis.governance.repository import GovernanceRepository
+from marvis.governance.service import GovernanceService
 from marvis.orchestrator.contracts import PlanStatus
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
@@ -30,6 +32,7 @@ from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.repositories.strategy import StrategyRepository
 from marvis.settings import build_settings
 
 
@@ -51,20 +54,47 @@ def _join_driver(tmp_path):
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"
     load_builtin_packs(plugin_registry, packs_root)
     tool_registry = ToolRegistry(plugin_registry)
+    plan_repo = PlanRepository(settings.db_path)
+    governance_repo = GovernanceRepository(settings.db_path)
+    principal = governance_repo.create_local_principal(
+        display_name="JOIN E2E 操作员"
+    )
+    governance_service = GovernanceService(
+        plan_repo=plan_repo,
+        tool_registry=tool_registry,
+        strategy_repo=StrategyRepository(settings.db_path),
+        governance_repo=governance_repo,
+    )
     runner = ToolRunner(
         tool_registry,
         plugin_repo,
         python_executable=sys.executable,
         datasets_root=settings.datasets_dir,
         workspace=settings.workspace,
+        governance=governance_repo,
+        binding_resolver=governance_service,
     )
     data_repo = DatasetRepository(settings.db_path)
     backend = DataBackend(settings.datasets_dir)
     registry = DatasetRegistry(data_repo, backend, settings.datasets_dir)
-    plan_repo = PlanRepository(settings.db_path)
-    executor = PlanExecutor(plan_repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(plan_repo))
+    executor = PlanExecutor(
+        plan_repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(plan_repo),
+        authorizer=governance_service,
+    )
     planner = Planner(tool_registry, lambda: FakeLLM(), PlanValidator(tool_registry))
-    driver = PlanDriver(plan_repo, executor, planner=planner, validator=PlanValidator(tool_registry))
+    driver = PlanDriver(
+        plan_repo,
+        executor,
+        planner=planner,
+        validator=PlanValidator(tool_registry),
+        governance_service=governance_service,
+        local_principal=principal,
+    )
     load_builtin_templates()
     return driver, registry, plan_repo
 

@@ -40,7 +40,7 @@ def conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=409, detail=detail)
 
 
-def unprocessable(detail: str) -> HTTPException:
+def unprocessable(detail: object) -> HTTPException:
     """422 -- syntactically valid but semantically invalid input. ``detail`` verbatim."""
     return HTTPException(status_code=422, detail=detail)
 
@@ -75,6 +75,11 @@ def precondition_required(detail: str) -> HTTPException:
     return HTTPException(status_code=428, detail=detail)
 
 
+def precondition_failed(detail: str) -> HTTPException:
+    """412 -- a request precondition did not match current state. ``detail`` verbatim."""
+    return HTTPException(status_code=412, detail=detail)
+
+
 def not_implemented(detail: str) -> HTTPException:
     """501 -- the requested capability is not wired up yet. ``detail`` verbatim."""
     return HTTPException(status_code=501, detail=detail)
@@ -91,5 +96,6 @@ __all__ = [
     "bad_gateway",
     "server_error",
     "precondition_required",
+    "precondition_failed",
     "not_implemented",
 ]

@@ -105,4 +105,4 @@
 - [ ] Memory management UI placement: settings modal first, then dedicated audit screen if volume requires it.
 - [ ] Plugin upload UI: administrator-only, ordinary user with confirmation, or local developer-only for public builds.
 - [ ] Portfolio/monitoring exposure: decide which backend-supported analysis workflows deserve first-screen task cards versus being launched from modeling/strategy outputs.
-- [ ] Multi-user governance: decide whether maker-checker, role permissions, and approval exports belong in V3 or remain explicit deployment guidance.
+- [ ] V2 multi-user governance: design maker-checker, role permissions, approval exports, production-operation confirmation, and recovery UX; the version scope is decided, only the interaction design remains open.

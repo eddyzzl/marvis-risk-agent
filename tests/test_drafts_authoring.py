@@ -143,6 +143,55 @@ def test_draft_script_rejects_network_file_write_and_file_delete_calls(code):
         )
 
 
+@pytest.mark.parametrize(
+    ("code", "blocked_import"),
+    [
+        (
+            "import sqlite3\n"
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    return {'margin': sqlite3.sqlite_version_info[0]}\n",
+            "import sqlite3",
+        ),
+        (
+            "from marvis.repositories.strategy import StrategyRepository\n"
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    return {'margin': 0}\n",
+            "from marvis import",
+        ),
+    ],
+)
+def test_draft_script_rejects_database_and_internal_imports(code, blocked_import):
+    with pytest.raises(AuthoringError, match=blocked_import):
+        draft_script(
+            "task-1",
+            "bad",
+            learning_note=None,
+            llm_factory=lambda: _FakeLLM(_valid_spec(code=code)),
+        )
+
+
+def test_draft_script_allows_pure_computation_standard_library_imports():
+    code = (
+        "import math\n"
+        "import statistics\n"
+        "from decimal import Decimal\n"
+        "from fractions import Fraction\n"
+        "def calc_margin(inputs: dict, ctx) -> dict:\n"
+        "    values = [Decimal(str(inputs['revenue'])), Decimal(str(inputs['cost']))]\n"
+        "    ratio = Fraction(1, 1)\n"
+        "    return {'margin': math.floor(statistics.mean(values) * ratio)}\n"
+    )
+
+    draft = draft_script(
+        "task-1",
+        "build margin calculator",
+        learning_note=None,
+        llm_factory=lambda: _FakeLLM(_valid_spec(code=code)),
+    )
+
+    assert draft.name == "calc_margin"
+
+
 class _SequenceLLM:
     def __init__(self, responses):
         self.responses = list(responses)

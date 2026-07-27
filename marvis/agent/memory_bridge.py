@@ -35,7 +35,10 @@ from marvis.agent_memory.retrieval import MemoryQuery, compare_model_experience,
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.domain import TASK_TYPE_DATA_JOIN, TASK_TYPE_MODELING, TASK_TYPE_STRATEGY, TaskRecord
 from marvis.memory_policy import load_memory_policy
+from marvis.packs.strategy.backtest_compat import approval_backtest_projection
+from marvis.packs.strategy.errors import StrategyError
 from marvis.repositories.strategy import StrategyRepository
+from marvis.strategy_lifecycle import ASSET_STATUS_ADOPTED_LOCAL
 
 MEMORY_ANCHOR_MAX_ENTRIES = 3
 MEMORY_ANCHOR_MAX_LINE_CHARS = 120
@@ -176,7 +179,7 @@ def _capture_strategy_experience(settings, task: TaskRecord) -> None:
     adopted = [
         meta
         for meta in strategies.list_meta_for_task(task.id)
-        if meta.get("status") == "adopted"
+        if meta.get("asset_status") == ASSET_STATUS_ADOPTED_LOCAL
     ]
     if not adopted:
         return
@@ -185,15 +188,24 @@ def _capture_strategy_experience(settings, task: TaskRecord) -> None:
     backtests = strategies.list_backtests(latest["id"])
     if strategy is None or not backtests:
         return
+    # The existing strategy_experience memory contract is deliberately approval
+    # specific.  Limit, pricing and segmentation backtests carry different typed
+    # metrics; skipping them is safer than inventing approval-rate aliases.
+    if strategy.strategy_type not in {"approval", "reject"}:
+        return
     backtest = backtests[-1]
+    memory_metrics = _approval_backtest_memory_metrics(
+        backtest,
+        strategy_type=strategy.strategy_type,
+    )
+    if memory_metrics is None:
+        return
     result = {
         "task_id": task.id,
         "source_task_id": task.id,
         "strategy_type": strategy.strategy_type,
         "cutoff_summary": _strategy_cutoff_summary(strategy),
-        "approval_rate": backtest.approval_rate,
-        "approved_bad_rate": backtest.approved_bad_rate,
-        "expected_profit": backtest.expected_profit,
+        **memory_metrics,
         "scope": f"strategy:{strategy.strategy_type}:{task.model_name or task.id}",
     }
     candidate = extract_strategy_experience(result)
@@ -201,6 +213,44 @@ def _capture_strategy_experience(settings, task: TaskRecord) -> None:
         return
     store = AgentMemoryStore(settings.db_path)
     store.create(candidate, task_id=task.id)
+
+
+def _approval_backtest_memory_metrics(
+    backtest: object,
+    *,
+    strategy_type: str,
+) -> dict[str, Any] | None:
+    """Read approval memory fields from V2 envelopes or legacy result objects.
+
+    No arithmetic or fallback default is performed here. Approval rate and
+    approved bad rate must exist in deterministic backtest evidence; profit is
+    optional because a valid backtest may not have received economic assumptions.
+    For a versioned envelope, canonical ``metrics``/``economics`` win over any
+    top-level compatibility projection.
+    """
+
+    if strategy_type not in {"approval", "reject"}:
+        return None
+    envelope_type = getattr(backtest, "strategy_type", None)
+    if envelope_type is not None and envelope_type != strategy_type:
+        return None
+    try:
+        projection = approval_backtest_projection(
+            backtest,
+            preserve_undefined_rates=True,
+        )
+    except (AttributeError, StrategyError, TypeError):
+        return None
+    if projection.get("strategy_id") is None:
+        return None
+    values = {
+        "approval_rate": projection.get("approval_rate"),
+        "approved_bad_rate": projection.get("approved_bad_rate"),
+        "expected_profit": projection.get("expected_profit"),
+    }
+    if values["approval_rate"] is None or values["approved_bad_rate"] is None:
+        return None
+    return values
 
 
 def _strategy_cutoff_summary(strategy) -> str:

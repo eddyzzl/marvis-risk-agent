@@ -12,6 +12,7 @@ text unchanged, so this refactor introduced zero prompt-wording changes.
 from __future__ import annotations
 
 from marvis.llm_prompts import ALL_PROMPTS, PromptSpec, prompt_version_snapshot
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 # Hash-lock table: bump the version AND update the hash here in the same
@@ -34,6 +35,7 @@ _LOCKED_HASHES = {
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
     "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
+    "STRATEGY_REQUEST_COMPILER_SYS": (50, "ea9b6bee031f8817"),
 }
 
 
@@ -72,6 +74,24 @@ def test_prompt_version_snapshot_covers_all_prompts():
     assert snapshot["PLAN_SYS"] == 1
 
 
+def test_strategy_compiler_prompt_owns_pool_materialization_contract():
+    assert STRATEGY_REQUEST_COMPILER_SYS.version == 50
+    assert "strategy_pool_materialize" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "draft Strategy" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "不采纳、不部署" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "match、conditions" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "parallel_time_cohorts" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "原生 V2" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "单层 flat and/or" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "time_ranges.column 必须与非空 field_bindings.time_field" in (
+        STRATEGY_REQUEST_COMPILER_SYS.text
+    )
+    assert "cross_matrix_candidate_search" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "cross_matrix_candidate_build_from_search" in (
+        STRATEGY_REQUEST_COMPILER_SYS.text
+    )
+
+
 def test_call_site_constants_re_export_registry_text_unchanged():
     """Every call site's module-level SYS constant must equal the registry's
     text byte-for-byte — this refactor moved prompts into one module, it did
@@ -79,6 +99,7 @@ def test_call_site_constants_re_export_registry_text_unchanged():
     import marvis.agent.auto_drive as auto_drive
     import marvis.agent.instruction_router as instruction_router
     import marvis.agent.prompts as agent_prompts
+    import marvis.agent.strategy_request_compiler as strategy_request_compiler
     import marvis.agent_memory.distillation as distillation
     import marvis.drafts.authoring as authoring
     import marvis.drafts.learning as learning
@@ -102,8 +123,15 @@ def test_call_site_constants_re_export_registry_text_unchanged():
         (learning.LEARN_SYS, lp.LEARN_SYS.text),
         (derive.CROSS_SYS, lp.CROSS_SYS.text),
         (agent_prompts.AGENT_SYSTEM_PROMPT, lp.AGENT_SYSTEM_PROMPT.text),
-        (agent_prompts.WORD_CONCLUSION_SYSTEM_PROMPT, lp.WORD_CONCLUSION_SYSTEM_PROMPT.text),
+        (
+            agent_prompts.WORD_CONCLUSION_SYSTEM_PROMPT,
+            lp.WORD_CONCLUSION_SYSTEM_PROMPT.text,
+        ),
         (modeling_tools.REPORT_NARRATIVE_SYS, lp.REPORT_NARRATIVE_SYS.text),
+        (
+            strategy_request_compiler._SYSTEM,
+            lp.STRATEGY_REQUEST_COMPILER_SYS.text,
+        ),
     ]
     for call_site_text, registry_text in pairs:
         assert call_site_text == registry_text

@@ -144,6 +144,58 @@ def test_parse_manifest_rejects_unknown_hook_event_and_missing_tool():
         parse_manifest(_manifest(hooks=[{"event": "task.created", "tool": "missing"}]))
 
 
+def test_parse_manifest_rejects_effect_authorized_tool_as_hook():
+    tool = dict(_manifest()["tools"][0])
+    tool["input_schema"] = {
+        **tool["input_schema"],
+        "properties": {
+            **tool["input_schema"]["properties"],
+            "strategy_id": {"type": "string"},
+        },
+    }
+    tool["policy"] = {
+        "human_decision_gate": "required",
+        "effect_authorization": "required",
+        "effect_target": {
+            "kind": "strategy",
+            "id_input": "strategy_id",
+            "expected_statuses": ["draft"],
+            "result_status": "adopted",
+        },
+    }
+
+    with pytest.raises(ManifestError, match="effect-authorized.*hook"):
+        parse_manifest(_manifest(tools=[tool]))
+
+
+def test_parse_manifest_rejects_human_decision_tool_as_hook():
+    tool = dict(_manifest()["tools"][0])
+    tool["policy"] = {
+        "human_decision_gate": "required",
+        "effect_authorization": "none",
+    }
+
+    with pytest.raises(ManifestError, match="human-decision-gated.*hook"):
+        parse_manifest(_manifest(tools=[tool]))
+
+
+def test_parse_manifest_requires_effect_target_id_in_tool_inputs():
+    tool = dict(_manifest()["tools"][0])
+    tool["policy"] = {
+        "human_decision_gate": "required",
+        "effect_authorization": "required",
+        "effect_target": {
+            "kind": "strategy",
+            "id_input": "strategy_id",
+            "expected_statuses": ["draft"],
+            "result_status": "adopted",
+        },
+    }
+
+    with pytest.raises(ManifestError, match="id_input"):
+        parse_manifest(_manifest(tools=[tool], hooks=[]))
+
+
 @pytest.mark.parametrize(
     "event",
     [

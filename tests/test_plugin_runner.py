@@ -7,14 +7,22 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
 
 from marvis.db import PluginRepository, init_db
+from marvis.governance.errors import ApprovalBindingError, ApprovalStateError
 from marvis.plugins.contracts import PROTOCOL_VERSION, WORKER_RESULT_SENTINEL
 from marvis.plugins.loader import load_builtin_packs
-from marvis.plugins.manifest import PluginManifest, ToolRef, ToolSpec
+from marvis.plugins.manifest import (
+    EffectTargetPolicy,
+    GovernancePolicy,
+    PluginManifest,
+    ToolRef,
+    ToolSpec,
+)
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import (
     _WORKER_ENV_ALLOWLIST,
@@ -70,6 +78,647 @@ def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
     assert result.duration_ms >= 0
 
 
+def test_tool_runner_fails_closed_before_worker_for_protected_tool_without_context(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    policy = GovernancePolicy(
+        human_decision_gate="required",
+        effect_authorization="required",
+        effect_target=EffectTargetPolicy(
+            kind="strategy",
+            id_input="strategy_id",
+            expected_statuses=("draft",),
+            result_status="adopted",
+        ),
+    )
+    manifest = PluginManifest(
+        name="protected",
+        version="1.0.0",
+        display_name="Protected",
+        description="Protected effect",
+        module="protected.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="adopt",
+                summary="Adopt",
+                input_schema={
+                    "type": "object",
+                    "properties": {"strategy_id": {"type": "string"}},
+                    "required": ["strategy_id"],
+                    "additionalProperties": False,
+                },
+                output_schema={"type": "object"},
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="fail",
+                side_effects=("write:strategy",),
+                entrypoint="run",
+                policy=policy,
+            ),
+        ),
+        permissions=("write:strategy",),
+        builtin=True,
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            return manifest, manifest.tools[0]
+
+    monkeypatch.setattr(
+        "marvis.plugins.runner.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("protected worker must not start")
+        ),
+    )
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "authorization"
+
+
+def _protected_runner_runtime(
+    tmp_path,
+    *,
+    governance=None,
+    binding_resolver=None,
+    policy=None,
+):
+    db_path = tmp_path / "protected.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    policy = policy or GovernancePolicy(
+        human_decision_gate="required",
+        effect_authorization="required",
+        effect_target=EffectTargetPolicy(
+            kind="strategy",
+            id_input="strategy_id",
+            expected_statuses=("draft",),
+            result_status="adopted",
+        ),
+    )
+    side_effects = (
+        ("write:strategy",)
+        if policy.effect_authorization == "required"
+        else ()
+    )
+    manifest = PluginManifest(
+        name="protected",
+        version="1.0.0",
+        display_name="Protected",
+        description="Protected effect",
+        module="protected.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="adopt",
+                summary="Adopt",
+                input_schema={
+                    "type": "object",
+                    "properties": {"strategy_id": {"type": "string"}},
+                    "required": ["strategy_id"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {"status": {"type": "string"}},
+                    "required": ["status"],
+                    "additionalProperties": False,
+                },
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="retry",
+                side_effects=side_effects,
+                entrypoint="run",
+                policy=policy,
+            ),
+        ),
+        permissions=side_effects,
+        builtin=True,
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            return manifest, manifest.tools[0]
+
+    return ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+        governance=governance,
+        binding_resolver=binding_resolver,
+    ), repo
+
+
+def _execution_context(*, effect=True):
+    return SimpleNamespace(
+        plan_id="plan-1",
+        plan_revision=3,
+        step_id="step-adopt",
+        decision_id="decision-1",
+        approval_id="approval-1" if effect else None,
+        runtime_generation="runtime-1",
+        human_decision_required=True,
+        effect_authorization_required=effect,
+    )
+
+
+def _worker_success(output=None):
+    payload = {
+        "ok": True,
+        "output": output or {"status": "adopted"},
+        "worker_protocol_version": PROTOCOL_VERSION,
+    }
+    return subprocess.CompletedProcess(
+        args=[sys.executable],
+        returncode=0,
+        stdout=WORKER_RESULT_SENTINEL + json.dumps(payload),
+        stderr="",
+    )
+
+
+def test_human_only_manifest_policy_fails_closed_without_decision_context(
+    tmp_path,
+    monkeypatch,
+):
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        policy=GovernancePolicy(human_decision_gate="required"),
+    )
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("human-governed worker must not start")
+        ),
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "authorization"
+
+
+def test_human_only_manifest_policy_verifies_live_decision_before_worker(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+    binding = object()
+    context = _execution_context(effect=False)
+
+    class Governance:
+        def verify_decision(self, observed_context, live_binding):
+            events.append(("verify", observed_context, live_binding))
+            return SimpleNamespace(id="decision-1")
+
+        def reserve_effect(self, *_args, **_kwargs):
+            raise AssertionError("human-only steps must not reserve an effect")
+
+    def resolve_binding(**kwargs):
+        events.append(("binding", kwargs))
+        return binding
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=resolve_binding,
+        policy=GovernancePolicy(human_decision_gate="required"),
+    )
+
+    def run_worker(_python, job, **kwargs):
+        events.append(("worker", job, kwargs))
+        return _worker_success()
+
+    monkeypatch.setattr("marvis.plugins.runner._run_worker", run_worker)
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=context,
+    )
+
+    assert result.ok is True
+    assert [event[0] for event in events] == ["binding", "verify", "worker"]
+    assert events[1] == ("verify", context, binding)
+
+
+def test_context_elevated_effect_policy_reserves_dispatches_and_consumes(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+    binding = object()
+    context = _execution_context(effect=True)
+
+    class Governance:
+        def reserve_effect(self, observed_context, live_binding):
+            events.append(("reserve", observed_context, live_binding))
+            return SimpleNamespace(id="effect-1", reservation_id="reservation-1")
+
+        def mark_effect_dispatched(self, effect_id, *, reservation_id):
+            events.append(("dispatched", effect_id, reservation_id))
+
+        def mark_effect_committed(self, effect_id, *, reservation_id, result_hash):
+            events.append(("committed", effect_id, reservation_id, result_hash))
+
+        def mark_effect_uncertain(self, *args, **kwargs):
+            events.append(("uncertain", args, kwargs))
+
+        def release_prepared_effect(self, *args, **kwargs):
+            events.append(("released", args, kwargs))
+
+    def resolve_binding(**kwargs):
+        events.append(("binding", kwargs))
+        return binding
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=resolve_binding,
+        policy=GovernancePolicy(),
+    )
+
+    def run_worker(_python, job, **kwargs):
+        events.append(("worker", job, kwargs))
+        assert job["effect_execution_id"] == "effect-1"
+        assert job["runtime_generation"] == "runtime-1"
+        return _worker_success()
+
+    monkeypatch.setattr("marvis.plugins.runner._run_worker", run_worker)
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=context,
+    )
+
+    assert result.ok is True
+    assert [event[0] for event in events] == [
+        "binding",
+        "reserve",
+        "dispatched",
+        "worker",
+        "committed",
+    ]
+
+
+def test_protected_tool_requires_live_binding_resolver_before_worker(tmp_path, monkeypatch):
+    governance = SimpleNamespace()
+    runner, _repo = _protected_runner_runtime(tmp_path, governance=governance)
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("protected worker must not start")
+        ),
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=_execution_context(),
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "authorization"
+
+
+def test_protected_tool_rejects_stale_binding_before_worker(tmp_path, monkeypatch):
+    class Governance:
+        def reserve_effect(self, context, binding):
+            raise ApprovalBindingError("input hash changed")
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("worker must not start for stale authorization")
+        ),
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=_execution_context(),
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "authorization"
+    assert result.error_detail == {"authorization_phase": "reserve"}
+
+
+def test_protected_tool_reserves_dispatches_and_commits_one_shot_effect(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+    binding = object()
+
+    class Governance:
+        def reserve_effect(self, context, live_binding):
+            events.append(("reserve", context, live_binding))
+            return SimpleNamespace(id="effect-1", reservation_id="reservation-1")
+
+        def mark_effect_dispatched(self, effect_id, *, reservation_id):
+            events.append(("dispatched", effect_id, reservation_id))
+
+        def mark_effect_committed(self, effect_id, *, reservation_id, result_hash):
+            events.append(("committed", effect_id, reservation_id, result_hash))
+
+        def mark_effect_uncertain(self, *args, **kwargs):
+            events.append(("uncertain", args, kwargs))
+
+        def release_prepared_effect(self, *args, **kwargs):
+            events.append(("released", args, kwargs))
+
+    def resolve_binding(**kwargs):
+        events.append(("binding", kwargs))
+        return binding
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=resolve_binding,
+    )
+
+    def run_worker(_python, job, **kwargs):
+        events.append(("worker", job, kwargs))
+        assert job["inputs"] == {"strategy_id": "strategy-1"}
+        assert "approval_id" not in job["inputs"]
+        assert "effect_execution_id" not in job["inputs"]
+        assert job["effect_execution_id"] == "effect-1"
+        assert job["runtime_generation"] == "runtime-1"
+        return _worker_success()
+
+    monkeypatch.setattr("marvis.plugins.runner._run_worker", run_worker)
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=_execution_context(),
+    )
+
+    assert result.ok is True
+    assert [event[0] for event in events] == [
+        "binding",
+        "reserve",
+        "dispatched",
+        "worker",
+        "committed",
+    ]
+    assert events[-1][3].startswith("sha256:")
+
+
+def test_runner_preserves_domain_owned_committed_effect_receipt(tmp_path, monkeypatch):
+    events = []
+
+    class Governance:
+        def reserve_effect(self, context, binding):
+            return SimpleNamespace(id="effect-1", reservation_id="reservation-1")
+
+        def mark_effect_dispatched(self, effect_id, *, reservation_id):
+            events.append("dispatched")
+
+        def get_effect_execution(self, effect_id):
+            return SimpleNamespace(state="committed")
+
+        def mark_effect_committed(self, effect_id, *, reservation_id, result_hash):
+            events.append(("committed", result_hash))
+
+        def mark_effect_uncertain(self, *args, **kwargs):
+            raise AssertionError("committed effect must not be downgraded")
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: _worker_success(),
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=_execution_context(),
+    )
+
+    assert result.ok is True
+    assert events == ["dispatched", ("committed", None)]
+
+
+def test_post_commit_worker_failure_never_downgrades_or_reissues_effect(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+
+    class Governance:
+        def reserve_effect(self, context, binding):
+            return SimpleNamespace(id="effect-1", reservation_id="reservation-1")
+
+        def mark_effect_dispatched(self, effect_id, *, reservation_id):
+            events.append("dispatched")
+
+        def get_effect_execution(self, effect_id):
+            return SimpleNamespace(state="committed")
+
+        def mark_effect_uncertain(self, *args, **kwargs):
+            raise AssertionError("committed effect must not be downgraded")
+
+        def release_prepared_effect(self, *args, **kwargs):
+            raise AssertionError("committed effect must not be released")
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=lambda **kwargs: object(),
+    )
+    failed_payload = {
+        "ok": False,
+        "error_kind": "execution",
+        "error": "artifact write failed after domain commit",
+        "worker_protocol_version": PROTOCOL_VERSION,
+    }
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[sys.executable],
+            returncode=1,
+            stdout=WORKER_RESULT_SENTINEL + json.dumps(failed_payload),
+            stderr="",
+        ),
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=_execution_context(),
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert "artifact write failed" in result.error
+    assert events == ["dispatched"]
+
+
+def test_protected_tool_releases_only_pre_dispatch_reservation_failure(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+
+    class Governance:
+        def reserve_effect(self, context, binding):
+            return SimpleNamespace(id="effect-1", reservation_id="reservation-1")
+
+        def mark_effect_dispatched(self, effect_id, *, reservation_id):
+            raise ApprovalStateError("ledger unavailable before worker spawn")
+
+        def release_prepared_effect(self, effect_id, *, reservation_id, reason):
+            events.append((effect_id, reservation_id, reason))
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("worker must not start when dispatch checkpoint fails")
+        ),
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=_execution_context(),
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "authorization"
+    assert len(events) == 1
+    assert events[0][0:2] == ("effect-1", "reservation-1")
+
+
+def test_protected_tool_marks_post_dispatch_timeout_uncertain_without_release(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+
+    class Governance:
+        def reserve_effect(self, context, binding):
+            return SimpleNamespace(id="effect-1", reservation_id="reservation-1")
+
+        def mark_effect_dispatched(self, effect_id, *, reservation_id):
+            events.append("dispatched")
+
+        def mark_effect_uncertain(self, effect_id, *, reservation_id, reason):
+            events.append(("uncertain", effect_id, reservation_id, reason))
+
+        def release_prepared_effect(self, *args, **kwargs):
+            events.append("released")
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired("worker", 10)
+        ),
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=_execution_context(),
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "timeout"
+    assert events[0] == "dispatched"
+    assert events[1][0] == "uncertain"
+    assert "released" not in events
+
+
+def test_protected_tool_marks_worker_launch_failure_uncertain(tmp_path, monkeypatch):
+    events = []
+
+    class Governance:
+        def reserve_effect(self, context, binding):
+            return SimpleNamespace(id="effect-1", reservation_id="reservation-1")
+
+        def mark_effect_dispatched(self, effect_id, *, reservation_id):
+            events.append("dispatched")
+
+        def mark_effect_uncertain(self, effect_id, *, reservation_id, reason):
+            events.append(("uncertain", reason))
+
+    runner, _repo = _protected_runner_runtime(
+        tmp_path,
+        governance=Governance(),
+        binding_resolver=lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("spawn failed")),
+    )
+
+    result = runner.invoke(
+        ToolRef("protected", "adopt"),
+        {"strategy_id": "strategy-1"},
+        task_id="task-1",
+        execution_context=_execution_context(),
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert [event[0] if isinstance(event, tuple) else event for event in events] == [
+        "dispatched",
+        "uncertain",
+    ]
+
+
 def test_tool_context_load_dataset_path_rejects_parent_escape(tmp_path):
     ctx = ToolContext(
         task_id="task-1",
@@ -81,6 +730,54 @@ def test_tool_context_load_dataset_path_rejects_parent_escape(tmp_path):
     assert ctx.load_dataset_path("task-1/sample.parquet") == tmp_path / "datasets" / "task-1" / "sample.parquet"
     with pytest.raises(PermissionError):
         ctx.load_dataset_path("../outside.parquet")
+
+
+def test_worker_tool_context_receives_only_opaque_effect_execution_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.plugins import subprocess_worker
+
+    captured = {}
+
+    def tool(inputs, ctx):
+        captured["inputs"] = inputs
+        captured["effect_execution_id"] = ctx.effect_execution_id
+        captured["runtime_generation"] = ctx.runtime_generation
+        return {"ok": True}
+
+    monkeypatch.setattr(subprocess_worker, "_install_network_guard", lambda _effects: None)
+    monkeypatch.setattr(subprocess_worker, "_install_process_guard", lambda _effects: None)
+    monkeypatch.setattr(subprocess_worker, "_should_install_file_guard", lambda _job: False)
+    monkeypatch.setattr(
+        subprocess_worker,
+        "_load_module",
+        lambda _job: SimpleNamespace(run=tool),
+    )
+
+    result = subprocess_worker._run_tool(
+        {
+            "module": "protected.tools",
+            "entrypoint": "run",
+            "inputs": {"strategy_id": "strategy-1"},
+            "task_id": "task-1",
+            "seed": None,
+            "datasets_root": str(tmp_path / "datasets"),
+            "workspace": str(tmp_path / "workspace"),
+            "plugin_paths": [],
+            "side_effects": ["write:strategy"],
+            "builtin": True,
+            "effect_execution_id": "effect-1",
+            "runtime_generation": "runtime-1",
+        }
+    )
+
+    assert result == {"ok": True}
+    assert captured == {
+        "inputs": {"strategy_id": "strategy-1"},
+        "effect_execution_id": "effect-1",
+        "runtime_generation": "runtime-1",
+    }
 
 
 def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeypatch):
@@ -525,6 +1222,78 @@ def test_tool_runner_redacts_stdout_and_stderr_tails(tmp_path):
     assert "138******00" in combined
     assert "[REDACTED_EMAIL]" in combined
     assert "6222********1234" in combined
+
+
+def test_invoke_adhoc_cannot_bypass_registered_strategy_governance(
+    tmp_path,
+    monkeypatch,
+):
+    runner = _runner(tmp_path)
+    strategy_module = (
+        Path(__file__).parents[1] / "marvis" / "packs" / "strategy" / "tools.py"
+    )
+    monkeypatch.setattr(
+        "marvis.plugins.runner.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("registered plugin worker must not start through invoke_adhoc")
+        ),
+    )
+
+    result = runner.invoke_adhoc(
+        module=strategy_module,
+        entrypoint="tool_adopt_strategy",
+        inputs={
+            "strategy_id": "strategy-1",
+            "backtest_id": "backtest-1",
+            "adoption_reason": "bypass attempt",
+        },
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "authorization"
+    assert "manifest-aware" in result.error
+
+
+def test_invoke_adhoc_cannot_bypass_registered_module_through_hardlink(
+    tmp_path,
+    monkeypatch,
+):
+    runner = _runner(tmp_path)
+    strategy_module = (
+        Path(__file__).parents[1] / "marvis" / "packs" / "strategy" / "tools.py"
+    )
+    alias_module = tmp_path / "strategy_tools_alias.py"
+    alias_module.hardlink_to(strategy_module)
+    monkeypatch.setattr(
+        "marvis.plugins.runner.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("registered plugin alias must not start an adhoc worker")
+        ),
+    )
+
+    result = runner.invoke_adhoc(
+        module=alias_module,
+        entrypoint="tool_adopt_strategy",
+        inputs={
+            "strategy_id": "strategy-1",
+            "backtest_id": "backtest-1",
+            "adoption_reason": "alias bypass attempt",
+        },
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "authorization"
+    assert "manifest-aware" in result.error
 
 
 def test_tool_runner_denies_network_for_adhoc_without_network_side_effect(tmp_path):

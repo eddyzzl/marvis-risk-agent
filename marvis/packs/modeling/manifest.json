@@ -1,8 +1,8 @@
 {
   "name": "modeling",
-  "version": "0.4.6",
+  "version": "0.6.0",
   "display_name": "Modeling Pack",
-  "description": "Modeling readiness, frame preparation, feature selection, training, experiment comparison, probability calibration, PMML export, and V1 validation handoff tools.",
+  "description": "Modeling readiness, frame preparation, feature selection, governed V2 training and score evidence, experiment comparison, probability calibration, PMML export, and V1 validation handoff tools.",
   "module": "marvis.packs.modeling.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
@@ -1351,6 +1351,727 @@
       "memory_limit_mb": 4096
     },
     {
+      "name": "train_model_with_evidence_v2",
+      "summary": "Train one governed native binary model on the exact StrategySampleDesign V2 risk population. Development, validation, and OOT splits are materialized privately from authenticated membership; callers cannot supply a source split column or aliases. Atomically publish the immutable model binary plus canonical training evidence. This does not select, calibrate, adopt, or deploy the model.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_membership_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "bundle_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "recipe": {
+            "type": "string",
+            "enum": [
+              "lgb",
+              "xgb",
+              "catboost",
+              "lr",
+              "scorecard",
+              "mlp"
+            ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 10000,
+            "uniqueItems": true
+          },
+          "params": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "early_stopping_rounds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        },
+        "required": [
+          "sample_design_ref",
+          "recipe",
+          "features",
+          "params",
+          "seed",
+          "early_stopping_rounds"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "modeling.train-model-with-evidence-v2-tool.v1.2"
+          },
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "score_product": {
+            "type": "string",
+            "const": "raw_native_uncalibrated_bad_probability"
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_membership_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "bundle_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "artifacts": {
+            "type": "object",
+            "properties": {
+              "model_binary": {
+                "type": "object",
+                "properties": {
+                  "artifact_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "modeling_model_binary"
+                  },
+                  "filename": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "download_url": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "artifact_id",
+                  "kind",
+                  "filename",
+                  "content_hash",
+                  "download_url"
+                ],
+                "additionalProperties": false
+              },
+              "training_evidence": {
+                "type": "object",
+                "properties": {
+                  "artifact_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "modeling_training_evidence_json"
+                  },
+                  "filename": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "download_url": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "artifact_id",
+                  "kind",
+                  "filename",
+                  "content_hash",
+                  "download_url"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "model_binary",
+              "training_evidence"
+            ],
+            "additionalProperties": false
+          },
+          "governance": {
+            "type": "object",
+            "properties": {
+              "not_selected": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_calibrated": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_adopted": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_deployed": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "not_selected",
+              "not_calibrated",
+              "not_adopted",
+              "not_deployed"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "schema_version",
+          "experiment_id",
+          "model_artifact_id",
+          "evidence_id",
+          "evidence_content_hash",
+          "score_product",
+          "sample_design_ref",
+          "artifacts",
+          "governance"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 1800,
+      "failure_policy": "fail",
+      "entrypoint": "tool_train_model_with_evidence_v2",
+      "side_effects": [
+        "read:dataset",
+        "read:model",
+        "write:model",
+        "write:experiment",
+        "write:task"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "materialize_model_score_evidence_v2",
+      "summary": "Score the exact active dataset bound by one complete authenticated ModelingTrainingEvidence V2 reference, then atomically publish an immutable float64 probability vector and canonical Strategy-ready score evidence. The score is native uncalibrated bad probability; this does not compare, select, adopt, or deploy a model.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "training_evidence_ref": {
+            "$ref": "#/$defs/training_evidence_ref"
+          }
+        },
+        "required": [
+          "training_evidence_ref"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_membership_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "bundle_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "training_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "sample_design_ref": {
+                "$ref": "#/$defs/sample_design_ref"
+              },
+              "model_binary_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_model_binary_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "evidence_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_evidence_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_experiment_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_model_artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_evidence_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_evidence_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "sample_design_ref",
+              "model_binary_artifact_id",
+              "expected_model_binary_artifact_content_hash",
+              "evidence_artifact_id",
+              "expected_evidence_artifact_content_hash",
+              "expected_experiment_id",
+              "expected_model_artifact_id",
+              "expected_evidence_id",
+              "expected_evidence_content_hash"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "modeling.materialize-model-score-evidence-v2-tool.v1"
+          },
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_content_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "single_model_evidence_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "single_model_evidence_content_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "input_space": {
+            "type": "string",
+            "const": "bound_active_training_dataset"
+          },
+          "training_evidence_ref": {
+            "$ref": "#/$defs/training_evidence_ref"
+          },
+          "artifacts": {
+            "type": "object",
+            "properties": {
+              "score_vector": {
+                "$ref": "#/$defs/score_vector_artifact"
+              },
+              "score_evidence": {
+                "$ref": "#/$defs/score_evidence_artifact"
+              }
+            },
+            "required": [
+              "score_vector",
+              "score_evidence"
+            ],
+            "additionalProperties": false
+          },
+          "resource_budgets": {
+            "$ref": "#/$defs/resource_budgets"
+          },
+          "governance": {
+            "$ref": "#/$defs/governance"
+          },
+          "content_hash": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "required": [
+          "schema_version",
+          "evidence_id",
+          "evidence_content_hash",
+          "single_model_evidence_id",
+          "single_model_evidence_content_hash",
+          "input_space",
+          "training_evidence_ref",
+          "artifacts",
+          "resource_budgets",
+          "governance",
+          "content_hash"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_membership_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "bundle_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "training_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "sample_design_ref": {
+                "$ref": "#/$defs/sample_design_ref"
+              },
+              "model_binary_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_model_binary_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "evidence_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_evidence_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_experiment_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_model_artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_evidence_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_evidence_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "sample_design_ref",
+              "model_binary_artifact_id",
+              "expected_model_binary_artifact_content_hash",
+              "evidence_artifact_id",
+              "expected_evidence_artifact_content_hash",
+              "expected_experiment_id",
+              "expected_model_artifact_id",
+              "expected_evidence_id",
+              "expected_evidence_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "filename": {
+                "type": "string",
+                "minLength": 1
+              },
+              "content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "download_url": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          },
+          "score_vector_artifact": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/artifact"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "model_score_vector_parquet"
+                  }
+                }
+              }
+            ]
+          },
+          "score_evidence_artifact": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/artifact"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "model_score_evidence_json"
+                  }
+                }
+              }
+            ]
+          },
+          "resource_budgets": {
+            "type": "object",
+            "properties": {
+              "max_rows": {
+                "type": "integer",
+                "const": 2000000
+              },
+              "rows_scored": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000000
+              },
+              "max_score_bins": {
+                "type": "integer",
+                "const": 10
+              },
+              "score_bins_used": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "max_months": {
+                "type": "integer",
+                "const": 240
+              },
+              "months_used": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 240
+              },
+              "max_observations": {
+                "type": "integer",
+                "const": 50000
+              },
+              "observations_used": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50000
+              }
+            },
+            "required": [
+              "max_rows",
+              "rows_scored",
+              "max_score_bins",
+              "score_bins_used",
+              "max_months",
+              "months_used",
+              "max_observations",
+              "observations_used"
+            ],
+            "additionalProperties": false
+          },
+          "governance": {
+            "type": "object",
+            "properties": {
+              "not_compared": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_selected": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_adopted": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_deployed": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "not_compared",
+              "not_selected",
+              "not_adopted",
+              "not_deployed"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 1800,
+      "failure_policy": "fail",
+      "entrypoint": "tool_materialize_model_score_evidence_v2",
+      "side_effects": [
+        "read:task",
+        "read:artifacts",
+        "read:dataset",
+        "read:experiment",
+        "read:model",
+        "write:artifact",
+        "write:task"
+      ],
+      "memory_limit_mb": 4096,
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      }
+    },
+    {
       "name": "train_models",
       "summary": "Train one or more recipes and return all experiments plus the best experiment using the target-aware selector: binary overfit-penalized test KS (OOT reported only, not used for selection), regression lower OOT RMSE (test RMSE fallback), and multiclass OOT macro-AUC (test macro-AUC fallback, then lower logloss). lgb uses tuned params when provided; other recipes train with their own defaults. The single-recipe case mirrors train_model.",
       "input_schema": {
@@ -2678,12 +3399,15 @@
   ],
   "hooks": [],
   "permissions": [
+    "read:task",
+    "read:artifacts",
     "read:dataset",
     "write:dataset",
     "read:model",
     "write:model",
     "read:experiment",
     "write:experiment",
+    "write:artifact",
     "write:task",
     "write:report",
     "llm"

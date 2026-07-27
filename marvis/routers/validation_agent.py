@@ -11,6 +11,7 @@ from marvis.agent.service import (
     is_stop_validation_intent,
     summarize_stage,
 )
+from marvis.agent.strategy_setup import strategy_development_clarification
 from marvis.agent.turn_handlers import DRIVER_AGENT_TASK_TYPES
 from marvis.agent.validation_app_service import (
     WIRED_AGENT_TASK_TYPES,
@@ -44,13 +45,45 @@ from marvis.api_schemas import (
     AgentMessageRequest,
     AgentModelRequest,
     AgentReportDraftConfirmRequest,
+    StrategyTaskInputRequest,
 )
 from marvis.api_task_helpers import get_task_or_404, reject_if_task_has_active_job
+from marvis.domain import TASK_TYPE_STRATEGY, StrategyProfitInput, StrategyTaskInput
 
 
 router = APIRouter(prefix="/api", tags=["validation-agent"])
 REPORT_DIRECTIVE_LIMIT = 6
 REPORT_DIRECTIVE_CHARS = 1_600
+
+
+def _domain_strategy_input(
+    contract: StrategyTaskInputRequest | None,
+) -> StrategyTaskInput | None:
+    if contract is None:
+        return None
+    profit = contract.profit
+    domain_profit = (
+        StrategyProfitInput(
+            ead_col=profit.ead_col,
+            pd_col=profit.pd_col,
+            annual_rate=profit.annual_rate,
+            funding_rate=profit.funding_rate,
+            lgd=profit.lgd,
+            operating_cost_per_loan=profit.operating_cost_per_loan,
+            term_months=profit.term_months,
+        )
+        if profit is not None
+        else None
+    )
+    return StrategyTaskInput(
+        entry_mode=contract.entry_mode,
+        strategy_type=contract.strategy_type,
+        objective=contract.objective,
+        max_bad_rate=contract.max_bad_rate,
+        min_approval_rate=contract.min_approval_rate,
+        baseline_strategy_id=contract.baseline_strategy_id,
+        profit=domain_profit,
+    )
 
 
 def _report_revision_instruction_context(
@@ -133,6 +166,8 @@ def start_agent_task(
             user_text=None,
             agent_client=agent_client,
             acceptance_mode=payload.acceptance_mode,
+            recovery_model_id=payload.model_id,
+            recovery_effort=payload.effort,
         )
     model_profile = resolve_agent_model(request, payload.model_id, payload.effort)
     return dispatch_agent_validation_job(
@@ -154,11 +189,45 @@ def post_agent_message(
 ) -> dict:
     repo = agent_repo(request)
     task = get_task_or_404(repo, task_id)
+    if payload.strategy_input is not None and task.task_type != TASK_TYPE_STRATEGY:
+        raise unprocessable("strategy_input 只能用于 strategy 类型任务。")
+    if payload.strategy_request is not None and task.task_type != TASK_TYPE_STRATEGY:
+        raise unprocessable("strategy_request 只能用于 strategy 类型任务。")
     require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
     require_wired_agent_task_type(task, WIRED_AGENT_TASK_TYPES)
     content = payload.content.strip()
     if not content:
         raise unprocessable("message content is required")
+    if payload.strategy_request is not None:
+        mixed_fields = [
+            name
+            for name, value in (
+                ("strategy_input", payload.strategy_input),
+                ("selection", payload.selection),
+                ("dedup_strategies", payload.dedup_strategies),
+                ("adjust_params", payload.adjust_params),
+                ("expected_step_id", payload.expected_step_id),
+            )
+            if value is not None
+        ]
+        if mixed_fields:
+            raise unprocessable(
+                "strategy_request 不能与以下结构化输入同时提交："
+                + "、".join(mixed_fields)
+                + "。"
+            )
+        if is_stop_validation_intent(content):
+            raise unprocessable("停止指令不能与 strategy_request 同时提交。")
+    strategy_input = _domain_strategy_input(payload.strategy_input)
+    if strategy_input is not None and is_stop_validation_intent(content):
+        raise unprocessable("停止指令不能与 strategy_input 同时提交。")
+    if (
+        strategy_input is not None
+        and strategy_input.entry_mode == "strategy_development"
+    ):
+        clarification = strategy_development_clarification(strategy_input)
+        if clarification is not None:
+            raise unprocessable(clarification)
     if is_stop_validation_intent(content):
         user_message = repo.add_agent_message(
             task_id,
@@ -170,7 +239,13 @@ def post_agent_message(
         capture_user_preference_memory(request, task_id, user_message)
         return handle_agent_stop_message(repo, task)
     if task.task_type in DRIVER_AGENT_TASK_TYPES:
-        agent_client = resolve_driver_agent_client(request, task, payload)
+        # A typed Candidate Lab request is already executable user input. It
+        # must remain usable in agent mode without resolving or calling an LLM.
+        agent_client = (
+            None
+            if payload.strategy_request is not None
+            else resolve_driver_agent_client(request, task, payload)
+        )
         return dispatch_driver_turn(
             request,
             repo,
@@ -182,6 +257,17 @@ def post_agent_message(
             dedup_strategies=payload.dedup_strategies,
             adjust_params=payload.adjust_params,
             expected_step_id=payload.expected_step_id,
+            strategy_input=strategy_input,
+            strategy_request=(
+                None
+                if payload.strategy_request is None
+                else payload.strategy_request.model_dump(
+                    mode="python",
+                    exclude_none=True,
+                )
+            ),
+            recovery_model_id=payload.model_id,
+            recovery_effort=payload.effort,
         )
     if is_agent_material_reselection_intent(content):
         reject_if_task_has_active_job(repo, task_id)

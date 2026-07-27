@@ -367,7 +367,7 @@ _STRATEGY_REPLAN_SCRIPT = [
             "tool": {"plugin": "strategy", "tool": "build_strategy"},
             "inputs": {
                 "strategy_type": "approval",
-                "rules": [{"if": "score>=650", "then": "approve"}],
+                "rules": [{"condition": "score >= 650", "decision": "approve"}],
                 "default_decision": "reject",
             },
             "depends_on": [],

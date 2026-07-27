@@ -10,8 +10,9 @@ to the profit convention only has to be mirrored in one small place, and the uni
 tests hand-check every cell against this exact formula.
 
 PD source: pd_col mean over the band's rows when a PD column is supplied, else the
-band's empirical bad rate as a PD proxy (surfaced as a ``pd_proxy_used`` red flag --
-an empirical bad rate is a coarse stand-in for a calibrated PD).
+band's empirical bad rate under the caller's explicit 0/1 ``target_bad_value``
+semantics (surfaced as a ``pd_proxy_used`` red flag -- an empirical bad rate is a
+coarse stand-in for a calibrated PD).
 """
 
 from __future__ import annotations
@@ -68,6 +69,7 @@ def limit_pricing_matrix(
     rate_grid: list[float],
     params: PricingParams,
     target_col: str | None = None,
+    target_bad_value: int = 1,
     pd_col: str | None = None,
     band_edges: list[float] | None = None,
     n_bands: int = 5,
@@ -79,6 +81,12 @@ def limit_pricing_matrix(
         raise StrategyError("limit_pricing_matrix requires at least one rate")
     if pd_col is None and target_col is None:
         raise StrategyError("limit_pricing_matrix requires pd_col or target_col")
+    if (
+        isinstance(target_bad_value, bool)
+        or not isinstance(target_bad_value, int)
+        or target_bad_value not in {0, 1}
+    ):
+        raise StrategyError("target_bad_value must be integer 0 or 1")
 
     scores = pd.to_numeric(df[score_col], errors="raise").astype(float)
     edges = _resolve_edges(scores, n_bands=n_bands, band_edges=band_edges)
@@ -97,7 +105,12 @@ def limit_pricing_matrix(
         band_df = df.loc[mask]
         count = int(len(band_df))
         band_label = f"[{_fmt_edge(lo)},{_fmt_edge(hi)})"
-        band_pd = _band_pd(band_df, pd_col=pd_col, target_col=target_col)
+        band_pd = _band_pd(
+            band_df,
+            pd_col=pd_col,
+            target_col=target_col,
+            target_bad_value=target_bad_value,
+        )
 
         band_cells: list[PricingCell] = []
         for limit in limit_grid:
@@ -176,7 +189,13 @@ def _price_cell(
     )
 
 
-def _band_pd(band_df: pd.DataFrame, *, pd_col: str | None, target_col: str | None) -> float:
+def _band_pd(
+    band_df: pd.DataFrame,
+    *,
+    pd_col: str | None,
+    target_col: str | None,
+    target_bad_value: int,
+) -> float:
     if len(band_df) == 0:
         return 0.0
     column = pd_col or target_col
@@ -185,8 +204,8 @@ def _band_pd(band_df: pd.DataFrame, *, pd_col: str | None, target_col: str | Non
         return 0.0
     if pd_col is not None:
         return float(values.mean())
-    # PD proxy: the band's empirical bad rate (share of target==1).
-    return float((values == 1).mean())
+    # PD proxy: the band's empirical bad rate under the governed target polarity.
+    return float((values == target_bad_value).mean())
 
 
 def _fmt_edge(value: float) -> str:

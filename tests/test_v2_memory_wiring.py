@@ -214,6 +214,71 @@ def test_capture_agent_memory_writes_strategy_experience_on_adoption(tmp_path: P
     assert "score < 600" in entry.payload["cutoff_summary"]
 
 
+def test_capture_agent_memory_keeps_typed_strategy_without_profit_assumptions(
+    tmp_path: Path,
+):
+    """A valid adopted strategy is still reusable memory when no economic
+    assumptions were supplied. The memory must preserve an unknown profit as
+    ``None`` instead of inventing a zero or dropping the whole experience."""
+    from marvis.packs.strategy import build_strategy
+    from marvis.packs.strategy.typed_backtest import run_typed_backtest
+    from marvis.repositories.strategy import StrategyRepository
+
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(
+        id="task-strategy-no-profit",
+        task_type=TASK_TYPE_STRATEGY,
+        model_name="无利润假设策略",
+    )
+    strategies = StrategyRepository(settings.db_path)
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+        description="typed memory without profit assumptions",
+    )
+    strategies.create_strategy(task.id, strategy)
+    result = run_typed_backtest(
+        pd.DataFrame(
+            {
+                "score": [500, 650, 700],
+                "bad": [1, 0, 1],
+            }
+        ),
+        strategy.spec,
+        target_col="bad",
+        strategy_id=strategy.id,
+    )
+    assert result.economics == {}
+    strategies.save_backtest(
+        "backtest-no-profit",
+        strategy.id,
+        "dataset-1",
+        result,
+    )
+    strategies.adopt_strategy_with_audit(
+        strategy.id,
+        reason="test no-profit adoption",
+        audit={"kind": "strategy.adopt", "target_ref": strategy.id},
+    )
+
+    capture_agent_memory_for_driver_done(
+        settings,
+        task,
+        done_message_content="策略文档已生成",
+        done_message_metadata={},
+    )
+
+    entries = AgentMemoryStore(settings.db_path).list_entries(
+        memory_type="strategy_experience"
+    )
+    assert len(entries) == 1
+    assert entries[0].payload["expected_profit"] is None
+    assert "预期利润未计算" in entries[0].summary
+
+
 def test_capture_agent_memory_strategy_is_noop_when_nothing_adopted(tmp_path: Path):
     """A strategy task whose plan hasn't reached adoption (or used the
     lightweight strategy_analysis entry, which never calls adopt_strategy)
@@ -543,6 +608,100 @@ def test_agent_autodrive_decision_message_carries_memory_references_and_audits_u
     store = AgentMemoryStore(settings.db_path)
     events = store.list_events(memory_id)
     assert any(event["event_type"] == "use" for event in events)
+
+
+def test_agent_autodrive_fails_closed_when_memory_use_audit_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from marvis.agent.turn_handlers import DRIVER_TURN_FUNCS, agent_autodrive_turn
+
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    _seed_history_entry(
+        settings,
+        ks=0.30,
+        auc=0.70,
+        scope="binary:binary:A卡",
+    )
+
+    class _TokenRepo:
+        def __init__(self):
+            self.messages = [
+                {
+                    "role": "assistant",
+                    "metadata": {
+                        "kind": "gate",
+                        "step_id": "gate-1",
+                        "model_delivery": {
+                            "source_tool": "select_experiment",
+                            "recipe": "lgb",
+                            "metrics": {},
+                        },
+                    },
+                }
+            ]
+
+        def list_agent_messages(self, task_id):
+            return self.messages
+
+        def add_agent_message(
+            self,
+            task_id,
+            *,
+            role,
+            stage,
+            content,
+            metadata,
+        ):
+            message = {
+                "id": f"msg-{len(self.messages)}",
+                "role": role,
+                "stage": stage,
+                "content": content,
+                "metadata": metadata,
+            }
+            self.messages.append(message)
+            return message
+
+    class _FakeLLM:
+        def complete(self, **kwargs):
+            return json.dumps({"action": "confirm", "reason": "结果正常,继续"})
+
+    calls = []
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    def fail_audit(*args, **kwargs):
+        raise OSError("audit store unavailable")
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.audit_agent_memory_use_from_store",
+        fail_audit,
+    )
+    repo = _TokenRepo()
+    task = _task_record(
+        id="task-current",
+        task_type=TASK_TYPE_MODELING,
+        model_name="A卡",
+    )
+
+    agent_autodrive_turn(
+        SimpleNamespace(settings=settings),
+        repo,
+        task,
+        client=_FakeLLM(),
+    )
+
+    assert calls == []
+    blocked = repo.messages[-1]
+    assert blocked["metadata"]["intent"] == "agent_error"
+    assert blocked["metadata"]["kind"] == "governance_block"
+    assert blocked["metadata"]["code"] == "memory_use_audit_failed"
+    assert "无审计执行" in blocked["content"]
 
 
 # -- (e) MEM-4: field_convention hints reorder setup candidates --------------

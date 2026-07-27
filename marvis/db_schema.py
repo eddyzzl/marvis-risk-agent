@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -6,10 +8,22 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
+from marvis.strategy_lifecycle import (
+    ASSET_STATUS_ADOPTED_LOCAL,
+    ASSET_STATUS_DRAFT,
+    ASSET_STATUS_RETIRED,
+    LEGACY_STATUS_ADOPTED,
+    LEGACY_STATUS_RETIRED,
+    StrategyLifecycleError,
+    asset_status_from_legacy,
+    validate_lifecycle_pair,
+)
+
 logger = logging.getLogger(__name__)
 
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MIGRATION_TABLES = frozenset({
+    "audit",
     "tasks",
     "jobs",
     "plans",
@@ -20,7 +34,25 @@ _MIGRATION_TABLES = frozenset({
     "model_artifacts",
     "llm_calls",
     "datasets",
+    "strategy_artifacts",
+    "strategies",
     "validation_input_contracts",
+    "data_analysis_runs",
+    "data_transform_runs",
+    "dataset_lineage_edges",
+    "task_artifacts",
+    "strategy_candidate_pools",
+    "strategy_candidate_pool_revisions",
+    "strategy_candidate_pool_items",
+    "strategy_candidate_pools_v1_archive",
+    "strategy_candidate_pool_revisions_v1_archive",
+    "strategy_candidate_pool_items_v1_archive",
+    "strategy_automatic_tree_apply_runs",
+    "strategy_project_context_heads",
+    "strategy_project_context_revisions",
+    "strategy_report_heads",
+    "strategy_report_revisions",
+    "strategy_pool_materializations",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -66,7 +98,95 @@ _MIGRATION_TABLES = frozenset({
 # _migration_003_validation_input_contracts adds the immutable validation
 # workflow-version discriminator and the normalized, revisioned input contract.
 # It backfills only historical validation rows that still carry version 0.
-SCHEMA_VERSION = 3
+#
+# _migration_004_strategy_task_input adds the optional, governed strategy
+# business contract. Historical rows remain NULL so callers can distinguish a
+# legacy task from an explicitly supplied (possibly still incomplete) contract.
+#
+# _migration_005_governance_authorization adds the Phase 0B immutable policy
+# snapshot plus server-issued local principals, immutable human DecisionRecords,
+# one-shot ApprovalRecords, and the crash-safe effect execution ledger used by
+# ToolRunner.
+#
+# _migration_006_strategy_dsl adds the canonical, versioned Strategy DSL payload.
+# The columns are nullable on purpose: historical rules_json rows are adapted at
+# the repository boundary and are not rewritten during database migration.
+#
+# _migration_007_pending_strategy_requests moves confirmed-but-not-yet-consumed
+# natural-language strategy drafts out of agent message metadata.  The request
+# row is task-scoped, integrity-bound and one-shot so a repeated confirmation
+# cannot replay the same draft into a second plan.
+#
+# _migration_008_strategy_monitoring_ledger adds append-only monitoring plan
+# revisions and evidence-bound monitoring runs. Runtime tools are wired in a
+# later slice; this migration only establishes the durable governance boundary.
+#
+# _migration_009_strategy_asset_lifecycle adds the canonical strategy asset
+# lifecycle while preserving the legacy status field and wire token.
+#
+# _migration_010_task_artifact_registry adds one immutable, task-owned registry
+# for downloadable workflow outputs.  The registry intentionally does not
+# backfill legacy workflow-specific artifact tables because those rows do not
+# carry the content hash and provenance required by this boundary.
+#
+# _migration_011_verified_strategy_artifacts adds nullable integrity metadata to
+# historical strategy artifacts. Existing rows remain explicit legacy records;
+# new verified rows are immutable and content-addressed.
+#
+# _migration_012_data_workspaces adds the task-scoped, CAS-updated data workspace
+# used by the V2 data/semantics experience. Computed analysis stays outside this
+# row and is invalidated through its server-owned analysis_generation counter.
+#
+# _migration_013_data_analysis_runs adds the task-owned, evidence-bound execution
+# ledger for deterministic data-analysis artifacts.  The row is idempotent by
+# canonical computational input and keeps the originating workspace revision as
+# immutable provenance.
+#
+# _migration_014_data_transform_lineage adds immutable, task-owned successful
+# transform records plus explicit parent->child dataset lineage.  A transform
+# is bound to the exact source workspace generation and the activated result
+# workspace generation; result bytes and structured evidence are content-bound.
+#
+# _migration_015_strategy_candidate_pools adds one mutable task/type head and
+# append-only candidate-pool revisions.  Revision payloads and their normalized
+# item projections are immutable; only the head's current pointer may advance.
+#
+# _migration_016_strategy_candidate_pool_v2 archives the internal v1 draft
+# ledger byte-for-byte and creates the generic VerifiedCandidateFragment v2
+# ledger.  Old task-artifact rows and files remain immutable and downloadable;
+# v2 starts a fresh revision chain instead of relabelling incompatible JSON.
+#
+# _migration_017_automatic_tree_apply_runs adds the immutable, idempotent
+# committed-facts registry used by full automatic-tree dataset writeback.  The
+# repository remains deliberately narrower than transform lineage: callers own
+# file promotion, dataset/artifact registration, workspace activation and audit.
+#
+# _migration_018_strategy_dsl_content_hash adds an independent digest for the
+# complete canonical Strategy DSL.  Legacy compatibility columns cannot encode
+# both typed action values and optional row-output aliases, so they cannot prove
+# full DSL integrity by themselves.
+#
+# _migration_019_strategy_project_context adds one task-scoped mutable head and
+# an append-only revision chain for the governed StrategyProjectContext.  The
+# database owns lineage/head integrity while the repository revalidates the
+# canonical contract and its content hashes on every read and write.
+#
+# _migration_020_strategy_report_revisions adds one immutable report ledger per
+# task/strategy scope.  Three task-owned rendered artifacts are bound to every
+# revision, while a CAS head and database triggers enforce exact N-1 lineage.
+#
+# _migration_021_strategy_report_docx adds an optional DOCX artifact pair to
+# the frozen migration-20 ledger.  Rows created by migration 20 retain NULLs
+# and remain readable as three-output legacy evidence; every new row is guarded
+# by rebuilt triggers that require all four exact, task-owned output artifacts.
+#
+# _migration_022_strategy_pool_materializations adds the immutable bridge from
+# one exact current Strategy Pool revision to one canonical root Strategy. The
+# selected design, including its existing logical Pool lineage, is persisted
+# byte-for-byte; the separate ledger additionally binds the physical Pool
+# artifact, requirements, design/effect/DSL hashes, Strategy row, and its single
+# creation audit without enriching or rewriting that DSL.
+SCHEMA_VERSION = 22
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -824,6 +944,2601 @@ def _migration_003_validation_input_contracts(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_004_strategy_task_input(conn: sqlite3.Connection) -> None:
+    """Add the optional serialized StrategyTaskInput to task records.
+
+    Versioned test/repair databases can contain only a subset of baseline tables,
+    so mirror migration 3's defensive tasks-table probe.
+    """
+    tasks_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+    ).fetchone()
+    if tasks_exists is None:
+        return
+    _ensure_column(
+        conn,
+        table="tasks",
+        column="strategy_input_json",
+        definition="TEXT",
+    )
+
+
+def _migration_005_governance_authorization(conn: sqlite3.Connection) -> None:
+    plan_steps_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plan_steps'"
+    ).fetchone()
+    if plan_steps_exists is not None:
+        _ensure_column(
+            conn,
+            table="plan_steps",
+            column="policy_json",
+            definition=(
+                "TEXT NOT NULL DEFAULT "
+                "'{\"schema_version\":\"tool-policy.v1\","
+                "\"human_decision_gate\":\"none\","
+                "\"effect_authorization\":\"none\"}'"
+            ),
+        )
+        # ALTER TABLE gives every historical row the permissive default. Raise
+        # (never lower) pre-upgrade explicit gates before stamping migration 5,
+        # otherwise a later replan could silently discard them.
+        legacy_gate_rows = conn.execute(
+            "SELECT id, policy_json FROM plan_steps WHERE needs_confirmation = 1"
+        ).fetchall()
+        for row in legacy_gate_rows:
+            try:
+                policy = json.loads(str(row["policy_json"] or "{}"))
+            except (TypeError, ValueError):
+                policy = {}
+            if not isinstance(policy, dict):
+                policy = {}
+            policy["schema_version"] = "tool-policy.v1"
+            policy["human_decision_gate"] = "required"
+            policy.setdefault("effect_authorization", "none")
+            conn.execute(
+                "UPDATE plan_steps SET policy_json = ? WHERE id = ?",
+                (
+                    json.dumps(
+                        policy,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    row["id"],
+                ),
+            )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS local_principals (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK(kind = 'local_session'),
+            display_name TEXT NOT NULL,
+            session_token_hash TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK(status IN ('active', 'expired', 'revoked')),
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_records (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            plan_revision INTEGER NOT NULL,
+            step_id TEXT NOT NULL,
+            tool_ref TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK(decision IN ('approve', 'reject')),
+            reason TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            evidence_hash TEXT NOT NULL,
+            effect_target_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(principal_id) REFERENCES local_principals(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_records_step "
+        "ON decision_records(plan_id, step_id, created_at)"
+    )
+    # A DecisionRecord is evidence, not mutable application state. Reversal is
+    # represented by a later DecisionRecord/Approval revocation; silently
+    # rewriting or deleting the original would destroy the audit chain.
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_records_immutable_update
+        BEFORE UPDATE ON decision_records
+        BEGIN
+            SELECT RAISE(ABORT, 'decision_records are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_records_immutable_delete
+        BEFORE DELETE ON decision_records
+        BEGIN
+            SELECT RAISE(ABORT, 'decision_records are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approval_records (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            plan_revision INTEGER NOT NULL,
+            step_id TEXT NOT NULL,
+            tool_ref TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            evidence_hash TEXT NOT NULL,
+            effect_target_json TEXT NOT NULL,
+            nonce TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK(
+                status IN ('issued', 'reserved', 'consumed', 'expired', 'revoked')
+            ),
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            reserved_at TEXT,
+            reservation_id TEXT,
+            consumed_at TEXT,
+            revoked_at TEXT,
+            revoke_reason TEXT,
+            FOREIGN KEY(decision_id) REFERENCES decision_records(id),
+            FOREIGN KEY(principal_id) REFERENCES local_principals(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_records_step "
+        "ON approval_records(plan_id, step_id, issued_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_records_status "
+        "ON approval_records(status, expires_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS effect_executions (
+            id TEXT PRIMARY KEY,
+            approval_id TEXT NOT NULL,
+            reservation_id TEXT NOT NULL UNIQUE,
+            runtime_generation TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(
+                status IN ('prepared', 'dispatched', 'committed', 'uncertain')
+            ),
+            prepared_at TEXT NOT NULL,
+            dispatched_at TEXT,
+            committed_at TEXT,
+            uncertain_at TEXT,
+            released_at TEXT,
+            release_reason TEXT,
+            uncertain_reason TEXT,
+            result_hash TEXT,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(approval_id) REFERENCES approval_records(id)
+        )
+        """
+    )
+    # An approval is one-shot. A preparation that provably never dispatched may
+    # be released (released_at != NULL), after which the same still-valid
+    # approval can be reserved again. Dispatched/uncertain/committed executions
+    # keep the uniqueness lock permanently and can never be blindly replayed.
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_effect_executions_active_approval
+            ON effect_executions(approval_id)
+         WHERE released_at IS NULL
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_effect_executions_status "
+        "ON effect_executions(status, prepared_at)"
+    )
+
+
+def _migration_006_strategy_dsl(conn: sqlite3.Connection) -> None:
+    """Add the canonical Strategy DSL without mutating historical definitions."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'strategies'"
+    ).fetchone()
+    if table is None:
+        # Some compatibility tests and repaired historical databases carry a
+        # legitimate schema version but only the task subset. There is no strategy
+        # definition to migrate in that shape, so advancing the version is safe.
+        return
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    for column, definition in (
+        ("dsl_json", "TEXT"),
+        ("dsl_schema_version", "TEXT"),
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE strategies ADD COLUMN {column} {definition}")
+
+
+def _migration_007_pending_strategy_requests(conn: sqlite3.Connection) -> None:
+    """Add one-shot storage for validated natural-language strategy drafts.
+
+    Only validated control-plane JSON belongs here.  Dataset identity is a
+    fingerprint/locator object; sample rows are never materialized into this
+    table.  Status is constrained at the database boundary because the
+    repository relies on a conditional ``pending -> terminal`` update for
+    replay protection.
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pending_strategy_requests (
+            id TEXT PRIMARY KEY,
+            nonce TEXT NOT NULL UNIQUE,
+            task_id TEXT NOT NULL,
+            validated_draft_json TEXT NOT NULL,
+            dataset_identity_json TEXT NOT NULL,
+            target_col TEXT,
+            payload_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK(status IN ('pending', 'consumed', 'cancelled', 'invalidated')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_pending_strategy_requests_task_status
+            ON pending_strategy_requests(task_id, status, created_at, id)
+        """
+    )
+
+
+def _migration_008_strategy_monitoring_ledger(conn: sqlite3.Connection) -> None:
+    """Add immutable plan revisions and evidence-bound monitoring runs."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_monitoring_plans (
+            id TEXT PRIMARY KEY,
+            strategy_id TEXT NOT NULL,
+            strategy_version INTEGER NOT NULL CHECK(strategy_version >= 1),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            schema_version TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL CHECK(length(payload_hash) = 64),
+            supersedes_plan_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(strategy_id, revision),
+            UNIQUE(id, strategy_id),
+            FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
+            FOREIGN KEY(supersedes_plan_id)
+                REFERENCES strategy_monitoring_plans(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_monitoring_plans_latest
+            ON strategy_monitoring_plans(strategy_id, revision DESC, created_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_monitoring_plans_payload_hash
+            ON strategy_monitoring_plans(strategy_id, payload_hash)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_monitoring_plans_immutable_update
+        BEFORE UPDATE ON strategy_monitoring_plans
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_monitoring_plans are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_monitoring_runs (
+            id TEXT PRIMARY KEY,
+            strategy_id TEXT NOT NULL,
+            monitoring_plan_id TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
+            dataset_content_hash TEXT NOT NULL CHECK(length(dataset_content_hash) = 64),
+            strategy_effect_hash TEXT NOT NULL CHECK(length(strategy_effect_hash) = 64),
+            economics_binding_hash TEXT NOT NULL CHECK(length(economics_binding_hash) = 64),
+            result_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL CHECK(length(result_hash) = 64),
+            overall_level TEXT NOT NULL
+                CHECK(overall_level IN ('green', 'amber', 'red', 'n/a')),
+            created_at TEXT NOT NULL,
+            UNIQUE(
+                monitoring_plan_id,
+                dataset_content_hash,
+                strategy_effect_hash,
+                economics_binding_hash
+            ),
+            FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
+            FOREIGN KEY(monitoring_plan_id, strategy_id)
+                REFERENCES strategy_monitoring_plans(id, strategy_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(dataset_id) REFERENCES datasets(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_monitoring_runs_strategy
+            ON strategy_monitoring_runs(strategy_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_monitoring_runs_plan
+            ON strategy_monitoring_runs(monitoring_plan_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_monitoring_runs_immutable_update
+        BEFORE UPDATE ON strategy_monitoring_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_monitoring_runs are immutable');
+        END
+        """
+    )
+
+
+def _migration_009_strategy_asset_lifecycle(conn: sqlite3.Connection) -> None:
+    """Add and backfill canonical lifecycle state without inventing deployment."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'strategies'"
+    ).fetchone()
+    if table is None:
+        # Defensive compatibility for tests/tools that stamp a deliberately
+        # partial historical schema. A real MARVIS v8 database owns this table.
+        return
+    strategy_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    if "status" not in strategy_columns:
+        # The migration test/repair boundary permits deliberately partial
+        # historical schemas. A real MARVIS v8 strategies table owns status.
+        return
+    rows = conn.execute("SELECT id, status FROM strategies ORDER BY id").fetchall()
+    for row in rows:
+        try:
+            asset_status_from_legacy(row["status"])
+        except StrategyLifecycleError as exc:
+            raise StrategyLifecycleError(
+                f"unknown legacy strategy status for {row['id']}: {row['status']!r}"
+            ) from exc
+
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    if "asset_status" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE strategies ADD COLUMN asset_status
+                TEXT NOT NULL DEFAULT 'draft'
+                CHECK(asset_status IN ('draft', 'validated', 'adopted_local', 'retired'))
+            """
+        )
+
+    # The default is intentionally ``draft`` so old draft rows remain stable.
+    # The two updates also complete an idempotent, partially applied migration.
+    conn.execute(
+        "UPDATE strategies SET asset_status = ? "
+        "WHERE status = ? AND asset_status = ?",
+        (ASSET_STATUS_ADOPTED_LOCAL, LEGACY_STATUS_ADOPTED, ASSET_STATUS_DRAFT),
+    )
+    conn.execute(
+        "UPDATE strategies SET asset_status = ? "
+        "WHERE status = ? AND asset_status = ?",
+        (ASSET_STATUS_RETIRED, LEGACY_STATUS_RETIRED, ASSET_STATUS_DRAFT),
+    )
+
+    rows = conn.execute(
+        "SELECT id, status, asset_status FROM strategies ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        try:
+            validate_lifecycle_pair(row["status"], row["asset_status"])
+        except StrategyLifecycleError as exc:
+            raise StrategyLifecycleError(
+                "strategy lifecycle drift for "
+                f"{row['id']}: status={row['status']!r}, "
+                f"asset_status={row['asset_status']!r}"
+            ) from exc
+
+
+def _migration_010_task_artifact_registry(conn: sqlite3.Connection) -> None:
+    """Add the immutable, task-scoped artifact provenance registry."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_artifacts (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            path TEXT NOT NULL,
+            content_hash TEXT NOT NULL
+                CHECK(length(content_hash) = 64)
+                CHECK(content_hash NOT GLOB '*[^0-9a-f]*'),
+            origin_tool TEXT NOT NULL,
+            provenance_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, kind, path),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_artifacts_task_created
+            ON task_artifacts(task_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_task_artifacts_immutable_update
+        BEFORE UPDATE ON task_artifacts
+        BEGIN
+            SELECT RAISE(ABORT, 'task_artifacts are immutable');
+        END
+        """
+    )
+
+
+def _migration_011_verified_strategy_artifacts(conn: sqlite3.Connection) -> None:
+    """Add immutable integrity metadata without fabricating legacy hashes."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'strategy_artifacts'"
+    ).fetchone()
+    if table is None:
+        # Synthetic partial-schema migration tests may not own the V2 strategy
+        # tables. A normal database always created this table in migration 2.
+        return
+    _ensure_column(
+        conn,
+        "strategy_artifacts",
+        "content_hash",
+        "TEXT CHECK(content_hash IS NULL OR "
+        "(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'))",
+    )
+    _ensure_column(
+        conn,
+        "strategy_artifacts",
+        "content_size",
+        "INTEGER CHECK(content_size IS NULL OR content_size >= 0)",
+    )
+    _ensure_column(conn, "strategy_artifacts", "provenance_json", "TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_artifacts_verified_content
+            ON strategy_artifacts(strategy_id, kind, content_hash)
+         WHERE content_hash IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_artifacts_verified_path
+            ON strategy_artifacts(strategy_id, kind, path)
+         WHERE content_hash IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_artifacts_integrity_triplet
+        BEFORE INSERT ON strategy_artifacts
+        WHEN NOT (
+            (NEW.content_hash IS NULL
+             AND NEW.content_size IS NULL
+             AND NEW.provenance_json IS NULL)
+            OR
+            (NEW.content_hash IS NOT NULL
+             AND NEW.content_size IS NOT NULL
+             AND NEW.provenance_json IS NOT NULL)
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy artifact integrity metadata must be complete');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_artifacts_immutable_update
+        BEFORE UPDATE ON strategy_artifacts
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_artifacts are immutable');
+        END
+        """
+    )
+
+
+def _migration_012_data_workspaces(conn: sqlite3.Connection) -> None:
+    """Add the canonical, task-scoped data-workspace snapshot."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS data_workspaces (
+            task_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'data-workspace.v1'),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            active_dataset_id TEXT,
+            active_dataset_content_hash TEXT
+                CHECK(active_dataset_content_hash IS NULL OR
+                    (length(active_dataset_content_hash) = 64
+                     AND active_dataset_content_hash NOT GLOB '*[^0-9a-f]*')),
+            analysis_generation INTEGER NOT NULL
+                CHECK(analysis_generation >= 0),
+            page TEXT NOT NULL
+                CHECK(page IN ('overview', 'fields', 'semantics',
+                               'history', 'statistics')),
+            selected_field TEXT,
+            semantic_mapping_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK(
+                (active_dataset_id IS NULL AND active_dataset_content_hash IS NULL)
+                OR
+                (active_dataset_id IS NOT NULL
+                 AND active_dataset_content_hash IS NOT NULL)
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(active_dataset_id) REFERENCES datasets(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_workspaces_active_dataset
+            ON data_workspaces(active_dataset_id)
+        """
+    )
+
+
+def _migration_013_data_analysis_runs(conn: sqlite3.Connection) -> None:
+    """Add idempotent, task-owned data-analysis execution records."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS data_analysis_runs (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'data-analysis.v1'),
+            task_id TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
+            dataset_content_hash TEXT NOT NULL
+                CHECK(length(dataset_content_hash) = 64)
+                CHECK(dataset_content_hash NOT GLOB '*[^0-9a-f]*'),
+            workspace_revision INTEGER NOT NULL CHECK(workspace_revision >= 0),
+            analysis_generation INTEGER NOT NULL CHECK(analysis_generation >= 0),
+            semantic_mapping_hash TEXT NOT NULL
+                CHECK(length(semantic_mapping_hash) = 64)
+                CHECK(semantic_mapping_hash NOT GLOB '*[^0-9a-f]*'),
+            config_json TEXT NOT NULL,
+            config_hash TEXT NOT NULL
+                CHECK(length(config_hash) = 64)
+                CHECK(config_hash NOT GLOB '*[^0-9a-f]*'),
+            producer_version TEXT NOT NULL,
+            input_hash TEXT NOT NULL
+                CHECK(length(input_hash) = 64)
+                CHECK(input_hash NOT GLOB '*[^0-9a-f]*'),
+            job_id TEXT,
+            status TEXT NOT NULL
+                CHECK(status IN (
+                    'queued', 'running', 'succeeded', 'failed', 'cancelled'
+                )),
+            result_artifact_id TEXT,
+            result_content_hash TEXT
+                CHECK(result_content_hash IS NULL OR
+                    (length(result_content_hash) = 64
+                     AND result_content_hash NOT GLOB '*[^0-9a-f]*')),
+            error_kind TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            UNIQUE(task_id, input_hash),
+            CHECK(
+                (result_artifact_id IS NULL AND result_content_hash IS NULL)
+                OR
+                (result_artifact_id IS NOT NULL AND result_content_hash IS NOT NULL)
+            ),
+            CHECK(
+                (error_kind IS NULL AND error_message IS NULL)
+                OR
+                (error_kind IS NOT NULL AND error_message IS NOT NULL)
+            ),
+            CHECK(
+                (status = 'queued'
+                 AND started_at IS NULL
+                 AND completed_at IS NULL
+                 AND result_artifact_id IS NULL
+                 AND error_kind IS NULL)
+                OR
+                (status = 'running'
+                 AND started_at IS NOT NULL
+                 AND completed_at IS NULL
+                 AND result_artifact_id IS NULL
+                 AND error_kind IS NULL)
+                OR
+                (status = 'succeeded'
+                 AND started_at IS NOT NULL
+                 AND completed_at IS NOT NULL
+                 AND result_artifact_id IS NOT NULL
+                 AND error_kind IS NULL)
+                OR
+                (status IN ('failed', 'cancelled')
+                 AND completed_at IS NOT NULL
+                 AND result_artifact_id IS NULL
+                 AND error_kind IS NOT NULL)
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+            FOREIGN KEY(result_artifact_id) REFERENCES task_artifacts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_analysis_runs_task
+            ON data_analysis_runs(task_id, created_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_analysis_runs_current
+            ON data_analysis_runs(
+                task_id, dataset_id, dataset_content_hash,
+                analysis_generation, semantic_mapping_hash,
+                config_hash, producer_version, status
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_analysis_runs_status
+            ON data_analysis_runs(status, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_data_analysis_runs_identity_immutable
+        BEFORE UPDATE ON data_analysis_runs
+        WHEN NEW.id IS NOT OLD.id
+          OR NEW.schema_version IS NOT OLD.schema_version
+          OR NEW.task_id IS NOT OLD.task_id
+          OR NEW.dataset_id IS NOT OLD.dataset_id
+          OR NEW.dataset_content_hash IS NOT OLD.dataset_content_hash
+          OR NEW.workspace_revision IS NOT OLD.workspace_revision
+          OR NEW.analysis_generation IS NOT OLD.analysis_generation
+          OR NEW.semantic_mapping_hash IS NOT OLD.semantic_mapping_hash
+          OR NEW.config_json IS NOT OLD.config_json
+          OR NEW.config_hash IS NOT OLD.config_hash
+          OR NEW.producer_version IS NOT OLD.producer_version
+          OR NEW.input_hash IS NOT OLD.input_hash
+          OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'data_analysis_runs identity is immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_data_analysis_runs_succeeded_immutable
+        BEFORE UPDATE ON data_analysis_runs
+        WHEN OLD.status = 'succeeded'
+         AND (
+             NEW.job_id IS NOT OLD.job_id
+             OR NEW.status IS NOT OLD.status
+             OR NEW.result_artifact_id IS NOT OLD.result_artifact_id
+             OR NEW.result_content_hash IS NOT OLD.result_content_hash
+             OR NEW.error_kind IS NOT OLD.error_kind
+             OR NEW.error_message IS NOT OLD.error_message
+             OR NEW.updated_at IS NOT OLD.updated_at
+             OR NEW.started_at IS NOT OLD.started_at
+             OR NEW.completed_at IS NOT OLD.completed_at
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'succeeded data_analysis_run is immutable');
+        END
+        """
+    )
+
+
+def _migration_014_data_transform_lineage(conn: sqlite3.Connection) -> None:
+    """Add immutable data-transform evidence and parent/child lineage."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS data_transform_runs (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'data-transform.v1'),
+            task_id TEXT NOT NULL,
+            source_dataset_id TEXT NOT NULL,
+            source_content_hash TEXT NOT NULL
+                CHECK(length(source_content_hash) = 64)
+                CHECK(source_content_hash NOT GLOB '*[^0-9a-f]*'),
+            workspace_revision INTEGER NOT NULL CHECK(workspace_revision >= 0),
+            analysis_generation INTEGER NOT NULL CHECK(analysis_generation >= 0),
+            semantic_mapping_hash TEXT NOT NULL
+                CHECK(length(semantic_mapping_hash) = 64)
+                CHECK(semantic_mapping_hash NOT GLOB '*[^0-9a-f]*'),
+            operations_json TEXT NOT NULL,
+            operations_hash TEXT NOT NULL
+                CHECK(length(operations_hash) = 64)
+                CHECK(operations_hash NOT GLOB '*[^0-9a-f]*'),
+            producer_version TEXT NOT NULL,
+            input_hash TEXT NOT NULL
+                CHECK(length(input_hash) = 64)
+                CHECK(input_hash NOT GLOB '*[^0-9a-f]*'),
+            result_dataset_id TEXT NOT NULL,
+            result_content_hash TEXT NOT NULL
+                CHECK(length(result_content_hash) = 64)
+                CHECK(result_content_hash NOT GLOB '*[^0-9a-f]*'),
+            result_artifact_id TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL
+                CHECK(length(result_hash) = 64)
+                CHECK(result_hash NOT GLOB '*[^0-9a-f]*'),
+            result_workspace_revision INTEGER NOT NULL
+                CHECK(result_workspace_revision > workspace_revision),
+            result_analysis_generation INTEGER NOT NULL
+                CHECK(result_analysis_generation = analysis_generation + 1),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, input_hash),
+            CHECK(source_dataset_id <> result_dataset_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(result_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(result_artifact_id) REFERENCES task_artifacts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_transform_runs_task
+            ON data_transform_runs(task_id, created_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_transform_runs_source
+            ON data_transform_runs(task_id, source_dataset_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_transform_runs_result
+            ON data_transform_runs(task_id, result_dataset_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_data_transform_runs_immutable
+        BEFORE UPDATE ON data_transform_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'data_transform_runs are immutable');
+        END
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dataset_lineage_edges (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'dataset-lineage.v1'),
+            task_id TEXT NOT NULL,
+            parent_dataset_id TEXT NOT NULL,
+            child_dataset_id TEXT NOT NULL,
+            transform_run_id TEXT NOT NULL,
+            relation_kind TEXT NOT NULL CHECK(relation_kind = 'transform'),
+            edge_order INTEGER NOT NULL CHECK(edge_order >= 0),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, parent_dataset_id, child_dataset_id, relation_kind),
+            CHECK(parent_dataset_id <> child_dataset_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(child_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(transform_run_id) REFERENCES data_transform_runs(id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dataset_lineage_edges_task
+            ON dataset_lineage_edges(task_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dataset_lineage_edges_parent
+            ON dataset_lineage_edges(task_id, parent_dataset_id, edge_order, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dataset_lineage_edges_child
+            ON dataset_lineage_edges(task_id, child_dataset_id, edge_order, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_dataset_lineage_edges_matches_run
+        BEFORE INSERT ON dataset_lineage_edges
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM data_transform_runs AS run
+             WHERE run.id = NEW.transform_run_id
+               AND run.task_id = NEW.task_id
+               AND run.source_dataset_id = NEW.parent_dataset_id
+               AND run.result_dataset_id = NEW.child_dataset_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'dataset lineage edge does not match transform run');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_dataset_lineage_edges_immutable
+        BEFORE UPDATE ON dataset_lineage_edges
+        BEGIN
+            SELECT RAISE(ABORT, 'dataset_lineage_edges are immutable');
+        END
+        """
+    )
+
+
+def _migration_015_strategy_candidate_pools(conn: sqlite3.Connection) -> None:
+    """Add task/type-scoped draft pools with immutable revision lineage."""
+
+    # Synthetic partial-schema migration tests may carry only the table under
+    # test from an earlier version.  A real v14 database always owns the task
+    # and immutable artifact columns required by this task-owned pool ledger.
+    required_columns = {
+        "tasks": {"id"},
+        "task_artifacts": {"id", "task_id", "kind", "content_hash"},
+    }
+    for table, expected in required_columns.items():
+        table_sql = _migration_table_identifier(table)
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if exists is None:
+            return
+        actual = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
+        }
+        if not expected <= actual:
+            return
+
+    absent_snapshot_hash = (
+        "9024538661b531de814a43e87e932bf39b4b87522525f7a7afea1bf5bf8968ee"
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_artifacts_id_task
+            ON task_artifacts(id, task_id)
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS strategy_candidate_pools (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.candidate-pool-head.v1'),
+            task_id TEXT NOT NULL,
+            strategy_type TEXT NOT NULL
+                CHECK(strategy_type IN (
+                    'approval', 'reject', 'limit', 'pricing', 'segmentation'
+                )),
+            current_revision INTEGER NOT NULL CHECK(current_revision >= 0),
+            current_revision_id TEXT,
+            current_snapshot_hash TEXT NOT NULL
+                CHECK(length(current_snapshot_hash) = 64)
+                CHECK(current_snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(task_id, strategy_type),
+            UNIQUE(id, task_id, strategy_type),
+            CHECK(
+                (current_revision = 0
+                 AND current_revision_id IS NULL
+                 AND current_snapshot_hash = '{absent_snapshot_hash}')
+                OR
+                (current_revision >= 1 AND current_revision_id IS NOT NULL)
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(current_revision_id, id)
+                REFERENCES strategy_candidate_pool_revisions(id, pool_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_candidate_pools_task
+            ON strategy_candidate_pools(task_id, strategy_type)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_candidate_pool_revisions (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.candidate-pool.v1'),
+            pool_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            strategy_type TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            parent_revision_id TEXT,
+            parent_snapshot_hash TEXT NOT NULL
+                CHECK(length(parent_snapshot_hash) = 64)
+                CHECK(parent_snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            operation_kind TEXT NOT NULL,
+            operation_hash TEXT NOT NULL
+                CHECK(length(operation_hash) = 64)
+                CHECK(operation_hash NOT GLOB '*[^0-9a-f]*'),
+            operation_reason TEXT,
+            default_action_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status = 'draft'),
+            validation_status TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            snapshot_hash TEXT NOT NULL
+                CHECK(length(snapshot_hash) = 64)
+                CHECK(snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            artifact_id TEXT NOT NULL,
+            artifact_content_hash TEXT NOT NULL
+                CHECK(length(artifact_content_hash) = 64)
+                CHECK(artifact_content_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            UNIQUE(pool_id, revision),
+            UNIQUE(id, pool_id),
+            UNIQUE(id, pool_id, task_id),
+            FOREIGN KEY(pool_id, task_id, strategy_type)
+                REFERENCES strategy_candidate_pools(id, task_id, strategy_type)
+                ON DELETE CASCADE,
+            FOREIGN KEY(parent_revision_id, pool_id)
+                REFERENCES strategy_candidate_pool_revisions(id, pool_id),
+            FOREIGN KEY(artifact_id, task_id)
+                REFERENCES task_artifacts(id, task_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_candidate_pool_revisions_latest
+            ON strategy_candidate_pool_revisions(
+                pool_id, revision DESC, created_at DESC, id DESC
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_strategy_candidate_pool_revisions_operation
+            ON strategy_candidate_pool_revisions(
+                pool_id, COALESCE(parent_revision_id, ''), operation_hash
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_candidate_pool_items (
+            revision_id TEXT NOT NULL,
+            pool_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            position INTEGER NOT NULL CHECK(position >= 0),
+            entry_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            source_artifact_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL
+                CHECK(source_kind = 'strategy_candidate_asset_json'),
+            source_content_hash TEXT NOT NULL
+                CHECK(length(source_content_hash) = 64)
+                CHECK(source_content_hash NOT GLOB '*[^0-9a-f]*'),
+            asset_id TEXT NOT NULL,
+            asset_hash TEXT NOT NULL
+                CHECK(length(asset_hash) = 64)
+                CHECK(asset_hash NOT GLOB '*[^0-9a-f]*'),
+            candidate_kind TEXT NOT NULL,
+            fragment_id TEXT NOT NULL,
+            effect_id TEXT NOT NULL,
+            effect_stage TEXT NOT NULL,
+            source_validation_status TEXT NOT NULL,
+            parent_candidate_id TEXT NOT NULL,
+            parent_evidence_hash TEXT NOT NULL
+                CHECK(length(parent_evidence_hash) = 64)
+                CHECK(parent_evidence_hash NOT GLOB '*[^0-9a-f]*'),
+            dataset_id TEXT NOT NULL,
+            dataset_content_hash TEXT NOT NULL
+                CHECK(length(dataset_content_hash) = 64)
+                CHECK(dataset_content_hash NOT GLOB '*[^0-9a-f]*'),
+            workspace_revision INTEGER NOT NULL CHECK(workspace_revision >= 0),
+            workspace_generation INTEGER NOT NULL CHECK(workspace_generation >= 0),
+            semantic_mapping_hash TEXT NOT NULL
+                CHECK(length(semantic_mapping_hash) = 64)
+                CHECK(semantic_mapping_hash NOT GLOB '*[^0-9a-f]*'),
+            condition_json TEXT NOT NULL,
+            requirements_json TEXT NOT NULL,
+            action_json TEXT NOT NULL,
+            enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+            PRIMARY KEY(revision_id, position),
+            UNIQUE(revision_id, entry_id),
+            UNIQUE(revision_id, rule_id),
+            UNIQUE(revision_id, asset_id, fragment_id),
+            FOREIGN KEY(revision_id, pool_id, task_id)
+                REFERENCES strategy_candidate_pool_revisions(id, pool_id, task_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(source_artifact_id, task_id)
+                REFERENCES task_artifacts(id, task_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_candidate_pool_items_asset
+            ON strategy_candidate_pool_items(
+                task_id, source_artifact_id, revision_id
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_candidate_pool_revisions_parent
+        BEFORE INSERT ON strategy_candidate_pool_revisions
+        WHEN (
+            (NEW.revision = 1
+             AND (NEW.parent_revision_id IS NOT NULL
+                  OR NEW.parent_snapshot_hash <>
+                     '9024538661b531de814a43e87e932bf39b4b87522525f7a7afea1bf5bf8968ee'))
+            OR
+            (NEW.revision > 1 AND NOT EXISTS (
+                SELECT 1
+                  FROM strategy_candidate_pool_revisions AS parent
+                 WHERE parent.id = NEW.parent_revision_id
+                   AND parent.pool_id = NEW.pool_id
+                   AND parent.revision = NEW.revision - 1
+                   AND parent.snapshot_hash = NEW.parent_snapshot_hash
+            ))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy candidate pool parent mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_candidate_pool_revisions_artifact
+        BEFORE INSERT ON strategy_candidate_pool_revisions
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM task_artifacts AS artifact
+             WHERE artifact.id = NEW.artifact_id
+               AND artifact.task_id = NEW.task_id
+               AND artifact.kind = 'strategy_candidate_pool_json'
+               AND artifact.content_hash = NEW.artifact_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy candidate pool artifact mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_candidate_pool_items_artifact
+        BEFORE INSERT ON strategy_candidate_pool_items
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM task_artifacts AS artifact
+             WHERE artifact.id = NEW.source_artifact_id
+               AND artifact.task_id = NEW.task_id
+               AND artifact.kind = NEW.source_kind
+               AND artifact.content_hash = NEW.source_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy candidate pool item artifact mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_candidate_pools_head_target
+        BEFORE UPDATE ON strategy_candidate_pools
+        WHEN NEW.current_revision > 0 AND NOT EXISTS (
+            SELECT 1
+              FROM strategy_candidate_pool_revisions AS revision
+             WHERE revision.id = NEW.current_revision_id
+               AND revision.pool_id = NEW.id
+               AND revision.revision = NEW.current_revision
+               AND revision.snapshot_hash = NEW.current_snapshot_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy candidate pool head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_candidate_pools_identity_immutable
+        BEFORE UPDATE ON strategy_candidate_pools
+        WHEN NEW.id IS NOT OLD.id
+          OR NEW.schema_version IS NOT OLD.schema_version
+          OR NEW.task_id IS NOT OLD.task_id
+          OR NEW.strategy_type IS NOT OLD.strategy_type
+          OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_candidate_pools identity is immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_candidate_pool_revisions_immutable_update
+        BEFORE UPDATE ON strategy_candidate_pool_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_candidate_pool_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_candidate_pool_items_immutable_update
+        BEFORE UPDATE ON strategy_candidate_pool_items
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_candidate_pool_items are immutable');
+        END
+        """
+    )
+
+
+def _migration_016_strategy_candidate_pool_v2(conn: sqlite3.Connection) -> None:
+    """Archive the incompatible v1 draft ledger and create the v2 ledger.
+
+    Candidate Pool v1 was an internal draft-only contract whose persisted JSON
+    embedded the concrete univariate CandidateAsset shape.  The generic
+    VerifiedCandidateFragment contract is intentionally v2: re-labelling v1
+    rows would invalidate their snapshot/artifact hashes and immutable files.
+    Migration 16 therefore keeps the complete v1 tables as a read-only archive
+    and starts an empty, independently hashed v2 revision chain.
+    """
+
+    required_columns = {
+        "tasks": {"id"},
+        "task_artifacts": {
+            "id",
+            "task_id",
+            "kind",
+            "content_hash",
+            "origin_tool",
+        },
+    }
+    for table, expected in required_columns.items():
+        table_sql = _migration_table_identifier(table)
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if exists is None:
+            return
+        actual = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
+        }
+        if not expected <= actual:
+            return
+
+    live_tables = (
+        "strategy_candidate_pools",
+        "strategy_candidate_pool_revisions",
+        "strategy_candidate_pool_items",
+    )
+    archive_tables = tuple(f"{table}_v1_archive" for table in live_tables)
+    present_live = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN (?, ?, ?)",
+            live_tables,
+        ).fetchall()
+    }
+    present_archive = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN (?, ?, ?)",
+            archive_tables,
+        ).fetchall()
+    }
+    if present_archive:
+        raise RuntimeError(
+            "strategy candidate pool v1 archive already exists before migration 16"
+        )
+    if present_live and present_live != set(live_tables):
+        raise RuntimeError(
+            "strategy candidate pool v1 ledger is partial; refusing unsafe migration"
+        )
+
+    conn.execute("SAVEPOINT migration_016_strategy_candidate_pool_v2")
+    try:
+        if present_live:
+            for trigger in (
+                "trg_strategy_candidate_pool_revisions_parent",
+                "trg_strategy_candidate_pool_revisions_artifact",
+                "trg_strategy_candidate_pool_items_artifact",
+                "trg_strategy_candidate_pools_head_target",
+                "trg_strategy_candidate_pools_identity_immutable",
+                "trg_strategy_candidate_pool_revisions_immutable_update",
+                "trg_strategy_candidate_pool_items_immutable_update",
+            ):
+                conn.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+            for index in (
+                "idx_strategy_candidate_pools_task",
+                "idx_strategy_candidate_pool_revisions_latest",
+                "idx_strategy_candidate_pool_revisions_operation",
+                "idx_strategy_candidate_pool_items_asset",
+            ):
+                conn.execute(f'DROP INDEX IF EXISTS "{index}"')
+
+            # Rename child-to-parent so SQLite rewrites every foreign-key target
+            # onto the archive tables while preserving all rows and constraints.
+            conn.execute(
+                "ALTER TABLE strategy_candidate_pool_items "
+                "RENAME TO strategy_candidate_pool_items_v1_archive"
+            )
+            conn.execute(
+                "ALTER TABLE strategy_candidate_pool_revisions "
+                "RENAME TO strategy_candidate_pool_revisions_v1_archive"
+            )
+            conn.execute(
+                "ALTER TABLE strategy_candidate_pools "
+                "RENAME TO strategy_candidate_pools_v1_archive"
+            )
+            for table in archive_tables:
+                trigger = f"trg_{table}_immutable_update"
+                conn.execute(
+                    f"""
+                    CREATE TRIGGER {trigger}
+                    BEFORE UPDATE ON {table}
+                    BEGIN
+                        SELECT RAISE(ABORT, 'legacy strategy candidate pool archive is immutable');
+                    END
+                    """
+                )
+
+        _create_strategy_candidate_pool_v2_schema(conn)
+        conn.execute("RELEASE migration_016_strategy_candidate_pool_v2")
+    except Exception:
+        conn.execute("ROLLBACK TO migration_016_strategy_candidate_pool_v2")
+        conn.execute("RELEASE migration_016_strategy_candidate_pool_v2")
+        raise
+
+
+def _create_strategy_candidate_pool_v2_schema(conn: sqlite3.Connection) -> None:
+    """Create the live generic-fragment Candidate Pool v2 schema."""
+
+    absent_snapshot_hash = (
+        "bb5dd85a1de804deb759c6ff78e785bcc579f0d67d12d44c658f28dc5e0e64c9"
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_artifacts_id_task
+            ON task_artifacts(id, task_id)
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS strategy_candidate_pools (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.candidate-pool-head.v2'),
+            task_id TEXT NOT NULL,
+            strategy_type TEXT NOT NULL
+                CHECK(strategy_type IN (
+                    'approval', 'reject', 'limit', 'pricing', 'segmentation'
+                )),
+            current_revision INTEGER NOT NULL CHECK(current_revision >= 0),
+            current_revision_id TEXT,
+            current_snapshot_hash TEXT NOT NULL
+                CHECK(length(current_snapshot_hash) = 64)
+                CHECK(current_snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(task_id, strategy_type),
+            UNIQUE(id, task_id, strategy_type),
+            CHECK(
+                (current_revision = 0
+                 AND current_revision_id IS NULL
+                 AND current_snapshot_hash = '{absent_snapshot_hash}')
+                OR
+                (current_revision >= 1 AND current_revision_id IS NOT NULL)
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(current_revision_id, id)
+                REFERENCES strategy_candidate_pool_revisions(id, pool_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_candidate_pools_task
+            ON strategy_candidate_pools(task_id, strategy_type)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_candidate_pool_revisions (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.candidate-pool.v2'),
+            pool_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            strategy_type TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            parent_revision_id TEXT,
+            parent_snapshot_hash TEXT NOT NULL
+                CHECK(length(parent_snapshot_hash) = 64)
+                CHECK(parent_snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            operation_kind TEXT NOT NULL,
+            operation_hash TEXT NOT NULL
+                CHECK(length(operation_hash) = 64)
+                CHECK(operation_hash NOT GLOB '*[^0-9a-f]*'),
+            operation_reason TEXT,
+            default_action_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status = 'draft'),
+            validation_status TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            snapshot_hash TEXT NOT NULL
+                CHECK(length(snapshot_hash) = 64)
+                CHECK(snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            artifact_id TEXT NOT NULL,
+            artifact_content_hash TEXT NOT NULL
+                CHECK(length(artifact_content_hash) = 64)
+                CHECK(artifact_content_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            UNIQUE(pool_id, revision),
+            UNIQUE(id, pool_id),
+            UNIQUE(id, pool_id, task_id),
+            FOREIGN KEY(pool_id, task_id, strategy_type)
+                REFERENCES strategy_candidate_pools(id, task_id, strategy_type)
+                ON DELETE CASCADE,
+            FOREIGN KEY(parent_revision_id, pool_id)
+                REFERENCES strategy_candidate_pool_revisions(id, pool_id),
+            FOREIGN KEY(artifact_id, task_id)
+                REFERENCES task_artifacts(id, task_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_candidate_pool_revisions_latest
+            ON strategy_candidate_pool_revisions(
+                pool_id, revision DESC, created_at DESC, id DESC
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_strategy_candidate_pool_revisions_operation
+            ON strategy_candidate_pool_revisions(
+                pool_id, COALESCE(parent_revision_id, ''), operation_hash
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_candidate_pool_items (
+            revision_id TEXT NOT NULL,
+            pool_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            position INTEGER NOT NULL CHECK(position >= 0),
+            entry_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            source_artifact_id TEXT NOT NULL,
+            source_artifact_kind TEXT NOT NULL,
+            source_artifact_schema_version TEXT NOT NULL,
+            source_artifact_content_hash TEXT NOT NULL
+                CHECK(length(source_artifact_content_hash) = 64)
+                CHECK(source_artifact_content_hash NOT GLOB '*[^0-9a-f]*'),
+            source_origin_tool TEXT NOT NULL,
+            asset_schema_version TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            asset_hash TEXT NOT NULL
+                CHECK(length(asset_hash) = 64)
+                CHECK(asset_hash NOT GLOB '*[^0-9a-f]*'),
+            asset_type TEXT NOT NULL,
+            fragment_id TEXT NOT NULL,
+            fragment_hash TEXT NOT NULL
+                CHECK(length(fragment_hash) = 64)
+                CHECK(fragment_hash NOT GLOB '*[^0-9a-f]*'),
+            fragment_type TEXT NOT NULL,
+            effect_id TEXT NOT NULL,
+            evidence_id TEXT NOT NULL,
+            evidence_hash TEXT NOT NULL
+                CHECK(length(evidence_hash) = 64)
+                CHECK(evidence_hash NOT GLOB '*[^0-9a-f]*'),
+            candidate_stage TEXT NOT NULL CHECK(candidate_stage = 'development'),
+            observation_stage TEXT NOT NULL CHECK(observation_stage = 'backtested'),
+            source_validation_status TEXT NOT NULL
+                CHECK(source_validation_status = 'unvalidated'),
+            dataset_id TEXT NOT NULL,
+            dataset_content_hash TEXT NOT NULL
+                CHECK(length(dataset_content_hash) = 64)
+                CHECK(dataset_content_hash NOT GLOB '*[^0-9a-f]*'),
+            workspace_revision INTEGER NOT NULL CHECK(workspace_revision >= 0),
+            workspace_generation INTEGER NOT NULL CHECK(workspace_generation >= 0),
+            semantic_mapping_hash TEXT NOT NULL
+                CHECK(length(semantic_mapping_hash) = 64)
+                CHECK(semantic_mapping_hash NOT GLOB '*[^0-9a-f]*'),
+            sample_context_hash TEXT NOT NULL
+                CHECK(length(sample_context_hash) = 64)
+                CHECK(sample_context_hash NOT GLOB '*[^0-9a-f]*'),
+            condition_json TEXT NOT NULL,
+            requirements_json TEXT NOT NULL,
+            action_json TEXT NOT NULL,
+            enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+            PRIMARY KEY(revision_id, position),
+            UNIQUE(revision_id, entry_id),
+            UNIQUE(revision_id, rule_id),
+            UNIQUE(revision_id, asset_id, fragment_id),
+            FOREIGN KEY(revision_id, pool_id, task_id)
+                REFERENCES strategy_candidate_pool_revisions(id, pool_id, task_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(source_artifact_id, task_id)
+                REFERENCES task_artifacts(id, task_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_candidate_pool_items_asset
+            ON strategy_candidate_pool_items(
+                task_id, source_artifact_id, revision_id
+            )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_candidate_pool_revisions_parent
+        BEFORE INSERT ON strategy_candidate_pool_revisions
+        WHEN (
+            (NEW.revision = 1
+             AND (NEW.parent_revision_id IS NOT NULL
+                  OR NEW.parent_snapshot_hash <> '{absent_snapshot_hash}'))
+            OR
+            (NEW.revision > 1 AND NOT EXISTS (
+                SELECT 1
+                  FROM strategy_candidate_pool_revisions AS parent
+                 WHERE parent.id = NEW.parent_revision_id
+                   AND parent.pool_id = NEW.pool_id
+                   AND parent.revision = NEW.revision - 1
+                   AND parent.snapshot_hash = NEW.parent_snapshot_hash
+            ))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy candidate pool parent mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_candidate_pool_revisions_artifact
+        BEFORE INSERT ON strategy_candidate_pool_revisions
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM task_artifacts AS artifact
+             WHERE artifact.id = NEW.artifact_id
+               AND artifact.task_id = NEW.task_id
+               AND artifact.kind = 'strategy_candidate_pool_json'
+               AND artifact.content_hash = NEW.artifact_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy candidate pool artifact mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_candidate_pool_items_artifact
+        BEFORE INSERT ON strategy_candidate_pool_items
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM task_artifacts AS artifact
+             WHERE artifact.id = NEW.source_artifact_id
+               AND artifact.task_id = NEW.task_id
+               AND artifact.kind = NEW.source_artifact_kind
+               AND artifact.content_hash = NEW.source_artifact_content_hash
+               AND artifact.origin_tool = NEW.source_origin_tool
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy candidate pool item artifact mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_candidate_pools_head_target
+        BEFORE UPDATE ON strategy_candidate_pools
+        WHEN NEW.current_revision > 0 AND NOT EXISTS (
+            SELECT 1
+              FROM strategy_candidate_pool_revisions AS revision
+             WHERE revision.id = NEW.current_revision_id
+               AND revision.pool_id = NEW.id
+               AND revision.revision = NEW.current_revision
+               AND revision.snapshot_hash = NEW.current_snapshot_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy candidate pool head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_candidate_pools_identity_immutable
+        BEFORE UPDATE ON strategy_candidate_pools
+        WHEN NEW.id IS NOT OLD.id
+          OR NEW.schema_version IS NOT OLD.schema_version
+          OR NEW.task_id IS NOT OLD.task_id
+          OR NEW.strategy_type IS NOT OLD.strategy_type
+          OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_candidate_pools identity is immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_candidate_pool_revisions_immutable_update
+        BEFORE UPDATE ON strategy_candidate_pool_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_candidate_pool_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_candidate_pool_items_immutable_update
+        BEFORE UPDATE ON strategy_candidate_pool_items
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_candidate_pool_items are immutable');
+        END
+        """
+    )
+
+
+def _migration_017_automatic_tree_apply_runs(conn: sqlite3.Connection) -> None:
+    """Add immutable committed facts for full automatic-tree writeback."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_automatic_tree_apply_runs (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.automatic-tree-apply-run.v1'),
+            task_id TEXT NOT NULL,
+            input_hash TEXT NOT NULL
+                CHECK(length(input_hash) = 64)
+                CHECK(input_hash NOT GLOB '*[^0-9a-f]*'),
+            source_tree_artifact_id TEXT NOT NULL,
+            source_tree_artifact_hash TEXT NOT NULL
+                CHECK(length(source_tree_artifact_hash) = 64)
+                CHECK(source_tree_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            asset_id TEXT NOT NULL,
+            asset_hash TEXT NOT NULL
+                CHECK(length(asset_hash) = 64)
+                CHECK(asset_hash NOT GLOB '*[^0-9a-f]*'),
+            tree_result_hash TEXT NOT NULL
+                CHECK(length(tree_result_hash) = 64)
+                CHECK(tree_result_hash NOT GLOB '*[^0-9a-f]*'),
+            source_dataset_id TEXT NOT NULL,
+            source_dataset_hash TEXT NOT NULL
+                CHECK(length(source_dataset_hash) = 64)
+                CHECK(source_dataset_hash NOT GLOB '*[^0-9a-f]*'),
+            output_leaf_column TEXT NOT NULL
+                CHECK(length(output_leaf_column) BETWEEN 1 AND 64)
+                CHECK(substr(output_leaf_column, 1, 1) GLOB '[A-Za-z_]')
+                CHECK(output_leaf_column NOT GLOB '*[^A-Za-z0-9_]*'),
+            output_rule_column TEXT NOT NULL
+                CHECK(length(output_rule_column) BETWEEN 1 AND 64)
+                CHECK(substr(output_rule_column, 1, 1) GLOB '[A-Za-z_]')
+                CHECK(output_rule_column NOT GLOB '*[^A-Za-z0-9_]*'),
+            writer_contract TEXT NOT NULL CHECK(length(writer_contract) > 0),
+            writer_version TEXT NOT NULL CHECK(length(writer_version) > 0),
+            result_dataset_id TEXT NOT NULL,
+            result_dataset_hash TEXT NOT NULL
+                CHECK(length(result_dataset_hash) = 64)
+                CHECK(result_dataset_hash NOT GLOB '*[^0-9a-f]*'),
+            result_dataset_path TEXT NOT NULL CHECK(length(result_dataset_path) > 0),
+            evidence_artifact_id TEXT NOT NULL,
+            evidence_artifact_hash TEXT NOT NULL
+                CHECK(length(evidence_artifact_hash) = 64)
+                CHECK(evidence_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            evidence_artifact_path TEXT NOT NULL
+                CHECK(length(evidence_artifact_path) > 0),
+            result_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL
+                CHECK(length(result_hash) = 64)
+                CHECK(result_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, input_hash),
+            CHECK(source_dataset_id <> result_dataset_id),
+            CHECK(source_tree_artifact_id <> evidence_artifact_id),
+            CHECK(lower(output_leaf_column) <> lower(output_rule_column)),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(result_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(source_tree_artifact_id) REFERENCES task_artifacts(id),
+            FOREIGN KEY(evidence_artifact_id) REFERENCES task_artifacts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_automatic_tree_apply_runs_task
+            ON strategy_automatic_tree_apply_runs(task_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_automatic_tree_apply_runs_source
+            ON strategy_automatic_tree_apply_runs(
+                task_id, source_dataset_id, source_tree_artifact_id, created_at, id
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_automatic_tree_apply_runs_result
+            ON strategy_automatic_tree_apply_runs(task_id, result_dataset_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_automatic_tree_apply_runs_immutable_update
+        BEFORE UPDATE ON strategy_automatic_tree_apply_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_automatic_tree_apply_runs are immutable');
+        END
+        """
+    )
+
+
+def _migration_018_strategy_dsl_content_hash(conn: sqlite3.Connection) -> None:
+    """Add and backfill the full-DSL digest for every canonical strategy row."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'strategies'"
+    ).fetchone()
+    if table is None:
+        return
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    if "dsl_content_hash" not in existing:
+        conn.execute("ALTER TABLE strategies ADD COLUMN dsl_content_hash TEXT")
+    if not {"dsl_json", "dsl_schema_version"} <= existing:
+        # Compatibility tests and repaired databases may legitimately carry a
+        # high schema stamp with only the lifecycle subset.  There is no
+        # canonical Strategy DSL to backfill in that partial shape.
+        return
+    from marvis.packs.strategy.dsl import canonical_strategy_json, parse_strategy_spec
+
+    rows = conn.execute(
+        "SELECT id, dsl_json, dsl_schema_version, dsl_content_hash FROM strategies"
+    ).fetchall()
+    for row in rows:
+        dsl_json = row["dsl_json"]
+        schema_version = row["dsl_schema_version"]
+        stored_hash = row["dsl_content_hash"]
+        if dsl_json is None:
+            if schema_version is not None or stored_hash is not None:
+                raise ValueError(
+                    f"strategy {row['id']} has incomplete canonical DSL columns"
+                )
+            continue
+        if schema_version is None:
+            raise ValueError(
+                f"strategy {row['id']} has incomplete canonical DSL columns"
+            )
+        spec = parse_strategy_spec(json.loads(str(dsl_json)))
+        if str(schema_version) != spec.schema_version:
+            raise ValueError(
+                f"strategy {row['id']} dsl_schema_version does not match dsl_json"
+            )
+        expected_hash = hashlib.sha256(
+            canonical_strategy_json(spec).encode("utf-8")
+        ).hexdigest()
+        if stored_hash is not None and str(stored_hash) != expected_hash:
+            raise ValueError(f"strategy {row['id']} dsl_content_hash drifted")
+        conn.execute(
+            "UPDATE strategies SET dsl_content_hash = ? WHERE id = ?",
+            (expected_hash, row["id"]),
+        )
+
+
+def _migration_019_strategy_project_context(conn: sqlite3.Connection) -> None:
+    """Add the immutable StrategyProjectContext revision ledger and CAS head."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_project_context_revisions (
+            revision_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL,
+            producer_version TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            parent_revision_id TEXT,
+            parent_state_hash TEXT,
+            operation_kind TEXT NOT NULL,
+            operation_hash TEXT NOT NULL
+                CHECK(length(operation_hash) = 64)
+                CHECK(operation_hash NOT GLOB '*[^0-9a-f]*'),
+            revision_json TEXT NOT NULL CHECK(json_valid(revision_json)),
+            state_hash TEXT NOT NULL
+                CHECK(length(state_hash) = 64)
+                CHECK(state_hash NOT GLOB '*[^0-9a-f]*'),
+            content_hash TEXT NOT NULL
+                CHECK(length(content_hash) = 64)
+                CHECK(content_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, revision),
+            UNIQUE(revision_id, task_id),
+            CHECK(
+                (revision = 1
+                 AND parent_revision_id IS NULL
+                 AND parent_state_hash IS NULL)
+                OR
+                (revision > 1
+                 AND parent_revision_id IS NOT NULL
+                 AND length(parent_state_hash) = 64
+                 AND parent_state_hash NOT GLOB '*[^0-9a-f]*')
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_revision_id, task_id)
+                REFERENCES strategy_project_context_revisions(revision_id, task_id)
+                DEFERRABLE INITIALLY DEFERRED
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_project_context_revisions_latest
+            ON strategy_project_context_revisions(
+                task_id, revision DESC, created_at DESC, revision_id DESC
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_strategy_project_context_revisions_operation
+            ON strategy_project_context_revisions(
+                task_id, COALESCE(parent_revision_id, ''), operation_hash
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_project_context_heads (
+            task_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.project-context-head.v1'),
+            current_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(current_revision >= 0),
+            current_revision_id TEXT,
+            current_state_hash TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK(
+                (current_revision = 0
+                 AND current_revision_id IS NULL
+                 AND current_state_hash IS NULL)
+                OR
+                (current_revision >= 1
+                 AND current_revision_id IS NOT NULL
+                 AND length(current_state_hash) = 64
+                 AND current_state_hash NOT GLOB '*[^0-9a-f]*')
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(current_revision_id, task_id)
+                REFERENCES strategy_project_context_revisions(revision_id, task_id)
+                DEFERRABLE INITIALLY DEFERRED
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_revisions_parent
+        BEFORE INSERT ON strategy_project_context_revisions
+        WHEN (
+            (NEW.revision = 1
+             AND (NEW.parent_revision_id IS NOT NULL
+                  OR NEW.parent_state_hash IS NOT NULL))
+            OR
+            (NEW.revision > 1 AND NOT EXISTS (
+                SELECT 1
+                  FROM strategy_project_context_revisions AS parent
+                 WHERE parent.revision_id = NEW.parent_revision_id
+                   AND parent.task_id = NEW.task_id
+                   AND parent.revision = NEW.revision - 1
+                   AND parent.state_hash = NEW.parent_state_hash
+            ))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context parent mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_revisions_head_parent
+        BEFORE INSERT ON strategy_project_context_revisions
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_project_context_heads AS head
+             WHERE head.task_id = NEW.task_id
+               AND head.current_revision = NEW.revision - 1
+               AND head.current_revision_id IS NEW.parent_revision_id
+               AND head.current_state_hash IS NEW.parent_state_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context revision is not based on head');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_heads_target_insert
+        BEFORE INSERT ON strategy_project_context_heads
+        WHEN NEW.current_revision > 0 AND NOT EXISTS (
+            SELECT 1
+              FROM strategy_project_context_revisions AS revision
+             WHERE revision.revision_id = NEW.current_revision_id
+               AND revision.task_id = NEW.task_id
+               AND revision.revision = NEW.current_revision
+               AND revision.state_hash = NEW.current_state_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_heads_target_update
+        BEFORE UPDATE ON strategy_project_context_heads
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_project_context_revisions AS revision
+             WHERE revision.revision_id = NEW.current_revision_id
+               AND revision.task_id = NEW.task_id
+               AND revision.revision = NEW.current_revision
+               AND revision.state_hash = NEW.current_state_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_heads_immutable_fields
+        BEFORE UPDATE ON strategy_project_context_heads
+        WHEN NEW.task_id IS NOT OLD.task_id
+          OR NEW.schema_version IS NOT OLD.schema_version
+          OR NEW.created_at IS NOT OLD.created_at
+          OR NEW.current_revision <> OLD.current_revision + 1
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context head is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_revisions_immutable_update
+        BEFORE UPDATE ON strategy_project_context_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_project_context_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_revisions_immutable_delete
+        BEFORE DELETE ON strategy_project_context_revisions
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_project_context_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_heads_immutable_delete
+        BEFORE DELETE ON strategy_project_context_heads
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_project_context_heads are task-owned');
+        END
+        """
+    )
+
+
+def _migration_020_strategy_report_revisions(conn: sqlite3.Connection) -> None:
+    """Add immutable StrategyReportBundle revisions and exact CAS heads."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_report_revisions (
+            report_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.report-bundle.v2'),
+            producer_version TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            strategy_scope TEXT NOT NULL,
+            strategy_id TEXT,
+            strategy_version TEXT,
+            report_revision INTEGER NOT NULL CHECK(report_revision >= 1),
+            previous_report_id TEXT,
+            report_json TEXT NOT NULL CHECK(json_valid(report_json)),
+            bundle_content_hash TEXT NOT NULL
+                CHECK(length(bundle_content_hash) = 64)
+                CHECK(bundle_content_hash NOT GLOB '*[^0-9a-f]*'),
+            json_artifact_id TEXT NOT NULL,
+            json_artifact_hash TEXT NOT NULL
+                CHECK(length(json_artifact_hash) = 64)
+                CHECK(json_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            markdown_artifact_id TEXT NOT NULL,
+            markdown_artifact_hash TEXT NOT NULL
+                CHECK(length(markdown_artifact_hash) = 64)
+                CHECK(markdown_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            xlsx_artifact_id TEXT NOT NULL,
+            xlsx_artifact_hash TEXT NOT NULL
+                CHECK(length(xlsx_artifact_hash) = 64)
+                CHECK(xlsx_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, strategy_scope, report_revision),
+            UNIQUE(report_id, task_id, strategy_scope),
+            CHECK(
+                (strategy_id IS NULL
+                 AND strategy_version IS NULL
+                 AND strategy_scope = 'task-draft')
+                OR
+                (strategy_id IS NOT NULL
+                 AND strategy_version IS NOT NULL
+                 AND strategy_scope = 'strategy:' || strategy_id)
+            ),
+            CHECK(
+                (report_revision = 1 AND previous_report_id IS NULL)
+                OR
+                (report_revision > 1 AND previous_report_id IS NOT NULL)
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(previous_report_id, task_id, strategy_scope)
+                REFERENCES strategy_report_revisions(
+                    report_id, task_id, strategy_scope
+                )
+                DEFERRABLE INITIALLY DEFERRED,
+            FOREIGN KEY(json_artifact_id) REFERENCES task_artifacts(id),
+            FOREIGN KEY(markdown_artifact_id) REFERENCES task_artifacts(id),
+            FOREIGN KEY(xlsx_artifact_id) REFERENCES task_artifacts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_report_revisions_latest
+            ON strategy_report_revisions(
+                task_id, strategy_scope, report_revision DESC,
+                created_at DESC, report_id DESC
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_report_heads (
+            task_id TEXT NOT NULL,
+            strategy_scope TEXT NOT NULL,
+            strategy_id TEXT,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.report-head.v2'),
+            current_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(current_revision >= 0),
+            current_report_id TEXT,
+            current_content_hash TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(task_id, strategy_scope),
+            CHECK(
+                (strategy_id IS NULL AND strategy_scope = 'task-draft')
+                OR
+                (strategy_id IS NOT NULL
+                 AND strategy_scope = 'strategy:' || strategy_id)
+            ),
+            CHECK(
+                (current_revision = 0
+                 AND current_report_id IS NULL
+                 AND current_content_hash IS NULL)
+                OR
+                (current_revision >= 1
+                 AND current_report_id IS NOT NULL
+                 AND length(current_content_hash) = 64
+                 AND current_content_hash NOT GLOB '*[^0-9a-f]*')
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(current_report_id, task_id, strategy_scope)
+                REFERENCES strategy_report_revisions(
+                    report_id, task_id, strategy_scope
+                )
+                DEFERRABLE INITIALLY DEFERRED
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_parent
+        BEFORE INSERT ON strategy_report_revisions
+        WHEN (
+            (NEW.report_revision = 1 AND NEW.previous_report_id IS NOT NULL)
+            OR
+            (NEW.report_revision > 1 AND NOT EXISTS (
+                SELECT 1
+                  FROM strategy_report_revisions AS parent
+                 WHERE parent.report_id = NEW.previous_report_id
+                   AND parent.task_id = NEW.task_id
+                   AND parent.strategy_scope = NEW.strategy_scope
+                   AND parent.report_revision = NEW.report_revision - 1
+            ))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report parent mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_head_parent
+        BEFORE INSERT ON strategy_report_revisions
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_report_heads AS head
+             WHERE head.task_id = NEW.task_id
+               AND head.strategy_scope = NEW.strategy_scope
+               AND head.current_revision = NEW.report_revision - 1
+               AND head.current_report_id IS NEW.previous_report_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report revision is not based on head');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_artifacts
+        BEFORE INSERT ON strategy_report_revisions
+        WHEN NOT (
+            EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.json_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_bundle_json'
+                   AND artifact.content_hash = NEW.json_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.markdown_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_markdown'
+                   AND artifact.content_hash = NEW.markdown_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.xlsx_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_xlsx'
+                   AND artifact.content_hash = NEW.xlsx_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report output artifact mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_heads_target_insert
+        BEFORE INSERT ON strategy_report_heads
+        WHEN NEW.current_revision > 0 AND NOT EXISTS (
+            SELECT 1
+              FROM strategy_report_revisions AS revision
+             WHERE revision.report_id = NEW.current_report_id
+               AND revision.task_id = NEW.task_id
+               AND revision.strategy_scope = NEW.strategy_scope
+               AND revision.report_revision = NEW.current_revision
+               AND revision.bundle_content_hash = NEW.current_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_heads_target_update
+        BEFORE UPDATE ON strategy_report_heads
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_report_revisions AS revision
+             WHERE revision.report_id = NEW.current_report_id
+               AND revision.task_id = NEW.task_id
+               AND revision.strategy_scope = NEW.strategy_scope
+               AND revision.report_revision = NEW.current_revision
+               AND revision.bundle_content_hash = NEW.current_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_heads_append_only
+        BEFORE UPDATE ON strategy_report_heads
+        WHEN NEW.task_id IS NOT OLD.task_id
+          OR NEW.strategy_scope IS NOT OLD.strategy_scope
+          OR NEW.strategy_id IS NOT OLD.strategy_id
+          OR NEW.schema_version IS NOT OLD.schema_version
+          OR NEW.created_at IS NOT OLD.created_at
+          OR NEW.current_revision <> OLD.current_revision + 1
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report head is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_immutable_update
+        BEFORE UPDATE ON strategy_report_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_report_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_immutable_delete
+        BEFORE DELETE ON strategy_report_revisions
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_report_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_heads_immutable_delete
+        BEFORE DELETE ON strategy_report_heads
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_report_heads are task-owned');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_report_output_artifacts_immutable_delete
+        BEFORE DELETE ON task_artifacts
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+         AND EXISTS (
+            SELECT 1
+              FROM strategy_report_revisions AS revision
+             WHERE revision.json_artifact_id = OLD.id
+                OR revision.markdown_artifact_id = OLD.id
+                OR revision.xlsx_artifact_id = OLD.id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'published strategy report artifacts are immutable');
+        END
+        """
+    )
+
+
+def _migration_021_strategy_report_docx(conn: sqlite3.Connection) -> None:
+    """Extend report revisions with governed DOCX while preserving v20 rows."""
+
+    _ensure_column(
+        conn,
+        table="strategy_report_revisions",
+        column="docx_artifact_id",
+        definition="TEXT REFERENCES task_artifacts(id)",
+    )
+    _ensure_column(
+        conn,
+        table="strategy_report_revisions",
+        column="docx_artifact_hash",
+        definition=(
+            "TEXT CHECK("
+            "docx_artifact_hash IS NULL OR "
+            "(length(docx_artifact_hash) = 64 "
+            "AND docx_artifact_hash NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    )
+
+    incomplete = conn.execute(
+        """
+        SELECT report_id
+          FROM strategy_report_revisions
+         WHERE (docx_artifact_id IS NULL) <> (docx_artifact_hash IS NULL)
+         LIMIT 1
+        """
+    ).fetchone()
+    if incomplete is not None:
+        raise RuntimeError(
+            "strategy report DOCX artifact pair is incomplete before migration 21"
+        )
+
+    # Migration 20 is frozen.  Replace only the two triggers whose predicates
+    # must know about the new output; all lineage/head/immutability guards keep
+    # their original definitions.
+    conn.execute("DROP TRIGGER IF EXISTS trg_strategy_report_revisions_artifacts")
+    conn.execute(
+        """
+        CREATE TRIGGER trg_strategy_report_revisions_artifacts
+        BEFORE INSERT ON strategy_report_revisions
+        WHEN NOT (
+            EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.json_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_bundle_json'
+                   AND artifact.content_hash = NEW.json_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.markdown_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_markdown'
+                   AND artifact.content_hash = NEW.markdown_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.xlsx_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_xlsx'
+                   AND artifact.content_hash = NEW.xlsx_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND NEW.docx_artifact_id IS NOT NULL
+            AND NEW.docx_artifact_hash IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.docx_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_docx'
+                   AND artifact.content_hash = NEW.docx_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report output artifact mismatch');
+        END
+        """
+    )
+
+    conn.execute(
+        "DROP TRIGGER IF EXISTS "
+        "trg_strategy_report_output_artifacts_immutable_delete"
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER trg_strategy_report_output_artifacts_immutable_delete
+        BEFORE DELETE ON task_artifacts
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+         AND EXISTS (
+            SELECT 1
+              FROM strategy_report_revisions AS revision
+             WHERE revision.json_artifact_id = OLD.id
+                OR revision.markdown_artifact_id = OLD.id
+                OR revision.xlsx_artifact_id = OLD.id
+                OR revision.docx_artifact_id = OLD.id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'published strategy report artifacts are immutable');
+        END
+        """
+    )
+
+
+def _migration_022_strategy_pool_materializations(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add one immutable Pool-revision to canonical-Strategy ledger."""
+
+    required_columns = {
+        "tasks": {"id"},
+        "strategies": {
+            "id",
+            "task_id",
+            "strategy_type",
+            "version",
+            "status",
+            "asset_status",
+            "parent_strategy_id",
+            "dsl_content_hash",
+        },
+        "audit": {
+            "id",
+            "kind",
+            "actor",
+            "target_ref",
+            "inputs_hash",
+            "outcome",
+            "at",
+        },
+        "task_artifacts": {"id", "task_id", "kind", "content_hash"},
+        "strategy_candidate_pool_revisions": {
+            "id",
+            "pool_id",
+            "task_id",
+            "strategy_type",
+            "revision",
+            "snapshot_hash",
+            "artifact_id",
+            "artifact_content_hash",
+        },
+        "strategy_candidate_pools": {
+            "id",
+            "task_id",
+            "strategy_type",
+            "current_revision",
+            "current_revision_id",
+            "current_snapshot_hash",
+        },
+    }
+    for table, expected in required_columns.items():
+        table_sql = _migration_table_identifier(table)
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if exists is None:
+            return
+        actual = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
+        }
+        if not expected <= actual:
+            return
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_id_task_type
+            ON strategies(id, task_id, strategy_type)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_strategy_candidate_pool_revisions_full_identity
+            ON strategy_candidate_pool_revisions(
+                id, pool_id, task_id, strategy_type
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_pool_materializations (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.pool-materialization.v1'),
+            producer_version TEXT NOT NULL
+                CHECK(producer_version = 'marvis.strategy.pool-materialization/1'),
+            task_id TEXT NOT NULL,
+            strategy_type TEXT NOT NULL
+                CHECK(strategy_type IN (
+                    'approval', 'reject', 'limit', 'pricing', 'segmentation'
+                )),
+            strategy_id TEXT NOT NULL UNIQUE,
+            strategy_version INTEGER NOT NULL CHECK(strategy_version = 1),
+            pool_id TEXT NOT NULL,
+            pool_revision_id TEXT NOT NULL UNIQUE,
+            pool_revision INTEGER NOT NULL CHECK(pool_revision >= 1),
+            pool_snapshot_hash TEXT NOT NULL
+                CHECK(length(pool_snapshot_hash) = 64)
+                CHECK(pool_snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            pool_artifact_id TEXT NOT NULL,
+            pool_artifact_content_hash TEXT NOT NULL
+                CHECK(length(pool_artifact_content_hash) = 64)
+                CHECK(pool_artifact_content_hash NOT GLOB '*[^0-9a-f]*'),
+            selected_design_hash TEXT NOT NULL
+                CHECK(length(selected_design_hash) = 64)
+                CHECK(selected_design_hash NOT GLOB '*[^0-9a-f]*'),
+            requirements_json TEXT NOT NULL CHECK(json_valid(requirements_json)),
+            requirements_hash TEXT NOT NULL
+                CHECK(length(requirements_hash) = 64)
+                CHECK(requirements_hash NOT GLOB '*[^0-9a-f]*'),
+            strategy_spec_hash TEXT NOT NULL
+                CHECK(length(strategy_spec_hash) = 64)
+                CHECK(strategy_spec_hash NOT GLOB '*[^0-9a-f]*'),
+            strategy_dsl_content_hash TEXT NOT NULL
+                CHECK(length(strategy_dsl_content_hash) = 64)
+                CHECK(strategy_dsl_content_hash NOT GLOB '*[^0-9a-f]*'),
+            audit_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            UNIQUE(id, task_id, strategy_type),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(strategy_id, task_id, strategy_type)
+                REFERENCES strategies(id, task_id, strategy_type)
+                ON DELETE CASCADE,
+            FOREIGN KEY(pool_revision_id, pool_id, task_id, strategy_type)
+                REFERENCES strategy_candidate_pool_revisions(
+                    id, pool_id, task_id, strategy_type
+                )
+                ON DELETE CASCADE,
+            FOREIGN KEY(pool_artifact_id, task_id)
+                REFERENCES task_artifacts(id, task_id),
+            FOREIGN KEY(audit_id) REFERENCES audit(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_pool_materializations_task
+            ON strategy_pool_materializations(
+                task_id, strategy_type, pool_revision DESC, id
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_pool_binding
+        BEFORE INSERT ON strategy_pool_materializations
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_candidate_pool_revisions AS revision
+             WHERE revision.id = NEW.pool_revision_id
+               AND revision.pool_id = NEW.pool_id
+               AND revision.task_id = NEW.task_id
+               AND revision.strategy_type = NEW.strategy_type
+               AND revision.revision = NEW.pool_revision
+               AND revision.snapshot_hash = NEW.pool_snapshot_hash
+               AND revision.artifact_id = NEW.pool_artifact_id
+               AND revision.artifact_content_hash =
+                   NEW.pool_artifact_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy Pool materialization binding mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_current_pool
+        BEFORE INSERT ON strategy_pool_materializations
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_candidate_pools AS head
+             WHERE head.id = NEW.pool_id
+               AND head.task_id = NEW.task_id
+               AND head.strategy_type = NEW.strategy_type
+               AND head.current_revision = NEW.pool_revision
+               AND head.current_revision_id = NEW.pool_revision_id
+               AND head.current_snapshot_hash = NEW.pool_snapshot_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy Pool materialization requires current Pool');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_strategy_binding
+        BEFORE INSERT ON strategy_pool_materializations
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategies AS strategy
+             WHERE strategy.id = NEW.strategy_id
+               AND strategy.task_id = NEW.task_id
+               AND strategy.strategy_type = NEW.strategy_type
+               AND strategy.version = NEW.strategy_version
+               AND strategy.status = 'draft'
+               AND strategy.asset_status = 'draft'
+               AND strategy.parent_strategy_id IS NULL
+               AND strategy.created_at = NEW.created_at
+               AND strategy.dsl_content_hash =
+                   NEW.strategy_dsl_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy Pool materialized Strategy mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_audit_binding
+        BEFORE INSERT ON strategy_pool_materializations
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM audit AS entry
+             WHERE entry.id = NEW.audit_id
+               AND entry.kind = 'strategy.materialize_pool'
+               AND entry.actor = 'system'
+               AND entry.target_ref = NEW.strategy_id
+               AND entry.inputs_hash = NEW.selected_design_hash
+               AND entry.outcome = 'succeeded'
+               AND entry.at = NEW.created_at
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy Pool materialization audit mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_immutable_update
+        BEFORE UPDATE ON strategy_pool_materializations
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_pool_materializations are immutable');
+        END
+        """
+    )
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -835,6 +3550,25 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_001_baseline),
     (2, _migration_002_strategy_versioning),
     (3, _migration_003_validation_input_contracts),
+    (4, _migration_004_strategy_task_input),
+    (5, _migration_005_governance_authorization),
+    (6, _migration_006_strategy_dsl),
+    (7, _migration_007_pending_strategy_requests),
+    (8, _migration_008_strategy_monitoring_ledger),
+    (9, _migration_009_strategy_asset_lifecycle),
+    (10, _migration_010_task_artifact_registry),
+    (11, _migration_011_verified_strategy_artifacts),
+    (12, _migration_012_data_workspaces),
+    (13, _migration_013_data_analysis_runs),
+    (14, _migration_014_data_transform_lineage),
+    (15, _migration_015_strategy_candidate_pools),
+    (16, _migration_016_strategy_candidate_pool_v2),
+    (17, _migration_017_automatic_tree_apply_runs),
+    (18, _migration_018_strategy_dsl_content_hash),
+    (19, _migration_019_strategy_project_context),
+    (20, _migration_020_strategy_report_revisions),
+    (21, _migration_021_strategy_report_docx),
+    (22, _migration_022_strategy_pool_materializations),
 ]
 
 
@@ -860,9 +3594,19 @@ def init_db(db_path: Path) -> None:
         for version, migration in _MIGRATIONS:
             if version <= current_version:
                 continue
-            migration(conn)
-            conn.execute(f"PRAGMA user_version = {int(version)}")
-            conn.commit()
+            try:
+                # sqlite3 no longer starts an implicit transaction for DDL.
+                # Begin explicitly so the migration body and its version stamp
+                # either both persist or both roll back.  This also makes any
+                # migration-local SAVEPOINT genuinely nested instead of letting
+                # RELEASE commit schema changes before user_version is stamped.
+                conn.execute("BEGIN IMMEDIATE")
+                migration(conn)
+                conn.execute(f"PRAGMA user_version = {int(version)}")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             current_version = version
 
 

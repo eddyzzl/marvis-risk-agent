@@ -37,7 +37,7 @@ V2 不是只有运行时外壳：欢迎页露出的每个任务入口都是真�
 
 ## 核心文档
 
-- [Roadmap](docs/roadmap.md)：当前 V2 平台地图、V1 兼容边界、未来 V3/V4 方向和 Plugin/Tool/Hook/Workflow 术语。
+- [Roadmap](docs/roadmap.md)：完整 V2 平台范围、V1 兼容边界、实施轨和 Plugin/Tool/Hook/Workflow 术语。
 - [Versioning](docs/versioning.md)：发布 helper、tag、版本更新和 forward-port 规则。
 - [Notebook contract](docs/notebook_contract.md)：当前模型验证 Notebook 运行契约。
 - [Design](DESIGN.md)：产品体验和 UI/UX 决策来源。
@@ -225,7 +225,7 @@ ruff check marvis tests --extend-exclude '*.ipynb'
 node --check marvis/static/app.js
 ```
 
-日常小改动可运行 `scripts/check --affected`，按 git diff 选择相关测试；无法安全映射时会自动退回 fast 层。需要覆盖全部非重型用例时运行 `scripts/check --fast`，它会排除 `slow`、`e2e` 和 `llm` 用例。发布前仍运行不带这两个参数的完整 `scripts/check`。
+日常小改动可运行 `scripts/check --affected`，按 git diff 选择相关测试文件，并只执行其中的 fast 用例；运行时改动无法安全映射时才退回完整 fast 层。`website/` 和构建输出等未跟踪、非 MARVIS 运行时目录不会再触发该退回；动态加载的 Strategy pack 已维护策略/API/Workflow/Plugin 契约测试组，其他未建组的 pack 仍保持保守退回。阶段收口运行 `scripts/check --affected-full`，执行受影响测试文件的全部层级；映射不确定时会取消层级过滤，但 `--` 后显式传入的 pytest 选择参数仍然生效。需要覆盖全部非重型用例时运行 `scripts/check --fast`，它会排除 `slow`、`e2e` 和 `llm` 用例。发布前仍运行不带参数的完整 `scripts/check`。
 
 ## 发布推送
 

@@ -2,7 +2,11 @@ from pathlib import Path
 
 from marvis.db import PluginRepository, init_db
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck
-from marvis.orchestrator.validator import PlanValidator, _schema_has_path
+from marvis.orchestrator.validator import (
+    PlanValidator,
+    _relax_required,
+    _schema_has_path,
+)
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef, parse_manifest
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -223,6 +227,49 @@ def test_plan_validator_checks_literal_inputs_but_skips_deferred_inputs(tmp_path
 
     assert any("schema" in problem for problem in _validator(tmp_path).validate(_plan(bad)))
     assert _validator(tmp_path).validate(_plan(deferred)) == []
+
+
+def test_plan_validator_defers_null_gate_inputs_until_confirmation(tmp_path):
+    gated = _step(
+        "step-1",
+        ToolRef("_sample", "echo"),
+        {"message": None},
+        needs_confirmation=True,
+    )
+    ungated = _step("step-1", ToolRef("_sample", "echo"), {"message": None})
+
+    assert _validator(tmp_path).validate(_plan(gated)) == []
+    assert any(
+        "schema" in problem
+        for problem in _validator(tmp_path).validate(_plan(ungated))
+    )
+
+
+def test_relax_required_reaches_conditional_branches_without_mutating_schema():
+    schema = {
+        "type": "object",
+        "properties": {
+            "champion_id": {"type": "string"},
+            "challenger_receipt": {"type": "object"},
+        },
+        "allOf": [
+            {
+                "if": {"required": ["champion_id"]},
+                "then": {"required": ["challenger_receipt"]},
+            }
+        ],
+    }
+
+    relaxed = _relax_required(
+        schema,
+        {
+            "champion_id": "champion-1",
+            "challenger_receipt": "$ref:backtest.output",
+        },
+    )
+
+    assert relaxed["allOf"][0]["then"]["required"] == []
+    assert schema["allOf"][0]["then"]["required"] == ["challenger_receipt"]
 
 
 def test_plan_validator_checks_dangling_dependencies_and_cycles(tmp_path):

@@ -1,0 +1,566 @@
+"""Minimal structured-turn E2E coverage for interactive-tree revisions."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+import pytest
+from fastapi.testclient import TestClient
+
+from marvis.app import create_app
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_ASSET_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.interactive_tree_tools import (
+    INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+    INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.interactive_tree_split_search_tools import (
+    INTERACTIVE_TREE_SPLIT_SEARCH_ARTIFACT_KIND,
+    INTERACTIVE_TREE_SPLIT_SEARCH_ORIGIN_TOOL,
+)
+from marvis.plugins.manifest import ToolRef
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
+
+
+def _standard_workflow_request(
+    workflow: str,
+    workflow_inputs: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "request_kind": "standard_workflow",
+        "workflow": workflow,
+        "workflow_inputs": workflow_inputs,
+    }
+
+
+@pytest.fixture
+def automatic_tree_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    source = tmp_path / "source"
+    source.mkdir()
+    pd.DataFrame(
+        {
+            "customer_id": [f"C{index:03d}" for index in range(24)],
+            "score": [360 + index * 20 for index in range(24)],
+            "income": [3000 + (index % 8) * 800 for index in range(24)],
+            "bad": [1 if index < 12 else 0 for index in range(24)],
+        }
+    ).to_csv(source / "sample.csv", index=False)
+
+    client = TestClient(create_app(tmp_path))
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "交互式决策树修剪端到端",
+            "validator": "qa",
+            "source_dir": str(source),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
+
+    built = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "用 score 和 income 构建自动树候选。",
+            "strategy_request": _standard_workflow_request(
+                "automatic_tree_candidate_build",
+                {
+                    "features": ["score", "income"],
+                    "max_depth": 2,
+                    "min_leaf_count": 2,
+                },
+            ),
+        },
+    )
+    assert built.status_code == 202, built.text
+
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    automatic_plan = plans[-1]
+    assert automatic_plan["template_id"] == (
+        "strategy_automatic_tree_candidate_build"
+    )
+    assert automatic_plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(automatic_plan["id"])
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    asset_descriptor = next(
+        artifact
+        for artifact in output["artifacts"]
+        if artifact["kind"] == AUTOMATIC_TREE_ASSET_ARTIFACT_KIND
+    )
+    downloaded = client.get(asset_descriptor["download_url"])
+    assert downloaded.status_code == 200, downloaded.text
+    asset = json.loads(downloaded.content)
+    root_node_id = asset["tree_result"]["tree"]["root_node_id"]
+    root = next(
+        node
+        for node in asset["tree_result"]["tree"]["nodes"]
+        if node["node_id"] == root_node_id
+    )
+    assert root["kind"] == "split"
+    return {
+        "client": client,
+        "task_id": task_id,
+        "asset_id": output["summary"]["asset_id"],
+        "root_node_id": root_node_id,
+        "root_feature": root["feature"],
+        "root_threshold": root["threshold"],
+        "feature_order": asset["tree_result"]["training"]["feature_order"],
+        "feature_medians": asset["tree_result"]["preprocessing"]["medians"],
+    }
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_executes_interactive_tree_revision_and_registers_artifact(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    source_tree_id = str(automatic_tree_turn["asset_id"])
+    node_id = str(automatic_tree_turn["root_node_id"])
+    reason = "人工确认根节点以下颗粒度过细"
+    workflow_inputs = {
+        "source_tree_id": source_tree_id,
+        "node_id": node_id,
+        "operation": "prune_subtree",
+        "reason": reason,
+    }
+
+    revised = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按指定节点创建一个不可变的交互式树修订。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert revised.status_code == 202, revised.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = plans[-1]
+    assert plan["template_id"] == "strategy_interactive_tree_revision"
+    assert plan["status"] == "done"
+    assert len(plan["steps"]) == 1
+    assert plan["steps"][0]["status"] == "done"
+    assert plan["steps"][0]["needs_confirmation"] is False
+
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].tool_ref == ToolRef(
+        "strategy",
+        "revise_interactive_tree",
+    )
+    assert stored.steps[0].inputs == workflow_inputs
+
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["source_tree_id"] == source_tree_id
+    assert output["edit"] == {
+        "operation": "prune_subtree",
+        "node_id": node_id,
+        "reason": reason,
+    }
+    assert output["replay"]["exactly_once"] is True
+    assert output["replay"]["metrics_matched"] is True
+    assert len(output["artifacts"]) == 1
+    descriptor = output["artifacts"][0]
+    assert descriptor["kind"] == INTERACTIVE_TREE_REVISION_ARTIFACT_KIND
+
+    artifacts = client.get(
+        f"/api/tasks/{task_id}/task-artifacts"
+    ).json()["artifacts"]
+    registered = next(
+        artifact
+        for artifact in artifacts
+        if artifact["id"] == descriptor["artifact_id"]
+    )
+    assert registered["kind"] == INTERACTIVE_TREE_REVISION_ARTIFACT_KIND
+    assert registered["origin_tool"] == INTERACTIVE_TREE_REVISION_ORIGIN_TOOL
+    assert registered["content_hash"] == descriptor["content_hash"]
+    assert registered["available"] is True
+    downloaded = client.get(registered["download_url"])
+    assert downloaded.status_code == 200, downloaded.text
+    revision = downloaded.json()
+    assert revision["revision_id"] == output["revision_id"]
+    assert revision["revision_hash"] == output["revision_hash"]
+    assert revision["edit"] == output["edit"]
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_executes_bounded_all_feature_node_search(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    workflow_inputs = {
+        "source_tree_id": str(automatic_tree_turn["asset_id"]),
+        "node_id": str(automatic_tree_turn["root_node_id"]),
+        "mode": "all_features",
+        "max_thresholds_per_feature": 5,
+        "max_row_evaluations": 2_000,
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按当前树投影搜索指定节点的全部特征分裂候选。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_split_search",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = plans[-1]
+    assert plan["template_id"] == (
+        "strategy_interactive_tree_split_search"
+    )
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].tool_ref == ToolRef(
+        "strategy",
+        "search_interactive_tree_split_candidates",
+    )
+    assert stored.steps[0].inputs == workflow_inputs
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["winner_selected"] is False
+    assert output["tree_modified"] is False
+    assert output["feature_count"] == 2
+    assert output["eligible_candidates"] > 0
+    descriptor = output["artifacts"][0]
+    assert descriptor["kind"] == INTERACTIVE_TREE_SPLIT_SEARCH_ARTIFACT_KIND
+    artifacts = client.get(
+        f"/api/tasks/{task_id}/task-artifacts"
+    ).json()["artifacts"]
+    registered = next(
+        artifact
+        for artifact in artifacts
+        if artifact["id"] == descriptor["artifact_id"]
+    )
+    assert registered["origin_tool"] == INTERACTIVE_TREE_SPLIT_SEARCH_ORIGIN_TOOL
+    downloaded = client.get(registered["download_url"])
+    assert downloaded.status_code == 200
+    assert downloaded.json()["claims"]["winner_selected"] is False
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_continues_exact_reviewed_frontier_candidate(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    root_id = str(automatic_tree_turn["root_node_id"])
+    pruned = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "把根节点明确作为当前 frontier。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                {
+                    "source_tree_id": str(automatic_tree_turn["asset_id"]),
+                    "node_id": root_id,
+                    "operation": "prune_subtree",
+                },
+            ),
+        },
+    )
+    assert pruned.status_code == 202, pruned.text
+    prune_plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1]
+    stored_prune = client.app.state.plan_repo.load_plan(prune_plan["id"])
+    prune_output = client.app.state.plan_repo.load_step_output(
+        stored_prune.steps[0].id
+    )
+    searched = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "搜索根 frontier 的全部特征候选。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_split_search",
+                {
+                    "source_tree_id": prune_output["revision_id"],
+                    "node_id": root_id,
+                    "mode": "all_features",
+                    "max_thresholds_per_feature": 5,
+                    "max_row_evaluations": 2_000,
+                },
+            ),
+        },
+    )
+    assert searched.status_code == 202, searched.text
+    search_plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1]
+    stored_search = client.app.state.plan_repo.load_plan(search_plan["id"])
+    search_output = client.app.state.plan_repo.load_step_output(
+        stored_search.steps[0].id
+    )
+    candidate = next(
+        item
+        for item in search_output["search_result"]["candidates"]
+        if item["eligible"]
+    )
+    workflow_inputs = {
+        "search_id": search_output["search_id"],
+        "candidate_id": candidate["candidate_id"],
+        "max_additional_depth": 2,
+        "min_gini_gain": 0.0,
+        "max_generated_nodes": 7,
+        "max_thresholds_per_feature": 5,
+        "max_row_evaluations": 20_000,
+        "objective": "max_gini_gain",
+        "tie_break": "eligible_gain_feature_threshold_candidate_id",
+    }
+    continued = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "从人工明确选择的候选受控续建。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_auto_continuation",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert continued.status_code == 202, continued.text
+    plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1]
+    assert plan["template_id"] == (
+        "strategy_interactive_tree_auto_continuation"
+    )
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].tool_ref == ToolRef(
+        "strategy",
+        "auto_continue_interactive_tree",
+    )
+    assert stored.steps[0].inputs == workflow_inputs
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["search_id"] == search_output["search_id"]
+    assert output["candidate_id"] == candidate["candidate_id"]
+    assert output["replay"]["exactly_once"] is True
+    assert output["automatic_winner_selection"] is False
+    assert output["pool_modified"] is False
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_without_dataset_reaches_tool_instead_of_preview_preflight(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "empty-source"
+    source.mkdir()
+    client = TestClient(create_app(tmp_path))
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "无样本交互树修剪",
+            "validator": "qa",
+            "source_dir": str(source),
+            "task_type": "strategy",
+            "run_mode": "manual",
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    workflow_inputs = {
+        "source_tree_id": "candidate-asset-" + "a" * 32,
+        "node_id": "node-" + "b" * 20,
+        "operation": "prune_subtree",
+        "reason": "验证无 preview 时仍由 Tool 认证源资产",
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按指定源树和节点执行修剪。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan["template_id"] == "strategy_interactive_tree_revision"
+    assert plan["status"] == "failed"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].tool_ref == ToolRef(
+        "strategy",
+        "revise_interactive_tree",
+    )
+    assert stored.steps[0].inputs == workflow_inputs
+
+    assistant_codes = {
+        message.get("metadata", {}).get("code")
+        for message in response.json()["messages"]
+        if message.get("role") == "assistant"
+    }
+    assert "strategy_dataset_context_required" not in assistant_codes
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_executes_one_exact_threshold_adjustment(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    threshold = float(automatic_tree_turn["root_threshold"]) + 0.25
+    workflow_inputs = {
+        "source_tree_id": str(automatic_tree_turn["asset_id"]),
+        "node_id": str(automatic_tree_turn["root_node_id"]),
+        "operation": "adjust_split_threshold",
+        "threshold": threshold,
+        "reason": "人工复核后微调当前可见根节点阈值",
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按当前投影中的指定节点调整阈值。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = plans[-1]
+    assert plan["template_id"] == "strategy_interactive_tree_revision"
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].inputs == workflow_inputs
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["schema_version"] == (
+        "strategy.revise-interactive-tree-tool.v2"
+    )
+    assert output["edit"] == {
+        "operation": "adjust_split_threshold",
+        "node_id": workflow_inputs["node_id"],
+        "previous_threshold": float(automatic_tree_turn["root_threshold"]),
+        "threshold": threshold,
+        "reason": workflow_inputs["reason"],
+    }
+    assert output["replay"]["exactly_once"] is True
+    assert output["replay"]["all_visible_metrics_matched"] is True
+    assert output["replay"]["threshold"] == threshold
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_executes_one_exact_split_feature_replacement(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    root_feature = str(automatic_tree_turn["root_feature"])
+    feature_order = list(automatic_tree_turn["feature_order"])
+    replacement = next(
+        feature for feature in feature_order if feature != root_feature
+    )
+    threshold = float(
+        dict(automatic_tree_turn["feature_medians"])[replacement]
+    )
+    workflow_inputs = {
+        "source_tree_id": str(automatic_tree_turn["asset_id"]),
+        "node_id": str(automatic_tree_turn["root_node_id"]),
+        "operation": "replace_split_feature",
+        "feature": replacement,
+        "threshold": threshold,
+        "reason": "从认证候选中人工选择替代分裂",
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按当前投影精确替换指定节点的分裂字段和阈值。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = plans[-1]
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].inputs == workflow_inputs
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["edit"]["operation"] == "replace_split_feature"
+    assert output["edit"]["previous_feature"] == root_feature
+    assert output["edit"]["feature"] == replacement
+    assert output["replay"]["feature"] == replacement
+    assert output["replay"]["exactly_once"] is True
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_threshold_turn_rejects_a_node_outside_the_current_projection(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    existing_plan_ids = {
+        item["id"]
+        for item in client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按当前投影中的指定节点调整阈值。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                {
+                    "source_tree_id": str(automatic_tree_turn["asset_id"]),
+                    "node_id": "node-" + "f" * 20,
+                    "operation": "adjust_split_threshold",
+                    "threshold": (
+                        float(automatic_tree_turn["root_threshold"]) + 0.25
+                    ),
+                },
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    current_plan_ids = {
+        item["id"]
+        for item in client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    }
+    assert current_plan_ids == existing_plan_ids
+    assistant_codes = {
+        message.get("metadata", {}).get("code")
+        for message in response.json()["messages"]
+        if message.get("role") == "assistant"
+    }
+    assert "interactive_tree_revision_current_projection_required" in (
+        assistant_codes
+    )

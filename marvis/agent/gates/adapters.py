@@ -38,9 +38,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from marvis.agent.driver_turn import DriverTurn
+from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.plan_utils import find_step
 from marvis.orchestrator.contracts import Plan, PlanStep
+from marvis.strategy_adoption import ADOPTION_REASON_MIN_LENGTH
 
 
 def _pending_dedup_features(plan: Plan, gate: PlanStep, load_output: Callable[[str], Any]) -> list[str]:
@@ -71,6 +72,22 @@ def _rule_candidate_count(plan: Plan, gate: PlanStep, load_output: Callable[[str
             return len(output["candidate_rules"])
     candidates = (gate.inputs or {}).get("candidate_rules")
     return len(candidates) if isinstance(candidates, list) else 0
+
+
+def _monitoring_run_output(
+    plan: Plan,
+    gate: PlanStep,
+    load_output: Callable[[str], Any],
+) -> dict:
+    """Return the evidence output reviewed by a monitoring disposition gate."""
+
+    for dep_id in gate.depends_on or []:
+        dep = find_step(plan, dep_id)
+        if dep is None or dep.tool_ref.tool != "run_strategy_monitoring":
+            continue
+        output = load_output(dep.id)
+        return dict(output) if isinstance(output, dict) else {}
+    return {}
 
 
 @dataclass(frozen=True)
@@ -274,7 +291,7 @@ class _RuleSelectionAdapter:
 
 
 # ---------------------------------------------------------------------------
-# strategy-monitoring disposition adapter (render_monitoring_report gate)
+# strategy-monitoring disposition adapter (apply_monitoring_disposition gate)
 # ---------------------------------------------------------------------------
 _MONITORING_NEW_VERSION = re.compile(
     r"(?:起新版本|新版本|新起一版|起一版|重起)|\bnew\s+(?:version|strategy)\b",
@@ -332,23 +349,84 @@ def parse_monitoring_disposition(text: str) -> str | None:
 
 
 class _MonitoringDispositionAdapter:
-    """render_monitoring_report gate (the report step IS the gate, rendering its
-    run_strategy_monitoring dependency's verdict + red-light checklist). A
-    red-light reply naming one of the three dispositions (观察 / 调阈值 / 起新版本)
-    is recorded onto the report gate's own `disposition` input before confirming
-    the gate to proceed (so the report surfaces next_action)."""
+    """Govern the real effect of a strategy-monitoring alarm decision.
 
-    tool = "render_monitoring_report"
+    The gate is bound to the immutable plan/run receipt rendered from its
+    ``run_strategy_monitoring`` dependency. Observe and new-version are complete
+    explicit decisions and execute immediately. Threshold adjustment is a
+    two-part decision: choosing it records the disposition, then the user must
+    provide a concrete threshold patch and explicitly confirm that patch.
+    """
+
+    tool = "apply_monitoring_disposition"
 
     def parse_reply(self, text: str, ctx: GateReplyContext) -> str | None:
         return parse_monitoring_disposition(text)
 
     def apply(self, driver, plan: Plan, gate: PlanStep, parsed: str, *, run_seq) -> DriverTurn:
-        driver._apply_monitoring_disposition(gate, parsed)
-        driver._repo.confirm_step(gate.id)
+        reason = f"人工选择监控处置：{parsed}"
+        driver._apply_monitoring_disposition(gate, parsed, reason=reason)
+        if parsed == "adjust_threshold" and not isinstance(
+            (gate.inputs or {}).get("threshold_patch"), dict
+        ):
+            return DriverTurn(
+                plan.id,
+                plan.status.value,
+                [
+                    DriverMessage(
+                        "gate",
+                        "已选择「调阈值重跑」。请说明要调整的监控项及 warn/fail 数值；"
+                        "Agent 会生成结构化阈值补丁，展示后仍需你明确确认才会追加计划版本并重跑。",
+                        {
+                            "plan_id": plan.id,
+                            "step_id": gate.id,
+                            "run_seq": run_seq,
+                        },
+                    )
+                ],
+            )
+        driver._confirm_gate(
+            plan,
+            gate,
+            reason=reason,
+        )
         return driver._run_and_handle(plan.id, run_seq=run_seq)
 
     def adjust_schema(self, plan: Plan, gate: PlanStep, load_output: Callable[[str], Any]) -> dict:
+        output = _monitoring_run_output(plan, gate, load_output)
+        raw_threshold_ids = output.get("adjustable_threshold_ids")
+        threshold_ids = (
+            list(
+                dict.fromkeys(
+                    value.strip()
+                    for value in raw_threshold_ids
+                    if isinstance(value, str) and value.strip()
+                )
+            )
+            if isinstance(raw_threshold_ids, list)
+            else []
+        )
+        patch_schema = {
+            "type": "object",
+            "title": "阈值补丁",
+            "description": "只填写要调整的现有监控项及 warn/fail；其余计划证据保持不变。",
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "warn": {"type": "number"},
+                    "fail": {"type": "number"},
+                },
+                "minProperties": 1,
+                "additionalProperties": False,
+            },
+        }
+        if threshold_ids:
+            patch_schema["propertyNames"] = {"enum": threshold_ids}
+        else:
+            # Fail closed when the immutable run receipt does not declare the
+            # exact monitoring-plan keys that may be changed.  Check ``metric``
+            # aliases are presentation data and must never become patch ids.
+            patch_schema["maxProperties"] = 0
         return {
             "type": "object",
             "properties": {
@@ -356,8 +434,89 @@ class _MonitoringDispositionAdapter:
                     "type": "string",
                     "title": "红灯处置（三选一）",
                     "enum": list(_MONITORING_DISPOSITIONS),
+                },
+                "reason": {
+                    "type": "string",
+                    "title": "处置理由",
+                    "minLength": 4,
+                },
+                "threshold_patch": patch_schema,
+            },
+            "additionalProperties": False,
+        }
+
+
+def monitoring_plain_confirm_error(
+    plan: Plan,
+    gate: PlanStep | None,
+    load_output: Callable[[str], Any],
+) -> str | None:
+    """Explain why a bare confirmation cannot execute a red-light gate.
+
+    Green/amber runs may be acknowledged with a plain confirmation. A red run
+    must name one of the three dispositions; threshold adjustment additionally
+    needs a non-empty patch. This guard prevents ``确认`` from silently becoming
+    ``observe`` or from executing an empty threshold revision.
+    """
+
+    if gate is None or gate.tool_ref.tool != "apply_monitoring_disposition":
+        return None
+    output = _monitoring_run_output(plan, gate, load_output)
+    if str(output.get("overall_level") or "") != "red":
+        return None
+    inputs = gate.inputs or {}
+    disposition = inputs.get("disposition")
+    if disposition not in _MONITORING_DISPOSITIONS:
+        return "本次监控为红灯，不能只回复「确认」。请明确选择「观察」「调阈值」或「起新版本」。"
+    if disposition == "adjust_threshold" and not inputs.get("threshold_patch"):
+        return "已选择调阈值，但还没有具体 warn/fail 补丁；请先说明要调整的监控项和数值。"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# strategy adoption reason adapter (adopt_strategy gate)
+# ---------------------------------------------------------------------------
+class _AdoptionReasonAdapter:
+    """Declare the gate-time business reason required by ``adopt_strategy``.
+
+    The value is submitted through the structured ``adjust_params`` channel and
+    consumed atomically by :class:`PlanDriver`; this adapter intentionally does
+    not guess a reason from arbitrary free text.
+    """
+
+    tool = "adopt_strategy"
+
+    def parse_reply(self, text: str, ctx: GateReplyContext) -> None:
+        return None
+
+    def apply(
+        self,
+        driver,
+        plan: Plan,
+        gate: PlanStep,
+        parsed: Any,
+        *,
+        run_seq,
+    ) -> None:
+        return None
+
+    def adjust_schema(
+        self,
+        plan: Plan,
+        gate: PlanStep,
+        load_output: Callable[[str], Any],
+    ) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "adoption_reason": {
+                    "type": "string",
+                    "title": "采纳理由",
+                    "description": "说明基于当前策略与回测证据采纳该版本的业务理由。",
+                    "minLength": ADOPTION_REASON_MIN_LENGTH,
                 }
             },
+            "required": ["adoption_reason"],
             "additionalProperties": False,
         }
 
@@ -371,6 +530,7 @@ _ADAPTERS: dict[str, GateReplyAdapter] = {
         _JoinDedupAdapter(),
         _RuleSelectionAdapter(),
         _MonitoringDispositionAdapter(),
+        _AdoptionReasonAdapter(),
     )
 }
 
@@ -402,6 +562,7 @@ __all__ = [
     "GateReplyContext",
     "gate_editable_input_schema",
     "get_gate_adapter",
+    "monitoring_plain_confirm_error",
     "parse_dedup_instruction",
     "parse_monitoring_disposition",
     "parse_rule_selection_instruction",

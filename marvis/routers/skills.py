@@ -113,6 +113,7 @@ def _step_payload(step) -> dict:
             for check in step.post_checks
         ],
         "needs_confirmation": step.needs_confirmation,
+        "policy": step.policy.to_dict(),
         "decision_point": step.decision_point,
         "sub_agent_scope": step.sub_agent_scope,
         "granted_tools": [

@@ -30,6 +30,9 @@ from marvis.app import create_app
 from marvis.domain import TASK_TYPE_MODELING
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
 from marvis.plugins.manifest import ToolRef
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 def _join_dir(root: Path, n: int = 50) -> Path:
@@ -215,6 +218,7 @@ def test_agent_autodrive_binds_gate_step_token_to_confirm_action(monkeypatch):
 
     assert calls
     assert calls[0]["expected_step_id"] == "gate-1"
+    assert calls[0]["confirmation_source"] == "auto"
 
 
 def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch):
@@ -224,8 +228,21 @@ def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch)
     calls = []
 
     class _FakeDriver:
-        def replan_structured(self, *, plan_id, goal, expected_step_id=None, run_seq=0):
-            calls.append({"plan_id": plan_id, "goal": goal, "expected_step_id": expected_step_id})
+        def replan_structured(
+            self,
+            *,
+            plan_id,
+            goal,
+            expected_step_id=None,
+            run_seq=0,
+            confirmation_source="human",
+        ):
+            calls.append({
+                "plan_id": plan_id,
+                "goal": goal,
+                "expected_step_id": expected_step_id,
+                "confirmation_source": confirmation_source,
+            })
             from marvis.agent.driver_turn import DriverMessage, DriverTurn
             return DriverTurn(plan_id, "confirmed", [DriverMessage("chat", "已重规划。", {})])
 
@@ -246,6 +263,36 @@ def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch)
     assert calls[0]["plan_id"] == "plan-9"
     assert calls[0]["goal"] == "重规划当前步骤"
     assert calls[0]["expected_step_id"] == "gate-1"
+    assert calls[0]["confirmation_source"] == "auto"
+
+
+def test_agent_autodrive_marks_structured_adjust_turn_as_auto_source(monkeypatch):
+    calls = []
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    repo = _TokenRepo()
+    repo.messages[0]["metadata"]["gate_envelope"] = {
+        "kind": "screen",
+        "target_step_id": "gate-1",
+        "allowed_actions": ["confirm", "adjust", "halt"],
+        "controls": [{"id": "leakage_ks", "kind": "number"}],
+    }
+    task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
+    client = _FakeLLM(action="adjust", reason="放宽筛选阈值")
+    client._payload = json.dumps({
+        "action": "adjust",
+        "reason": "放宽筛选阈值",
+        "params": {"leakage_ks": 0.35},
+    })
+
+    agent_autodrive_turn(SimpleNamespace(), repo, task, client=client)
+
+    assert calls
+    assert calls[0]["confirmation_source"] == "auto"
 
 
 def test_agent_autodrive_warns_when_gate_budget_exhausted(monkeypatch):
@@ -382,20 +429,28 @@ def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_pa
         "run_mode": "agent",
         "target_col": "bad",
         "score_col": "score",
+        # This test exercises the legacy lightweight AUTO hand-off.  Full
+        # strategy development is now the product default and requires a
+        # governed business contract, so the compatibility route is explicit.
+        "strategy_input": {"entry_mode": "strategy_analysis"},
     }).json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
 
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={"acceptance_mode": "auto_accept"})
 
     assert resp.status_code == 202, resp.text
     msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     done = _last_assistant(msgs)
-    # FIN-3 #1: 回测策略/backtest_strategy is a forced decision gate (approval_rate /
-    # bad_rate review before the strategy proceeds). A bare AUTO confirm halts, so the
-    # last message is the strategy_direction_approval hand-off rather than the
-    # downstream tradeoff view.
-    assert "strategy_direction_approval" in done["content"]
-    assert "已转人工确认" in done["content"]
-    assert len(fake.calls) >= 2
+    # Strategy analysis/backtesting is reversible and AUTO-operable. Only a real
+    # adoption or monitoring-disposition effect must hand off to a human gate.
+    assert "计划已全部完成" in done["content"]
+    assert "策略权衡视图完成" in done["content"]
+    assert "已转人工确认" not in done["content"]
+    assert len(fake.calls) == 1  # plan overview only; no reversible-analysis gates
     assert any(m["metadata"].get("intent") == "agent_decision" for m in msgs if m["role"] == "assistant")
 
 
@@ -1043,26 +1098,6 @@ _REAL_GATE_ENVELOPE_FIXTURES = [
         },
         id="modeling-select_experiment-champion-confirm",
     ),
-    pytest.param(
-        "strategy-tradeoff_view-confirm",
-        {
-            "plan_id": "p1",
-            "step_id": "tradeoff",
-            "run_seq": 1,
-            "kind": "gate",
-        },
-        id="strategy-tradeoff_view-confirm",
-    ),
-    pytest.param(
-        "vintage-vintage_curve-confirm",
-        {
-            "plan_id": "p1",
-            "step_id": "vintage-curve",
-            "run_seq": 1,
-            "kind": "gate",
-        },
-        id="vintage-vintage_curve-confirm",
-    ),
     # FIN-3 #1: seven forced-confirmation gates whose gate_source_tool (set by
     # plan_message_composer.gate_message from gate.tool_ref.tool in production) now
     # maps to a high-risk flag. Each carries ONLY the production gate_source_tool key
@@ -1099,16 +1134,16 @@ _REAL_GATE_ENVELOPE_FIXTURES = [
         id="modeling-generate_model_report-confirm",
     ),
     pytest.param(
-        "strategy-backtest_strategy-confirm",
-        {"plan_id": "p1", "step_id": "plan-step-2", "run_seq": 1, "kind": "gate",
-         "gate_source_tool": "backtest_strategy"},
-        id="strategy-backtest_strategy-confirm",
+        "strategy-adopt_strategy-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-7", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "adopt_strategy"},
+        id="strategy-adopt_strategy-confirm",
     ),
     pytest.param(
-        "strategy-select_rule_set-confirm",
+        "strategy-apply_monitoring_disposition-confirm",
         {"plan_id": "p1", "step_id": "plan-step-2", "run_seq": 1, "kind": "gate",
-         "gate_source_tool": "select_rule_set"},
-        id="strategy-select_rule_set-confirm",
+         "gate_source_tool": "apply_monitoring_disposition"},
+        id="strategy-apply_monitoring_disposition-confirm",
     ),
 ]
 
@@ -1158,6 +1193,35 @@ def test_auto_safety_policy_keeps_modeling_funnel_gates_auto_confirmable(source_
     )
 
 
+@pytest.mark.parametrize(
+    "source_tool",
+    [
+        "run_strategy_monitoring",
+        "render_monitoring_report",
+        "design_cutoff_bands",
+        "backtest_strategy",
+        "select_rule_set",
+        "tradeoff_view",
+        "compare_strategies",
+        "vintage_curve",
+    ],
+)
+def test_strategy_reversible_tools_do_not_claim_a_mandatory_human_gate(source_tool):
+    envelope = extract_gate_envelope(
+        {
+            "metadata": {
+                "plan_id": "p1",
+                "step_id": "plan-step-reversible",
+                "run_seq": 1,
+                "kind": "gate",
+                "gate_source_tool": source_tool,
+            }
+        }
+    )
+
+    assert envelope.risk_flags == ()
+
+
 def test_auto_safety_policy_still_blocks_declared_risk_flags_on_model_delivery_gate():
     """Sanity check for the matrix above: when a gate DOES carry an explicit
     risk_flags list (the one path that already works today, per
@@ -1185,6 +1249,56 @@ def test_auto_safety_policy_still_blocks_declared_risk_flags_on_model_delivery_g
 
     assert result["action"] == "halt"
     assert "production_deploy_champion_model" in result["reason"]
+
+
+@pytest.mark.parametrize("action", ["confirm", "adjust", "replan", "clarify", "halt"])
+def test_auto_safety_policy_always_halts_canonical_mandatory_human_gate(action):
+    envelope = extract_gate_envelope({
+        "metadata": {
+            "gate_envelope": {
+                "kind": "strategy_decision",
+                "target_step_id": "opaque-step-id",
+                "allowed_actions": ["confirm", "adjust", "replan", "clarify", "halt"],
+                "human_decision_gate": "required",
+                "effect_authorization": "none",
+                "policy_hash": "sha256:canonical",
+                "risk_flags": [],
+            },
+        },
+    })
+
+    result = _apply_safety_policy(
+        {"action": action, "reason": "AUTO says it can proceed", "replan_goal": "retry"},
+        envelope,
+    )
+
+    assert result["action"] == "halt"
+    assert "强制人工" in result["reason"]
+
+
+def test_auto_safety_policy_never_claims_effect_authorization_even_without_risk_flags():
+    envelope = extract_gate_envelope({
+        "metadata": {
+            "gate_envelope": {
+                "kind": "effect_authorization",
+                "target_step_id": "opaque-step-id",
+                "allowed_actions": ["confirm", "halt"],
+                "human_decision_gate": "required",
+                "effect_authorization": "required",
+                "policy_hash": "sha256:canonical",
+                "risk_flags": [],
+            },
+        },
+    })
+
+    result = _apply_safety_policy(
+        {"action": "confirm", "reason": "AUTO authorizes this effect"},
+        envelope,
+    )
+
+    assert result["action"] == "halt"
+    assert "副作用授权" in result["reason"]
+    assert "AUTO 无权" in result["reason"]
 
 
 # -- LT-2: AUTO stale-control rejection ----------------------------------------

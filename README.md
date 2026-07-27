@@ -37,7 +37,7 @@ Current status in this checkout:
 
 ## Core Docs
 
-- [Roadmap](docs/roadmap.md): current V2 platform map, V1 compatibility boundary, future V3/V4 directions, and Plugin/Tool/Hook/Workflow terminology.
+- [Roadmap](docs/roadmap.md): complete V2 platform scope, V1 compatibility boundary, implementation tracks, and Plugin/Tool/Hook/Workflow terminology.
 - [Versioning](docs/versioning.md): release helper, tags, version bumps, and forward-port rules.
 - [Notebook contract](docs/notebook_contract.md): the current model-validation notebook runtime contract.
 - [Design](DESIGN.md): product experience and UI/UX decision source of truth.
@@ -231,21 +231,35 @@ ruff check marvis tests --extend-exclude '*.ipynb'
 node --check marvis/static/app.js
 ```
 
-Tests are tiered with pytest markers (`slow`, `e2e`, `llm`). For fast local
+Tests are tiered with pytest markers (`slow`, `e2e`, `llm`, `pmml_runtime`). For fast local
 iteration, run only the fast tier (excludes real-training/real-subprocess
-tests, browser e2e smoke tests, and LLM evals):
+tests, browser e2e smoke tests, LLM evals, and the real PMML/JVM runtime):
 
 ```bash
-python -m pytest -m "not slow and not e2e and not llm" -q
+python -m pytest -m "not slow and not e2e and not llm and not pmml_runtime" -q
 # or
 scripts/check --fast
 ```
 
 For a small local change, `scripts/check --affected` follows local Python
-imports and runs only the mapped test files. It uses `CHECK_DIFF_RANGE` when
-provided and conservatively falls back to the fast tier when any changed file
-cannot be mapped safely. Pull-request and push CI use the fast tier; manual CI
+imports and runs the fast tests in only the mapped test files. It uses
+`CHECK_DIFF_RANGE` when provided and conservatively falls back to the whole
+fast tier when a runtime change cannot be mapped safely. Untracked local trees
+outside the MARVIS runtime/test surfaces (for example `website/` or build
+output) do not force that fallback. The dynamically loaded Strategy pack has a
+maintained strategy/API/workflow/Plugin-contract test group; uncurated packs
+still use the conservative fallback.
+
+At phase close, `scripts/check --affected-full` runs every tier in the mapped
+test files. For an uncertain mapping it removes the tier filter; explicit
+pytest selectors supplied after `--` still apply. Pull-request and push CI run
+the fast tier and the `pmml_runtime` tier as separate parallel jobs; manual CI
 dispatch and the release gate run the full, untiered suite.
+
+Use `scripts/check --profile` with any full, fast, affected, or affected-full
+mode to print the 50 slowest pytest durations of at least 0.5 seconds. The full,
+unfiltered check still runs `pmml_runtime`; the separate CI PMML/JVM job keeps
+runtime coverage without delaying fast-test results.
 
 ## Release Push
 

@@ -1,10 +1,13 @@
+import json
 import sqlite3
 
 import pytest
+from pydantic import ValidationError
 
 import marvis.db as db_module
 import marvis.db_schema as db_schema_module
 import marvis.repositories.tasks as task_repo_module
+from marvis.api_schemas import CreateTaskRequest
 from marvis.db import (
     DatasetRepository,
     ModelingRepository,
@@ -19,6 +22,8 @@ from marvis.db import (
 from marvis.data.contracts import ColumnFingerprint, ColumnProfile, Dataset, JoinPlan
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
+    StrategyProfitInput,
+    StrategyTaskInput,
     TaskCreate,
     TaskStatus,
 )
@@ -107,6 +112,181 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
     values, revision = repo.get_report_values(task.id)
     assert values == {"TEXT:report_title": "自定义标题"}
     assert revision == 0
+
+
+def test_create_and_get_task_round_trips_strategy_input(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    strategy_input = StrategyTaskInput(
+        entry_mode="strategy_development",
+        objective="max_profit",
+        max_bad_rate=0.05,
+        min_approval_rate=0.6,
+        baseline_strategy_id="strategy-champion-v3",
+        profit=StrategyProfitInput(
+            ead_col="loan_amount",
+            pd_col="predicted_pd",
+            annual_rate=0.18,
+            funding_rate=0.04,
+            lgd=0.55,
+            operating_cost_per_loan=12.5,
+            term_months=12,
+        ),
+    )
+
+    task = repo.create_task(
+        _task_create(task_type="strategy", strategy_input=strategy_input)
+    )
+
+    loaded = repo.get_task(task.id)
+    assert loaded.strategy_input == strategy_input
+    assert isinstance(loaded.strategy_input, StrategyTaskInput)
+    assert isinstance(loaded.strategy_input.profit, StrategyProfitInput)
+    with connect(db_path) as conn:
+        raw = conn.execute(
+            "SELECT strategy_input_json FROM tasks WHERE id = ?", (task.id,)
+        ).fetchone()[0]
+    assert '"entry_mode":"strategy_development"' in raw
+    assert '"ead_col":"loan_amount"' in raw
+
+
+def test_strategy_input_defaults_are_explicit_and_backward_compatible(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    legacy_shape = repo.create_task(_task_create(task_type="strategy"))
+    explicit_defaults = repo.create_task(
+        _task_create(task_type="strategy", strategy_input=StrategyTaskInput())
+    )
+
+    assert repo.get_task(legacy_shape.id).strategy_input is None
+    assert repo.get_task(explicit_defaults.id).strategy_input == StrategyTaskInput(
+        entry_mode="strategy_development",
+        objective="",
+    )
+
+
+def test_task_repository_rejects_strategy_input_on_non_strategy_task(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    with pytest.raises(ValueError, match="strategy_input.*strategy"):
+        repo.create_task(_task_create(task_type="modeling", strategy_input=StrategyTaskInput()))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"entry_mode": "unknown"},
+        {"objective": "min_bad_rate"},
+        {"max_bad_rate": -0.001},
+        {"max_bad_rate": 1.001},
+        {"max_bad_rate": float("nan")},
+        {"min_approval_rate": -0.001},
+        {"min_approval_rate": 1.001},
+        {"min_approval_rate": float("inf")},
+        {"baseline_strategy_id": "   "},
+    ],
+)
+def test_strategy_task_input_rejects_invalid_contract_values(overrides):
+    with pytest.raises(ValueError):
+        StrategyTaskInput(**overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ead_col": ""},
+        {"pd_col": "   "},
+        {"annual_rate": -0.001},
+        {"annual_rate": 1.001},
+        {"annual_rate": float("nan")},
+        {"funding_rate": -0.001},
+        {"funding_rate": 1.001},
+        {"lgd": -0.001},
+        {"lgd": 1.001},
+        {"operating_cost_per_loan": -0.001},
+        {"operating_cost_per_loan": float("inf")},
+        {"term_months": 0},
+        {"term_months": 1.5},
+    ],
+)
+def test_strategy_profit_input_rejects_invalid_contract_values(overrides):
+    values = {
+        "ead_col": "ead",
+        "pd_col": "pd",
+        "annual_rate": 0.18,
+        "funding_rate": 0.04,
+        "lgd": 0.55,
+        "operating_cost_per_loan": 12.5,
+        "term_months": 12,
+    }
+    values.update(overrides)
+    with pytest.raises(ValueError):
+        StrategyProfitInput(**values)
+
+
+def test_create_task_request_parses_strict_nested_strategy_input():
+    request = CreateTaskRequest.model_validate(
+        {
+            "model_name": "利润策略开发",
+            "validator": "qa",
+            "source_dir": "/tmp/source",
+            "task_type": "strategy",
+            "strategy_input": {
+                "entry_mode": "strategy_development",
+                "objective": "max_profit",
+                "max_bad_rate": 0.05,
+                "profit": {
+                    "ead_col": "ead",
+                    "pd_col": "pd",
+                    "annual_rate": 0.18,
+                    "funding_rate": 0.04,
+                    "lgd": 0.55,
+                    "operating_cost_per_loan": 12.5,
+                    "term_months": 12,
+                },
+            },
+        }
+    )
+
+    assert request.strategy_input is not None
+    assert request.strategy_input.objective == "max_profit"
+    assert request.strategy_input.profit is not None
+    assert request.strategy_input.profit.term_months == 12
+
+    for invalid_strategy_input in (
+        {"entry_mode": "development"},
+        {"objective": "profit"},
+        {"max_bad_rate": 1.01},
+        {"min_approval_rate": -0.01},
+        {"max_bad_rate": "0.05"},
+        {
+            "objective": "max_profit",
+            "profit": {
+                "ead_col": "ead",
+                "pd_col": "pd",
+                "annual_rate": 0.18,
+                "funding_rate": 0.04,
+                "lgd": 1.01,
+                "operating_cost_per_loan": 12.5,
+                "term_months": 12,
+            },
+        },
+    ):
+        with pytest.raises(ValidationError):
+            CreateTaskRequest.model_validate(
+                {
+                    "model_name": "非法策略 contract",
+                    "validator": "qa",
+                    "source_dir": "/tmp/source",
+                    "task_type": "strategy",
+                    "strategy_input": invalid_strategy_input,
+                }
+            )
 
 
 def test_create_task_rejects_unknown_algorithm_and_normalizes_run_mode_defaults(tmp_path):
@@ -741,7 +921,16 @@ def test_init_db_stamps_schema_version_on_fresh_database(tmp_path):
     # Spot-check a representative slice of tables from across the schema
     # (base tables, plugin tables, S1a/S1b additions all land via the same
     # baseline migration).
-    assert {"tasks", "jobs", "audit", "plugins", "tools", "model_artifacts", "agent_memory_entries"} <= tables
+    assert {
+        "tasks",
+        "jobs",
+        "audit",
+        "plugins",
+        "tools",
+        "model_artifacts",
+        "agent_memory_entries",
+        "task_artifacts",
+    } <= tables
 
 
 def test_init_db_upgrades_pre_arch10_database_losslessly(tmp_path):
@@ -859,6 +1048,593 @@ def test_init_db_migration_002_adds_strategy_versioning_to_version1_database(tmp
     assert row["parent_strategy_id"] is None
     assert row["description"] == "legacy strategy"
     assert "strategy_artifacts" in tables
+
+
+def test_init_db_migration_004_adds_strategy_input_to_version3_database(tmp_path):
+    db_path = tmp_path / "legacy_v3.sqlite"
+
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                model_name TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("INSERT INTO tasks(id, model_name) VALUES ('task-1', '历史策略任务')")
+        conn.execute("PRAGMA user_version = 3")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        row = conn.execute(
+            "SELECT id, model_name, strategy_input_json FROM tasks WHERE id = 'task-1'"
+        ).fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert "strategy_input_json" in columns
+    assert row["id"] == "task-1"
+    assert row["model_name"] == "历史策略任务"
+    assert row["strategy_input_json"] is None
+
+
+def test_init_db_migration_006_adds_canonical_strategy_dsl_to_version5_database(tmp_path):
+    """Existing V2 databases gain nullable DSL columns without rewriting legacy rules."""
+
+    db_path = tmp_path / "legacy_v5.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                rules_json TEXT NOT NULL,
+                score_col TEXT,
+                default_decision_json TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'draft',
+                adopted_at TEXT,
+                adoption_reason TEXT,
+                parent_strategy_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO strategies(
+                id, task_id, strategy_type, rules_json, score_col,
+                default_decision_json, description, created_at
+            ) VALUES (
+                'legacy-strategy', 'task-1', 'approval',
+                '[{"condition":"score < 600","decision":"reject","value":null}]',
+                'score', '"approve"', 'legacy row', '2026-07-18T00:00:00Z'
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 5")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)")}
+        row = conn.execute(
+            "SELECT rules_json, dsl_json, dsl_schema_version "
+            "FROM strategies WHERE id = 'legacy-strategy'"
+        ).fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert {"dsl_json", "dsl_schema_version"} <= columns
+    assert json.loads(row["rules_json"])[0]["condition"] == "score < 600"
+    assert row["dsl_json"] is None
+    assert row["dsl_schema_version"] is None
+
+
+def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_path):
+    db_path = tmp_path / "legacy_v8.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'draft'
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO strategies(id, status) VALUES (?, ?)",
+            [
+                ("draft-strategy", "draft"),
+                ("adopted-strategy", "adopted"),
+                ("retired-strategy", "retired"),
+            ],
+        )
+        conn.execute("PRAGMA user_version = 8")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)")}
+        rows = conn.execute(
+            "SELECT id, status, asset_status FROM strategies ORDER BY id"
+        ).fetchall()
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert "asset_status" in columns
+    assert [tuple(row) for row in rows] == [
+        ("adopted-strategy", "adopted", "adopted_local"),
+        ("draft-strategy", "draft", "draft"),
+        ("retired-strategy", "retired", "retired"),
+    ]
+
+
+def test_init_db_migration_009_preserves_validated_partial_canonical_row(tmp_path):
+    db_path = tmp_path / "partial_v8.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                asset_status TEXT NOT NULL DEFAULT 'draft'
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO strategies(id, status, asset_status) VALUES (?, ?, ?)",
+            [
+                ("validated-strategy", "draft", "validated"),
+                ("partial-adopted", "adopted", "draft"),
+            ],
+        )
+        conn.execute("PRAGMA user_version = 8")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, status, asset_status FROM strategies ORDER BY id"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("partial-adopted", "adopted", "adopted_local"),
+        ("validated-strategy", "draft", "validated"),
+    ]
+
+
+def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_path):
+    db_path = tmp_path / "legacy_v9.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
+        conn.execute("PRAGMA user_version = 9")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(task_artifacts)")
+        }
+        task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(task_artifacts)")
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert columns == {
+        "id",
+        "task_id",
+        "kind",
+        "path",
+        "content_hash",
+        "origin_tool",
+        "provenance_json",
+        "created_at",
+    }
+    assert task["id"] == "task-1"
+    assert "idx_task_artifacts_task_created" in indexes
+
+
+def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
+    db_path = tmp_path / "legacy_v11.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
+        # A database stamped at migration 11 necessarily already owns the
+        # migration-10 artifact registry.  Later report migrations attach
+        # integrity triggers to that real predecessor table.
+        db_schema_module._migration_010_task_artifact_registry(conn)
+        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
+        conn.execute("PRAGMA user_version = 11")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(data_workspaces)")
+        }
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(data_workspaces)")
+        }
+        task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert columns == {
+        "task_id",
+        "schema_version",
+        "revision",
+        "active_dataset_id",
+        "active_dataset_content_hash",
+        "analysis_generation",
+        "page",
+        "selected_field",
+        "semantic_mapping_json",
+        "updated_at",
+    }
+    assert "idx_data_workspaces_active_dataset" in indexes
+    assert task["id"] == "task-1"
+
+
+def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path):
+    db_path = tmp_path / "legacy_v12.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_artifacts (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
+        conn.execute("INSERT INTO datasets(id) VALUES ('dataset-1')")
+        conn.execute("PRAGMA user_version = 12")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(data_analysis_runs)")
+        }
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(data_analysis_runs)")
+        }
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'trigger' AND tbl_name = 'data_analysis_runs'"
+            )
+        }
+        task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert columns == {
+        "id",
+        "schema_version",
+        "task_id",
+        "dataset_id",
+        "dataset_content_hash",
+        "workspace_revision",
+        "analysis_generation",
+        "semantic_mapping_hash",
+        "config_json",
+        "config_hash",
+        "producer_version",
+        "input_hash",
+        "job_id",
+        "status",
+        "result_artifact_id",
+        "result_content_hash",
+        "error_kind",
+        "error_message",
+        "created_at",
+        "updated_at",
+        "started_at",
+        "completed_at",
+    }
+    assert {
+        "idx_data_analysis_runs_task",
+        "idx_data_analysis_runs_current",
+        "idx_data_analysis_runs_status",
+    } <= indexes
+    assert {
+        "trg_data_analysis_runs_identity_immutable",
+        "trg_data_analysis_runs_succeeded_immutable",
+    } <= triggers
+    assert task["id"] == "task-1"
+
+
+def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
+    tmp_path,
+):
+    db_path = tmp_path / "legacy_v13.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_artifacts (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
+        conn.execute("PRAGMA user_version = 13")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        run_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(data_transform_runs)")
+        }
+        edge_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(dataset_lineage_edges)")
+        }
+        run_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(data_transform_runs)")
+        }
+        edge_indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(dataset_lineage_edges)")
+        }
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name IN ('data_transform_runs', 'dataset_lineage_edges')"
+            )
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert run_columns == {
+        "id",
+        "schema_version",
+        "task_id",
+        "source_dataset_id",
+        "source_content_hash",
+        "workspace_revision",
+        "analysis_generation",
+        "semantic_mapping_hash",
+        "operations_json",
+        "operations_hash",
+        "producer_version",
+        "input_hash",
+        "result_dataset_id",
+        "result_content_hash",
+        "result_artifact_id",
+        "result_json",
+        "result_hash",
+        "result_workspace_revision",
+        "result_analysis_generation",
+        "created_at",
+    }
+    assert edge_columns == {
+        "id",
+        "schema_version",
+        "task_id",
+        "parent_dataset_id",
+        "child_dataset_id",
+        "transform_run_id",
+        "relation_kind",
+        "edge_order",
+        "created_at",
+    }
+    assert {
+        "idx_data_transform_runs_task",
+        "idx_data_transform_runs_source",
+        "idx_data_transform_runs_result",
+    } <= run_indexes
+    assert {
+        "idx_dataset_lineage_edges_task",
+        "idx_dataset_lineage_edges_parent",
+        "idx_dataset_lineage_edges_child",
+    } <= edge_indexes
+    assert {
+        "trg_data_transform_runs_immutable",
+        "trg_dataset_lineage_edges_immutable",
+    } <= triggers
+
+
+def test_init_db_migration_016_upgrades_candidate_pool_ledger_from_v14_database(
+    tmp_path,
+):
+    db_path = tmp_path / "legacy_v14.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute(
+            """
+            CREATE TABLE task_artifacts (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                origin_tool TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 14")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        item_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(strategy_candidate_pool_items)"
+            )
+        }
+        archived_item_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(strategy_candidate_pool_items_v1_archive)"
+            )
+        }
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name LIKE 'strategy_candidate_pool%'"
+            )
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert {
+        "strategy_candidate_pools",
+        "strategy_candidate_pool_revisions",
+        "strategy_candidate_pool_items",
+        "strategy_candidate_pools_v1_archive",
+        "strategy_candidate_pool_revisions_v1_archive",
+        "strategy_candidate_pool_items_v1_archive",
+    } <= tables
+    assert {
+        "dataset_id",
+        "dataset_content_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "sample_context_hash",
+        "source_artifact_kind",
+        "source_artifact_schema_version",
+        "source_origin_tool",
+        "fragment_hash",
+    } <= item_columns
+    assert "source_kind" in archived_item_columns
+    assert "source_artifact_kind" not in archived_item_columns
+    assert {
+        "trg_strategy_candidate_pool_revisions_immutable_update",
+        "trg_strategy_candidate_pool_items_immutable_update",
+        "trg_strategy_candidate_pools_head_target",
+    } <= triggers
+
+
+def test_init_db_migration_and_version_stamp_share_one_atomic_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "migration_atomicity.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute(
+            """
+            CREATE TABLE task_artifacts (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                origin_tool TEXT NOT NULL
+            )
+            """
+        )
+        db_schema_module._migration_015_strategy_candidate_pools(conn)
+        conn.execute("PRAGMA user_version = 15")
+
+    migration_016 = db_schema_module._migration_016_strategy_candidate_pool_v2
+
+    def crash_after_schema_change(conn):
+        migration_016(conn)
+        assert conn.in_transaction is True
+        raise RuntimeError("simulated crash before version stamp")
+
+    monkeypatch.setattr(db_schema_module, "_MIGRATIONS", [(16, crash_after_schema_change)])
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        init_db(db_path)
+
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        item_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(strategy_candidate_pool_items)"
+            )
+        }
+    assert "strategy_candidate_pools_v1_archive" not in tables
+    assert "source_kind" in item_columns
+    assert "source_artifact_kind" not in item_columns
+
+    monkeypatch.setattr(db_schema_module, "_MIGRATIONS", [(16, migration_016)])
+    init_db(db_path)
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'strategy_candidate_pools_v1_archive'"
+        ).fetchone()
+
+
+def test_init_db_migration_009_rejects_unknown_legacy_status_without_stamping(tmp_path):
+    db_path = tmp_path / "unknown_status_v8.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE strategies (id TEXT PRIMARY KEY, status TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO strategies(id, status) VALUES ('unsafe-strategy', 'deployed')"
+        )
+        conn.execute("PRAGMA user_version = 8")
+
+    with pytest.raises(ValueError, match="unknown legacy strategy status"):
+        init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)")}
+        status = conn.execute(
+            "SELECT status FROM strategies WHERE id = 'unsafe-strategy'"
+        ).fetchone()[0]
+    assert version == 8
+    assert "asset_status" not in columns
+    assert status == "deployed"
+
+
+def test_init_db_migration_009_rejects_canonical_drift_without_stamping(tmp_path):
+    db_path = tmp_path / "drifting_status_v8.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                asset_status TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO strategies(id, status, asset_status)
+            VALUES ('drifting-strategy', 'draft', 'adopted_local')
+            """
+        )
+        conn.execute("PRAGMA user_version = 8")
+
+    with pytest.raises(ValueError, match="strategy lifecycle drift"):
+        init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        row = conn.execute(
+            "SELECT status, asset_status FROM strategies WHERE id = 'drifting-strategy'"
+        ).fetchone()
+    assert version == 8
+    assert tuple(row) == ("draft", "adopted_local")
 
 
 def test_init_db_is_idempotent_across_repeated_calls(tmp_path):
@@ -1056,7 +1832,7 @@ def test_purge_task_removes_all_task_scoped_rows_and_writes_audit(tmp_path):
     with pytest.raises(KeyError):
         repo.get_task(task.id)
     with connect(db_path) as conn:
-        for table, column in (
+        for table, _column in (
             ("datasets", "task_id"),
             ("joins", "task_id"),
             ("plans", "task_id"),

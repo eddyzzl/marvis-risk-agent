@@ -1,3 +1,9 @@
+import { isStrategyClarificationMessage } from "./strategy_clarification_controller.js";
+import {
+  hasWorkflowErrorDiagnostic,
+  workflowMessageContentHtml,
+} from "./workflow_error_card.js";
+
 const emptyRenderer = () => "";
 const markdownRenderer = (value) => String(value || "");
 
@@ -41,7 +47,13 @@ export function lastAssistantMessageId(messages = []) {
 // in exactly one place.
 export function driverGateHasWidget(message) {
   const meta = message?.metadata || {};
-  return Boolean(meta.join_c1 || meta.screen || meta.modeling_setup || meta.dedup);
+  return Boolean(
+    meta.join_c1
+    || meta.screen
+    || meta.modeling_setup
+    || meta.dedup
+    || meta.editable_input_schema?.properties?.adoption_reason
+  );
 }
 
 // UX-2: mounts the FULL body (structured widget(s) + any accompanying
@@ -60,6 +72,7 @@ export function driverGateBodyHtml(message, renderers = {}, options = {}) {
   const renderDedupPicker = renderers.renderDedupPicker || emptyRenderer;
   const renderModelingSetup = renderers.renderModelingSetup || emptyRenderer;
   const renderScreenTable = renderers.renderScreenTable || emptyRenderer;
+  const renderAdoptionGate = renderers.renderAdoptionGate || emptyRenderer;
   const renderTables = renderers.renderTables || emptyRenderer;
   const meta = message?.metadata || {};
   const interactive = options.interactive !== false;
@@ -67,6 +80,9 @@ export function driverGateBodyHtml(message, renderers = {}, options = {}) {
   if (meta.screen) return `${renderModelingSetup(message, { interactive })}${renderScreenTable(message, { interactive })}`;
   if (meta.modeling_setup) return `${renderModelingSetup(message, { interactive })}${renderTables(message)}`;
   if (meta.dedup) return `${renderTables(message)}${renderDedupPicker(message, { interactive })}`;
+  if (meta.editable_input_schema?.properties?.adoption_reason) {
+    return `${renderTables(message)}${renderAdoptionGate(message, { interactive })}`;
+  }
   return "";
 }
 
@@ -78,6 +94,7 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
   const renderMarkdown = renderers.renderAgentMarkdown || markdownRenderer;
   const renderTables = renderers.renderTables || emptyRenderer;
   const renderModelDelivery = renderers.renderModelDelivery || emptyRenderer;
+  const renderStrategyClarification = renderers.renderStrategyClarification || emptyRenderer;
   // The plain-gate confirm control (a gate with no structured widget). In manual
   // mode ALL interactive controls live in this middle region now, so the pending
   // gate section renders its own confirm button here instead of the rail. Widget
@@ -100,13 +117,40 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
       ? ` data-driver-gate-section="${escapeAttr(stepId)}"`
       : "";
     const sectionClass = isPendingGate ? "driver-analysis-section is-gate-pending" : "driver-analysis-section";
-    if (meta.error) {
+    if (hasWorkflowErrorDiagnostic(meta)) {
+      const diagnostic = workflowMessageContentHtml(
+        message,
+        (content) => renderMarkdown(content),
+      );
       sections.push(
-        `<section class="driver-analysis-section is-error">${renderMarkdown(message.content || "")}</section>`,
+        `<section class="driver-analysis-section is-error has-workflow-error">${diagnostic}</section>`,
       );
       continue;
     }
-    const intro = renderMarkdown(stripChatInstructions(message.content || ""));
+    if (meta.error) {
+      const legacyError = workflowMessageContentHtml(
+        message,
+        (content) => renderMarkdown(content),
+      );
+      sections.push(
+        `<section class="driver-analysis-section is-error">${legacyError}</section>`,
+      );
+      continue;
+    }
+    const intro = workflowMessageContentHtml(
+      message,
+      (content) => renderMarkdown(stripChatInstructions(content)),
+    );
+    if (isStrategyClarificationMessage(message)) {
+      const interactive = String(message.id || "") === lastMessageId;
+      const clarificationClass = interactive
+        ? "driver-analysis-section is-clarification is-clarification-pending"
+        : "driver-analysis-section is-clarification";
+      sections.push(
+        `<section class="${clarificationClass}">${intro}${renderStrategyClarification(message, { interactive })}</section>`,
+      );
+      continue;
+    }
     if (meta.join_c1) {
       sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
       continue;
@@ -136,7 +180,8 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     // middle section. Non-gate plain sections with no text and no tables are
     // skipped as before.
     const confirm = isPendingGate ? renderGateConfirm(message) : "";
-    if (!String(message.content || "").trim() && !tables && !confirm) continue;
+    const hasIngestNotices = Array.isArray(meta.ingest_notices) && meta.ingest_notices.length > 0;
+    if (!String(message.content || "").trim() && !tables && !confirm && !hasIngestNotices) continue;
     sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${tables}${confirm}</section>`);
   }
   return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';

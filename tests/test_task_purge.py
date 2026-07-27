@@ -50,6 +50,36 @@ def _upload_dataset(client, task_id: str, frame: pd.DataFrame, *, name: str = "s
     return response.json()["datasets"][0]
 
 
+def _activate_and_analyze(client, task_id: str, dataset: dict) -> str:
+    activated = client.put(
+        f"/api/tasks/{task_id}/data-workspace",
+        headers={"If-Match": "0"},
+        json={
+            "active_dataset_id": dataset["id"],
+            "active_dataset_content_hash": dataset["content_hash"],
+            "page": "overview",
+            "selected_field": None,
+            "semantic_mapping": {
+                "target_col": None,
+                "field_roles": {},
+                "business_names": {},
+            },
+        },
+    )
+    assert activated.status_code == 200, activated.text
+    accepted = client.post(
+        f"/api/tasks/{task_id}/data-analysis",
+        headers={"If-Match": str(activated.json()["revision"])},
+        json={"sections": ["overview"]},
+    )
+    assert accepted.status_code == 202, accepted.text
+    run_id = accepted.json()["run_id"]
+    completed = client.get(f"/api/tasks/{task_id}/data-analysis/{run_id}")
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "succeeded"
+    return run_id
+
+
 def test_purge_preview_endpoint_lists_expected_counts_without_deleting(tmp_path):
     client, settings = _client(tmp_path)
     task = _create_task(client)
@@ -99,6 +129,75 @@ def test_delete_task_removes_dataset_files_and_writes_delete_audit(tmp_path):
 
     with pytest.raises(KeyError):
         TaskRepository(settings.db_path).get_task(task["id"])
+
+
+def test_delete_task_purges_data_workspace_and_analysis_before_dataset(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    dataset = _upload_dataset(
+        client,
+        task["id"],
+        pd.DataFrame({"acct_id": ["A1", "B2"]}),
+    )
+    _activate_and_analyze(client, task["id"], dataset)
+
+    response = client.delete(f"/api/tasks/{task['id']}")
+
+    assert response.status_code == 204
+    with connect(settings.db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM data_analysis_runs WHERE task_id = ?",
+            (task["id"],),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM data_workspaces WHERE task_id = ?",
+            (task["id"],),
+        ).fetchone()[0] == 0
+    from marvis.repositories.audit import _list_audit_rows
+
+    audit = _list_audit_rows(settings.db_path, kind="task.delete")[-1]
+    assert audit["detail"]["purge_summary"]["data_analysis_runs"] == 1
+    assert audit["detail"]["purge_summary"]["data_workspaces"] == 1
+
+
+def test_task_purge_rolls_back_analysis_and_workspace_on_later_failure(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    dataset = _upload_dataset(
+        client,
+        task["id"],
+        pd.DataFrame({"acct_id": ["A1", "B2"]}),
+    )
+    _activate_and_analyze(client, task["id"], dataset)
+    with connect(settings.db_path) as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER abort_test_dataset_delete
+            BEFORE DELETE ON datasets
+            BEGIN
+                SELECT RAISE(ABORT, 'synthetic dataset purge failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="synthetic dataset purge"):
+        TaskRepository(settings.db_path).purge_task(task["id"])
+
+    with connect(settings.db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE id = ?", (task["id"],)
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM datasets WHERE task_id = ?", (task["id"],)
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM data_workspaces WHERE task_id = ?",
+            (task["id"],),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM data_analysis_runs WHERE task_id = ?",
+            (task["id"],),
+        ).fetchone()[0] == 1
 
 
 def test_delete_task_keeps_dataset_file_still_referenced_by_another_task(tmp_path):

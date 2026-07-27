@@ -17,6 +17,7 @@ testable offline.
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
@@ -25,7 +26,9 @@ from marvis.agent.gate_param_schema import gate_param_schema
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.gates.adapters import (
     GateReplyContext,
+    gate_editable_input_schema,
     get_gate_adapter,
+    monitoring_plain_confirm_error,
     parse_dedup_instruction as _parse_dedup_instruction,
     parse_monitoring_disposition as _parse_monitoring_disposition,
     parse_rule_selection_instruction as _parse_rule_selection_instruction,
@@ -33,8 +36,11 @@ from marvis.agent.gates.adapters import (
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.agent.renderers import render_tool_output
+from marvis.governance.errors import AuthorizationError
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
+from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 
 # A reply counts as confirmation of the current gate only when, after stripping
 # whitespace/punctuation, the *entire* remaining text is made up of short affirmative
@@ -52,6 +58,12 @@ _CONFIRM_DIRECT_COMMANDS = {
     "开始模型开发",
     "开始模型验证",
     "开始策略开发",
+    "确认采纳",
+    "确认导出",
+    "确认并导出",
+    "接受矩阵",
+    "接受并导出",
+    "导出矩阵",
 }
 # Interrogative guard: any hard question mark/particle disqualifies a reply from
 # being read as confirmation even if it also contains an affirmative token (e.g.
@@ -73,6 +85,12 @@ _STRIP_PUNCT = re.compile(
 )
 _CONFIRM_DIRECT_PREFIXES = ("好的", "好", "那", "请", "麻烦", "帮我", "先", "可以", "确认")
 _CONFIRM_DIRECT_SUFFIXES = ("一下", "下", "吧", "了")
+CONFIRMATION_SOURCE_HUMAN = "human"
+CONFIRMATION_SOURCE_AUTO = "auto"
+_CONFIRMATION_SOURCES = frozenset({
+    CONFIRMATION_SOURCE_HUMAN,
+    CONFIRMATION_SOURCE_AUTO,
+})
 
 
 def _strip_direct_confirm_affixes(value: str) -> str:
@@ -110,12 +128,49 @@ def is_confirm(text: str) -> bool:
     return bool(_CONFIRM_FULLMATCH.fullmatch(compact))
 
 
+def _has_adoption_reason_adjust(adjust_params) -> bool:
+    return isinstance(adjust_params, dict) and "adoption_reason" in adjust_params
+
+
+def _is_adoption_gate(gate: PlanStep | None) -> bool:
+    return bool(
+        gate is not None
+        and gate.tool_ref is not None
+        and gate.tool_ref.tool == "adopt_strategy"
+    )
+
+
 class DriverError(Exception):
     pass
 
 
+def _normalize_confirmation_source(value: str) -> str:
+    source = str(value or "").strip().lower()
+    if source not in _CONFIRMATION_SOURCES:
+        raise DriverError("确认来源无效，必须由平台标记为 human 或 auto。")
+    return source
+
+
+def _assert_source_may_operate_gate(gate: PlanStep | None, source: str) -> None:
+    if source != CONFIRMATION_SOURCE_AUTO or gate is None:
+        return
+    policy = getattr(gate, "policy", None)
+    if getattr(policy, "human_decision_gate", "none") == "required":
+        raise DriverError("AUTO 不得操作或确认强制人工业务决策节点，请由人工继续。")
+
+
 class PlanDriver:
-    def __init__(self, plan_repo, executor, *, planner=None, validator=None, llm_client=None):
+    def __init__(
+        self,
+        plan_repo,
+        executor,
+        *,
+        planner=None,
+        validator=None,
+        llm_client=None,
+        governance_service=None,
+        local_principal=None,
+    ):
         self._repo = plan_repo
         self._executor = executor
         self._planner = planner
@@ -123,8 +178,28 @@ class PlanDriver:
         # Optional LLM for agent-mode free-text gate instructions (adjust / replan).
         # None in manual mode — non-confirm replies then show the canned hint.
         self._llm = llm_client
+        self._governance = governance_service
+        self._principal = local_principal
+        artifact_repo = (
+            TaskArtifactRepository(self._repo.db_path)
+            if getattr(self._repo, "db_path", None) is not None
+            else None
+        )
         self._composer = PlanMessageComposer(
             load_output=self._safe_output,
+            load_task_artifact=(
+                artifact_repo.get_for_task if artifact_repo is not None else None
+            ),
+            tasks_root=(
+                Path(self._repo.db_path).parent / "tasks"
+                if artifact_repo is not None
+                else None
+            ),
+            db_path=(
+                Path(self._repo.db_path)
+                if artifact_repo is not None
+                else None
+            ),
             latest_failed_step_run_error_kind=self._latest_failed_step_run_error_kind,
         )
         self._gate_execution = GateExecutionAdapter(
@@ -180,6 +255,7 @@ class PlanDriver:
         dedup_strategies=None,
         adjust_params=None,
         expected_step_id=None,
+        confirmation_source=CONFIRMATION_SOURCE_HUMAN,
     ) -> DriverTurn:
         """Advance the plan given a user reply. Two gate kinds are handled: the
         plan-level overview gate (plan not yet started) and per-step gates.
@@ -197,6 +273,7 @@ class PlanDriver:
         ``adjust_params`` (optional): structured manual control overrides. Unlike
         free-text instructions, these do not require an LLM router.
         """
+        confirmation_source = _normalize_confirmation_source(confirmation_source)
         plan = self._repo.load_plan(plan_id)
         # Plan-level overview gate: nothing has run yet → 「开始」 begins execution.
         if plan.status == PlanStatus.VALIDATED:
@@ -217,25 +294,90 @@ class PlanDriver:
             )
         except GateControlValidationError as exc:
             raise DriverError(str(exc)) from exc
+        # Defense in depth: AUTO's decision layer normally halts before this
+        # call.  The driver still owns the final confirmation boundary so a
+        # direct/internal caller cannot bypass the canonical step policy.
+        _assert_source_may_operate_gate(gate, confirmation_source)
+        if (
+            confirmation_source == CONFIRMATION_SOURCE_AUTO
+            and gate is not None
+            and self._requires_governed_human_decision(gate)
+        ):
+            raise DriverError("AUTO 不得操作或确认强制人工业务决策节点，请由人工继续。")
         # Join dedup picker: re-confirm with the chosen strategies, then re-pause at the
         # (now conflict-free) gate — do NOT confirm-execute yet; the user confirms after.
         if dedup_strategies and gate is not None:
             self._gate_execution.apply_dedup_strategies(plan, gate, dedup_strategies)
             return self._run_and_handle(plan_id, run_seq=run_seq)
+        if _has_adoption_reason_adjust(adjust_params) and gate is not None:
+            if not is_confirm(user_text):
+                raise DriverError("提交采纳理由时必须同时确认采纳。")
+            adoption_reason = self._require_adoption_reason(
+                (adjust_params or {}).get("adoption_reason")
+            )
+            self._confirm_gate(
+                plan,
+                gate,
+                reason=adoption_reason,
+                input_updates={"adoption_reason": adoption_reason},
+            )
+            return self._run_and_handle(plan_id, run_seq=run_seq)
         if adjust_params and gate is not None:
             return self._gate_execution.apply_adjust(plan, gate, adjust_params, run_seq)
         if is_confirm(user_text):
+            monitoring_error = monitoring_plain_confirm_error(
+                plan,
+                gate,
+                self._safe_output,
+            )
+            if monitoring_error:
+                return DriverTurn(
+                    plan.id,
+                    plan.status.value,
+                    [
+                        self._composer.instruction_message(
+                            plan,
+                            gate,
+                            run_seq=run_seq,
+                            text=monitoring_error,
+                        )
+                    ],
+                )
             if gate is not None:
                 if selection is not None:
                     self._gate_execution.apply_screen_selection(plan, gate, selection)
-                self._repo.confirm_step(gate.id)
+                if _is_adoption_gate(gate):
+                    adoption_reason = self._require_adoption_reason(
+                        (gate.inputs or {}).get("adoption_reason")
+                    )
+                    self._confirm_gate(
+                        plan,
+                        gate,
+                        reason=adoption_reason,
+                        input_updates={"adoption_reason": adoption_reason},
+                    )
+                else:
+                    monitoring_updates = None
+                    if (
+                        gate.tool_ref.tool == "apply_monitoring_disposition"
+                        and not str((gate.inputs or {}).get("reason") or "").strip()
+                    ):
+                        monitoring_updates = {
+                            "reason": str(user_text or "人工确认本次监控结果")
+                        }
+                    self._confirm_gate(
+                        plan,
+                        gate,
+                        reason=str(user_text or "人工确认当前业务决策"),
+                        input_updates=monitoring_updates,
+                    )
             return self._run_and_handle(plan_id, run_seq=run_seq)
         # Manual-mode TEXT gate reply, dispatched through the per-tool gate adapter
         # registry (marvis/agent/gates/adapters.py) instead of an inline per-tool
         # if-chain. Each adapter parses its own reply shape and applies it:
         #   * confirm_join      -- 「去重 first」/「用 last 去重」  (§6 same-key conflict)
         #   * select_rule_set   -- 「选 1,3,5」/「去掉 2」/「全选」 (§3 rule-set selection)
-        #   * render_monitoring_report -- 观察 / 调阈值 / 起新版本 (S5 red-light disposition)
+        #   * apply_monitoring_disposition -- 观察 / 调阈值 / 起新版本 (S5 red-light disposition)
         # A None from parse_reply (not this adapter's shape) or apply (a no-op, e.g.
         # a dedup instruction at a gate with no pending conflicts) falls through to
         # the generic confirm / LLM-router path unchanged.
@@ -255,6 +397,7 @@ class PlanDriver:
         goal: str,
         expected_step_id=None,
         run_seq=0,
+        confirmation_source=CONFIRMATION_SOURCE_HUMAN,
     ) -> DriverTurn:
         """Structural replan driven by an already-decided goal (AGT-8).
 
@@ -270,10 +413,18 @@ class PlanDriver:
         silently dropping the replan intent (both routes never reach
         ``apply_replan`` in that case).
         """
+        confirmation_source = _normalize_confirmation_source(confirmation_source)
         plan = self._repo.load_plan(plan_id)
         gate = None if plan.status == PlanStatus.VALIDATED else self._awaiting_step(plan)
         if expected_step_id and (gate is None or gate.id != str(expected_step_id)):
             raise DriverError("当前待确认步骤已变化，请刷新后重试。")
+        _assert_source_may_operate_gate(gate, confirmation_source)
+        if (
+            confirmation_source == CONFIRMATION_SOURCE_AUTO
+            and gate is not None
+            and self._requires_governed_human_decision(gate)
+        ):
+            raise DriverError("AUTO 不得操作或确认强制人工业务决策节点，请由人工继续。")
         return self._gate_execution.apply_replan(plan, gate, goal, run_seq)
 
     def _handle_instruction(self, plan, gate, user_text, run_seq) -> DriverTurn:
@@ -287,17 +438,45 @@ class PlanDriver:
         # actually declare (name/type/current value/bounds) instead of leaving it
         # to blind-guess key names from free text — a wrong guess previously only
         # surfaced as "没有识别到可调整的参数" after apply_adjust already failed.
-        param_schema = gate_param_schema(plan, gate)
+        editable_schema = gate_editable_input_schema(
+            plan,
+            gate,
+            self._safe_output,
+        )
+        param_schema = gate_param_schema(
+            plan,
+            gate,
+            editable_input_schema=editable_schema,
+        )
         route = route_instruction(
             self._llm, gate_context=context, instruction=user_text, param_schema=param_schema
         )
         action = route["action"]
         if action == "confirm":
-            if plan.status == PlanStatus.VALIDATED:
-                self._repo.confirm_plan(plan.id)
-            elif gate is not None:
-                self._repo.confirm_step(gate.id)
-            return self._run_and_handle(plan.id, run_seq=run_seq)
+            # This branch is reached only after ``is_confirm`` rejected the
+            # user's text.  An LLM classification is therefore interpretation,
+            # not an explicit human action.  It may neither start a validated
+            # plan nor confirm any step (governed or otherwise).
+            governed_gate = (
+                gate is not None and self._requires_governed_human_decision(gate)
+            )
+            text = (
+                "当前节点必须由你明确回复「确认」；Agent 不能代替你作出强制业务决策或签发副作用授权。"
+                if governed_gate
+                else "请由你明确回复「确认」后继续；Agent 不能根据语义猜测代替你启动计划或确认步骤。"
+            )
+            return DriverTurn(
+                plan.id,
+                plan.status.value,
+                [
+                    self._composer.instruction_message(
+                        plan,
+                        gate,
+                        run_seq=run_seq,
+                        text=text,
+                    )
+                ],
+            )
         if action == "adjust" and gate is not None and gate.depends_on:
             return self._gate_execution.apply_adjust(plan, gate, route["params"], run_seq)
         if action == "replan":
@@ -323,6 +502,13 @@ class PlanDriver:
             plan.status.value,
             [self._composer.manual_adjust_placeholder_message(plan, gate, run_seq=run_seq)],
         )
+
+    @staticmethod
+    def _require_adoption_reason(value) -> str:
+        try:
+            return normalize_adoption_reason(value)
+        except AdoptionReasonError as exc:
+            raise DriverError(str(exc)) from exc
 
     # -- plan build -----------------------------------------------------------
     def build_plan(
@@ -389,16 +575,70 @@ class PlanDriver:
         candidate count off this context, so the driver stays free of it."""
         return GateReplyContext(plan=plan, gate=gate, load_output=self._safe_output)
 
-    def _apply_monitoring_disposition(self, gate: PlanStep, disposition: str) -> None:
-        """Record the parsed red-light disposition onto the report gate's own
-        `disposition` input (literal-None default in the template) so its output
-        surfaces the right next_action. Persists the input change via update_step
-        (preserving the step's AWAITING_CONFIRM status -- the apply_screen_selection
-        precedent), so the following confirm_step + run executes the report tool with
-        the chosen disposition. reset_step is deliberately NOT used here: it would
-        clear the confirmation and re-arm the gate to pause a second time."""
-        gate.inputs = {**(gate.inputs or {}), "disposition": disposition}
+    def _apply_monitoring_disposition(
+        self,
+        gate: PlanStep,
+        disposition: str,
+        *,
+        reason: str,
+    ) -> None:
+        """Bind an explicit alarm decision to the evidence-bound effect gate.
+
+        The step remains ``AWAITING_CONFIRM`` while inputs are updated. Observe
+        and new-version are immediately confirmed by the adapter; threshold
+        adjustment remains paused until a concrete patch is supplied.
+        """
+        gate.inputs = {
+            **(gate.inputs or {}),
+            "disposition": disposition,
+            "reason": reason,
+        }
         self._repo.update_step(gate)
+
+    def _confirm_gate(
+        self,
+        plan: Plan,
+        gate: PlanStep,
+        *,
+        reason: str,
+        input_updates: dict | None = None,
+    ) -> None:
+        if not self._requires_governed_human_decision(gate):
+            if input_updates:
+                self._repo.confirm_step_with_inputs(
+                    gate.id,
+                    input_updates=input_updates,
+                )
+            else:
+                self._repo.confirm_step(gate.id)
+            return
+        if self._governance is None or self._principal is None:
+            raise DriverError(
+                "当前步骤需要平台记录人工决策，但本次请求没有有效的本地身份。"
+            )
+        try:
+            self._governance.authorize_step(
+                plan_id=plan.id,
+                step_id=gate.id,
+                principal=self._principal,
+                reason=str(reason or "人工确认当前业务决策"),
+                expected_plan_revision=int(plan.replan_count),
+                input_updates=input_updates,
+            )
+        except (AuthorizationError, TypeError, ValueError) as exc:
+            raise DriverError(str(exc)) from exc
+
+    def _requires_governed_human_decision(self, gate: PlanStep) -> bool:
+        policy = getattr(gate, "policy", None)
+        if getattr(policy, "human_decision_gate", "none") == "required":
+            return True
+        resolver = getattr(self._governance, "requires_human_decision", None)
+        if not callable(resolver):
+            return False
+        try:
+            return bool(resolver(gate))
+        except (AuthorizationError, TypeError, ValueError) as exc:
+            raise DriverError(str(exc)) from exc
 
     def _latest_failed_step_run_error_kind(self, step_id: str) -> str | None:
         latest_error_kind = getattr(self._repo, "latest_failed_step_run_error_kind", None)
@@ -406,6 +646,8 @@ class PlanDriver:
             return latest_error_kind(step_id)
         return None
 __all__ = [
+    "CONFIRMATION_SOURCE_AUTO",
+    "CONFIRMATION_SOURCE_HUMAN",
     "PlanDriver",
     "DriverMessage",
     "DriverTurn",

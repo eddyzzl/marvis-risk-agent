@@ -6,7 +6,8 @@ message payloads and metadata envelopes returned after those transitions.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from marvis.agent.driver_turn import DriverMessage
@@ -17,6 +18,7 @@ from marvis.agent.gates.adapters import gate_editable_input_schema
 from marvis.agent.plan_utils import downstream_step_ids, find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStep, StepStatus
+from marvis.plugins.manifest import governance_policy_hash
 
 
 class PlanMessageComposer:
@@ -26,9 +28,30 @@ class PlanMessageComposer:
         self,
         *,
         load_output: Callable[[str], Any],
+        load_task_artifact: Callable[[str, str], Any] | None = None,
+        tasks_root: Path | str | None = None,
+        db_path: Path | str | None = None,
         latest_failed_step_run_error_kind: Callable[[str], str | None] | None = None,
     ):
         self._load_output = load_output
+        self._load_task_artifact = load_task_artifact
+        self._tasks_root = (
+            None if tasks_root is None else Path(tasks_root).absolute()
+        )
+        artifact_repository = getattr(
+            load_task_artifact,
+            "__self__",
+            None,
+        )
+        inferred_db_path = getattr(artifact_repository, "db_path", None)
+        effective_db_path = (
+            db_path if db_path is not None else inferred_db_path
+        )
+        self._db_path = (
+            None
+            if effective_db_path is None
+            else Path(effective_db_path).absolute()
+        )
         self._latest_failed_step_run_error_kind = latest_failed_step_run_error_kind
 
     def plan_overview_message(self, plan: Plan) -> DriverMessage:
@@ -73,6 +96,14 @@ class PlanMessageComposer:
         # halt a bare AUTO confirm on them.
         if gate is not None and gate.tool_ref is not None:
             meta["gate_source_tool"] = gate.tool_ref.tool
+        if gate is not None:
+            # Phase 0B: AUTO and the frontend consume the same immutable policy
+            # snapshot the validator accepted for this plan step.  Tool names and
+            # free-form risk text remain useful context, but are no longer the
+            # authority for whether a human must act.
+            meta["human_decision_gate"] = gate.policy.human_decision_gate
+            meta["effect_authorization"] = gate.policy.effect_authorization
+            meta["policy_hash"] = governance_policy_hash(gate.policy)
         if rendered.output_refs:
             meta["output_refs"] = rendered.output_refs
         if rendered.screen is not None:
@@ -114,7 +145,20 @@ class PlanMessageComposer:
         if terminal is not None:
             output = self._safe_output(terminal.id)
             if output is not None:
-                text, tables = render_tool_output(terminal.tool_ref.tool, output)
+                text, tables = render_tool_output(
+                    terminal.tool_ref.tool,
+                    output,
+                    trusted_task_id=plan.task_id,
+                    trusted_inputs=self._trusted_terminal_inputs(
+                        plan,
+                        terminal,
+                    ),
+                    trusted_artifacts=self._trusted_terminal_artifacts(
+                        plan.task_id,
+                        terminal,
+                        output,
+                    ),
+                )
                 if text:
                     parts.append(text)
         meta = {"plan_id": plan.id, "run_seq": run_seq, "tables": tables}
@@ -194,11 +238,210 @@ class PlanMessageComposer:
             return (output if isinstance(output, dict) else None), dep
         return None, None
 
+    def _trusted_terminal_inputs(
+        self,
+        plan: Plan,
+        step: PlanStep,
+    ) -> Mapping[str, Any] | None:
+        """Resolve only PoolStability's exact direct ImpactCube references."""
+
+        if step.tool_ref.tool != "measure_strategy_pool_stability":
+            return step.inputs
+        if not isinstance(step.inputs, Mapping):
+            return None
+        raw = dict(step.inputs)
+        if not any(
+            isinstance(value, str) and value.startswith("$ref:")
+            for value in raw.values()
+        ):
+            return raw
+        if len(step.depends_on) != 1:
+            return None
+        dependency = find_step(plan, step.depends_on[0])
+        if (
+            dependency is None
+            or dependency.status != StepStatus.DONE
+            or dependency.tool_ref.tool != "measure_strategy_impact_cube"
+            or not dependency.output_ref
+        ):
+            return None
+        expected_paths = {
+            "artifact_id": ("artifact", "artifact_id"),
+            "expected_artifact_content_hash": (
+                "artifact",
+                "content_hash",
+            ),
+            "expected_cube_id": ("cube_id",),
+            "expected_cube_content_hash": ("content_hash",),
+        }
+        if set(raw) != set(expected_paths):
+            return None
+        output = self._safe_output(dependency.id)
+        if not isinstance(output, Mapping):
+            return None
+        resolved: dict[str, str] = {}
+        for field, path in expected_paths.items():
+            expected_ref = (
+                f"$ref:{dependency.id}.output." + ".".join(path)
+            )
+            if raw[field] != expected_ref:
+                return None
+            value: object = output
+            for component in path:
+                if not isinstance(value, Mapping) or component not in value:
+                    return None
+                value = value[component]
+            if not isinstance(value, str) or not value:
+                return None
+            resolved[field] = value
+        return resolved
+
     def _safe_output(self, step_id: str):
         try:
             return self._load_output(step_id)
         except KeyError:
             return None
+
+    def _trusted_delivery_artifacts(
+        self,
+        task_id: str,
+        step: PlanStep,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if (
+            step.tool_ref.tool != "export_strategy_delivery"
+            or self._load_task_artifact is None
+            or not isinstance(output, Mapping)
+        ):
+            return None
+        artifacts = output.get("artifacts")
+        names = ("python", "sql", "strategy_json", "equivalence_json")
+        if not isinstance(artifacts, list) or len(artifacts) != len(names):
+            return None
+        trusted: dict[str, dict] = {}
+        for name, artifact in zip(names, artifacts, strict=True):
+            if not isinstance(artifact, Mapping):
+                return None
+            artifact_id = artifact.get("artifact_id")
+            if not isinstance(artifact_id, str) or not artifact_id:
+                return None
+            try:
+                record = self._load_task_artifact(task_id, artifact_id)
+            except (KeyError, TypeError, ValueError):
+                return None
+            if not isinstance(record, Mapping):
+                return None
+            trusted[name] = dict(record)
+        return trusted
+
+    def _trusted_terminal_artifacts(
+        self,
+        task_id: str,
+        step: PlanStep,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if step.tool_ref.tool == "measure_candidate_monthly_stability":
+            return self._trusted_candidate_stability_artifact(
+                task_id,
+                output,
+            )
+        if step.tool_ref.tool == "measure_strategy_pool_validation":
+            return self._trusted_pool_validation_artifact(
+                task_id,
+                output,
+            )
+        if step.tool_ref.tool == "measure_strategy_pool_stability":
+            return self._trusted_pool_stability_artifact(
+                task_id,
+                output,
+            )
+        return self._trusted_delivery_artifacts(task_id, step, output)
+
+    def _trusted_pool_stability_artifact(
+        self,
+        task_id: str,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if (
+            self._load_task_artifact is None
+            or self._tasks_root is None
+            or self._db_path is None
+            or not isinstance(output, Mapping)
+        ):
+            return None
+        artifact = output.get("artifact")
+        if not isinstance(artifact, Mapping):
+            return None
+        artifact_id = artifact.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            return None
+        try:
+            record = self._load_task_artifact(task_id, artifact_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not isinstance(record, Mapping):
+            return None
+        return {
+            "pool_stability": {
+                "record": dict(record),
+                "tasks_root": str(self._tasks_root),
+                "db_path": str(self._db_path),
+            }
+        }
+
+    def _trusted_pool_validation_artifact(
+        self,
+        task_id: str,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if (
+            self._load_task_artifact is None
+            or self._tasks_root is None
+            or not isinstance(output, Mapping)
+        ):
+            return None
+        artifact = output.get("artifact")
+        if not isinstance(artifact, Mapping):
+            return None
+        artifact_id = artifact.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            return None
+        try:
+            record = self._load_task_artifact(task_id, artifact_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not isinstance(record, Mapping):
+            return None
+        return {
+            "pool_validation": {
+                "record": dict(record),
+                "tasks_root": str(self._tasks_root),
+            }
+        }
+
+    def _trusted_candidate_stability_artifact(
+        self,
+        task_id: str,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if self._load_task_artifact is None or not isinstance(output, Mapping):
+            return None
+        artifacts = output.get("artifacts")
+        if not isinstance(artifacts, list) or len(artifacts) != 1:
+            return None
+        artifact = artifacts[0]
+        if not isinstance(artifact, Mapping):
+            return None
+        artifact_id = artifact.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            return None
+        try:
+            record = self._load_task_artifact(task_id, artifact_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not isinstance(record, Mapping):
+            return None
+        return {"stability": dict(record)}
 
 
 __all__ = ["PlanMessageComposer"]

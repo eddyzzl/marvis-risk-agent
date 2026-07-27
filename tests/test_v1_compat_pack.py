@@ -489,7 +489,14 @@ def test_model_validation_workflow_executes_v1_compat_until_report_confirmation(
     assert [step["status"] for step in waiting["steps"][:3]] == ["done", "done", "done"]
     assert waiting["steps"][-1]["status"] == "awaiting_confirm"
 
-    resumed = client.post(f"/api/plans/{plan_id}/steps/{report_step_id}/confirm")
+    resumed = client.post(
+        f"/api/plans/{plan_id}/steps/{report_step_id}/decisions",
+        json={
+            "decision": "approve",
+            "reason": "Reviewer approved rendering the validation reports",
+            "expected_plan_revision": waiting["replan_count"],
+        },
+    )
     completed = client.get(f"/api/plans/{plan_id}").json()["plan"]
 
     assert resumed.status_code == 202, resumed.text

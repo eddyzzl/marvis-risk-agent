@@ -67,6 +67,7 @@ markers = [
   "slow: real training/real subprocess/JVM-warm-up tests that take more than ~5s",
   "e2e: tests that start a real service (FastAPI app, browser, etc.)",
   "llm: LLM evaluation/eval-set tests",
+  "pmml_runtime: tests that execute the real pypmml/PMML4S JVM runtime",
 ]
 
 [tool.setuptools.packages.find]

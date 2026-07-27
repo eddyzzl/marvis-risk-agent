@@ -21,11 +21,18 @@ from marvis.agent.plan_driver import (
 )
 from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.db import PlanRepository, init_db
+from marvis.governance.contracts import AuthorizationBinding
+from marvis.governance.repository import GovernanceRepository, canonical_payload_hash
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.reviewer import Reviewer
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.manifest import (
+    EffectTargetPolicy,
+    GovernancePolicy,
+    ToolRef,
+    governance_policy_hash,
+)
 from marvis.plugins.runner import ToolResult
 
 
@@ -45,7 +52,7 @@ class FakeRunner:
         self.calls = []
         self._tools = FakeTools()
 
-    def invoke(self, ref, inputs, *, task_id):
+    def invoke(self, ref, inputs, *, task_id, execution_context=None):
         self.calls.append((ref.tool, inputs))
         return ToolResult(ok=True, output=self.outputs.pop(0), error=None, error_kind=None, duration_ms=1)
 
@@ -55,7 +62,7 @@ class FailingRunner:
         self.calls = []
         self._tools = FakeTools()
 
-    def invoke(self, ref, inputs, *, task_id):
+    def invoke(self, ref, inputs, *, task_id, execution_context=None):
         self.calls.append((ref.tool, inputs))
         return ToolResult(
             ok=False,
@@ -182,6 +189,76 @@ def _gated_join_dedup_plan() -> Plan:
     return plan
 
 
+def _gated_strategy_adoption_plan() -> Plan:
+    backtest = _dataclass_replace(
+        _step("backtest", index=0, tool="backtest_strategy"),
+        plan_id="plan-adopt",
+        tool_ref=ToolRef("strategy", "backtest_strategy"),
+    )
+    adopt = _dataclass_replace(
+        _step(
+            "adopt",
+            index=1,
+            tool="adopt_strategy",
+            depends_on=["backtest"],
+            needs_confirmation=True,
+        ),
+        plan_id="plan-adopt",
+        tool_ref=ToolRef("strategy", "adopt_strategy"),
+        inputs={
+            "strategy_id": "strategy-1",
+            "backtest_id": "backtest-1",
+            "adoption_reason": "",
+        },
+    )
+    return Plan(
+        id="plan-adopt",
+        task_id="task-adopt",
+        goal="strategy adoption",
+        source="template",
+        template_id="strategy_development",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[backtest, adopt],
+    )
+
+
+def _adoption_driver(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_strategy_adoption_plan())
+    runner = FakeRunner([
+        {
+            "backtest_id": "backtest-1",
+            "strategy_id": "strategy-1",
+            "approval_rate": 0.7,
+            "approved_bad_rate": 0.04,
+            "rejected_bad_rate": 0.22,
+            "expected_profit": 2300.0,
+            "swap_in_count": 5,
+            "swap_out_count": 8,
+            "by_segment": [],
+        },
+        {
+            "strategy_id": "strategy-1",
+            "version": 1,
+            "status": "adopted",
+            "retired_strategy_ids": [],
+            "artifacts": [],
+        },
+    ])
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+    return PlanDriver(repo, executor), repo, runner
+
+
 def _driver(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -240,6 +317,178 @@ def test_driver_resume_confirm_runs_to_done(tmp_path):
     loaded = repo.load_plan("plan-1")
     assert loaded.status == PlanStatus.DONE
     assert all(s.status == StepStatus.DONE for s in loaded.steps)
+
+
+def test_driver_auto_source_cannot_confirm_canonical_human_gate(tmp_path):
+    driver, repo = _driver(tmp_path)
+    plan = repo.load_plan("plan-1")
+    gate = next(step for step in plan.steps if step.id == "tune")
+    gate.policy = GovernancePolicy(human_decision_gate="required")
+    repo.update_step(gate)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    with pytest.raises(DriverError, match="AUTO.*强制人工"):
+        driver.resume(
+            plan_id="plan-1",
+            user_text="确认",
+            run_seq=1,
+            expected_step_id="tune",
+            confirmation_source="auto",
+        )
+
+    loaded = repo.load_plan("plan-1")
+    assert loaded.status == PlanStatus.AWAITING_CONFIRM
+    assert next(step for step in loaded.steps if step.id == "tune").status == StepStatus.AWAITING_CONFIRM
+    assert repo.is_step_confirmed("tune") is False
+
+
+def test_driver_auto_uses_live_governance_policy_when_step_snapshot_is_stale(tmp_path):
+    driver, repo = _driver(tmp_path)
+
+    class _LiveGovernance:
+        @staticmethod
+        def requires_human_decision(_gate):
+            return True
+
+    driver._governance = _LiveGovernance()
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    with pytest.raises(DriverError, match="AUTO.*强制人工"):
+        driver.resume(
+            plan_id="plan-1",
+            user_text="确认",
+            run_seq=1,
+            expected_step_id="tune",
+            confirmation_source="auto",
+        )
+
+    assert repo.is_step_confirmed("tune") is False
+
+
+def test_driver_human_source_remains_compatible_on_canonical_human_gate(tmp_path):
+    driver, repo = _driver(tmp_path)
+    decisions = []
+    governance_repo = GovernanceRepository(repo.db_path)
+    principal = governance_repo.create_local_principal()
+
+    class _Governance:
+        binding = None
+
+        def authorize_step(self, **kwargs):
+            decisions.append(kwargs)
+            plan = repo.load_plan(kwargs["plan_id"])
+            step = next(item for item in plan.steps if item.id == kwargs["step_id"])
+            self.binding = AuthorizationBinding(
+                task_id=plan.task_id,
+                plan_id=plan.id,
+                plan_revision=plan.replan_count,
+                step_id=step.id,
+                tool_ref=step.tool_ref.label(),
+                manifest_hash="sha256:test-manifest",
+                policy_hash=governance_policy_hash(step.policy),
+                input_hash=canonical_payload_hash(step.inputs),
+                evidence_hash=canonical_payload_hash([]),
+                effect_target={},
+            )
+            return governance_repo.authorize_step(
+                self.binding,
+                principal=kwargs["principal"],
+                reason=kwargs["reason"],
+                issue_effect_approval=False,
+            )
+
+        def execution_context_for(self, *, plan, step, inputs):
+            assert self.binding is not None
+            assert canonical_payload_hash(inputs) == self.binding.input_hash
+            return governance_repo.execution_context_for_binding(self.binding)
+
+    governance = _Governance()
+    driver._governance = governance
+    driver._executor._authorizer = governance
+    driver._principal = principal
+    plan = repo.load_plan("plan-1")
+    gate = next(step for step in plan.steps if step.id == "tune")
+    gate.policy = GovernancePolicy(human_decision_gate="required")
+    repo.update_step(gate)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="确认",
+        run_seq=1,
+        expected_step_id="tune",
+        confirmation_source="human",
+    )
+
+    assert turn.status == PlanStatus.DONE.value
+    assert repo.is_step_confirmed("tune") is True
+    assert decisions[0]["reason"] == "确认"
+    assert decisions[0]["expected_plan_revision"] == 0
+
+
+def test_llm_instruction_router_cannot_confirm_canonical_human_gate(tmp_path):
+    driver, repo = _driver(tmp_path)
+    authorizations = []
+
+    class _Governance:
+        @staticmethod
+        def requires_human_decision(_gate):
+            return True
+
+        @staticmethod
+        def authorize_step(**kwargs):
+            authorizations.append(kwargs)
+
+    driver._governance = _Governance()
+    driver._principal = object()
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"","reason":"模型认为可以继续"}'
+    )
+    plan = repo.load_plan("plan-1")
+    gate = next(step for step in plan.steps if step.id == "tune")
+    gate.policy = GovernancePolicy(human_decision_gate="required")
+    repo.update_step(gate)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    # The question is deliberately not an explicit confirmation.  Even when
+    # the instruction-router LLM labels it "confirm", the governed gate stays
+    # open and no server-attributed decision is written.
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="这样可以吗？",
+        run_seq=1,
+        expected_step_id="tune",
+        confirmation_source="human",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert repo.is_step_confirmed("tune") is False
+    assert authorizations == []
+    assert "明确回复「确认」" in turn.messages[-1].content
+
+
+def test_llm_instruction_router_cannot_start_plan_overview(tmp_path):
+    driver, repo = _driver(tmp_path)
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"","reason":"模型认为可以开始"}'
+    )
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="这样可以吗？",
+        run_seq=0,
+        confirmation_source="human",
+    )
+
+    plan = repo.load_plan("plan-1")
+    assert turn.status == PlanStatus.VALIDATED.value
+    assert plan.status is PlanStatus.VALIDATED
+    assert all(step.status is StepStatus.PENDING for step in plan.steps)
+    assert "明确回复「确认」" in turn.messages[-1].content
 
 
 def test_driver_failed_message_carries_retry_contract(tmp_path):
@@ -1356,6 +1605,43 @@ def test_plan_overview_message_carries_gate_envelope():
     assert msg.metadata["gate_envelope"]["allowed_actions"] == ["confirm", "replan", "clarify", "halt"]
 
 
+def test_gate_message_carries_exact_step_governance_policy_and_hash():
+    policy = GovernancePolicy(
+        human_decision_gate="required",
+        effect_authorization="required",
+        effect_target=EffectTargetPolicy(
+            kind="strategy",
+            id_input="strategy_id",
+            expected_statuses=("draft",),
+            result_status="adopted",
+        ),
+    )
+    step = _step(
+        "adopt",
+        index=0,
+        tool="adopt_strategy",
+        needs_confirmation=True,
+    )
+    step.policy = policy
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="adopt strategy",
+        source="template",
+        template_id="strategy_development",
+        autonomy_level=1,
+        steps=[step],
+    )
+    composer = PlanMessageComposer(load_output=lambda _step_id: None)
+
+    msg = composer.gate_message(plan, step, run_seq=3)
+
+    envelope = msg.metadata["gate_envelope"]
+    assert envelope["human_decision_gate"] == "required"
+    assert envelope["effect_authorization"] == "required"
+    assert envelope["policy_hash"] == governance_policy_hash(policy)
+
+
 def test_gate_message_attaches_deterministic_select_experiment_red_flags():
     """AGT-9: a gate whose dependencies include tune_hyperparameters/train_models
     outputs gets meta['red_flags'] computed deterministically (train-test
@@ -1510,6 +1796,134 @@ def test_resume_plain_confirm_rejects_stale_gate_token_when_supplied(tmp_path):
 
     with pytest.raises(DriverError, match="待确认步骤已变化"):
         driver.resume(plan_id="plan-1", user_text="确认", run_seq=1, expected_step_id="old-gate")
+
+
+def test_adoption_gate_exposes_required_reason_schema_and_bare_confirm_fails_closed(tmp_path):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+
+    paused = driver._run_and_handle("plan-adopt", run_seq=0)
+
+    assert paused.status == PlanStatus.AWAITING_CONFIRM.value
+    schema = paused.messages[-1].metadata["editable_input_schema"]
+    assert schema["required"] == ["adoption_reason"]
+    assert schema["properties"]["adoption_reason"]["minLength"] == 2
+
+    with pytest.raises(DriverError, match="采纳理由"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="确认",
+            run_seq=1,
+            expected_step_id="adopt",
+        )
+
+    loaded = repo.load_plan("plan-adopt")
+    adopt = next(step for step in loaded.steps if step.id == "adopt")
+    assert loaded.status == PlanStatus.AWAITING_CONFIRM
+    assert adopt.status == StepStatus.AWAITING_CONFIRM
+    assert repo.is_step_confirmed("adopt") is False
+    assert [call[0] for call in runner.calls] == ["backtest_strategy"]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["", "   ", "x", "（待采纳时确认）", "TODO later", "pending approval"],
+)
+def test_adoption_reason_control_rejects_invalid_value_without_confirming(tmp_path, reason):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+    driver._run_and_handle("plan-adopt", run_seq=0)
+
+    with pytest.raises(DriverError, match="采纳理由"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="确认",
+            run_seq=1,
+            adjust_params={"adoption_reason": reason},
+            expected_step_id="adopt",
+        )
+
+    assert repo.load_plan("plan-adopt").status == PlanStatus.AWAITING_CONFIRM
+    assert repo.is_step_confirmed("adopt") is False
+    assert [call[0] for call in runner.calls] == ["backtest_strategy"]
+
+
+def test_adoption_reason_control_requires_current_gate_token_and_adopt_gate(tmp_path):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+    driver._run_and_handle("plan-adopt", run_seq=0)
+
+    with pytest.raises(DriverError, match="缺少待确认步骤校验"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="确认",
+            run_seq=1,
+            adjust_params={"adoption_reason": "委员会批准"},
+        )
+    with pytest.raises(DriverError, match="待确认步骤已变化"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="确认",
+            run_seq=1,
+            adjust_params={"adoption_reason": "委员会批准"},
+            expected_step_id="old-adopt",
+        )
+    assert repo.is_step_confirmed("adopt") is False
+    assert [call[0] for call in runner.calls] == ["backtest_strategy"]
+
+    other_path = tmp_path / "other"
+    other_path.mkdir()
+    other_driver, other_repo = _driver(other_path)
+    other_repo.confirm_plan("plan-1")
+    other_driver._run_and_handle("plan-1", run_seq=0)
+    with pytest.raises(DriverError, match="采纳策略确认步骤"):
+        other_driver.resume(
+            plan_id="plan-1",
+            user_text="确认",
+            run_seq=1,
+            adjust_params={"adoption_reason": "委员会批准"},
+            expected_step_id="tune",
+        )
+
+
+def test_adoption_reason_control_atomically_updates_confirms_and_runs(tmp_path):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+    driver._run_and_handle("plan-adopt", run_seq=0)
+
+    turn = driver.resume(
+        plan_id="plan-adopt",
+        user_text="确认采纳",
+        run_seq=1,
+        adjust_params={"adoption_reason": "  委员会批准 Q3 上线  "},
+        expected_step_id="adopt",
+    )
+
+    assert turn.status == PlanStatus.DONE.value
+    assert [call[0] for call in runner.calls] == ["backtest_strategy", "adopt_strategy"]
+    assert runner.calls[-1][1]["adoption_reason"] == "委员会批准 Q3 上线"
+    adopt = next(step for step in repo.load_plan("plan-adopt").steps if step.id == "adopt")
+    assert adopt.status == StepStatus.DONE
+    assert adopt.inputs["adoption_reason"] == "委员会批准 Q3 上线"
+    assert repo.is_step_confirmed("adopt") is True
+
+
+def test_adoption_reason_control_requires_explicit_confirm_intent(tmp_path):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+    driver._run_and_handle("plan-adopt", run_seq=0)
+
+    with pytest.raises(DriverError, match="同时确认采纳"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="先记录理由",
+            run_seq=1,
+            adjust_params={"adoption_reason": "委员会批准"},
+            expected_step_id="adopt",
+        )
+
+    assert repo.is_step_confirmed("adopt") is False
+    assert [call[0] for call in runner.calls] == ["backtest_strategy"]
 
 
 def test_resume_dedup_control_rejects_stale_or_missing_gate_token(tmp_path):
@@ -2079,6 +2493,10 @@ def test_is_confirm_accepts_task_start_shortcuts():
     assert is_confirm("开始建模")
     assert is_confirm("开始模型开发")
     assert is_confirm("开始策略开发")
+    assert is_confirm("确认采纳")
+    assert is_confirm("确认导出")
+    assert is_confirm("接受并导出")
+    assert is_confirm("导出矩阵")
     assert not is_confirm("不要开始建模")
     assert not is_confirm("开始建模吗？")
 

@@ -46,9 +46,14 @@ class ErrorKind:
     SCORE_DIRECTION_CONFLICT = "score_direction_conflict"
     PERFORMANCE_FRAME_INVALID = "performance_frame_invalid"
     DATASET_TOO_LARGE = "dataset_too_large"
+    CSV_PARSE = "csv_parse"
 
     # --- Pack typed errors (marvis/packs/*/errors.py to_detail kinds) ---
     STRATEGY_NOT_ADOPTED = "strategy_not_adopted"
+    LEGACY_POOL_DRAFT_NEEDS_REBUILD = "legacy_pool_draft_needs_rebuild"
+    STRATEGY_SAMPLE_DESIGN_V2_NATIVE_SOURCE_UNSUPPORTED = (
+        "strategy_sample_design_v2_native_source_unsupported"
+    )
     MISSING_BASELINE = "missing_baseline"
     REPORT_SCORE_MISSING = "report_score_missing"
 

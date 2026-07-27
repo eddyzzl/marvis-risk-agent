@@ -139,6 +139,7 @@ def _seed_experiment(tmp_path: Path, *, sample_weight_col: str = "", preprocessi
     return settings, store, source_task, dataset, stored_artifact
 
 
+@pytest.mark.pmml_runtime
 def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
     settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
 
@@ -186,6 +187,7 @@ def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
     assert audit["detail"]["artifact_id"] == artifact.id
 
 
+@pytest.mark.pmml_runtime
 def test_scoring_notebook_replays_preprocessing_chain_when_artifact_has_one(tmp_path):
     """PREP-2 regression (c): when the trained artifact carries a preprocessing_steps
     chain, the generated handoff scoring notebook must contain a replay step (calling
@@ -217,6 +219,7 @@ def test_scoring_notebook_replays_preprocessing_chain_when_artifact_has_one(tmp_
     assert '"kind": "impute"' in source or "'kind': 'impute'" in source or "kind\": \"impute" in source
 
 
+@pytest.mark.pmml_runtime
 def test_scoring_notebook_replays_woe_preprocessing_step_with_infinite_edges(tmp_path):
     """W3a tail regression: a 'woe' preprocessing step's edges legitimately contain
     +-inf (the platform's open-interval bin convention) -- persist_model_meta's
@@ -254,6 +257,7 @@ def test_scoring_notebook_replays_woe_preprocessing_step_with_infinite_edges(tmp
     assert '"kind": "woe"' in source or "'kind': 'woe'" in source or "kind\": \"woe" in source
 
 
+@pytest.mark.pmml_runtime
 def test_scoring_notebook_replay_is_a_no_op_without_a_preprocessing_chain(tmp_path):
     """PREP-2 regression: an artifact with no preprocessing_steps still generates a
     notebook that calls apply_preprocessing_steps (uniform code path), but with an
@@ -275,6 +279,7 @@ def test_scoring_notebook_replay_is_a_no_op_without_a_preprocessing_chain(tmp_pa
     assert "RMC_PREPROCESSING_STEPS = json.loads('[]')" in source
 
 
+@pytest.mark.pmml_runtime
 def test_handoff_to_validation_uses_connection_scoped_task_write(tmp_path, monkeypatch):
     settings, store, _source_task, dataset, artifact = _seed_experiment(tmp_path)
 
@@ -298,6 +303,7 @@ def test_handoff_to_validation_uses_connection_scoped_task_write(tmp_path, monke
     assert store.get(artifact.experiment_id).status == "handed_off"
 
 
+@pytest.mark.pmml_runtime
 def test_handoff_to_validation_rolls_back_task_status_and_materials_when_audit_fails(
     tmp_path,
     monkeypatch,
@@ -337,6 +343,7 @@ def test_handoff_to_validation_rolls_back_task_status_and_materials_when_audit_f
     ).exists()
 
 
+@pytest.mark.pmml_runtime
 def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_path):
     settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
 
@@ -393,6 +400,7 @@ def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_pat
     assert store.get(artifact.experiment_id).status == "trained"
 
 
+@pytest.mark.pmml_runtime
 def test_create_challenger_backtest_uses_connection_scoped_task_write(tmp_path, monkeypatch):
     settings, store, _source_task, dataset, artifact = _seed_experiment(tmp_path)
 
@@ -418,6 +426,7 @@ def test_create_challenger_backtest_uses_connection_scoped_task_write(tmp_path, 
     assert Path(result["package_path"]).exists()
 
 
+@pytest.mark.pmml_runtime
 def test_create_challenger_backtest_task_rolls_back_materials_when_audit_fails(
     tmp_path,
     monkeypatch,
@@ -456,6 +465,7 @@ def test_create_challenger_backtest_task_rolls_back_materials_when_audit_fails(
     ).exists()
 
 
+@pytest.mark.pmml_runtime
 def test_export_pmml_meta_failure_does_not_persist_success_state(tmp_path, monkeypatch):
     settings, _store, source_task, _dataset, artifact = _seed_experiment(tmp_path)
 
@@ -480,6 +490,7 @@ def test_export_pmml_meta_failure_does_not_persist_success_state(tmp_path, monke
     assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
 
 
+@pytest.mark.pmml_runtime
 def test_post_training_action_writes_sample_weight_governance_artifacts(tmp_path):
     settings, _store, source_task, dataset, artifact = _seed_experiment(
         tmp_path,
@@ -784,6 +795,7 @@ def test_post_training_action_skips_malformed_scorecard_without_pmml_failure(tmp
     assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
 
 
+@pytest.mark.pmml_runtime
 def test_mark_validated_from_validation_task_updates_completed_experiment(tmp_path):
     settings, store, _, dataset, artifact = _seed_experiment(tmp_path)
     validation_task_id = handoff_to_validation(

@@ -55,6 +55,9 @@ def test_driver_report_download_button_lives_in_middle_panel_with_handler():
     assert 'data-driver-report-download="1"' not in substep_body
     assert "plan-step-ready" in substep_body
     assert 'data-plan-report-locate="1"' in substep_body
+    assert "build_report_bundle_v2" in substep_body
+    assert 'data-plan-report-locate="strategy"' in substep_body
+    assert 'openDriverActionCard("strategy-artifacts")' not in substep_body
 
     # the handler navigates to the driver-report download endpoint
     assert "function handleDriverReportDownloadClick" in app_js

@@ -12,9 +12,9 @@ from marvis.plugins.manifest import ToolRef
 MONITORING_RUN = WorkflowTemplate(
     # S1b/DOM-3: closes the monitoring-policy execution gap -- score a fresh
     # dataset against a trained experiment's artifact, then run PSI/CSI/KS/AUC
-    # checks against the training-time baseline snapshot, ending in an alert
-    # confirmation gate whose copy names any red/amber flags and the suggested
-    # action (see marvis.agent.renderers._render_monitor_run).
+    # checks against the training-time baseline snapshot. The result remains an
+    # evidence-bearing decision point, but an ordinary monitoring run has no
+    # side effect that warrants a local confirmation gate.
     id="monitoring_run",
     title="模型监控运行",
     goal_patterns=("模型监控", "监控运行", "monitoring run", "model monitoring"),
@@ -53,9 +53,6 @@ MONITORING_RUN = WorkflowTemplate(
                 PostCheck("nonempty", {"field": "overall_level"}),
                 PostCheck("nonempty", {"field": "checks"}),
             ),
-            # 告警确认门:门文案（渲染自 monitor_run 输出）列出红/黄旗名目与建议动作，
-            # 需人工确认后才算本次监控运行收口（S-8 红旗 checklist 精神的监控侧落地）。
-            needs_confirmation=True,
             decision_point=True,
         ),
     ),
@@ -66,13 +63,15 @@ MONITORING_RUN = WorkflowTemplate(
 
 STRATEGY_MONITORING = WorkflowTemplate(
     # S5: strategy monitoring closure. Runs one monitoring pass off an adopted
-    # strategy's monitoring plan (model PSI/CSI via the monitor_run kernel when
+    # strategy's immutable monitoring plan (model PSI/CSI via the monitor_run kernel when
     # model-backed, plus strategy-facing approval/bad-rate drift vs the adoption
     # baseline), pausing at an alarm confirmation gate whose copy names the
-    # red/amber flags. On a red verdict the gate offers three dispositions
-    # (维持并观察 / 调阈值重跑 / 起新版本策略); the driver parses the reply and, for
-    # 起新版本, surfaces a next_action pointing at STRATEGY_DEVELOPMENT (it never
-    # auto-creates a task). The second step renders a monitoring report.
+    # red/amber flags. The governed disposition step binds the exact immutable
+    # plan/run receipt the user reviewed. On a red verdict it offers three real
+    # dispositions (维持并观察 / 调阈值重跑 / 起新版本策略): observe records an
+    # immutable decision, threshold adjustment appends a plan revision and reruns,
+    # and new-version creates a fresh draft strategy task. The final step renders
+    # the resulting receipt; it no longer substitutes a suggestion for execution.
     id="strategy_monitoring",
     title="策略监控",
     goal_patterns=("策略监控", "跑监控", "monitoring run 策略", "strategy monitoring"),
@@ -96,31 +95,50 @@ STRATEGY_MONITORING = WorkflowTemplate(
             post_checks=(
                 PostCheck("nonempty", {"field": "overall_level"}),
                 PostCheck("nonempty", {"field": "checks"}),
+                PostCheck("nonempty", {"field": "monitoring_plan_id"}),
+                PostCheck("nonempty", {"field": "monitoring_run_id"}),
             ),
+        ),
+        StepTemplate(
+            title="处置监控结果",
+            tool_ref=ToolRef("strategy", "apply_monitoring_disposition"),
+            inputs_template={
+                "strategy_id": "{slot:strategy_id}",
+                "monitoring_run_id": "$ref:执行策略监控.output.monitoring_run_id",
+                "expected_plan_id": "$ref:执行策略监控.output.monitoring_plan_id",
+                "expected_plan_revision": "$ref:执行策略监控.output.monitoring_plan_revision",
+                "expected_plan_hash": "$ref:执行策略监控.output.monitoring_plan_hash",
+                # Literal None defaults are filled only through the governed gate.
+                # A red run may never turn bare "确认" into implicit observe.
+                "disposition": None,
+                "reason": None,
+                "threshold_patch": None,
+            },
+            depends_on_titles=("执行策略监控",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "status"}),
+                PostCheck("nonempty", {"field": "resolved_monitoring_run_id"}),
+            ),
+            # 告警确认门：文案渲染自 run_strategy_monitoring 的证据。红灯必须
+            # 明确三选一；绿/黄灯允许确认知悉。该门执行真实处置，不只是生成
+            # next_action 提示。
+            needs_confirmation=True,
+            decision_point=True,
         ),
         StepTemplate(
             title="生成监控报告",
             tool_ref=ToolRef("strategy", "render_monitoring_report"),
             inputs_template={
                 "strategy_id": "{slot:strategy_id}",
-                "overall_level": "$ref:执行策略监控.output.overall_level",
-                "checks": "$ref:执行策略监控.output.checks",
-                # Literal None default: the red-light gate's parsed disposition
-                # (observe/adjust_threshold/new_version) is written onto this gate
-                # step's own `disposition` input through the reset_step channel the
-                # driver uses at this gate (the band_edges/selection precedent), so
-                # the report surfaces next_action. None -> no disposition chosen
-                # (green/amber runs skip the checklist).
-                "disposition": None,
+                "source_monitoring_run_id": (
+                    "$ref:处置监控结果.output.source_monitoring_run_id"
+                ),
             },
-            depends_on_titles=("执行策略监控",),
-            post_checks=(PostCheck("nonempty", {"field": "report_path"}),),
-            # 告警确认门:门文案(渲染自其依赖 run_strategy_monitoring 的输出,见
-            # renderers._render_run_strategy_monitoring)分级列出红/黄旗;red 时列出
-            # 「维持并观察 / 调阈值重跑 / 起新版本策略」三选项处置建议,门回复解析
-            # 三关键词。需人工确认才算本次监控收口(执行到报告落盘)。
-            needs_confirmation=True,
-            decision_point=True,
+            depends_on_titles=("处置监控结果",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "report_path"}),
+                PostCheck("nonempty", {"field": "artifact_id"}),
+            ),
         ),
     ),
     default_autonomy=1,

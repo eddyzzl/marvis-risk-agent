@@ -20,6 +20,8 @@ default; both accept an optional balance-weighted transition ratio.
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype
 
@@ -51,6 +53,10 @@ def roll_rate_matrix(
     state_order = tuple(str(state) for state in states)
     if not state_order:
         raise ValueError("states must not be empty")
+    if any(not state.strip() for state in state_order):
+        raise ValueError("states must not contain blank values")
+    if len(set(state_order)) != len(state_order):
+        raise ValueError("states must not contain duplicates")
     required = [id_col, time_col, status_col]
     if balance_col:
         required.append(balance_col)
@@ -88,22 +94,55 @@ def _adjacent_pairs(
     balance_col: str | None = None,
 ) -> tuple[pd.DataFrame, tuple[dict, ...]]:
     columns = [id_col, time_col, status_col] + ([balance_col] if balance_col else [])
-    sorted_frame = df[columns].dropna(subset=[id_col, time_col, status_col]).copy()
+    selected = df[columns].copy()
+    required_null_mask = selected[[id_col, time_col, status_col]].isna().any(axis=1)
+    dropped_null_rows = int(required_null_mask.sum())
+    sorted_frame = selected.loc[~required_null_mask].copy()
     sorted_frame["_marvis_time_order"] = _parse_time_order(sorted_frame[time_col])
+    duplicate_mask = sorted_frame.duplicated(
+        subset=[id_col, "_marvis_time_order"], keep=False
+    )
+    if duplicate_mask.any():
+        duplicate_count = int(duplicate_mask.sum())
+        raise ValueError(
+            "duplicate id/time observations are not valid for adjacent-observation "
+            f"roll rate ({duplicate_count} rows)"
+        )
+    if balance_col:
+        try:
+            balances = pd.to_numeric(sorted_frame[balance_col], errors="raise").astype(float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("balance values must be numeric, finite, and nonnegative") from exc
+        if balances.isna().any() or not balances.map(math.isfinite).all():
+            raise ValueError("balance values must be finite and nonnegative")
+        if (balances < 0).any():
+            raise ValueError("balance values must be nonnegative")
+        sorted_frame[balance_col] = balances
     sorted_frame = sorted_frame.sort_values([id_col, "_marvis_time_order", time_col], kind="mergesort")
     rows = []
     warnings: list[dict] = []
+    if dropped_null_rows:
+        warnings.append(
+            {
+                "code": "null_rows_dropped",
+                "count": dropped_null_rows,
+                "input_rows": int(len(selected)),
+                "usable_rows": int(len(sorted_frame)),
+                "message": (
+                    f"已排除 {dropped_null_rows} 行缺少 id/time/status 的记录；"
+                    "矩阵仅基于字段完整的相邻观测。"
+                ),
+            }
+        )
     for id_value, group in sorted_frame.groupby(id_col, sort=False):
         statuses = group[status_col].map(str).tolist()
         orders = group["_marvis_time_order"].tolist()
-        balances = (
-            pd.to_numeric(group[balance_col], errors="coerce").tolist() if balance_col else None
-        )
+        balances = group[balance_col].astype(float).tolist() if balance_col else None
         gap_months = 0
         for i in range(len(statuses) - 1):
             row = {"from": statuses[i], "to": statuses[i + 1]}
             if balance_col:
-                row["balance"] = balances[i] if balances[i] == balances[i] else 0.0  # NaN-safe
+                row["balance"] = balances[i]
             rows.append(row)
             months_apart = _month_delta(orders[i], orders[i + 1])
             if months_apart > _MAX_ADJACENT_MONTH_GAP:
@@ -118,6 +157,16 @@ def _adjacent_pairs(
                     "跨越缺失月份（不改变矩阵计算，仅提示口径风险）。"
                 ),
             })
+    if not rows:
+        warnings.append(
+            {
+                "code": "no_transitions",
+                "count": 0,
+                "message": (
+                    "没有主体包含两条及以上可用观测，矩阵没有可计算的相邻状态转移。"
+                ),
+            }
+        )
     columns_out = ["from", "to", "balance"] if balance_col else ["from", "to"]
     return pd.DataFrame(rows, columns=columns_out), tuple(warnings)
 

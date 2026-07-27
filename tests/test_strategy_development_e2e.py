@@ -1,20 +1,8 @@
-"""End-to-end S2 journey: scan -> band-design gate (incl. one manual band_edges
-override round) -> backtest gate -> adopt gate (mandatory) -> doc, through the
-REAL PlanDriver + PlanExecutor + ToolRunner against the strategy pack's real
-tools -- the "agent/manual dual mode runs the full 分数->分段->回测->采纳->导出
-journey" acceptance bar from the spec.
+"""End-to-end strategy development with one real human-responsibility gate.
 
-Gate sequence verified empirically (traced with a real driver run): 权衡扫描 and
-回测策略/对比基线 are decision_point steps but that alone does not pause the
-executor loop -- only needs_confirmation does (orchestrator/executor.py's
-_next_ready_step / needs_confirmation check). So 权衡扫描 runs straight through
-into 设计分数带 (needs_confirmation=True) on the same resume call, and the gate
-message shown at that pause is 权衡扫描's rendered output (gate_message renders
-the completed *dependency* step's output, not the paused step itself). Likewise
-confirming 设计分数带 runs 构造策略 (no gate) through to 回测策略's gate, showing
-构造策略's message; confirming 回测策略 runs it plus 对比基线 through to 采纳策略's
-mandatory gate, showing both rendered; confirming 采纳策略 runs it plus 策略文档
-straight to DONE.
+All reversible calculations run after the plan overview is accepted. The driver
+stops only at evidence-bound adoption; confirming that gate produces the final
+document and completes the plan.
 """
 
 from __future__ import annotations
@@ -32,6 +20,8 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, PlanRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
+from marvis.governance.repository import GovernanceRepository
+from marvis.governance.service import GovernanceService
 from marvis.orchestrator.contracts import PlanStatus
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
@@ -42,8 +32,12 @@ from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.packs.strategy.backtest_compat import approval_backtest_projection
 from marvis.repositories.strategy import StrategyRepository
 from marvis.settings import build_settings
+from tests.strategy_tool_sample_design_support import (
+    materialize_strategy_tool_sample_design,
+)
 
 
 class FakeLLM:
@@ -64,20 +58,47 @@ def _strategy_driver(tmp_path):
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"
     load_builtin_packs(plugin_registry, packs_root)
     tool_registry = ToolRegistry(plugin_registry)
+    plan_repo = PlanRepository(settings.db_path)
+    governance_repo = GovernanceRepository(settings.db_path)
+    principal = governance_repo.create_local_principal(
+        display_name="策略开发 E2E 操作员"
+    )
+    governance_service = GovernanceService(
+        plan_repo=plan_repo,
+        tool_registry=tool_registry,
+        strategy_repo=StrategyRepository(settings.db_path),
+        governance_repo=governance_repo,
+    )
     runner = ToolRunner(
         tool_registry,
         plugin_repo,
         python_executable=sys.executable,
         datasets_root=settings.datasets_dir,
         workspace=settings.workspace,
+        governance=governance_repo,
+        binding_resolver=governance_service,
     )
     data_repo = DatasetRepository(settings.db_path)
     backend = DataBackend(settings.datasets_dir)
     registry = DatasetRegistry(data_repo, backend, settings.datasets_dir)
-    plan_repo = PlanRepository(settings.db_path)
-    executor = PlanExecutor(plan_repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(plan_repo))
+    executor = PlanExecutor(
+        plan_repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(plan_repo),
+        authorizer=governance_service,
+    )
     planner = Planner(tool_registry, lambda: FakeLLM(), PlanValidator(tool_registry))
-    driver = PlanDriver(plan_repo, executor, planner=planner, validator=PlanValidator(tool_registry))
+    driver = PlanDriver(
+        plan_repo,
+        executor,
+        planner=planner,
+        validator=PlanValidator(tool_registry),
+        governance_service=governance_service,
+        local_principal=principal,
+    )
     load_builtin_templates()
     task = TaskRepository(settings.db_path).create_task(
         TaskCreate(
@@ -108,13 +129,19 @@ def _register_dataset(registry, tmp_path, task_id: str):
 
 def _strategy_backtest_approval_rate(strategies: StrategyRepository, strategy_id: str) -> float:
     backtests = strategies.list_backtests(strategy_id)
-    return backtests[-1].approval_rate
+    return float(approval_backtest_projection(backtests[-1])["approval_rate"])
 
 
 @pytest.mark.slow
-def test_strategy_development_full_journey_with_manual_band_edges_override(tmp_path):
+def test_strategy_development_runs_reversible_steps_to_only_adoption_gate(tmp_path):
     driver, registry, plan_repo, settings, task = _strategy_driver(tmp_path)
     dataset = _register_dataset(registry, tmp_path, task.id)
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        settings,
+        task,
+        dataset,
+        field_roles={"score": "score"},
+    )
 
     turn = driver.start(
         task_id=task.id,
@@ -123,6 +150,8 @@ def test_strategy_development_full_journey_with_manual_band_edges_override(tmp_p
             "dataset_id": dataset.id,
             "target_col": "bad",
             "score_col": "score",
+            "sample_design_ref": sample_design_ref,
+            "strategy_type": "approval",
             "score_direction": "higher_is_better",
             # A max_bad_rate constraint is required for a max_profit-objective
             # scan with no profit_params (every prefix ties at 0 expected
@@ -132,65 +161,24 @@ def test_strategy_development_full_journey_with_manual_band_edges_override(tmp_p
             # gap in design_cutoff_bands worth a follow-up, not papered over
             # silently: flagged separately, not fixed in this commit.
             "max_bad_rate": 0.05,
-            "adoption_reason": "committee approved for Q3 rollout",
         },
     )
     assert turn.status == PlanStatus.VALIDATED.value
     plan_id = turn.plan_id
 
-    # 开始 -> runs 权衡扫描 (decision_point, no needs_confirmation, so it does not
-    # pause on its own) straight through to the 设计分数带 mandatory confirm gate.
-    # The gate message renders 权衡扫描's output (its completed dependency).
     turn = driver.resume(plan_id=plan_id, user_text="开始", run_seq=1)
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value
     gate = turn.messages[-1]
-    assert "策略权衡视图完成" in gate.content
+    assert gate.metadata["gate_source_tool"] == "adopt_strategy"
     plan = plan_repo.load_plan(plan_id)
-    assert next(s for s in plan.steps if s.title == "权衡扫描").status.value == "done"
-    assert next(s for s in plan.steps if s.title == "设计分数带").status.value == "awaiting_confirm"
-
-    # Manual mode: structured band_edges override via the generic adjust_params
-    # gate-recompute channel (apply_adjust: agent/gate_execution_adapter.py).
-    # 设计分数带 IS the reviewed computation (unlike confirm_join-style gates that
-    # wrap a separate upstream step), so needs_confirmation pauses again *before*
-    # rerunning it with the new inputs -- the override lands and re-arms the
-    # gate, but the actual recompute happens on the next confirm.
-    turn = driver.resume(
-        plan_id=plan_id,
-        user_text="",
-        run_seq=2,
-        adjust_params={"band_edges": [100, 400, 1200, 2000]},
-    )
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
-    plan = plan_repo.load_plan(plan_id)
-    bands_step = next(s for s in plan.steps if s.title == "设计分数带")
-    assert bands_step.status.value == "awaiting_confirm"
-    assert bands_step.inputs["band_edges"] == [100, 400, 1200, 2000]
-    assert bands_step.output_ref is None  # not yet recomputed with the override
-
-    # Confirm -> reruns 设计分数带 with the overridden band_edges, then 构造策略
-    # (no gate) through to the 回测策略 mandatory gate; message renders 构造策略's
-    # output.
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=3)
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
-    gate = turn.messages[-1]
-    assert "策略候选已生成" in gate.content
-    plan = plan_repo.load_plan(plan_id)
+    assert [
+        step.title for step in plan.steps if step.status.value == "awaiting_confirm"
+    ] == ["采纳策略"]
     bands_step = next(s for s in plan.steps if s.title == "设计分数带")
     assert bands_step.status.value == "done"
-    reran_output = plan_repo.load_step_output(bands_step.id)
-    assert reran_output["band_edges"] == [100.0, 400.0, 1200.0, 2000.0]
+    bands_output = plan_repo.load_step_output(bands_step.id)
+    assert bands_output["band_edges"]
     assert next(s for s in plan.steps if s.title == "构造策略").status.value == "done"
-    assert next(s for s in plan.steps if s.title == "回测策略").status.value == "awaiting_confirm"
-
-    # Confirm 回测策略 -> runs it plus 对比基线 (decision_point, no baseline slot
-    # supplied -> degrades to a no-op instead of failing) through to the
-    # mandatory 采纳策略 gate.
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=4)
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
-    gate = turn.messages[-1]
-    assert "策略回测完成" in gate.content
-    plan = plan_repo.load_plan(plan_id)
     backtest_step = next(s for s in plan.steps if s.title == "回测策略")
     assert backtest_step.status.value == "done"
     backtest_output = plan_repo.load_step_output(backtest_step.id)
@@ -203,8 +191,15 @@ def test_strategy_development_full_journey_with_manual_band_edges_override(tmp_p
     adopt_step = next(s for s in plan.steps if s.title == "采纳策略")
     assert adopt_step.status.value == "awaiting_confirm"  # mandatory gate: not yet executed
 
-    # Confirm adoption (the forced gate) -> runs 采纳策略 + 策略文档 -> DONE.
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=5)
+    # Adoption binds the reviewed evidence, a real operator reason, and the
+    # current gate token in one request; task setup never pre-authorizes it.
+    turn = driver.resume(
+        plan_id=plan_id,
+        user_text="确认采纳",
+        run_seq=2,
+        adjust_params={"adoption_reason": "committee approved for Q3 rollout"},
+        expected_step_id=adopt_step.id,
+    )
     assert turn.status == PlanStatus.DONE.value
     done = turn.messages[-1]
     assert done.stage == "done"
@@ -247,6 +242,12 @@ def test_strategy_development_double_adopt_confirm_conflicts_gracefully(tmp_path
     double-adopt (the ConflictError guard from Commit 1, exercised end-to-end)."""
     driver, registry, plan_repo, settings, task = _strategy_driver(tmp_path)
     dataset = _register_dataset(registry, tmp_path, task.id)
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        settings,
+        task,
+        dataset,
+        field_roles={"score": "score"},
+    )
     turn = driver.start(
         task_id=task.id,
         template_id="strategy_development",
@@ -254,16 +255,25 @@ def test_strategy_development_double_adopt_confirm_conflicts_gracefully(tmp_path
             "dataset_id": dataset.id,
             "target_col": "bad",
             "score_col": "score",
+            "sample_design_ref": sample_design_ref,
+            "strategy_type": "approval",
             "score_direction": "higher_is_better",
             "max_bad_rate": 0.05,
-            "adoption_reason": "first adoption",
         },
     )
     plan_id = turn.plan_id
-    driver.resume(plan_id=plan_id, user_text="开始", run_seq=1)  # -> 设计分数带 gate
-    driver.resume(plan_id=plan_id, user_text="确认", run_seq=2)  # -> 回测策略 gate
-    driver.resume(plan_id=plan_id, user_text="确认", run_seq=3)  # -> 采纳策略 gate
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=4)  # -> DONE
+    turn = driver.resume(plan_id=plan_id, user_text="开始", run_seq=1)
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    plan = plan_repo.load_plan(plan_id)
+    adopt_step = next(s for s in plan.steps if s.title == "采纳策略")
+    assert adopt_step.status.value == "awaiting_confirm"
+    turn = driver.resume(
+        plan_id=plan_id,
+        user_text="确认采纳",
+        run_seq=2,
+        adjust_params={"adoption_reason": "first adoption"},
+        expected_step_id=adopt_step.id,
+    )  # -> DONE
     assert turn.status == PlanStatus.DONE.value
 
     plan = plan_repo.load_plan(plan_id)

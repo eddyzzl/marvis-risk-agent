@@ -15,6 +15,7 @@ from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.settings import build_settings
+from tests.xls_fixture import legacy_xls_bytes
 
 
 def _runtime(tmp_path):
@@ -72,6 +73,137 @@ def test_data_ops_ingest_excel_and_infer_schema_via_runner(tmp_path):
     assert schema.ok is True
     assert schema.output["has_target"] is True
     assert schema.output["target_col"] == "bad_flag"
+
+
+def test_data_ops_ingest_legacy_xls_via_runner(tmp_path):
+    runner, _registry, repo = _runtime(tmp_path)
+    workbook_path = tmp_path / "workspace" / "materials" / "legacy.xls"
+    workbook_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook_path.write_bytes(legacy_xls_bytes())
+
+    ingest = runner.invoke(
+        ToolRef("data_ops", "ingest_excel"),
+        {"path": str(workbook_path), "sheets": ["Sample"], "role": "sample"},
+        task_id="task-1",
+    )
+
+    assert ingest.ok is True
+    dataset_id = ingest.output["datasets"][0]["id"]
+    dataset = repo.get_dataset(dataset_id)
+    assert dataset is not None
+    assert [column.name for column in dataset.columns] == [
+        "mobile",
+        "bad_flag",
+        "loan_amount",
+    ]
+
+
+def test_data_ops_ingest_excel_honors_row_guardrail(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_MAX_EXCEL_ROWS", "1")
+    runner, _registry, repo = _runtime(tmp_path)
+    workbook_path = tmp_path / "workspace" / "materials" / "legacy.xls"
+    workbook_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook_path.write_bytes(legacy_xls_bytes())
+
+    ingest = runner.invoke(
+        ToolRef("data_ops", "ingest_excel"),
+        {"path": str(workbook_path), "sheets": ["Sample"], "role": "sample"},
+        task_id="task-1",
+    )
+
+    assert ingest.ok is False
+    assert "数据行数超过上限" in ingest.error
+    assert repo.list_datasets("task-1") == []
+
+
+def test_data_ops_ingest_excel_honors_byte_guardrail(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_MAX_EXCEL_UPLOAD_BYTES", "1024")
+    runner, _registry, repo = _runtime(tmp_path)
+    workbook_path = tmp_path / "workspace" / "materials" / "legacy.xls"
+    workbook_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook_path.write_bytes(legacy_xls_bytes())
+
+    ingest = runner.invoke(
+        ToolRef("data_ops", "ingest_excel"),
+        {"path": str(workbook_path), "sheets": ["Sample"], "role": "sample"},
+        task_id="task-1",
+    )
+
+    assert ingest.ok is False
+    assert "文件大小超过上限" in ingest.error
+    assert repo.list_datasets("task-1") == []
+
+
+def test_data_ops_ingest_excel_rolls_back_all_sheets_when_one_fails(tmp_path):
+    runner, _registry, repo = _runtime(tmp_path)
+    workbook_path = tmp_path / "workspace" / "materials" / "legacy.xls"
+    workbook_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook_path.write_bytes(legacy_xls_bytes())
+
+    ingest = runner.invoke(
+        ToolRef("data_ops", "ingest_excel"),
+        {
+            "path": str(workbook_path),
+            "sheets": ["Sample", "Missing"],
+            "role": "sample",
+        },
+        task_id="task-1",
+    )
+
+    assert ingest.ok is False
+    assert "Missing" in ingest.error
+    assert repo.list_datasets("task-1") == []
+    excel_dir = tmp_path / "workspace" / "datasets" / "task-1" / "excel"
+    assert not list(excel_dir.glob("*.parquet"))
+
+
+def test_data_ops_ingest_excel_second_db_insert_failure_rolls_back_everything(
+    tmp_path,
+):
+    runner, _registry, repo = _runtime(tmp_path)
+    workbook_path = tmp_path / "workspace" / "materials" / "two_sheets.xlsx"
+    workbook_path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(workbook_path, engine="openpyxl") as writer:
+        pd.DataFrame({"metric": [101]}).to_excel(
+            writer,
+            sheet_name="First",
+            index=False,
+        )
+        pd.DataFrame({"metric": [202]}).to_excel(
+            writer,
+            sheet_name="Second",
+            index=False,
+        )
+    with repo.transaction() as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER fail_second_task_dataset_insert
+            BEFORE INSERT ON datasets
+            WHEN NEW.task_id = 'task-1'
+             AND (SELECT COUNT(*) FROM datasets WHERE task_id = NEW.task_id) >= 1
+            BEGIN
+                SELECT RAISE(ABORT, 'injected second dataset insert failure');
+            END
+            """
+        )
+
+    ingest = runner.invoke(
+        ToolRef("data_ops", "ingest_excel"),
+        {
+            "path": str(workbook_path),
+            "sheets": ["First", "Second"],
+            "role": "feature",
+        },
+        task_id="task-1",
+    )
+
+    assert ingest.ok is False
+    assert "injected second dataset insert failure" in ingest.error
+    assert repo.list_datasets("task-1") == []
+    task_dataset_dir = tmp_path / "workspace" / "datasets" / "task-1"
+    assert not list(task_dataset_dir.rglob("*.parquet"))
+    assert not list(task_dataset_dir.rglob(".staging"))
+    assert not list(task_dataset_dir.rglob(".excel_ingest_*"))
 
 
 def test_data_ops_ingest_excel_rejects_paths_outside_material_roots(tmp_path):

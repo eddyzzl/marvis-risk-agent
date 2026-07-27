@@ -174,6 +174,40 @@ def test_planner_generate_accepts_valid_llm_plan(tmp_path):
     assert llm.calls[0]["response_format"] == {"type": "json_object"}
 
 
+def test_planner_applies_manifest_governance_when_llm_omits_policy(tmp_path):
+    llm = FakeLLM([
+        json.dumps({
+            "steps": [
+                {
+                    "title": "Adopt strategy",
+                    "tool": {"plugin": "strategy", "tool": "adopt_strategy"},
+                    "inputs": {
+                        "strategy_id": "strategy-1",
+                        "backtest_id": "backtest-1",
+                        "adoption_reason": "Human reviewed the backtest",
+                    },
+                    "depends_on": [],
+                    "post_checks": [],
+                }
+            ]
+        })
+    ])
+
+    plan = _planner(tmp_path, llm).generate(
+        "adopt strategy",
+        "task-1",
+        memory_context={},
+        task_context={},
+    )
+
+    step = plan.steps[0]
+    assert step.needs_confirmation is True
+    assert step.policy.human_decision_gate == "required"
+    assert step.policy.effect_authorization == "required"
+    assert step.policy.effect_target is not None
+    assert step.policy.effect_target.kind == "strategy"
+
+
 def test_plan_prompt_uses_compact_catalog_and_ref_examples():
     catalog = [
         {

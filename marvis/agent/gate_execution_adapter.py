@@ -121,6 +121,15 @@ class GateExecutionAdapter:
         deps = [step for step in (find_step(plan, dep_id) for dep_id in (gate.depends_on or [])) if step is not None]
         candidates = [*deps, gate]
         params = params or {}
+        if gate.tool_ref.tool == "apply_monitoring_disposition":
+            monitoring_error = self._monitoring_adjust_error(plan, gate, params)
+            if monitoring_error:
+                return self._instruction_message(
+                    plan,
+                    gate,
+                    run_seq,
+                    monitoring_error,
+                )
         validation_error = adjust_param_error(params)
         if validation_error:
             return self._instruction_message(plan, gate, run_seq, validation_error)
@@ -164,6 +173,73 @@ class GateExecutionAdapter:
             ),
         )
         return turn
+
+    def _monitoring_adjust_error(
+        self,
+        plan: Plan,
+        gate: PlanStep,
+        params: dict,
+    ) -> str | None:
+        allowed = {"disposition", "reason", "threshold_patch"}
+        unexpected = sorted(set(params) - allowed)
+        if unexpected:
+            return (
+                "监控处置只能调整 disposition、reason 和 threshold_patch；"
+                "不可修改已冻结的 plan/run/strategy 证据。"
+            )
+        disposition = params.get("disposition")
+        if disposition is not None and disposition not in {
+            "observe",
+            "adjust_threshold",
+            "new_version",
+        }:
+            return "disposition 必须是 observe、adjust_threshold 或 new_version。"
+        if "reason" in params and not str(params.get("reason") or "").strip():
+            return "监控处置理由不能为空。"
+        if "threshold_patch" not in params:
+            return None
+        patch = params.get("threshold_patch")
+        if not isinstance(patch, dict) or not patch:
+            return "threshold_patch 必须是非空对象。"
+
+        checks: dict[str, dict] = {}
+        for dep_id in gate.depends_on or []:
+            dep = find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "run_strategy_monitoring":
+                continue
+            output = self._safe_output(dep.id)
+            if not isinstance(output, dict):
+                continue
+            for check in output.get("checks") or []:
+                if not isinstance(check, dict):
+                    continue
+                key = str(check.get("metric") or check.get("id") or "").strip()
+                if key:
+                    checks[key] = check
+
+        for raw_check_id, changes in patch.items():
+            check_id = str(raw_check_id)
+            if checks and check_id not in checks:
+                return f"threshold_patch 包含未知监控项 {check_id}。"
+            if not isinstance(changes, dict) or not changes:
+                return f"threshold_patch.{check_id} 必须是非空对象。"
+            if not set(changes) <= {"warn", "fail"}:
+                return "threshold_patch 只能修改 warn/fail。"
+            for field, value in changes.items():
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return f"threshold_patch.{check_id}.{field} 必须是有限数字。"
+                if value != value or value in {float("inf"), float("-inf")}:
+                    return f"threshold_patch.{check_id}.{field} 必须是有限数字。"
+            current = checks.get(check_id, {})
+            direction = current.get("direction")
+            warn = changes.get("warn", current.get("warn"))
+            fail = changes.get("fail", current.get("fail"))
+            if isinstance(warn, (int, float)) and isinstance(fail, (int, float)):
+                if direction == "min" and float(warn) < float(fail):
+                    return f"{check_id} 为 min 方向，必须满足 warn >= fail。"
+                if direction == "max" and float(warn) > float(fail):
+                    return f"{check_id} 为 max 方向，必须满足 warn <= fail。"
+        return None
 
     def _reset_downstream_steps(self, plan: Plan, root_ids: list[str]) -> set[str]:
         downstream_ids = downstream_step_ids(plan, root_ids)

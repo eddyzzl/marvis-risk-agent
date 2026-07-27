@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from importlib import import_module
 
 from marvis.orchestrator.contracts import PostCheck
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.manifest import GovernancePolicy, ToolRef
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ class StepTemplate:
     depends_on_titles: tuple[str, ...]
     post_checks: tuple[PostCheck, ...]
     needs_confirmation: bool = False
+    policy: GovernancePolicy = GovernancePolicy()
     decision_point: bool = False
     sub_agent_scope: str | None = None
     granted_tools: tuple[ToolRef, ...] = ()

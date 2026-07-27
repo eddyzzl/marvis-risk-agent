@@ -62,6 +62,7 @@ def test_save_and_load_lgb_and_xgb_models(tmp_path):
     assert isinstance(load_model(xgb_artifact, base_dir=tmp_path), xgb.Booster)
 
 
+@pytest.mark.pmml_runtime
 def test_export_lr_pmml_can_be_loaded_by_pypmml(tmp_path):
     frame = pd.DataFrame({"x1": [0.1, 0.2, 0.8, 0.9], "y": [0, 0, 1, 1]})
     sample_path = tmp_path / "sample.parquet"
@@ -88,6 +89,7 @@ def test_export_lr_pmml_can_be_loaded_by_pypmml(tmp_path):
     )
 
 
+@pytest.mark.pmml_runtime
 @pytest.mark.parametrize(
     ("algorithm", "model"),
     [
@@ -152,6 +154,7 @@ def test_export_tree_sklearn_wrapper_pmml_can_be_loaded_by_pypmml(
     )
 
 
+@pytest.mark.pmml_runtime
 def test_export_pmml_uses_explicit_target_when_sample_weight_precedes_label(tmp_path):
     frame = pd.DataFrame({
         "x1": [0.1, 0.2, 0.8, 0.9],
@@ -211,6 +214,7 @@ def test_export_pmml_rejects_native_lgb_booster_payload(tmp_path):
         export_pmml(artifact, sample_path, tmp_path / "model.pmml", base_dir=tmp_path)
 
 
+@pytest.mark.pmml_runtime
 def test_save_scorecard_model_preserves_woe_maps_and_exports_pmml(tmp_path):
     frame = pd.DataFrame({"x1": [0.1, 0.2, 0.8, 0.9], "y": [0, 0, 1, 1]})
     sample_path = tmp_path / "sample.parquet"

@@ -2,7 +2,13 @@ import pandas as pd
 import pytest
 
 import marvis.packs.strategy as strategy_pack
-from marvis.packs.strategy import ProfitParams, apply_strategy, backtest_strategy, build_strategy
+from marvis.packs.strategy import (
+    ProfitParams,
+    apply_strategy,
+    backtest_strategy,
+    build_strategy,
+    build_strategy_from_spec,
+)
 from marvis.packs.strategy.errors import StrategyError
 
 
@@ -86,6 +92,103 @@ def test_backtest_strategy_defaults_swap_and_profit_when_optional_inputs_missing
     # bad rates are undefined (None), not the misleading 0.0 (DOM-11).
     assert result.swap_in_bad_rate is None
     assert result.swap_out_bad_rate is None
+
+
+def test_backtest_does_not_count_review_queue_as_approved_population() -> None:
+    frame = pd.DataFrame(
+        {"score": [580, 650, 720], "bad": [1, 0, 0]}
+    )
+    strategy = build_strategy(
+        "approval",
+        [
+            {"condition": "score < 600", "decision": "reject"},
+            {"condition": "score < 680", "decision": "review"},
+        ],
+        score_col="score",
+        default_decision="approve",
+    )
+
+    result = backtest_strategy(frame, strategy, target_col="bad")
+
+    assert result.approved_count == 1
+    assert result.approval_rate == pytest.approx(1 / 3)
+    assert result.approved_bad_rate == 0.0
+    assert result.rejected_bad_rate == 1.0
+    assert result.rejected_count == 1
+    assert result.review_count == 1
+    assert result.review_rate == pytest.approx(1 / 3)
+    assert result.review_bad_rate == 0.0
+    assert {row["decision"] for row in result.by_segment} == {
+        "approve",
+        "reject",
+        "review",
+    }
+
+
+def test_legacy_output_alias_never_changes_typed_backtest_breakdown() -> None:
+    from marvis.packs.strategy.contracts import Strategy
+    from marvis.packs.strategy.dsl import StrategyAction, StrategySpec
+
+    spec = StrategySpec(
+        strategy_type="approval",
+        default_action=StrategyAction(type="approval", output_value="pass"),
+    )
+    strategy = Strategy(
+        id="legacy-pass",
+        strategy_type="approval",
+        rules=(),
+        score_col="score",
+        default_decision="pass",
+        description="legacy",
+        spec=spec,
+    )
+
+    result = backtest_strategy(
+        pd.DataFrame({"score": [500], "bad": [0]}),
+        strategy,
+        target_col="bad",
+    )
+
+    assert result.approved_count == 1
+    assert result.by_segment == (
+        {
+            "decision": "approve",
+            "count": 1,
+            "bad_count": 0,
+            "bad_rate": 0.0,
+            "legacy_output_value": "pass",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("strategy_type", "action_type", "value", "metric"),
+    [
+        ("limit", "limit", 1000, "mean_limit"),
+        ("pricing", "pricing", 0.12, "mean_rate"),
+        ("segmentation", "segment", "prime", "segment_count"),
+    ],
+)
+def test_nonapproval_backtest_returns_typed_metrics_without_fake_approval_fields(
+    strategy_type: str, action_type: str, value, metric: str,
+) -> None:
+    strategy = build_strategy_from_spec(
+        {
+            "strategy_type": strategy_type,
+            "default_action": {"type": action_type, "value": value},
+            "rules": [],
+        }
+    )
+
+    result = backtest_strategy(
+        pd.DataFrame({"score": [500], "bad": [0]}),
+        strategy,
+        target_col="bad",
+    )
+
+    assert result.strategy_type == strategy_type
+    assert metric in result.metrics
+    assert "approval_rate" not in result.to_dict()
 
 
 def test_strategy_conditions_coerce_numeric_literals_for_string_columns():

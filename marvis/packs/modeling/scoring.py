@@ -1,16 +1,115 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
+
 from marvis.feature.encode import woe_encode
 from marvis.feature.preprocessing import apply_preprocessing_steps
+from marvis.packs.modeling._common import CALIBRATION_PARAMS_KEY, _optional_str, _resolve_artifact_path
 from marvis.packs.modeling.artifact import load_model
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
-from pathlib import Path
 
-from marvis.packs.modeling._common import CALIBRATION_PARAMS_KEY, _optional_str, _resolve_artifact_path
+
+def scorecard_points_from_raw_pd(
+    raw_pd: Sequence[float] | np.ndarray,
+    *,
+    factor: float,
+    offset: float,
+) -> np.ndarray:
+    """Convert bad-event probabilities to higher-is-better scorecard points."""
+
+    scale_factor, scale_offset = _scorecard_scale(factor=factor, offset=offset)
+    probability = _scorecard_numeric_vector(raw_pd, name="raw PD")
+    if not np.all(np.isfinite(probability)):
+        raise ModelingError("scorecard raw PD values must all be finite")
+    if np.any(probability < 0.0) or np.any(probability > 1.0):
+        raise ModelingError("scorecard raw PD values must all be in [0, 1]")
+    logits = np.empty(probability.shape, dtype=np.float64)
+    at_zero = probability == 0.0
+    at_one = probability == 1.0
+    interior = ~(at_zero | at_one)
+    logits[at_zero] = -np.inf
+    logits[at_one] = np.inf
+    logits[interior] = (
+        np.log(probability[interior])
+        - np.log1p(-probability[interior])
+    )
+    with np.errstate(over="ignore"):
+        points = np.asarray(
+            scale_offset - scale_factor * logits,
+            dtype=np.float64,
+        )
+    points.setflags(write=False)
+    return points
+
+
+def raw_pd_from_scorecard_points(
+    points: Sequence[float] | np.ndarray,
+    *,
+    factor: float,
+    offset: float,
+) -> np.ndarray:
+    """Convert finite higher-is-better scorecard points to bad-event probabilities."""
+
+    scale_factor, scale_offset = _scorecard_scale(factor=factor, offset=offset)
+    score = _scorecard_numeric_vector(points, name="points")
+    if not np.all(np.isfinite(score)):
+        raise ModelingError("scorecard points values must all be finite")
+    with np.errstate(over="ignore"):
+        logits = (scale_offset - score) / scale_factor
+    probability = np.empty(score.shape, dtype=np.float64)
+    nonnegative = logits >= 0.0
+    probability[nonnegative] = 1.0 / (1.0 + np.exp(-logits[nonnegative]))
+    exp_logits = np.exp(logits[~nonnegative])
+    probability[~nonnegative] = exp_logits / (1.0 + exp_logits)
+    probability.setflags(write=False)
+    return probability
+
+
+def _scorecard_numeric_vector(
+    values: Sequence[float] | np.ndarray,
+    *,
+    name: str,
+) -> np.ndarray:
+    try:
+        raw = np.asarray(values)
+    except (TypeError, ValueError) as exc:
+        raise ModelingError(
+            f"scorecard {name} must be a one-dimensional numeric vector"
+        ) from exc
+    if raw.ndim != 1 or raw.dtype.kind not in "iuf":
+        raise ModelingError(
+            f"scorecard {name} must be a one-dimensional numeric vector"
+        )
+    return np.ascontiguousarray(raw, dtype=np.float64)
+
+
+def _scorecard_scale(*, factor: float, offset: float) -> tuple[float, float]:
+    scale_factor = _scorecard_finite_scalar(factor, name="factor")
+    if scale_factor <= 0.0:
+        raise ModelingError("scorecard factor must be finite and greater than zero")
+    scale_offset = _scorecard_finite_scalar(offset, name="offset")
+    return scale_factor, scale_offset
+
+
+def _scorecard_finite_scalar(value: float, *, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ModelingError(f"scorecard {name} must be a finite number")
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise ModelingError(f"scorecard {name} must be a finite number") from exc
+    if raw.ndim != 0 or raw.dtype.kind not in "iuf":
+        raise ModelingError(f"scorecard {name} must be a finite number")
+    normalized = float(raw)
+    if not np.isfinite(normalized):
+        raise ModelingError(f"scorecard {name} must be a finite number")
+    return normalized
 
 
 def _fit_calibrator(method: str, scores: np.ndarray, labels: np.ndarray):

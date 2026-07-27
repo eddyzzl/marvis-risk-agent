@@ -18,7 +18,8 @@ from marvis.orchestrator.contracts import (
 )
 from marvis.orchestrator.errors import PlanNotFoundError
 from marvis.orchestrator.harness_state import assert_plan_transition
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.errors import ManifestError
+from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.redaction import redact_value
 from marvis.repositories.audit import _list_audit_rows, _write_audit_row
 from marvis.state_machine import ConflictError
@@ -92,7 +93,8 @@ class PlanRepository:
                 """
                 SELECT id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
                        inputs_json, depends_on_json, post_checks_json,
-                       needs_confirmation, decision_point, sub_agent_scope, granted_tools_json,
+                       needs_confirmation, policy_json, decision_point, sub_agent_scope,
+                       granted_tools_json,
                        status, sub_agent_id, output_ref, review_json, error, phase
                   FROM plan_steps
                  WHERE plan_id = ?
@@ -132,6 +134,28 @@ class PlanRepository:
             ).fetchone()
         return int(row["total"])
 
+    def latest_nonterminal_summary_for_task(
+        self,
+        task_id: str,
+    ) -> dict[str, str] | None:
+        """Return only the newest active plan identity needed by UI guards."""
+
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, status
+                  FROM plans
+                 WHERE task_id = ?
+                   AND status NOT IN ('done', 'failed', 'cancelled')
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"plan_id": str(row["id"]), "status": str(row["status"])}
+
     def list_plans_by_status(self, status: PlanStatus) -> list[Plan]:
         """Plans currently in ``status`` across every task, oldest first. Used
         by the startup reclaim pass (REL-4) to find RUNNING V2 plans left
@@ -169,6 +193,7 @@ class PlanRepository:
                        depends_on_json = ?,
                        post_checks_json = ?,
                        needs_confirmation = ?,
+                       policy_json = ?,
                        decision_point = ?,
                        sub_agent_scope = ?,
                        granted_tools_json = ?,
@@ -214,6 +239,12 @@ class PlanRepository:
 
     def confirm_step(self, step_id: str) -> None:
         with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status, confirmed, policy_json FROM plan_steps WHERE id = ?",
+                (step_id,),
+            ).fetchone()
+            _assert_raw_confirmation_allowed(row, step_id=step_id)
             # Atomic one-shot transition: only an AWAITING_CONFIRM step that has
             # NOT already been confirmed flips confirmed 0 -> 1. confirm_step
             # never changes status (the executor advances the step later), so
@@ -248,6 +279,71 @@ class PlanRepository:
                 kind="plan.step.confirm",
                 target_ref=step_id,
                 outcome="succeeded",
+            )
+
+    def confirm_step_with_inputs(
+        self,
+        step_id: str,
+        *,
+        input_updates: dict,
+    ) -> None:
+        """Atomically merge reviewed gate inputs and confirm the current step.
+
+        This is the structured-control counterpart to ``confirm_step``.  The
+        input mutation and one-shot confirmation share the same transaction and
+        compare-and-swap guard, so an adoption reason cannot be persisted without
+        the confirmation it belongs to (or vice versa).
+        """
+
+        if not isinstance(input_updates, dict) or not input_updates:
+            raise ValueError("input_updates must be a non-empty object")
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT status, confirmed, inputs_json, policy_json
+                  FROM plan_steps
+                 WHERE id = ?
+                """,
+                (step_id,),
+            ).fetchone()
+            _assert_raw_confirmation_allowed(row, step_id=step_id)
+            current_inputs = json.loads(str(row["inputs_json"] or "{}"))
+            if not isinstance(current_inputs, dict):
+                raise ValueError(f"step {step_id} inputs are not an object")
+            merged_inputs = {**current_inputs, **input_updates}
+            cursor = conn.execute(
+                """
+                UPDATE plan_steps
+                   SET inputs_json = ?, confirmed = 1
+                 WHERE id = ?
+                   AND status = ?
+                   AND confirmed = 0
+                """,
+                (
+                    json.dumps(merged_inputs, ensure_ascii=False),
+                    step_id,
+                    StepStatus.AWAITING_CONFIRM.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                latest = conn.execute(
+                    "SELECT status, confirmed FROM plan_steps WHERE id = ?",
+                    (step_id,),
+                ).fetchone()
+                if latest is None:
+                    raise KeyError(step_id)
+                if int(latest["confirmed"] or 0):
+                    raise ConflictError("step is already confirmed")
+                raise ConflictError(
+                    f"step is not awaiting confirmation: {latest['status']}"
+                )
+            _write_audit_row(
+                conn,
+                kind="plan.step.confirm",
+                target_ref=step_id,
+                outcome="succeeded",
+                detail={"updated_input_keys": sorted(str(key) for key in input_updates)},
             )
 
     def reset_step(self, step_id: str, *, inputs: dict | None = None) -> None:
@@ -673,6 +769,7 @@ class PlanRepository:
         with connect(self.db_path) as conn:
             loop_events = _load_plan_loop_events(conn, plan_id)
             _append_normalized_loop_event(loop_events, loop_event)
+            _assert_mandatory_policies_preserved(conn, plan_id, payload["steps"])
             completed_rows = conn.execute(
                 """
                 SELECT id
@@ -938,10 +1035,10 @@ class PlanRepository:
             INSERT INTO plan_steps(
                 id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
                 inputs_json, depends_on_json, post_checks_json,
-                needs_confirmation, decision_point, sub_agent_scope, granted_tools_json,
-                status, sub_agent_id, output_ref, review_json, error, phase
+                needs_confirmation, policy_json, decision_point, sub_agent_scope,
+                granted_tools_json, status, sub_agent_id, output_ref, review_json, error, phase
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _step_insert_values(step),
         )
@@ -1033,6 +1130,7 @@ def _step_payload_from_row(row: sqlite3.Row) -> dict:
         "depends_on": _load_json_array(row["depends_on_json"]),
         "post_checks": _load_json_array(row["post_checks_json"]),
         "needs_confirmation": bool(row["needs_confirmation"]),
+        "policy": _load_json_object_unchecked(row["policy_json"]),
         "decision_point": bool(row["decision_point"]),
         "sub_agent_scope": row["sub_agent_scope"],
         "granted_tools": _load_json_array(row["granted_tools_json"]),
@@ -1059,6 +1157,7 @@ def _step_insert_values(step: dict) -> tuple:
         _dump_json_any(step.get("depends_on") or []),
         _dump_json_any(step.get("post_checks") or []),
         int(bool(step.get("needs_confirmation"))),
+        _dump_json_any(step.get("policy") or {}),
         int(bool(step.get("decision_point"))),
         step.get("sub_agent_scope"),
         _dump_json_any(step.get("granted_tools") or []),
@@ -1073,6 +1172,114 @@ def _step_insert_values(step: dict) -> tuple:
 
 def _step_update_values(step: dict) -> tuple:
     return (*_step_insert_values(step)[2:], step["id"])
+
+
+def _assert_raw_confirmation_allowed(
+    row: sqlite3.Row | None,
+    *,
+    step_id: str,
+) -> None:
+    """Fail closed before a raw repository confirmation can bypass governance.
+
+    This check intentionally uses the policy snapshot persisted on the step,
+    not the legacy ``needs_confirmation`` bit.  A policy with no human gate
+    keeps historical callers working; a required or unreadable policy must go
+    through ``GovernanceRepository.authorize_step`` so the confirmation and
+    immutable DecisionRecord share one transaction.
+    """
+
+    if row is None:
+        raise KeyError(step_id)
+    if int(row["confirmed"] or 0):
+        raise ConflictError("step is already confirmed")
+    if str(row["status"]) != StepStatus.AWAITING_CONFIRM.value:
+        raise ConflictError(f"step is not awaiting confirmation: {row['status']}")
+
+    raw_policy = row["policy_json"]
+    try:
+        policy_payload = {} if raw_policy in (None, "") else json.loads(str(raw_policy))
+        if not isinstance(policy_payload, dict):
+            raise ManifestError("persisted tool policy must be an object")
+        policy = GovernancePolicy.from_dict(policy_payload)
+    except (json.JSONDecodeError, ManifestError) as exc:
+        raise ConflictError(
+            f"step {step_id} has an invalid persisted governance policy"
+        ) from exc
+    if policy.human_decision_gate == "required":
+        raise ConflictError(
+            f"step {step_id} requires governed human-decision authorization"
+        )
+
+
+def _assert_mandatory_policies_preserved(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    replacement_steps: list[dict],
+) -> None:
+    """Prevent adaptive replanning from deleting or weakening a human gate.
+
+    The repository is the final write boundary for every replan path.  Checking
+    here protects decision-point, failure, final-review, user-instruction, and
+    future callers even if a planner/validator integration is accidentally
+    skipped.
+    """
+
+    rows = conn.execute(
+        """
+        SELECT id, tool_plugin, tool_name, tool_version, needs_confirmation,
+               policy_json
+          FROM plan_steps
+         WHERE plan_id = ?
+           AND status NOT IN ('done', 'skipped')
+        """,
+        (plan_id,),
+    ).fetchall()
+    replacements = {
+        str(step["id"]): step
+        for step in replacement_steps
+        if step.get("status") not in {"done", "skipped"}
+    }
+    for row in rows:
+        required = GovernancePolicy.from_dict(
+            _load_json_object_unchecked(row["policy_json"])
+        )
+        # Phase 0B's immutable source is the policy snapshot.  Migration 5
+        # backfills historical ``needs_confirmation`` rows into that snapshot;
+        # do not keep treating the legacy display/execution bit as a second
+        # policy source after migration.
+        required_human = required.human_decision_gate == "required"
+        required_effect = required.effect_authorization == "required"
+        if not required_human and not required_effect:
+            continue
+        replacement = replacements.get(str(row["id"]))
+        if replacement is None:
+            raise ConflictError(
+                f"mandatory governance policy step {row['id']} cannot be deleted by replan"
+            )
+        tool_ref = replacement["tool_ref"]
+        if (
+            str(tool_ref.get("plugin") or "") != str(row["tool_plugin"])
+            or str(tool_ref.get("tool") or "") != str(row["tool_name"])
+            or str(tool_ref.get("version") or "") != str(row["tool_version"] or "")
+        ):
+            raise ConflictError(
+                f"mandatory governance policy step {row['id']} cannot change Tool"
+            )
+        actual = GovernancePolicy.from_dict(replacement.get("policy"))
+        if required_human and (
+            actual.human_decision_gate != "required"
+            or not bool(replacement.get("needs_confirmation"))
+        ):
+            raise ConflictError(
+                f"mandatory governance policy step {row['id']} cannot lower human gate"
+            )
+        if required_effect and (
+            actual.effect_authorization != "required"
+            or actual.effect_target != required.effect_target
+        ):
+            raise ConflictError(
+                f"mandatory governance policy step {row['id']} cannot lower effect authorization"
+            )
 
 
 def _tool_ref_to_dict(ref: ToolRef) -> dict[str, str]:

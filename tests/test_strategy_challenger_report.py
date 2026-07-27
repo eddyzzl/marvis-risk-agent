@@ -1,15 +1,18 @@
-"""S6 Commit 3: challenger presentation — report tool + compare renderer.
+"""Trusted challenger presentation and compare rendering.
 
-The report is assembled purely from the passed-in compare + backtest tool outputs
-(report follows tool output: change the numbers in, the numbers in the report change).
-With no champion the report degrades to a no-op (no artifact) mirroring
-compare_strategies' own no-baseline degradation.
+The report accepts a persisted challenger-backtest receipt, reloads both
+task-owned strategies and the bound dataset, and deterministically recomputes
+the displayed evidence. Caller-supplied metrics or lifecycle claims are not an
+input contract. With no champion it remains a no-artifact no-op.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+import pandas as pd
+import pytest
 
 from marvis.agent.renderers import render_tool_output
 from marvis.data.backend import DataBackend
@@ -39,41 +42,70 @@ def _runtime(tmp_path):
     return runner, registry, settings
 
 
-def _build_strategy(runner):
+def _build_strategy(runner, *, threshold=2, task_id="task-1"):
     return runner.invoke(
         ToolRef("strategy", "build_strategy"),
-        {"strategy_type": "approval", "rules": [{"condition": "score < 2", "decision": "reject"}],
+        {"strategy_type": "approval", "rules": [{"condition": f"score < {threshold}", "decision": "reject"}],
          "score_col": "score", "default_decision": "approve"},
-        task_id="task-1",
+        task_id=task_id,
     ).output["strategy_id"]
 
 
-def test_challenger_report_numbers_follow_tool_output(tmp_path):
-    runner, _registry, settings = _runtime(tmp_path)
-    strategy_id = _build_strategy(runner)
-    compare = {
-        "matrix_2x2": {
-            "both_approve": {"count": 10, "bad_rate": 0.05},
-            "only_new": {"count": 3, "bad_rate": 0.10},
-            "only_baseline": {"count": 2, "bad_rate": 0.20},
-            "both_decline": {"count": 5, "bad_rate": 0.40},
+def _dataset(registry, tmp_path):
+    path = tmp_path / "challenger.parquet"
+    pd.DataFrame(
+        {
+            "score": [0, 1, 2, 3, 4, 5],
+            "bad": [1, 1, 0, 0, 0, 0],
+        }
+    ).to_parquet(path, index=False)
+    return registry.register_existing(
+        path,
+        task_id="task-1",
+        role="strategy_sample",
+    )
+
+
+def _trusted_evidence(runner, registry, tmp_path):
+    champion_id = _build_strategy(runner, threshold=2)
+    strategy_id = _build_strategy(runner, threshold=3)
+    dataset = _dataset(registry, tmp_path)
+    champion_bt = runner.invoke(
+        ToolRef("strategy", "backtest_strategy"),
+        {
+            "dataset_id": dataset.id,
+            "strategy_id": champion_id,
+            "target_col": "bad",
         },
-        "deltas": {"approval_rate": 0.02, "approved_bad_rate": -0.01, "expected_profit": 15.0},
-        "summary_text": "新策略审批率较基线上升2.0pp。",
-        "red_flags": [],
-    }
-    challenger_bt = {"approval_rate": 0.62, "approved_bad_rate": 0.04, "expected_profit": 115.0}
-    champion_bt = {"approval_rate": 0.60, "approved_bad_rate": 0.05, "expected_profit": 100.0}
+        task_id="task-1",
+    )
+    assert champion_bt.ok is True, champion_bt.error
+    challenger_bt = runner.invoke(
+        ToolRef("strategy", "backtest_strategy"),
+        {
+            "dataset_id": dataset.id,
+            "strategy_id": strategy_id,
+            "baseline_strategy_id": champion_id,
+            "target_col": "bad",
+        },
+        task_id="task-1",
+    )
+    assert challenger_bt.ok is True, challenger_bt.error
+    return strategy_id, champion_id, champion_bt.output, challenger_bt.output
+
+
+def test_challenger_report_recomputes_task_owned_persisted_evidence(tmp_path):
+    runner, registry, settings = _runtime(tmp_path)
+    strategy_id, champion_id, champion_bt, challenger_bt = _trusted_evidence(
+        runner, registry, tmp_path
+    )
 
     result = runner.invoke(
         ToolRef("strategy", "render_challenger_report"),
         {
             "strategy_id": strategy_id,
-            "champion_strategy_id": "champion-1",
-            "compare": compare,
+            "champion_strategy_id": champion_id,
             "challenger_backtest": challenger_bt,
-            "champion_backtest": champion_bt,
-            "adopted": True,
         },
         task_id="task-1",
     )
@@ -81,12 +113,10 @@ def test_challenger_report_numbers_follow_tool_output(tmp_path):
     assert result.ok is True, result.error
     assert result.output["status"] == "rendered"
     md = result.output["report_md"]
-    # Numbers come straight from the passed-in tool outputs.
-    assert "0.6200" in md and "0.6000" in md  # challenger vs champion approval
-    assert "115.0000" in md and "100.0000" in md  # expected profit both sides
-    assert "0.0200" in md  # approval delta
-    assert "已采纳挑战者" in md
-    assert compare["summary_text"] in md
+    assert f"{float(challenger_bt['approval_rate']):.4f}" in md
+    assert f"{float(champion_bt['approval_rate']):.4f}" in md
+    assert "未采纳（仍以基线为准）" in md
+    assert "挑战者审批率较基线" in md
     assert [a["kind"] for a in result.output["artifacts"]] == ["challenger_report_md"]
 
     strategies = StrategyRepository(settings.db_path)
@@ -99,38 +129,35 @@ def test_challenger_report_numbers_follow_tool_output(tmp_path):
     assert len(rows) == 1
 
 
-def test_challenger_report_changes_when_compare_numbers_change(tmp_path):
-    runner, _registry, _settings = _runtime(tmp_path)
-    strategy_id = _build_strategy(runner)
-
-    def _render(profit_delta):
-        return runner.invoke(
-            ToolRef("strategy", "render_challenger_report"),
-            {
-                "strategy_id": strategy_id,
-                "champion_strategy_id": "champion-1",
-                "compare": {
-                    "deltas": {"approval_rate": 0.0, "approved_bad_rate": 0.0, "expected_profit": profit_delta},
-                    "summary_text": "x",
-                    "red_flags": [],
-                },
-                "challenger_backtest": {"expected_profit": profit_delta},
-                "champion_backtest": {"expected_profit": 0.0},
-            },
-            task_id="task-1",
-        ).output["report_md"]
-
-    assert "42.0000" in _render(42.0)
-    assert "99.0000" in _render(99.0)
+def test_challenger_report_rejects_caller_fabricated_metrics_and_status(tmp_path):
+    runner, registry, _settings = _runtime(tmp_path)
+    strategy_id, champion_id, _champion_bt, challenger_bt = _trusted_evidence(
+        runner, registry, tmp_path
+    )
+    result = runner.invoke(
+        ToolRef("strategy", "render_challenger_report"),
+        {
+            "strategy_id": strategy_id,
+            "champion_strategy_id": champion_id,
+            "challenger_backtest": challenger_bt,
+            "compare": {"deltas": {"expected_profit": 999999}},
+            "champion_backtest": {"approval_rate": 1.0},
+            "adopted": True,
+        },
+        task_id="task-1",
+    )
+    assert result.ok is False
+    assert result.error_kind == "schema"
 
 
+@pytest.mark.slow
 def test_challenger_report_no_champion_degrades_to_no_op(tmp_path):
     runner, _registry, settings = _runtime(tmp_path)
     strategy_id = _build_strategy(runner)
 
     result = runner.invoke(
         ToolRef("strategy", "render_challenger_report"),
-        {"strategy_id": strategy_id, "compare": {}, "challenger_backtest": {}},
+        {"strategy_id": strategy_id},
         task_id="task-1",
     )
 
@@ -142,19 +169,24 @@ def test_challenger_report_no_champion_degrades_to_no_op(tmp_path):
     assert strategies.list_strategy_artifacts(strategy_id) == []
 
 
-def test_challenger_report_degrades_when_compare_itself_degraded(tmp_path):
-    runner, _registry, _settings = _runtime(tmp_path)
-    strategy_id = _build_strategy(runner)
-    # compare_strategies' own no-baseline no-op carries this summary_text.
-    degraded_compare = {"summary_text": "未提供基线策略，跳过对比。", "deltas": {}, "red_flags": []}
-
+def test_challenger_report_rejects_cross_task_champion_before_writing(tmp_path):
+    runner, _registry, settings = _runtime(tmp_path)
+    strategy_id = _build_strategy(runner, task_id="task-1")
+    foreign_champion_id = _build_strategy(runner, threshold=3, task_id="task-2")
     result = runner.invoke(
         ToolRef("strategy", "render_challenger_report"),
-        {"strategy_id": strategy_id, "champion_strategy_id": "champion-1", "compare": degraded_compare},
+        {
+            "strategy_id": strategy_id,
+            "champion_strategy_id": foreign_champion_id,
+            "challenger_backtest": {"backtest_id": "not-used"},
+        },
         task_id="task-1",
     )
-    assert result.output["status"] == "no_baseline"
-    assert result.output["artifacts"] == []
+    assert result.ok is False
+    # The ownership boundary deliberately does not reveal that the foreign id
+    # exists; it is indistinguishable from an unknown strategy to this task.
+    assert "strategy not found" in str(result.error)
+    assert StrategyRepository(settings.db_path).list_strategy_artifacts(strategy_id) == []
 
 
 def test_compare_renderer_uses_matrix_heat_and_conclusion_line():

@@ -13,9 +13,9 @@ here directly.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
-from fastapi import BackgroundTasks, Request
+from fastapi import BackgroundTasks, HTTPException, Request
 
 from marvis.errors import conflict, not_implemented, unprocessable
 
@@ -37,6 +37,7 @@ from marvis.agent.turn_handlers import (
     DriverTurnRuntime,
     dispatch_driver_turn as dispatch_plan_driver_turn,
 )
+from marvis.agent.workflow_recovery import answer_workflow_recovery_message
 from marvis.agent.validation_runner import (
     ValidationJobCallbacks,
     run_agent_validation_job as run_agent_validation_job_impl,
@@ -73,7 +74,7 @@ from marvis.agent.validation_service import (
     mark_agent_cancelled,
     raise_if_agent_cancelled,
 )
-from marvis.agent.plan_driver import DriverError
+from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN, DriverError
 from marvis.agent_memory.api_support import (
     agent_memory_context_from_store,
     audit_agent_memory_use_from_store,
@@ -99,6 +100,7 @@ from marvis.domain import (
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
     TASK_TYPE_VINTAGE,
+    StrategyTaskInput,
     TaskRecord,
     TaskStatus,
 )
@@ -117,6 +119,7 @@ from marvis.repositories.validation_contracts import (
     require_confirmed_validation_input_contract,
 )
 from marvis.state_machine import ConflictError
+from marvis.orchestrator.contracts import PlanStatus
 
 
 AGENT_ACCEPTANCE_NORMAL = "normal"
@@ -127,6 +130,9 @@ _VALID_EFFORTS = ("low", "medium", "high")
 
 _DRIVER_JOB_KIND = "driver"
 _DRIVER_JOB_BUSY_DETAIL = "该任务正在执行上一步，请等待完成"
+_TERMINAL_PLAN_STATUSES = frozenset(
+    {PlanStatus.DONE, PlanStatus.FAILED, PlanStatus.CANCELLED}
+)
 
 
 def repo(request: Request) -> TaskRepository:
@@ -263,10 +269,15 @@ def dispatch_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    strategy_input: StrategyTaskInput | None = None,
+    strategy_request: Mapping[str, object] | None = None,
+    recovery_model_id: str | None = None,
+    recovery_effort: str | None = None,
 ) -> dict:
     """Run one driver turn. ``acceptance_mode`` controls the agent-mode behavior at
-    gates (spec §6, two 受控度): AUTO(自动审查) lets the LLM auto-drive ALL gates;
-    NORMAL(默认权限) runs a single turn and STOPS at the first gate for the user to
+    gates (spec §6, two 受控度): AUTO(自动审查) lets the LLM auto-drive low-risk gates;
+    canonical mandatory business/effect gates still stop for a human. NORMAL(默认权限)
+    runs a single turn and STOPS at the first gate for the user to
     confirm — even with an LLM configured. Manual mode (agent_client None) always
     stops at the gate for the control button. ``selection`` carries an edited feature
     set from the §4 screening table; ``dedup_strategies`` carries the per-feature dedup
@@ -288,21 +299,41 @@ def dispatch_driver_turn(
         raise conflict(_DRIVER_JOB_BUSY_DETAIL) from exc
     if repo_.mark_job_running(job_id) is False:
         raise conflict(_DRIVER_JOB_BUSY_DETAIL)
-    runtime = DriverTurnRuntime(
-        settings=request.app.state.settings,
-        plan_repo=request.app.state.plan_repo,
-        plan_executor=request.app.state.plan_executor,
-        planner=request.app.state.planner,
-        plan_validator=request.app.state.plan_validator,
-        llm_client=driver_llm_client(request, task),
-        tier=task_tier(request, task),
-    )
     try:
+        if strategy_input is not None:
+            if task.task_type != TASK_TYPE_STRATEGY:
+                raise DriverError("strategy_input 只能用于 strategy 类型任务。")
+            plans = request.app.state.plan_repo.list_plans_for_task(task.id)
+            if any(plan.status not in _TERMINAL_PLAN_STATUSES for plan in plans):
+                raise DriverError("当前策略任务已有进行中的计划，不能修改业务口径。")
+            task = repo_.update_strategy_input(task.id, strategy_input)
+        runtime = DriverTurnRuntime(
+            settings=request.app.state.settings,
+            plan_repo=request.app.state.plan_repo,
+            plan_executor=request.app.state.plan_executor,
+            planner=request.app.state.planner,
+            plan_validator=request.app.state.plan_validator,
+            llm_client=driver_llm_client(request, task),
+            tier=task_tier(request, task),
+            governance_service=getattr(request.app.state, "governance_service", None),
+            local_principal=getattr(request.state, "local_principal", None),
+            recovery_responder=_driver_recovery_responder(
+                request,
+                task,
+                model_id=recovery_model_id,
+                effort=recovery_effort,
+            ),
+        )
         result = dispatch_plan_driver_turn(
             runtime, repo_, task, user_text=user_text, agent_client=agent_client,
             auto_accept_enabled=agent_auto_accept(acceptance_mode), selection=selection,
             dedup_strategies=dedup_strategies, adjust_params=adjust_params,
             expected_step_id=expected_step_id,
+            strategy_request=strategy_request,
+            confirmation_source=CONFIRMATION_SOURCE_HUMAN,
+            recovery_bypass=(
+                strategy_input is not None or strategy_request is not None
+            ),
         )
     except DriverError as exc:
         repo_.finish_job(job_id, status="failed", error_name="DriverError", error_value=str(exc))
@@ -311,8 +342,50 @@ def dispatch_driver_turn(
         repo_.finish_job(job_id, status="failed", error_name=exc.__class__.__name__, error_value=str(exc))
         raise
     else:
-        repo_.finish_job(job_id, status="succeeded")
+        if result.get("status") == "error":
+            messages = result.get("messages") or []
+            metadata = (messages[-1].get("metadata") or {}) if messages else {}
+            diagnostic = metadata.get("error_diagnostic") or {}
+            repo_.finish_job(
+                job_id,
+                status="failed",
+                error_name=str(diagnostic.get("exception_type") or "DriverTurnError"),
+                error_value=str(
+                    diagnostic.get("summary")
+                    or (messages[-1].get("content") if messages else "driver turn failed")
+                ),
+            )
+        else:
+            repo_.finish_job(job_id, status="succeeded")
         return result
+
+
+def _driver_recovery_responder(
+    request: Request,
+    task: TaskRecord,
+    *,
+    model_id: str | None,
+    effort: str | None,
+):
+    """Build a lazy general-chat responder without reusing gate/router prompts."""
+
+    if task.run_mode != "agent":
+        return None
+
+    def respond(*, task: TaskRecord, user_message: str, diagnostic: dict):
+        try:
+            profile = resolve_agent_model(request, model_id, effort)
+        except HTTPException:
+            client = None
+        else:
+            client = OpenAICompatibleLLMClient(profile)
+        return answer_workflow_recovery_message(
+            user_message=user_message,
+            diagnostic=diagnostic,
+            client=client,
+        )
+
+    return respond
 
 
 def dispatch_agent_validation_job(

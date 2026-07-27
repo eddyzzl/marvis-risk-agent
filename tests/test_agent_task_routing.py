@@ -13,9 +13,13 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from marvis.agent.strategy_setup import resolve_strategy_intent
 from marvis.agent.turn_handlers import _strategy_success_criteria
 from marvis.app import create_app
 from marvis.domain import TASK_TYPE_STRATEGY, TaskRecord, TaskStatus
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 @pytest.fixture
@@ -23,17 +27,311 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path))
 
 
-def test_strategy_agent_start_builds_plan_and_reaches_strategy_gate(client, tmp_path):
+def _strategy_source(tmp_path: Path) -> Path:
     src = tmp_path / "strategy"
     src.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({
         "bad": [1, 0, 0, 0, 1, 0],
         "score": [580, 620, 730, 760, 590, 800],
     }).to_csv(src / "strategy.csv", index=False)
+    return src
+
+
+@pytest.mark.parametrize(
+    ("goal", "expected"),
+    [
+        ("额度准入策略", "full_development"),
+        ("快速策略分析", "quick_analysis"),
+        ("规则挖掘后快速策略分析", "rule_mining"),
+        ("策略监控并检查规则策略", "monitoring"),
+        ("额度定价", "limit_pricing"),
+        ("定价矩阵", "limit_pricing"),
+        ("limit pricing", "limit_pricing"),
+        ("按客群做利润测算", "standard_analysis"),
+        ("计算滚动率矩阵", "standard_analysis"),
+        ("最大利润审批策略", "full_development"),
+        ("组合分析", "portfolio_analysis"),
+    ],
+)
+def test_strategy_intent_taxonomy_and_priority(goal, expected):
+    assert resolve_strategy_intent(None, goal) == expected
+
+
+def test_strategy_agent_start_defaults_to_full_development_plan(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    src = _strategy_source(tmp_path)
     created = client.post(
         "/api/tasks",
         json={
-            "model_name": "策略回测",
+            "model_name": "额度准入策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    assert started.json()["status"] == "ok"
+    assert any(
+        message.get("metadata", {}).get("intent") == "full_development"
+        for message in started.json()["messages"]
+    )
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert plans[-1]["template_id"] == "strategy_development"
+    assert plans[-1]["success_criteria"] == [
+        {"metric": "approved_bad_rate", "max": 0.20}
+    ]
+    assert [step["title"] for step in plans[-1]["steps"]] == [
+        "权衡扫描",
+        "设计分数带",
+        "构造策略",
+        "回测策略",
+        "对比基线",
+        "挑战者报告",
+        "采纳策略",
+        "策略文档",
+    ]
+
+
+def test_strategy_agent_start_requires_governed_sample_design(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "额度准入策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    payload = started.json()
+    assert payload["status"] == "clarification_required"
+    assert payload["code"] == "strategy_sample_design_required"
+    assert set(payload["fields"]) == {
+        "target_bad_value",
+        "drop_nan_labels",
+        "relationship",
+        "approval_population",
+        "risk_population",
+        "partitioning",
+        "maturity",
+        "performance_window",
+        "observation_window",
+        "field_bindings",
+        "historical_score",
+    }
+    assert "成熟策略样本设计" in payload["messages"][-1]["content"]
+    assert not any(
+        "开始完整策略开发" in message["content"]
+        for message in payload["messages"]
+    )
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+@pytest.mark.parametrize("strategy_type", ["limit", "pricing", "segmentation"])
+def test_nonapproval_typed_strategy_never_falls_into_cutoff_template(
+    client,
+    tmp_path,
+    strategy_type,
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": f"{strategy_type} strategy",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "strategy_type": strategy_type,
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    started = client.post(f"/api/tasks/{created.json()['id']}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    payload = started.json()
+    assert payload["status"] == "clarification_required"
+    assert payload["clarification"]["code"] == "strategy_typed_spec_required"
+    assert payload["clarification"]["strategy_type"] == strategy_type
+    assert payload["clarification"]["missing_fields"] == ["strategy_spec"]
+    assert client.get(f"/api/tasks/{created.json()['id']}/plans").json()["plans"] == []
+
+
+def test_strategy_limit_pricing_intent_redirects_without_approval_plan(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "额度准入策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "请做额度定价矩阵"},
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "clarification_required"
+    assert payload["intent"] == "limit_pricing"
+    assert payload["code"] == "strategy_standard_workflow_inputs_required"
+    assert payload["available_workflow"] == "limit_pricing_matrix"
+    clarification = payload["clarification"]
+    assert clarification["intent"] == "limit_pricing"
+    assert clarification["available_workflow"] == "limit_pricing_matrix"
+    metadata = payload["messages"][-1]["metadata"]
+    assert metadata["intent"] == "limit_pricing"
+    assert metadata["code"] == "strategy_standard_workflow_inputs_required"
+    assert metadata["available_workflow"] == "limit_pricing_matrix"
+    assert "已可执行" in payload["messages"][-1]["content"]
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "请做客群利润测算",
+        "按客群计算利润和 ROA",
+        "请做 profit analysis",
+        "请计算滚动率矩阵",
+    ],
+)
+def test_standard_analysis_without_compiler_never_falls_into_approval_plan(
+    client,
+    tmp_path,
+    content,
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "策略分析",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    task_id = created.json()["id"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": content},
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "clarification_required"
+    assert payload["intent"] == "standard_analysis"
+    assert payload["code"] == "strategy_standard_workflow_inputs_required"
+    assert set(payload["available_workflows"]) == {"profit_calc", "roll_rate_matrix"}
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+def test_strategy_portfolio_intent_redirects_to_portfolio_task_without_plan(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "额度准入策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "开始组合分析"},
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "clarification_required"
+    assert payload["intent"] == "portfolio_analysis"
+    assert payload["code"] == "strategy_portfolio_task_redirect"
+    assert payload["suggested_task_type"] == "portfolio"
+    clarification = payload["clarification"]
+    assert clarification["intent"] == "portfolio_analysis"
+    assert clarification["suggested_task_type"] == "portfolio"
+    metadata = payload["messages"][-1]["metadata"]
+    assert metadata["intent"] == "portfolio_analysis"
+    assert metadata["code"] == "strategy_portfolio_task_redirect"
+    assert metadata["suggested_task_type"] == "portfolio"
+    assert "V2" in payload["messages"][-1]["content"]
+    assert "V3" not in payload["messages"][-1]["content"]
+    assert "V4" not in payload["messages"][-1]["content"]
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+def test_strategy_development_without_business_constraints_clarifies_without_plan(
+    client, tmp_path
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "缺经营口径的策略",
             "validator": "qa",
             "source_dir": str(src),
             "task_type": "strategy",
@@ -46,29 +344,230 @@ def test_strategy_agent_start_builds_plan_and_reaches_strategy_gate(client, tmp_
     task_id = created.json()["id"]
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    assert started.json()["status"] == "clarification_required"
+    clarification = started.json()["clarification"]
+    assert clarification["code"] == "strategy_business_inputs_required"
+    assert clarification["current_input"] is None
+    assert started.json()["messages"][-1]["metadata"]["current_input"] is None
+    assert set(clarification["missing_fields"]) == {
+        "objective",
+        "max_bad_rate_or_min_approval_rate",
+    }
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+def test_strategy_clarification_preserves_partial_business_contract(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "已有目标待补约束的策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {"objective": "max_approval"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    assert started.json()["status"] == "clarification_required"
+    expected = {
+        "entry_mode": "strategy_development",
+        "strategy_type": "approval",
+        "objective": "max_approval",
+        "max_bad_rate": None,
+        "min_approval_rate": None,
+        "baseline_strategy_id": None,
+        "profit": None,
+    }
+    clarification = started.json()["clarification"]
+    assert clarification["missing_fields"] == ["max_bad_rate_or_min_approval_rate"]
+    assert clarification["current_input"] == expected
+    metadata = started.json()["messages"][-1]["metadata"]
+    assert metadata["current_input"] == expected
+    assert metadata["clarification"]["current_input"] == expected
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+def test_max_profit_strategy_requires_complete_profit_contract(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "利润目标策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_profit",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    assert started.json()["status"] == "clarification_required"
+    missing = set(started.json()["clarification"]["missing_fields"])
+    assert missing == {
+        "profit.ead_col",
+        "profit.pd_col",
+        "profit.annual_rate",
+        "profit.funding_rate",
+        "profit.lgd",
+        "profit.operating_cost_per_loan",
+        "profit.term_months",
+    }
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+def test_explicit_quick_strategy_analysis_keeps_lightweight_workflow(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "兼容轻量策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {"entry_mode": "strategy_analysis"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert started.status_code == 202, started.text
     start_messages = started.json()["messages"]
     assert any("开始策略分析" in message["content"] for message in start_messages)
     assert start_messages[-1]["metadata"]["kind"] == "plan_overview"
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert plans[-1]["template_id"] == "strategy_analysis"
 
     confirmed = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     assert confirmed.status_code == 202, confirmed.text
-    gate = confirmed.json()["messages"][-1]
-    assert gate["metadata"]["kind"] == "gate"
-    assert "策略候选已生成" in gate["content"]
+    done = confirmed.json()["messages"][-1]
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1][
+        "status"
+    ] == "done"
+    assert "策略权衡视图完成" in done["content"]
     assert any(
-        table["title"] == "策略规则（按顺序命中）"
-        for table in gate["metadata"]["tables"]
+        table["title"] == "cutoff 权衡点"
+        for table in done["metadata"]["tables"]
     )
 
-    finished = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
-    assert finished.status_code == 202, finished.text
-    done = finished.json()["messages"][-1]
-    assert "策略权衡视图完成" in done["content"]
-    assert any(table["title"] == "cutoff 权衡点" for table in done["metadata"]["tables"])
+
+def test_quick_strategy_analysis_phrase_overrides_development_default(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "临时策略预览",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
+
+    started = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "快速策略分析"},
+    )
+
+    assert started.status_code == 202, started.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert plans[-1]["template_id"] == "strategy_analysis"
 
 
-def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(client, tmp_path):
+def test_start_strategy_development_message_uses_full_product_route(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "对话式策略任务",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_approval",
+                "min_approval_rate": 0.60,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
+
+    started = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "开始策略开发"},
+    )
+
+    assert started.status_code == 202, started.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert plans[-1]["template_id"] == "strategy_development"
+    assert plans[-1]["success_criteria"] == [
+        {"metric": "approval_rate", "min": 0.60}
+    ]
+
+
+def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(
+    client,
+    tmp_path,
+    monkeypatch,
+):
     src = tmp_path / "rules"
     src.mkdir(parents=True, exist_ok=True)
     # bad concentrated where f1 is low -> mining returns candidate reject rules.
@@ -92,6 +591,11 @@ def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(client, tmp_
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert started.status_code == 202, started.text
@@ -101,9 +605,11 @@ def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(client, tmp_
     assert confirmed.status_code == 202, confirmed.text
     gate = confirmed.json()["messages"][-1]
     assert gate["metadata"]["kind"] == "gate"
-    assert "规则挖掘完成" in gate["content"]
+    assert gate["metadata"]["gate_source_tool"] == "adopt_strategy"
+    assert "策略候选已生成" in gate["content"]
+    assert "策略回测完成" in gate["content"]
     assert any(
-        table["title"] == "候选规则（按 lift 降序）"
+        table["title"] == "策略规则（按顺序命中）"
         for table in gate["metadata"]["tables"]
     )
 

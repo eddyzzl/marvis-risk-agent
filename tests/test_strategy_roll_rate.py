@@ -89,6 +89,10 @@ def test_roll_rate_matrix_returns_complete_zero_matrix_for_no_transitions():
 
     assert result.base_counts == {"C": 0, "M1": 0}
     assert result.matrix == ((0.0, 0.0), (0.0, 0.0))
+    assert any(
+        warning["code"] == "no_transitions"
+        for warning in result.data_quality_warnings
+    )
 
 
 def test_roll_rate_matrix_rejects_unknown_status_and_empty_states():
@@ -201,6 +205,64 @@ def test_roll_rate_matrix_default_behavior_unchanged_without_balance_col():
         (0.0, 0.0, 0.0, 1.0),
     )
     assert result.data_quality_warnings == ()
+
+
+def test_roll_rate_matrix_reports_dropped_null_required_rows():
+    frame = pd.DataFrame({
+        "customer_id": ["A", "A", "B", None],
+        "month": ["202601", "202602", None, "202601"],
+        "status": ["C", "M1", "C", "C"],
+    })
+
+    result = roll_rate_matrix(
+        frame,
+        id_col="customer_id",
+        time_col="month",
+        status_col="status",
+        states=["C", "M1"],
+    )
+
+    warning = next(item for item in result.data_quality_warnings if item["code"] == "null_rows_dropped")
+    assert warning["count"] == 2
+    assert warning["input_rows"] == 4
+    assert warning["usable_rows"] == 2
+
+
+def test_roll_rate_matrix_rejects_duplicate_id_period_after_time_normalization():
+    frame = pd.DataFrame({
+        "customer_id": ["A", "A", "A"],
+        "month": ["2026-01", "202601", "2026-02"],
+        "status": ["C", "M1", "M1"],
+    })
+
+    with pytest.raises(ValueError, match="duplicate id/time"):
+        roll_rate_matrix(
+            frame,
+            id_col="customer_id",
+            time_col="month",
+            status_col="status",
+            states=["C", "M1"],
+        )
+
+
+@pytest.mark.parametrize("balance", [[100.0, -1.0], [100.0, float("nan")], [100.0, "bad"]])
+def test_roll_rate_matrix_rejects_invalid_balance_weights(balance):
+    frame = pd.DataFrame({
+        "customer_id": ["A", "A"],
+        "month": ["202601", "202602"],
+        "status": ["C", "M1"],
+        "balance": balance,
+    })
+
+    with pytest.raises(ValueError, match="balance"):
+        roll_rate_matrix(
+            frame,
+            id_col="customer_id",
+            time_col="month",
+            status_col="status",
+            states=["C", "M1"],
+            balance_col="balance",
+        )
 
 
 def test_strategy_package_exports_roll_rate_matrix():

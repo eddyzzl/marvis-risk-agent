@@ -59,12 +59,22 @@ import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import {
+  handleAdoptionConfirmClick as handleAdoptionConfirmClickController,
+  renderAdoptionGate,
+  submitAdoption as submitAdoptionController,
+} from "./js/v2/adoption_gate_controller.js";
+import {
   driverGateBodyHtml as driverGateBodyHtmlController,
   driverGateHasWidget as driverGateHasWidgetController,
   driverManualAnalysisHtml as driverManualAnalysisHtmlController,
+  lastAssistantMessageId as lastAssistantMessageIdController,
   latestInteractiveScreenMessageId as latestInteractiveScreenMessageIdController,
   stripChatInstructions as stripChatInstructionsController,
 } from "./js/v2/driver_manual_analysis.js";
+import {
+  hasWorkflowErrorDiagnostic,
+  workflowMessageContentHtml,
+} from "./js/v2/workflow_error_card.js";
 import {
   handleDriverConfirmClick as handleDriverConfirmClickController,
   renderDriverGateButton,
@@ -103,6 +113,13 @@ import {
   submitScreenThresholdAdjust as submitScreenThresholdAdjustController,
 } from "./js/v2/screen_gate_controller.js";
 import { renderSkillManager } from "./js/v2/skill_manager.js";
+import {
+  handleStrategyClarificationChange as handleStrategyClarificationChangeController,
+  handleStrategyClarificationSubmit as handleStrategyClarificationSubmitController,
+  isStrategyClarificationMessage as isStrategyClarificationMessageController,
+  renderStrategyClarification,
+} from "./js/v2/strategy_clarification_controller.js";
+import { createStrategyCandidateLabController } from "./js/v2/strategy_candidate_lab_controller.js";
 import { getSelectedTier, onSelectedTierChange } from "./js/v2/state_v2.js";
 import {
   columnFractions,
@@ -270,6 +287,30 @@ const planRailController = createPlanRailController({
   loadAgentMessages,
   renderAll,
   fillComposer: focusAgentComposerForIntervene,
+});
+const strategyCandidateLabController = createStrategyCandidateLabController({
+  $,
+  getSelectedTask: () => selectedTask,
+  getSelectedTaskId: () => selectedTaskId,
+  getBlockedReason: () => {
+    if (latestOpenGateMessage()) return "open_gate";
+    if (selectedTask?.task_type === "strategy" && selectedTaskIsBusy()) return "active_plan";
+    return "";
+  },
+  setActionStatus,
+  setAgentMessages: (messages) => {
+    if (Array.isArray(messages)) agentMessages = messages;
+  },
+  renderAgentConversation,
+  pollAgentMessagesUntilSettled,
+  settleCandidateLabSubmission: (taskId) => pollValidationProgress(
+    terminalTaskStatuses,
+    taskId,
+    { settleWhenServerIdle: true },
+  ),
+  refreshAgentMessages: loadAgentMessages,
+  resetPlanFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+  renderWorkflowStepper,
 });
 const taskSearchController = createTaskSearchController({
   getElementById: $,
@@ -3920,6 +3961,10 @@ function selectTask(task) {
     rememberSelectedTaskId(task.id);
     renderCurrentTask();
     renderTaskList();
+    strategyCandidateLabController.renderAvailability();
+    if (task.task_type === "strategy") {
+      void strategyCandidateLabController.refresh(task.id, { silent: true });
+    }
     return;
   }
   // Task identity is changing — drop any in-flight typewriter state so a
@@ -3935,12 +3980,14 @@ function selectTask(task) {
   ensureActiveTaskProgressPolling(task);
   renderMetricPreview({});
   renderStoredStateSummaries();
+  const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   runAction(async () => {
     try {
       renderTaskList();
       await loadTaskEvidence();
       await loadReportFields();
       await loadAgentMessages(task.id);
+      await candidateLabLoadPromise;
     } finally {
       renderAll();
       await restoreResultScrollPositionAfterRender(task.id);
@@ -3957,6 +4004,7 @@ function deselectCurrentTask() {
   rememberSelectedTaskId(null);
   latestNotebookSteps = [];
   agentMessages = [];
+  strategyCandidateLabController.clear();
   resetAgentComposerToGlobalDefaults();
   renderMetricPreview({});
   setActionStatus("");
@@ -4688,6 +4736,7 @@ function renderAll() {
   renderTaskList();
   renderSettingsState();
   renderAgentConversation();
+  strategyCandidateLabController.renderAvailability();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -4703,6 +4752,7 @@ function renderChangedValidationViews() {
   renderTaskList();
   renderSettingsState();
   renderAgentConversation();
+  strategyCandidateLabController.renderAvailability();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -4857,6 +4907,7 @@ function renderAgentConversation() {
   const composer = $("agentComposer");
   const workspace = $("resultWorkspace");
   if (!panel) return;
+  strategyCandidateLabController.renderAvailability();
   const isAgent = selectedTaskIsAgentMode();
   // Driver tasks (data_join / feature / modeling) show the same conversation +
   // controls in BOTH modes. Manual = the user operates the controls (no free-text
@@ -4970,6 +5021,10 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
     const hideMeta = Boolean(label && label === previousAssistantLabel);
     previousAssistantLabel = label || previousAssistantLabel;
     const metadata = message?.metadata || {};
+    const hasWorkflowPresentation = role === "assistant" && (
+      hasWorkflowErrorDiagnostic(metadata)
+      || (Array.isArray(metadata.ingest_notices) && metadata.ingest_notices.length > 0)
+    );
     return {
       id: message?.id || "",
       role,
@@ -4986,6 +5041,17 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
         awaiting_next_stage: metadata.awaiting_next_stage || "",
         intent: metadata.intent || "",
         tool_call_name: metadata.tool_call?.name || "",
+        // Structured recovery/error cards must be rebuilt as a unit. The
+        // streaming fast path only patches .agent-message-content with plain
+        // Markdown, so include their content + metadata in the structural key
+        // to prevent it from replacing a card with the legacy text body.
+        workflow_presentation: hasWorkflowPresentation
+          ? {
+            content: message?.content || "",
+            error_diagnostic: metadata.error_diagnostic || null,
+            ingest_notices: metadata.ingest_notices || [],
+          }
+          : null,
         is_latest_gate: Boolean(latestGateId) && String(message?.id || "") === latestGateId,
         memory_references: Array.isArray(metadata.memory_references)
           ? metadata.memory_references.map((reference) => [
@@ -5247,6 +5313,8 @@ function driverManualAnalysisHtml(messages) {
     renderScreenTable: agentMessageScreenTableHtml,
     renderTables: agentMessageTablesHtml,
     renderModelDelivery: agentMessageModelDeliveryHtml,
+    renderAdoptionGate: agentMessageAdoptionGateHtml,
+    renderStrategyClarification: agentMessageStrategyClarificationHtml,
     // The plain-gate confirm control now lives in the middle analysis section
     // (not the rail). renderDriverGateButton already returns "" for gates that
     // carry a structured widget, so only genuinely plain gates get this button —
@@ -5563,6 +5631,40 @@ function agentMessageModelDeliveryHtml(message, options = {}) {
   return renderModelDeliveryPanel(message, options);
 }
 
+function agentMessageAdoptionGateHtml(message, options = {}) {
+  return renderAdoptionGate(message, options);
+}
+
+function agentMessageStrategyClarificationHtml(message, options = {}) {
+  return renderStrategyClarification(message, options);
+}
+
+function handleStrategyClarificationSubmit(event) {
+  return handleStrategyClarificationSubmitController(
+    event,
+    strategyClarificationControllerContext(),
+  );
+}
+
+function handleStrategyClarificationChange(event) {
+  return handleStrategyClarificationChangeController(event);
+}
+
+function strategyClarificationControllerContext() {
+  return {
+    ...driverConfirmControllerContext(),
+    refreshAgentMessages: (taskId) => loadAgentMessages(taskId),
+  };
+}
+
+async function submitAdoption(button) {
+  return submitAdoptionController(button, driverConfirmControllerContext());
+}
+
+function handleAdoptionConfirmClick(event) {
+  return handleAdoptionConfirmClickController(event, driverConfirmControllerContext());
+}
+
 async function submitModelingWeightAdjust(button) {
   return submitModelingWeightAdjustController(button, modelingSetupControllerContext());
 }
@@ -5593,6 +5695,9 @@ function modelingSetupControllerContext() {
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleModelingWeightAdjustClick);
+  document.addEventListener("click", handleAdoptionConfirmClick);
+  document.addEventListener("click", handleStrategyClarificationSubmit);
+  document.addEventListener("change", handleStrategyClarificationChange);
 }
 
 function agentMessageC1FormHtml(message, options = {}) {
@@ -5884,26 +5989,42 @@ function agentMessageGateBodyHtml(message, interactive) {
     renderModelingSetup: agentMessageModelingSetupHtml,
     renderScreenTable: agentMessageScreenTableHtml,
     renderTables: agentMessageTablesHtml,
+    renderAdoptionGate: agentMessageAdoptionGateHtml,
   }, { interactive });
+}
+
+function agentMessageStrategyClarificationBodyHtml(message, interactive) {
+  return agentMessageStrategyClarificationHtml(message, { interactive });
 }
 
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
+  const hasWorkflowError = role === "assistant"
+    && hasWorkflowErrorDiagnostic(message?.metadata || {});
+  const isStrategyClarification = role === "assistant"
+    && !hasWorkflowError
+    && isStrategyClarificationMessageController(message);
   // join_c1 turns carry no explicit metadata.kind (backend groups them with
   // "gate" for turn-boundary purposes at turn_handlers.py:612) but are the
   // same needs_confirmation moment — the C1 role-assignment form — so they
   // get the same card treatment.
   const isGate = role === "assistant"
+    && !hasWorkflowError
     && (message?.metadata?.kind === "gate" || Boolean(message?.metadata?.join_c1));
   const hasWidget = isGate && driverGateHasWidgetController(message);
   const className = role === "user"
     ? "agent-message user"
-    : `agent-message assistant${isGate ? " has-gate-card" : ""}`;
+    : `agent-message assistant${isGate ? " has-gate-card" : ""}${isStrategyClarification ? " has-strategy-clarification" : ""}${hasWorkflowError ? " has-workflow-error" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
+  const legacyContentHtml = thinking
+    ? ""
+    : formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" });
   const contentHtml = thinking
     ? agentThinkingHtml()
-    : formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" });
+    : role === "assistant"
+      ? workflowMessageContentHtml(message, () => legacyContentHtml)
+      : legacyContentHtml;
   const memoryReferencesHtml = role === "assistant"
     ? agentMemoryReferencesHtml(message?.metadata?.memory_references)
     : "";
@@ -5918,8 +6039,14 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   // read-only snapshots so a stale card cannot be actioned against an
   // already-advanced step.
   const interactive = hasWidget && Boolean(options.isLatestGate);
+  const clarificationInteractive = isStrategyClarification
+    && Boolean(messageId)
+    && messageId === lastAssistantMessageIdController(agentMessages);
   const bodyHtml = [
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
+    isStrategyClarification
+      ? agentMessageStrategyClarificationBodyHtml(message, clarificationInteractive)
+      : "",
     role === "assistant" && hasWidget ? agentMessageGateBodyHtml(message, interactive) : "",
     role === "assistant" && !hasWidget ? `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}` : "",
     role === "assistant" ? agentMessageGateButtonHtml(message) : "",
@@ -6234,8 +6361,10 @@ async function createTask() {
   selectedTask = task;
   rememberSelectedTaskId(task.id);
   renderStoredStateSummaries();
+  const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   await refreshTasks();
   await loadReportFields();
+  await candidateLabLoadPromise;
   setCreateStatus("任务已创建。");
   closeTaskDialog();
   prefillAgentTaskInstruction(task);
@@ -6359,6 +6488,21 @@ async function dispatchDriverStart(taskId = selectedTaskId) {
   renderAgentConversation();
 }
 
+async function refreshStrategyCandidateLabAfterSettled(taskId, task) {
+  if (
+    selectedTaskId !== taskId
+    || task?.task_type !== "strategy"
+  ) {
+    return;
+  }
+  try {
+    await strategyCandidateLabController.refresh(taskId, { silent: true });
+  } catch (_error) {
+    // Candidate evidence is secondary to the main job lifecycle. A projection
+    // refresh failure must not keep a completed Agent task inside the poller.
+  }
+}
+
 async function pollValidationProgress(
   doneStatuses = terminalTaskStatuses,
   taskId = selectedTaskId,
@@ -6391,27 +6535,34 @@ async function pollValidationProgress(
 
       const status = polledTask.status || "";
       const serverBusyAction = taskServerBusyAction(polledTask);
+      const stopped = stopping && !serverBusyAction;
+      const settledOnServerIdle = settleWhenServerIdle && !serverBusyAction;
+      const reachedTerminalStatus = doneStatuses.has(status) && !serverBusyAction;
       if (stopping && !serverBusyAction) {
         if (selectedTaskId === taskId && !background) {
           setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
         }
-        return polledTask;
       }
       // Agent-stage exceptions may occur before a deterministic stage updates
       // the task status (for example while constructing the scan contract).
       // The job lease is the authoritative liveness signal in that gap: once
       // it is gone, return control to the composer instead of polling the stale
       // pre-stage status for an hour.
-      if (settleWhenServerIdle && !serverBusyAction) {
-        return polledTask;
-      }
-      if (doneStatuses.has(status) && !serverBusyAction) {
+      if (!stopped && !settledOnServerIdle && reachedTerminalStatus) {
         if (selectedTaskId === taskId && !background) {
           if (status === "failed" || status === "review_required") {
             setTaskFailureActionStatus(polledTask);
           } else {
             setActionStatus("验证完成。", "success");
           }
+        }
+      }
+      if (stopped || settledOnServerIdle || reachedTerminalStatus) {
+        // Some focused source-level harnesses execute this poller in isolation.
+        // Keep the secondary projection hook optional there, while the app
+        // always supplies it.
+        if (typeof refreshStrategyCandidateLabAfterSettled === "function") {
+          await refreshStrategyCandidateLabAfterSettled(taskId, polledTask);
         }
         return polledTask;
       }
@@ -6940,11 +7091,10 @@ $("agentAcceptanceModeSelect").onchange = (event) => {
   event.target.value = agentAcceptanceMode;
   renderAgentAcceptanceModePreference();
   persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });
-  // UX-10: switching INTO auto mode is the moment the risk (Agent confirms every
-  // gate on the user's behalf, including destructive ones like execute_join) becomes
-  // real — surface it once here rather than relying only on the chip's hover title.
+  // Phase 0B: AUTO only operates low-risk nodes.  Mandatory business decisions
+  // and effect authorizations always stay with the local human principal.
   if (agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept") {
-    setAgentComposerNotice("自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。", "info");
+    setAgentComposerNotice("自动模式仅处理低风险节点；强制业务决策与副作用授权始终需要人工操作。", "info");
   }
   event.target.blur();
 };
@@ -7050,6 +7200,7 @@ bindRunModeDeselectableCards();
 bindDialogBackdropDismissal();
 bindPlatformConfirmDialog();
 materialBindingDialog.bind();
+strategyCandidateLabController.bind(document);
 mountGovernanceExtensions();
 onSelectedTierChange(syncCreateTaskTierDefault);
 createTaskDialog.bindMaterialSourceControls();

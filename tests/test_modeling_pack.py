@@ -85,6 +85,9 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     manifest = plugin_registry.get("modeling")
     tool_names = {tool.name for tool in manifest.tools}
     train_tool = next(tool for tool in manifest.tools if tool.name == "train_model")
+    evidence_train_tool = next(
+        tool for tool in manifest.tools if tool.name == "train_model_with_evidence_v2"
+    )
     choose_tool = next(tool for tool in manifest.tools if tool.name == "choose_modeling_spec")
     configure_tool = next(tool for tool in manifest.tools if tool.name == "configure_tuning")
     tune_tool = next(tool for tool in manifest.tools if tool.name == "tune_hyperparameters")
@@ -109,6 +112,8 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "configure_tuning",
         "tune_hyperparameters",
         "train_model",
+        "train_model_with_evidence_v2",
+        "materialize_model_score_evidence_v2",
         "train_models",
         "compare_experiments",
         "select_experiment",
@@ -128,6 +133,31 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert {"read:dataset", "write:dataset"} <= set(reject_tool.side_effects)
     assert {"write:model", "write:dataset"} <= set(train_tool.side_effects)
     assert "monotone_constraints" in train_tool.input_schema["properties"]
+    assert evidence_train_tool.entrypoint == "tool_train_model_with_evidence_v2"
+    assert evidence_train_tool.input_schema["additionalProperties"] is False
+    assert evidence_train_tool.input_schema["properties"]["sample_design_ref"][
+        "additionalProperties"
+    ] is False
+    assert evidence_train_tool.input_schema["properties"]["recipe"]["enum"] == [
+        "lgb",
+        "xgb",
+        "catboost",
+        "lr",
+        "scorecard",
+        "mlp",
+    ]
+    assert "dataset_id" not in evidence_train_tool.input_schema["properties"]
+    assert "target_col" not in evidence_train_tool.input_schema["properties"]
+    assert "drop_nan_labels" not in evidence_train_tool.input_schema["properties"]
+    assert "split_col" not in evidence_train_tool.input_schema["properties"]
+    assert "split_values" not in evidence_train_tool.input_schema["properties"]
+    assert not {"split_col", "split_values"} & set(
+        evidence_train_tool.input_schema["required"]
+    )
+    assert evidence_train_tool.output_schema["additionalProperties"] is False
+    assert {"write:model", "write:experiment", "write:task"} <= set(
+        evidence_train_tool.side_effects
+    )
     assert choose_tool.determinism == "deterministic"
     assert "metric_policy" in choose_tool.output_schema["required"]
     assert "params" in configure_tool.input_schema["properties"]

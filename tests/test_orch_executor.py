@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from marvis.db import PlanRepository, init_db
+from marvis.db import PlanRepository, connect, init_db
 from marvis.llm_client import LLMClientError
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.contracts import (
@@ -20,7 +20,13 @@ from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.errors import OrchestratorError
 from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.reviewer import Reviewer
-from marvis.plugins.manifest import PluginManifest, ToolRef, ToolSpec
+from marvis.plugins.manifest import (
+    EffectTargetPolicy,
+    GovernancePolicy,
+    PluginManifest,
+    ToolRef,
+    ToolSpec,
+)
 from marvis.plugins.runner import ToolResult
 
 
@@ -174,6 +180,7 @@ def _step(
     decision_point=False,
     sub_agent_scope=None,
     granted_tools=None,
+    policy=None,
     status=StepStatus.PENDING,
 ):
     return PlanStep(
@@ -189,6 +196,7 @@ def _step(
         decision_point=decision_point,
         sub_agent_scope=sub_agent_scope,
         granted_tools=granted_tools or [],
+        policy=policy or GovernancePolicy(),
         status=status,
     )
 
@@ -215,6 +223,16 @@ def _repo(tmp_path, plan):
     return repo
 
 
+def _force_confirmed_bit(repo, step_id):
+    """Simulate a legacy/tampered raw confirmation without governance proof."""
+
+    with connect(repo.db_path) as conn:
+        conn.execute(
+            "UPDATE plan_steps SET confirmed = 1 WHERE id = ?",
+            (step_id,),
+        )
+
+
 def _seed_run_for_checking_step(repo, step_id, *, inputs=None):
     """Seed a run-ledger row for a step that is now CHECKING, the way it really
     happens: the run is opened while the step is RUNNING (start_step_run only
@@ -236,7 +254,7 @@ def _seed_run_for_checking_step(repo, step_id, *, inputs=None):
     return run_id
 
 
-def _executor(repo, runner, reviewer=None, subagents=None, hooks=None):
+def _executor(repo, runner, reviewer=None, subagents=None, hooks=None, authorizer=None):
     return PlanExecutor(
         repo,
         runner,
@@ -244,10 +262,11 @@ def _executor(repo, runner, reviewer=None, subagents=None, hooks=None):
         subagents,
         hooks or FakeHooks(),
         HarnessState(repo),
+        authorizer=authorizer,
     )
 
 
-def _adaptive_executor(repo, runner, planner, reviewer=None, hooks=None):
+def _adaptive_executor(repo, runner, planner, reviewer=None, hooks=None, authorizer=None):
     return PlanExecutor(
         repo,
         runner,
@@ -256,6 +275,7 @@ def _adaptive_executor(repo, runner, planner, reviewer=None, hooks=None):
         hooks or FakeHooks(),
         HarnessState(repo),
         planner=planner,
+        authorizer=authorizer,
     )
 
 
@@ -795,6 +815,288 @@ def test_plan_executor_applies_retry_skip_and_fail_policies(tmp_path):
     fail_result = _executor(fail_repo, FakeRunner([_fail("fatal")])).run("plan-1")
     assert fail_result.status == PlanStatus.FAILED
     assert fail_repo.load_plan("plan-1").steps[0].status == StepStatus.FAILED
+
+
+def _protected_effect_policy():
+    return GovernancePolicy(
+        human_decision_gate="required",
+        effect_authorization="required",
+        effect_target=EffectTargetPolicy(
+            kind="strategy",
+            id_input="strategy_id",
+            expected_statuses=("draft",),
+            result_status="adopted",
+        ),
+    )
+
+
+def _protected_human_policy():
+    return GovernancePolicy(human_decision_gate="required")
+
+
+def test_executor_uses_canonical_human_policy_even_if_legacy_gate_bit_is_false(
+    tmp_path,
+):
+    step = _step(
+        "step-1",
+        needs_confirmation=False,
+        policy=GovernancePolicy(human_decision_gate="required"),
+    )
+    repo = _repo(tmp_path, _plan(step))
+    runner = FakeRunner([_ok({"value": 1})])
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+
+    result = executor.run("plan-1")
+
+    assert result.status == PlanStatus.AWAITING_CONFIRM
+    assert runner.calls == []
+    loaded = repo.load_plan("plan-1")
+    assert loaded.steps[0].status == StepStatus.AWAITING_CONFIRM
+
+
+class ProtectedEffectRunner:
+    def __init__(self, outputs, *, policy=None):
+        self.outputs = list(outputs)
+        self.calls = []
+        effective_policy = policy or _protected_effect_policy()
+        self._tools = SimpleNamespace(
+            resolve=lambda _ref: SimpleNamespace(
+                failure_policy="retry",
+                policy=effective_policy,
+            )
+        )
+
+    def invoke(self, ref, inputs, *, task_id, execution_context=None):
+        self.calls.append((ref, inputs, task_id, execution_context))
+        return self.outputs.pop(0)
+
+
+def test_plan_executor_passes_effect_context_out_of_band_to_runner(tmp_path):
+    step = _step(
+        "step-adopt",
+        tool="adopt",
+        inputs={"strategy_id": "strategy-1"},
+        needs_confirmation=True,
+        policy=_protected_effect_policy(),
+    )
+    repo = _repo(tmp_path, _plan(step))
+    runner = ProtectedEffectRunner([_ok({"status": "adopted"})])
+    context = SimpleNamespace(
+        plan_id="plan-1",
+        plan_revision=0,
+        step_id="step-adopt",
+        decision_id="decision-1",
+        approval_id="approval-1",
+        runtime_generation="runtime-1",
+        human_decision_required=True,
+        effect_authorization_required=True,
+    )
+    authorizer_calls = []
+
+    class Authorizer:
+        def execution_context_for(self, *, plan, step, inputs):
+            authorizer_calls.append((plan.id, step.id, inputs))
+            return context
+
+    executor = _executor(repo, runner, authorizer=Authorizer())
+    assert executor.run("plan-1").status == PlanStatus.AWAITING_CONFIRM
+    _force_confirmed_bit(repo, "step-adopt")
+    result = executor.run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert authorizer_calls == [
+        ("plan-1", "step-adopt", {"strategy_id": "strategy-1"})
+    ]
+    assert runner.calls == [
+        (
+            ToolRef("_sample", "adopt"),
+            {"strategy_id": "strategy-1"},
+            "task-1",
+            context,
+        )
+    ]
+
+
+def test_plan_executor_never_retries_or_replans_protected_effect_failure(tmp_path):
+    step = _step(
+        "step-adopt",
+        tool="adopt",
+        inputs={"strategy_id": "strategy-1"},
+        needs_confirmation=True,
+        policy=_protected_effect_policy(),
+    )
+    plan = _plan(step)
+    plan.tier = "adaptive"
+    repo = _repo(tmp_path, plan)
+    runner = ProtectedEffectRunner(
+        [_fail("effect outcome uncertain"), _ok({"status": "adopted"})]
+    )
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[_step("step-retry", tool="adopt")]
+    )
+
+    executor = _adaptive_executor(
+        repo,
+        runner,
+        planner,
+        authorizer=lambda **kwargs: SimpleNamespace(
+            plan_id="plan-1",
+            plan_revision=0,
+            step_id="step-adopt",
+            approval_id="approval-1",
+            runtime_generation="runtime-1",
+        ),
+    )
+    assert executor.run("plan-1").status == PlanStatus.AWAITING_CONFIRM
+    _force_confirmed_bit(repo, "step-adopt")
+    result = executor.run("plan-1")
+
+    assert result.status == PlanStatus.FAILED
+    assert len(runner.calls) == 1
+    assert planner.replan_calls == []
+    assert repo.load_plan("plan-1").steps[0].status == StepStatus.FAILED
+
+
+def test_plan_executor_fails_closed_without_issued_effect_context(tmp_path):
+    step = _step(
+        "step-adopt",
+        tool="adopt",
+        inputs={"strategy_id": "strategy-1"},
+        needs_confirmation=True,
+        policy=_protected_effect_policy(),
+    )
+    repo = _repo(tmp_path, _plan(step))
+    runner = ProtectedEffectRunner([_ok({"status": "adopted"})])
+    executor = _executor(repo, runner)
+    assert executor.run("plan-1").status == PlanStatus.AWAITING_CONFIRM
+    _force_confirmed_bit(repo, "step-adopt")
+
+    result = executor.run("plan-1")
+
+    assert result.status == PlanStatus.FAILED
+    assert runner.calls == []
+    assert "execution context unavailable" in repo.load_plan("plan-1").steps[0].error
+
+
+def test_confirmed_bit_without_decision_record_never_executes_human_gate(tmp_path):
+    step = _step(
+        "step-review",
+        tool="review",
+        inputs={"candidate": "candidate-1"},
+        needs_confirmation=True,
+        policy=_protected_human_policy(),
+    )
+    repo = _repo(tmp_path, _plan(step))
+    runner = ProtectedEffectRunner(
+        [_ok({"status": "reviewed"})],
+        policy=_protected_human_policy(),
+    )
+    executor = _executor(repo, runner)
+    assert executor.run("plan-1").status == PlanStatus.AWAITING_CONFIRM
+    _force_confirmed_bit(repo, "step-review")
+    result = executor.run("plan-1")
+
+    assert result.status == PlanStatus.FAILED
+    assert runner.calls == []
+    loaded = repo.load_plan("plan-1").steps[0]
+    assert loaded.status == StepStatus.FAILED
+    assert "execution context unavailable" in loaded.error
+
+
+def test_valid_decision_only_context_executes_human_gate(tmp_path):
+    step = _step(
+        "step-review",
+        tool="review",
+        inputs={"candidate": "candidate-1"},
+        needs_confirmation=True,
+        policy=_protected_human_policy(),
+    )
+    repo = _repo(tmp_path, _plan(step))
+    runner = ProtectedEffectRunner(
+        [_ok({"status": "reviewed"})],
+        policy=_protected_human_policy(),
+    )
+    context = SimpleNamespace(
+        plan_id="plan-1",
+        plan_revision=0,
+        step_id="step-review",
+        decision_id="decision-1",
+        approval_id=None,
+        runtime_generation="runtime-1",
+        human_decision_required=True,
+        effect_authorization_required=False,
+    )
+    calls = []
+
+    class Authorizer:
+        def execution_context_for(self, *, plan, step, inputs):
+            calls.append((plan.id, step.id, inputs))
+            return context
+
+    executor = _executor(repo, runner, authorizer=Authorizer())
+    assert executor.run("plan-1").status == PlanStatus.AWAITING_CONFIRM
+    _force_confirmed_bit(repo, "step-review")
+    result = executor.run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert calls == [
+        ("plan-1", "step-review", {"candidate": "candidate-1"})
+    ]
+    assert runner.calls == [
+        (
+            ToolRef("_sample", "review"),
+            {"candidate": "candidate-1"},
+            "task-1",
+            context,
+        )
+    ]
+
+
+def test_plan_executor_never_retries_or_replans_human_gate_failure(tmp_path):
+    step = _step(
+        "step-review",
+        tool="review",
+        needs_confirmation=True,
+        policy=_protected_human_policy(),
+    )
+    plan = _plan(step)
+    plan.tier = "adaptive"
+    repo = _repo(tmp_path, plan)
+    runner = ProtectedEffectRunner(
+        [_fail("decision proof rejected"), _ok({"status": "reviewed"})],
+        policy=_protected_human_policy(),
+    )
+    planner = FakeAdaptivePlanner(replanned_steps=[_step("step-retry")])
+    context = SimpleNamespace(
+        plan_id="plan-1",
+        plan_revision=0,
+        step_id="step-review",
+        decision_id="decision-1",
+        approval_id=None,
+        runtime_generation="runtime-1",
+        human_decision_required=True,
+        effect_authorization_required=False,
+    )
+    executor = _adaptive_executor(
+        repo,
+        runner,
+        planner,
+        authorizer=lambda **_kwargs: context,
+    )
+    assert executor.run("plan-1").status == PlanStatus.AWAITING_CONFIRM
+    _force_confirmed_bit(repo, "step-review")
+    result = executor.run("plan-1")
+
+    assert result.status == PlanStatus.FAILED
+    assert len(runner.calls) == 1
+    assert planner.replan_calls == []
 
 
 def test_plan_executor_blocks_deterministic_postcheck_failure_without_llm_rescue(tmp_path):

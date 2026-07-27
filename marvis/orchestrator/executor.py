@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from marvis.governance.errors import AuthorizationError
 from marvis.orchestrator.capability import CapabilityTier, resolve_tier
 from marvis.orchestrator.context.observation import summarize_failure, summarize_output
 from marvis.orchestrator.contracts import (
@@ -48,6 +49,7 @@ class PlanExecutor:
         hook_dispatcher,
         harness_state,
         planner=None,
+        authorizer=None,
     ):
         self._repo = plan_repo
         self._runner = tool_runner
@@ -56,6 +58,7 @@ class PlanExecutor:
         self._hooks = hook_dispatcher
         self._state = harness_state
         self._planner = planner
+        self._authorizer = authorizer
         self._step_recovery = PlanStepRecovery(plan_repo, reviewer, hook_dispatcher, harness_state)
 
     def run(self, plan_id: str) -> ExecutionResult:
@@ -126,7 +129,9 @@ class PlanExecutor:
                 if result.status == PlanStatus.RUNNING:
                     continue
                 return result
-            if step.needs_confirmation and not self._repo.is_step_confirmed(step.id):
+            if self._requires_human_decision(step) and not self._repo.is_step_confirmed(
+                step.id
+            ):
                 self._set_step_status(step, StepStatus.AWAITING_CONFIRM)
                 self._set_plan_status(plan, PlanStatus.AWAITING_CONFIRM)
                 return ExecutionResult(plan.id, PlanStatus.AWAITING_CONFIRM, None, None)
@@ -139,6 +144,7 @@ class PlanExecutor:
                 and last.decision_point
                 and tier.decision_point_replan
                 and not is_safety_step(last)
+                and not self._requires_effect_authorization(last)
             ):
                 self._try_replan(plan, last, reason="decision_point", tier=tier)
 
@@ -276,7 +282,44 @@ class PlanExecutor:
 
     def _invoke_step(self, plan: Plan, step: PlanStep, resolved_inputs: dict) -> ToolResult:
         policy = self._failure_policy(step)
-        attempts = MAX_STEP_RETRIES + 1 if policy == "retry" else 1
+        protected_execution = self._is_governed_step(step)
+        attempts = (
+            MAX_STEP_RETRIES + 1
+            if policy == "retry" and not protected_execution
+            else 1
+        )
+        execution_context = None
+        if protected_execution:
+            if step.sub_agent_scope:
+                return ToolResult(
+                    ok=False,
+                    output=None,
+                    error="governed steps cannot run in a sub-agent",
+                    error_kind="authorization",
+                    duration_ms=0,
+                )
+            try:
+                execution_context = self._resolve_execution_context(
+                    plan,
+                    step,
+                    resolved_inputs,
+                )
+            except AuthorizationError as exc:
+                return ToolResult(
+                    ok=False,
+                    output=None,
+                    error=f"governed execution context unavailable: {exc}",
+                    error_kind="authorization",
+                    duration_ms=0,
+                )
+            if execution_context is None:
+                return ToolResult(
+                    ok=False,
+                    output=None,
+                    error="governed execution context unavailable",
+                    error_kind="authorization",
+                    duration_ms=0,
+                )
         last_result = None
         for _attempt in range(attempts):
             if step.sub_agent_scope:
@@ -284,11 +327,19 @@ class PlanExecutor:
                 step.sub_agent_id = sub.id
                 result = self._subagents.run(sub, goal_inputs=resolved_inputs)
             else:
-                result = self._runner.invoke(
-                    step.tool_ref,
-                    resolved_inputs,
-                    task_id=plan.task_id,
-                )
+                if protected_execution:
+                    result = self._runner.invoke(
+                        step.tool_ref,
+                        resolved_inputs,
+                        task_id=plan.task_id,
+                        execution_context=execution_context,
+                    )
+                else:
+                    result = self._runner.invoke(
+                        step.tool_ref,
+                        resolved_inputs,
+                        task_id=plan.task_id,
+                    )
             if result.ok:
                 return result
             last_result = result
@@ -382,6 +433,8 @@ class PlanExecutor:
         return ExecutionResult(plan.id, final_status, summary_ref, review)
 
     def _failure_policy(self, step: PlanStep) -> str:
+        if self._is_governed_step(step):
+            return "fail"
         tools = getattr(self._runner, "_tools", None)
         if tools is None:
             return "fail"
@@ -430,6 +483,8 @@ class PlanExecutor:
         step: PlanStep,
     ) -> bool:
         if self._planner is None:
+            return False
+        if self._is_governed_step(step):
             return False
         if not tier.failure_driven_replan:
             return False
@@ -492,6 +547,8 @@ class PlanExecutor:
             return False
         trigger = _last_executed_step(plan)
         if trigger is None:
+            return False
+        if self._requires_effect_authorization(trigger):
             return False
         try:
             new_plan = self._planner.replan(
@@ -622,6 +679,56 @@ class PlanExecutor:
             return tools.resolve(step.tool_ref)
         except Exception:
             return None
+
+    def _requires_effect_authorization(self, step: PlanStep) -> bool:
+        step_policy = getattr(step, "policy", None)
+        if getattr(step_policy, "effect_authorization", "none") == "required":
+            return True
+        tool = self._tool_spec(step)
+        tool_policy = getattr(tool, "policy", None)
+        return getattr(tool_policy, "effect_authorization", "none") == "required"
+
+    def _requires_human_decision(self, step: PlanStep) -> bool:
+        return self._requires_governed_human_decision(step) or bool(
+            step.needs_confirmation
+        )
+
+    def _requires_governed_human_decision(self, step: PlanStep) -> bool:
+        step_policy = getattr(step, "policy", None)
+        if (
+            getattr(step_policy, "human_decision_gate", "none") == "required"
+            or getattr(step_policy, "effect_authorization", "none") == "required"
+        ):
+            return True
+        tool = self._tool_spec(step)
+        tool_policy = getattr(tool, "policy", None)
+        if (
+            getattr(tool_policy, "human_decision_gate", "none") == "required"
+            or getattr(tool_policy, "effect_authorization", "none") == "required"
+        ):
+            return True
+        return False
+
+    def _is_governed_step(self, step: PlanStep) -> bool:
+        return self._requires_governed_human_decision(
+            step
+        ) or self._requires_effect_authorization(step)
+
+    def _resolve_execution_context(
+        self,
+        plan: Plan,
+        step: PlanStep,
+        resolved_inputs: dict,
+    ):
+        authorizer = self._authorizer
+        if authorizer is None:
+            return None
+        resolve = getattr(authorizer, "execution_context_for", None)
+        if callable(resolve):
+            return resolve(plan=plan, step=step, inputs=resolved_inputs)
+        if not callable(authorizer):
+            raise TypeError("authorizer must be callable or expose execution_context_for")
+        return authorizer(plan=plan, step=step, inputs=resolved_inputs)
 
     def _no_progress(self, plan: Plan, failed_step: PlanStep) -> bool:
         try:

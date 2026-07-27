@@ -1,7 +1,7 @@
 import { api } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
 import { skeletonRowsHtml, skeletonTableHtml } from "../skeleton.js";
-import { listPluginTools } from "./api_v2.js";
+import { listPluginTools, listStrategyArtifacts, listTaskArtifacts } from "./api_v2.js";
 import { attachArtifactHandlers, renderArtifact } from "./artifact_view.js";
 import { gateConfirmLabel } from "./driver_gate_confirm.js";
 
@@ -427,6 +427,11 @@ export function createPlanRailController({
   // hand the user straight into typing a steering instruction. Optional so
   // callers that don't wire the composer (tests) don't need a stub.
   fillComposer,
+  // Strategy artifacts stay off the high-frequency task payload.  They are
+  // fetched only after the latest strategy plan reaches done and then cached
+  // per task + plan revision.
+  listStrategyArtifactsClient = listStrategyArtifacts,
+  listTaskArtifactsClient = listTaskArtifacts,
 } = {}) {
   const v2PlanCache = new Map();
   const v2PlanLastFetch = new Map();
@@ -440,6 +445,8 @@ export function createPlanRailController({
   // asks for, with no behavior regression.
   const v2ToolSchemaCache = new Map();
   const v2ToolSchemaFetching = new Set();
+  const strategyArtifactsCache = new Map();
+  const strategyArtifactsFetching = new Set();
   const renderStepChecker = typeof stepCheckerHtml === "function" ? stepCheckerHtml : () => "";
   let artifactHandlersInstalled = false;
 
@@ -563,11 +570,20 @@ export function createPlanRailController({
     // 下载报告 button lives in the middle driver-actions panel (renderDriverActionsPanel
     // below). The rail step row only marks that the report is ready plus a locate
     // entry that scrolls to (and flashes) the middle download card.
-    const isReportDone = (ref.tool === "generate_model_report" || ref.tool === "generate_feature_report")
+    const isDriverReport = (
+      ref.tool === "generate_model_report"
+      || ref.tool === "generate_feature_report"
+    );
+    const isStrategyReport = ref.tool === "build_report_bundle_v2";
+    const isReportDone = (isDriverReport || isStrategyReport)
       && status === "done";
     const download = isReportDone
       ? '<span class="plan-step-ready">报告已就绪</span>'
-        + '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="1" title="跳到中间的下载卡片">定位</button>'
+        + (
+          isStrategyReport
+            ? '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="strategy" title="跳到中间的策略报告产物">定位</button>'
+            : '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="1" title="跳到中间的下载卡片">定位</button>'
+        )
       : "";
     const output = planOutputButtonHtml(step);
     if (status === "failed") maybeFetchToolSchema(ref);
@@ -885,13 +901,233 @@ export function createPlanRailController({
     }) || null;
   }
 
+  function strategyArtifactPlanKey(plan) {
+    if (!plan?.id || plan?.status !== "done") return "";
+    return `${String(plan.id)}:${String(plan.revision || 1)}`;
+  }
+
+  function maybeFetchStrategyArtifacts(plan, taskId = selectedTaskId()) {
+    if (
+      selectedTask()?.task_type !== "strategy"
+      || typeof listStrategyArtifactsClient !== "function"
+      || typeof listTaskArtifactsClient !== "function"
+    ) {
+      return null;
+    }
+    const planKey = strategyArtifactPlanKey(plan);
+    if (!taskId || !planKey) return null;
+    const cached = strategyArtifactsCache.get(taskId);
+    if (cached?.planKey === planKey || strategyArtifactsFetching.has(`${taskId}:${planKey}`)) {
+      return cached || { planKey, state: "loading", artifacts: [] };
+    }
+
+    const fetchKey = `${taskId}:${planKey}`;
+    const loading = { planKey, state: "loading", artifacts: [] };
+    strategyArtifactsCache.set(taskId, loading);
+    strategyArtifactsFetching.add(fetchKey);
+    Promise.all([
+      Promise.resolve(listStrategyArtifactsClient(taskId)),
+      Promise.resolve(listTaskArtifactsClient(taskId)),
+    ])
+      .then(([strategyPayload, taskPayload]) => {
+        if (strategyArtifactsCache.get(taskId)?.planKey !== planKey) return;
+        const strategyArtifacts = Array.isArray(strategyPayload?.artifacts)
+          ? strategyPayload.artifacts.map((item) => ({ ...item, artifact_scope: "strategy" }))
+          : [];
+        const taskArtifacts = Array.isArray(taskPayload?.artifacts)
+          ? taskPayload.artifacts.map((item) => ({ ...item, artifact_scope: "task_analysis" }))
+          : [];
+        const seen = new Set(
+          strategyArtifacts.map((item) => `${String(item?.kind || "")}\u0000${String(item?.filename || "")}`),
+        );
+        const newestTaskArtifactByKey = new Map();
+        taskArtifacts.forEach((item, index) => {
+          const key = `${String(item?.kind || "")}\u0000${String(item?.filename || "")}`;
+          const createdAt = Date.parse(String(item?.created_at || ""));
+          const candidate = {
+            item,
+            index,
+            createdAt: Number.isFinite(createdAt) ? createdAt : Number.NEGATIVE_INFINITY,
+          };
+          const current = newestTaskArtifactByKey.get(key);
+          if (
+            !current
+            || candidate.createdAt > current.createdAt
+            || (
+              candidate.createdAt === current.createdAt
+              && candidate.index > current.index
+            )
+          ) {
+            newestTaskArtifactByKey.set(key, candidate);
+          }
+        });
+        const artifacts = [
+          ...strategyArtifacts,
+          ...taskArtifacts.filter((item, index) => {
+            const key = `${String(item?.kind || "")}\u0000${String(item?.filename || "")}`;
+            if (newestTaskArtifactByKey.get(key)?.index !== index) return false;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          }),
+        ];
+        strategyArtifactsCache.set(taskId, { planKey, state: "ready", artifacts });
+      })
+      .catch((error) => {
+        if (strategyArtifactsCache.get(taskId)?.planKey !== planKey) return;
+        strategyArtifactsCache.set(taskId, {
+          planKey,
+          state: "error",
+          artifacts: [],
+          error: String(error?.message || "策略产物读取失败"),
+        });
+      })
+      .finally(() => {
+        strategyArtifactsFetching.delete(fetchKey);
+        if (selectedTaskId() === taskId) renderWorkflowStepper?.({ force: true });
+      });
+    return loading;
+  }
+
+  function strategyArtifactStatusLabel(status) {
+    const labels = {
+      adopted_local: "本地采纳",
+      validated: "已验证",
+      draft: "草稿",
+      retired: "已退役",
+    };
+    return labels[String(status || "")] || "状态未标注";
+  }
+
+  const strategyDeliveryKindLabels = {
+    strategy_delivery_python: "Python",
+    strategy_delivery_sql: "DuckDB SQL",
+    strategy_delivery_json: "Strategy JSON",
+    strategy_delivery_equivalence_json: "Equivalence JSON",
+  };
+  const strategyReportFormatByKind = {
+    strategy_report_bundle_json: "JSON",
+    strategy_report_markdown: "Markdown",
+    strategy_report_xlsx: "Excel",
+    strategy_report_docx: "Word",
+  };
+
+  function strategyReportArtifactGroupHtml(artifacts) {
+    const byFormat = new Map();
+    for (const artifact of artifacts) {
+      const format = strategyReportFormatByKind[String(artifact?.kind || "")];
+      if (format) byFormat.set(format, artifact);
+    }
+    if (!byFormat.size) return "";
+    const actions = ["JSON", "Markdown", "Excel", "Word"].map((format) => {
+      const artifact = byFormat.get(format);
+      const downloadUrl = String(artifact?.download_url || "");
+      const available = Boolean(artifact?.available && downloadUrl);
+      return available
+        ? `<a class="button compact secondary strategy-artifact-download" href="${escapeHtml(downloadUrl)}" download>${escapeHtml(format)}</a>`
+        : `<span class="strategy-artifact-unavailable" aria-label="${escapeHtml(format)} 文件不可用">${escapeHtml(format)} 不可用</span>`;
+    }).join("");
+    return [
+      '<li class="strategy-artifact-row strategy-report-artifact-group">',
+      '<span class="strategy-artifact-copy">',
+      "<strong>策略报告</strong>",
+      "<small>同一最新修订 · JSON · Markdown · Excel · Word</small>",
+      "</span>",
+      `<span class="strategy-report-artifact-actions">${actions}</span>`,
+      "</li>",
+    ].join("");
+  }
+
+  function strategyArtifactRowsHtml(artifacts) {
+    if (!artifacts.length) {
+      return '<p class="strategy-artifacts-empty">计划已完成，当前没有可下载的策略产物。</p>';
+    }
+    const reportGroup = strategyReportArtifactGroupHtml(artifacts);
+    const rows = artifacts
+      .filter((artifact) => !strategyReportFormatByKind[String(artifact?.kind || "")])
+      .map((artifact) => {
+      const filename = String(artifact?.filename || "策略产物");
+      const kind = String(artifact?.kind || "artifact");
+      const deliveryKind = strategyDeliveryKindLabels[kind] || "";
+      const version = artifact?.version == null ? "" : `v${String(artifact.version)}`;
+      const taskAnalysis = artifact?.artifact_scope === "task_analysis";
+      let scope = version;
+      let status = strategyArtifactStatusLabel(artifact?.asset_status);
+      if (taskAnalysis) {
+        scope = "任务分析";
+        status = String(artifact?.origin_tool || "任务分析产物");
+      }
+      if (deliveryKind) {
+        scope = "策略交付";
+        status = "离线交付";
+      }
+      const downloadUrl = String(artifact?.download_url || "");
+      const available = Boolean(artifact?.available && downloadUrl);
+      const action = available
+        ? `<a class="button compact secondary strategy-artifact-download" href="${escapeHtml(downloadUrl)}" download>下载</a>`
+        : '<span class="strategy-artifact-unavailable" aria-label="文件不可用">不可用</span>';
+      return [
+        '<li class="strategy-artifact-row">',
+        '<span class="strategy-artifact-copy">',
+        `<strong>${escapeHtml(filename)}</strong>`,
+        `<small>${escapeHtml([deliveryKind || kind, scope, status].filter(Boolean).join(" · "))}</small>`,
+        "</span>",
+        action,
+        "</li>",
+      ].join("");
+      });
+    return `<ul class="strategy-artifact-list">${reportGroup}${rows.join("")}</ul>`;
+  }
+
+  function strategyArtifactsCardHtml(state) {
+    if (!state) return "";
+    if (state.state === "loading") {
+      return [
+        '<section class="plan-driver-action-card" data-driver-action="strategy-artifacts">',
+        '<header class="plan-driver-action-head">',
+        '<span class="plan-driver-action-pill">策略产物</span>',
+        '<span class="plan-driver-action-title">正在读取本地策略产物…</span>',
+        "</header>",
+        "</section>",
+      ].join("");
+    }
+    if (state.state === "error") {
+      return [
+        '<section class="plan-driver-action-card" data-driver-action="strategy-artifacts">',
+        '<header class="plan-driver-action-head">',
+        '<span class="plan-driver-action-pill">策略产物</span>',
+        `<span class="plan-driver-action-title">${escapeHtml(state.error || "策略产物读取失败")}</span>`,
+        "</header>",
+        '<button type="button" class="button compact secondary" data-strategy-artifacts-retry="1">重新读取</button>',
+        "</section>",
+      ].join("");
+    }
+    const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
+    const hasAdopted = artifacts.some((item) => item?.asset_status === "adopted_local");
+    const title = hasAdopted
+      ? `策略产物已在当前工作区本地采纳，共 ${artifacts.length} 个。`
+      : `策略计划已完成，共 ${artifacts.length} 个产物。`;
+    return [
+      '<section class="plan-driver-action-card strategy-artifacts-card" data-driver-action="strategy-artifacts">',
+      '<header class="plan-driver-action-head">',
+      `<span class="plan-driver-action-pill">${hasAdopted ? "本地采纳" : "策略产物"}</span>`,
+      `<span class="plan-driver-action-title">${escapeHtml(title)}</span>`,
+      "</header>",
+      hasAdopted
+        ? '<p class="strategy-artifacts-notice">本地采纳仅代表当前 MARVIS 工作区已确认，不代表生产环境已上线。</p>'
+        : '<p class="strategy-artifacts-notice">这些文件是当前任务的本地分析产物，不代表策略已采纳或生产环境已上线。</p>',
+      strategyArtifactRowsHtml(artifacts),
+      "</section>",
+    ].join("");
+  }
+
   // Builds the middle-workspace driver-actions panel body: the 开始执行 control
   // (plan built but not started, manual mode) and/or the 下载报告 control (a
   // report step has completed). Both reuse the existing document-level handlers
   // (data-driver-confirm / data-driver-report-download) — only the mount moves
   // out of the narrow rail into the roomy middle region. Returns "" when there is
   // no driver action to surface (the caller then hides the panel).
-  function planDriverActionsHtml(plan) {
+  function planDriverActionsHtml(plan, strategyArtifactState = null) {
     const cards = [];
     const awaitingStart = plan?.status === "validated" && !isAgentMode?.();
     if (awaitingStart) {
@@ -916,17 +1152,20 @@ export function createPlanRailController({
         "</section>",
       ].join(""));
     }
+    const strategyArtifactsCard = strategyArtifactsCardHtml(strategyArtifactState);
+    if (strategyArtifactsCard) cards.push(strategyArtifactsCard);
     if (!cards.length) return "";
     return `<div class="plan-driver-actions-body">${cards.join("")}</div>`;
   }
 
   // A stable signature of the driver-actions panel state, so an unchanged panel
   // is not rebuilt on every poll tick (which would drop focus / restart flashes).
-  function planDriverActionsSignature(plan) {
+  function planDriverActionsSignature(plan, strategyArtifactState = null) {
     const report = doneReportStep(plan);
     return JSON.stringify({
       start: plan?.status === "validated" && !isAgentMode?.(),
       report: report ? String(report.id || report.output_ref || "1") : "",
+      strategy_artifacts: strategyArtifactState,
     });
   }
 
@@ -937,7 +1176,8 @@ export function createPlanRailController({
   function renderDriverActionsPanel(plan) {
     const panel = $("planDriverActions");
     if (!panel) return;
-    const html = planDriverActionsHtml(plan);
+    const strategyArtifactState = maybeFetchStrategyArtifacts(plan);
+    const html = planDriverActionsHtml(plan, strategyArtifactState);
     if (!html) {
       if (panel.dataset.driverActionsSignature !== "") {
         panel.dataset.driverActionsSignature = "";
@@ -948,7 +1188,7 @@ export function createPlanRailController({
       panel.setAttribute("aria-hidden", "true");
       return;
     }
-    const signature = planDriverActionsSignature(plan);
+    const signature = planDriverActionsSignature(plan, strategyArtifactState);
     if (panel.dataset.driverActionsSignature !== signature) {
       panel.dataset.driverActionsSignature = signature;
       panel.innerHTML = html;
@@ -1342,6 +1582,16 @@ export function createPlanRailController({
   }
 
   function handleClick(event) {
+    const strategyArtifactsRetry = event.target?.closest?.("[data-strategy-artifacts-retry]");
+    if (strategyArtifactsRetry) {
+      event.preventDefault();
+      event.stopPropagation();
+      const taskId = selectedTaskId();
+      strategyArtifactsCache.delete(taskId);
+      maybeFetchStrategyArtifacts(v2PlanCache.get(taskId), taskId);
+      renderWorkflowStepper?.({ force: true });
+      return true;
+    }
     // Rail's lightweight entry: open the middle retry panel and scroll to the
     // step's card. The heavy form itself lives in the middle workspace.
     const planRetryOpen = event.target?.closest?.("[data-plan-retry-open]");
@@ -1380,7 +1630,11 @@ export function createPlanRailController({
     if (reportLocate) {
       event.preventDefault();
       event.stopPropagation();
-      openDriverActionCard("report-download");
+      openDriverActionCard(
+        reportLocate.dataset.planReportLocate === "strategy"
+          ? "strategy-artifacts"
+          : "report-download",
+      );
       return true;
     }
     const retryButton = event.target?.closest?.("[data-plan-rail-retry]");
