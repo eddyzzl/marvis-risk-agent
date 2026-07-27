@@ -1177,12 +1177,41 @@ _INTERACTIVE_TREE_THRESHOLD_ACTION_RE = re.compile(
     r"(?:split\s+)?threshold(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
+_INTERACTIVE_TREE_FEATURE_ACTION_RE = re.compile(
+    r"(?:替换|更换|修改|调整|改用|换成|设置)"
+    r"[^，,；;。.!?！？\n]{0,180}(?:分裂|切分)?(?:特征|字段|变量)|"
+    r"(?:分裂|切分)?(?:特征|字段|变量)"
+    r"[^，,；;。.!?！？\n]{0,180}(?:替换|更换|修改|调整|改为|改成|改用)|"
+    r"(?<![A-Za-z0-9_])replace_split_feature(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:replace|change|set)\s+(?:the\s+)?"
+    r"(?:split\s+)?feature(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_FEATURE_VALUE_RE = re.compile(
+    r"(?:新\s*)?(?:分裂|切分)?(?:特征|字段|变量)\s*"
+    r"(?:替换|更换|修改|调整|设置|改)?\s*"
+    r"(?:为|成|到|=|:|：)\s*"
+    r"(?P<zh_feature>[A-Za-z0-9_.\-\u4e00-\u9fff]+)|"
+    r"(?<![A-Za-z0-9_])(?:replace|change|set)\s+(?:the\s+)?"
+    r"(?:new\s+)?(?:split\s+)?feature\s+(?:to|=|:)\s*"
+    r"(?P<en_feature>[A-Za-z0-9_.\-]+)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 _INTERACTIVE_TREE_THRESHOLD_AMBIGUOUS_RE = re.compile(
     r"(?:调好一点|调(?:整|节)?一点|优化(?:一下)?|自动(?:调整|调节|优化|选择|"
     r"推荐)|最佳阈值|最优阈值|最合适阈值|全部节点|所有节点|每个节点)|"
     r"(?<![A-Za-z0-9_])(?:slightly|best|optimal|automatically\s+"
     r"(?:adjust|optimi[sz]e|select)|all\s+nodes?|every\s+node)"
     r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_FEATURE_AMBIGUOUS_RE = re.compile(
+    r"(?:最佳特征|最优特征|最合适(?:的)?(?:特征|字段|变量)|"
+    r"自动(?:选择|推荐|替换|更换)(?:特征|字段|变量)|"
+    r"全部特征|所有特征|每个特征)|"
+    r"(?<![A-Za-z0-9_])(?:best|optimal)\s+(?:split\s+)?feature|"
+    r"(?<![A-Za-z0-9_])automatically\s+(?:select|recommend|replace)"
+    r"\s+(?:the\s+)?(?:split\s+)?feature(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 _INTERACTIVE_TREE_THRESHOLD_VALUE_RE = re.compile(
@@ -5989,6 +6018,7 @@ def _validate_interactive_tree_revision_inputs(
         "source_tree_id",
         "node_id",
         "operation",
+        "feature",
         "threshold",
         "reason",
     }
@@ -6019,19 +6049,35 @@ def _validate_interactive_tree_revision_inputs(
         inputs["operation"],
         name=f"{workflow} operation",
     )
-    if operation not in {"prune_subtree", "adjust_split_threshold"}:
+    if operation not in {
+        "prune_subtree",
+        "adjust_split_threshold",
+        "replace_split_feature",
+    }:
         raise _DraftValidationError(
-            f"{workflow} operation 只允许 prune_subtree 或 "
-            "adjust_split_threshold。"
+            f"{workflow} operation 只允许 prune_subtree、"
+            "adjust_split_threshold 或 replace_split_feature。"
         )
     has_threshold = "threshold" in inputs
-    if operation == "adjust_split_threshold" and not has_threshold:
+    has_feature = "feature" in inputs
+    if operation in {
+        "adjust_split_threshold",
+        "replace_split_feature",
+    } and not has_threshold:
         raise _DraftValidationError(
-            f"{workflow} adjust_split_threshold 必须提供 threshold。"
+            f"{workflow} 分裂调整必须提供 threshold。"
         )
     if operation == "prune_subtree" and has_threshold:
         raise _DraftValidationError(
             f"{workflow} prune_subtree 不能提供 threshold。"
+        )
+    if operation == "replace_split_feature" and not has_feature:
+        raise _DraftValidationError(
+            f"{workflow} replace_split_feature 必须提供 feature。"
+        )
+    if operation != "replace_split_feature" and has_feature:
+        raise _DraftValidationError(
+            f"{workflow} 只有 replace_split_feature 可以提供 feature。"
         )
     normalized: dict[str, Any] = {
         "source_tree_id": source_tree_id,
@@ -6053,6 +6099,11 @@ def _validate_interactive_tree_revision_inputs(
                 f"{workflow} threshold 超出精确 JSON number 范围。"
             )
         normalized["threshold"] = float(threshold)
+    if has_feature:
+        normalized["feature"] = _required_text(
+            inputs["feature"],
+            name=f"{workflow} feature",
+        )
     if "reason" in inputs:
         reason = inputs["reason"]
         if reason is None:
@@ -13890,6 +13941,9 @@ def _ground_interactive_tree_revision(
     threshold_action = (
         _INTERACTIVE_TREE_THRESHOLD_ACTION_RE.search(utterance) is not None
     )
+    feature_action = (
+        _INTERACTIVE_TREE_FEATURE_ACTION_RE.search(utterance) is not None
+    )
     prune_action = _INTERACTIVE_TREE_PRUNE_ACTION_RE.search(utterance) is not None
     if _INTERACTIVE_TREE_AMBIGUOUS_NODE_RE.search(utterance) is not None:
         return _clarification(
@@ -13915,9 +13969,17 @@ def _ground_interactive_tree_revision(
             code="interactive_tree_revision_threshold_ambiguous",
             fields=fields,
         )
+    if _INTERACTIVE_TREE_FEATURE_AMBIGUOUS_RE.search(utterance) is not None:
+        return _clarification(
+            "换分裂特征必须点名一个当前可见 split node、一个认证特征和一个"
+            "有限阈值；平台不会按“最佳特征”“自动推荐”或“全部特征”直接"
+            "替用户修改树。请先单独运行节点候选分析，再精确选择。",
+            code="interactive_tree_revision_feature_ambiguous",
+            fields=("feature", "threshold"),
+        )
     if (
         _INTERACTIVE_TREE_NEGATED_OR_NONCURRENT_RE.search(utterance) is not None
-        or not (prune_action or threshold_action)
+        or not (prune_action or threshold_action or feature_action)
     ):
         return _clarification(
             "原话必须是当前、肯定的一次修剪或阈值调整命令；问句、否定、假设、未来或"
@@ -13934,7 +13996,7 @@ def _ground_interactive_tree_revision(
         )
     if (
         prune_action
-        and threshold_action
+        and (threshold_action or feature_action)
         or any(
         pattern.search(utterance) is not None
         for pattern in (
@@ -13984,14 +14046,34 @@ def _ground_interactive_tree_revision(
         )
     threshold_values = _interactive_tree_threshold_values(utterance)
     expected_operation = (
-        "adjust_split_threshold" if threshold_action else "prune_subtree"
+        "replace_split_feature"
+        if feature_action
+        else (
+            "adjust_split_threshold"
+            if threshold_action
+            else "prune_subtree"
+        )
     )
-    if expected_operation == "adjust_split_threshold" and len(threshold_values) != 1:
+    if expected_operation in {
+        "adjust_split_threshold",
+        "replace_split_feature",
+    } and len(threshold_values) != 1:
         return _clarification(
-            "阈值调整必须在同一条命令中明确且只给出一个有限的新 threshold "
+            "分裂调整必须在同一条命令中明确且只给出一个有限的新 threshold "
             "数值；平台不会从描述、指标或历史树中推断。",
             code="interactive_tree_revision_explicit_threshold_required",
             fields=("threshold",),
+        )
+    feature_values = _interactive_tree_feature_values(utterance)
+    if (
+        expected_operation == "replace_split_feature"
+        and len(feature_values) != 1
+    ):
+        return _clarification(
+            "换分裂特征必须在同一条命令中逐字给出且只给出一个新 feature；"
+            "平台不会从排名或树结构中推断。",
+            code="interactive_tree_revision_explicit_feature_required",
+            fields=("feature",),
         )
 
     ungrounded: list[str] = []
@@ -14001,7 +14083,10 @@ def _ground_interactive_tree_revision(
         ungrounded.append("node_id")
     if inputs["operation"] != expected_operation:
         ungrounded.append("operation")
-    if expected_operation == "adjust_split_threshold":
+    if expected_operation in {
+        "adjust_split_threshold",
+        "replace_split_feature",
+    }:
         supplied_threshold = inputs.get("threshold")
         if (
             isinstance(supplied_threshold, bool)
@@ -14011,6 +14096,11 @@ def _ground_interactive_tree_revision(
             ungrounded.append("threshold")
     elif "threshold" in inputs:
         ungrounded.append("threshold")
+    if expected_operation == "replace_split_feature":
+        if inputs.get("feature") != feature_values[0]:
+            ungrounded.append("feature")
+    elif "feature" in inputs:
+        ungrounded.append("feature")
     if ungrounded:
         return _clarification(
             "模型草案中的来源树、节点、操作或新阈值与用户原话不一致；"
@@ -14044,6 +14134,15 @@ def _interactive_tree_threshold_values(utterance: str) -> tuple[float, ...]:
         except (TypeError, ValueError, OverflowError):
             continue
         if math.isfinite(value):
+            values.append(value)
+    return tuple(values)
+
+
+def _interactive_tree_feature_values(utterance: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for match in _INTERACTIVE_TREE_FEATURE_VALUE_RE.finditer(utterance):
+        value = match.group("zh_feature") or match.group("en_feature")
+        if value:
             values.append(value)
     return tuple(values)
 
@@ -17157,7 +17256,11 @@ def _standard_workflow_confirmation_text(
             (
                 "已识别为〔交互式树阈值调整修订 Workflow〕"
                 if operation == "adjust_split_threshold"
-                else "已识别为〔交互式树修剪修订 Workflow〕"
+                else (
+                    "已识别为〔交互式树换分裂特征修订 Workflow〕"
+                    if operation == "replace_split_feature"
+                    else "已识别为〔交互式树修剪修订 Workflow〕"
+                )
             ),
             f"来源树 pointer：{inputs['source_tree_id']}",
             f"精确 split node pointer：{inputs['node_id']}",
@@ -17167,8 +17270,13 @@ def _standard_workflow_confirmation_text(
             "每次编辑发布一个不可变 revision；不会修改原树，也不会加入 "
             "Strategy Pool；不会采纳或部署，也不会设置业务动作或写回",
         ]
-        if operation == "adjust_split_threshold":
+        if operation in {
+            "adjust_split_threshold",
+            "replace_split_feature",
+        }:
             details.insert(4, f"用户明确的新阈值：{inputs['threshold']}")
+        if operation == "replace_split_feature":
+            details.insert(4, f"用户明确的新分裂特征：{inputs['feature']}")
         if "reason" in inputs and inputs["reason"] is not None:
             details.append(f"用户原话编辑说明：{inputs['reason']}")
     elif draft.workflow == "interactive_tree_frontier_group_materialization":
@@ -17970,10 +18078,13 @@ def _user_prompt(
         "对于 interactive_tree_revision，只能逐字抄录用户当前肯定命令中唯一完整的"
         " source_tree_id（candidate-asset- 或 interactive-tree-revision- 后接 32 位"
         "小写十六进制）、唯一完整的 split node_id（node- 后接 20 位小写十六进制）、"
-        "唯一 operation=prune_subtree 或 adjust_split_threshold，以及用户显式标注时"
-        "逐字一致的 reason。adjust_split_threshold 还必须逐字抄录用户明确给出的唯一"
-        "有限数值 threshold；prune_subtree 必须省略 threshold。“调好一点”“最佳阈值”"
-        "“自动优化”“全部节点”等模糊、推荐或批量修改请求必须 clarification。不得输出"
+        "唯一 operation=prune_subtree、adjust_split_threshold 或 "
+        "replace_split_feature，以及用户显式标注时逐字一致的 reason。"
+        "adjust_split_threshold 必须逐字抄录唯一有限 threshold；"
+        "replace_split_feature 必须逐字抄录唯一 feature 和唯一有限 threshold；"
+        "prune_subtree 必须省略 feature/threshold。“调好一点”“最佳阈值”"
+        "“最佳特征”“自动优化”“全部节点”等模糊、推荐或批量修改请求必须 "
+        "clarification。不得输出"
         "artifact/hash、父链、tree/frontier/condition/metrics、dataset/workspace/"
         "SampleDesign 或重放结果，这些均由平台恢复。不得按最好、风险最高、不稳定或"
         "代词替用户选节点，也不得同轮串联另一种树编辑、前沿物化、入池、业务动作、"

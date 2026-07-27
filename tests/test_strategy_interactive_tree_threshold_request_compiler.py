@@ -139,6 +139,73 @@ def test_exact_natural_language_threshold_edit_compiles_to_the_same_request() ->
     assert "最佳阈值" in prompt
 
 
+def test_exact_natural_language_feature_replacement_is_bidirectionally_grounded() -> (
+    None
+):
+    expected = _payload(
+        operation="replace_split_feature",
+        feature="z",
+        threshold=1.5,
+        reason=REASON,
+    )
+    llm = _FakeLLM(expected)
+
+    result = compile_strategy_request(
+        (
+            f"把交互式树 {SOURCE_ID} 当前可见分裂节点 {NODE_ID} 的"
+            f"新分裂特征改为 z，新阈值调整为 1.5；理由：{REASON}。"
+        ),
+        allowed_columns=("x", "z"),
+        llm=llm,
+    )
+
+    assert result.draft is not None
+    assert result.draft.to_dict() == expected
+    assert "换分裂特征" in result.confirmation
+    assert "z" in result.confirmation
+
+
+@pytest.mark.parametrize(
+    ("reply", "field"),
+    [
+        (
+            _payload(
+                operation="replace_split_feature",
+                feature="x",
+                threshold=1.5,
+            ),
+            "feature",
+        ),
+        (
+            _payload(
+                operation="replace_split_feature",
+                feature="z",
+                threshold=2.5,
+            ),
+            "threshold",
+        ),
+    ],
+)
+def test_feature_replacement_rejects_llm_control_drift(
+    reply: dict,
+    field: str,
+) -> None:
+    result = compile_strategy_request(
+        (
+            f"把交互式树 {SOURCE_ID} 当前可见分裂节点 {NODE_ID} 的"
+            "新分裂特征改为 z，新阈值调整为 1.5"
+        ),
+        allowed_columns=("x", "z"),
+        llm=_FakeLLM(reply),
+    )
+
+    assert result.draft is None
+    assert result.clarification_code == (
+        "interactive_tree_revision_controls_not_grounded"
+    )
+    assert field in result.clarification_fields
+
+
 @pytest.mark.parametrize(
     "utterance",
     [

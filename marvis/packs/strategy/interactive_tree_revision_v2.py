@@ -58,7 +58,9 @@ _TOP_LEVEL_FIELDS = frozenset(
 _REVISION_ID_RE = re.compile(r"^interactive-tree-revision-[0-9a-f]{32}$")
 _SEMANTIC_TREE_ID_RE = re.compile(r"^interactive-tree-[0-9a-f]{32}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_WARNING_CODES = frozenset({"threshold_grouping_unchanged"})
+_WARNING_CODES = frozenset(
+    {"threshold_grouping_unchanged", "split_grouping_unchanged"}
+)
 
 
 class InteractiveTreeRevisionV2Error(StrategyError):
@@ -125,6 +127,86 @@ def build_adjusted_interactive_tree_revision_v2(
         visible=tuple(replay.visible_node_ids),
         frontier=tuple(replay.frontier_node_ids),
         checks=checks,
+    )
+    return validate_interactive_tree_revision_v2(
+        payload,
+        source,
+        parent_revision=parent,
+        ancestor_revisions=ancestor_revisions,
+    )
+
+
+def build_replaced_interactive_tree_split_revision_v2(
+    automatic_tree_asset: Mapping[str, Any],
+    *,
+    node_id: str,
+    feature: str,
+    threshold: float,
+    reason: str | None,
+    replay: InteractiveTreeReplayResult,
+    parent_revision: Mapping[str, Any] | None = None,
+    ancestor_revisions: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Build one immutable exact feature/threshold replacement revision."""
+
+    source = validate_automatic_tree_asset(automatic_tree_asset)
+    parent = _validated_parent(
+        parent_revision,
+        source,
+        ancestor_revisions=ancestor_revisions,
+    )
+    current = _effective_view(source, parent)
+    normalized_node_id = _text(node_id, "node_id")
+    node = current["node_by_id"].get(normalized_node_id)
+    if node is None or node["kind"] != "split":
+        raise InteractiveTreeRevisionV2Error(
+            "split replacement requires a current visible split node"
+        )
+    if normalized_node_id in set(current["frontier"]):
+        raise InteractiveTreeRevisionV2Error(
+            "split replacement cannot target a frontier node"
+        )
+    normalized_feature = _text(feature, "feature")
+    allowed_features = tuple(
+        source["tree_result"]["training"]["feature_order"]
+    )
+    if normalized_feature not in allowed_features:
+        raise InteractiveTreeRevisionV2Error(
+            "split replacement feature is outside the authenticated universe"
+        )
+    previous_feature = _text(node["feature"], "previous_feature")
+    if normalized_feature == previous_feature:
+        raise InteractiveTreeRevisionV2Error(
+            "split replacement must change the current feature"
+        )
+    normalized_threshold = _finite_number(threshold, "threshold")
+    previous_threshold = _finite_number(
+        node["threshold"],
+        "previous_threshold",
+    )
+    if (
+        tuple(replay.visible_node_ids) != tuple(current["visible"])
+        or tuple(replay.frontier_node_ids) != tuple(current["frontier"])
+    ):
+        raise InteractiveTreeRevisionV2Error(
+            "split replacement replay changed the visible topology"
+        )
+    payload = _assemble(
+        source,
+        parent=parent,
+        edit={
+            "operation": "replace_split_feature",
+            "node_id": normalized_node_id,
+            "previous_feature": previous_feature,
+            "feature": normalized_feature,
+            "previous_threshold": previous_threshold,
+            "threshold": normalized_threshold,
+            "reason": _reason(reason),
+        },
+        nodes=[deepcopy(item) for item in replay.nodes],
+        visible=tuple(replay.visible_node_ids),
+        frontier=tuple(replay.frontier_node_ids),
+        checks=_checks(replay.replay.get("warning_codes", [])),
     )
     return validate_interactive_tree_revision_v2(
         payload,
@@ -480,7 +562,10 @@ def _effective_view(
         conditions = _conditions_from_configs(
             source,
             {
-                item["node_id"]: float(item["threshold"])
+                item["node_id"]: {
+                    "feature": item["feature"],
+                    "threshold": float(item["threshold"]),
+                }
                 for item in source_nodes
                 if item["kind"] == "split"
             },
@@ -506,7 +591,10 @@ def _base_effective_node(
     conditions = _conditions_from_configs(
         source,
         {
-            item["node_id"]: float(item["threshold"])
+            item["node_id"]: {
+                "feature": item["feature"],
+                "threshold": float(item["threshold"]),
+            }
             for item in source["tree_result"]["tree"]["nodes"]
             if item["kind"] == "split"
         },
@@ -571,7 +659,10 @@ def _normalize_tree(
     }
     medians = source["tree_result"]["preprocessing"]["medians"]
     nodes: list[dict[str, Any]] = []
-    thresholds: dict[str, float] = {}
+    configs: dict[str, dict[str, Any]] = {}
+    allowed_features = set(
+        source["tree_result"]["training"]["feature_order"]
+    )
     for raw in nodes_value:
         if not isinstance(raw, Mapping):
             raise InteractiveTreeRevisionV2Error("v2 tree node must be an object")
@@ -636,14 +727,18 @@ def _normalize_tree(
                 raise InteractiveTreeRevisionV2Error(
                     "v2 node base_threshold changed"
                 )
+            feature = _text(raw["feature"], "node.feature")
+            if feature not in allowed_features or feature not in medians:
+                raise InteractiveTreeRevisionV2Error(
+                    "v2 split feature is outside the authenticated universe"
+                )
             missing = (
                 "left"
-                if float(medians[base["feature"]]) <= threshold
+                if float(medians[feature]) <= threshold
                 else "right"
             )
             if (
-                raw["feature"] != base["feature"]
-                or raw["missing_child"] != missing
+                raw["missing_child"] != missing
                 or raw["left_child_id"] != base["left_child_id"]
                 or raw["right_child_id"] != base["right_child_id"]
             ):
@@ -652,7 +747,7 @@ def _normalize_tree(
                 )
             node.update(
                 {
-                    "feature": base["feature"],
+                    "feature": feature,
                     "threshold": threshold,
                     "base_threshold": base_threshold,
                     "missing_child": missing,
@@ -664,7 +759,10 @@ def _normalize_tree(
                     ),
                 }
             )
-            thresholds[node_id] = threshold
+            configs[node_id] = {
+                "feature": feature,
+                "threshold": threshold,
+            }
         nodes.append(node)
     if [item["node_id"] for item in nodes] != visible:
         raise InteractiveTreeRevisionV2Error(
@@ -675,16 +773,19 @@ def _normalize_tree(
         raise InteractiveTreeRevisionV2Error(
             "v2 visible topology is not canonical"
         )
-    effective_thresholds = {
+    effective_configs = {
         item["node_id"]: (
-            thresholds[item["node_id"]]
-            if item["node_id"] in thresholds
-            else float(item["threshold"])
+            configs[item["node_id"]]
+            if item["node_id"] in configs
+            else {
+                "feature": item["feature"],
+                "threshold": float(item["threshold"]),
+            }
         )
         for item in source["tree_result"]["tree"]["nodes"]
         if item["kind"] == "split"
     }
-    conditions = _conditions_from_configs(source, effective_thresholds)
+    conditions = _conditions_from_configs(source, effective_configs)
     for node in nodes:
         if node["condition"] != conditions[node["node_id"]]:
             raise InteractiveTreeRevisionV2Error(
@@ -751,7 +852,7 @@ def _require_edit_transition(
         or tuple(tree["frontier_node_ids"]) != tuple(current["frontier"])
     ):
         raise InteractiveTreeRevisionV2Error(
-            "v2 threshold edit changed visible topology"
+            "v2 split edit changed visible topology"
         )
     previous = _finite_number(
         current_node["threshold"],
@@ -759,14 +860,27 @@ def _require_edit_transition(
     )
     if edit["previous_threshold"] != previous:
         raise InteractiveTreeRevisionV2Error(
-            "v2 threshold edit previous_threshold changed"
+            "v2 split edit previous_threshold changed"
         )
     target = next(
         item for item in tree["nodes"] if item["node_id"] == node_id
     )
     if target["threshold"] != edit["threshold"]:
         raise InteractiveTreeRevisionV2Error(
-            "v2 threshold edit does not match effective node"
+            "v2 split edit does not match effective node"
+        )
+    if operation == "replace_split_feature":
+        if edit["previous_feature"] != current_node["feature"]:
+            raise InteractiveTreeRevisionV2Error(
+                "v2 split edit previous_feature changed"
+            )
+        if target["feature"] != edit["feature"]:
+            raise InteractiveTreeRevisionV2Error(
+                "v2 split edit feature does not match effective node"
+            )
+    elif target["feature"] != current_node["feature"]:
+        raise InteractiveTreeRevisionV2Error(
+            "v2 threshold edit changed the effective feature"
         )
     target_path = tuple(current_node["path"])
     tree_by_id = {item["node_id"]: item for item in tree["nodes"]}
@@ -781,22 +895,24 @@ def _require_edit_transition(
             continue
         if tree_by_id[current_id] != current_item:
             raise InteractiveTreeRevisionV2Error(
-                "v2 threshold edit changed a node outside the target subtree"
+                "v2 split edit changed a node outside the target subtree"
             )
-    for field in (
+    invariant_fields = [
         "node_id",
         "kind",
         "depth",
         "path",
         "metrics",
-        "feature",
         "base_threshold",
         "left_child_id",
         "right_child_id",
-    ):
+    ]
+    if operation != "replace_split_feature":
+        invariant_fields.append("feature")
+    for field in invariant_fields:
         if target[field] != current_node[field]:
             raise InteractiveTreeRevisionV2Error(
-                f"v2 threshold edit changed target {field}"
+                f"v2 split edit changed target {field}"
             )
 
 
@@ -884,7 +1000,7 @@ def _candidate_evidence(semantic_body: Mapping[str, Any]) -> dict[str, str]:
 
 def _conditions_from_configs(
     source: Mapping[str, Any],
-    thresholds: Mapping[str, float],
+    configs: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     source_by_id = {
         item["node_id"]: item
@@ -903,24 +1019,35 @@ def _conditions_from_configs(
                 else {"op": "and", "args": list(clauses)}
             )
         else:
-            threshold = thresholds[node_id]
+            config = configs[node_id]
+            feature = _text(config["feature"], "split feature")
+            threshold = _finite_number(
+                config["threshold"],
+                "split threshold",
+            )
             missing = (
                 "left"
-                if float(medians[node["feature"]]) <= threshold
+                if float(medians[feature]) <= threshold
                 else "right"
             )
-            left, right = _branch_clauses(node, threshold, missing)
+            left, right = _branch_clauses(
+                feature,
+                threshold,
+                missing,
+            )
             expression = {"op": "or", "args": [left, right]}
         conditions[node_id] = canonicalize_expression(expression)
         if node["kind"] == "leaf":
             return
-        threshold = thresholds[node_id]
+        config = configs[node_id]
+        feature = _text(config["feature"], "split feature")
+        threshold = _finite_number(config["threshold"], "split threshold")
         missing = (
             "left"
-            if float(medians[node["feature"]]) <= threshold
+            if float(medians[feature]) <= threshold
             else "right"
         )
-        left, right = _branch_clauses(node, threshold, missing)
+        left, right = _branch_clauses(feature, threshold, missing)
         visit(node["left_child_id"], (*clauses, left))
         visit(node["right_child_id"], (*clauses, right))
 
@@ -929,21 +1056,21 @@ def _conditions_from_configs(
 
 
 def _branch_clauses(
-    node: Mapping[str, Any],
+    feature: str,
     threshold: float,
     missing_child: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     return (
         {
             "op": "compare",
-            "field": node["feature"],
+            "field": feature,
             "operator": "<=",
             "value": threshold,
             "missing": "match" if missing_child == "left" else "no_match",
         },
         {
             "op": "compare",
-            "field": node["feature"],
+            "field": feature,
             "operator": ">",
             "value": threshold,
             "missing": "match" if missing_child == "right" else "no_match",
@@ -1281,30 +1408,53 @@ def _normalize_checks(value: object) -> dict[str, Any]:
 def _normalize_edit(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise InteractiveTreeRevisionV2Error("v2 edit must be an object")
+    operation = value.get("operation")
+    expected_fields = {
+        "operation",
+        "node_id",
+        "previous_threshold",
+        "threshold",
+        "reason",
+    }
+    if operation == "replace_split_feature":
+        expected_fields |= {"previous_feature", "feature"}
     _exact_fields(
         value,
-        {
-            "operation",
-            "node_id",
-            "previous_threshold",
-            "threshold",
-            "reason",
-        },
+        expected_fields,
         "interactive-tree v2 edit",
     )
-    operation = value["operation"]
-    if operation not in {"adjust_split_threshold", "prune_subtree"}:
+    if operation not in {
+        "adjust_split_threshold",
+        "replace_split_feature",
+        "prune_subtree",
+    }:
         raise InteractiveTreeRevisionV2Error("v2 edit operation is invalid")
-    if operation == "adjust_split_threshold":
+    if operation in {
+        "adjust_split_threshold",
+        "replace_split_feature",
+    }:
         previous = _finite_number(
             value["previous_threshold"],
             "edit.previous_threshold",
         )
         threshold = _finite_number(value["threshold"], "edit.threshold")
-        if threshold == previous:
+        if operation == "adjust_split_threshold" and threshold == previous:
             raise InteractiveTreeRevisionV2Error(
                 "v2 threshold edit is a no-op"
             )
+        if operation == "replace_split_feature":
+            previous_feature = _text(
+                value["previous_feature"],
+                "edit.previous_feature",
+            )
+            feature = _text(value["feature"], "edit.feature")
+            if feature == previous_feature:
+                raise InteractiveTreeRevisionV2Error(
+                    "v2 split feature edit is a no-op"
+                )
+        else:
+            previous_feature = None
+            feature = None
     else:
         if value["previous_threshold"] is not None or value["threshold"] is not None:
             raise InteractiveTreeRevisionV2Error(
@@ -1312,13 +1462,19 @@ def _normalize_edit(value: object) -> dict[str, Any]:
             )
         previous = None
         threshold = None
-    return {
+        previous_feature = None
+        feature = None
+    normalized = {
         "operation": operation,
         "node_id": _text(value["node_id"], "edit.node_id"),
         "previous_threshold": previous,
         "threshold": threshold,
         "reason": _reason(value["reason"]),
     }
+    if operation == "replace_split_feature":
+        normalized["previous_feature"] = previous_feature
+        normalized["feature"] = feature
+    return normalized
 
 
 def _validated_parent(

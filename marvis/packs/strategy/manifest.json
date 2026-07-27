@@ -3189,7 +3189,7 @@
     },
     {
       "name": "revise_interactive_tree",
-      "summary": "Prune one exact visible split or adjust its finite effective threshold from a live task-owned automatic tree or immutable interactive-tree revision, replay the complete visible tree against the governed development sample, and publish a new immutable revision without changing the Strategy Pool.",
+      "summary": "Prune one exact visible split, adjust its finite effective threshold, or replace its feature and threshold from the authenticated tree feature universe; replay the complete visible tree against the governed development sample and publish a new immutable revision without changing the Strategy Pool.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3200,8 +3200,13 @@
           "node_id": {"type": "string", "minLength": 1},
           "operation": {
             "type": "string",
-            "enum": ["prune_subtree", "adjust_split_threshold"]
+            "enum": [
+              "prune_subtree",
+              "adjust_split_threshold",
+              "replace_split_feature"
+            ]
           },
+          "feature": {"type": "string", "minLength": 1},
           "threshold": {"type": "number"},
           "reason": {
             "type": ["string", "null"],
@@ -3227,7 +3232,28 @@
               }
             },
             "then": {
-              "not": {"required": ["threshold"]}
+              "allOf": [
+                {"not": {"required": ["feature"]}},
+                {"not": {"required": ["threshold"]}}
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "operation": {"const": "replace_split_feature"}
+              }
+            },
+            "then": {"required": ["feature", "threshold"]}
+          },
+          {
+            "if": {
+              "properties": {
+                "operation": {"const": "adjust_split_threshold"}
+              }
+            },
+            "then": {
+              "not": {"required": ["feature"]}
             }
           }
         ],
@@ -3327,6 +3353,31 @@
                   "reason"
                 ],
                 "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "operation": {"const": "replace_split_feature"},
+                  "node_id": {"type": "string", "minLength": 1},
+                  "previous_feature": {"type": "string", "minLength": 1},
+                  "feature": {"type": "string", "minLength": 1},
+                  "previous_threshold": {"type": "number"},
+                  "threshold": {"type": "number"},
+                  "reason": {
+                    "type": ["string", "null"],
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "operation",
+                  "node_id",
+                  "previous_feature",
+                  "feature",
+                  "previous_threshold",
+                  "threshold",
+                  "reason"
+                ],
+                "additionalProperties": false
               }
             ]
           },
@@ -3395,6 +3446,8 @@
                   "metric_conservation_passed": {"const": true},
                   "previous_threshold": {"type": "number"},
                   "threshold": {"type": "number"},
+                  "previous_feature": {"type": "string", "minLength": 1},
+                  "feature": {"type": "string", "minLength": 1},
                   "previous_missing_child": {
                     "type": "string",
                     "enum": ["left", "right"]
@@ -3409,7 +3462,10 @@
                     "type": "array",
                     "uniqueItems": true,
                     "items": {
-                      "const": "threshold_grouping_unchanged"
+                      "enum": [
+                        "threshold_grouping_unchanged",
+                        "split_grouping_unchanged"
+                      ]
                     }
                   },
                   "assignment_hash": {

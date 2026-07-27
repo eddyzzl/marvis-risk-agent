@@ -72,6 +72,7 @@ def test_interactive_tree_revision_is_one_nongated_builtin_tool_step() -> None:
         "source_tree_id",
         "node_id",
         "operation",
+        "feature",
         "threshold",
         "reason",
     }
@@ -88,6 +89,7 @@ def test_interactive_tree_revision_is_one_nongated_builtin_tool_step() -> None:
         "source_tree_id": "{slot:source_tree_id}",
         "node_id": "{slot:node_id}",
         "operation": "{slot:operation}",
+        "feature": "{slot:feature}",
         "threshold": "{slot:threshold}",
         "reason": "{slot:reason}",
     }
@@ -125,6 +127,7 @@ def test_interactive_tree_revision_template_matches_the_closed_tool_contract(
         "source_tree_id",
         "node_id",
         "operation",
+        "feature",
         "threshold",
         "reason",
     }

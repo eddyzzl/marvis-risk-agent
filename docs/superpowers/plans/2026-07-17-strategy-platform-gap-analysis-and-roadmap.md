@@ -550,6 +550,8 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 
 **交互式树不可变剪枝纵切（已完成，2026-07-25）**：Agent 和 Candidate Lab Manual 入口现在可从同一受认证自动树或任一历史 revision 的完整拓扑中精确选择一个仍可见、非 frontier 的 split 节点，执行 `prune_subtree` 并创建新的不可变分支；原树、父 revision 和 sibling 分支均不覆盖，也不存在平台暗选“当前最佳分支”。Tool 递归认证完整父链、task-owned registry/path/hash/provenance、样本设计与活动 DataWorkspace，在同一 development 样本上重放全部 frontier 条件并对件数、好坏、风险和金额观测做 exactly-once 守恒，再原子登记 canonical revision artifact。Candidate Lab 只投影 UI 所需的节点、frontier、历史 ID 和精确 eligible pointer，不暴露服务端 hash/binding；点击节点只预填二次确认表单，最终提交会再次按最新投影校验，计划完成后由统一 settle 轮询只刷新一次。Voting 搜索和从搜索结果构建候选的既有 Manual 表单也已补齐严格 HTTP schema，和 Agent compiler 共用相同约束。该纵切仍不等于“完整交互树”：手工改分裂、全特征最佳分裂、自动续建、frontier 入池、树代码生成/叶 ID 写回及独立验证继续留在 V2 Phase 3-5。
 
+**交互树精确替换分裂字段纵切（已完成，2026-07-27）**：`interactive_tree_revision` 在保留既有剪枝和阈值契约的同时新增 `replace_split_feature`。用户必须逐字提供唯一来源树/revision、当前可见 split node、来源树认证 feature universe 中一个不同字段及唯一有限阈值；自然语言和 Manual DTO 都拒绝“最佳字段”“自动推荐”、平台 binding 注入、同字段 no-op 与复合后续动作。确定性 replay 会使用当前 effective tree 配置，只改变目标 node 的字段/阈值/缺失路由并重算目标子树，核对其他分支未变化、完整 frontier exactly-once、最小叶、指标守恒、方向诊断和 DSL evaluator 等价；随后在 writer lock 内重新认证父链、SampleDesign、dataset/workspace 与文件字节并发布 task-owned 不可变 revision。Candidate Lab 投影只暴露认证 feature universe 和可换字段节点 pointer，不自动选字段；生成的 revision 继续复用前沿物化、Pool 和下游治理链。全字段候选指标搜索、单字段候选点和自动续建仍待后续纵切。
+
 交付：
 
 1. **单规则**：tree/quantile/equal-width/chi 四类分箱、类别等值箱、3-20 箱、最小样本、KS/IV/AUC/WOE/LIFT、件数+金额、批量排序、人工选箱/合并入池和 Excel；

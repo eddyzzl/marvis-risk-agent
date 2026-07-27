@@ -783,7 +783,12 @@ class ManualInteractiveTreeRevisionInputs(BaseModel):
 
     source_tree_id: ManualInteractiveTreeSourceId
     node_id: ManualInteractiveTreeNodeId
-    operation: Literal["prune_subtree", "adjust_split_threshold"]
+    operation: Literal[
+        "prune_subtree",
+        "adjust_split_threshold",
+        "replace_split_feature",
+    ]
+    feature: StrictCanonicalNonEmptyStr | None = None
     threshold: StrictInt | StrictFloat | None = None
     reason: ManualSelectionReason | None = None
 
@@ -793,9 +798,16 @@ class ManualInteractiveTreeRevisionInputs(BaseModel):
             raise ValueError(
                 "optional fields must be omitted instead of null: threshold"
             )
+        if "feature" in self.model_fields_set and self.feature is None:
+            raise ValueError(
+                "optional fields must be omitted instead of null: feature"
+            )
         if "reason" in self.model_fields_set and self.reason is None:
             raise ValueError("optional fields must be omitted instead of null: reason")
-        if self.operation == "adjust_split_threshold":
+        if self.operation in {
+            "adjust_split_threshold",
+            "replace_split_feature",
+        }:
             if self.threshold is None:
                 raise ValueError(
                     "adjust_split_threshold requires a finite threshold"
@@ -808,6 +820,15 @@ class ManualInteractiveTreeRevisionInputs(BaseModel):
                 raise ValueError("threshold must be a finite exact JSON number")
         elif self.threshold is not None:
             raise ValueError("prune_subtree forbids threshold")
+        if self.operation == "replace_split_feature":
+            if self.feature is None:
+                raise ValueError(
+                    "replace_split_feature requires an authenticated feature"
+                )
+        elif self.feature is not None:
+            raise ValueError(
+                "feature is allowed only for replace_split_feature"
+            )
         return self
 
 

@@ -57,8 +57,37 @@ def replay_interactive_tree_threshold(
 ) -> InteractiveTreeReplayResult:
     """Replay one finite threshold override against the current visible tree."""
 
+    return replay_interactive_tree_split(
+        frame,
+        automatic_tree_asset,
+        node_id=node_id,
+        feature=None,
+        threshold=threshold,
+        target=target,
+        weights=weights,
+        loan_values=loan_values,
+        overdue_values=overdue_values,
+        parent_revision=parent_revision,
+    )
+
+
+def replay_interactive_tree_split(
+    frame: pd.DataFrame,
+    automatic_tree_asset: Mapping[str, Any],
+    *,
+    node_id: str,
+    feature: object | None,
+    threshold: object,
+    target: np.ndarray,
+    weights: np.ndarray | None,
+    loan_values: np.ndarray | None,
+    overdue_values: np.ndarray | None,
+    parent_revision: Mapping[str, Any] | None = None,
+) -> InteractiveTreeReplayResult:
+    """Replay one exact feature/threshold split over the current topology."""
+
     if not isinstance(frame, pd.DataFrame):
-        raise StrategyError("interactive-tree threshold replay frame is invalid")
+        raise StrategyError("interactive-tree split replay frame is invalid")
     normalized_threshold = _finite_number(threshold, "threshold")
     source_nodes = automatic_tree_asset["tree_result"]["tree"]["nodes"]
     source_by_id = {item["node_id"]: item for item in source_nodes}
@@ -98,8 +127,31 @@ def replay_interactive_tree_threshold(
     source_node = source_by_id.get(node_id)
     if source_node is None or source_node["kind"] != "split":
         raise StrategyError(
-            "interactive-tree threshold adjustment requires a visible split node"
+            "interactive-tree split adjustment requires a visible split node"
         )
+    current_feature = str(current_nodes[node_id]["feature"])
+    if feature is None:
+        normalized_feature = current_feature
+        replacing_feature = False
+    else:
+        if not isinstance(feature, str) or not feature.strip():
+            raise StrategyError(
+                "interactive-tree replacement feature must be non-empty text"
+            )
+        normalized_feature = feature.strip()
+        allowed_features = tuple(
+            automatic_tree_asset["tree_result"]["training"]["feature_order"]
+        )
+        if normalized_feature not in allowed_features:
+            raise StrategyError(
+                "interactive-tree replacement feature is outside the "
+                "authenticated feature universe"
+            )
+        if normalized_feature == current_feature:
+            raise StrategyError(
+                "interactive-tree replacement feature must change the current feature"
+            )
+        replacing_feature = True
     current_threshold = _finite_number(
         current_nodes[node_id]["threshold"],
         "current threshold",
@@ -117,10 +169,11 @@ def replay_interactive_tree_threshold(
         medians=medians,
     )
     new_configs = deepcopy(old_configs)
+    new_configs[node_id]["feature"] = normalized_feature
     new_configs[node_id]["threshold"] = normalized_threshold
     new_configs[node_id]["missing_child"] = (
         "left"
-        if float(medians[source_node["feature"]]) <= normalized_threshold
+        if float(medians[normalized_feature]) <= normalized_threshold
         else "right"
     )
 
@@ -170,12 +223,12 @@ def replay_interactive_tree_threshold(
             left_mask, right_mask = _split_child_masks(
                 frame,
                 parent_mask=old_masks[current_id],
-                feature=source_node["feature"],
+                feature=config["feature"],
                 threshold=config["threshold"],
                 missing_child=config["missing_child"],
             )
             diagnostic = _direction_diagnostic(
-                direction=directions[source_node["feature"]],
+                direction=directions[config["feature"]],
                 left_mask=left_mask,
                 right_mask=right_mask,
                 target=target,
@@ -219,7 +272,7 @@ def replay_interactive_tree_threshold(
             left_mask, right_mask = _split_child_masks(
                 frame,
                 parent_mask=mask,
-                feature=source_node["feature"],
+                feature=config["feature"],
                 threshold=config["threshold"],
                 missing_child=config["missing_child"],
             )
@@ -229,14 +282,14 @@ def replay_interactive_tree_threshold(
                 )
             node.update(
                 {
-                    "feature": source_node["feature"],
+                    "feature": config["feature"],
                     "threshold": config["threshold"],
                     "base_threshold": float(source_node["threshold"]),
                     "missing_child": config["missing_child"],
                     "left_child_id": source_node["left_child_id"],
                     "right_child_id": source_node["right_child_id"],
                     "direction_diagnostic": _direction_diagnostic(
-                        direction=directions[source_node["feature"]],
+                        direction=directions[config["feature"]],
                         left_mask=left_mask,
                         right_mask=right_mask,
                         target=target,
@@ -272,7 +325,15 @@ def replay_interactive_tree_threshold(
     )
     grouping_unchanged = affected == 0
     warning_codes = (
-        ["threshold_grouping_unchanged"] if grouping_unchanged else []
+        [
+            (
+                "split_grouping_unchanged"
+                if replacing_feature
+                else "threshold_grouping_unchanged"
+            )
+        ]
+        if grouping_unchanged
+        else []
     )
     replay_body = {
         "schema_version": INTERACTIVE_TREE_REPLAY_SCHEMA_VERSION,
@@ -298,6 +359,9 @@ def replay_interactive_tree_threshold(
         "warning_codes": warning_codes,
         "assignment_hash": _sha256(new_assignment),
     }
+    if replacing_feature:
+        replay_body["previous_feature"] = current_feature
+        replay_body["feature"] = normalized_feature
     replay = {**replay_body, "result_hash": _sha256(replay_body)}
     return InteractiveTreeReplayResult(
         nodes=tuple(replayed_nodes),
@@ -345,12 +409,14 @@ def _effective_split_configs(
         if source["kind"] != "split":
             continue
         current = current_nodes.get(node_id, source)
+        feature = str(current.get("feature", source["feature"]))
         threshold = _finite_number(current["threshold"], "effective threshold")
         result[node_id] = {
+            "feature": feature,
             "threshold": threshold,
             "missing_child": (
                 "left"
-                if float(medians[source["feature"]]) <= threshold
+                if float(medians[feature]) <= threshold
                 else "right"
             ),
         }
@@ -387,7 +453,7 @@ def _route_masks(
         left, right = _split_child_masks(
             frame,
             parent_mask=mask,
-            feature=node["feature"],
+            feature=config["feature"],
             threshold=config["threshold"],
             missing_child=config["missing_child"],
         )
@@ -458,12 +524,11 @@ def _path_condition(
         current = owner
     clauses = []
     for owner, side in reversed(steps):
-        node = source_by_id[owner]
         config = configs[owner]
         clauses.append(
             {
                 "op": "compare",
-                "field": node["feature"],
+                "field": config["feature"],
                 "operator": "<=" if side == "left" else ">",
                 "value": config["threshold"],
                 "missing": (
@@ -474,7 +539,6 @@ def _path_condition(
             }
         )
     if not clauses:
-        node = source_by_id[root_id]
         config = configs[root_id]
         clauses = [
             {
@@ -482,7 +546,7 @@ def _path_condition(
                 "args": [
                     {
                         "op": "compare",
-                        "field": node["feature"],
+                        "field": config["feature"],
                         "operator": "<=",
                         "value": config["threshold"],
                         "missing": (
@@ -493,7 +557,7 @@ def _path_condition(
                     },
                     {
                         "op": "compare",
-                        "field": node["feature"],
+                        "field": config["feature"],
                         "operator": ">",
                         "value": config["threshold"],
                         "missing": (
@@ -533,7 +597,7 @@ def _require_adjustment_scope(
             new_masks[current_id],
         ):
             raise StrategyError(
-                "interactive-tree threshold replay changed rows outside the "
+                "interactive-tree split replay changed rows outside the "
                 "target descendants"
             )
 

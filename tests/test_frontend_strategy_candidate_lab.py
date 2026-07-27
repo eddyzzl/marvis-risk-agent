@@ -3834,6 +3834,27 @@ def test_interactive_tree_threshold_collector_is_pointer_only_and_keeps_prune():
     )
 
 
+def test_interactive_tree_feature_replacement_controls_are_projection_bound() -> None:
+    html = (ROOT / "marvis" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    source = (
+        ROOT
+        / "marvis"
+        / "static"
+        / "js"
+        / "v2"
+        / "strategy_candidate_lab_controller.js"
+    ).read_text(encoding="utf-8")
+
+    assert '<option value="replace_split_feature">' in html
+    assert 'data-candidate-lab-field="interactive_tree_feature"' in html
+    assert "eligible_feature_replacements" in source
+    assert "feature_universe" in source
+    assert 'operation === "replace_split_feature"' in source
+    assert "新分裂字段必须从当前来源树的认证字段全集中明确选择" in source
+
+
 def test_interactive_tree_render_exposes_authenticated_threshold_adjustments():
     run_node(
         """

@@ -43,6 +43,13 @@ THRESHOLD_ADJUSTMENT_FIELDS = {
     "feature",
     "current_threshold",
 }
+FEATURE_REPLACEMENT_FIELDS = {
+    "source_tree_id",
+    "node_id",
+    "operation",
+    "current_feature",
+    "current_threshold",
+}
 
 
 def _revise(
@@ -142,6 +149,29 @@ def _assert_operable_topology(
         }
         for node in nodes
         if node["can_prune"]
+    ]
+    feature_universe = source_asset["tree_result"]["training"]["feature_order"]
+    assert item["pointers"]["feature_universe"] == feature_universe
+    eligible_feature_replacements = item["pointers"][
+        "eligible_feature_replacements"
+    ]
+    assert all(
+        set(pointer) == FEATURE_REPLACEMENT_FIELDS
+        for pointer in eligible_feature_replacements
+    )
+    assert eligible_feature_replacements == [
+        {
+            "source_tree_id": source_tree_id,
+            "node_id": node["node_id"],
+            "operation": "replace_split_feature",
+            "current_feature": node["feature"],
+            "current_threshold": node["threshold"],
+        }
+        for node in nodes
+        if (
+            node["can_prune"]
+            and any(feature != node["feature"] for feature in feature_universe)
+        )
     ]
 
 
@@ -298,8 +328,14 @@ def test_candidate_lab_projects_each_tree_source_without_inventing_one_current_b
         by_id[second["revision_id"]]["pointers"]["visible_node_ids"]
         != by_id[sibling["revision_id"]]["pointers"]["visible_node_ids"]
     )
-    assert _current_keys(base_after) == {"current_threshold"}
-    assert _current_keys(revisions) == {"current_threshold"}
+    assert _current_keys(base_after) == {
+        "current_feature",
+        "current_threshold",
+    }
+    assert _current_keys(revisions) == {
+        "current_feature",
+        "current_threshold",
+    }
     assert _hash_keys(base_after) == set()
     assert _hash_keys(revisions) == set()
 
@@ -375,7 +411,10 @@ def test_candidate_lab_projects_effective_threshold_revision_as_new_immutable_so
         "feature": base_root_before["feature"],
         "current_threshold": 1.5,
     }
-    assert _current_keys(revision) == {"current_threshold"}
+    assert _current_keys(revision) == {
+        "current_feature",
+        "current_threshold",
+    }
     assert _hash_keys(revision) == set()
 
 

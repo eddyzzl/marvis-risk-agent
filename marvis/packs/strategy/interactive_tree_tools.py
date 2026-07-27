@@ -62,11 +62,13 @@ from marvis.packs.strategy.interactive_tree_revision import (
     validate_interactive_tree_revision,
 )
 from marvis.packs.strategy.interactive_tree_replay import (
+    replay_interactive_tree_split,
     replay_interactive_tree_threshold,
 )
 from marvis.packs.strategy.interactive_tree_revision_v2 import (
     InteractiveTreeRevisionV2Error,
     build_adjusted_interactive_tree_revision_v2,
+    build_replaced_interactive_tree_split_revision_v2,
 )
 from marvis.packs.strategy.sample_design_execution import (
     StrategyRiskDevelopmentExecutionBinding,
@@ -110,7 +112,14 @@ MAX_INTERACTIVE_TREE_REVISION_CHAIN = 511
 MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES = 64 * 1024 * 1024
 
 _INPUT_FIELDS = frozenset(
-    {"source_tree_id", "node_id", "operation", "threshold", "reason"}
+    {
+        "source_tree_id",
+        "node_id",
+        "operation",
+        "feature",
+        "threshold",
+        "reason",
+    }
 )
 _REQUIRED_INPUT_FIELDS = frozenset(
     {"source_tree_id", "node_id", "operation"}
@@ -848,32 +857,58 @@ def _build_revision(
     runtime,
     task_id: str,
 ) -> tuple[dict[str, Any], _ReplayBinding]:
-    if request["operation"] == "adjust_split_threshold":
+    if request["operation"] in {
+        "adjust_split_threshold",
+        "replace_split_feature",
+    }:
         context = _load_replay_context(
             runtime,
             task_id=task_id,
             source=source.automatic_source,
         )
-        replay_result = replay_interactive_tree_threshold(
-            context.labeled,
-            source.automatic_source.asset,
-            node_id=request["node_id"],
-            threshold=request["threshold"],
-            target=context.target,
-            weights=context.weights,
-            loan_values=context.loan_values,
-            overdue_values=context.overdue_values,
-            parent_revision=source.parent_revision,
+        replay_kwargs = {
+            "node_id": request["node_id"],
+            "threshold": request["threshold"],
+            "target": context.target,
+            "weights": context.weights,
+            "loan_values": context.loan_values,
+            "overdue_values": context.overdue_values,
+            "parent_revision": source.parent_revision,
+        }
+        replay_result = (
+            replay_interactive_tree_split(
+                context.labeled,
+                source.automatic_source.asset,
+                feature=request["feature"],
+                **replay_kwargs,
+            )
+            if request["operation"] == "replace_split_feature"
+            else replay_interactive_tree_threshold(
+                context.labeled,
+                source.automatic_source.asset,
+                **replay_kwargs,
+            )
         )
         try:
-            revision = build_adjusted_interactive_tree_revision_v2(
-                source.automatic_source.asset,
-                node_id=request["node_id"],
-                threshold=request["threshold"],
-                reason=request.get("reason"),
-                replay=replay_result,
-                parent_revision=source.parent_revision,
-                ancestor_revisions=source.ancestor_revisions,
+            builder_kwargs = {
+                "node_id": request["node_id"],
+                "threshold": request["threshold"],
+                "reason": request.get("reason"),
+                "replay": replay_result,
+                "parent_revision": source.parent_revision,
+                "ancestor_revisions": source.ancestor_revisions,
+            }
+            revision = (
+                build_replaced_interactive_tree_split_revision_v2(
+                    source.automatic_source.asset,
+                    feature=request["feature"],
+                    **builder_kwargs,
+                )
+                if request["operation"] == "replace_split_feature"
+                else build_adjusted_interactive_tree_revision_v2(
+                    source.automatic_source.asset,
+                    **builder_kwargs,
+                )
             )
         except (
             InteractiveTreeRevisionError,
@@ -882,7 +917,7 @@ def _build_revision(
             ValueError,
         ) as exc:
             raise StrategyError(
-                "interactive-tree threshold revision edit is invalid"
+                "interactive-tree split revision edit is invalid"
             ) from exc
         return revision, _ReplayBinding(
             data_binding=context.data_binding,
@@ -1586,7 +1621,11 @@ def _require_revision_provenance_scalars(
         operations = {"prune_subtree"}
     elif schema == INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION_V2:
         producer = INTERACTIVE_TREE_REVISION_V2_PRODUCER_VERSION
-        operations = {"prune_subtree", "adjust_split_threshold"}
+        operations = {
+            "prune_subtree",
+            "adjust_split_threshold",
+            "replace_split_feature",
+        }
     else:
         raise StrategyError(
             "interactive-tree revision provenance schema_version changed"
@@ -1863,17 +1902,32 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
     source_tree_id = _required_text(inputs["source_tree_id"], "source_tree_id")
     node_id = _required_text(inputs["node_id"], "node_id")
     operation = _required_text(inputs["operation"], "operation")
-    if operation not in {"prune_subtree", "adjust_split_threshold"}:
+    if operation not in {
+        "prune_subtree",
+        "adjust_split_threshold",
+        "replace_split_feature",
+    }:
         raise StrategyError(
-            "operation must be prune_subtree or adjust_split_threshold"
+            "operation must be prune_subtree, adjust_split_threshold, "
+            "or replace_split_feature"
         )
     has_threshold = "threshold" in inputs
-    if operation == "adjust_split_threshold" and not has_threshold:
+    has_feature = "feature" in inputs
+    if operation in {
+        "adjust_split_threshold",
+        "replace_split_feature",
+    } and not has_threshold:
         raise StrategyError(
-            "threshold is required for adjust_split_threshold"
+            "threshold is required for a split adjustment"
         )
     if operation == "prune_subtree" and has_threshold:
         raise StrategyError("threshold is unsupported for prune_subtree")
+    if operation == "replace_split_feature" and not has_feature:
+        raise StrategyError("feature is required for replace_split_feature")
+    if operation != "replace_split_feature" and has_feature:
+        raise StrategyError(
+            "feature is supported only for replace_split_feature"
+        )
     normalized: dict[str, Any] = {
         "source_tree_id": source_tree_id,
         "node_id": node_id,
@@ -1887,6 +1941,8 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
         if not math.isfinite(normalized_threshold):
             raise StrategyError("threshold must be a finite number")
         normalized["threshold"] = normalized_threshold
+    if has_feature:
+        normalized["feature"] = _required_text(inputs["feature"], "feature")
     if "reason" in inputs:
         reason = inputs["reason"]
         if reason is not None:

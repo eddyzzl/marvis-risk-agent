@@ -2876,7 +2876,8 @@ def _run_validated_strategy_request(
                 task_id=task.id,
                 draft=draft,
             )
-            if inputs.get("operation") == "adjust_split_threshold"
+            if inputs.get("operation")
+            in {"adjust_split_threshold", "replace_split_feature"}
             else dict(inputs)
         )
         return _start_confirmed_strategy_plan(
@@ -4288,7 +4289,10 @@ def _standard_workflow_request_preflight(
         # stale/hidden split before a plan is created.  The Tool still repeats
         # full authentication under its writer lock before replay/persistence.
         # Existing prune requests intentionally retain their Tool-owned binding.
-        if draft.workflow_inputs.get("operation") == "adjust_split_threshold":
+        if draft.workflow_inputs.get("operation") in {
+            "adjust_split_threshold",
+            "replace_split_feature",
+        }:
             try:
                 _interactive_tree_revision_plan_slots(
                     runtime,
@@ -4955,13 +4959,16 @@ def _interactive_tree_revision_plan_slots(
     inputs = draft.to_dict()["workflow_inputs"]
     source_tree_id = inputs.get("source_tree_id")
     node_id = inputs.get("node_id")
+    operation = inputs.get("operation")
     if (
-        inputs.get("operation") != "adjust_split_threshold"
+        operation
+        not in {"adjust_split_threshold", "replace_split_feature"}
         or not isinstance(source_tree_id, str)
         or not isinstance(node_id, str)
     ):
         raise StrategySetupError(
-            "交互树阈值调整必须提供完整来源树、当前可见 split node 和新阈值。"
+            "交互树分裂调整必须提供完整来源树、当前可见 split node 和"
+            "精确控制值。"
         )
 
     repository = TaskArtifactRepository(runtime.settings.db_path)
@@ -5024,6 +5031,11 @@ def _interactive_tree_revision_plan_slots(
             topology = interactive_tree_topology_evidence(
                 verified_source.asset,
             )
+            authenticated_feature_order = tuple(
+                verified_source.asset["tree_result"]["training"][
+                    "feature_order"
+                ]
+            )
         except Exception as exc:
             raise StrategySetupError(
                 f"自动树资产 {source_tree_id} 未通过完整制品认证，不能调整阈值。"
@@ -5045,6 +5057,11 @@ def _interactive_tree_revision_plan_slots(
                 revision_payload=verified_revision.revision,
                 parent_revision=(ancestors[0] if ancestors else None),
                 ancestor_revisions=(ancestors[1:] if ancestors else ()),
+            )
+            authenticated_feature_order = tuple(
+                verified_revision.automatic_source.asset["tree_result"][
+                    "training"
+                ]["feature_order"]
             )
         except Exception as exc:
             raise StrategySetupError(
@@ -5071,6 +5088,17 @@ def _interactive_tree_revision_plan_slots(
             f"节点 {node_id} 不是来源树 {source_tree_id} 当前投影中的可编辑 "
             "split node；请刷新树视图并重新选择。"
         )
+    if operation == "replace_split_feature":
+        feature = inputs.get("feature")
+        if (
+            not isinstance(feature, str)
+            or feature not in authenticated_feature_order
+            or feature == matches[0].get("feature")
+        ):
+            raise StrategySetupError(
+                f"新特征 {feature!r} 不属于来源树的认证特征全集，或与节点"
+                "当前特征相同；请从当前候选证据中重新选择。"
+            )
 
     # Never pass projection rows, metrics, hashes or ancestry through a user
     # plan.  The deterministic Tool recovers those facts itself.
@@ -5080,6 +5108,7 @@ def _interactive_tree_revision_plan_slots(
             "source_tree_id",
             "node_id",
             "operation",
+            "feature",
             "threshold",
             "reason",
         )

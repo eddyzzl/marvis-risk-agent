@@ -1883,8 +1883,10 @@ STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
         "删除决策树子树",
         "基于自动树创建修剪版本",
         "调整交互式决策树分裂阈值",
+        "替换交互式决策树分裂特征",
         "prune an interactive decision tree subtree",
         "adjust an interactive decision tree split threshold",
+        "replace an interactive decision tree split feature",
         "create an immutable interactive tree revision",
     ),
     slots=(
@@ -1907,6 +1909,12 @@ STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
             "Exact prune_subtree or adjust_split_threshold operation",
         ),
         SlotSpec(
+            "feature",
+            False,
+            "user",
+            "Exact authenticated feature for a split-feature replacement",
+        ),
+        SlotSpec(
             "threshold",
             False,
             "user",
@@ -1927,6 +1935,7 @@ STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
                 "source_tree_id": "{slot:source_tree_id}",
                 "node_id": "{slot:node_id}",
                 "operation": "{slot:operation}",
+                "feature": "{slot:feature}",
                 "threshold": "{slot:threshold}",
                 "reason": "{slot:reason}",
             },

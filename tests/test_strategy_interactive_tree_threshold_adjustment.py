@@ -202,6 +202,93 @@ def test_threshold_adjusts_nested_visible_split_without_changing_topology(
     assert result["replay"]["grouping_unchanged"] is False
 
 
+def test_replace_split_feature_replays_exact_effective_tree_and_pool_rule(
+    scenario,
+) -> None:
+    root_id = scenario.source_asset["tree_result"]["tree"]["root_node_id"]
+    root = next(
+        node
+        for node in scenario.source_asset["tree_result"]["tree"]["nodes"]
+        if node["node_id"] == root_id
+    )
+    replacement = next(
+        feature
+        for feature in scenario.source_asset["tree_result"]["training"][
+            "feature_order"
+        ]
+        if feature != root["feature"]
+    )
+
+    result = strategy_tools.tool_revise_interactive_tree(
+        {
+            "source_tree_id": scenario.source_asset["asset_id"],
+            "node_id": root_id,
+            "operation": "replace_split_feature",
+            "feature": replacement,
+            "threshold": 1.5,
+            "reason": "Use the reviewed alternative split.",
+        },
+        scenario.ctx,
+    )
+
+    assert result["schema_version"] == (
+        "strategy.revise-interactive-tree-tool.v2"
+    )
+    assert result["edit"]["operation"] == "replace_split_feature"
+    assert result["edit"]["previous_feature"] == root["feature"]
+    assert result["edit"]["feature"] == replacement
+    assert result["replay"]["previous_feature"] == root["feature"]
+    assert result["replay"]["feature"] == replacement
+    assert result["replay"]["exactly_once"] is True
+
+    record = scenario.repository.get_for_task(
+        scenario.task.id,
+        result["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    revision = json.loads(Path(record["path"]).read_text("utf-8"))
+    revised_root = next(
+        node
+        for node in revision["tree"]["nodes"]
+        if node["node_id"] == root_id
+    )
+    assert revised_root["feature"] == replacement
+    assert revised_root["threshold"] == 1.5
+    assert any(
+        clause.get("field") == replacement
+        for fragment in revision["fragments"]
+        for clause in (
+            fragment["condition"].get("args", [fragment["condition"]])
+        )
+    )
+
+
+def test_replace_split_feature_rejects_same_feature_and_unknown_feature(
+    scenario,
+) -> None:
+    root_id = scenario.source_asset["tree_result"]["tree"]["root_node_id"]
+    root = next(
+        node
+        for node in scenario.source_asset["tree_result"]["tree"]["nodes"]
+        if node["node_id"] == root_id
+    )
+    for feature, match in (
+        (root["feature"], "feature"),
+        ("not_in_authenticated_feature_universe", "feature"),
+    ):
+        with pytest.raises(StrategyError, match=match):
+            strategy_tools.tool_revise_interactive_tree(
+                {
+                    "source_tree_id": scenario.source_asset["asset_id"],
+                    "node_id": root_id,
+                    "operation": "replace_split_feature",
+                    "feature": feature,
+                    "threshold": float(root["threshold"]) + 0.25,
+                },
+                scenario.ctx,
+            )
+
+
 def test_v2_chain_keeps_threshold_when_pruned_and_rejects_hidden_adjustment(
     scenario,
 ) -> None:

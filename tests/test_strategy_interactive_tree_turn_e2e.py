@@ -111,7 +111,10 @@ def automatic_tree_turn(
         "task_id": task_id,
         "asset_id": output["summary"]["asset_id"],
         "root_node_id": root_node_id,
+        "root_feature": root["feature"],
         "root_threshold": root["threshold"],
+        "feature_order": asset["tree_result"]["training"]["feature_order"],
+        "feature_medians": asset["tree_result"]["preprocessing"]["medians"],
     }
 
 
@@ -301,6 +304,56 @@ def test_structured_turn_executes_one_exact_threshold_adjustment(
     assert output["replay"]["exactly_once"] is True
     assert output["replay"]["all_visible_metrics_matched"] is True
     assert output["replay"]["threshold"] == threshold
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_executes_one_exact_split_feature_replacement(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    root_feature = str(automatic_tree_turn["root_feature"])
+    feature_order = list(automatic_tree_turn["feature_order"])
+    replacement = next(
+        feature for feature in feature_order if feature != root_feature
+    )
+    threshold = float(
+        dict(automatic_tree_turn["feature_medians"])[replacement]
+    )
+    workflow_inputs = {
+        "source_tree_id": str(automatic_tree_turn["asset_id"]),
+        "node_id": str(automatic_tree_turn["root_node_id"]),
+        "operation": "replace_split_feature",
+        "feature": replacement,
+        "threshold": threshold,
+        "reason": "从认证候选中人工选择替代分裂",
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按当前投影精确替换指定节点的分裂字段和阈值。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_revision",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = plans[-1]
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].inputs == workflow_inputs
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["edit"]["operation"] == "replace_split_feature"
+    assert output["edit"]["previous_feature"] == root_feature
+    assert output["edit"]["feature"] == replacement
+    assert output["replay"]["feature"] == replacement
+    assert output["replay"]["exactly_once"] is True
 
 
 @pytest.mark.slow

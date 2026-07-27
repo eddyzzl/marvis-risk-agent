@@ -3024,6 +3024,7 @@ def _project_automatic_tree(
             **_interactive_tree_topology_pointers(
                 source_tree_id=asset["asset_id"],
                 topology=topology,
+                feature_universe=tree["training"]["feature_order"],
             ),
         },
         "total": len(fragments),
@@ -3168,6 +3169,9 @@ def _project_interactive_tree_revision(
             **_interactive_tree_topology_pointers(
                 source_tree_id=source_tree_id,
                 topology=topology,
+                feature_universe=binding.automatic_source.asset[
+                    "tree_result"
+                ]["training"]["feature_order"],
             ),
         },
         "total": len(topology["nodes"]),
@@ -3179,6 +3183,7 @@ def _interactive_tree_topology_pointers(
     *,
     source_tree_id: str,
     topology: Mapping[str, Any],
+    feature_universe: Sequence[str],
 ) -> dict[str, Any]:
     nodes = [
         dict(node)
@@ -3210,6 +3215,35 @@ def _interactive_tree_topology_pointers(
         for node in nodes
         if node.get("can_prune") is True
     ]
+    authenticated_features = list(
+        _text_sequence(
+            feature_universe,
+            "interactive-tree feature universe",
+        )
+    )
+    eligible_feature_replacements = [
+        {
+            "source_tree_id": source_tree_id,
+            "node_id": _text(
+                node.get("node_id"),
+                "interactive-tree replacement node_id",
+            ),
+            "operation": "replace_split_feature",
+            "current_feature": _text(
+                node.get("feature"),
+                "interactive-tree current feature",
+            ),
+            "current_threshold": float(node["threshold"]),
+        }
+        for node in nodes
+        if (
+            node.get("can_prune") is True
+            and any(
+                feature != node.get("feature")
+                for feature in authenticated_features
+            )
+        )
+    ]
     return {
         "root_node_id": _text(
             topology.get("root_node_id"),
@@ -3230,6 +3264,8 @@ def _interactive_tree_topology_pointers(
         ),
         "eligible_prunes": eligible_prunes,
         "eligible_threshold_adjustments": eligible_threshold_adjustments,
+        "eligible_feature_replacements": eligible_feature_replacements,
+        "feature_universe": authenticated_features,
     }
 
 

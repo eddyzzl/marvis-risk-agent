@@ -1059,6 +1059,57 @@ function interactiveTreeThresholdEligiblePointers(item) {
   });
 }
 
+function interactiveTreeFeatureEligiblePointers(item) {
+  const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
+  const featureUniverse = new Set(
+    (Array.isArray(item?.pointers?.feature_universe)
+      ? item.pointers.feature_universe
+      : [])
+      .map(nonEmptyText)
+      .filter(Boolean),
+  );
+  const nodes = new Map(
+    (Array.isArray(item?.pointers?.nodes) ? item.pointers.nodes : [])
+      .filter(isRecord)
+      .map((node) => [nonEmptyText(node.node_id), node]),
+  );
+  const pointers = Array.isArray(
+    item?.pointers?.eligible_feature_replacements,
+  )
+    ? item.pointers.eligible_feature_replacements.filter(isRecord)
+    : [];
+  const seen = new Set();
+  return pointers.filter((pointer) => {
+    const pointerSource = nonEmptyText(pointer.source_tree_id);
+    const nodeId = nonEmptyText(pointer.node_id);
+    const currentFeature = nonEmptyText(pointer.current_feature);
+    const currentThreshold = Number(pointer.current_threshold);
+    const node = nodes.get(nodeId);
+    const key = `${pointerSource}\u001f${nodeId}`;
+    if (
+      pointerSource !== sourceTreeId
+      || !INTERACTIVE_TREE_SOURCE_ID_RE.test(pointerSource)
+      || !INTERACTIVE_TREE_NODE_ID_RE.test(nodeId)
+      || pointer.operation !== "replace_split_feature"
+      || !featureUniverse.has(currentFeature)
+      || featureUniverse.size < 2
+      || typeof pointer.current_threshold !== "number"
+      || !Number.isFinite(currentThreshold)
+      || node?.kind !== "split"
+      || node?.is_visible !== true
+      || node?.is_frontier === true
+      || node?.can_prune !== true
+      || nonEmptyText(node?.feature) !== currentFeature
+      || Number(node?.threshold) !== currentThreshold
+      || seen.has(key)
+    ) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 function interactiveTreeFrontierEligiblePointers(item) {
   if (item?.kind !== "interactive_tree_revision") return [];
   const revisionId = nonEmptyText(item?.detail?.revision_id);
@@ -3536,7 +3587,11 @@ function collectInteractiveTreeRevisionInputs(form) {
     || nonEmptyText(source.dataset?.sourceTreeId) !== sourceTreeId
     || nonEmptyText(node.dataset?.sourceTreeId) !== sourceTreeId
     || nonEmptyText(node.dataset?.nodeId) !== nodeId
-    || !["prune_subtree", "adjust_split_threshold"].includes(operation)
+    || ![
+      "prune_subtree",
+      "adjust_split_threshold",
+      "replace_split_feature",
+    ].includes(operation)
     || node.dataset?.operation !== operation
   ) {
     throw new Error(
@@ -3548,7 +3603,10 @@ function collectInteractiveTreeRevisionInputs(form) {
     node_id: nodeId,
     operation,
   };
-  if (operation === "adjust_split_threshold") {
+  if (
+    operation === "adjust_split_threshold"
+    || operation === "replace_split_feature"
+  ) {
     const currentThreshold = Number(
       nonEmptyText(node.dataset?.currentThreshold),
     );
@@ -3570,10 +3628,30 @@ function collectInteractiveTreeRevisionInputs(form) {
     ) {
       throw new Error("新 threshold 必须是有限且可精确表达的数字。");
     }
-    if (threshold === currentThreshold) {
+    if (
+      operation === "adjust_split_threshold"
+      && threshold === currentThreshold
+    ) {
       throw new Error("新 threshold 必须与当前阈值不同。");
     }
     inputs.threshold = threshold;
+    if (operation === "replace_split_feature") {
+      const featureOption = selectedProjectionOption(
+        form,
+        "interactive_tree_feature",
+        "新分裂字段",
+      );
+      const feature = nonEmptyText(featureOption.value);
+      if (
+        !feature
+        || nonEmptyText(featureOption.dataset?.sourceTreeId) !== sourceTreeId
+        || featureOption.dataset?.candidateLabProjection !== "1"
+        || feature === nonEmptyText(node.dataset?.feature)
+      ) {
+        throw new Error("新分裂字段必须从当前来源树的认证字段全集中明确选择。");
+      }
+      inputs.feature = feature;
+    }
   }
   optionalText(inputs, "reason", formValue(form, "interactive_tree_reason"));
   return inputs;
@@ -3831,9 +3909,13 @@ function interactiveTreePointer(payload, sourceTreeId, nodeId) {
 }
 
 function interactiveTreePointersForOperation(item, operation) {
-  return operation === "adjust_split_threshold"
-    ? interactiveTreeThresholdEligiblePointers(item)
-    : interactiveTreeEligiblePointers(item);
+  if (operation === "adjust_split_threshold") {
+    return interactiveTreeThresholdEligiblePointers(item);
+  }
+  if (operation === "replace_split_feature") {
+    return interactiveTreeFeatureEligiblePointers(item);
+  }
+  return interactiveTreeEligiblePointers(item);
 }
 
 function interactiveTreeRevisionPointer(
@@ -3862,14 +3944,41 @@ function interactiveTreeRevisionRequestIsCurrent(payload, inputs) {
   );
   if (!pointer) return false;
   if (operation === "prune_subtree") {
-    return !Object.prototype.hasOwnProperty.call(inputs, "threshold");
+    return (
+      !Object.prototype.hasOwnProperty.call(inputs, "feature")
+      && !Object.prototype.hasOwnProperty.call(inputs, "threshold")
+    );
   }
-  if (operation !== "adjust_split_threshold") return false;
+  if (
+    operation !== "adjust_split_threshold"
+    && operation !== "replace_split_feature"
+  ) return false;
   const threshold = Number(inputs.threshold);
+  if (
+    typeof inputs.threshold !== "number"
+    || !Number.isFinite(threshold)
+  ) return false;
+  if (operation === "adjust_split_threshold") {
+    return threshold !== Number(pointer.current_threshold);
+  }
+  const source = interactiveTreeProjectionSources(payload).find(
+    (item) => item?.detail?.source_tree_id === inputs.source_tree_id,
+  );
+  const features = new Set(
+    (Array.isArray(source?.pointers?.feature_universe)
+      ? source.pointers.feature_universe
+      : [])
+      .map(nonEmptyText)
+      .filter(Boolean),
+  );
   return (
-    typeof inputs.threshold === "number"
-    && Number.isFinite(threshold)
-    && threshold !== Number(pointer.current_threshold)
+    typeof inputs.feature === "string"
+    && features.has(inputs.feature)
+    && inputs.feature !== pointer.current_feature
+    && (
+      threshold !== Number(pointer.current_threshold)
+      || inputs.feature !== pointer.current_feature
+    )
   );
 }
 
@@ -3891,6 +4000,7 @@ function syncInteractiveTreeRevisionControls(
   const allowedOperations = [
     "prune_subtree",
     "adjust_split_threshold",
+    "replace_split_feature",
   ];
   const requested = nonEmptyText(requestedOperation);
   if (operationField && allowedOperations.includes(requested)) {
@@ -3931,7 +4041,11 @@ function syncInteractiveTreeRevisionControls(
         : "automatic";
       const pointerLabel = operation === "adjust_split_threshold"
         ? "个可调阈值节点"
-        : "个可剪枝节点";
+        : (
+          operation === "replace_split_feature"
+            ? "个可换字段节点"
+            : "个可剪枝节点"
+        );
       return projectionOptionHtml(
         sourceTreeId,
         `${sourceTreeId} · ${type} · ${eligibleCount} ${pointerLabel}`,
@@ -3973,9 +4087,9 @@ function syncInteractiveTreeRevisionControls(
           "source-tree-id": pointer.source_tree_id,
           "node-id": pointer.node_id,
           operation,
-          ...(operation === "adjust_split_threshold"
+          ...(operation !== "prune_subtree"
             ? {
-              feature: pointer.feature,
+              feature: pointer.feature || pointer.current_feature,
               "current-threshold": stablePrimitiveText(
                 pointer.current_threshold,
               ),
@@ -4003,15 +4117,19 @@ function syncInteractiveTreeRevisionControls(
     ].join("\u001f")
     : "";
   const isThresholdAdjustment = operation === "adjust_split_threshold";
+  const isFeatureReplacement = operation === "replace_split_feature";
+  const isSplitAdjustment = (
+    isThresholdAdjustment || isFeatureReplacement
+  );
   const thresholdPanel = form.querySelector?.(
     "[data-candidate-lab-tree-threshold-panel]",
   );
-  thresholdPanel?.classList?.toggle?.("hidden", !isThresholdAdjustment);
+  thresholdPanel?.classList?.toggle?.("hidden", !isSplitAdjustment);
   const thresholdFeature = form.querySelector?.(
     "[data-candidate-lab-tree-threshold-feature]",
   );
   if (thresholdFeature) {
-    thresholdFeature.textContent = isThresholdAdjustment
+    thresholdFeature.textContent = isSplitAdjustment
       ? nonEmptyText(selectedNodeOption?.dataset?.feature) || "请先选择节点"
       : "—";
   }
@@ -4019,19 +4137,47 @@ function syncInteractiveTreeRevisionControls(
     "[data-candidate-lab-tree-current-threshold]",
   );
   if (currentThreshold) {
-    currentThreshold.textContent = isThresholdAdjustment
+    currentThreshold.textContent = isSplitAdjustment
       ? nonEmptyText(selectedNodeOption?.dataset?.currentThreshold)
         || "请先选择节点"
       : "—";
   }
   if (thresholdField) {
     thresholdField.value = (
-      isThresholdAdjustment
+      isSplitAdjustment
       && previousPointerIdentity
       && previousPointerIdentity === selectedPointerIdentity
     )
       ? previousThreshold
       : "";
+  }
+  const featurePanel = form.querySelector?.(
+    "[data-candidate-lab-tree-feature-panel]",
+  );
+  featurePanel?.classList?.toggle?.("hidden", !isFeatureReplacement);
+  const featureField = formField(form, "interactive_tree_feature");
+  if (featureField) {
+    const currentFeature = nonEmptyText(
+      selectedNodeOption?.dataset?.feature,
+    );
+    const featureUniverse = Array.isArray(
+      selectedSource?.pointers?.feature_universe,
+    )
+      ? selectedSource.pointers.feature_universe
+        .map(nonEmptyText)
+        .filter((feature) => feature && feature !== currentFeature)
+      : [];
+    featureField.innerHTML = [
+      '<option value="">请选择认证字段</option>',
+      ...featureUniverse.map((feature) => projectionOptionHtml(
+        feature,
+        feature,
+        {
+          "candidate-lab-projection": "1",
+          "source-tree-id": selectedSourceId,
+        },
+      )),
+    ].join("");
   }
   const help = form.querySelector?.("[data-candidate-lab-tree-help]");
   if (help) {
@@ -4045,6 +4191,8 @@ function syncInteractiveTreeRevisionControls(
         : "该分支当前没有可继续剪枝的可见 split 节点。";
     } else if (!selectedNodeOption) {
       help.textContent = "请明确选择一个受认证 split 节点；页面不会按效果、排名或数量自动代选。";
+    } else if (isFeatureReplacement) {
+      help.textContent = "请明确选择一个认证新字段并填写有限阈值；页面不会按排名自动代选，提交只创建不可变 revision。";
     } else if (isThresholdAdjustment) {
       help.textContent = `当前 ${nonEmptyText(
         selectedNodeOption.dataset?.feature,

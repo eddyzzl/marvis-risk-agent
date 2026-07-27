@@ -2428,7 +2428,7 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
-                        <span><strong>交互式树修订</strong><small>从受认证 split 节点创建不可变剪枝或阈值调整分支</small></span>
+                        <span><strong>交互式树修订</strong><small>从受认证 split 节点创建不可变剪枝、阈值或字段调整分支</small></span>
                       </summary>
                       <form
                         data-candidate-lab-form
@@ -2440,6 +2440,7 @@
                           <select data-candidate-lab-field="interactive_tree_operation">
                             <option value="prune_subtree" selected>剪枝到所选节点</option>
                             <option value="adjust_split_threshold">调整所选 split 节点阈值</option>
+                            <option value="replace_split_feature">替换所选 split 节点字段和阈值</option>
                           </select>
                         </label>
                         <label class="candidate-lab-field candidate-lab-field-wide">
@@ -2462,6 +2463,15 @@
                             当前字段：<strong data-candidate-lab-tree-threshold-feature>—</strong>
                             · 当前阈值：<strong data-candidate-lab-tree-current-threshold>—</strong>
                           </p>
+                          <label
+                            class="candidate-lab-field candidate-lab-field-wide hidden"
+                            data-candidate-lab-tree-feature-panel
+                          >
+                            <span>新分裂字段 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="interactive_tree_feature">
+                              <option value="">请选择认证字段</option>
+                            </select>
+                          </label>
                           <label class="candidate-lab-field candidate-lab-field-wide">
                             <span>新阈值 <b aria-hidden="true">*</b></span>
                             <input
