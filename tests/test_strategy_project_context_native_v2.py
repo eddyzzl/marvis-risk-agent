@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 import hashlib
 from pathlib import Path
 
@@ -217,6 +218,13 @@ def _materialize_native_v2_context_sources(
         fx["ctx"],
         fx["runtime"],
     )
+    impact_record = next(
+        item
+        for item in TaskArtifactRepository(
+            fx["settings"].db_path
+        ).list_for_task(fx["task"].id)
+        if item["id"] == impact["artifact"]["artifact_id"]
+    )
     message = TaskRepository(fx["settings"].db_path).add_agent_message(
         fx["task"].id,
         role="user",
@@ -233,7 +241,12 @@ def _materialize_native_v2_context_sources(
                 message["content"].encode("utf-8")
             ).hexdigest(),
         },
-        "as_of": "2026-07-27",
+        # Bind the cutoff to the evidence created by this fixture. A fixed
+        # calendar date makes the test start excluding its own fresh artifacts
+        # as soon as the wall clock advances past that date.
+        "as_of": datetime.fromisoformat(
+            impact_record["created_at"].replace("Z", "+00:00")
+        ).date().isoformat(),
         "scope": "原生 V2 策略开发",
         "business_context": {},
         "explicit_unavailable": ["historical_strategy_reviews"],
