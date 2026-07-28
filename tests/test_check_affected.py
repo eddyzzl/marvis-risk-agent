@@ -418,6 +418,110 @@ def test_ci_runs_strategy_smoke_separately_without_jvm_or_manual_duplication():
     )
 
 
+def test_ci_keeps_manual_full_runs_independent_and_aggregates_every_gate():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    checks_job = workflow.split("\n  checks:\n", maxsplit=1)[1].split(
+        "\n  strategy_smoke:\n", maxsplit=1
+    )[0]
+
+    assert (
+        "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}"
+        in workflow
+    )
+    assert "if: ${{ !cancelled() }}" in checks_job
+    assert (
+        "needs:\n"
+        "      [quality, fast_tests, full_checks, strategy_smoke, "
+        "pmml_runtime, security]"
+        in checks_job
+    )
+    for result in (
+        "QUALITY_RESULT",
+        "FAST_TESTS_RESULT",
+        "FULL_CHECKS_RESULT",
+        "STRATEGY_SMOKE_RESULT",
+        "PMML_RUNTIME_RESULT",
+        "SECURITY_RESULT",
+    ):
+        assert result in checks_job
+
+
+def _ci_checks_script() -> str:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    checks_job = workflow.split("\n  checks:\n", maxsplit=1)[1].split(
+        "\n  strategy_smoke:\n", maxsplit=1
+    )[0]
+    indented_script = checks_job.split("        run: |\n", maxsplit=1)[1]
+    return "\n".join(
+        line[10:] for line in indented_script.splitlines() if line.startswith("          ")
+    )
+
+
+@pytest.mark.parametrize(
+    ("event_name", "overrides", "expected_returncode"),
+    [
+        ("push", {}, 0),
+        (
+            "workflow_dispatch",
+            {
+                "QUALITY_RESULT": "skipped",
+                "FAST_TESTS_RESULT": "skipped",
+                "FULL_CHECKS_RESULT": "success",
+                "STRATEGY_SMOKE_RESULT": "skipped",
+                "PMML_RUNTIME_RESULT": "skipped",
+            },
+            0,
+        ),
+        ("push", {"QUALITY_RESULT": "failure"}, 1),
+        ("push", {"FAST_TESTS_RESULT": "cancelled"}, 1),
+        ("push", {"STRATEGY_SMOKE_RESULT": "failure"}, 1),
+        ("push", {"PMML_RUNTIME_RESULT": "failure"}, 1),
+        ("push", {"SECURITY_RESULT": "failure"}, 1),
+        ("push", {"FULL_CHECKS_RESULT": "success"}, 1),
+        (
+            "workflow_dispatch",
+            {
+                "QUALITY_RESULT": "skipped",
+                "FAST_TESTS_RESULT": "skipped",
+                "FULL_CHECKS_RESULT": "failure",
+                "STRATEGY_SMOKE_RESULT": "skipped",
+                "PMML_RUNTIME_RESULT": "skipped",
+            },
+            1,
+        ),
+    ],
+)
+def test_ci_checks_script_enforces_event_specific_results(
+    event_name: str,
+    overrides: dict[str, str],
+    expected_returncode: int,
+):
+    env = {
+        **os.environ,
+        "EVENT_NAME": event_name,
+        "QUALITY_RESULT": "success",
+        "FAST_TESTS_RESULT": "success",
+        "FULL_CHECKS_RESULT": "skipped",
+        "STRATEGY_SMOKE_RESULT": "success",
+        "PMML_RUNTIME_RESULT": "success",
+        "SECURITY_RESULT": "success",
+        **overrides,
+    }
+
+    completed = subprocess.run(
+        ["bash", "-e", "-c", _ci_checks_script()],
+        cwd=ROOT,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == expected_returncode
+
+
 def test_check_fast_keeps_marker_filter_with_custom_pytest_args(tmp_path: Path):
     capture = tmp_path / "python-args.txt"
     fake_python = tmp_path / "python"

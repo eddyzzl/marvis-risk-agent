@@ -8,10 +8,10 @@ on:
   # Manual dispatch runs the FULL suite (slow/e2e included) — see CHECK_MODE.
   workflow_dispatch:
 
-# One run per branch: a new push supersedes and cancels the previous run, and
-# PR branches no longer double-run via the push trigger.
+# Keep push/PR feedback and manually requested full regression independent.
+# Newer runs still supersede older runs of the same event type on the same ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -140,8 +140,11 @@ jobs:
           uv run scripts/check
 
   checks:
-    if: always()
-    needs: [quality, fast_tests, full_checks]
+    # A superseded run is expected cancellation, not a failed verification.
+    # For completed runs, aggregate every gate that applies to the event.
+    if: ${{ !cancelled() }}
+    needs:
+      [quality, fast_tests, full_checks, strategy_smoke, pmml_runtime, security]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -152,12 +155,23 @@ jobs:
           QUALITY_RESULT: ${{ needs.quality.result }}
           FAST_TESTS_RESULT: ${{ needs.fast_tests.result }}
           FULL_CHECKS_RESULT: ${{ needs.full_checks.result }}
+          STRATEGY_SMOKE_RESULT: ${{ needs.strategy_smoke.result }}
+          PMML_RUNTIME_RESULT: ${{ needs.pmml_runtime.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
         run: |
+          test "$SECURITY_RESULT" = "success"
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             test "$FULL_CHECKS_RESULT" = "success"
+            test "$QUALITY_RESULT" = "skipped"
+            test "$FAST_TESTS_RESULT" = "skipped"
+            test "$STRATEGY_SMOKE_RESULT" = "skipped"
+            test "$PMML_RUNTIME_RESULT" = "skipped"
           else
+            test "$FULL_CHECKS_RESULT" = "skipped"
             test "$QUALITY_RESULT" = "success"
             test "$FAST_TESTS_RESULT" = "success"
+            test "$STRATEGY_SMOKE_RESULT" = "success"
+            test "$PMML_RUNTIME_RESULT" = "success"
           fi
 
   strategy_smoke:
