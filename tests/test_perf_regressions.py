@@ -154,10 +154,10 @@ def _synthetic_training_frame(n_rows: int, n_features: int, *, seed: int) -> pd.
 def test_train_models_multi_recipe_reads_dataset_exactly_once(tmp_path, monkeypatch):
     """LT-8 #2: an N-recipe tool_train_models run through the REAL DataBackend
     (real parquet file, real recipes -- lr + scorecard, chosen for speed) must
-    trigger exactly ONE DataBackend.read_frame call for the shared modeling
-    dataset (PERF-10's _TrainingDatasetBackend contract: TrainingDataset.load
-    reads once, every recipe is served from the cached CoW frame). A regression
-    back to "each recipe re-reads the dataset" would show read_count == len(recipes).
+    trigger exactly ONE compact load for the shared modeling dataset and no
+    legacy full-frame read. Every recipe is then served from the cached CoW
+    frame. A regression back to "each recipe re-loads the dataset" would make
+    the compact-load count scale with len(recipes).
 
     This is a counting-guard angle distinct from
     test_modeling_training_dataset.test_train_models_uses_training_dataset_cache_for_multiple_recipes
@@ -187,15 +187,39 @@ def test_train_models_multi_recipe_reads_dataset_exactly_once(tmp_path, monkeypa
     )
 
     orig_read_frame = DataBackend.read_frame
+    orig_compact_reader = DataBackend.read_compact_numeric_frame
     read_calls: list[Path] = []
+    compact_calls: list[Path] = []
 
     def counting_read_frame(self, call_path, *, columns=None, nrows=None):
         read_calls.append(Path(call_path))
         return orig_read_frame(self, call_path, columns=columns, nrows=nrows)
 
+    def counting_compact_reader(
+        self,
+        call_path,
+        *,
+        numeric_columns,
+        other_columns=(),
+        batch_size=16,
+    ):
+        compact_calls.append(Path(call_path))
+        return orig_compact_reader(
+            self,
+            call_path,
+            numeric_columns=numeric_columns,
+            other_columns=other_columns,
+            batch_size=batch_size,
+        )
+
     # Only count reads that happen during the train_models call itself --
     # dataset registration above already did its own (unrelated) profiling reads.
     monkeypatch.setattr(DataBackend, "read_frame", counting_read_frame)
+    monkeypatch.setattr(
+        DataBackend,
+        "read_compact_numeric_frame",
+        counting_compact_reader,
+    )
 
     recipes = ["lr", "scorecard"]
     started = time.monotonic()
@@ -214,12 +238,16 @@ def test_train_models_multi_recipe_reads_dataset_exactly_once(tmp_path, monkeypa
     )
     elapsed = time.monotonic() - started
 
-    # Deterministic counting-guard proxy: however many recipes ran, the
-    # underlying dataset parquet is read exactly ONCE through DataBackend.
+    # Deterministic counting guard: however many recipes ran, the modeling
+    # projection is built once through the bounded compact reader. The parquet
+    # implementation deliberately bypasses the legacy full-frame reader.
     dataset_reads = [call for call in read_calls if call == path]
-    assert len(dataset_reads) == 1, (
-        f"expected exactly 1 DataBackend.read_frame call for the shared modeling "
-        f"dataset across {len(recipes)} recipes, got {len(dataset_reads)} -- PERF-10 regression"
+    dataset_compact_reads = [call for call in compact_calls if call == path]
+    assert dataset_reads == []
+    assert len(dataset_compact_reads) == 1, (
+        "expected exactly 1 DataBackend.read_compact_numeric_frame call for the "
+        f"shared modeling dataset across {len(recipes)} recipes, got "
+        f"{len(dataset_compact_reads)} -- PERF-10 regression"
     )
 
     assert len(out["experiment_ids"]) == len(recipes)
