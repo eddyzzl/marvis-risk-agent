@@ -1,11 +1,19 @@
 <p align="center">
-  <img src="marvis/static/brand/marvis-workspace-logo.png" alt="MARVIS-Agent V2 logo" width="156" />
+  <img src="marvis/static/brand/marvis-workspace-logo.png" alt="MARVIS-Agent logo" width="150" />
 </p>
 
-<h1 align="center">MARVIS-Agent V2</h1>
+<h1 align="center">MARVIS-Agent</h1>
 
 <p align="center">
-  A local-first credit-risk Agent workbench for validation, data processing, feature analysis, modeling, strategy, and vintage workflows.
+  <strong>Tell MARVIS what risk decision you need.</strong><br />
+  It turns local data into governed analysis, models, strategies, and audit-ready deliverables.
+</p>
+
+<p align="center">
+  <a href="https://github.com/eddyzzl/marvis-risk-agent/actions/workflows/ci.yml"><img src="https://github.com/eddyzzl/marvis-risk-agent/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status" /></a>
+  <a href="https://github.com/eddyzzl/marvis-risk-agent/tags"><img src="https://img.shields.io/github/v/tag/eddyzzl/marvis-risk-agent?sort=semver&label=release" alt="Latest release" /></a>
+  <img src="https://img.shields.io/badge/Python-3.11%E2%80%933.13-3776AB?logo=python&logoColor=white" alt="Python 3.11–3.13" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-303034" alt="MIT License" /></a>
 </p>
 
 <p align="center">
@@ -14,92 +22,184 @@
   <a href="README.zh-CN.md">中文</a>
 </p>
 
+<p align="center">
+  <img src="docs/readme-assets/screenshots/marvis-overview.png" alt="MARVIS-Agent wide desktop workbench with data, feature, risk, modeling, validation, and strategy workflows" width="100%" />
+</p>
+
+<p align="center"><em>One workbench for local risk analysis and development—from data to strategy and reports.</em></p>
+
 ---
 
-MARVIS-Agent V2 is the current mainline for a usable credit-risk Agent workbench. It keeps governed work close to local files, local runtimes, and auditable evidence while expanding beyond the stable V1.1 model-validation workflow.
+## From a request to a reviewable result
 
-V2 is not just a runtime shell: every task entry shown on the welcome screen is a real end-to-end workflow with human-in-the-loop confirmation, tool execution, structured results, downloads or reports, and audit history. As of V2.0 this covers data join, feature analysis, model development and delivery, scoring and monitoring, strategy development (cutoff bands, rule mining, adoption with versioning), portfolio analysis, limit/pricing, and ad-hoc slice analytics — see `docs/plans/v2-master-backlog.md` and `docs/reviews/` for the full evidence trail.
+MARVIS is a local-first, governed credit-risk Agent platform—not a chatbot
+wrapped around a collection of scripts.
 
-Current status in this checkout:
+Describe the business outcome in natural language. MARVIS asks for missing
+files and definitions, builds a reviewable plan, pauses at responsibility
+gates, runs deterministic tools, and returns real datasets, evidence, models,
+strategy code, and reports.
 
-- **Model validation** keeps the stable V1.1 manual and Agent-assisted validation path.
-- **Data processing, feature analysis, and model development** are the active V2 build path, using the Plugin/Tool/Workflow runtime and task-level Agent flow.
-- **Strategy, monitoring, portfolio analysis, and vintage workflows** are wired end to end (S1-S6 batches), each behind confirmation gates with red-flag checklists.
-
-## What You Get
-
-- **Local-first execution**: serve the platform from your own machine or server workspace.
-- **Task-level Agent workbench**: drive credit-risk tasks through conversation, confirmation gates, and a persistent right-rail execution context.
-- **Plugin/Tool/Workflow runtime**: install or ship governed capability packs with schemas, permissions, execution logs, and auditable outputs.
-- **Notebook validation runtime**: keep V1.1 validation notebooks and downstream metrics reproducible while V2 workflows grow around them.
-- **Configurable branding**: keep private customer or institution branding outside source code.
-- **OSS-friendly defaults**: remove local branding config and the app falls back to the public MARVIS brand.
-
-## Core Docs
-
-- [Roadmap](docs/roadmap.md): complete V2 platform scope, V1 compatibility boundary, implementation tracks, and Plugin/Tool/Hook/Workflow terminology.
-- [Versioning](docs/versioning.md): release helper, tags, version bumps, and forward-port rules.
-- [Notebook contract](docs/notebook_contract.md): the current model-validation notebook runtime contract.
-- [Design](DESIGN.md): product experience and UI/UX decision source of truth.
-
-## Public Default Brand
-
-- Platform name: `MARVIS-全能风控智能体`
-- Primary color: neutral charcoal (`#303034`)
-- Default main logo: `marvis/static/brand/marvis-workspace-logo.png`
-- Default favicon: `marvis/static/brand/marvis-favicon.png`
-
-## Branding
-
-Private or customer-specific branding is intentionally not committed. To apply a local brand, create an ignored workspace config:
-
-```text
-workspace/branding/brand.json
+```mermaid
+flowchart LR
+    A["Describe the risk goal"] --> B["Agent clarifies inputs and definitions"]
+    B --> C["Validated workflow plan"]
+    C --> D{"Human confirmation<br/>where required"}
+    D --> E["Deterministic tools execute"]
+    E --> F["Evidence, artifacts, and reports"]
+    F --> G["Review, adopt, and iterate"]
 ```
 
-Example:
+### What the current V2 delivers
 
-```json
-{
-  "platform_name": "本地信贷风控智能体",
-  "browser_title": "本地信贷风控工作台",
-  "primary_color": "#1f6feb",
-  "logo": "private-logo.svg",
-  "favicon": "private-logo.svg"
-}
-```
+- **A complete seven-step strategy-development workflow**: current and
+  historical evidence, governed dual-population samples, univariate and model
+  evidence, trees, Cross, scorecards, Voting, Strategy Pools, impact
+  measurement, validation, code delivery, and four-format review reports.
+- **A governed data-to-model workflow**: ingest and join files, analyze and
+  engineer features, train and compare multiple recipes, export PMML, score
+  data, generate model reports, and hand the selected model and supporting
+  evidence directly into model validation. PMML export is available for
+  supported recipes.
+- **Conversational risk analysis**: MARVIS first asks what to analyze and which
+  fields, units, dates, scenarios, and assumptions apply. It then runs the
+  selected VTG-terminal/annualized-bad-rate or profitability calculation and
+  delivers an audited Excel report. Standard Vintage and roll-rate are separate
+  governed workflows with structured evidence and artifacts.
 
-Put referenced logo files next to `brand.json`. When `workspace/branding/` is absent, the app falls back to the public MARVIS brand.
+## Why risk teams use MARVIS
 
-See `docs/branding.md` for details.
+<table>
+  <tr>
+    <td width="25%"><strong>Work in business language</strong><br />Start with the decision you need, not a hand-built chain of scripts and notebooks.</td>
+    <td width="25%"><strong>Trust the numbers</strong><br />KS, AUC, PSI, bad rate, approval rate, profit, and impact are calculated by deterministic platform code—not guessed by an LLM.</td>
+    <td width="25%"><strong>Keep data close</strong><br />Files, task state, evidence, and outputs stay in a controlled local workspace by default.</td>
+    <td width="25%"><strong>Retain human responsibility</strong><br />High-impact actions pause for confirmation, and key governed results carry lineage and audit evidence.</td>
+  </tr>
+</table>
 
-## Local Deployment Requirements
+Agent mode and the Manual Workbench share the same validated workflows, tools,
+schemas, and deterministic calculation kernels.
 
-- Windows users can use the one-click installer once a Windows release artifact
-  is attached. It bundles a private Python runtime and Java runtime.
-- Source installs need Python 3.11 or newer. Python 3.12 is recommended for a
-  new local install.
-- macOS or Linux for the currently verified source-install workflow.
-- Source installs need a Java runtime compatible with `pypmml` if you need PMML
-  scoring.
-- Node.js is only needed for frontend syntax checks; the app itself serves static HTML/CSS/JS through FastAPI.
+| A fragmented workflow | With MARVIS |
+|---|---|
+| Requirements, scripts, notebooks, screenshots, and reports live in different places. | The request, plan, execution evidence, decisions, and deliverables stay in one task. |
+| Analysts manually reconnect data, feature, model, strategy, and report steps. | Governed workflows carry task ownership, data fingerprints, parameters, and artifacts forward. |
+| AI can explain an answer, but it is hard to prove where the number came from. | Agent explanations point back to deterministic evidence and auditable memory references. |
+| A result is copied into a document and loses its lineage. | Reports and code are generated from structured, versioned platform results. |
 
-## Windows One-Click Installer
+## One workbench for end-to-end local risk analysis and development
 
-For personal Windows machines, use the release asset named:
+| Module | What MARVIS can do | Typical deliverables |
+|---|---|---|
+| **Data processing** | Register CSV/Excel files, infer schemas, profile data, align columns, propose and confirm joins, diagnose match rate, fan-out and row inflation, deduplicate explicitly, run governed transformations, and export safely. | Derived datasets, join evidence, profiling summaries, CSV/XLSX exports |
+| **Labels, samples, and features** | Define bad labels from DPD plus observation and performance windows, check cohort maturity, design development/validation/OOT samples, calculate IV/KS/AUC/PSI/Lift/Coverage, bin numeric and categorical features, analyze correlation and collinearity, encode, impute, cap, and derive features. | Feature evidence, governed sample definitions, selected feature sets, Excel reports |
+| **Model development** | Build binary, regression, and multiclass recipes; check modeling readiness; run governed reject inference with explicit assumptions and sample weights; prepare leakage-aware splits; resolve special values; select features; tune and train multiple recipes; compare experiments; select and calibrate a model; assess segment value; score datasets; and create monitoring handoffs. | Experiments, score evidence, model reports, scored data, PMML for supported recipes, model cards and handoff packages |
+| **Model validation** | Scan Notebook, sample, PMML, and dictionary materials; execute the Notebook; compare in-memory model scores with submitted PMML scores; calculate performance, stability, score consistency, binning, and stress evidence; keep both manual and Agent-assisted paths available. | Structured validation evidence, Excel and Word reports |
+| **Strategy development** | Design approval and risk populations; analyze variables and models; build and refine approval, reject, limit, pricing, and segmentation rules; use automatic and interactive trees, 2D Cross Matrix, 2D/3D cross-threshold search, scorecard cutoffs, and Voting/n-of-k combinations; compile Strategy Pools; measure impact and stability; validate on independent partitions; and adopt local versions through human gates. | Canonical strategies, backtests, ImpactCube evidence, Python/DuckDB SQL/JSON code, JSON/Markdown/XLSX/DOCX reports |
+| **Vintage and risk analysis** | After confirming fields, units, cut-off dates, scenarios, and assumptions, run the selected VTG-terminal/annualized-bad-rate or profitability calculation. Run Standard Vintage and roll-rate as separate governed analyses with bounded cohort/segment evidence. | Audited risk-analysis Excel reports; structured Vintage and roll-rate evidence, charts, assumptions, conclusions, and red flags |
+| **Monitoring and portfolio analytics** | Monitor score and feature stability, strategy thresholds and disposition, turn red monitoring evidence into a governed new-version task, and use implemented portfolio tools for flow rate, bucket migration, segments, concentration, Expected Loss, stability trends, and limit/pricing trade-offs. | Monitoring evidence, portfolio reports, migration tables, pricing matrices |
+| **Agent, governance, and memory** | Clarify intent, instantiate validated workflows, enforce task ownership and confirmation gates, preserve hashes and provenance, and reuse bounded memories about preferences, field definitions, prior performance, and known pitfalls—with source and audit metadata. | Reviewable plans, evidence envelopes, audit history, traceable memory references |
 
-```text
-MARVIS-Setup-<version>-win-x64.exe
-```
+The six primary desktop entries are Data Processing, Feature Analysis, Risk
+Analysis, Model Development, Model Validation, and Strategy Development.
+Monitoring is integrated into model and strategy workflows. Portfolio tools,
+templates, and report rendering are implemented and tested, but portfolio is
+not currently exposed as a first-screen or supported conversational Agent task.
 
-The installer does not require Python, Java, Git, conda, WSL, or Docker on the
-user's machine. It installs per user, starts the local MARVIS service, and opens
-the browser at `http://127.0.0.1:8000/`. Windows installer build assets live in
-`packaging/windows/`.
+## Strategy development, end to end
 
-## Install From GitHub
+Strategy work is where MARVIS goes furthest beyond “AI assistance.” The current
+V2 workflow follows the real seven-step development process:
 
-Clone the repository, then install from the checkout. Create an environment with any name you prefer. For example, with `venv`:
+1. **Understand the current project** — approval rate, risk level, profitability,
+   population, metric definitions, and known constraints.
+2. **Review historical versions** — compare prior strategy evidence, outcomes,
+   assumptions, and reusable lessons.
+3. **Design the sample** — create governed approval and risk populations,
+   development/validation/OOT partitions, maturity rules, labels, weights, and
+   immutable membership evidence.
+4. **Evaluate variables and models** — produce deterministic univariate,
+   score-band, model, lift, stability, and risk evidence.
+5. **Develop combinations** — build and refine single rules, automatic and
+   interactive trees, 2D Cross Matrix, 2D/3D cross-threshold searches,
+   scorecards, and Voting/n-of-k candidates for approval, reject, limit,
+   pricing, and segmentation in a common Strategy Pool.
+6. **Measure impact** — replay the strategy by month, segment, amount, and
+   partition; compare approval rate, bad rate, swap, and risk; measure
+   profitability where the required economics are available; and run stability
+   and independent validation checks.
+7. **Deliver the review package** — materialize a canonical strategy, verify
+   equivalent Python/DuckDB SQL/JSON execution, and generate
+   JSON/Markdown/XLSX/DOCX reports aligned to a seven-section strategy review.
+
+If optional report information is unavailable, MARVIS asks for it. When the
+user explicitly says it is not currently available, the report keeps that
+field blank instead of inventing content.
+
+## Example requests
+
+You can start with requests like:
+
+> Join the application table with the bureau features. Check key precision,
+> duplicate keys, match rate, and row inflation before asking me to approve the
+> join.
+
+> Compare logistic regression, LightGBM, and a scorecard. Keep an OOT sample,
+> explain leakage risks, and do not select the champion until I confirm.
+
+> Build a new-customer approval strategy with bad rate no higher than 5% and
+> approval rate at least 60%. Ask me for anything needed before you design the
+> sample.
+
+> Calculate VTG terminal and annualized bad rate. First list the tables,
+> columns, units, cut-off date, scenario, and assumptions you need from me.
+
+## Outputs, not just chat
+
+Depending on the workflow, MARVIS produces:
+
+- immutable derived datasets and safe CSV/XLSX exports;
+- feature evidence and downloadable feature-analysis workbooks;
+- experiment comparisons, scored data, PMML, model cards, monitoring policies,
+  and model-development reports;
+- validation evidence and Excel/Word validation reports;
+- canonical strategy assets, versioned backtests, ImpactCube and stability
+  evidence, equivalent Python/DuckDB SQL/JSON implementations, and four-format
+  review bundles;
+- audited VTG/annualized-bad-rate or profitability Excel reports, plus
+  structured Vintage, roll-rate, monitoring, and portfolio artifacts;
+- provenance, hashes, confirmation records, tool-run logs, and auditable memory
+  references.
+
+## Responsible automation
+
+MARVIS automates work without pretending that responsibility disappeared:
+
+- The Agent understands, clarifies, plans, summarizes, and explains.
+- Platform tools own deterministic metrics, rules, sample membership,
+  backtests, impact calculations, and report numbers.
+- Strategy adoption, high-risk monitoring actions, and production changes
+  require explicit human authority. **Local adoption is not production
+  deployment.**
+- Memory can suggest context or warn about a prior pitfall, but it cannot change
+  KS, AUC, PSI, bad rate, score consistency, or any other deterministic result.
+- Raw customer rows, full model files, PMML contents, credentials, private
+  reports, and database connections are excluded from Agent memory.
+- Code paths and CI are verified, but real-project acceptance still requires
+  representative business materials, agreed metric definitions, independent
+  reconciliation, and responsible-party sign-off.
+- Current V2 is a local-first workbench. Full multi-user RBAC, production
+  promotion/rollback, real-time decision-engine integration, and cross-device
+  synchronization must not be inferred from the local workflow.
+
+See the [product roadmap](docs/roadmap.md) for the precise current scope and V2
+delivery boundary.
+
+## Quick start
+
+Source installation supports Python 3.11–3.13; Python 3.12 is recommended for a
+new environment.
 
 ```bash
 git clone https://github.com/eddyzzl/marvis-risk-agent.git
@@ -107,170 +207,60 @@ cd marvis-risk-agent
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
-python -m pip install -e ".[dev]"
-```
-
-Or with conda:
-
-```bash
-git clone https://github.com/eddyzzl/marvis-risk-agent.git
-cd marvis-risk-agent
-conda create -n marvis python=3.12
-conda activate marvis
-python -m pip install -U pip
-python -m pip install -e ".[dev]"
-```
-
-## Local Run
-
-After installation, start MARVIS with:
-
-```bash
+python -m pip install -e .
 marvis
 ```
 
-By default, this is equivalent to:
+Open `http://127.0.0.1:8000/`.
 
-```bash
-marvis serve --host 127.0.0.1 --port 8000 --workspace ./workspace
-```
+On Windows, activate the environment with `.venv\Scripts\activate` instead.
+When a release includes `MARVIS-Setup-<version>-win-x64.exe`, that asset provides
+the one-click local installer without requiring a separate Python, Java, Git,
+conda, WSL, or Docker installation.
 
-Then open `http://127.0.0.1:8000/`.
+PMML scoring requires a Java runtime compatible with `pypmml`. For material
+directory permissions, Windows drives, WSL paths, conda setup, upgrades, and
+deployment details, use the [runbook](docs/runbook.md).
 
-The Python module name `marvis` is retained in V1 for compatibility with the current validation runtime. The older entrypoints still work:
-
-```bash
-python -m marvis serve --host 127.0.0.1 --port 8000 --workspace ./workspace
-marvis-risk-agent serve --host 127.0.0.1 --port 8000 --workspace ./workspace
-```
-
-## Material Directories
-
-When creating a task, the material directory must be under the current `workspace` or the current user's home directory by default. On Windows, allow another drive or local folder before startup:
-
-```powershell
-$env:RMC_MATERIAL_ROOTS="D:\model_materials"
-marvis serve --host 127.0.0.1 --port 8000 --workspace .\workspace
-```
-
-When running under WSL2, enter the WSL path such as `/mnt/c/Users/<you>/Downloads/project`, not a `C:\...` Windows path.
-
-## Multiple Worktrees / Versions
-
-When running multiple worktrees at the same time, use different ports and different workspaces. Profiles choose safe defaults:
-
-```bash
-# Stable main demo
-marvis serve --profile main
-# http://127.0.0.1:8000, workspace ./workspace-main
-
-# V2 development worktree
-marvis serve --profile v2
-# http://127.0.0.1:8200, workspace ./workspace-v2
-```
-
-Explicit options override profile defaults:
-
-```bash
-marvis serve --profile v2 --port 8217 --workspace ./custom-workspace
-```
-
-## Update
-
-If MARVIS was installed from a GitHub clone and the checkout is on a clean `main` branch, run:
+To update a clean GitHub checkout:
 
 ```bash
 marvis update
 ```
 
-The command runs `git fetch origin`, `git pull --ff-only origin main`, then refreshes the editable MARVIS install without re-resolving the whole Python environment:
+## Product and operator documentation
+
+- [Roadmap](docs/roadmap.md) — product scope, current V2 boundary, and workflow terminology
+- [Runbook](docs/runbook.md) — installation, startup, updates, material paths, and operations
+- [Notebook contract](docs/notebook_contract.md) — model-validation Notebook runtime contract
+- [Notebook submission requirements](docs/对notebook的要求.md) — requirements for model developers
+- [Design](DESIGN.md) — product experience and interface decisions
+- [Branding](docs/branding.md) — local customer branding without source-code changes
+- [Versioning](docs/versioning.md) — release helper, versions, and tag rules
+- [Review evidence](docs/reviews/) — implementation and code-review evidence
+
+<details>
+<summary><strong>Contributor checks and release commands</strong></summary>
 
 ```bash
-python -m pip install -e . --no-deps
-```
-
-If `marvis update` is run from Anaconda/conda `base`, MARVIS creates or reuses a dedicated `marvis` environment and installs there instead of modifying `base`. After the update, start the app with the same single command:
-
-```bash
-marvis
-```
-
-The `base` launcher automatically delegates runtime commands into the dedicated environment. This default is intentional for Anaconda and Windows machines where unrelated packages in the same environment may have strict pins. Use `--env-name <name>` to choose another dedicated conda environment. If a future release adds new runtime dependencies, run `marvis update --with-deps` from a dedicated MARVIS environment, not from Anaconda `base`.
-
-If tracked local files have uncommitted changes, `marvis update` refuses to continue. Commit, stash, or back up those tracked changes before updating. Untracked local files are allowed unless Git itself detects that a pull would overwrite them.
-
-If your current older install does not have `marvis update` yet, run one manual upgrade from the repository directory:
-
-```bash
-git pull --ff-only origin main
-python -m pip install -e . --no-deps
-```
-
-From Anaconda `base`, install only the lightweight MARVIS launcher first, then let `marvis update` prepare the dedicated environment:
-
-```bash
-git pull --ff-only origin main
-python -m pip install -e . --no-deps
-marvis update
-marvis
-```
-
-After that, future upgrades can use `marvis update`.
-
-If you are deliberately running a V2 branch or worktree, pass the branch explicitly:
-
-```bash
-marvis update --branch <v2-branch>
-```
-
-## Tests
-
-```bash
-python -m pytest -q
-ruff check marvis tests --extend-exclude '*.ipynb'
-node --check marvis/static/app.js
-```
-
-Tests are tiered with pytest markers (`slow`, `e2e`, `llm`, `pmml_runtime`). For fast local
-iteration, run only the fast tier (excludes real-training/real-subprocess
-tests, browser e2e smoke tests, LLM evals, and the real PMML/JVM runtime):
-
-```bash
-python -m pytest -m "not slow and not e2e and not llm and not pmml_runtime" -q
-# or
+# Fast local feedback
 scripts/check --fast
-```
 
-For a small local change, `scripts/check --affected` follows local Python
-imports and runs the fast tests in only the mapped test files. It uses
-`CHECK_DIFF_RANGE` when provided and conservatively falls back to the whole
-fast tier when a runtime change cannot be mapped safely. Untracked local trees
-outside the MARVIS runtime/test surfaces (for example `website/` or build
-output) do not force that fallback. The dynamically loaded Strategy pack has a
-maintained strategy/API/workflow/Plugin-contract test group; uncurated packs
-still use the conservative fallback.
+# Small, mapped changes
+scripts/check --affected
 
-At phase close, `scripts/check --affected-full` runs every tier in the mapped
-test files. For an uncertain mapping it removes the tier filter; explicit
-pytest selectors supplied after `--` still apply. Pull-request and push CI run
-the fast tier and the `pmml_runtime` tier as separate parallel jobs; manual CI
-dispatch and the release gate run the full, untiered suite.
+# Full release gate
+scripts/check
 
-Use `scripts/check --profile` with any full, fast, affected, or affected-full
-mode to print the 50 slowest pytest durations of at least 0.5 seconds. The full,
-unfiltered check still runs `pmml_runtime`; the separate CI PMML/JVM job keeps
-runtime coverage without delaying fast-test results.
-
-## Release Push
-
-Use the release helper instead of raw `git push` when publishing a new public version. Run it **after** the feature, fix, or documentation changes have been verified and committed. The helper requires a clean worktree and creates a separate version bump commit plus an annotated tag.
-
-```bash
+# Publish a verified patch release
 python scripts/release_push.py --bump patch
 ```
 
-The helper updates release metadata, creates a release commit, creates an annotated `Vx.y.z` tag, and pushes `main` plus the tag. See `docs/versioning.md` for the full release sequence and versioning rules.
+Pull requests use parallel fast-test shards plus quality, security, strategy,
+and PMML gates. A manual CI dispatch runs the full, unfiltered release check.
+
+</details>
 
 ## License
 
-This project is released under the MIT License. See `LICENSE` for details.
+MARVIS-Agent is released under the [MIT License](LICENSE).
