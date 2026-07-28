@@ -195,7 +195,7 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "数据处理" in welcome_markup
     assert "数据拼接" not in welcome_markup
     assert "风险分析" in welcome_markup
-    assert "资产Vintage&滚动率分析、FPD、入催回收率分析" in welcome_markup
+    assert "Vintage、滚动率、VTG 年化不良与收益测算" in welcome_markup
     assert "Vintage、FPD、营利性测算" not in welcome_markup
     assert "Vintage分析" not in welcome_markup
     assert "Vintage 分析" not in welcome_markup

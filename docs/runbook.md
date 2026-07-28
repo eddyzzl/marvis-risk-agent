@@ -5,7 +5,7 @@ MARVIS-Agent 的产品边界是面向数据处理、特征分析、建模、验�
 ## 本地部署要求
 
 - Windows 个人电脑优先使用一键安装包；安装包内置私有 Python runtime 和 Java runtime。
-- 源码安装需要 Python 3.11 或更高版本，推荐新环境使用 Python 3.12。
+- 源码安装支持 Python 3.11–3.13，推荐新环境使用 Python 3.12。
 - 当前验证过的源码安装运行环境为 macOS / Linux。
 - 源码安装如需执行 PMML 打分，请安装与 `pypmml` 兼容的 Java Runtime。
 - Node.js 只用于前端静态语法检查；运行 Web 服务不依赖前端构建。

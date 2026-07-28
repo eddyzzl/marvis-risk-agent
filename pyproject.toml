@@ -9,7 +9,7 @@ description = "MARVIS-Agent: all-purpose credit-risk agent for model development
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
   "fastapi>=0.115,<1",
   "filelock>=3.13,<4",
