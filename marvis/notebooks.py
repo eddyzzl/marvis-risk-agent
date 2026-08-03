@@ -1048,7 +1048,7 @@ def _run_notebook_in_subprocess(
     }
     started = datetime.now(timezone.utc).isoformat()
     process = subprocess.Popen(
-        [sys.executable, "-m", "marvis.notebook_worker"],
+        _notebook_worker_command(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1200,6 +1200,38 @@ def _run_notebook_in_subprocess(
         cancelled=bool(result_payload.get("cancelled")),
         resource_usage=resource_usage,
     )
+
+
+def _notebook_worker_command() -> list[str]:
+    """Bootstrap the current MARVIS package without changing notebook cwd.
+
+    A ToolRunner child intentionally receives no ambient PYTHONPATH. The
+    nested notebook worker still has to import the exact package that spawned
+    it while its process cwd remains the submitted-materials directory. Load
+    only that trusted package directory through argv (not host site-packages or
+    the environment), so third-party dependencies, the kernel's filtered
+    environment, and the relative-file contract stay unchanged.
+    """
+
+    package_dir = Path(__file__).resolve().parent.as_posix()
+    bootstrap = "\n".join(
+        [
+            "import importlib.util, runpy, sys",
+            f"_marvis_package_dir = {package_dir!r}",
+            "_marvis_spec = importlib.util.spec_from_file_location(",
+            "    'marvis',",
+            "    _marvis_package_dir + '/__init__.py',",
+            "    submodule_search_locations=[_marvis_package_dir],",
+            ")",
+            "if _marvis_spec is None or _marvis_spec.loader is None:",
+            "    raise ImportError('cannot bootstrap current marvis package')",
+            "_marvis_package = importlib.util.module_from_spec(_marvis_spec)",
+            "sys.modules['marvis'] = _marvis_package",
+            "_marvis_spec.loader.exec_module(_marvis_package)",
+            "runpy.run_module('marvis.notebook_worker', run_name='__main__')",
+        ]
+    )
+    return [sys.executable, "-c", bootstrap]
 
 
 def _communicate_notebook_worker(

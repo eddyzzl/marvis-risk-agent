@@ -1,13 +1,16 @@
 ---
 status: clean
-reviewed_at: 2026-08-03T05:34:11Z
+reviewed_at: 2026-08-03T13:37:50Z
 base_sha: 9845e907c702f65edc77a9d0121f0967f52488c2
 staged_file_count: 130
 staged_diff_sha256: 2a10220fe8502b79a1f005ef93ac06651c4b35aaca5ae523a5437518dce2edcf
 followup_base_sha: 58ce9ec6de52f7df835daec7fe72cdbbf42eceb6
 followup_staged_file_count: 7
 followup_staged_diff_sha256: 3ef1ede5259eab91739c23eafcd717d27342869b40b64a3fd931c957b3a53d2e
-review_depth: standard_domain_split_plus_ci_failure_root_cause_and_two_axis_re_review
+second_followup_base_sha: 4d7e05f31f74d695558588c064eba5436269d945
+second_followup_staged_file_count: 2
+second_followup_staged_diff_sha256: 55bbceb14e8730cb9d2b67f6f9facc1ad0d2947485efe1600d0b3547cf0d7733
+review_depth: standard_domain_split_plus_two_ci_failure_root_causes_and_two_axis_re_reviews
 findings:
   blocker: 0
   warning: 0
@@ -34,6 +37,12 @@ base、文件数与 diff 哈希，未发现 blocker 或 warning。
 竞态。修复增量相对提交 `58ce9ec6` 包含 7 个文件，staged diff SHA-256 为
 `3ef1ede5259eab91739c23eafcd717d27342869b40b64a3fd931c957b3a53d2e`；
 Standards 与 Spec 两个独立审查轴均复审为 **CLEAN**，0 blocker、0 warning。
+
+第二次完整 CI 在最终汇总处暴露源码 checkout 的嵌套 Notebook worker
+bootstrap 缺口。修复增量相对提交 `4d7e05f3` 包含 2 个文件，staged diff
+SHA-256 为
+`55bbceb14e8730cb9d2b67f6f9facc1ad0d2947485efe1600d0b3547cf0d7733`；
+Standards 与 Spec 两个独立审查轴同样均为 **CLEAN**，0 blocker、0 warning。
 
 ## 已关闭的审查问题
 
@@ -62,6 +71,13 @@ Standards 与 Spec 两个独立审查轴均复审为 **CLEAN**，0 blocker、0 w
    数据转换和策略自动树都保留占位直至同盘 `Path.replace()` 原子覆盖，并把
    覆盖放进 UOW rollback 边界。原先对子进程无效的 monkeypatch 用例也已拆成
    真实 ToolRunner 并发测试与直接 reservation contract 测试。
+8. **嵌套 Notebook worker 在材料目录找不到当前 MARVIS — 已关闭。**
+   ToolRunner 外层按安全约束剥离 `PYTHONPATH`，内层 worker 又从材料目录运行，
+   旧的 `python -m marvis.notebook_worker` 因而在未安装源码 checkout 中失败。
+   现在通过受信任 argv bootstrap 仅锚定当前 `marvis/` 包，再执行 worker module；
+   不改变材料 cwd、不修改 filtered env、不把宿主 `site-packages` 注入 selected
+   Python。Notebook 相对路径、kernel 依赖解析、进程组、取消/超时与 sentinel
+   协议保持不变。
 
 ## 最终候选验证
 
@@ -78,10 +94,17 @@ Standards 与 Spec 两个独立审查轴均复审为 **CLEAN**，0 blocker、0 w
 - 修复后重复并发压测：数据导出 **30/30**、数据转换 **30/30**、策略自动树
   **10/10**；winner Parquet 可读，dataset/evidence/result 哈希一致
 - 并发修复增量复审：Standards **CLEAN**；Spec **CLEAN**
+- Notebook worker 最小反馈环：修复前 **1 failed in 0.34s**，修复后
+  **1 passed in 1.27s**
+- 完整 CI 的两条原始 V1 compatibility 失败链：**2 passed in 33.40s**
+- Notebook/V1 compatibility/worker import 扩大集合：**61 passed in 62.01s**
+- Notebook bootstrap 增量复审：Standards **CLEAN**；Spec **CLEAN**
 
 完整、无 fast/affected 限制的 `scripts/check` 按发布流程在本报告提交后的
 干净 release clone 上从头执行；本报告不提前声称该后续 gate 已通过。此前
-中止的运行仅证明了 `1 failed, 1750 passed` 时捕获上述竞态，不能作为最终通过。
+两次失败运行分别为 `1 failed, 1750 passed`（暂存竞态）和
+`2 failed, 10457 passed, 3 skipped, 24 warnings`（Notebook worker bootstrap），
+都只能作为缺陷捕获证据，不能作为最终通过。
 
 ## UI / 运行时证据范围
 

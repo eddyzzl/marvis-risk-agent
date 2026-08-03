@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 
@@ -13,6 +14,7 @@ from marvis.notebooks import (
     _build_step_events,
     _finalize_successful_cell_events,
     _notebook_worker_env,
+    _notebook_worker_command,
     _parse_notebook_worker_result,
     _record_cell_complete,
     _record_cell_start,
@@ -103,7 +105,14 @@ def test_run_notebook_executes_relative_to_notebook_directory(tmp_path: Path):
     assert not (tmp_path / output_name).exists()
 
 
-def test_run_notebook_isolated_executes_in_worker_process(tmp_path: Path):
+def test_run_notebook_isolated_executes_in_worker_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # A source checkout must not rely on ambient PYTHONPATH or an editable
+    # install: ToolRunner deliberately strips PYTHONPATH before this nested
+    # notebook worker is launched from the submitted-materials directory.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     notebook_dir = tmp_path / "notebooks"
     notebook_dir.mkdir()
     notebook_path = notebook_dir / "source.ipynb"
@@ -129,6 +138,36 @@ def test_run_notebook_isolated_executes_in_worker_process(tmp_path: Path):
     assert (notebook_dir / output_name).read_text(encoding="utf-8") == "ok"
     assert executed_path.exists()
     assert log_path.read_text(encoding="utf-8") == "succeeded\n"
+
+
+def test_notebook_worker_command_bootstraps_checkout_without_pythonpath(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    command = _notebook_worker_command()
+    package_dir = (Path(__file__).resolve().parents[1] / "marvis").as_posix()
+
+    assert command[:2] == [sys.executable, "-c"]
+    assert repr(package_dir) in command[2]
+    assert "sys.path.insert" not in command[2]
+    assert "run_module('marvis.notebook_worker'" in command[2]
+    assert "PYTHONPATH" not in _notebook_worker_env()
+
+    completed = subprocess.run(
+        command,
+        cwd=tmp_path,
+        env=_notebook_worker_env(),
+        input="",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert NOTEBOOK_RESULT_SENTINEL in completed.stdout
+    assert "ModuleNotFoundError" not in completed.stderr
 
 
 def test_notebook_worker_env_strips_host_secrets(monkeypatch):
