@@ -44,6 +44,7 @@ from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.agent.plan_utils import find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.governance.errors import AuthorizationError
+from marvis.modeling_limits import normalize_n_trials
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
 from marvis.repositories.task_artifacts import TaskArtifactRepository
@@ -73,6 +74,24 @@ _CONFIRM_DIRECT_COMMANDS = {
     "接受并导出",
     "导出矩阵",
 }
+
+_MODELING_RECIPE_DISPLAY_NAMES = {
+    "lgb": "LightGBM",
+    "xgb": "XGBoost",
+    "catboost": "CatBoost",
+    "lr": "逻辑回归",
+    "scorecard": "评分卡",
+    "mlp": "MLP",
+    "lgb_regressor": "LightGBM（回归）",
+    "xgb_regressor": "XGBoost（回归）",
+    "lr_regressor": "逻辑回归（回归）",
+    "mlp_regressor": "MLP（回归）",
+    "lgb_multiclass": "LightGBM（多分类）",
+    "xgb_multiclass": "XGBoost（多分类）",
+    "lr_multiclass": "逻辑回归（多分类）",
+    "mlp_multiclass": "MLP（多分类）",
+    "ensemble": "集成模型",
+}
 # Interrogative guard: any hard question mark/particle disqualifies a reply from
 # being read as confirmation even if it also contains an affirmative token (e.g.
 # “这样可以吗？”, “KS高吗，可以到0.3吗”, “行不行”). A trailing “吧” is handled
@@ -95,6 +114,19 @@ _EXPLICIT_CONFIRM_STATEMENT = re.compile(
 _CONFIRM_STATEMENT_BLOCKER = re.compile(
     r"(?:但|但是|不过|然而|如果|假如|除非|改成|修改|调整|去掉|删除|增加|新增|换成|切换|"
     r"不要|别|暂停|停止|取消|先不|暂不|等一下|稍后|重新)",
+    re.IGNORECASE,
+)
+_EXPLICIT_CONTINUE_COMMAND = re.compile(
+    r"^(?:(?:好的?|可以|没问题|同意|请|麻烦|那就)\s*[，,]?\s*)?"
+    r"(?:"
+    r"开始(?:执行)?(?:这个|当前|上述)?计划"
+    r"|继续(?:执行|往下(?:走)?|下一步)?"
+    r"|(?:按|照)(?:这个|当前|上述)方案(?:继续(?:执行)?|执行|往下(?:走)?|走)"
+    r"|(?:继续)?下一步"
+    r")"
+    r"(?:\s*(?:，|,|并)?\s*(?:先)?(?:到|在)"
+    r"[^。.!！?？]{1,80}(?:停下|停住|等我确认))?"
+    r"[。.!！]?$",
     re.IGNORECASE,
 )
 _STRIP_PUNCT = re.compile(
@@ -142,6 +174,12 @@ def is_confirm(text: str) -> bool:
     if _NEGATED_CONFIRM.search(compact):
         return False
     if direct_confirm:
+        return True
+    # A deterministic, full-string command is an explicit human action too.
+    # This accepts natural continuation language without asking an LLM to
+    # infer consent, while mixed adjustments, questions, and negations have
+    # already been rejected above.
+    if _EXPLICIT_CONTINUE_COMMAND.fullmatch(raw.strip()):
         return True
     # Agent mode accepts a human's explicit confirmation sentence, not only a
     # one-token reply.  Keep this deliberately narrower than semantic intent:
@@ -302,10 +340,11 @@ class PlanDriver:
         free-text instructions, these do not require an LLM router.
         """
         confirmation_source = _normalize_confirmation_source(confirmation_source)
+        confirmed = is_confirm(user_text)
         plan = self._repo.load_plan(plan_id)
         # Plan-level overview gate: nothing has run yet → 「开始」 begins execution.
         if plan.status == PlanStatus.VALIDATED:
-            if is_confirm(user_text):
+            if confirmed:
                 self._repo.confirm_plan(plan_id)  # VALIDATED -> CONFIRMED so the executor runs
                 return self._run_and_handle(plan_id, run_seq=run_seq)
             return self._handle_instruction(plan, None, user_text, run_seq)
@@ -338,7 +377,7 @@ class PlanDriver:
             self._gate_execution.apply_dedup_strategies(plan, gate, dedup_strategies)
             return self._run_and_handle(plan_id, run_seq=run_seq)
         if _has_adoption_reason_adjust(adjust_params) and gate is not None:
-            if not is_confirm(user_text):
+            if not confirmed:
                 raise DriverError("提交采纳理由时必须同时确认采纳。")
             adoption_reason = self._require_adoption_reason(
                 (adjust_params or {}).get("adoption_reason")
@@ -350,8 +389,30 @@ class PlanDriver:
                 input_updates={"adoption_reason": adoption_reason},
             )
             return self._run_and_handle(plan_id, run_seq=run_seq)
+        if (
+            isinstance(adjust_params, dict)
+            and "selected_experiment_id" in adjust_params
+            and gate is not None
+        ):
+            if not confirmed:
+                raise DriverError("提交候选实验时必须同时明确授权采用。")
+            selection_error = self._experiment_selection_adjust_error(
+                plan,
+                gate,
+                adjust_params,
+            )
+            if selection_error:
+                raise DriverError(selection_error)
+            selected_id = str(adjust_params["selected_experiment_id"]).strip()
+            self._confirm_gate(
+                plan,
+                gate,
+                reason=str(user_text or f"人工选择实验 {selected_id}"),
+                input_updates={"selected_experiment_id": selected_id},
+            )
+            return self._run_and_handle(plan_id, run_seq=run_seq)
         if has_feature_binning_adjust(adjust_params) and gate is not None:
-            if not is_confirm(user_text):
+            if not confirmed:
                 raise DriverError("提交分箱设置时必须同时确认。")
             params = {
                 "features": list((adjust_params or {}).get("features") or []),
@@ -374,7 +435,7 @@ class PlanDriver:
             )
             return self._run_and_handle(plan_id, run_seq=run_seq)
         if has_special_value_adjust(adjust_params) and gate is not None:
-            if not is_confirm(user_text):
+            if not confirmed:
                 raise DriverError("提交特殊值治理策略时必须同时确认。")
             raw_decisions = (adjust_params or {}).get("decisions")
             error = adjust_param_error({"decisions": raw_decisions})
@@ -400,7 +461,7 @@ class PlanDriver:
             return self._run_and_handle(plan_id, run_seq=run_seq)
         if adjust_params and gate is not None:
             return self._gate_execution.apply_adjust(plan, gate, adjust_params, run_seq)
-        if is_confirm(user_text):
+        if confirmed:
             monitoring_error = monitoring_plain_confirm_error(
                 plan,
                 gate,
@@ -739,25 +800,20 @@ class PlanDriver:
         requested: dict[str, int] = {}
         for raw_recipe, raw_count in dict(n_trials_by_recipe or {}).items():
             recipe = str(raw_recipe).strip()
-            if (
-                not recipe
-                or isinstance(raw_count, bool)
-                or not isinstance(raw_count, int)
-                or raw_count < 1
-                or raw_count > 200
-            ):
+            try:
+                count = normalize_n_trials(raw_count)
+            except ValueError:
                 raise DriverError("每种算法的调参预算必须是 1 到 200 的整数。")
-            requested[recipe] = raw_count
+            if not recipe:
+                raise DriverError("每种算法的调参预算必须是 1 到 200 的整数。")
+            requested[recipe] = int(count)
         if default_n_trials is not None:
-            if (
-                isinstance(default_n_trials, bool)
-                or not isinstance(default_n_trials, int)
-                or default_n_trials < 1
-                or default_n_trials > 200
-            ):
+            try:
+                default_budget = normalize_n_trials(default_n_trials)
+            except ValueError:
                 raise DriverError("统一调参预算必须是 1 到 200 的整数。")
             for recipe in recipes:
-                requested.setdefault(recipe, default_n_trials)
+                requested.setdefault(recipe, int(default_budget))
         if not requested:
             raise DriverError("必须明确新的调参预算，计划未修改。")
         unknown = [recipe for recipe in requested if recipe not in recipes]
@@ -816,23 +872,60 @@ class PlanDriver:
             gate,
             editable_input_schema=editable_schema,
         )
+        selection_schema = self._experiment_selection_param_schema(plan, gate)
+        if selection_schema is not None:
+            # ``selected_experiment_id`` is a decision input on the pending gate
+            # itself, not an input of an already-computed dependency. Surface
+            # persisted candidates plus the platform recommendation so the LLM
+            # grounds a free-text choice in real execution evidence.
+            param_schema = [
+                item
+                for item in param_schema
+                if item.get("name") != "selected_experiment_id"
+            ]
+            param_schema.append(selection_schema)
         route = route_instruction(
             self._llm, gate_context=context, instruction=user_text, param_schema=param_schema
         )
         action = route["action"]
         if action == "confirm":
-            # This branch is reached only after ``is_confirm`` rejected the
-            # user's text.  An LLM classification is therefore interpretation,
-            # not an explicit human action.  It may neither start a validated
-            # plan nor confirm any step (governed or otherwise).
-            governed_gate = (
-                gate is not None and self._requires_governed_human_decision(gate)
-            )
-            text = (
-                "当前节点必须由你明确回复「确认」；Agent 不能代替你作出强制业务决策或签发副作用授权。"
-                if governed_gate
-                else "请由你明确回复「确认」后继续；Agent 不能根据语义猜测代替你启动计划或确认步骤。"
-            )
+            if route.get("params"):
+                selection_error = self._experiment_selection_adjust_error(
+                    plan,
+                    gate,
+                    route["params"],
+                )
+                if selection_error:
+                    return DriverTurn(
+                        plan.id,
+                        plan.status.value,
+                        [
+                            self._composer.instruction_message(
+                                plan,
+                                gate,
+                                run_seq=run_seq,
+                                text=selection_error,
+                            )
+                        ],
+                    )
+            if (
+                route.get("confidence") == "high"
+                and route.get("explicit_authorization") is True
+            ):
+                text = (
+                    "我理解你希望继续，但语义识别不会直接放行执行。"
+                    "请点击当前确认控件，或明确回复「确认」后继续。"
+                )
+            else:
+                text = (
+                    "我理解到可能的继续意图，但还不能确定这句话是否授权执行。"
+                    + (
+                        f"判断依据：{route.get('reason')}。"
+                        if route.get("reason")
+                        else ""
+                    )
+                    + "请再明确说明你的意图。"
+                )
             return DriverTurn(
                 plan.id,
                 plan.status.value,
@@ -846,6 +939,27 @@ class PlanDriver:
                 ],
             )
         if action == "adjust" and gate is not None and gate.depends_on:
+            if self._gate_execution.is_noop_adjustment(
+                plan,
+                gate,
+                route["params"],
+            ):
+                return DriverTurn(
+                    plan.id,
+                    plan.status.value,
+                    [
+                        self._composer.instruction_message(
+                            plan,
+                            gate,
+                            run_seq=run_seq,
+                            text=(
+                                "我理解到的调整与当前参数一致，本次未执行也未放行。"
+                                "若接受当前设置，请点击当前确认控件或明确回复「确认」；"
+                                "如需调整，请说明不同的参数。"
+                            ),
+                        )
+                    ],
+                )
             return self._gate_execution.apply_adjust(plan, gate, route["params"], run_seq)
         if action == "replan":
             return self._gate_execution.apply_replan(plan, gate, user_text, run_seq)
@@ -861,6 +975,145 @@ class PlanDriver:
                 )
             ],
         )
+
+    def _experiment_selection_param_schema(
+        self,
+        plan: Plan,
+        gate: PlanStep | None,
+    ) -> dict | None:
+        candidates, recommended_id = self._experiment_selection_candidate_context(
+            plan,
+            gate,
+        )
+        candidate_ids = [row["experiment_id"] for row in candidates]
+        if not candidate_ids:
+            return None
+        return {
+            "name": "selected_experiment_id",
+            "type": "string",
+            "current": recommended_id or candidate_ids[0],
+            "enum": candidate_ids,
+            "bounds": {"enum": candidate_ids},
+            "candidates": candidates,
+        }
+
+    def _experiment_selection_candidates(
+        self,
+        plan: Plan,
+        gate: PlanStep | None,
+    ) -> tuple[list[str], str]:
+        candidates, recommended_id = self._experiment_selection_candidate_context(
+            plan,
+            gate,
+        )
+        return [row["experiment_id"] for row in candidates], recommended_id
+
+    def _experiment_selection_candidate_context(
+        self,
+        plan: Plan,
+        gate: PlanStep | None,
+    ) -> tuple[list[dict], str]:
+        if (
+            gate is None
+            or gate.tool_ref is None
+            or gate.tool_ref.tool != "select_experiment"
+        ):
+            return [], ""
+        candidates: dict[str, dict] = {}
+        recommended_id = ""
+
+        def add(value, row: dict | None = None) -> None:
+            candidate = str(value or "").strip()
+            if not candidate:
+                return
+            details = candidates.setdefault(
+                candidate,
+                {
+                    "experiment_id": candidate,
+                    "recipe": "",
+                    "display_name": "",
+                    "recommended": False,
+                },
+            )
+            if not isinstance(row, dict):
+                return
+            recipe = str(
+                row.get("recipe")
+                or row.get("algorithm")
+                or details.get("recipe")
+                or ""
+            ).strip()
+            display_name = str(
+                row.get("display_name")
+                or row.get("name")
+                or details.get("display_name")
+                or ""
+            ).strip()
+            if recipe:
+                details["recipe"] = recipe
+            if display_name:
+                details["display_name"] = display_name
+
+        for dep_id in gate.depends_on or []:
+            output = self._safe_output(dep_id)
+            if not isinstance(output, dict):
+                continue
+            if not recommended_id:
+                recommended_id = str(
+                    output.get("best_experiment_id")
+                    or output.get("recommended_experiment_id")
+                    or ""
+                ).strip()
+            raw_ids = output.get("experiment_ids")
+            if isinstance(raw_ids, list):
+                for item in raw_ids:
+                    add(item)
+            rows = output.get("experiments")
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, dict):
+                        add(row.get("id") or row.get("experiment_id"), row)
+        if recommended_id:
+            add(recommended_id)
+        for details in candidates.values():
+            recipe = str(details.get("recipe") or "").strip()
+            if not details.get("display_name"):
+                details["display_name"] = (
+                    _MODELING_RECIPE_DISPLAY_NAMES.get(recipe)
+                    or recipe
+                    or details["experiment_id"]
+                )
+            details["recommended"] = (
+                details["experiment_id"] == recommended_id
+            )
+        return list(candidates.values()), recommended_id
+
+    def _experiment_selection_adjust_error(
+        self,
+        plan: Plan,
+        gate: PlanStep | None,
+        params,
+    ) -> str | None:
+        if not isinstance(params, dict):
+            return "候选实验选择必须是结构化参数。"
+        if (
+            gate is None
+            or gate.tool_ref is None
+            or gate.tool_ref.tool != "select_experiment"
+        ):
+            return "当前节点不接受带参数的确认，请明确是继续还是调整。"
+        if set(params) != {"selected_experiment_id"}:
+            return "选择实验时只能提交 selected_experiment_id。"
+        selected_id = str(params.get("selected_experiment_id") or "").strip()
+        candidate_ids, _recommended_id = self._experiment_selection_candidates(
+            plan,
+            gate,
+        )
+        if not selected_id:
+            return "请选择一个具体的候选实验。"
+        if selected_id not in candidate_ids:
+            return "所选实验不在当前任务的候选集合中，请从已展示候选中选择。"
+        return None
 
     def _adjust_placeholder(self, plan_id, gate, run_seq) -> DriverTurn:
         # Manual mode (no LLM): non-confirm free text can only show the canned hint.

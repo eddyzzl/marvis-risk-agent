@@ -55,6 +55,138 @@ def test_roll_rate_matrix_sorts_by_parsed_dates_not_lexical_strings():
     )
 
 
+def test_roll_rate_matrix_accepts_finite_numeric_mob_and_sorts_numerically():
+    frame = pd.DataFrame(
+        {
+            "customer_id": ["A", "B", "A", "A", "B", "B"],
+            "mob": [2, 1, 0, 1, 0, 2],
+            "status": ["1", "1", "0", "0", "0", "1"],
+        }
+    )
+
+    result = roll_rate_matrix(
+        frame,
+        id_col="customer_id",
+        time_col="mob",
+        status_col="status",
+        states=["0", "1"],
+    )
+
+    assert result.base_counts == {"0": 3, "1": 1}
+    assert result.matrix == ((1 / 3, 2 / 3), (0.0, 1.0))
+    assert result.data_quality_warnings == ()
+
+
+def test_roll_rate_matrix_treats_integral_numeric_yyyymm_as_adjacent_calendar_months():
+    frame = pd.DataFrame(
+        {
+            "customer_id": ["A", "A"],
+            "period": [202412, 202501],
+            "status": ["C", "M1"],
+        }
+    )
+
+    result = roll_rate_matrix(
+        frame,
+        id_col="customer_id",
+        time_col="period",
+        status_col="status",
+        states=["C", "M1"],
+    )
+
+    assert result.base_counts == {"C": 1, "M1": 0}
+    assert result.matrix == ((0.0, 1.0), (0.0, 0.0))
+    assert result.data_quality_warnings == ()
+
+
+def test_roll_rate_matrix_counts_missing_months_for_integral_numeric_yyyymm():
+    frame = pd.DataFrame(
+        {
+            "customer_id": ["A", "A"],
+            "period": [202412, 202502],
+            "status": ["C", "M1"],
+        }
+    )
+
+    result = roll_rate_matrix(
+        frame,
+        id_col="customer_id",
+        time_col="period",
+        status_col="status",
+        states=["C", "M1"],
+    )
+
+    assert result.data_quality_warnings == (
+        {
+            "code": "missing_month",
+            "id": "A",
+            "gap_months": 1,
+            "message": (
+                "id=A 的相邻观测跳过 1 个月，roll-rate 转移可能"
+                "跨越缺失月份（不改变矩阵计算，仅提示口径风险）。"
+            ),
+        },
+    )
+
+
+@pytest.mark.parametrize("periods", [[0, 202412], [202413, 202501]])
+def test_roll_rate_matrix_rejects_mixed_or_invalid_numeric_yyyymm(periods):
+    frame = pd.DataFrame(
+        {
+            "customer_id": ["A", "A"],
+            "period": periods,
+            "status": ["C", "M1"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="time_col"):
+        roll_rate_matrix(
+            frame,
+            id_col="customer_id",
+            time_col="period",
+            status_col="status",
+            states=["C", "M1"],
+        )
+
+
+def test_roll_rate_matrix_rejects_mixed_numeric_and_date_time_values():
+    frame = pd.DataFrame(
+        {
+            "customer_id": ["A", "A"],
+            "time": [1, "2026-02"],
+            "status": ["0", "1"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="time_col"):
+        roll_rate_matrix(
+            frame,
+            id_col="customer_id",
+            time_col="time",
+            status_col="status",
+            states=["0", "1"],
+        )
+
+
+def test_roll_rate_matrix_rejects_duplicate_numeric_mob_after_normalization():
+    frame = pd.DataFrame(
+        {
+            "customer_id": ["A", "A", "A"],
+            "mob": [0, 1, 1.0],
+            "status": ["0", "0", "1"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="duplicate id/time"):
+        roll_rate_matrix(
+            frame,
+            id_col="customer_id",
+            time_col="mob",
+            status_col="status",
+            states=["0", "1"],
+        )
+
+
 def test_roll_rate_matrix_rejects_unparseable_time_values():
     frame = pd.DataFrame({
         "customer_id": ["A", "A"],

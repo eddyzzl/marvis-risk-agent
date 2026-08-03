@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from marvis.agent.data_setup import reconcile_source_data_tables
@@ -25,10 +26,12 @@ from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
+from marvis.modeling_limits import normalize_n_trials
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.prepare import DEFAULT_OOT_SIZE
 
 _DATA_ROLES = frozenset({FileRole.SAMPLE.value, "sample", "feature"})
+_DEFAULT_N_TRIALS = 1
 
 
 class ModelingSetupError(ValueError):
@@ -49,6 +52,7 @@ class ModelingProposal:
     recipe: str = "lgb"  # primary recipe (the one tuned, if lgb is among recipes)
     recipes: list[str] = field(default_factory=lambda: ["lgb"])  # all recipes to train + compare
     seed: int = DEFAULT_RANDOM_SEED
+    n_trials: int = _DEFAULT_N_TRIALS
     target_type: str = "binary"  # derived: _regressor⇒continuous, *multiclass*⇒multiclass, else binary
     notes: list[str] = field(default_factory=list)
     template_id: str = "modeling"
@@ -78,6 +82,7 @@ class ModelingProposal:
                 "recipe": self.recipe,
                 "recipes": self.recipes,
                 "seed": self.seed,
+                "n_trials": self.n_trials,
                 "holdout_values": self.holdout_values,
                 "target_type": self.target_type,
                 "split_config": dict(self.split_config),
@@ -101,6 +106,7 @@ class ModelingProposal:
             "recipe": self.recipe,
             "recipes": self.recipes,
             "seed": self.seed,
+            "n_trials": self.n_trials,
             "holdout_values": self.holdout_values,
             "target_type": self.target_type,
             # The G1 make_split gate passes the setup-decided split through unchanged
@@ -142,6 +148,14 @@ _SUPPORTED_RECIPES = (
     "lr_multiclass",
     "mlp_multiclass",
 )
+
+
+def supported_modeling_recipes() -> list[str]:
+    """Return the recipe ids accepted by the deterministic setup validator."""
+
+    return list(_SUPPORTED_RECIPES)
+
+
 _BINARY_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "ensemble"})
 _WEIGHT_NAME_HINTS = ("sample_weight", "sampleweight", "weight", "样本权重", "权重")
 # LT-14: a weight column strongly correlated with the target is a leakage red
@@ -162,6 +176,7 @@ _BUSINESS_COLUMN_ALIASES = {
 def build_modeling_proposal(
     registry, backend, task_id: str, source_dir, *, seed: int = DEFAULT_RANDOM_SEED,
     recipe: str | None = None, recipes: list[str] | None = None,
+    n_trials: int | None = None,
     target_type: str | None = None,
     sample_weight_col: str | None = None,
     time_col: str | None = None,
@@ -170,6 +185,7 @@ def build_modeling_proposal(
     target_col: str | None = None,
     field_hints: dict | None = None,
 ) -> ModelingProposal:
+    normalized_n_trials = _normalize_n_trials(n_trials)
     datasets = _resolve_datasets(registry, task_id, source_dir)
     by_id = {dataset.id: dataset for dataset in datasets}
     join_feature_ids = [str(item_id) for item_id in (join_feature_ids or []) if str(item_id)]
@@ -194,12 +210,31 @@ def build_modeling_proposal(
     available_columns = backend.column_names(path)
     business_columns = _infer_business_columns(available_columns)
     requested_target_type = _normalize_target_type(target_type)
+    profiled_target_type = None
+    if target_col:
+        profiled_target_type = _infer_configured_target_type(
+            backend,
+            path,
+            target_col=str(target_col),
+        )
+    inferred_target_type = None
+    if not requested_target_type and not recipes and not recipe and target_col:
+        inferred_target_type = profiled_target_type
+        if inferred_target_type is None:
+            raise ModelingSetupError(
+                f"无法从目标列 `{target_col}` 的完整取值精确判断 binary/continuous/"
+                "multiclass；请显式指定目标类型和同族算法。"
+            )
     if recipes:
         recipe_list = [str(item).strip() for item in recipes]
     elif recipe:
         recipe_list = [str(recipe).strip()]
     else:
-        recipe_list = [_default_recipe_for_target_type(requested_target_type or "binary")]
+        recipe_list = [
+            _default_recipe_for_target_type(
+                requested_target_type or inferred_target_type or "binary"
+            )
+        ]
     for item in recipe_list:
         if item not in _SUPPORTED_RECIPES:
             raise ModelingSetupError(
@@ -210,7 +245,7 @@ def build_modeling_proposal(
         raise ModelingSetupError(
             f"目标类型 `{requested_target_type}` 与算法 `{', '.join(recipe_list)}` 不匹配；请重新选择同一目标类型的算法。"
         )
-    target_type = requested_target_type or derived_target_type
+    target_type = requested_target_type or inferred_target_type or derived_target_type
     setup = detect_setup(
         backend,
         path,
@@ -218,6 +253,38 @@ def build_modeling_proposal(
         target_type=target_type,
         field_hints=field_hints,
     )
+    configured_target = str(target_col or "").strip()
+    if (
+        configured_target
+        and profiled_target_type == target_type
+        and setup.target_col != configured_target
+    ):
+        # ``detect_setup`` deliberately uses a bounded probe for general schema
+        # discovery. When the complete target-only profile has already proved
+        # the configured family, bind that exact user-selected target even if a
+        # rare class was absent from the probe. Keep every other bounded setup
+        # decision (split and candidate discovery) intact.
+        setup.target_col = configured_target
+        setup.candidates = [
+            column for column in setup.candidates if column != configured_target
+        ]
+        setup.excluded_categorical = [
+            item
+            for item in setup.excluded_categorical
+            if item.get("column") != configured_target
+        ]
+        setup.excluded_numeric = [
+            item
+            for item in setup.excluded_numeric
+            if item.get("column") != configured_target
+        ]
+        if target_type != "binary":
+            setup.bad_rate = None
+        setup.notes = [
+            note
+            for note in setup.notes
+            if not note.startswith(("多分类任务请指定", "回归任务请指定"))
+        ]
     if not setup.target_col:
         if target_type == "continuous":
             raise ModelingSetupError("未能识别连续型目标列；请确认数据含数值目标列（如 income/amount）后重试。")
@@ -346,6 +413,7 @@ def build_modeling_proposal(
         recipe=primary_recipe,
         recipes=recipe_list,
         seed=seed,
+        n_trials=normalized_n_trials,
         target_type=target_type,
         notes=notes,
         template_id="modeling_with_join" if joined else "modeling",
@@ -474,6 +542,53 @@ def _normalize_target_type(value: str | None) -> str | None:
     if target_type not in {"binary", "continuous", "multiclass"}:
         raise ModelingSetupError(f"不支持的目标类型 `{target_type}`；可选:binary/continuous/multiclass。")
     return target_type
+
+
+def _normalize_n_trials(value: int | None) -> int:
+    if value is None:
+        return _DEFAULT_N_TRIALS
+    try:
+        normalized = normalize_n_trials(value)
+    except ValueError as exc:
+        raise ModelingSetupError("n_trials 必须是 1-200 之间的整数。") from exc
+    return int(normalized)
+
+
+def _infer_configured_target_type(backend, path: Path, *, target_col: str) -> str | None:
+    """Infer an Agent-mode target family from an explicitly named target column.
+
+    Agent-created modeling tasks intentionally start without a recipe family.
+    Once C1 has bound an exact target column, the data profile is sufficient to
+    choose the matching default family without requiring the user to recreate
+    the task: numeric targets with more than the supported multiclass cardinality
+    are continuous; 3-20 distinct values are multiclass; exact 0/1 remains
+    binary. Ambiguous or unsupported shapes deliberately fall back to the
+    existing binary setup error.
+    """
+
+    target_col = str(target_col or "").strip()
+    if not target_col or target_col not in backend.column_names(path):
+        return None
+    frame = backend.read_frame(path, columns=[target_col])
+    if target_col not in frame.columns:
+        return None
+    target = frame[target_col].dropna()
+    if target.empty:
+        return None
+    if pd.api.types.is_numeric_dtype(target.dtype):
+        numeric = target.to_numpy(dtype=float)
+        if not np.isfinite(numeric).all():
+            return None
+    unique_values = target.unique().tolist()
+    unique_count = len(unique_values)
+    binary_values = set(unique_values)
+    if unique_count == 2 and binary_values.issubset({0, 1, 0.0, 1.0, True, False}):
+        return "binary"
+    if 3 <= unique_count <= 20:
+        return "multiclass"
+    if pd.api.types.is_numeric_dtype(target.dtype) and unique_count > 20:
+        return "continuous"
+    return None
 
 
 def _default_recipe_for_target_type(target_type: str) -> str:

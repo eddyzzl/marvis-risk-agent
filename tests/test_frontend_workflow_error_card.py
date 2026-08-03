@@ -194,6 +194,155 @@ def test_manual_driver_reuses_structured_cards_and_agent_mode_is_wired() -> None
     assert "workflow_presentation" in app_js
 
 
+def test_manual_driver_current_plan_gate_supersedes_recovered_failure_history() -> None:
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          driverManualAnalysisHtml,
+        } from "./marvis/static/js/v2/driver_manual_analysis.js";
+
+        const failure = (id, stepId) => ({
+          id,
+          role: "assistant",
+          content: "OLD_FAILURE_SHOULD_NOT_RENDER",
+          metadata: {
+            kind: "gate",
+            error: true,
+            step_id: stepId,
+            error_diagnostic: {
+              code: "workflow_step_failed",
+              workflow: "driver",
+              title: "步骤执行失败",
+              summary: "历史失败",
+              cause: "旧环境缺少依赖",
+              retryable: true,
+            },
+          },
+        });
+        const featureGate = {
+          id: "feature-binning-gate",
+          role: "assistant",
+          content: "确认可选分箱",
+          metadata: {
+            kind: "gate",
+            step_id: "feature-binning",
+            feature_binning: {},
+          },
+        };
+        const modelingGate = {
+          id: "feature-screen-gate",
+          role: "assistant",
+          content: "确认特征筛选",
+          metadata: {
+            kind: "gate",
+            step_id: "feature-screen",
+            screen: {},
+          },
+        };
+        const statusByStep = {
+          "feature-metrics": "done",
+          "feature-binning": "awaiting_confirm",
+          "data-split": "done",
+          "feature-screen": "awaiting_confirm",
+        };
+        const renderers = {
+          renderAgentMarkdown: (value) => `<p>${value}</p>`,
+          stepStatus: (message) => statusByStep[message?.metadata?.step_id] || "",
+          renderFeatureBinning: (_message, { interactive }) => (
+            `<button data-feature-gate="${interactive}">确认分箱</button>`
+          ),
+          renderModelingSetup: () => "",
+          renderScreenTable: (_message, { interactive }) => (
+            `<button data-model-gate="${interactive}">确认筛选</button>`
+          ),
+        };
+
+        // Persisted failure messages can sort after the newly-opened gate. The
+        // authoritative current plan says the failed step recovered and the next
+        // gate is open, so history must not steal the interactive slot.
+        const featureHtml = driverManualAnalysisHtml([
+          featureGate,
+          failure("feature-old-failure", "feature-metrics"),
+        ], renderers);
+        const modelingHtml = driverManualAnalysisHtml([
+          modelingGate,
+          failure("model-old-failure", "data-split"),
+        ], renderers);
+
+        assert.ok(featureHtml.includes('data-feature-gate="true"'));
+        assert.ok(modelingHtml.includes('data-model-gate="true"'));
+        assert.equal(featureHtml.includes("OLD_FAILURE_SHOULD_NOT_RENDER"), false);
+        assert.equal(modelingHtml.includes("OLD_FAILURE_SHOULD_NOT_RENDER"), false);
+        assert.equal(featureHtml.includes("workflow-error-card"), false);
+        assert.equal(modelingHtml.includes("workflow-error-card"), false);
+        """
+    )
+
+
+def test_manual_driver_keeps_unrecovered_previous_plan_failure_as_read_only_history() -> None:
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          driverManualAnalysisHtml,
+        } from "./marvis/static/js/v2/driver_manual_analysis.js";
+
+        const currentGate = {
+          id: "current-gate",
+          role: "assistant",
+          content: "确认当前计划的特征分箱",
+          metadata: {
+            kind: "gate",
+            plan_id: "plan-B",
+            step_id: "feature-binning",
+            feature_binning: {},
+          },
+        };
+        const historicalFailure = {
+          id: "old-failure",
+          role: "assistant",
+          content: "OLD_FAILURE_RAW",
+          metadata: {
+            error: true,
+            plan_id: "plan-A",
+            step_id: "feature-metrics",
+            error_diagnostic: {
+              code: "workflow_step_failed",
+              workflow: "feature",
+              title: "步骤执行失败",
+              summary: "历史计划仍有未恢复失败",
+              cause: "旧环境缺少依赖",
+              retryable: true,
+            },
+          },
+        };
+        const html = driverManualAnalysisHtml([
+          currentGate,
+          historicalFailure,
+        ], {
+          renderAgentMarkdown: (value) => `<p>${value}</p>`,
+          stepStatus: (message) => (
+            message?.metadata?.plan_id === "plan-A"
+              ? "historical"
+              : "awaiting_confirm"
+          ),
+          renderFeatureBinning: (_message, { interactive }) => (
+            `<button data-feature-gate="${interactive}">确认分箱</button>`
+          ),
+        });
+
+        assert.ok(html.includes('data-feature-gate="true"'));
+        assert.ok(html.includes("历史计划失败（只读）"));
+        assert.ok(html.includes("计划 plan-A · 步骤 feature-metrics"));
+        assert.ok(html.includes("历史计划仍有未恢复失败"));
+        assert.ok(html.includes('class="driver-analysis-history is-error"'));
+        assert.ok(html.includes('class="driver-analysis-section is-error has-workflow-error is-historical"'));
+        assert.equal(html.includes("OLD_FAILURE_RAW"), false);
+        """
+    )
+
+
 def test_workflow_cards_use_border_first_responsive_theme_styles() -> None:
     styles = (ROOT / "marvis/static/styles.css").read_text(encoding="utf-8")
     start = styles.index(".workflow-error-card,")

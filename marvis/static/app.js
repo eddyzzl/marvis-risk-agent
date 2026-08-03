@@ -68,6 +68,8 @@ import {
   driverGateBodyHtml as driverGateBodyHtmlController,
   driverGateHasWidget as driverGateHasWidgetController,
   driverManualAnalysisHtml as driverManualAnalysisHtmlController,
+  filterRecoveredWorkflowFailures,
+  gateMessageForCurrentTool,
   lastAssistantMessageId as lastAssistantMessageIdController,
   latestInteractiveScreenMessageId as latestInteractiveScreenMessageIdController,
   stripChatInstructions as stripChatInstructionsController,
@@ -565,6 +567,12 @@ function currentTaskSignature(task) {
     task.validation_workflow_version || 0,
     task.report_available ? 1 : 0,
     taskStopped(task) ? 1 : 0,
+    // Plan-rail state can change after the task payload has already rendered.
+    // Include the derived label/tone so a failed current plan invalidates a
+    // stale optimistic “已完成/已提交” hero without waiting for task fields to
+    // change independently.
+    taskStatusLabel(task),
+    taskStatusTone(task),
   ]);
 }
 
@@ -2785,10 +2793,27 @@ function selectedTaskIsRiskAnalysisAgent(task = selectedTask) {
   return task?.run_mode === "agent" && task?.task_type === "vintage";
 }
 
+function latestRiskAnalysisIntakePhase(messages = agentMessages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const intake = messages[index]?.metadata?.risk_analysis_intake;
+    if (intake && typeof intake === "object") return String(intake.phase || "");
+  }
+  return "";
+}
+
+function selectedTaskNeedsManualRiskIntake(
+  task = selectedTask,
+  messages = agentMessages,
+) {
+  if (task?.run_mode !== "manual" || task?.task_type !== "vintage") return false;
+  return latestRiskAnalysisIntakePhase(messages) !== "ready";
+}
+
 function syncRiskMaterialUploadControl() {
   const button = $("riskMaterialUploadButton");
   if (!button) return;
-  const visible = selectedTaskIsRiskAnalysisAgent();
+  const visible = selectedTaskIsRiskAnalysisAgent()
+    || selectedTaskNeedsManualRiskIntake();
   button.classList.toggle("hidden", !visible);
   button.disabled = !visible || taskBusyAction(selectedTaskId) === "agent";
 }
@@ -4998,15 +5023,23 @@ function renderAgentConversation() {
   if (!panel) return;
   strategyCandidateLabController.renderAvailability();
   const isAgent = selectedTaskIsAgentMode();
+  const showManualRiskIntake = selectedTaskNeedsManualRiskIntake();
   // Driver tasks (data_join / feature / modeling) show the same conversation +
   // controls in BOTH modes. Manual = the user operates the controls (no free-text
   // composer, no LLM); agent = an LLM operates them + free-text composer.
   const showConversation = isAgent || taskUsesPlanRail(selectedTask);
   panel.classList.toggle("hidden", !showConversation);
   panel.setAttribute("aria-hidden", showConversation ? "false" : "true");
-  composer?.classList.toggle("hidden", !isAgent);
-  composer?.setAttribute("aria-hidden", isAgent ? "false" : "true");
-  workspace?.classList.toggle("agent-composer-active", isAgent);
+  composer?.classList.toggle("hidden", !(isAgent || showManualRiskIntake));
+  composer?.classList.toggle("manual-risk-intake", showManualRiskIntake);
+  composer?.setAttribute("aria-hidden", isAgent || showManualRiskIntake ? "false" : "true");
+  workspace?.classList.toggle("agent-composer-active", isAgent || showManualRiskIntake);
+  const composerInput = $("agentComposerInput");
+  if (composerInput) {
+    composerInput.placeholder = showManualRiskIntake
+      ? "输入分析类型或材料口径"
+      : "输入执行步骤或问题";
+  }
   syncRiskMaterialUploadControl();
   renderAgentAcceptanceModePreference();
   renderAgentModelOptions();
@@ -5043,13 +5076,26 @@ function renderAgentConversation() {
   // DOM when the messages actually changed, so the entry animation does not
   // re-fire each tick and in-progress draft edits are never wiped.
   const visibleStages = agentTimelineVisibleStages();
+  const reportMessages = agentReportMessagesForDisplay(agentMessages);
   const displayedMessages = hideSupersededTuningThinking(
-    agentReportMessagesForDisplay(agentMessages),
+    taskUsesPlanRail(selectedTask)
+      ? filterRecoveredWorkflowFailures(reportMessages, driverManualMessageStepStatus)
+      : reportMessages,
   );
+  const driverPlanSignature = taskUsesPlanRail(selectedTask)
+    ? {
+      currentPlanId: planRailController.planId(selectedTaskId),
+      stepStatuses: agentMessages.map((message) => [
+        String(message?.id || ""),
+        String(driverManualMessageStepStatus(message)),
+      ]),
+    }
+    : null;
   const structuralSignature = agentStructuralSignature(displayedMessages, visibleStages);
   const signature = JSON.stringify({
     messages: agentMessages,
     visibleStages,
+    driverPlanSignature,
   });
   if (signature === lastAgentRenderSignature) return;
   if (
@@ -5417,6 +5463,26 @@ function stripChatInstructions(content) {
   return stripChatInstructionsController(content);
 }
 
+function driverManualMessageStepStatus(message) {
+  const metadata = message?.metadata || {};
+  const currentPlanId = planRailController.planId(selectedTaskId);
+  const messagePlanId = String(
+    metadata.plan_id
+    || metadata.failure_envelope?.plan_id
+    || "",
+  );
+  if (currentPlanId && messagePlanId && messagePlanId !== currentPlanId) {
+    return "historical";
+  }
+  const stepId = metadata.step_id
+    || metadata.failure_envelope?.failed_step_id
+    || "";
+  return planRailController.planStep(
+    { ...metadata, step_id: stepId },
+    selectedTaskId,
+  )?.status || "";
+}
+
 function driverManualAnalysisHtml(messages) {
   return driverManualAnalysisHtmlController(messages, {
     renderAgentMarkdown,
@@ -5438,6 +5504,10 @@ function driverManualAnalysisHtml(messages) {
     // carry a structured widget, so only genuinely plain gates get this button —
     // reusing the same document-level data-driver-confirm handler.
     renderGateConfirm: agentMessageGateButtonHtml,
+    // Retry history remains in agentMessages for auditability. Resolve each
+    // message's step against the current plan so recovered failures cannot steal
+    // the interactive slot from the newly-opened gate.
+    stepStatus: driverManualMessageStepStatus,
   });
 }
 
@@ -5449,12 +5519,24 @@ function renderDriverManualAnalysis(messages) {
   const panel = $("agentConversationPanel");
   const container = $("agentMessages");
   if (!panel || !container) return;
-  // driverManualAnalysisHtml is a pure function of `messages` (all interactive /
-  // latest-gate decisions derive from messages), so the messages alone are a
-  // complete cache key for the produced DOM. Skip the destroy-and-rebuild when
-  // nothing changed — otherwise every poll tick wipes the node the user is
-  // hovering / reading / selecting inside and re-runs the entry animation.
-  const signature = JSON.stringify(messages || []);
+  // Gate interactivity also depends on the current plan step state. A retry can
+  // move failed -> done and open the next gate without appending a new message,
+  // so include per-message step status in the cache key or the stale failure DOM
+  // survives even after the plan cache advances.
+  const currentPlanId = planRailController.planId(selectedTaskId);
+  const planStepStatuses = (messages || []).map((message) => {
+    const metadata = message?.metadata || {};
+    return [
+      String(message?.id || ""),
+      String(metadata.step_id || metadata.failure_envelope?.failed_step_id || ""),
+      String(driverManualMessageStepStatus(message)),
+    ];
+  });
+  const signature = JSON.stringify({
+    messages: messages || [],
+    currentPlanId,
+    planStepStatuses,
+  });
   if (signature === lastDriverManualAnalysisSignature) return;
   removeAgentTimelineBuckets();
   resetAgentTypingState();
@@ -6243,6 +6325,7 @@ function agentMessageStrategyClarificationBodyHtml(message, interactive) {
 }
 
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
+  message = gateMessageForCurrentTool(message);
   const role = message.role === "user" ? "user" : "assistant";
   const isTuningProgress = role === "assistant"
     && String(message?.metadata?.kind || "") === "tool_progress"
@@ -6509,14 +6592,17 @@ async function startAgentValidation() {
     setActionStatus("请输入要交给 Agent 的任务。", "error");
     return;
   }
-  // Agent mode is, by definition, "manual mode with the operator's decisions made
-  // by an LLM" — so it always requires a configured LLM. Without one, error out and
-  // prompt the user to configure a model (no canned/default agent conversation).
-  // The deterministic, no-LLM flow is the *manual* mode, reached a different way.
-  const unavailableModelMessage = agentModelUnavailableMessage();
-  if (showAgentModelGuidance(unavailableModelMessage)) return;
+  // Agent mode is manual operation delegated to an LLM and therefore requires a
+  // configured model. Manual risk intake is the one deterministic exception: the
+  // existing risk state machine parses the operator's explicit analysis type and
+  // material contract without invoking an LLM.
+  const deterministicRiskIntake = selectedTaskNeedsManualRiskIntake();
+  if (!deterministicRiskIntake) {
+    const unavailableModelMessage = agentModelUnavailableMessage();
+    if (showAgentModelGuidance(unavailableModelMessage)) return;
+  }
   setAgentComposerNotice("");
-  const modelId = $("agentModelSelect").value || "";
+  const modelId = deterministicRiskIntake ? "" : ($("agentModelSelect")?.value || "");
   input.value = "";
   autoGrowComposerInput();
   updateAgentSendDisabled();
@@ -6526,15 +6612,16 @@ async function startAgentValidation() {
   agentRequestAbortControllers.set(taskId, controller);
   let result;
   try {
+    const requestBody = { content };
+    if (!deterministicRiskIntake) {
+      requestBody.model_id = modelId || null;
+      requestBody.effort = agentEffort();
+      requestBody.acceptance_mode = agentAcceptanceModeValue();
+    }
     const requestPromise = api(`api/tasks/${taskId}/agent/messages`, {
       method: "POST",
       signal: controller.signal,
-      body: JSON.stringify({
-        content,
-        model_id: modelId || null,
-        effort: agentEffort(),
-        acceptance_mode: agentAcceptanceModeValue(),
-      }),
+      body: JSON.stringify(requestBody),
     });
     const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
     result = await requestPromise;
@@ -6577,8 +6664,11 @@ async function startAgentValidation() {
 
 async function uploadRiskAnalysisMaterials(files) {
   const taskId = requireTaskId(selectedTaskId, "上传风险分析材料");
-  if (!selectedTaskIsRiskAnalysisAgent()) {
-    throw new Error("当前任务不是 Agent 风险分析任务。");
+  if (
+    !selectedTaskIsRiskAnalysisAgent()
+    && !selectedTaskNeedsManualRiskIntake()
+  ) {
+    throw new Error("当前任务不支持风险分析材料上传。");
   }
   const selectedFiles = Array.from(files || []);
   if (!selectedFiles.length) return;
@@ -7515,7 +7605,13 @@ for (const id of agentComposerSelectIds) {
   });
 }
 $("riskMaterialUploadButton").onclick = () => {
-  if (!selectedTaskIsRiskAnalysisAgent() || taskBusyAction(selectedTaskId) === "agent") return;
+  if (
+    (
+      !selectedTaskIsRiskAnalysisAgent()
+      && !selectedTaskNeedsManualRiskIntake()
+    )
+    || taskBusyAction(selectedTaskId) === "agent"
+  ) return;
   $("riskMaterialUploadInput")?.click();
 };
 $("riskMaterialUploadInput").addEventListener("change", (event) => {
@@ -7577,6 +7673,7 @@ function agentComposerStopIntent(value) {
   ];
   if (negated.some((phrase) => text.includes(phrase))) return false;
   if (/[?？]|为什么|为何|怎么|如何|是否|有没有|停止了没|停止了吗/.test(text)) return false;
+  if (/(?:(?:到|等到|待|运行到|执行到).{1,40}(?:处|后|时)?|在.{1,40}(?:处|时))(?:停止|停下|暂停|中止)/.test(text)) return false;
   return [
     "停止", "停下", "终止", "中止", "取消", "别跑", "不用跑",
     "stop", "cancel", "abort", "terminate",
@@ -7706,10 +7803,12 @@ function finishAppBoot() {
 async function initializeApp() {
   try {
     await refreshTasks();
+    const candidateLabLoadPromise = strategyCandidateLabController.selectTask(selectedTask);
     renderStoredStateSummaries();
     await loadReportFields();
     await loadTaskEvidence();
     await loadAgentMessages();
+    await candidateLabLoadPromise;
   } catch (error) {
     const detail = error?.message || "";
     setActionStatus("服务连接失败，请检查后端是否运行。", "error", detail);

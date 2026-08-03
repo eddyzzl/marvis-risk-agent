@@ -36,16 +36,25 @@ def train_lgb_regressor(backend, dataset_path, config: TrainConfig, *, out_dir: 
     train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
         train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
     )
+    supplied_params = model_params(config.params)
     params = {
         **get_recipe("lgb_regressor").default_params,
-        **model_params(config.params),
+        **supplied_params,
         "seed": config.seed,
         # TUNE-6: sourced from defaults.py -- see lgb.py's train_lgb for the
         # single-source rationale shared across every tree recipe's direct-train path.
         "num_threads": DEFAULT_TRAIN_NUM_THREADS,
         "deterministic": True,
-        "force_row_wise": True,
     }
+    if "force_col_wise" not in supplied_params and "force_row_wise" not in supplied_params:
+        params["force_row_wise"] = True
+    elif bool(params.get("force_col_wise")):
+        # Tuning deliberately emits force_col_wise. Preserve that selected
+        # mode and discard a conflicting row-wise flag instead of making
+        # LightGBM abort before the final fit.
+        params.pop("force_row_wise", None)
+    elif bool(params.get("force_row_wise")):
+        params.pop("force_col_wise", None)
     num_boost_round = pop_boost_rounds(params, default=20)
     fit_train = train
     if config.early_stopping_rounds:

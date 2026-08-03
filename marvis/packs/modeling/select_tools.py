@@ -165,12 +165,16 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     ) if target_type == "binary" else {"applied": False, "requested": refit_requested, "reason": "非二分类任务暂不支持全量重训。"}
     final_artifact_id = refit_info.get("artifact_id") or artifact_id
     final_experiment_id = refit_info.get("experiment_id") or selected_id
+    report_experiment_ids = list(
+        dict.fromkeys([final_experiment_id, *experiment_ids])
+    )
     final_metrics = refit_info.get("metrics") or pre_refit_metrics
     ks_ci_note = _ks_ci_overlap_note(selected, rows, target_type=target_type)
     if ks_ci_note:
         selection_reason = f"{selection_reason} {ks_ci_note}"
     return {
         "selected_experiment_id": final_experiment_id,
+        "report_experiment_ids": report_experiment_ids,
         "artifact_id": final_artifact_id,
         "recipe": selected.get("recipe") or experiment.recipe_id,
         "target_type": target_type,

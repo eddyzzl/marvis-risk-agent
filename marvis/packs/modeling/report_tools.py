@@ -42,12 +42,27 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
 def tool_generate_model_reports(inputs: dict, ctx) -> dict:
     """MODELING §5 multi-version fan-out: render one report per requested experiment
     using version-specific output paths. Each report reuses the single-report pipeline.
-    report_path mirrors the first report so the existing download endpoint stays
-    compatible."""
+    When model selection supplied a Champion, keep it first so the compatible
+    primary ``report_path`` and detail fields follow the governed selection while
+    ``reports`` still contains every trained version."""
     runtime = _runtime(ctx)
     experiment_ids = [str(item) for item in inputs.get("experiment_ids") or []]
     if not experiment_ids:
         raise ModelingError("experiment_ids must not be empty")
+    selected_experiment_id = str(inputs.get("selected_experiment_id") or "").strip()
+    if selected_experiment_id:
+        if selected_experiment_id not in experiment_ids:
+            raise ModelingError(
+                "selected_experiment_id must be one of experiment_ids"
+            )
+        experiment_ids = [
+            selected_experiment_id,
+            *[
+                experiment_id
+                for experiment_id in experiment_ids
+                if experiment_id != selected_experiment_id
+            ],
+        ]
     outputs_dir = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs"
     reports: list[dict] = []
     primary_output: dict | None = None

@@ -1247,6 +1247,75 @@ def test_tool_runner_returns_schema_error_before_worker(tmp_path):
     assert "message" in result.error
 
 
+def test_tool_runner_rejects_incompatible_configured_worker_python_before_import(
+    tmp_path,
+    monkeypatch,
+):
+    """The host Python can satisfy a pack while the configured worker cannot.
+
+    A legacy Notebook kernel is a valid user choice, but importing current V2
+    packs under that interpreter must fail as an actionable environment error
+    before opaque SyntaxError/TypeError failures escape from the worker.
+    """
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    manifest = PluginManifest(
+        name="modern",
+        version="1.0.0",
+        display_name="Modern",
+        description="Requires a modern worker Python",
+        module="modern.tools",
+        python_requires=">=3.10,<3.14",
+        tools=(
+            ToolSpec(
+                name="run",
+                summary="Run",
+                input_schema={"type": "object", "additionalProperties": False},
+                output_schema={"type": "object"},
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="fail",
+                side_effects=(),
+                entrypoint="run",
+            ),
+        ),
+        permissions=(),
+        builtin=True,
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            assert ref == ToolRef("modern", "run")
+            return manifest, manifest.tools[0]
+
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("incompatible worker must not start")
+        ),
+    )
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable="/opt/example/python3.7",
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+    )
+    runner._worker_python_version = (3, 7, 12)
+
+    result = runner.invoke(ToolRef("modern", "run"), {}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "environment"
+    assert ">=3.10,<3.14" in result.error
+    assert "3.7.12" in result.error
+    assert "设置" in result.error
+    audits = repo.list_audit(kind="tool.invoke")
+    assert audits[0]["target_ref"] == "modern.run"
+    assert audits[0]["outcome"] == "failed"
+
+
 def test_tool_runner_blocks_tool_when_side_effect_exceeds_permissions(tmp_path, monkeypatch):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

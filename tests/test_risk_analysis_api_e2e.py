@@ -89,6 +89,10 @@ def test_agent_risk_analysis_upload_to_report_download_and_memory(
     assert report["headline_metrics"]["annualized_bad_rate"] == pytest.approx(
         (35 + 60) / (500 + 800)
     )
+    assert done["metadata"]["report_download"] == {
+        "label": "下载风险分析报告",
+        "download_url": f"/api/tasks/{task_id}/driver-report/download",
+    }
 
     downloaded = client.get(f"/api/tasks/{task_id}/driver-report/download")
     assert downloaded.status_code == 200, downloaded.text
@@ -156,6 +160,121 @@ def test_agent_profitability_analysis_computes_weighted_net_yield(
         0.35 * 0.0306 + 0.65 * 0.0138
     )
     assert report["headline_metrics"]["negative_product_count"] == 0
+
+
+def test_profitability_material_confirmation_with_no_missing_text_stays_in_intake(
+    client: TestClient,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda request, task, payload: None,
+    )
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "收益测算路由回归",
+            "validator": "qa",
+            "source_dir": "",
+            "task_type": "vintage",
+            "run_mode": "agent",
+        },
+    )
+    task_id = created.json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    _post_message(client, task_id, "做收益测算")
+
+    csv_bytes = (
+        "product,asset_class,as_of_period,weight,weight_basis,customer_rate,risk_cost_rate,"
+        "funding_cost_rate,interest_loss_rate,revenue_share_rate,acquisition_cost_rate,"
+        "data_cost_rate,payment_cost_rate,collection_cost_rate,other_cost_rate,tax_rate\n"
+        "白条,生息资产,2026-06,1,average_balance,0.12,0.04,0.02,0.002,0.01,0,0,0,0,0,0.005\n"
+    ).encode("utf-8")
+    uploaded = client.post(
+        f"/api/tasks/{task_id}/datasets/upload",
+        files={"file": ("profitability.csv", csv_bytes, "text/csv")},
+        data={"role": "sample"},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    planned = _post_message(
+        client,
+        task_id,
+        "各成本字段均显式给值，无缺失静默补 0。材料已上传，请检查字段并生成计划。",
+    )
+
+    last = planned.json()["messages"][-1]
+    assert last["metadata"]["kind"] == "plan_overview"
+    assert last["metadata"]["plan_id"]
+    assert last["metadata"].get("code") != "active_dataset_required"
+
+
+def test_standard_vintage_material_scope_does_not_trigger_dataset_transform(
+    client: TestClient,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda request, task, payload: None,
+    )
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "Vintage 材料路由回归",
+            "validator": "qa",
+            "source_dir": "",
+            "task_type": "vintage",
+            "run_mode": "agent",
+        },
+    )
+    task_id = created.json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    selected = _post_message(
+        client,
+        task_id,
+        "做标准 Vintage，bad 是 incremental，不是 snapshot",
+    )
+    assert "Vintage panel" in selected.json()["messages"][-1]["content"]
+
+    uploaded = client.post(
+        f"/api/tasks/{task_id}/datasets/upload",
+        files={
+            "file": (
+                "vintage_panel.csv",
+                (
+                    "account_id,cohort,mob,bad,balance,channel\n"
+                    "A,2026-01,0,0,1000,app\n"
+                    "A,2026-01,1,1,900,app\n"
+                ).encode("utf-8"),
+                "text/csv",
+            )
+        },
+        data={"role": "sample"},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    planned = _post_message(
+        client,
+        task_id,
+        (
+            "材料已上传，覆盖表内全部 cohort、channel、MOB，"
+            "不做额外筛选；bad 是 incremental，不是 snapshot。"
+        ),
+    )
+
+    last = planned.json()["messages"][-1]
+    assert last["metadata"]["kind"] == "plan_overview"
+    assert last["metadata"]["plan_id"]
+    assert last["metadata"].get("intent") != "dataset_transform"
+    assert last["metadata"].get("code") != "active_dataset_required"
+
+    completed = _post_message(client, task_id, "开始")
+    done = completed.json()["messages"][-1]
+    assert "计划已全部完成" in done["content"]
+    assert "Vintage 曲线完成" in done["content"]
+    assert {table["title"] for table in done["metadata"]["tables"]} >= {
+        "Vintage 累计坏账率",
+    }
 
 
 def test_agent_profitability_derives_sample_style_raw_cost_bridge(

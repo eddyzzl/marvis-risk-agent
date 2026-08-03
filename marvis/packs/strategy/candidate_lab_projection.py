@@ -201,6 +201,8 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ARTIFACT_SCHEMA_VERSION,
+    SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
 )
 from marvis.packs.strategy.scorecard_candidate_tools import (
@@ -3890,97 +3892,70 @@ def _verify_scorecard_direct_sources(
     sample_ref = asset["sample_design_ref"]
     refs = asset["source_refs"]
 
+    try:
+        sample_binding = load_any_strategy_sample_design_v2_artifacts(
+            _scorecard_live_runtime(context),
+            task_id=context.task_id,
+            **sample_ref,
+        )
+        source_mode = resolve_strategy_sample_design_v2_source_mode(
+            sample_binding.bundle["sample_design"],
+        )
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "scorecard sample-design source replay failed"
+        ) from exc
+    if source_mode == "native_active_dataset":
+        membership_kind = SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+        sample_origin = SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+        sample_schema = SAMPLE_DESIGN_V2_NATIVE_ARTIFACT_SCHEMA_VERSION
+    else:
+        membership_kind = SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
+        sample_origin = SAMPLE_DESIGN_V2_ORIGIN_TOOL
+        sample_schema = SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION
+
     membership_record = _require_source_artifact(
         context,
         artifact_id=sample_ref["membership_artifact_id"],
         content_hash=sample_ref[
             "expected_membership_artifact_content_hash"
         ],
-        kind=SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
-        origin_tool=SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        kind=membership_kind,
+        origin_tool=sample_origin,
     )
-    membership_provenance = _mapping(
-        membership_record["provenance"],
-        "scorecard membership provenance",
-    )
-    membership_id = _source_path_component(
-        membership_provenance.get("membership_id"),
-        "scorecard membership id",
-    )
-    _require_exact_path(
-        membership_record,
-        task_root
-        / "strategy_sample_designs_v2"
-        / f"{membership_id}.bin",
-    )
-    _require_provenance_subset(
-        membership_provenance,
-        {
-            "schema_version": SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
-            "task_id": context.task_id,
-            "dataset_id": identity["dataset_id"],
-            "dataset_content_hash": identity["dataset_content_hash"],
-            "workspace_revision": identity["workspace_revision"],
-            "workspace_generation": identity["workspace_generation"],
-            "semantic_mapping_hash": identity["semantic_mapping_hash"],
-            "format": "binary",
-            "artifact_role": "membership",
-            "membership_artifact_content_hash": membership_record[
-                "content_hash"
-            ],
-        },
-        "scorecard membership",
-    )
-    membership_content_hash = _sha256(
-        membership_provenance.get("membership_content_hash"),
-        "scorecard membership content hash",
-    )
-
     bundle_record = _require_source_artifact(
         context,
         artifact_id=sample_ref["bundle_artifact_id"],
         content_hash=sample_ref["expected_bundle_artifact_content_hash"],
         kind=SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
-        origin_tool=SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        origin_tool=sample_origin,
     )
-    bundle_id = _source_path_component(
-        sample_ref["expected_bundle_id"],
-        "scorecard bundle id",
-    )
-    _require_exact_path(
-        bundle_record,
-        task_root / "strategy_sample_designs_v2" / f"{bundle_id}.json",
+    membership_provenance = _mapping(
+        membership_record["provenance"],
+        "scorecard membership provenance",
     )
     bundle_provenance = _mapping(
         bundle_record["provenance"],
         "scorecard sample bundle provenance",
     )
-    _require_provenance_subset(
-        bundle_provenance,
-        {
-            "schema_version": SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
-            "task_id": context.task_id,
-            "dataset_id": identity["dataset_id"],
-            "dataset_content_hash": identity["dataset_content_hash"],
-            "workspace_revision": identity["workspace_revision"],
-            "workspace_generation": identity["workspace_generation"],
-            "semantic_mapping_hash": identity["semantic_mapping_hash"],
-            "format": "json",
-            "artifact_role": "bundle",
-            "membership_id": membership_id,
-            "membership_content_hash": membership_content_hash,
-            "membership_artifact_id": membership_record["id"],
-            "membership_artifact_content_hash": membership_record[
-                "content_hash"
-            ],
-            "bundle_id": bundle_id,
-            "bundle_artifact_content_hash": bundle_record["content_hash"],
-            "sample_design_id": sample_ref["expected_sample_design_id"],
-            "sample_design_content_hash": sample_ref[
-                "expected_sample_design_content_hash"
-            ],
-        },
-        "scorecard sample bundle",
+    _require_exact_path(membership_record, sample_binding.membership_path)
+    _require_exact_path(bundle_record, sample_binding.bundle_path)
+    if (
+        membership_provenance != sample_binding.membership_provenance
+        or bundle_provenance != sample_binding.provenance
+        or membership_provenance.get("schema_version") != sample_schema
+        or bundle_provenance.get("schema_version") != sample_schema
+    ):
+        raise CandidateLabProjectionError(
+            "scorecard sample-design provenance drifted"
+        )
+    membership_id = _source_path_component(
+        sample_binding.membership["header"]["membership_id"],
+        "scorecard membership id",
+    )
+    membership_content_hash = _sha256(
+        sample_binding.membership["header"]["content_hash"],
+        "scorecard membership content hash",
     )
 
     training_ref = refs["training_evidence"]

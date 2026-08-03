@@ -166,6 +166,18 @@ def test_profitability_goal_lists_row_units_weights_and_tax_basis():
     assert "不会把缺失成本静默当成 0" in result.content
 
 
+def test_standard_vintage_goal_honors_incremental_with_negated_snapshot():
+    result = _advance(
+        _Registry(),
+        _Backend(),
+        user_text="做标准 Vintage，bad 是 incremental，不是 snapshot",
+        conversation=[_assistant_state("ask_goal")],
+    )
+
+    assert result.intake_state["analysis_kind"] == "standard_vintage"
+    assert result.intake_state["label_semantics"] == "incremental"
+
+
 def test_no_uploaded_data_waits_in_chat_instead_of_raising():
     result = _advance(
         _Registry(),
@@ -755,6 +767,47 @@ def test_standard_vintage_waits_for_material_stage_then_reuses_existing_proposal
     assert ready.template_id == "vintage_analysis"
     assert ready.slots["dataset_id"] == "panel"
     assert ready.intake_state["phase"] == "ready"
+
+
+def test_standard_vintage_explicit_incremental_semantics_reaches_plan_slots(
+    monkeypatch,
+):
+    class _Proposal:
+        template_id = "vintage_analysis"
+        dataset_id = "panel"
+        dataset_name = "panel.parquet"
+        cohort_col = "cohort"
+        mob_col = "mob"
+        bad_col = "bad"
+
+        def template_slots(self):
+            return {
+                "dataset_id": "panel",
+                "cohort_col": "cohort",
+                "mob_col": "mob",
+                "bad_col": "bad",
+            }
+
+    monkeypatch.setattr(
+        risk_setup, "build_vintage_proposal", lambda *args, **kwargs: _Proposal()
+    )
+    registry = _Registry([_Dataset("panel", "task-risk/panel.parquet")])
+
+    ready = _advance(
+        registry,
+        _Backend(),
+        user_text="材料已上传，确认 bad 是 incremental（当期新增）",
+        conversation=[
+            _assistant_state(
+                "request_materials",
+                "standard_vintage",
+                analysis_scope="标准 Vintage；bad 是增量标签（incremental）",
+            )
+        ],
+    )
+
+    assert ready.template_id == "vintage_analysis"
+    assert ready.slots["label_semantics"] == "incremental"
 
 
 def test_question_form_goal_is_not_hijacked_by_adhoc_routing():

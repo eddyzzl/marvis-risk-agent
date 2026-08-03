@@ -12,6 +12,7 @@ from marvis.agent.strategy_request_compiler import (
     REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS,
     STANDARD_STRATEGY_WORKFLOWS,
     STRATEGY_REQUEST_JSON_SCHEMA,
+    _sample_design_v2_has_chained_operation,
     _sample_v2_predicate_semantics_grounded,
     _sample_v2_predicate_grounded,
     compile_strategy_request,
@@ -28,6 +29,17 @@ class _FakeLLM:
     def complete(self, **kwargs):
         self.calls.append(kwargs)
         return self.reply
+
+
+class _SequencedLLM:
+    def __init__(self, *replies: object) -> None:
+        self.replies = list(replies)
+        self.calls: list[dict] = []
+
+    def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        reply_index = min(len(self.calls) - 1, len(self.replies) - 1)
+        return self.replies[reply_index]
 
 
 def _eq(column: str, value: object) -> dict:
@@ -98,6 +110,20 @@ def _v2_payload(inputs: dict | None = None) -> dict:
     }
 
 
+def _wrong_roll_rate_payload() -> dict:
+    return {
+        "request_kind": "standard_workflow",
+        "workflow": "roll_rate_matrix",
+        "workflow_inputs": {
+            "id_col": "customer_id",
+            "time_col": "apply_date",
+            "status_col": "channel",
+            "states": ["app", "web"],
+            "observation_semantics": "adjacent_observation",
+        },
+    }
+
+
 def _legacy_payload() -> dict:
     return {
         "request_kind": "standard_workflow",
@@ -150,6 +176,7 @@ _GROUNDED_UTTERANCE = (
     [
         "固化策略样本设计",
         "请创建样本设计",
+        "为当前表建立 SampleDesign",
         "把策略样本边界冻结下来",
         "materialize the strategy sample design",
     ],
@@ -227,9 +254,235 @@ def test_v2_sample_validates_and_compiler_grounds_every_user_control() -> None:
     assert compiled.draft is not None
     assert compiled.draft.to_dict() == payload
     assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt_version"] == 51
+    assert llm.calls[0]["prompt_version"] == 52
     assert "strategy_sample_design_v2" in llm.calls[0]["system_prompt"]
     assert "strategy_model_evidence_v2" in llm.calls[0]["system_prompt"]
+
+
+def test_sample_design_anchor_gets_one_structured_workflow_correction() -> None:
+    llm = _SequencedLLM(_wrong_roll_rate_payload(), _v2_payload())
+
+    result = compile_strategy_request(
+        _GROUNDED_UTTERANCE,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is not None
+    assert result.draft.to_dict() == _v2_payload()
+    assert len(llm.calls) == 2
+    correction = llm.calls[1]
+    repair_prompt = correction["user_prompt"]
+    assert "strategy_sample_design_v2_workflow_required" in repair_prompt
+    assert f"【原始用户意图】\n{_GROUNDED_UTTERANCE}" in repair_prompt
+    assert f"【列白名单】\n{_COLUMNS!r}" not in repair_prompt
+    assert "【列白名单】" in repair_prompt
+    assert "【当前目标列角色】\n\"bad\"" in repair_prompt
+    assert "这是唯一一次语义纠正机会" in repair_prompt
+    assert '"method":"time_ranges"' in repair_prompt
+    assert '"ranges":{"development"' in repair_prompt
+    assert "field_bindings 精确包含 entity_field、time_field" in repair_prompt
+    assert "confirmed_matured、not_matured、unknown、unavailable" in repair_prompt
+    assert "confirmed_matured 时 performance_window_days 和 cutoff_date 必填" in (
+        repair_prompt
+    )
+    assert "provided 时 days 必填" in repair_prompt
+    assert "provided 时 start/end 必填" in repair_prompt
+    assert "available 时 column 必填" in repair_prompt
+    assert "暂不可提供的字段必须输出 null" in repair_prompt
+    assert "higher_is_riskier 或 lower_is_riskier" in repair_prompt
+    assert "roll_rate_matrix" not in correction["system_prompt"]
+    assert "strategy_model_evidence_v2" not in correction["system_prompt"]
+    schema = correction["json_schema"]["schema"]["oneOf"][0]
+    assert schema["properties"]["workflow"] == {
+        "const": "strategy_sample_design_v2"
+    }
+    assert schema["properties"]["request_kind"] == {
+        "const": "standard_workflow"
+    }
+    assert set(schema["properties"]) == {
+        "request_kind",
+        "workflow",
+        "workflow_inputs",
+    }
+    assert correction["max_tokens"] == 8192
+
+
+def test_invalid_sample_design_shape_uses_dedicated_structured_correction() -> None:
+    malformed = _v2_payload()
+    malformed["workflow_inputs"]["partitioning"] = {
+        "selectors": malformed["workflow_inputs"]["partitioning"]["selectors"]
+    }
+    llm = _SequencedLLM(malformed, _v2_payload())
+
+    result = compile_strategy_request(
+        _GROUNDED_UTTERANCE,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is not None
+    assert result.draft.to_dict() == _v2_payload()
+    assert len(llm.calls) == 2
+    correction = llm.calls[1]
+    assert correction["prompt_name"] == "SAMPLE_DESIGN_V2_CORRECTION_SYS"
+    assert '"method":"time_ranges"' in correction["user_prompt"]
+    assert (
+        correction["json_schema"]["schema"]["oneOf"][0]["properties"][
+            "workflow"
+        ]["const"]
+        == "strategy_sample_design_v2"
+    )
+
+
+def test_sample_design_structured_correction_can_fail_closed_with_clarification() -> None:
+    llm = _SequencedLLM(
+        _wrong_roll_rate_payload(),
+        {"clarification": "请补充观察窗和全部字段角色。"},
+    )
+
+    result = compile_strategy_request(
+        "为当前表建立 SampleDesign，但其余口径还没有确定。",
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is None
+    assert result.clarification == "请补充观察窗和全部字段角色。"
+    correction_schema = llm.calls[1]["json_schema"]["schema"]
+    clarification_branch = correction_schema["oneOf"][1]
+    assert clarification_branch == {
+        "type": "object",
+        "properties": {
+            "clarification": {"type": "string", "minLength": 1},
+        },
+        "required": ["clarification"],
+        "additionalProperties": False,
+    }
+
+
+def test_sample_design_anchor_stays_safe_when_structured_correction_is_still_wrong() -> None:
+    llm = _SequencedLLM(_wrong_roll_rate_payload(), _wrong_roll_rate_payload())
+
+    result = compile_strategy_request(
+        _GROUNDED_UTTERANCE,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is None
+    assert result.clarification_code == "strategy_sample_design_v2_workflow_required"
+    assert "只能编译为 strategy_sample_design_v2" in result.clarification
+    assert len(llm.calls) == 2
+
+
+def test_sample_design_semantic_correction_gets_one_bounded_json_format_repair() -> None:
+    llm = _SequencedLLM(
+        _wrong_roll_rate_payload(),
+        "<not-json>",
+        _v2_payload(),
+    )
+
+    result = compile_strategy_request(
+        _GROUNDED_UTTERANCE,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is not None
+    assert result.draft.to_dict() == _v2_payload()
+    assert len(llm.calls) == 3
+    format_repair = llm.calls[2]
+    format_repair_prompt = format_repair["user_prompt"]
+    assert "上一次输出未通过平台校验" in format_repair_prompt
+    assert "不是有效 JSON" in format_repair_prompt
+    assert f"【原始用户意图】\n{_GROUNDED_UTTERANCE}" in format_repair_prompt
+    assert "这是唯一一次格式修复机会" in format_repair_prompt
+    assert "roll_rate_matrix" not in format_repair["system_prompt"]
+    assert (
+        format_repair["json_schema"]["schema"]["oneOf"][0]["properties"]["workflow"][
+            "const"
+        ]
+        == "strategy_sample_design_v2"
+    )
+
+
+def test_sample_design_semantic_json_format_repair_stays_safe_when_still_invalid() -> None:
+    llm = _SequencedLLM(
+        _wrong_roll_rate_payload(),
+        "<not-json>",
+        "<still-not-json>",
+    )
+
+    result = compile_strategy_request(
+        _GROUNDED_UTTERANCE,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is None
+    assert result.clarification == (
+        "模型返回的策略草案不是有效 JSON 对象，请重新说明策略请求。"
+    )
+    assert len(llm.calls) == 3
+
+
+def test_sample_design_json_failure_telemetry_records_shape_only(caplog) -> None:
+    sensitive_repair = (
+        "<think>SECRET_REASON</think>\n"
+        "```json\n"
+        '{"SECRET_COLUMN": [1'
+    )
+    sensitive_final = "SECRET_COMPLETION_ONLY"
+    llm = _SequencedLLM(
+        _wrong_roll_rate_payload(),
+        sensitive_repair,
+        sensitive_final,
+    )
+    caplog.set_level(
+        "WARNING",
+        logger="marvis.agent.strategy_request_compiler",
+    )
+
+    result = compile_strategy_request(
+        _GROUNDED_UTTERANCE,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=llm,
+        caller="strategy_request_compiler",
+    )
+
+    assert result.draft is None
+    parse_logs = [
+        message
+        for message in caplog.messages
+        if message.startswith("strategy JSON parse failed")
+    ]
+    assert len(parse_logs) == 2
+    assert "attempt_kind=sample_design_semantic_correction" in parse_logs[0]
+    assert "chars=" in parse_logs[0]
+    assert "has_think=True" in parse_logs[0]
+    assert "has_fence=True" in parse_logs[0]
+    assert "first_char_kind=other" in parse_logs[0]
+    assert "last_char_kind=digit" in parse_logs[0]
+    assert "brace_open=1" in parse_logs[0]
+    assert "brace_close=0" in parse_logs[0]
+    assert "bracket_open=1" in parse_logs[0]
+    assert "bracket_close=0" in parse_logs[0]
+    assert "balanced_object=False" in parse_logs[0]
+    assert "attempt_kind=sample_design_format_repair" in parse_logs[1]
+    joined_logs = "\n".join(parse_logs)
+    assert "SECRET_REASON" not in joined_logs
+    assert "SECRET_COLUMN" not in joined_logs
+    assert "SECRET_COMPLETION_ONLY" not in joined_logs
+    assert "customer_id" not in joined_logs
+    assert _GROUNDED_UTTERANCE not in joined_logs
 
 
 def test_v2_sample_confirmation_echoes_historical_score_binding() -> None:
@@ -323,6 +576,115 @@ def test_v2_sample_rejects_platform_identity_in_the_utterance() -> None:
 
     assert result.draft is None
     assert result.clarification_code == "strategy_sample_design_v2_platform_binding_forbidden"
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "不生成候选、不建模、不建树、不形成报告、不进入 Strategy Pool、不采纳、不部署。",
+        "无需建模，暂不形成报告，先不进入策略池，禁止部署。",
+    ],
+)
+def test_v2_sample_accepts_explicitly_negated_downstream_boundaries(
+    boundary: str,
+) -> None:
+    assert _sample_design_v2_has_chained_operation(boundary) is False
+
+
+def test_v2_sample_clause_scoped_grounding_accepts_distinct_field_and_range_values() -> None:
+    utterance = (
+        "请立即创建并固化策略样本设计 V2，只允许走 strategy_sample_design_v2 工作流，"
+        "不要走策略生命周期：当前唯一文件是 strategy_sample_v2.csv；"
+        "目标列 bad_flag，1 表示坏样本，目标缺失标签行要剔除；"
+        "审批总体和风险总体均为全表，都不做 inclusion 或 exclusion 筛选，"
+        "风险总体嵌套在审批总体内，relationship=nested_same_cohort；"
+        "按时间范围划分，时间字段 apply_date，"
+        "development 为 2025-10-15 至 2025-11-15，"
+        "validation 为 2025-12-15 至 2025-12-15，"
+        "OOT 为 2026-01-15 至 2026-01-15；"
+        "成熟度已确认，表现期 90 天，成熟截止日 2026-04-30；"
+        "表现窗口已提供 90 天；"
+        "观察窗口已提供，开始 2025-10-15，结束 2026-01-15；"
+        "主体字段 cust_id，时间字段 apply_date，分组字段 channel，"
+        "月份字段 apply_month，权重字段暂不可提供，放款金额字段 loan_amount，"
+        "逾期金额字段暂不可提供；"
+        "历史分可用，字段 score，越低风险越高。"
+        "只固化样本设计，不生成候选、不建模、不建树、不形成报告、"
+        "不进入 Strategy Pool、不采纳、不部署。"
+    )
+    inputs = {
+        "target_bad_value": 1,
+        "drop_nan_labels": True,
+        "relationship": "nested_same_cohort",
+        "approval_population": {"inclusion": None, "exclusion": None},
+        "risk_population": {"inclusion": None, "exclusion": None},
+        "partitioning": {
+            "method": "time_ranges",
+            "column": "apply_date",
+            "ranges": {
+                "development": {"start": "2025-10-15", "end": "2025-11-15"},
+                "validation": {"start": "2025-12-15", "end": "2025-12-15"},
+                "oot": {"start": "2026-01-15", "end": "2026-01-15"},
+            },
+        },
+        "maturity": {
+            "status": "confirmed_matured",
+            "performance_window_days": 90,
+            "cutoff_date": "2026-04-30",
+            "reason": None,
+        },
+        "performance_window": {"status": "provided", "days": 90},
+        "observation_window": {
+            "status": "provided",
+            "start": "2025-10-15",
+            "end": "2026-01-15",
+        },
+        "field_bindings": {
+            "entity_field": "cust_id",
+            "time_field": "apply_date",
+            "group_field": "channel",
+            "month_field": "apply_month",
+            "weight_field": None,
+            "loan_amount_field": "loan_amount",
+            "overdue_amount_field": None,
+        },
+        "historical_score": {
+            "status": "available",
+            "column": "score",
+            "direction": "lower_is_riskier",
+            "reason": None,
+        },
+    }
+
+    result = compile_strategy_request(
+        utterance,
+        allowed_columns=(
+            "cust_id",
+            "apply_date",
+            "channel",
+            "apply_month",
+            "loan_amount",
+            "score",
+        ),
+        target_col="bad_flag",
+        llm=_FakeLLM(_v2_payload(inputs)),
+    )
+
+    assert result.draft is not None
+    assert result.draft.to_dict()["workflow_inputs"] == inputs
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [
+        "先固化样本设计，再建模。",
+        "固化样本设计，然后形成报告。",
+        "不仅固化样本设计，还进入 Strategy Pool。",
+        "不只固化样本设计，还要部署。",
+    ],
+)
+def test_v2_sample_rejects_positive_downstream_chains(chain: str) -> None:
+    assert _sample_design_v2_has_chained_operation(chain) is True
 
 
 def test_v2_sample_rejects_ungrounded_field_binding() -> None:
@@ -1065,7 +1427,7 @@ def test_model_evidence_v2_compiles_only_existing_authenticated_univariate_summa
 
     assert result.draft is not None
     assert result.draft.to_dict() == payload
-    assert llm.calls[0]["prompt_version"] == 51
+    assert llm.calls[0]["prompt_version"] == 52
 
 
 @pytest.mark.parametrize(

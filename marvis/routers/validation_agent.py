@@ -1,5 +1,5 @@
 from fastapi import APIRouter, BackgroundTasks, Request
-from marvis.errors import unprocessable
+from marvis.errors import conflict, unprocessable
 
 from marvis.agent.service import (
     agent_rerun_stage,
@@ -59,6 +59,7 @@ from marvis.domain import (
     StrategyProfitInput,
     StrategyTaskInput,
 )
+from marvis.orchestrator.contracts import PlanStatus, StepStatus
 
 
 router = APIRouter(prefix="/api", tags=["validation-agent"])
@@ -146,6 +147,7 @@ def get_agent_messages(
     messages = repo.list_agent_messages(task_id, after_id=after_id, limit=query_limit)
     _enrich_historical_result_download(request, task_id, messages)
     _enrich_historical_workflow_errors(messages)
+    _enrich_current_plan_gate(request, task_id, messages)
     has_more = False
     if bounded_limit is not None and len(messages) > bounded_limit:
         has_more = True
@@ -156,6 +158,100 @@ def get_agent_messages(
         "has_more": has_more,
         "limit": bounded_limit,
     }
+
+
+def _enrich_current_plan_gate(
+    request: Request,
+    task_id: str,
+    messages: list[dict],
+) -> None:
+    """Recover the actionable gate after a raw plan-step retry.
+
+    The editable retry form deliberately uses the plan endpoint so it can
+    replace failed-step inputs. That executor path can stop at the next
+    ``awaiting_confirm`` step without passing through ``PlanDriver``'s message
+    composer, leaving the plan rail healthy but the middle workspace with no
+    gate control. Expose a transient, deterministic gate message on read while
+    keeping the persisted audit transcript unchanged.
+    """
+
+    plans = request.app.state.plan_repo.list_plans_for_task(task_id)
+    if not plans:
+        return
+    plan = plans[-1]
+    if plan.status != PlanStatus.AWAITING_CONFIRM:
+        return
+    gate = next(
+        (
+            step
+            for step in sorted(plan.steps, key=lambda item: (item.index, item.id))
+            if step.status == StepStatus.AWAITING_CONFIRM
+        ),
+        None,
+    )
+    if gate is None:
+        return
+
+    # Check the complete persisted transcript, not only this incremental page.
+    # Otherwise polling with ``after_id=<current gate>`` would fabricate a
+    # duplicate gate whenever the legitimate response page is empty.
+    persisted = agent_repo(request).list_agent_messages(task_id)
+    last_failure_index = -1
+    last_current_gate_index = -1
+    for index, message in enumerate(persisted):
+        if message.get("role") != "assistant":
+            continue
+        metadata = message.get("metadata") or {}
+        failure_envelope = metadata.get("failure_envelope") or {}
+        message_plan_id = str(
+            metadata.get("plan_id")
+            or failure_envelope.get("plan_id")
+            or ""
+        )
+        if (
+            (metadata.get("error") or metadata.get("error_diagnostic"))
+            and message_plan_id in {"", plan.id}
+        ):
+            last_failure_index = index
+        if (
+            not metadata.get("error")
+            and metadata.get("kind") == "gate"
+            and str(metadata.get("plan_id") or "") == plan.id
+            and str(metadata.get("step_id") or "") == gate.id
+        ):
+            last_current_gate_index = index
+    if last_current_gate_index > last_failure_index:
+        # A user turn after the gate consumes its interaction slot in the UI.
+        # If the plan nevertheless remains on the same awaiting-confirm step
+        # (for example an older client sent descriptive prose that was not
+        # recognized as a canonical confirmation), the persisted gate is now
+        # historical/read-only. Re-emit it transiently at the end so the user
+        # always has a recovery action instead of a dead-end conversation.
+        consumed_without_progress = any(
+            index > last_current_gate_index and message.get("role") == "user"
+            for index, message in enumerate(persisted)
+        )
+        if not consumed_without_progress:
+            return
+
+    composer = PlanMessageComposer(
+        load_output=request.app.state.plan_repo.load_step_output,
+    )
+    recovered = composer.gate_message(plan, gate, run_seq=0)
+    messages.append(
+        {
+            "id": f"recovered-gate:{plan.id}:{gate.id}:{plan.updated_at}",
+            "task_id": task_id,
+            "role": "assistant",
+            "stage": "chat",
+            "content": recovered.content,
+            "created_at": plan.updated_at,
+            "metadata": {
+                **recovered.metadata,
+                "recovered_from_plan": True,
+            },
+        }
+    )
 
 
 def _enrich_historical_workflow_errors(messages: list[dict]) -> None:
@@ -303,6 +399,7 @@ def post_agent_message(
                 ("dedup_strategies", payload.dedup_strategies),
                 ("adjust_params", payload.adjust_params),
                 ("expected_step_id", payload.expected_step_id),
+                ("expected_plan_id", payload.expected_plan_id),
                 ("ui_action", payload.ui_action),
             )
             if value is not None
@@ -328,6 +425,8 @@ def post_agent_message(
     }
     if payload.ui_action is not None and payload.ui_action not in allowed_ui_actions:
         raise unprocessable("invalid ui_action")
+    if payload.ui_action is not None and is_stop_validation_intent(content):
+        raise conflict("界面操作与停止指令冲突，请刷新页面后重新选择。")
     strategy_input = _domain_strategy_input(payload.strategy_input)
     if strategy_input is not None and is_stop_validation_intent(content):
         raise unprocessable("停止指令不能与 strategy_input 同时提交。")
@@ -338,7 +437,7 @@ def post_agent_message(
         clarification = strategy_development_clarification(strategy_input)
         if clarification is not None:
             raise unprocessable(clarification)
-    if is_stop_validation_intent(content):
+    if payload.ui_action is None and is_stop_validation_intent(content):
         user_message = repo.add_agent_message(
             task_id,
             role="user",
@@ -367,6 +466,7 @@ def post_agent_message(
             dedup_strategies=payload.dedup_strategies,
             adjust_params=payload.adjust_params,
             expected_step_id=payload.expected_step_id,
+            expected_plan_id=payload.expected_plan_id,
             ui_action=payload.ui_action,
             strategy_input=strategy_input,
             strategy_request=(

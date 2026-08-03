@@ -99,7 +99,7 @@ def test_pool_templates_instantiate_against_the_real_tool_manifests(
             "expected_pool_snapshot_hash": "9" * 64,
             "source_artifact_id": "artifact-1",
             "expected_artifact_content_hash": "b" * 64,
-            "expected_asset_id": "candidate-asset-" + "c" * 32,
+            "expected_asset_id": "scorecard-band-asset-" + "c" * 32,
             "expected_asset_hash": "d" * 64,
             "default_action": {"type": "approval", "value": "approve"},
             "action": {"type": "reject", "value": "reject"},
@@ -135,3 +135,16 @@ def test_pool_templates_instantiate_against_the_real_tool_manifests(
         )
         assert validator.validate(plan) == []
         assert plan.steps[0].needs_confirmation is False
+
+    unknown_asset = planner.from_template(
+        get_template("strategy_pool_add_candidate"),
+        {
+            **slots_by_template["strategy_pool_add_candidate"],
+            "expected_asset_id": "unknown-asset-" + "f" * 32,
+        },
+        task_id="task-1",
+    )
+    assert any(
+        "schema validation failed" in problem
+        for problem in validator.validate(unknown_asset)
+    )

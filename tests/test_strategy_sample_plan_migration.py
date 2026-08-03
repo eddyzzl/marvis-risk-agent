@@ -307,6 +307,7 @@ def test_non_strategy_turn_is_not_subject_to_strategy_plan_migration_guard(
         dedup_strategies=None,
         adjust_params=None,
         expected_step_id=None,
+        expected_plan_id=None,
         confirmation_source="human",
     )
 

@@ -3,8 +3,75 @@ import pandas as pd
 import pytest
 
 from marvis.data.backend import DataBackend
+from marvis.data.errors import NanLabelNotConfirmedError
 from marvis.feature.errors import FitRequiresSplitError
 from marvis.packs.modeling.select import SelectionResult, select_features
+
+
+def test_select_features_accepts_named_multiclass_labels(tmp_path):
+    rows = 90
+    frame = pd.DataFrame(
+        {
+            "signal": np.linspace(-1.0, 1.0, rows),
+            "noise": np.random.RandomState(31).normal(size=rows),
+            "risk_band_target": np.resize(["low", "mid", "high"], rows),
+            "split": ["train"] * 60 + ["test"] * 30,
+        }
+    )
+    path = tmp_path / "select_named_multiclass.parquet"
+    frame.to_parquet(path, index=False)
+
+    result = select_features(
+        DataBackend(tmp_path),
+        path,
+        features=["signal", "noise"],
+        target_col="risk_band_target",
+        target_type="multiclass",
+        split_col="split",
+    )
+
+    assert result.selected == ("signal", "noise")
+    assert result.fit_rows == 60
+    assert result.fit_split == "train"
+
+
+def test_select_features_requires_confirmation_for_multiclass_infinite_labels(tmp_path):
+    frame = pd.DataFrame(
+        {
+            "signal": np.linspace(-1.0, 1.0, 12),
+            "risk_band_target": [
+                0.0, 1.0, 2.0, 0.0, np.inf, 1.0,
+                2.0, 0.0, -np.inf, 1.0, 2.0, 0.0,
+            ],
+            "split": ["train"] * 12,
+        }
+    )
+    path = tmp_path / "select_multiclass_infinite_labels.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    with pytest.raises(NanLabelNotConfirmedError) as excinfo:
+        select_features(
+            backend,
+            path,
+            features=["signal"],
+            target_col="risk_band_target",
+            target_type="multiclass",
+            split_col="split",
+        )
+
+    assert excinfo.value.n_nan == 2
+    result = select_features(
+        backend,
+        path,
+        features=["signal"],
+        target_col="risk_band_target",
+        target_type="multiclass",
+        split_col="split",
+        drop_nan_labels=True,
+    )
+    assert result.nan_labels_dropped == 2
+    assert result.selected == ("signal",)
 
 
 def test_select_features_reads_wide_candidates_in_memory_bounded_batches(tmp_path, monkeypatch):

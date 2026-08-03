@@ -21,6 +21,7 @@ def test_feature_binning_gate_renders_optional_multiselect_and_bin_count():
         "if (!html.includes('跳过分箱并生成报告')) throw new Error('missing skip action');",
         "if (!html.includes('分析所选特征并生成报告')) throw new Error('missing selected action');",
         "if (!html.includes('x1') || !html.includes('推荐')) throw new Error('missing candidate context');",
+        "if (!html.includes('feature-binning-option-title')) throw new Error('missing compact title row');",
         "const readonly = renderFeatureBinningGate({metadata:{feature_binning:{features:[{feature:'x1'}]}}}, {interactive:false});",
         "if (!readonly.includes(' disabled')) throw new Error('agent evidence must be read-only');",
     ])
@@ -41,3 +42,25 @@ def test_feature_binning_gate_is_wired_to_shared_manual_and_agent_surfaces():
     assert "meta.feature_binning" in manual
     assert 'ui_action: "confirm_feature_binning"' in component
     assert 'adjust_params: { features, bins }' in component
+
+
+def test_feature_binning_gate_resets_global_form_styles_and_keeps_copy_readable():
+    styles = (STATIC / "css" / "v2-workbench.css").read_text(encoding="utf-8")
+
+    assert '.feature-binning-option > input[type="checkbox"]' in styles
+    assert "inline-size: 18px" in styles
+    assert "min-inline-size: 18px" in styles
+    assert "grid-template-columns: 18px minmax(0, 1fr)" in styles
+    assert "overflow-x: hidden" in styles
+    assert "scrollbar-gutter: stable" in styles
+    assert ".feature-binning-actions:empty" in styles
+    assert "display: none" in styles[
+        styles.index(".feature-binning-actions:empty"):
+        styles.index("}", styles.index(".feature-binning-actions:empty"))
+    ]
+
+    copy_start = styles.index(".feature-binning-option-main small {")
+    copy_rule = styles[copy_start:styles.index("}", copy_start)]
+    assert "white-space: normal" in copy_rule
+    assert "overflow-wrap: anywhere" in copy_rule
+    assert "text-overflow: ellipsis" not in copy_rule

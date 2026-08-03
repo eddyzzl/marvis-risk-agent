@@ -4,6 +4,7 @@ export function renderModelingSetupPanel(message, options = {}) {
   const setup = message?.metadata?.modeling_setup;
   if (!setup || typeof setup !== "object") return "";
   const messageId = message?.id ? String(message.id) : "";
+  const planId = message?.metadata?.plan_id ? String(message.metadata.plan_id) : "";
   const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
   const candidates = Array.isArray(setup.sample_weight_candidates)
     ? setup.sample_weight_candidates.map((value) => String(value)).filter(Boolean)
@@ -211,7 +212,7 @@ export function renderModelingSetupPanel(message, options = {}) {
   const journeyNav = journey.map(([id, label, note], index) => `<button type="button" class="modeling-journey-node${index === 0 ? " is-active" : ""}" data-modeling-step-jump="${id}" data-step-index="${index + 1}" aria-current="${index === 0 ? "step" : "false"}"${disabledAttr}>
     <span>${index + 1}</span><strong>${label}</strong><small>${note}</small>
   </button>`).join("");
-  return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}" data-current-split-config="${escapeHtml(JSON.stringify(splitConfig))}" data-modeling-active-step="split"${interactive ? "" : ' data-modeling-readonly="true"'}>
+  return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-plan-id="${escapeHtml(planId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}" data-current-split-config="${escapeHtml(JSON.stringify(splitConfig))}" data-modeling-active-step="split"${interactive ? "" : ' data-modeling-readonly="true"'}>
     <div class="modeling-setup-head">
       <span class="modeling-setup-title"><small>Agent 建模协作台</small><strong>一起确定这次模型怎么做</strong></span>
       <span class="modeling-setup-status"><i></i>${interactive ? "等待你逐步确认" : "历史规格"}</span>
@@ -290,6 +291,7 @@ export async function submitModelingWeightAdjust(button, context = {}) {
     return;
   }
   const expectedStepId = form.dataset.modelingGateStepId || "";
+  const expectedPlanId = form.dataset.modelingPlanId || "";
   if (!expectedStepId) {
     setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
@@ -314,9 +316,10 @@ export async function submitModelingWeightAdjust(button, context = {}) {
     const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
       method: "POST",
       body: JSON.stringify({
-        content: hasAdjustments ? (reason ? `调整建模规格：${reason}` : "调整建模规格") : "确认建模设置",
+        content: hasAdjustments ? (reason ? `调整建模规格：${reason}` : "调整建模规格") : "确认",
         ui_action: hasAdjustments ? "apply_modeling_setup" : "confirm_gate",
         ...(hasAdjustments ? { adjust_params: adjustParams } : {}),
+        expected_plan_id: expectedPlanId,
         expected_step_id: expectedStepId,
         acceptance_mode: typeof context.agentAcceptanceModeValue === "function"
           ? context.agentAcceptanceModeValue()
@@ -417,10 +420,15 @@ function selectedSplitConfig(form, current) {
   const testPercent = Number(form.querySelector(".modeling-test-size-input")?.value || 25);
   const ootPercent = Number(form.querySelector(".modeling-oot-size-input")?.value || 20);
   const timeColumn = String(form.querySelector(".modeling-time-column-select")?.value || "").trim();
-  const selected = {
-    ...current,
-    test_size: testPercent / 100,
-  };
+  const selected = { ...current };
+  // An empty split_config means "keep the setup's existing 75/25 split". The
+  // form renders that effective default as 25%; leaving it untouched must be a
+  // confirmation, not a synthetic adjustment that reruns the same gate.
+  if (Object.prototype.hasOwnProperty.call(current, "test_size") || testPercent !== 25) {
+    selected.test_size = testPercent / 100;
+  } else {
+    delete selected.test_size;
+  }
   delete selected.oot_by_time;
   delete selected.random_oot;
   delete selected.oot_size;

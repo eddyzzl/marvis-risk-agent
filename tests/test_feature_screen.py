@@ -505,6 +505,74 @@ def test_screen_non_binary_multiclass_ranks_by_one_vs_rest_auc(tmp_path):
     assert result.scores["informative"]["assoc_score"] > result.scores["noise"]["assoc_score"]
 
 
+def test_screen_non_binary_multiclass_accepts_string_class_labels(tmp_path):
+    """String class names are valid labels and must not be coerced to floats."""
+
+    rows = 150
+    rng = np.random.RandomState(14)
+    target = np.resize(["low", "mid", "high"], rows)
+    class_level = {"low": 0.0, "mid": 1.0, "high": 2.0}
+    informative = np.array([class_level[value] for value in target]) + rng.normal(
+        scale=0.1,
+        size=rows,
+    )
+    noise = rng.normal(size=rows)
+    frame = pd.DataFrame(
+        {
+            "noise": noise,
+            "informative": informative,
+            "risk_band_target": target,
+        }
+    )
+    backend, path = _write(tmp_path, frame, name="non_binary_mc_string.parquet")
+
+    result = screen_features_non_binary(
+        backend,
+        path,
+        features=["noise", "informative"],
+        target_col="risk_band_target",
+        target_type="multiclass",
+    )
+
+    assert result.selected == ("informative", "noise")
+    assert result.scores["informative"]["assoc_score"] > result.scores["noise"]["assoc_score"]
+
+
+def test_screen_multiclass_requires_confirmation_for_numeric_infinite_labels(tmp_path):
+    """Numeric infinities are invalid labels, not legitimate multiclass levels."""
+
+    from marvis.data.errors import NanLabelNotConfirmedError
+
+    frame = pd.DataFrame(
+        {
+            "feature": np.linspace(0.0, 1.0, 12),
+            "target": [0.0, 1.0, 2.0, 0.0, np.inf, 1.0, 2.0, 0.0, -np.inf, 1.0, 2.0, 0.0],
+        }
+    )
+    backend, path = _write(tmp_path, frame, name="multiclass_infinite_labels.parquet")
+
+    with pytest.raises(NanLabelNotConfirmedError) as excinfo:
+        screen_features_non_binary(
+            backend,
+            path,
+            features=["feature"],
+            target_col="target",
+            target_type="multiclass",
+        )
+
+    assert excinfo.value.n_nan == 2
+    result = screen_features_non_binary(
+        backend,
+        path,
+        features=["feature"],
+        target_col="target",
+        target_type="multiclass",
+        drop_nan_labels=True,
+    )
+    assert result.nan_labels_dropped == 2
+    assert result.selected == ("feature",)
+
+
 def test_screen_non_binary_requires_nan_label_confirmation_and_reports_drop(tmp_path):
     """Regression/multiclass screening must not coerce an unknown class to negative."""
 

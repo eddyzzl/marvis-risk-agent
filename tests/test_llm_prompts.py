@@ -26,7 +26,7 @@ _LOCKED_HASHES = {
     "CRITIC_SYS": (1, "b9aef8096c81cc56"),
     "CLASSIFY_SYS": (1, "b74f7d825f9b1b10"),
     "GATE_SYSTEM_TEMPLATE": (1, "7ae1a3768ff2aaa6"),
-    "GATE_INSTRUCTION_ROUTER_SYS": (2, "eb58b594db562c99"),
+    "GATE_INSTRUCTION_ROUTER_SYS": (7, "a217f6f1aeaade6a"),
     "WORKFLOW_INSIGHT_SYS": (1, "7984417217ee72da"),
     "AGENT_SYSTEM_PROMPT": (2, "80ee6702aa4fc81e"),
     "WORD_CONCLUSION_SYSTEM_PROMPT": (2, "a3754910d82cf210"),
@@ -36,7 +36,8 @@ _LOCKED_HASHES = {
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
     "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
-    "STRATEGY_REQUEST_COMPILER_SYS": (51, "c9f6b9551c8e265c"),
+    "STRATEGY_REQUEST_COMPILER_SYS": (52, "687a8ca54ffccf43"),
+    "SAMPLE_DESIGN_V2_CORRECTION_SYS": (1, "6ffd79f3c4790e46"),
 }
 
 
@@ -76,7 +77,10 @@ def test_prompt_version_snapshot_covers_all_prompts():
 
 
 def test_strategy_compiler_prompt_owns_pool_materialization_contract():
-    assert STRATEGY_REQUEST_COMPILER_SYS.version == 51
+    assert STRATEGY_REQUEST_COMPILER_SYS.version == 52
+    assert "scorecard_model_score_evidence_build" in (
+        STRATEGY_REQUEST_COMPILER_SYS.text
+    )
     assert "strategy_pool_materialize" in STRATEGY_REQUEST_COMPILER_SYS.text
     assert "draft Strategy" in STRATEGY_REQUEST_COMPILER_SYS.text
     assert "不采纳、不部署" in STRATEGY_REQUEST_COMPILER_SYS.text

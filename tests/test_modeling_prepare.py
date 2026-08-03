@@ -61,6 +61,52 @@ def test_prepare_modeling_frame_uses_existing_split_and_selected_columns(tmp_pat
     assert out["split"].tolist() == ["train", "train", "test", "oot"]
 
 
+def test_prepare_modeling_frame_explicit_split_config_overrides_existing_split(tmp_path):
+    """The modeling setup UI can replace an uploaded split with time/random/no
+    OOT.  A non-empty split_config is therefore an explicit override, not a
+    no-op merely because the source already has a split column.
+    """
+
+    months = ["2025-10", "2025-11", "2025-12", "2026-01"]
+    frame = pd.DataFrame(
+        {
+            "row_id": list(range(100)),
+            "apply_month": [months[index % len(months)] for index in range(100)],
+            "x": [index % 7 for index in range(100)],
+            "y": [index % 2 for index in range(100)],
+            # Deliberately incompatible with the requested time OOT so a
+            # pass-through implementation cannot satisfy the assertions.
+            "split": ["train"] * 70 + ["test"] * 20 + ["oot"] * 10,
+        }
+    )
+    backend, registry, dataset = _register_frame(tmp_path, frame)
+
+    result = prepare_modeling_frame(
+        registry,
+        backend,
+        dataset.id,
+        target_col="y",
+        feature_cols=["row_id", "x"],
+        split_col="split",
+        split_config={
+            "test_size": 0.25,
+            "oot_by_time": "apply_month",
+            "oot_size": 0.2,
+        },
+        passthrough_cols=["apply_month"],
+        seed=5,
+    )
+    out = backend.read_frame(registry.resolve_path(result.id))
+
+    assert out["split"].value_counts().to_dict() == {
+        "train": 57,
+        "test": 18,
+        "oot": 25,
+    }
+    assert set(out.loc[out["split"] == "oot", "apply_month"]) == {"2026-01"}
+    assert not (out.loc[out["split"] == "test", "apply_month"] == "2026-01").any()
+
+
 def test_prepare_modeling_frame_reads_duckdb_canonical_name_for_blank_parquet_column(
     tmp_path,
     monkeypatch,

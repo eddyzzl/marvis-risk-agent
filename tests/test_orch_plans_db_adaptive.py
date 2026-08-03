@@ -197,6 +197,118 @@ def test_replan_preserves_mandatory_governance_policy_when_step_is_retained(tmp_
     assert loaded.steps[1].policy.human_decision_gate == "required"
 
 
+def test_user_instruction_replan_cannot_delete_unrun_pending_human_only_gate(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _plan()
+    plan.steps[1].needs_confirmation = True
+    plan.steps[1].policy = GovernancePolicy(human_decision_gate="required")
+    repo.create_plan(plan)
+
+    with pytest.raises(ConflictError, match="mandatory governance policy"):
+        repo.replace_remaining_steps(
+            "plan-1",
+            _plan(_step("step-1", 0)),
+            loop_event={
+                "type": "replan",
+                "reason": "user_instruction",
+                "instruction": "删除这个可选分析步骤",
+            },
+        )
+
+    loaded = repo.load_plan("plan-1")
+    assert [step.id for step in loaded.steps] == ["step-1", "step-2"]
+    assert loaded.replan_count == 0
+    assert loaded.loop_events == []
+
+
+@pytest.mark.parametrize(
+    ("loop_event", "effect_authorization", "seed_run"),
+    [
+        (
+            {"type": "replan", "reason": "failure"},
+            False,
+            False,
+        ),
+        (
+            {"type": "replan", "reason": "user_instruction"},
+            False,
+            False,
+        ),
+        (
+            {
+                "type": "replan",
+                "reason": "user_instruction",
+                "instruction": "删除这个可选分析步骤",
+            },
+            True,
+            False,
+        ),
+        (
+            {
+                "type": "replan",
+                "reason": "user_instruction",
+                "instruction": "删除这个可选分析步骤",
+            },
+            False,
+            True,
+        ),
+    ],
+    ids=[
+        "non-user-reason",
+        "user-reason-without-instruction",
+        "effect-authorization",
+        "already-ran",
+    ],
+)
+def test_replan_still_rejects_unsafe_mandatory_gate_deletion(
+    tmp_path,
+    loop_event,
+    effect_authorization,
+    seed_run,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _plan()
+    plan.steps[1].needs_confirmation = True
+    if effect_authorization:
+        plan.steps[1].policy = GovernancePolicy(
+            human_decision_gate="required",
+            effect_authorization="required",
+            effect_target=EffectTargetPolicy(
+                kind="strategy",
+                id_input="strategy_id",
+                expected_statuses=("draft",),
+                result_status="adopted",
+            ),
+        )
+        plan.steps[1].inputs = {"strategy_id": "strategy-1"}
+    else:
+        plan.steps[1].policy = GovernancePolicy(human_decision_gate="required")
+    repo.create_plan(plan)
+    if seed_run:
+        stored = repo.load_plan("plan-1").steps[1]
+        stored.status = StepStatus.RUNNING
+        repo.update_step(stored)
+        repo.start_step_run(
+            plan_id="plan-1",
+            step_id="step-2",
+            tool_ref="_sample.echo",
+            inputs={"message": "hi"},
+        )
+        stored.status = StepStatus.PENDING
+        repo.update_step(stored)
+
+    with pytest.raises(ConflictError, match="mandatory governance policy"):
+        repo.replace_remaining_steps(
+            "plan-1",
+            _plan(_step("step-1", 0)),
+            loop_event=loop_event,
+        )
+
+
 def test_plan_repository_appends_steps_and_lists_recent_failed_refs(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

@@ -42,9 +42,15 @@ const GATE_CONFIRM_LABELS = {
   screen_features: "确认所选特征",
   select_features: "确认所选特征",
   train_model: "确认并开始训练",
+  configure_tuning: "确认调参配置",
   tune_hyperparameters: "确认并开始调参",
+  select_experiment: "确认所选实验",
+  generate_model_report: "确认并生成报告",
+  generate_model_reports: "确认并生成报告",
+  post_training_action: "确认模型交付",
   resolve_special_values: "确认治理策略并继续",
   adopt_strategy: "填写理由并采纳",
+  apply_monitoring_disposition: "确认知悉",
 };
 
 export function gateConfirmLabel(toolName) {
@@ -54,13 +60,17 @@ export function gateConfirmLabel(toolName) {
 export function renderDriverGateButton(message, options = {}) {
   if (message?.metadata?.kind !== "gate") return "";
   if (gateHasStructuredWidget(message)) return "";
+  const expectedPlanId = message?.metadata?.plan_id ? String(message.metadata.plan_id) : "";
   const expectedStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  const expectedPlanAttr = expectedPlanId
+    ? ` data-expected-plan-id="${escapeHtml(expectedPlanId)}"`
+    : "";
   const expectedAttr = expectedStepId
     ? ` data-expected-step-id="${escapeHtml(expectedStepId)}"`
     : "";
   const label = gateConfirmLabel(options.gateStepTool || "");
   return '<div class="driver-gate-actions gate-action-bar">'
-    + `<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1"${expectedAttr}>${escapeHtml(label)}</button>`
+    + `<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1"${expectedPlanAttr}${expectedAttr}>${escapeHtml(label)}</button>`
     + "</div>";
 }
 
@@ -93,8 +103,10 @@ export async function submitDriverConfirm(button, context = {}) {
     setDriverExecutionBusy,
   } = driverConfirmContext(context);
   if (!taskId || typeof api !== "function") return;
+  const expectedPlanId = button?.getAttribute?.("data-expected-plan-id") || "";
   const expectedStepId = button?.getAttribute?.("data-expected-step-id") || "";
   const body = { content: "确认", ui_action: expectedStepId ? "confirm_gate" : "start_plan" };
+  if (expectedPlanId) body.expected_plan_id = expectedPlanId;
   if (expectedStepId) body.expected_step_id = expectedStepId;
   button.disabled = true;
   setDriverExecutionBusy(true, taskId);

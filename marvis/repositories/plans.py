@@ -1124,8 +1124,15 @@ class PlanRepository:
         payload = plan_to_dict(new_plan)
         with connect(self.db_path) as conn:
             loop_events = _load_plan_loop_events(conn, plan_id)
-            _append_normalized_loop_event(loop_events, loop_event)
-            _assert_mandatory_policies_preserved(conn, plan_id, payload["steps"])
+            normalized_loop_event = _normalize_loop_event(loop_event)
+            if normalized_loop_event is not None:
+                loop_events.append(normalized_loop_event)
+            _assert_mandatory_policies_preserved(
+                conn,
+                plan_id,
+                payload["steps"],
+                loop_event=normalized_loop_event,
+            )
             completed_rows = conn.execute(
                 """
                 SELECT id
@@ -1571,6 +1578,8 @@ def _assert_mandatory_policies_preserved(
     conn: sqlite3.Connection,
     plan_id: str,
     replacement_steps: list[dict],
+    *,
+    loop_event: dict | None = None,
 ) -> None:
     """Prevent adaptive replanning from deleting or weakening a human gate.
 
@@ -1582,8 +1591,14 @@ def _assert_mandatory_policies_preserved(
 
     rows = conn.execute(
         """
-        SELECT id, tool_plugin, tool_name, tool_version, needs_confirmation,
-               policy_json
+        SELECT plan_steps.id, plan_steps.tool_plugin, plan_steps.tool_name,
+               plan_steps.tool_version, plan_steps.needs_confirmation,
+               plan_steps.policy_json, plan_steps.status,
+               EXISTS (
+                   SELECT 1
+                     FROM plan_step_runs
+                    WHERE plan_step_runs.step_id = plan_steps.id
+               ) AS has_run
           FROM plan_steps
          WHERE plan_id = ?
            AND status NOT IN ('done', 'skipped')
@@ -1609,6 +1624,9 @@ def _assert_mandatory_policies_preserved(
             continue
         replacement = replacements.get(str(row["id"]))
         if replacement is None:
+            # Free-form instructions and planner output are not authorization.
+            # A mandatory human/effect gate must remain present until a future
+            # typed, target-bound governance action explicitly supports removal.
             raise ConflictError(
                 f"mandatory governance policy step {row['id']} cannot be deleted by replan"
             )

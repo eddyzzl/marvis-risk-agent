@@ -175,9 +175,10 @@ def test_compile_uses_deterministic_json_schema_call_and_returns_confirmation() 
     assert call["response_format"] == {"type": "json_object"}
     assert call["json_schema"] == STRATEGY_REQUEST_JSON_SCHEMA
     assert call["stream"] is False
+    assert call["max_tokens"] == 8192
     assert call["caller"] == "strategy_request_compiler"
     assert call["prompt_name"] == "STRATEGY_REQUEST_COMPILER_SYS"
-    assert call["prompt_version"] == 51
+    assert call["prompt_version"] == 52
     assert set(result.to_dict()) == {"draft", "clarification", "confirmation"}
 
 
@@ -724,6 +725,185 @@ def test_standard_workflow_union_validates_and_echoes_exact_inputs(
     assert workflow in STANDARD_STRATEGY_WORKFLOWS
     for fragment in confirmation_fragments:
         assert fragment in result.confirmation
+
+
+def test_roll_rate_status_accepts_observed_target_excluded_from_feature_whitelist() -> None:
+    result = validate_strategy_request(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "roll_rate_matrix",
+            "workflow_inputs": {
+                "id_col": "account_id",
+                "time_col": "mob",
+                "status_col": "bad",
+                "states": ["0", "1"],
+                "balance_col": "balance",
+                "observation_semantics": "adjacent_observation",
+            },
+        },
+        allowed_columns=["account_id", "mob", "balance"],
+        target_col="bad",
+    )
+
+    assert result.draft is not None
+    assert result.draft.workflow_inputs["status_col"] == "bad"
+
+
+def _roll_rate_payload(*, time_col: str = "mob") -> dict:
+    return {
+        "request_kind": "standard_workflow",
+        "workflow": "roll_rate_matrix",
+        "workflow_inputs": {
+            "id_col": "account_id",
+            "time_col": time_col,
+            "status_col": "bad",
+            "states": ["0", "1"],
+            "balance_col": "balance",
+            "observation_semantics": "adjacent_observation",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        (
+            "客户 ID 字段 account_id；时间字段 mob；状态字段 bad；"
+            "使用 balance 作为余额权重。"
+        ),
+        (
+            "run roll rate with id_col=account_id, time_col=mob, "
+            "status_col=bad, balance_col=balance"
+        ),
+    ],
+)
+def test_roll_rate_explicit_role_bindings_accept_exact_draft(utterance: str) -> None:
+    llm = _SequencedLLM(_roll_rate_payload())
+
+    result = compile_strategy_request(
+        utterance,
+        allowed_columns=["account_id", "mob", "date", "balance"],
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is not None
+    assert result.draft.workflow_inputs["time_col"] == "mob"
+    assert len(llm.calls) == 1
+
+
+def test_roll_rate_legal_but_conflicting_column_gets_one_structured_correction() -> None:
+    llm = _SequencedLLM(
+        _roll_rate_payload(time_col="date"),
+        _roll_rate_payload(time_col="mob"),
+    )
+
+    result = compile_strategy_request(
+        (
+            "客户 ID 字段 account_id；时间字段 mob；状态字段 bad；"
+            "使用 balance 作为余额权重。"
+        ),
+        allowed_columns=["account_id", "mob", "date", "balance"],
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is not None
+    assert result.draft.workflow_inputs["time_col"] == "mob"
+    assert len(llm.calls) == 2
+    assert "roll_rate_column_binding_not_grounded" in llm.calls[1]["user_prompt"]
+    assert llm.calls[1]["response_format"] == {"type": "json_object"}
+    assert llm.calls[1]["json_schema"] == STRATEGY_REQUEST_JSON_SCHEMA
+
+
+def test_roll_rate_structured_correction_stops_safely_when_still_conflicting() -> None:
+    llm = _SequencedLLM(
+        _roll_rate_payload(time_col="date"),
+        _roll_rate_payload(time_col="date"),
+    )
+
+    result = compile_strategy_request(
+        "id_col=account_id；time_col=mob；status_col=bad；balance_col=balance",
+        allowed_columns=["account_id", "mob", "date", "balance"],
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is None
+    assert result.clarification_code == "roll_rate_column_binding_not_grounded"
+    assert result.clarification_fields == ("time_col",)
+    assert len(llm.calls) == 2
+
+
+def test_roll_rate_without_explicit_role_binding_keeps_llm_choice() -> None:
+    llm = _SequencedLLM(_roll_rate_payload(time_col="date"))
+
+    result = compile_strategy_request(
+        "请运行一份标准滚动率矩阵分析。",
+        allowed_columns=["account_id", "mob", "date", "balance"],
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is not None
+    assert result.draft.workflow_inputs["time_col"] == "date"
+    assert len(llm.calls) == 1
+
+
+def test_roll_rate_overlapping_explicit_column_mention_fails_closed() -> None:
+    llm = _SequencedLLM(_roll_rate_payload(time_col="申请月"))
+
+    result = compile_strategy_request(
+        (
+            "客户 ID 字段 account_id；时间字段申请月龄；状态字段 bad；"
+            "余额权重字段 balance。"
+        ),
+        allowed_columns=["account_id", "申请月", "月龄", "balance"],
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is None
+    assert result.clarification_code == "roll_rate_column_binding_not_grounded"
+    assert result.clarification_fields == ("workflow_inputs",)
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status_col", "ghost"),
+        ("id_col", "bad"),
+        ("time_col", "bad"),
+        ("balance_col", "bad"),
+    ],
+)
+def test_roll_rate_target_exception_is_limited_to_status_column(
+    field: str,
+    value: str,
+) -> None:
+    inputs = {
+        "id_col": "account_id",
+        "time_col": "mob",
+        "status_col": "status",
+        "states": ["0", "1"],
+        "balance_col": "balance",
+        "observation_semantics": "adjacent_observation",
+    }
+    inputs[field] = value
+
+    result = validate_strategy_request(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "roll_rate_matrix",
+            "workflow_inputs": inputs,
+        },
+        allowed_columns=["account_id", "mob", "status", "balance"],
+        target_col="bad",
+    )
+
+    assert result.draft is None
+    assert value in result.clarification
 
 
 def test_pricing_workflow_accepts_only_the_observed_target_as_target_risk_source() -> None:

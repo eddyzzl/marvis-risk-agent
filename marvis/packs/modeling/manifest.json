@@ -962,7 +962,8 @@
           },
           "n_trials": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 200
           },
           "params": {
             "type": "object"
@@ -1135,7 +1136,8 @@
           },
           "n_trials": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 200
           },
           "params": {
             "type": "object"
@@ -1171,7 +1173,8 @@
             "type": "object",
             "additionalProperties": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 200
             }
           },
           "cv_folds": {
@@ -1320,7 +1323,8 @@
           },
           "n_trials": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 1,
+            "maximum": 200
           },
           "early_stopping_rounds": {
             "type": "integer",
@@ -1372,7 +1376,8 @@
             "type": "object",
             "additionalProperties": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 200
             }
           },
           "cv_folds": {
@@ -2667,6 +2672,14 @@
           "selected_experiment_id": {
             "type": "string"
           },
+          "report_experiment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
           "artifact_id": {
             "type": "string"
           },
@@ -2715,6 +2728,7 @@
         },
         "required": [
           "selected_experiment_id",
+          "report_experiment_ids",
           "artifact_id",
           "selection_metric",
           "selection_reason",
@@ -3331,6 +3345,10 @@
               "minLength": 1
             },
             "minItems": 1
+          },
+          "selected_experiment_id": {
+            "type": "string",
+            "minLength": 1
           },
           "dataset_id": {
             "type": "string",

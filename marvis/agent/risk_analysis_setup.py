@@ -290,6 +290,11 @@ def advance_risk_analysis_setup(
         return _request_materials(
             analysis_kind,
             analysis_scope=_bounded_scope(user_text),
+            label_semantics=(
+                _parse_label_semantics(user_text)
+                if analysis_kind == STANDARD_VINTAGE
+                else None
+            ),
         )
 
     analysis_kind = str(previous.get("analysis_kind") or "")
@@ -299,13 +304,33 @@ def advance_risk_analysis_setup(
         return _request_materials(
             changed_kind,
             analysis_scope=_bounded_scope(user_text),
+            label_semantics=(
+                _parse_label_semantics(user_text)
+                if changed_kind == STANDARD_VINTAGE
+                else None
+            ),
         )
     if analysis_kind not in {VTG_TERMINAL, PROFITABILITY, STANDARD_VINTAGE}:
         return _ask_goal(clarify=True)
 
+    label_semantics = None
+    if analysis_kind == STANDARD_VINTAGE:
+        persisted_semantics = str(previous.get("label_semantics") or "").strip()
+        if persisted_semantics in {"incremental", "snapshot"}:
+            label_semantics = persisted_semantics
+        label_semantics = (
+            _parse_label_semantics(user_text)
+            or label_semantics
+            or _parse_label_semantics(analysis_scope)
+        )
+
     datasets = _ensure_registered_datasets(registry, task_id, source_dir)
     if not datasets:
-        return _await_no_data(analysis_kind, analysis_scope=analysis_scope)
+        return _await_no_data(
+            analysis_kind,
+            analysis_scope=analysis_scope,
+            label_semantics=label_semantics,
+        )
 
     if analysis_kind == STANDARD_VINTAGE:
         return _prepare_standard_vintage(
@@ -316,6 +341,7 @@ def advance_risk_analysis_setup(
             target_col=target_col,
             time_col=time_col,
             analysis_scope=analysis_scope,
+            label_semantics=label_semantics,
         )
 
     contract = _CONTRACTS[analysis_kind]
@@ -393,6 +419,32 @@ def _parse_explicit_analysis_switch(user_text: str | None) -> str | None:
     return parse_analysis_kind(user_text)
 
 
+def _parse_label_semantics(user_text: str | None) -> str | None:
+    text = _normalize_text(user_text)
+    if not text:
+        return None
+    incremental_tokens = ("incremental", "增量标签", "当期新增", "当期新发生")
+    snapshot_tokens = ("snapshot", "快照标签", "截至当期状态", "everbad")
+
+    def explicitly_negated(token: str) -> bool:
+        return any(
+            f"{prefix}{token}" in text
+            for prefix in ("不是", "并非", "而非", "非", "not", "不要")
+        )
+
+    incremental = any(
+        token in text and not explicitly_negated(token)
+        for token in incremental_tokens
+    )
+    snapshot = any(
+        token in text and not explicitly_negated(token)
+        for token in snapshot_tokens
+    )
+    if incremental == snapshot:
+        return None
+    return "incremental" if incremental else "snapshot"
+
+
 def material_contract(analysis_kind: str) -> dict:
     """Expose a JSON-safe contract for UI/tests without leaking internals."""
 
@@ -441,6 +493,7 @@ def _request_materials(
     analysis_kind: str,
     *,
     analysis_scope: str | None = None,
+    label_semantics: str | None = None,
 ) -> RiskAnalysisSetupDecision:
     scope_line = (
         f"\n- 已记录你的目标/范围：{analysis_scope}；报表覆盖上传表中的全部对应行。"
@@ -524,6 +577,8 @@ def _request_materials(
     state = {"phase": "request_materials", "analysis_kind": analysis_kind}
     if analysis_scope:
         state["analysis_scope"] = analysis_scope
+    if analysis_kind == STANDARD_VINTAGE and label_semantics is not None:
+        state["label_semantics"] = label_semantics
     return _chat_decision(
         content,
         state,
@@ -535,10 +590,13 @@ def _await_no_data(
     analysis_kind: str,
     *,
     analysis_scope: str | None = None,
+    label_semantics: str | None = None,
 ) -> RiskAnalysisSetupDecision:
     state = {"phase": "await_materials", "analysis_kind": analysis_kind}
     if analysis_scope:
         state["analysis_scope"] = analysis_scope
+    if analysis_kind == STANDARD_VINTAGE and label_semantics is not None:
+        state["label_semantics"] = label_semantics
     return _chat_decision(
         "还没有检测到已登记的数据表。请按上面的表/粒度/字段清单上传 CSV、XLSX 或 Parquet；"
         "上传完成后回复“材料已上传”，我再做契约检查。",
@@ -638,6 +696,7 @@ def _prepare_standard_vintage(
     target_col: str | None,
     time_col: str | None,
     analysis_scope: str | None = None,
+    label_semantics: str | None = None,
 ) -> RiskAnalysisSetupDecision:
     try:
         proposal = build_vintage_proposal(
@@ -656,6 +715,8 @@ def _prepare_standard_vintage(
         }
         if analysis_scope:
             state["analysis_scope"] = analysis_scope
+        if label_semantics is not None:
+            state["label_semantics"] = label_semantics
         return _chat_decision(
             f"标准 Vintage 材料还未通过字段检查：{exc} 请补充或重命名字段后重新上传。",
             state,
@@ -673,10 +734,19 @@ def _prepare_standard_vintage(
     }
     if analysis_scope:
         state["analysis_scope"] = analysis_scope
+    if label_semantics is not None:
+        state["label_semantics"] = label_semantics
+    slots = proposal.template_slots()
+    if label_semantics is not None:
+        slots["label_semantics"] = label_semantics
+    semantics_confirmation = (
+        f"，标签语义 `{label_semantics}`" if label_semantics is not None else ""
+    )
     return RiskAnalysisSetupDecision(
         content=(
             f"标准 Vintage 材料已通过：样本 `{proposal.dataset_name}`，cohort "
-            f"`{proposal.cohort_col}`，MOB `{proposal.mob_col}`，坏账列 `{proposal.bad_col}`。"
+            f"`{proposal.cohort_col}`，MOB `{proposal.mob_col}`，坏账列 `{proposal.bad_col}`"
+            f"{semantics_confirmation}。"
         ),
         metadata={
             "intent": "vintage",
@@ -684,7 +754,7 @@ def _prepare_standard_vintage(
             "risk_analysis_contract": material_contract(STANDARD_VINTAGE),
         },
         template_id=proposal.template_id,
-        slots=proposal.template_slots(),
+        slots=slots,
     )
 
 

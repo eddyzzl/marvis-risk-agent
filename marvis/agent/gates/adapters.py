@@ -90,6 +90,26 @@ def _monitoring_run_output(
     return {}
 
 
+def monitoring_verdict_error(
+    plan: Plan,
+    gate: PlanStep | None,
+    load_output: Callable[[str], Any],
+) -> str | None:
+    """Reject every monitoring disposition path without a trusted verdict."""
+
+    if (
+        gate is None
+        or gate.tool_ref is None
+        or gate.tool_ref.tool != "apply_monitoring_disposition"
+    ):
+        return None
+    output = _monitoring_run_output(plan, gate, load_output)
+    overall_level = str(output.get("overall_level") or "").strip().lower()
+    if overall_level not in {"green", "amber", "red"}:
+        return "本次监控缺少可信的绿/黄/红判级证据，不能确认处置；请先重新运行监控。"
+    return None
+
+
 @dataclass(frozen=True)
 class GateReplyContext:
     """Driver-side state a gate reply parser may need, adapter-agnostic.
@@ -409,6 +429,27 @@ class _MonitoringDispositionAdapter:
         return parse_monitoring_disposition(text)
 
     def apply(self, driver, plan: Plan, gate: PlanStep, parsed: str, *, run_seq) -> DriverTurn:
+        verdict_error = monitoring_verdict_error(
+            plan,
+            gate,
+            driver._safe_output,
+        )
+        if verdict_error:
+            return DriverTurn(
+                plan.id,
+                plan.status.value,
+                [
+                    DriverMessage(
+                        "gate",
+                        verdict_error,
+                        {
+                            "plan_id": plan.id,
+                            "step_id": gate.id,
+                            "run_seq": run_seq,
+                        },
+                    )
+                ],
+            )
         reason = f"人工选择监控处置：{parsed}"
         driver._apply_monitoring_disposition(gate, parsed, reason=reason)
         if parsed == "adjust_threshold" and not isinstance(
@@ -504,10 +545,14 @@ def monitoring_plain_confirm_error(
     ``observe`` or from executing an empty threshold revision.
     """
 
+    verdict_error = monitoring_verdict_error(plan, gate, load_output)
+    if verdict_error:
+        return verdict_error
     if gate is None or gate.tool_ref.tool != "apply_monitoring_disposition":
         return None
     output = _monitoring_run_output(plan, gate, load_output)
-    if str(output.get("overall_level") or "") != "red":
+    overall_level = str(output.get("overall_level") or "").strip().lower()
+    if overall_level in {"green", "amber"}:
         return None
     inputs = gate.inputs or {}
     disposition = inputs.get("disposition")
@@ -895,6 +940,7 @@ __all__ = [
     "gate_editable_input_schema",
     "get_gate_adapter",
     "monitoring_plain_confirm_error",
+    "monitoring_verdict_error",
     "parse_dedup_instruction",
     "parse_special_value_instruction",
     "parse_monitoring_disposition",

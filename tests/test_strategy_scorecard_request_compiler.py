@@ -34,6 +34,21 @@ def _build_payload(**inputs: object) -> dict:
     }
 
 
+def _model_score_payload(**overrides: object) -> dict:
+    inputs: dict[str, object] = {
+        "features": ["age", "income"],
+        "seed": 23,
+        "max_iter": 200,
+        "scorecard_max_bins": 4,
+    }
+    inputs.update(overrides)
+    return {
+        "request_kind": "standard_workflow",
+        "workflow": "scorecard_model_score_evidence_build",
+        "workflow_inputs": inputs,
+    }
+
+
 def _selection_payload(**overrides: object) -> dict:
     inputs: dict[str, object] = {
         "asset_id": ASSET_ID,
@@ -66,6 +81,46 @@ def test_scorecard_band_build_accepts_only_user_owned_banding(
     assert "Scorecard 完整分数带" in result.confirmation
     assert "不会自动选择" in result.confirmation
     assert "不会入池、应用、采纳或部署" in result.confirmation
+
+
+def test_scorecard_model_score_evidence_accepts_only_bounded_user_controls() -> None:
+    payload = _model_score_payload(sample_weight_col="weight")
+
+    result = validate_strategy_request(
+        payload,
+        allowed_columns=("age", "income", "weight"),
+        target_col="bad_flag",
+    )
+
+    assert result.draft is not None
+    assert result.draft.to_dict() == payload
+    assert "scorecard_model_score_evidence_build" in STANDARD_STRATEGY_WORKFLOWS
+    assert "Scorecard 训练与模型评分证据" in result.confirmation
+    assert "不比较、不选择、不采纳、不部署" in result.confirmation
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _model_score_payload(features=["age", "age"]),
+        _model_score_payload(features=["bad_flag"]),
+        _model_score_payload(features=["age"], sample_weight_col="age"),
+        _model_score_payload(seed=-1),
+        _model_score_payload(max_iter=19),
+        _model_score_payload(scorecard_max_bins=21),
+        _model_score_payload(model_artifact_id="forged"),
+    ],
+)
+def test_scorecard_model_score_evidence_rejects_invalid_controls(
+    payload: dict,
+) -> None:
+    result = validate_strategy_request(
+        payload,
+        allowed_columns=("age", "income", "weight"),
+        target_col="bad_flag",
+    )
+
+    assert result.draft is None
 
 
 @pytest.mark.parametrize(

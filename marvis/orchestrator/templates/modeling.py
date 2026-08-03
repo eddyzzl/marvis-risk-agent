@@ -195,6 +195,7 @@ MODELING = WorkflowTemplate(
         SlotSpec("recipe", True, "task_context", "Primary recipe to tune (lgb if among recipes)"),
         SlotSpec("recipes", True, "task_context", "Recipe ids to train + compare (≥1)"),
         SlotSpec("seed", True, "task_context", "Reproducibility seed"),
+        SlotSpec("n_trials", False, "task_context", "Per-recipe tuning trial budget", default=1),
         SlotSpec("split_config", False, "task_context", "Split rules/config for the G1 make_split gate (passthrough when empty)"),
         SlotSpec("target_type", False, "task_context", "Target type: binary, continuous, or multiclass"),
         SlotSpec("holdout_values", False, "task_context", "OOT split value(s) held out of the leakage screen"),
@@ -239,11 +240,9 @@ MODELING = WorkflowTemplate(
                 "sample_weight_col": "{slot:sample_weight_col}",
                 "sample_weight_candidates": "{slot:sample_weight_candidates}",
                 "sample_weight_diagnostics": "{slot:sample_weight_diagnostics}",
-                # Product default is one trial per recipe: enough to exercise the
-                # complete tuning/checkpoint path in the normal workflow without
-                # turning a smoke run into a long search.  Users may still widen
-                # the budget explicitly at the later tuning control.
-                "n_trials": 1,
+                # Product default is one trial per recipe, while an explicitly
+                # proposed first-turn budget is carried through this slot.
+                "n_trials": "{slot:n_trials}",
                 "params": "{slot:tuning_params}",
                 "seed": "{slot:seed}",
             },
@@ -453,7 +452,8 @@ MODELING = WorkflowTemplate(
             inputs_template={
                 # Preserve every trained version as a first-class report; the
                 # selected experiment remains the sole delivery Champion.
-                "experiment_ids": "$ref:训练模型.output.experiment_ids",
+                "experiment_ids": "$ref:选择实验.output.report_experiment_ids",
+                "selected_experiment_id": "$ref:选择实验.output.selected_experiment_id",
                 "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "business_columns": "{slot:business_columns}",
                 "feature_dictionary_id": "{slot:feature_dictionary_id}",
@@ -508,6 +508,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
         SlotSpec("recipe", True, "task_context", "Primary recipe to tune (lgb if among recipes)"),
         SlotSpec("recipes", True, "task_context", "Recipe ids to train + compare"),
         SlotSpec("seed", True, "task_context", "Reproducibility seed"),
+        SlotSpec("n_trials", False, "task_context", "Per-recipe tuning trial budget", default=1),
         SlotSpec("split_config", False, "task_context", "Split rules/config for the G1 make_split gate"),
         SlotSpec("target_type", False, "task_context", "Target type: binary, continuous, or multiclass"),
         SlotSpec("holdout_values", False, "task_context", "OOT split value(s) held out of the leakage screen"),
@@ -586,7 +587,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "sample_weight_col": "{slot:sample_weight_col}",
                 "sample_weight_candidates": "{slot:sample_weight_candidates}",
                 "sample_weight_diagnostics": "{slot:sample_weight_diagnostics}",
-                "n_trials": 1,
+                "n_trials": "{slot:n_trials}",
                 "params": "{slot:tuning_params}",
                 "seed": "{slot:seed}",
             },
@@ -771,7 +772,8 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             title="生成模型开发报告",
             tool_ref=ToolRef("modeling", "generate_model_reports"),
             inputs_template={
-                "experiment_ids": "$ref:训练模型.output.experiment_ids",
+                "experiment_ids": "$ref:选择实验.output.report_experiment_ids",
+                "selected_experiment_id": "$ref:选择实验.output.selected_experiment_id",
                 "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "business_columns": "{slot:business_columns}",
                 "feature_dictionary_id": "{slot:feature_dictionary_id}",

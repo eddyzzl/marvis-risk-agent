@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, Callable
@@ -19,7 +20,11 @@ from marvis.governance.errors import AuthorizationError
 from marvis.job_cancellation import JobCancelled
 from marvis.plugins.contracts import MAX_PROGRESS_BYTES, PROTOCOL_VERSION, WORKER_RESULT_SENTINEL
 from marvis.plugins.contracts import ToolContext as ToolContext  # noqa: F401 (re-exported for compatibility)
-from marvis.plugins.manifest import PluginManifest, ToolRef
+from marvis.plugins.manifest import (
+    PluginManifest,
+    ToolRef,
+    python_requires_satisfied,
+)
 from marvis.plugins.registry import ToolRegistry
 from marvis.plugins.schema_validation import validate_against_schema
 from marvis.plugins.errors import SchemaValidationError
@@ -165,7 +170,53 @@ class ToolRunner:
         self._rss_memory_limit_mb = rss_memory_limit_mb
         self._governance = governance
         self._binding_resolver = binding_resolver
+        self._worker_python_version: tuple[int, int, int] | None = None
+        self._worker_python_version_error: str | None = None
+        self._worker_python_version_lock = threading.Lock()
         _sweep_stale_progress_files(self._workspace)
+
+    def _worker_environment_error(
+        self,
+        manifest: PluginManifest,
+        target_ref: str,
+    ) -> str | None:
+        requirement = str(manifest.python_requires or "").strip()
+        if not requirement:
+            return None
+        version = self._configured_worker_python_version()
+        if version is None:
+            detail = self._worker_python_version_error or "unknown error"
+            return (
+                f"无法检查工具 {target_ref} 的运行环境 Python：{detail}。"
+                "请在“设置 → 执行环境”选择可用环境，并重启 MARVIS。"
+            )
+        if python_requires_satisfied(requirement, version):
+            return None
+        version_text = ".".join(str(part) for part in version)
+        return (
+            f"工具 {target_ref} 要求 Python {requirement}，"
+            f"但当前工具运行环境是 Python {version_text}"
+            f"（{self._python_executable}）。"
+            "请在“设置 → 执行环境”选择兼容环境，并重启 MARVIS。"
+        )
+
+    def _configured_worker_python_version(self) -> tuple[int, int, int] | None:
+        if self._worker_python_version is not None:
+            return self._worker_python_version
+        if self._worker_python_version_error is not None:
+            return None
+        with self._worker_python_version_lock:
+            if self._worker_python_version is not None:
+                return self._worker_python_version
+            if self._worker_python_version_error is not None:
+                return None
+            try:
+                self._worker_python_version = _python_version_for_executable(
+                    self._python_executable
+                )
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                self._worker_python_version_error = f"{type(exc).__name__}: {exc}"
+        return self._worker_python_version
 
     def invoke(
         self,
@@ -190,6 +241,24 @@ class ToolRunner:
             return self._finalize_audited_result(started, target_ref, inputs, result)
         except PermissionError as exc:
             result = _failed_result(started, "permission", str(exc))
+            return self._finalize_audited_result(started, target_ref, inputs, result)
+        environment_error = self._worker_environment_error(manifest, target_ref)
+        if environment_error is not None:
+            result = _failed_result(
+                started,
+                "environment",
+                environment_error,
+                error_detail={
+                    "kind": "worker_python_incompatible",
+                    "python_executable": str(self._python_executable),
+                    "python_requires": str(manifest.python_requires or ""),
+                    "worker_python_version": (
+                        ".".join(str(part) for part in self._worker_python_version)
+                        if self._worker_python_version is not None
+                        else ""
+                    ),
+                },
+            )
             return self._finalize_audited_result(started, target_ref, inputs, result)
         manifest_human_required = tool.policy.human_decision_gate == "required"
         manifest_effect_required = tool.policy.effect_authorization == "required"
@@ -1024,6 +1093,39 @@ class ToolRunner:
 
 def _has_binding_resolver(resolver) -> bool:
     return callable(getattr(resolver, "resolve_binding", None)) or callable(resolver)
+
+
+def _python_version_for_executable(executable: str) -> tuple[int, int, int]:
+    configured = Path(str(executable)).expanduser()
+    try:
+        if configured.resolve() == Path(sys.executable).resolve():
+            return tuple(int(part) for part in sys.version_info[:3])
+    except OSError:
+        pass
+    completed = subprocess.run(
+        [
+            str(executable),
+            "-c",
+            (
+                "import sys;"
+                "print('.'.join(str(part) for part in sys.version_info[:3]))"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if completed.returncode != 0:
+        detail = _tail(completed.stderr or completed.stdout) or (
+            f"exit code {completed.returncode}"
+        )
+        raise ValueError(detail)
+    raw = (completed.stdout or "").strip()
+    parts = raw.split(".")
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        raise ValueError(f"unexpected version output: {raw!r}")
+    return tuple(int(part) for part in parts)
 
 
 def _registered_manifest_for_module(

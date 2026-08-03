@@ -149,6 +149,11 @@ class PlanMessageComposer:
             meta["feature_binning"] = rendered.feature_binning
         if rendered.special_values is not None:
             meta["special_values"] = rendered.special_values
+        if rendered.monitoring_level is not None:
+            meta["monitoring_disposition"] = {
+                "overall_level": rendered.monitoring_level,
+                "requires_structured_input": rendered.monitoring_level == "red",
+            }
         if rendered.red_flags:
             # AGT-9: deterministic modeling red flags (computed in
             # gate_adapters.render_gate_dependencies straight from the tuning /
@@ -296,10 +301,13 @@ class PlanMessageComposer:
     ) -> None:
         if report_step is None or not isinstance(report_output, dict):
             return
-        label = (
-            "下载特征分析报告"
-            if report_step.tool_ref.tool == "generate_feature_report"
-            else "下载模型开发报告"
+        report_labels = {
+            "generate_feature_report": "下载特征分析报告",
+            "generate_risk_analysis_report": "下载风险分析报告",
+        }
+        label = report_labels.get(
+            report_step.tool_ref.tool,
+            "下载模型开发报告",
         )
         reports = driver_report_download_metadata(
             plan_id=plan.id,

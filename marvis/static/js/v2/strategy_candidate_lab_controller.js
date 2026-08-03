@@ -20,6 +20,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "cross_rule_search",
   "cross_rule_candidate_build_from_search",
   "automatic_tree_candidate_build",
+  "scorecard_model_score_evidence_build",
   "scorecard_band_build",
   "scorecard_cutoff_selection",
   "candidate_monthly_stability",
@@ -57,6 +58,7 @@ const WORKFLOW_LABELS = Object.freeze({
   cross_rule_search: "搜索 2D/3D Cross 阈值规则",
   cross_rule_candidate_build_from_search: "构建指定 Cross 阈值规则候选",
   automatic_tree_candidate_build: "启动自动规则树",
+  scorecard_model_score_evidence_build: "训练评分卡并生成模型评分证据",
   scorecard_band_build: "生成评分卡分档证据",
   scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
   candidate_monthly_stability: "测算候选逐月稳定性",
@@ -3019,6 +3021,43 @@ function parseRawPdBandEdges(value) {
   return edges;
 }
 
+function collectScorecardModelScoreEvidenceInputs(form) {
+  const features = uniqueValues(
+    splitValues(formValue(form, "scorecard_model_features")),
+    "评分卡建模特征",
+  );
+  if (!features.length || features.length > 50) {
+    throw new Error("评分卡建模特征必须包含 1 到 50 个独立字段。");
+  }
+  const inputs = {
+    features,
+    seed: parseRequiredInteger(
+      formValue(form, "scorecard_model_seed"),
+      "评分卡随机种子",
+      { min: 0, max: 4_294_967_295 },
+    ),
+    max_iter: parseRequiredInteger(
+      formValue(form, "scorecard_model_max_iter"),
+      "评分卡最大迭代次数",
+      { min: 20, max: 5_000 },
+    ),
+    scorecard_max_bins: parseRequiredInteger(
+      formValue(form, "scorecard_model_max_bins"),
+      "评分卡最大分箱数",
+      { min: 2, max: 20 },
+    ),
+  };
+  optionalText(
+    inputs,
+    "sample_weight_col",
+    formValue(form, "scorecard_model_sample_weight_col"),
+  );
+  if (inputs.sample_weight_col && features.includes(inputs.sample_weight_col)) {
+    throw new Error("评分卡样本权重列不能同时作为建模特征。");
+  }
+  return inputs;
+}
+
 function collectScorecardBandInputs(form) {
   const mode = formValue(form, "scorecard_banding_mode");
   if (mode === "equal_frequency") {
@@ -3305,6 +3344,38 @@ function collectSampleDesignV2Inputs(form) {
       reason: historicalReason,
     },
   };
+}
+
+export function syncSampleDesignV2StatusControls(form, fieldName) {
+  if (!form) return false;
+  if (fieldName === "sample_maturity_status") {
+    const status = formValue(form, fieldName);
+    const reason = formField(form, "sample_maturity_reason");
+    if (!reason) return false;
+    if (status === "confirmed_matured") {
+      reason.value = "";
+    } else if (
+      ["unknown", "unavailable"].includes(status)
+      && !nonEmptyText(reason.value)
+    ) {
+      reason.value = "暂未确认成熟度";
+    }
+    return true;
+  }
+  if (fieldName === "sample_historical_score_status") {
+    const status = formValue(form, fieldName);
+    const reason = formField(form, "sample_historical_score_reason");
+    if (!reason) return false;
+    if (status === "available") {
+      reason.value = "";
+    } else if (!nonEmptyText(reason.value)) {
+      reason.value = status === "not_applicable"
+        ? "历史分不适用"
+        : "暂未提供历史分";
+    }
+    return true;
+  }
+  return false;
 }
 
 function collectCandidateMonthlyStabilityInputs(form) {
@@ -4249,6 +4320,8 @@ export function collectStrategyCandidateLabRequest(form) {
     cross_rule_candidate_build_from_search:
       collectCrossRuleCandidateBuildInputs,
     automatic_tree_candidate_build: collectTreeInputs,
+    scorecard_model_score_evidence_build:
+      collectScorecardModelScoreEvidenceInputs,
     scorecard_band_build: collectScorecardBandInputs,
     scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
     candidate_monthly_stability: collectCandidateMonthlyStabilityInputs,
@@ -8458,6 +8531,17 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     const field = event.target?.closest?.("[data-candidate-lab-field]");
     if (!field) return false;
     const fieldName = field.dataset?.candidateLabField;
+    const sampleDesign = field.closest?.(
+      '[data-candidate-lab-workflow="strategy_sample_design_v2"]',
+    );
+    if (
+      sampleDesign
+      && syncSampleDesignV2StatusControls(sampleDesign, fieldName)
+    ) {
+      setFormError(sampleDesign, "");
+      renderAvailability();
+      return true;
+    }
     const adoption = field.closest?.(
       '[data-candidate-lab-workflow="strategy_lifecycle_adopt"]',
     );

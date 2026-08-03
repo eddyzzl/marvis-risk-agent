@@ -103,6 +103,7 @@ def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     split_col = _optional_str(inputs.get("split_col"))
+    split_config = inputs.get("split_config") or {}
     feature_cols = _resolve_feature_cols(
         runtime,
         dataset.id,
@@ -117,13 +118,13 @@ def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
         target_col=str(inputs["target_col"]),
         feature_cols=feature_cols,
         split_col=split_col,
-        split_config=inputs.get("split_config") or {},
+        split_config=split_config,
         passthrough_cols=[str(item) for item in inputs.get("passthrough_cols") or [] if str(item).strip()],
         seed=_effective_seed(inputs, ctx),
         audit_kind="modeling.dataset.derived",
         audit_detail={"tool": "prepare_modeling_frame"},
     )
-    split_col = split_col or "split"
+    split_col = SPLIT_COLUMN if split_config else (split_col or SPLIT_COLUMN)
     frame = runtime.backend.read_frame(runtime.registry.resolve_path(result.id), columns=[split_col])
     counts = {
         str(key): int(value)
@@ -151,6 +152,7 @@ def tool_make_split(inputs: dict, ctx) -> dict:
     # fallback). prepare_modeling_frame keeps the passed-through column's name, and names a
     # generated column SPLIT_COLUMN, so the effective name is one or the other.
     split_col = str(inputs["split_col"]) if inputs.get("split_col") else None
+    split_config = inputs.get("split_config") or {}
     dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     feature_cols = _resolve_feature_cols(
         runtime,
@@ -166,13 +168,13 @@ def tool_make_split(inputs: dict, ctx) -> dict:
         target_col=str(inputs["target_col"]),
         feature_cols=feature_cols,
         split_col=split_col,
-        split_config=inputs.get("split_config") or {},
+        split_config=split_config,
         passthrough_cols=[str(item) for item in inputs.get("passthrough_cols") or [] if str(item).strip()],
         seed=_effective_seed(inputs, ctx),
         audit_kind="modeling.dataset.derived",
         audit_detail={"tool": "make_split"},
     )
-    effective_split_col = split_col or SPLIT_COLUMN
+    effective_split_col = SPLIT_COLUMN if split_config else (split_col or SPLIT_COLUMN)
     split_frame = runtime.backend.read_frame(
         runtime.registry.resolve_path(result.id), columns=[effective_split_col]
     )

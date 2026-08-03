@@ -23,7 +23,11 @@ from __future__ import annotations
 import math
 
 import pandas as pd
-from pandas.api.types import is_datetime64_any_dtype
+from pandas.api.types import (
+    is_bool_dtype,
+    is_datetime64_any_dtype,
+    is_numeric_dtype,
+)
 
 from marvis.packs.strategy.contracts import RollRateMatrix
 from marvis.validation.vintage import RollRatePoint, compute_roll_rate
@@ -171,13 +175,40 @@ def _adjacent_pairs(
     return pd.DataFrame(rows, columns=columns_out), tuple(warnings)
 
 
-def _month_delta(earlier: pd.Timestamp, later: pd.Timestamp) -> int:
-    return (later.year - earlier.year) * 12 + (later.month - earlier.month)
+def _month_delta(earlier, later) -> int:
+    if isinstance(earlier, pd.Timestamp) and isinstance(later, pd.Timestamp):
+        return (later.year - earlier.year) * 12 + (later.month - earlier.month)
+    numeric_delta = float(later) - float(earlier)
+    if numeric_delta <= 0:
+        raise ValueError("numeric time values must be strictly increasing per id")
+    rounded = round(numeric_delta)
+    return int(rounded) if math.isclose(numeric_delta, rounded) else 1
 
 
 def _parse_time_order(values: pd.Series) -> pd.Series:
     if is_datetime64_any_dtype(values):
         return pd.to_datetime(values, errors="raise")
+    if is_numeric_dtype(values):
+        if is_bool_dtype(values):
+            raise ValueError("time_col boolean values are not a numeric sequence")
+        numeric = pd.to_numeric(values, errors="raise").astype(float)
+        if numeric.isna().any() or not numeric.map(math.isfinite).all():
+            raise ValueError("time_col numeric values must be finite")
+        integral = numeric.map(float.is_integer)
+        numeric_yyyymm = integral & numeric.between(100000, 999999)
+        if numeric_yyyymm.any():
+            if not numeric_yyyymm.all():
+                raise ValueError(
+                    "time_col must not mix numeric YYYYMM labels with numeric MOB values"
+                )
+            try:
+                month_labels = numeric.astype("int64").astype(str)
+                return pd.to_datetime(month_labels, format="%Y%m", errors="raise")
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "time_col numeric YYYYMM values must be valid calendar months"
+                ) from exc
+        return numeric
     try:
         return pd.Series([_parse_time_value(value) for value in values], index=values.index)
     except Exception as exc:

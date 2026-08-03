@@ -37,6 +37,44 @@ class _JsonResponse:
         ])
 
 
+class _ReasoningJsonResponse:
+    def __init__(
+        self,
+        *,
+        content: str,
+        reasoning_content: str,
+        finish_reason: str,
+        reasoning_tokens: int,
+    ) -> None:
+        self.payload = {
+            "choices": [
+                {
+                    "finish_reason": finish_reason,
+                    "message": {
+                        "content": content,
+                        "reasoning_content": reasoning_content,
+                    },
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": reasoning_tokens,
+                "completion_tokens_details": {
+                    "reasoning_tokens": reasoning_tokens,
+                },
+            },
+        }
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def __iter__(self):
+        return iter([json.dumps(self.payload).encode("utf-8")])
+
+
 class _InterruptedStreamingResponse:
     def __enter__(self):
         return self
@@ -254,6 +292,21 @@ class _JsonResponseWithUsage:
         ])
 
 
+class _EmptyJsonResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def __iter__(self):
+        return iter([
+            b'{"choices":[{"message":{"content":'
+            b'"<think>reasoning only</think>   "}}],'
+            b'"usage":{"prompt_tokens":11,"completion_tokens":7}}',
+        ])
+
+
 def test_complete_invokes_on_call_recorded_with_usage(monkeypatch):
     def fake_urlopen(request, timeout):
         return _JsonResponseWithUsage()
@@ -353,6 +406,175 @@ def test_transient_failure_is_retried_once_then_succeeds(monkeypatch):
     assert calls["n"] == 2
     assert records[0]["ok"] is True
     assert records[0]["retry_count"] == 1
+
+
+def test_empty_response_is_retried_then_nonempty_response_succeeds(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    responses = iter([_EmptyJsonResponse(), _JsonResponse()])
+    calls = {"n": 0}
+    records = []
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        return next(responses)
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    content = OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(
+        system_prompt="s",
+        user_prompt="u",
+        stream=False,
+        on_call_recorded=records.append,
+    )
+
+    assert content == "plain json"
+    assert calls["n"] == 2
+    assert len(records) == 1
+    assert records[0]["ok"] is True
+    assert records[0]["error_kind"] is None
+    assert records[0]["retry_count"] == 1
+
+
+def test_empty_response_retry_exhaustion_records_typed_failure(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+    records = []
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        return _EmptyJsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="empty response"):
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+                "transport_max_retries": 2,
+            }
+        ).complete(
+            system_prompt="s",
+            user_prompt="u",
+            stream=False,
+            on_call_recorded=records.append,
+        )
+
+    assert calls["n"] == 3
+    assert len(records) == 1
+    assert records[0]["ok"] is False
+    assert records[0]["error_kind"] == "empty_response"
+    assert records[0]["retry_count"] == 2
+
+
+def test_empty_reasoning_only_response_records_safe_length_telemetry(
+    monkeypatch, caplog
+):
+    private_reasoning = "private chain that must never be persisted"
+    records = []
+
+    monkeypatch.setattr(
+        "marvis.llm_client.urlopen",
+        lambda request, timeout: _ReasoningJsonResponse(
+            content="",
+            reasoning_content=private_reasoning,
+            finish_reason="length",
+            reasoning_tokens=2048,
+        ),
+    )
+
+    with pytest.raises(LLMClientError, match="empty response"):
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+                "transport_max_retries": 0,
+            }
+        ).complete(
+            system_prompt="s",
+            user_prompt="u",
+            stream=False,
+            on_call_recorded=records.append,
+        )
+
+    assert records[0]["finish_reason"] == "length"
+    assert records[0]["reasoning_tokens"] == 2048
+    assert records[0]["reasoning_chars"] == len(private_reasoning)
+    assert private_reasoning not in caplog.text
+    assert private_reasoning not in json.dumps(records)
+    assert "finish_reason=length" in caplog.text
+    assert "reasoning_tokens=2048" in caplog.text
+    assert f"reasoning_chars={len(private_reasoning)}" in caplog.text
+
+
+def test_nonempty_response_records_finish_reason_and_reasoning_length(monkeypatch):
+    records = []
+    monkeypatch.setattr(
+        "marvis.llm_client.urlopen",
+        lambda request, timeout: _ReasoningJsonResponse(
+            content='{"operation":"backtest"}',
+            reasoning_content="hidden",
+            finish_reason="stop",
+            reasoning_tokens=7,
+        ),
+    )
+
+    content = OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(
+        system_prompt="s",
+        user_prompt="u",
+        stream=False,
+        on_call_recorded=records.append,
+    )
+
+    assert content == '{"operation":"backtest"}'
+    assert records[0]["finish_reason"] == "stop"
+    assert records[0]["reasoning_tokens"] == 7
+    assert records[0]["reasoning_chars"] == len("hidden")
+
+
+def test_nonempty_response_is_not_retried(monkeypatch):
+    calls = {"n": 0}
+    records = []
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        return _JsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    content = OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            "transport_max_retries": 3,
+        }
+    ).complete(
+        system_prompt="s",
+        user_prompt="u",
+        stream=False,
+        on_call_recorded=records.append,
+    )
+
+    assert content == "plain json"
+    assert calls["n"] == 1
+    assert len(records) == 1
+    assert records[0]["ok"] is True
+    assert records[0]["retry_count"] == 0
 
 
 def test_http_4xx_is_not_retried(monkeypatch):

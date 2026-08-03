@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from marvis.data.labels import require_labels_confirmed
+from marvis.data.labels import non_binary_target_values, require_labels_confirmed
 from marvis.feature.binning import chimerge_edges, monotonic_direction, monotonic_edges
 from marvis.feature.correlation import correlation_matrix, find_collinear_pairs, vif
 from marvis.feature.encode import woe_encode
@@ -73,18 +73,29 @@ def select_features(
         allow_full_fit=allow_full_fit,
         batch_size=batch_size,
     )
-    nan_labels_dropped = require_labels_confirmed(
-        frame, target_col, drop_nan_labels=drop_nan_labels,
-    )
-    if str(target_type or "binary") != "binary":
+    normalized_target_type = str(target_type or "binary")
+    if normalized_target_type != "binary":
         # IV/KS (and therefore the WOE space) are binary-only statistics (the FS-1 funnel
         # is framed around binary KS/IV throughout). For continuous/multiclass targets,
         # skip the multivariate refinement and pass every candidate through top_k only —
         # mirrors screen_features' non-binary bypass (tools.py::_screen_features_non_binary).
+        target_values = non_binary_target_values(
+            frame[target_col],
+            target_type=normalized_target_type,
+        )
+        label_frame = pd.DataFrame({target_col: target_values}, index=frame.index)
+        nan_labels_dropped = require_labels_confirmed(
+            label_frame,
+            target_col,
+            drop_nan_labels=drop_nan_labels,
+        )
         return _select_features_passthrough(
             features, top_k=top_k, nan_labels_dropped=nan_labels_dropped,
             fit_rows=fit_rows, fit_split=fit_split,
         )
+    nan_labels_dropped = require_labels_confirmed(
+        frame, target_col, drop_nan_labels=drop_nan_labels,
+    )
     target = frame[target_col].to_numpy(dtype=float)
     normalized_space = str(space or "raw").strip().lower()
     if normalized_space == "woe":

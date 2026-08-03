@@ -50,6 +50,8 @@ def test_normalize_effort_falls_back_to_high():
         ("不要停止", False),
         ("先别取消当前动作", False),
         ("为什么停止了？", False),
+        ("开始执行这个计划，先到数据划分确认处停下。", False),
+        ("确认开始执行这个计划，并在数据划分确认处停下。", False),
         ("继续执行", False),
     ],
 )
@@ -74,7 +76,7 @@ def test_validation_agent_job_does_not_execute_after_queue_claim_is_lost(tmp_pat
     )
 
     client = _client(tmp_path)
-    task_id = _create_task(client, tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
     repo = TaskRepository(tmp_path / "marvis.sqlite")
     job_id = repo.start_job(task_id, "agent")
     repo.finish_job(job_id, status="cancelled")
@@ -556,7 +558,7 @@ def test_agent_scan_pending_contract_pauses_with_atomic_candidates(
     from marvis.agent.validation_app_service import run_agent_scan_stage
 
     client = _client(tmp_path)
-    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    task_id = _create_task(client, tmp_path)
     repo = TaskRepository(tmp_path / "marvis.sqlite")
     contract_payload = {
         "status": "pending_confirmation",

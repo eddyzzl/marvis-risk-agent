@@ -2498,6 +2498,123 @@ STRATEGY_CANDIDATE_MONTHLY_STABILITY = WorkflowTemplate(
 )
 
 
+STRATEGY_SCORECARD_MODEL_SCORE_EVIDENCE_BUILD = WorkflowTemplate(
+    id="strategy_scorecard_model_score_evidence_build",
+    title="训练 Scorecard 并生成评分证据",
+    goal_patterns=(
+        "训练 Scorecard 并生成评分证据",
+        "生成评分卡模型分证据",
+        "train scorecard and materialize score evidence",
+    ),
+    slots=(
+        SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Latest fully authenticated StrategySampleDesign V2 pair",
+        ),
+        SlotSpec(
+            "features",
+            True,
+            "user",
+            "Explicit non-target scorecard feature columns",
+        ),
+        SlotSpec(
+            "params",
+            True,
+            "user",
+            "Bounded scorecard training parameters",
+        ),
+        SlotSpec("seed", True, "user", "Explicit deterministic training seed"),
+    ),
+    steps=(
+        StepTemplate(
+            title="训练受治理 Scorecard",
+            tool_ref=ToolRef("modeling", "train_model_with_evidence_v2"),
+            inputs_template={
+                "sample_design_ref": "{slot:sample_design_ref}",
+                "recipe": "scorecard",
+                "features": "{slot:features}",
+                "params": "{slot:params}",
+                "seed": "{slot:seed}",
+                "early_stopping_rounds": None,
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "experiment_id"}),
+                PostCheck("nonempty", {"field": "model_artifact_id"}),
+                PostCheck("nonempty", {"field": "evidence_id"}),
+                PostCheck("nonempty", {"field": "evidence_content_hash"}),
+                PostCheck(
+                    "nonempty",
+                    {"field": "artifacts.model_binary.artifact_id"},
+                ),
+                PostCheck(
+                    "nonempty",
+                    {"field": "artifacts.training_evidence.artifact_id"},
+                ),
+            ),
+            needs_confirmation=False,
+        ),
+        StepTemplate(
+            title="生成受治理模型评分证据",
+            tool_ref=ToolRef("modeling", "materialize_model_score_evidence_v2"),
+            inputs_template={
+                "training_evidence_ref": {
+                    "sample_design_ref": (
+                        "$ref:训练受治理 Scorecard.output.sample_design_ref"
+                    ),
+                    "model_binary_artifact_id": (
+                        "$ref:训练受治理 Scorecard.output."
+                        "artifacts.model_binary.artifact_id"
+                    ),
+                    "expected_model_binary_artifact_content_hash": (
+                        "$ref:训练受治理 Scorecard.output."
+                        "artifacts.model_binary.content_hash"
+                    ),
+                    "evidence_artifact_id": (
+                        "$ref:训练受治理 Scorecard.output."
+                        "artifacts.training_evidence.artifact_id"
+                    ),
+                    "expected_evidence_artifact_content_hash": (
+                        "$ref:训练受治理 Scorecard.output."
+                        "artifacts.training_evidence.content_hash"
+                    ),
+                    "expected_experiment_id": (
+                        "$ref:训练受治理 Scorecard.output.experiment_id"
+                    ),
+                    "expected_model_artifact_id": (
+                        "$ref:训练受治理 Scorecard.output.model_artifact_id"
+                    ),
+                    "expected_evidence_id": (
+                        "$ref:训练受治理 Scorecard.output.evidence_id"
+                    ),
+                    "expected_evidence_content_hash": (
+                        "$ref:训练受治理 Scorecard.output.evidence_content_hash"
+                    ),
+                }
+            },
+            depends_on_titles=("训练受治理 Scorecard",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "evidence_id"}),
+                PostCheck("nonempty", {"field": "evidence_content_hash"}),
+                PostCheck(
+                    "nonempty",
+                    {"field": "artifacts.score_vector.artifact_id"},
+                ),
+                PostCheck(
+                    "nonempty",
+                    {"field": "artifacts.score_evidence.artifact_id"},
+                ),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_SCORECARD_BAND_BUILD = WorkflowTemplate(
     id="strategy_scorecard_band_build",
     title="构建 Scorecard 完整分数带",
@@ -4318,6 +4435,7 @@ VINTAGE_ANALYSIS = WorkflowTemplate(
             False,
             "user",
             "Bad-column cumulation basis: incremental or snapshot",
+            default=None,
         ),
         SlotSpec("drop_nan_labels", False, "user", "Confirm dropping NaN-label rows"),
     ),
@@ -4332,21 +4450,22 @@ VINTAGE_ANALYSIS = WorkflowTemplate(
                 "bad_col": "{slot:bad_col}",
                 "mob_max": "{slot:mob_max}",
                 "ref_mob": "{slot:ref_mob}",
-                # Literal null default (not {slot:label_semantics}), mirroring
-                # design_cutoff_bands' band_edges: apply_adjust's gate override only
-                # reaches a key already present in the instantiated inputs, and an
-                # omitted slot would be dropped by planner._fill_inputs. Baking null
-                # here (a valid ["string","null"] per the manifest) is what lets the
-                # gate write the user's incremental/snapshot choice onto this step;
-                # an unanswered gate leaves null -> the tool raises the semantics gate.
-                "label_semantics": None,
+                # SlotSpec supplies a literal-null default so the adjust gate can
+                # still write a choice when intake has no answer.  A declared
+                # conversational value now reaches the tool instead of being
+                # overwritten by that default.
+                "label_semantics": "{slot:label_semantics}",
                 # Baked False (a valid boolean per the manifest) for the same reason,
                 # so a "drop the NaN rows" confirmation can be written onto the step.
                 "drop_nan_labels": False,
             },
             depends_on_titles=(),
             post_checks=(PostCheck("nonempty", {"field": "cohorts"}),),
-            decision_point=True,
+            # Standard Vintage is a complete, deterministic one-step delivery.
+            # Leaving it as a decision point lets the generic LLM replan append
+            # an unrelated terminal step, and the completion composer then
+            # renders that step instead of the already-computed curve tables.
+            decision_point=False,
         ),
     ),
     default_autonomy=1,

@@ -8,6 +8,9 @@ import pandas as pd
 import pytest
 
 from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy.candidate_lab_projection import (
+    build_strategy_candidate_lab_projection,
+)
 import marvis.packs.strategy.scorecard_candidate_tools as scorecard_tools
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.scorecard_candidate_tools import (
@@ -22,6 +25,7 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 from tests.test_model_score_evidence_tool import _run_score
 from tests.test_modeling_training_evidence_tool import (
     _fixture,
+    _native_fixture,
     _run as run_training,
 )
 
@@ -35,6 +39,18 @@ def _real_scorecard(tmp_path: Path) -> dict:
             "scorecard_max_bins": 3,
         }
     )
+    training_output = run_training(fx)
+    score_output = _run_score(fx, training_output)
+    return {
+        "fx": fx,
+        "runtime": strategy_tools._runtime(fx["ctx"]),
+        "training_output": training_output,
+        "score_output": score_output,
+    }
+
+
+def _real_native_scorecard(tmp_path: Path) -> dict:
+    fx = _native_fixture(tmp_path)
     training_output = run_training(fx)
     score_output = _run_score(fx, training_output)
     return {
@@ -70,6 +86,59 @@ def _records(real: dict, kind: str) -> list[dict]:
         ).list_for_task(real["fx"]["task"].id)
         if record["kind"] == kind
     ]
+
+
+@pytest.mark.slow
+def test_native_scorecard_build_and_cutoff_selection_are_governed(
+    tmp_path: Path,
+) -> None:
+    real = _real_native_scorecard(tmp_path)
+    band = run_build_scorecard_band_asset(
+        {
+            **_build_inputs(real),
+            "banding": {"method": "equal_frequency", "bin_count": 5},
+        },
+        real["fx"]["ctx"],
+        real["runtime"],
+    )
+
+    loaded = load_scorecard_band_asset_artifact(
+        real["runtime"],
+        task_id=real["fx"]["task"].id,
+        artifact_id=band["artifacts"][0]["artifact_id"],
+        expected_artifact_content_hash=band["artifacts"][0]["content_hash"],
+        expected_asset_id=band["asset_id"],
+        expected_asset_hash=band["asset_hash"],
+    )
+    assert loaded.sample_design.bundle["sample_design"]["compatibility"] == {
+        "source_mode": "native_active_dataset",
+        "development_partition": "risk/development",
+    }
+    assert band["banding"]["requested_bin_count"] == 5
+    projection = build_strategy_candidate_lab_projection(
+        real["fx"]["settings"],
+        real["fx"]["task"].id,
+    )
+    assert projection["candidates"]["scorecard_band"]["latest"][
+        "candidate_id"
+    ] == band["asset_id"]
+    cutoff = band["scorecard_band_asset"]["cutoffs"][0]
+    selected = run_materialize_scorecard_cutoff_selection(
+        {
+            "source_artifact_id": band["artifacts"][0]["artifact_id"],
+            "expected_source_artifact_content_hash": band["artifacts"][0][
+                "content_hash"
+            ],
+            "expected_asset_id": band["asset_id"],
+            "expected_asset_hash": band["asset_hash"],
+            "cutoff_id": cutoff["cutoff_id"],
+            "reason": "UI E2E native scorecard cutoff",
+        },
+        real["fx"]["ctx"],
+        real["runtime"],
+    )
+    assert selected["selection"]["cutoff_id"] == cutoff["cutoff_id"]
+    assert selected["not_applied"] is True
 
 
 def test_public_build_rejects_non_increasing_manual_raw_pd_edges() -> None:

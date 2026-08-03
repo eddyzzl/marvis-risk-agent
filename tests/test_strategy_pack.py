@@ -2069,6 +2069,50 @@ def test_roll_rate_matrix_tool_surfaces_balance_weighting_and_warnings(tmp_path)
     assert result.output["data_quality_warnings"][0]["id"] == "A"
 
 
+def test_roll_rate_matrix_tool_executes_multi_period_numeric_mob_panel(tmp_path):
+    runner, _plugin_registry, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "account_id": ["A", "B", "A", "B", "A", "B"],
+            "mob": [2, 1, 0, 0, 1, 2],
+            "bad": [1, 1, 0, 0, 0, 1],
+            "balance": [80.0, 180.0, 100.0, 200.0, 90.0, 160.0],
+        }
+    )
+    path = tmp_path / "roll_rate_numeric_mob.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(
+        path,
+        task_id=task.id,
+        role="strategy_sample",
+    )
+
+    result = runner.invoke(
+        ToolRef("strategy", "roll_rate_matrix"),
+        {
+            "dataset_id": dataset.id,
+            "id_col": "account_id",
+            "time_col": "mob",
+            "status_col": "bad",
+            "states": ["0", "1"],
+            "balance_col": "balance",
+            "observation_semantics": "adjacent_observation",
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["base_counts"] == {"0": 390.0, "1": 180.0}
+    assert result.output["matrix"][0] == pytest.approx(
+        [100.0 / 390.0, 290.0 / 390.0]
+    )
+    assert result.output["matrix"][1] == [0.0, 1.0]
+    assert {item["kind"] for item in result.output["artifacts"]} == {
+        "roll_rate_csv",
+        "roll_rate_markdown",
+    }
+
+
 def _register_strategy_sample_with_nan_label(registry, tmp_path, task_id: str):
     frame = pd.DataFrame(
         {

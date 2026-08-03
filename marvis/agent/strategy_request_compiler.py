@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 import json
+import logging
 import math
 import re
 from types import MappingProxyType
@@ -21,7 +22,10 @@ import unicodedata
 
 from marvis.agent.json_reply import load_json_object
 from marvis.data.predicate_ast import PredicateAstError, canonicalize_predicate
-from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
+from marvis.llm_prompts import (
+    SAMPLE_DESIGN_V2_CORRECTION_SYS,
+    STRATEGY_REQUEST_COMPILER_SYS,
+)
 from marvis.packs.strategy.candidate_design import (
     CANDIDATE_DESIGN_SCHEMA_VERSION,
     CandidateDesignError,
@@ -34,6 +38,7 @@ from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_rea
 
 
 _SYSTEM = STRATEGY_REQUEST_COMPILER_SYS.text
+logger = logging.getLogger(__name__)
 
 
 STRATEGY_OPERATIONS = (
@@ -68,6 +73,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "univariate_candidate_analysis",
     "univariate_candidate_refinement",
     "candidate_monthly_stability",
+    "scorecard_model_score_evidence_build",
     "scorecard_band_build",
     "scorecard_cutoff_selection",
     "automatic_tree_candidate_build",
@@ -150,14 +156,14 @@ _SAMPLE_DESIGN_SUBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 _SAMPLE_DESIGN_ACTION_RE = re.compile(
-    r"(?:创建|生成|构建|设计|固化|冻结|物化|计算|分析|探索|先做)|"
+    r"(?:创建|生成|构建|建立|开始|完成|设计|固化|冻结|物化|计算|分析|探索|先做)|"
     r"(?<![A-Za-z0-9_])(?:create|build|design|freeze|materialize|"
     r"compute|analy[sz]e|explore)(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 _SAMPLE_DESIGN_NEGATED_ACTION_RE = re.compile(
     r"(?:不要|不用|无需|别|禁止|取消|暂不|先不)\s*"
-    r"(?:创建|生成|构建|设计|固化|冻结|物化|计算|分析|探索)|"
+    r"(?:创建|生成|构建|建立|开始|完成|设计|固化|冻结|物化|计算|分析|探索)|"
     r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel)\s+"
     r"(?:create|build|design|freeze|materialize|compute|analy[sz]e|explore)",
     re.IGNORECASE,
@@ -192,7 +198,7 @@ _SAMPLE_DESIGN_OBSERVATION_UNAVAILABLE_RE = re.compile(
 _SAMPLE_DESIGN_MATURITY_PATTERNS = {
     "confirmed_matured": re.compile(
         r"(?:确认(?:为)?|已经|已|明确(?:为)?)(?:完全)?成熟|"
-        r"成熟度.{0,10}(?:确认(?:为)?(?:已)?成熟|已成熟)|"
+        r"成熟度.{0,10}(?:确认(?:为)?(?:已)?成熟|已成熟|已确认)|"
         r"(?:confirmed|fully)\s+matured",
         re.IGNORECASE,
     ),
@@ -3245,6 +3251,375 @@ _CANDIDATE_DESIGN_JSON_SCHEMA = {
 }
 
 
+_SAMPLE_DESIGN_V2_NULLABLE_STRING_SCHEMA = {
+    "anyOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "null"},
+    ]
+}
+_SAMPLE_DESIGN_V2_SCALAR_SCHEMA = {
+    "anyOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "number"},
+        {"type": "boolean"},
+    ]
+}
+_SAMPLE_DESIGN_V2_CONDITION_SCHEMA = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "column": {"type": "string", "minLength": 1},
+                "operator": {
+                    "type": "string",
+                    "enum": ["eq", "ne", "gt", "gte", "lt", "lte"],
+                },
+                "value": _SAMPLE_DESIGN_V2_SCALAR_SCHEMA,
+            },
+            "required": ["column", "operator", "value"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "column": {"type": "string", "minLength": 1},
+                "operator": {
+                    "type": "string",
+                    "enum": ["is_null", "is_not_null"],
+                },
+            },
+            "required": ["column", "operator"],
+            "additionalProperties": False,
+        },
+    ]
+}
+_SAMPLE_DESIGN_V2_POPULATION_FILTER_SCHEMA = {
+    "anyOf": [
+        {"type": "null"},
+        {
+            "type": "object",
+            "properties": {
+                "match": {"type": "string", "enum": ["all", "any"]},
+                "conditions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "items": _SAMPLE_DESIGN_V2_CONDITION_SCHEMA,
+                },
+            },
+            "required": ["match", "conditions"],
+            "additionalProperties": False,
+        },
+    ]
+}
+_SAMPLE_DESIGN_V2_PREDICATE_LEAF_SCHEMA = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": ["eq", "ne", "gt", "gte", "lt", "lte"],
+                },
+                "left": {
+                    "type": "object",
+                    "properties": {
+                        "column": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["column"],
+                    "additionalProperties": False,
+                },
+                "right": {
+                    "type": "object",
+                    "properties": {
+                        "literal": _SAMPLE_DESIGN_V2_SCALAR_SCHEMA,
+                    },
+                    "required": ["literal"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["op", "left", "right"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": ["is_null", "is_not_null"],
+                },
+                "arg": {
+                    "type": "object",
+                    "properties": {
+                        "column": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["column"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["op", "arg"],
+            "additionalProperties": False,
+        },
+    ]
+}
+_SAMPLE_DESIGN_V2_PARTITION_SELECTOR_SCHEMA = {
+    "anyOf": [
+        _SAMPLE_DESIGN_V2_PREDICATE_LEAF_SCHEMA,
+        {
+            "type": "object",
+            "properties": {
+                "op": {"type": "string", "enum": ["and", "or"]},
+                "args": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 8,
+                    "items": _SAMPLE_DESIGN_V2_PREDICATE_LEAF_SCHEMA,
+                },
+            },
+            "required": ["op", "args"],
+            "additionalProperties": False,
+        },
+    ]
+}
+_SAMPLE_DESIGN_V2_DATE_BOUND_SCHEMA = {
+    "anyOf": [
+        {"type": "string", "format": "date"},
+        {"type": "null"},
+    ]
+}
+_SAMPLE_DESIGN_V2_TIME_RANGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "start": _SAMPLE_DESIGN_V2_DATE_BOUND_SCHEMA,
+        "end": _SAMPLE_DESIGN_V2_DATE_BOUND_SCHEMA,
+    },
+    "required": ["start", "end"],
+    "additionalProperties": False,
+}
+_SAMPLE_DESIGN_V2_PARTITIONING_SCHEMA = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "method": {"const": "predicate_ast"},
+                "selectors": {
+                    "type": "object",
+                    "properties": {
+                        "development": _SAMPLE_DESIGN_V2_PARTITION_SELECTOR_SCHEMA,
+                        "validation": _SAMPLE_DESIGN_V2_PARTITION_SELECTOR_SCHEMA,
+                        "oot": _SAMPLE_DESIGN_V2_PARTITION_SELECTOR_SCHEMA,
+                    },
+                    "required": ["development", "validation", "oot"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["method", "selectors"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "method": {"const": "time_ranges"},
+                "column": {"type": "string", "minLength": 1},
+                "ranges": {
+                    "type": "object",
+                    "properties": {
+                        "development": _SAMPLE_DESIGN_V2_TIME_RANGE_SCHEMA,
+                        "validation": _SAMPLE_DESIGN_V2_TIME_RANGE_SCHEMA,
+                        "oot": _SAMPLE_DESIGN_V2_TIME_RANGE_SCHEMA,
+                    },
+                    "required": ["development", "validation", "oot"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["method", "column", "ranges"],
+            "additionalProperties": False,
+        },
+    ]
+}
+_SAMPLE_DESIGN_V2_CORRECTION_WORKFLOW_INPUTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "target_bad_value": {"type": "integer", "enum": [0, 1]},
+        "drop_nan_labels": {"type": "boolean"},
+        "relationship": {
+            "type": "string",
+            "enum": ["nested_same_cohort", "parallel_time_cohorts"],
+        },
+        "approval_population": {
+            "type": "object",
+            "properties": {
+                "inclusion": _SAMPLE_DESIGN_V2_POPULATION_FILTER_SCHEMA,
+                "exclusion": _SAMPLE_DESIGN_V2_POPULATION_FILTER_SCHEMA,
+            },
+            "required": ["inclusion", "exclusion"],
+            "additionalProperties": False,
+        },
+        "risk_population": {
+            "type": "object",
+            "properties": {
+                "inclusion": _SAMPLE_DESIGN_V2_POPULATION_FILTER_SCHEMA,
+                "exclusion": _SAMPLE_DESIGN_V2_POPULATION_FILTER_SCHEMA,
+            },
+            "required": ["inclusion", "exclusion"],
+            "additionalProperties": False,
+        },
+        "partitioning": _SAMPLE_DESIGN_V2_PARTITIONING_SCHEMA,
+        "maturity": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "confirmed_matured",
+                        "not_matured",
+                        "unknown",
+                        "unavailable",
+                    ],
+                },
+                "performance_window_days": {
+                    "anyOf": [
+                        {"type": "integer", "minimum": 1},
+                        {"type": "null"},
+                    ]
+                },
+                "cutoff_date": _SAMPLE_DESIGN_V2_DATE_BOUND_SCHEMA,
+                "reason": _SAMPLE_DESIGN_V2_NULLABLE_STRING_SCHEMA,
+            },
+            "required": [
+                "status",
+                "performance_window_days",
+                "cutoff_date",
+                "reason",
+            ],
+            "additionalProperties": False,
+        },
+        "performance_window": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["provided", "unavailable"],
+                },
+                "days": {
+                    "anyOf": [
+                        {"type": "integer", "minimum": 1},
+                        {"type": "null"},
+                    ]
+                },
+            },
+            "required": ["status", "days"],
+            "additionalProperties": False,
+        },
+        "observation_window": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["provided", "unavailable"],
+                },
+                "start": _SAMPLE_DESIGN_V2_DATE_BOUND_SCHEMA,
+                "end": _SAMPLE_DESIGN_V2_DATE_BOUND_SCHEMA,
+            },
+            "required": ["status", "start", "end"],
+            "additionalProperties": False,
+        },
+        "field_bindings": {
+            "type": "object",
+            "properties": {
+                field: _SAMPLE_DESIGN_V2_NULLABLE_STRING_SCHEMA
+                for field in (
+                    "entity_field",
+                    "time_field",
+                    "group_field",
+                    "month_field",
+                    "weight_field",
+                    "loan_amount_field",
+                    "overdue_amount_field",
+                )
+            },
+            "required": [
+                "entity_field",
+                "time_field",
+                "group_field",
+                "month_field",
+                "weight_field",
+                "loan_amount_field",
+                "overdue_amount_field",
+            ],
+            "additionalProperties": False,
+        },
+        "historical_score": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["available", "unavailable", "not_applicable"],
+                },
+                "column": _SAMPLE_DESIGN_V2_NULLABLE_STRING_SCHEMA,
+                "direction": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "enum": [
+                                "higher_is_riskier",
+                                "lower_is_riskier",
+                            ],
+                        },
+                        {"type": "null"},
+                    ]
+                },
+                "reason": _SAMPLE_DESIGN_V2_NULLABLE_STRING_SCHEMA,
+            },
+            "required": ["status", "column", "direction", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    "required": [
+        "target_bad_value",
+        "drop_nan_labels",
+        "relationship",
+        "approval_population",
+        "risk_population",
+        "partitioning",
+        "maturity",
+        "performance_window",
+        "observation_window",
+        "field_bindings",
+        "historical_score",
+    ],
+    "additionalProperties": False,
+}
+SAMPLE_DESIGN_V2_CORRECTION_JSON_SCHEMA = {
+    "name": "strategy_sample_design_v2_correction",
+    "strict": False,
+    "schema": {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "request_kind": {"const": "standard_workflow"},
+                    "workflow": {"const": "strategy_sample_design_v2"},
+                    "workflow_inputs": (
+                        _SAMPLE_DESIGN_V2_CORRECTION_WORKFLOW_INPUTS_SCHEMA
+                    ),
+                },
+                "required": ["request_kind", "workflow", "workflow_inputs"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "clarification": {"type": "string", "minLength": 1},
+                },
+                "required": ["clarification"],
+                "additionalProperties": False,
+            },
+        ],
+    },
+}
+
+
 STRATEGY_REQUEST_JSON_SCHEMA = {
     "name": "strategy_request_draft",
     "strict": False,
@@ -3614,7 +3989,7 @@ def compile_strategy_request(
     llm,
     caller: str = "strategy_request_compiler",
 ) -> StrategyRequestCompilation:
-    """Compile one utterance with at most one LLM-format repair attempt."""
+    """Compile one utterance with bounded semantic and format correction."""
 
     if not isinstance(utterance, str) or not utterance.strip():
         return _clarification("请说明希望执行的策略操作和策略类型。")
@@ -3635,12 +4010,79 @@ def compile_strategy_request(
         return _clarification(
             "当前暂时无法解析策略请求，请稍后重试或直接说明操作、策略类型和策略对象。"
         )
-    outcome = _validate_reply(raw, whitelist, target_col=observed_target)
+    outcome = _validate_reply(
+        raw,
+        whitelist,
+        target_col=observed_target,
+        caller=caller,
+        attempt_kind="initial",
+    )
     if outcome.accepted:
-        return _ground_refinement_request(
+        grounded = _ground_refinement_request(
             normalized_utterance,
             outcome.result,
             whitelist=whitelist,
+            target_col=observed_target,
+        )
+        if grounded.clarification_code == "roll_rate_column_binding_not_grounded":
+            repair_prompt = _repair_prompt(
+                prompt,
+                raw=raw,
+                error=(
+                    f"{grounded.clarification_code}：{grounded.clarification}\n"
+                    "保持 workflow=roll_rate_matrix，只修正用户明确绑定的 "
+                    "id_col/time_col/status_col/balance_col；不得替换为其他合法列。"
+                ),
+            )
+            try:
+                repaired = _complete(llm, prompt=repair_prompt, caller=caller)
+            except Exception:
+                return grounded
+            repaired_outcome = _validate_reply(
+                repaired,
+                whitelist,
+                target_col=observed_target,
+                caller=caller,
+                attempt_kind="roll_rate_column_correction",
+            )
+            if not (
+                repaired_outcome.accepted
+                and isinstance(
+                    repaired_outcome.result.draft,
+                    StandardWorkflowRequestDraft,
+                )
+                and repaired_outcome.result.draft.workflow == "roll_rate_matrix"
+            ):
+                return grounded
+            return _ground_refinement_request(
+                normalized_utterance,
+                repaired_outcome.result,
+                whitelist=whitelist,
+                target_col=observed_target,
+            )
+        if (
+            grounded.clarification_code
+            == "strategy_sample_design_v2_workflow_required"
+        ):
+            return _correct_sample_design_v2_request(
+                llm,
+                utterance=normalized_utterance,
+                whitelist=whitelist,
+                target_col=observed_target,
+                error=(
+                    f"{grounded.clarification_code}：{grounded.clarification}\n"
+                ),
+                caller=caller,
+            )
+        return grounded
+    if utterance_targets_strategy_sample_design(normalized_utterance):
+        return _correct_sample_design_v2_request(
+            llm,
+            utterance=normalized_utterance,
+            whitelist=whitelist,
+            target_col=observed_target,
+            error=outcome.error or "SampleDesign V2 草案未通过平台校验。",
+            caller=caller,
         )
     if outcome.result.clarification_code in _NON_REPAIRABLE_CLARIFICATION_CODES:
         # These are platform-derived business-contract gaps, not JSON-format
@@ -3661,12 +4103,15 @@ def compile_strategy_request(
         repaired,
         whitelist,
         target_col=observed_target,
+        caller=caller,
+        attempt_kind="generic_repair",
     )
     if repaired_outcome.accepted:
         return _ground_refinement_request(
             normalized_utterance,
             repaired_outcome.result,
             whitelist=whitelist,
+            target_col=observed_target,
         )
     return repaired_outcome.result
 
@@ -3782,11 +4227,182 @@ def _complete(llm, *, prompt: str, caller: str):
         temperature=0.0,
         response_format={"type": "json_object"},
         json_schema=STRATEGY_REQUEST_JSON_SCHEMA,
+        # DeepSeek V4 counts reasoning tokens inside max_tokens.  This compiler
+        # prompt is intentionally broad and needs enough bounded headroom for
+        # thinking plus the final compact JSON decision.
+        max_tokens=8192,
         stream=False,
         caller=caller,
         prompt_name=STRATEGY_REQUEST_COMPILER_SYS.name,
         prompt_version=STRATEGY_REQUEST_COMPILER_SYS.version,
     )
+
+
+def _sample_design_v2_correction_prompt(
+    utterance: str,
+    *,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+    error: str,
+    format_repair: bool,
+) -> str:
+    opportunity = (
+        "这是唯一一次格式修复机会。"
+        if format_repair
+        else "这是唯一一次语义纠正机会。"
+    )
+    return (
+        "【原始用户意图】\n"
+        f"{utterance}\n"
+        "【列白名单】\n"
+        f"{json.dumps(list(whitelist), ensure_ascii=False)}\n"
+        "【当前目标列角色】\n"
+        f"{json.dumps(target_col, ensure_ascii=False)}\n"
+        "【上一次输出未通过平台校验】\n"
+        f"{error}\n"
+        f"{opportunity}"
+        "固定输出 strategy_sample_design_v2 的完整用户自有 DTO；"
+        "所有控制项必须来自原始意图并使用列白名单，不能补默认值或猜测。"
+        "workflow_inputs 必须精确包含 target_bad_value、drop_nan_labels、"
+        "relationship、approval_population、risk_population、partitioning、"
+        "maturity、performance_window、observation_window、field_bindings、"
+        "historical_score。relationship 只能是 nested_same_cohort 或 "
+        "parallel_time_cohorts。"
+        "time_ranges 分区必须使用精确形状："
+        '{"method":"time_ranges","column":"列名","ranges":'
+        '{"development":{"start":"YYYY-MM-DD或null","end":"YYYY-MM-DD或null"},'
+        '"validation":{"start":"YYYY-MM-DD或null","end":"YYYY-MM-DD或null"},'
+        '"oot":{"start":"YYYY-MM-DD或null","end":"YYYY-MM-DD或null"}}}。'
+        "predicate_ast 分区必须使用 method=predicate_ast 和完整 selectors。"
+        "approval_population 与 risk_population 都必须精确包含 inclusion、"
+        "exclusion；无筛选时两者都为 null。"
+        "maturity 精确包含 status、performance_window_days、cutoff_date、reason，"
+        "status 只能是 confirmed_matured、not_matured、unknown、unavailable；"
+        "confirmed_matured 时 performance_window_days 和 cutoff_date 必填且 reason "
+        "必须为 null；not_matured 时 performance_window_days、cutoff_date、原话中的"
+        "非空 reason 都必填；unknown/unavailable 时 performance_window_days 和 "
+        "cutoff_date 必须为 null，reason 必须是原话中的非空说明。"
+        "performance_window 精确包含 status、days，status 只能是 provided 或 "
+        "unavailable，provided 时 days 必填，unavailable 时 days 必须为 null；"
+        "observation_window 精确包含 status、start、end，status 只能是 provided 或 "
+        "unavailable，provided 时 start/end 必填，unavailable 时 start 和 end 必须为"
+        " null。field_bindings 精确包含 entity_field、time_field、"
+        "group_field、month_field、weight_field、loan_amount_field、"
+        "overdue_amount_field；原话明确暂不可提供的字段必须输出 null。"
+        "historical_score 精确包含 status、column、"
+        "direction、reason，status 只能是 available、unavailable、not_applicable，"
+        "available 时 column 必填、direction 只能是 higher_is_riskier 或 "
+        "lower_is_riskier 且 reason 必须为 null；unavailable/not_applicable 时 "
+        "column 和 direction "
+        "必须为 null，reason 必须是原话中的非空说明。"
+        "只输出一个 JSON 对象；信息不足时只返回中文 clarification。"
+    )
+
+
+def _complete_sample_design_v2_correction(
+    llm,
+    *,
+    prompt: str,
+    caller: str,
+):
+    return llm.complete(
+        system_prompt=SAMPLE_DESIGN_V2_CORRECTION_SYS.text,
+        user_prompt=prompt,
+        temperature=0.0,
+        response_format={"type": "json_object"},
+        json_schema=SAMPLE_DESIGN_V2_CORRECTION_JSON_SCHEMA,
+        max_tokens=8192,
+        stream=False,
+        caller=caller,
+        prompt_name=SAMPLE_DESIGN_V2_CORRECTION_SYS.name,
+        prompt_version=SAMPLE_DESIGN_V2_CORRECTION_SYS.version,
+    )
+
+
+def _correct_sample_design_v2_request(
+    llm,
+    *,
+    utterance: str,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+    error: str,
+    caller: str,
+) -> StrategyRequestCompilation:
+    repair_prompt = _sample_design_v2_correction_prompt(
+        utterance,
+        whitelist=whitelist,
+        target_col=target_col,
+        error=error,
+        format_repair=False,
+    )
+    try:
+        repaired = _complete_sample_design_v2_correction(
+            llm,
+            prompt=repair_prompt,
+            caller=caller,
+        )
+    except Exception:
+        return _clarification(
+            "当前暂时无法纠正 SampleDesign V2 请求，请稍后重试或补充完整样本口径。"
+        )
+    repaired_outcome = _validate_reply(
+        repaired,
+        whitelist,
+        target_col=target_col,
+        caller=caller,
+        attempt_kind="sample_design_semantic_correction",
+    )
+    if repaired_outcome.accepted:
+        if repaired_outcome.result.draft is None:
+            return repaired_outcome.result
+        return _ground_refinement_request(
+            utterance,
+            repaired_outcome.result,
+            whitelist=whitelist,
+            target_col=target_col,
+        )
+    if (
+        repaired_outcome.result.clarification
+        != "模型返回的策略草案不是有效 JSON 对象，请重新说明策略请求。"
+    ):
+        return repaired_outcome.result
+
+    format_repair_prompt = _sample_design_v2_correction_prompt(
+        utterance,
+        whitelist=whitelist,
+        target_col=target_col,
+        error=(
+            repaired_outcome.result.clarification
+            or repaired_outcome.error
+            or "输出格式无效"
+        ),
+        format_repair=True,
+    )
+    try:
+        format_repaired = _complete_sample_design_v2_correction(
+            llm,
+            prompt=format_repair_prompt,
+            caller=caller,
+        )
+    except Exception:
+        return repaired_outcome.result
+    format_repaired_outcome = _validate_reply(
+        format_repaired,
+        whitelist,
+        target_col=target_col,
+        caller=caller,
+        attempt_kind="sample_design_format_repair",
+    )
+    if format_repaired_outcome.accepted:
+        if format_repaired_outcome.result.draft is None:
+            return format_repaired_outcome.result
+        return _ground_refinement_request(
+            utterance,
+            format_repaired_outcome.result,
+            whitelist=whitelist,
+            target_col=target_col,
+        )
+    return format_repaired_outcome.result
 
 
 def _strategy_payload_within_limits(payload: object) -> bool:
@@ -3815,11 +4431,97 @@ def _strategy_payload_within_limits(payload: object) -> bool:
     return True
 
 
+def _reply_edge_char_kind(text: str, *, first: bool) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return "none"
+    char = stripped[0] if first else stripped[-1]
+    if char == "{":
+        return "brace_open"
+    if char == "}":
+        return "brace_close"
+    if char == "[":
+        return "bracket_open"
+    if char == "]":
+        return "bracket_close"
+    if char in {'"', "'"}:
+        return "quote"
+    if char.isdigit():
+        return "digit"
+    if char.isalpha():
+        return "letter"
+    return "other"
+
+
+def _reply_has_balanced_object(text: str) -> bool:
+    """Detect a balanced object boundary without retaining or parsing content."""
+
+    start = text.find("{")
+    while start >= 0:
+        depth = 0
+        in_string = False
+        escape = False
+        for char in text[start:]:
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return True
+                if depth < 0:
+                    break
+        start = text.find("{", start + 1)
+    return False
+
+
+def _log_json_parse_failure(
+    raw: object,
+    *,
+    caller: str,
+    attempt_kind: str,
+) -> None:
+    """Log shape-only diagnostics; never persist completion or prompt content."""
+
+    text = raw if isinstance(raw, str) else ""
+    lowered = text.lower()
+    logger.warning(
+        "strategy JSON parse failed caller=%s attempt_kind=%s "
+        "chars=%d has_think=%s has_fence=%s "
+        "first_char_kind=%s last_char_kind=%s "
+        "brace_open=%d brace_close=%d bracket_open=%d bracket_close=%d "
+        "balanced_object=%s",
+        caller,
+        attempt_kind,
+        len(text),
+        "<think" in lowered,
+        "```" in text,
+        _reply_edge_char_kind(text, first=True),
+        _reply_edge_char_kind(text, first=False),
+        text.count("{"),
+        text.count("}"),
+        text.count("["),
+        text.count("]"),
+        _reply_has_balanced_object(text),
+    )
+
+
 def _validate_reply(
     raw: object,
     whitelist: tuple[str, ...],
     *,
     target_col: str | None,
+    caller: str,
+    attempt_kind: str,
 ) -> _ValidationOutcome:
     if isinstance(raw, str) and len(raw) > _STRATEGY_REPLY_MAX_CHARS:
         return _invalid(
@@ -3829,6 +4531,11 @@ def _validate_reply(
         )
     payload, error = load_json_object(raw)
     if payload is None:
+        _log_json_parse_failure(
+            raw,
+            caller=caller,
+            attempt_kind=attempt_kind,
+        )
         message = "模型返回的策略草案不是有效 JSON 对象，请重新说明策略请求。"
         return _ValidationOutcome(_clarification(message), False, error or message)
     return _validate_payload(
@@ -4034,7 +4741,11 @@ def _validate_standard_workflow_payload(
         elif workflow == "profit_calc":
             normalized = _validate_profit_workflow_inputs(raw_inputs, whitelist)
         elif workflow == "roll_rate_matrix":
-            normalized = _validate_roll_rate_workflow_inputs(raw_inputs, whitelist)
+            normalized = _validate_roll_rate_workflow_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
         elif workflow == "limit_pricing_matrix":
             normalized = _validate_pricing_workflow_inputs(
                 raw_inputs,
@@ -4055,6 +4766,12 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "candidate_monthly_stability":
             normalized = _validate_candidate_monthly_stability_inputs(raw_inputs)
+        elif workflow == "scorecard_model_score_evidence_build":
+            normalized = _validate_scorecard_model_score_evidence_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
         elif workflow == "scorecard_band_build":
             normalized = _validate_scorecard_band_build_inputs(raw_inputs)
         elif workflow == "scorecard_cutoff_selection":
@@ -5291,6 +6008,8 @@ def _validate_profit_workflow_inputs(
 def _validate_roll_rate_workflow_inputs(
     inputs: Mapping[str, Any],
     whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
 ) -> dict[str, Any]:
     allowed = {
         "id_col",
@@ -5307,12 +6026,22 @@ def _validate_roll_rate_workflow_inputs(
         raise _DraftValidationError(
             "roll_rate_matrix 缺少字段：" + "、".join(missing) + "。"
         )
-    normalized = {
+    normalized: dict[str, Any] = {
         key: _workflow_column(
             inputs[key], name=f"roll_rate_matrix {key}", whitelist=whitelist
         )
-        for key in ("id_col", "time_col", "status_col")
+        for key in ("id_col", "time_col")
     }
+    status_whitelist = (
+        (*whitelist, target_col)
+        if target_col is not None and target_col not in whitelist
+        else whitelist
+    )
+    normalized["status_col"] = _workflow_column(
+        inputs["status_col"],
+        name="roll_rate_matrix status_col",
+        whitelist=status_whitelist,
+    )
     if len(set(normalized.values())) != len(normalized):
         raise _DraftValidationError(
             "roll_rate_matrix 的 id_col、time_col、status_col 必须互不相同。"
@@ -7426,6 +8155,107 @@ def _validate_candidate_monthly_stability_inputs(
     )
 
 
+def _validate_scorecard_model_score_evidence_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    """Validate user-owned controls for one governed Scorecard evidence chain."""
+
+    workflow = "scorecard_model_score_evidence_build"
+    allowed = {
+        "features",
+        "sample_weight_col",
+        "seed",
+        "max_iter",
+        "scorecard_max_bins",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted(
+        {"features", "seed", "max_iter", "scorecard_max_bins"} - set(inputs)
+    )
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+
+    raw_features = inputs["features"]
+    if (
+        not isinstance(raw_features, Sequence)
+        or isinstance(raw_features, str | bytes | bytearray)
+        or not 1 <= len(raw_features) <= 50
+    ):
+        raise _DraftValidationError(
+            f"{workflow} features 必须是包含 1 到 50 个字段的有序数组。"
+        )
+    features = [
+        _workflow_column(
+            value,
+            name=f"{workflow} features",
+            whitelist=whitelist,
+        )
+        for value in raw_features
+    ]
+    if len(features) != len(set(features)):
+        raise _DraftValidationError(f"{workflow} features 不能包含重复字段。")
+    if target_col is not None and target_col in features:
+        raise _DraftValidationError(
+            f"{workflow} features 不能包含目标列 {target_col}。"
+        )
+
+    seed = inputs["seed"]
+    if (
+        isinstance(seed, bool)
+        or not isinstance(seed, int)
+        or not 0 <= seed <= 4_294_967_295
+    ):
+        raise _DraftValidationError(
+            f"{workflow} seed 必须是 0 到 4294967295 的整数。"
+        )
+    max_iter = inputs["max_iter"]
+    if (
+        isinstance(max_iter, bool)
+        or not isinstance(max_iter, int)
+        or not 20 <= max_iter <= 5_000
+    ):
+        raise _DraftValidationError(
+            f"{workflow} max_iter 必须是 20 到 5000 的整数。"
+        )
+    max_bins = inputs["scorecard_max_bins"]
+    if (
+        isinstance(max_bins, bool)
+        or not isinstance(max_bins, int)
+        or not 2 <= max_bins <= 20
+    ):
+        raise _DraftValidationError(
+            f"{workflow} scorecard_max_bins 必须是 2 到 20 的整数。"
+        )
+
+    normalized: dict[str, Any] = {
+        "features": features,
+        "seed": seed,
+        "max_iter": max_iter,
+        "scorecard_max_bins": max_bins,
+    }
+    if "sample_weight_col" in inputs:
+        weight_col = _workflow_column(
+            inputs["sample_weight_col"],
+            name=f"{workflow} sample_weight_col",
+            whitelist=whitelist,
+        )
+        if target_col is not None and weight_col == target_col:
+            raise _DraftValidationError(
+                f"{workflow} sample_weight_col 不能使用目标列。"
+            )
+        if weight_col in features:
+            raise _DraftValidationError(
+                f"{workflow} sample_weight_col 不能同时作为建模特征。"
+            )
+        normalized["sample_weight_col"] = weight_col
+    return normalized
+
+
 def _validate_scorecard_band_build_inputs(
     inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -9448,11 +10278,119 @@ def _ground_candidate_monthly_stability_request(
     return result
 
 
+_ROLL_RATE_COLUMN_ROLE_LABELS = {
+    "id_col": (
+        r"(?:(?:客户|账户|借据)\s*(?:ID|id|编号)\s*(?:字段|列)?|"
+        r"(?<![A-Za-z0-9_])id_col(?![A-Za-z0-9_]))"
+    ),
+    "time_col": (
+        r"(?:(?:时间|日期|月份|月龄|MOB|mob)\s*(?:字段|列)?|"
+        r"(?<![A-Za-z0-9_])time_col(?![A-Za-z0-9_]))"
+    ),
+    "status_col": (
+        r"(?:(?:迁徙)?状态\s*(?:字段|列)?|"
+        r"(?<![A-Za-z0-9_])status_col(?![A-Za-z0-9_]))"
+    ),
+    "balance_col": (
+        r"(?:(?:余额(?:权重)?|金额权重)\s*(?:字段|列)?|"
+        r"(?<![A-Za-z0-9_])balance_col(?![A-Za-z0-9_]))"
+    ),
+}
+
+
+def _roll_rate_explicit_column_bindings(
+    utterance: str,
+    *,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+) -> tuple[dict[str, set[str]], bool]:
+    """Bind exact resolved column mentions to explicit roll-rate roles only."""
+
+    known_columns = tuple(
+        dict.fromkeys(
+            (
+                *whitelist,
+                *((target_col,) if target_col is not None else ()),
+            )
+        )
+    )
+    mentions, ambiguous = _automatic_tree_column_mention_resolution(
+        utterance,
+        known_columns,
+    )
+    if ambiguous:
+        return {}, True
+
+    bindings = {role: set() for role in _ROLL_RATE_COLUMN_ROLE_LABELS}
+    for start, end, column in mentions:
+        prefix = utterance[max(0, start - 48) : start]
+        suffix = utterance[end : min(len(utterance), end + 48)]
+        for role, label in _ROLL_RATE_COLUMN_ROLE_LABELS.items():
+            before = re.compile(
+                rf"(?:{label})\s*"
+                rf"(?:(?:为|是|用|使用|选择|指定)\s*)?"
+                rf"(?:=|:|：)?\s*$",
+                re.IGNORECASE,
+            )
+            after = re.compile(
+                rf"^\s*(?:(?:作为|用作|是|为)\s*)?(?:{label})",
+                re.IGNORECASE,
+            )
+            if before.search(prefix) or after.search(suffix):
+                bindings[role].add(column)
+    return (
+        {role: values for role, values in bindings.items() if values},
+        False,
+    )
+
+
+def _ground_roll_rate_column_bindings(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+) -> StrategyRequestCompilation:
+    draft = result.draft
+    if not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "roll_rate_matrix"
+    ):
+        return result
+    bindings, ambiguous = _roll_rate_explicit_column_bindings(
+        utterance,
+        whitelist=whitelist,
+        target_col=target_col,
+    )
+    if ambiguous:
+        return _clarification(
+            "滚动率请求中的显式列名存在重叠歧义；请为 ID、时间、状态和余额权重"
+            "分别提供一个完整且唯一的现有列名。",
+            code="roll_rate_column_binding_not_grounded",
+            fields=("workflow_inputs",),
+        )
+    inputs = draft.workflow_inputs
+    mismatched = tuple(
+        role
+        for role, values in bindings.items()
+        if len(values) != 1 or inputs.get(role) not in values
+    )
+    if mismatched:
+        return _clarification(
+            "滚动率草案必须逐字保留原话中明确的 ID、时间、状态和余额权重列绑定；"
+            "不得替换为另一个同样存在的数据列。",
+            code="roll_rate_column_binding_not_grounded",
+            fields=mismatched,
+        )
+    return result
+
+
 def _ground_refinement_request(
     utterance: str,
     result: StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
+    target_col: str | None,
 ) -> StrategyRequestCompilation:
     draft = result.draft
     if _utterance_targets_voting_search_selection(utterance):
@@ -9804,6 +10742,13 @@ def _ground_refinement_request(
         )
     if not isinstance(draft, StandardWorkflowRequestDraft):
         return result
+    if draft.workflow == "roll_rate_matrix":
+        return _ground_roll_rate_column_bindings(
+            utterance,
+            result,
+            whitelist=whitelist,
+            target_col=target_col,
+        )
     if draft.workflow == "strategy_project_context":
         return _ground_strategy_project_context_request(utterance, result)
     if draft.workflow == "strategy_sample_design_v2":
@@ -10438,6 +11383,9 @@ def utterance_targets_strategy_sample_design(utterance: str) -> bool:
         "创建",
         "生成",
         "构建",
+        "建立",
+        "开始",
+        "完成",
         "设计",
         "固化",
         "冻结",
@@ -10451,6 +11399,9 @@ def utterance_targets_strategy_sample_design(utterance: str) -> bool:
     after_subject_actions = {
         "创建",
         "生成",
+        "建立",
+        "开始",
+        "完成",
         "固化",
         "冻结",
         "物化",
@@ -10534,7 +11485,7 @@ def _utterance_targets_strategy_model_evidence_v2(utterance: str) -> bool:
 def _sample_design_build_intent_negated(utterance: str) -> bool:
     subject = r"(?:(?:策略)?样本(?:设计|边界|方案)|sample(?:\s|-|_)*design)"
     action = (
-        r"(?:创建|生成|构建|设计|固化|冻结|物化|计算|分析|探索|"
+        r"(?:创建|生成|构建|建立|开始|完成|设计|固化|冻结|物化|计算|分析|探索|"
         r"create|build|design|freeze|materialize|compute|analy[sz]e|explore)"
     )
     negation = (
@@ -10684,6 +11635,7 @@ def _ground_strategy_sample_design_v2_request(
             labels=(
                 "时间切分列",
                 "时间拆分列",
+                "时间字段",
                 "time partition column",
             ),
         ):
@@ -10736,7 +11688,7 @@ def _ground_strategy_sample_design_v2_request(
                     missing.append(f"partitioning.selectors.{partition}")
 
     binding_labels = {
-        "entity_field": ("实体字段", "客户字段", "entity field"),
+        "entity_field": ("实体字段", "主体字段", "客户字段", "entity field"),
         "time_field": ("时间字段", "日期字段", "time field"),
         "group_field": ("分组字段", "群组字段", "group field"),
         "month_field": ("月份字段", "月度字段", "month field"),
@@ -10812,17 +11764,22 @@ def _ground_strategy_model_evidence_v2_request(
     return result
 
 
-def _model_evidence_v2_has_positive_chain(utterance: str) -> bool:
-    """Return true only for a positively requested downstream operation."""
+def _has_positive_chained_operation(
+    utterance: str,
+    *,
+    operation_re: re.Pattern[str],
+) -> bool:
+    """Return true only when a clause positively requests a chained operation."""
 
     boundaries = "；;。.!?？\n，,、/"
-    for match in _MODEL_EVIDENCE_CHAIN_RE.finditer(utterance):
+    for match in operation_re.finditer(utterance):
         left = max(utterance.rfind(mark, 0, match.start()) for mark in boundaries) + 1
         prefix = utterance[left : match.start()]
         if re.search(
             r"(?:不需要|不用|暂不|先不|不要|无需|不再|不做|"
-            r"别|禁止|不会|未|没有|并非|而非|不)"
-            r"\s*(?:再|进行|做|生成|形成|输出)?\s*$|"
+            r"别|禁止|不会|未|没有|并非|而非|不(?!只|仅))"
+            r"\s*(?:再|进行|做|生成|形成|输出|进入|开展|执行|"
+            r"训练|构建|建立|创建|采纳|采用|部署|投产|上线)?\s*$|"
             r"(?:(?:do\s+not\s+need\s+to|don't\s+need\s+to|"
             r"do\s+not|don't|never|without|no)\s+)"
             r"(?:(?:further\s+)?(?:do|generate|create|run)\s+)?$",
@@ -10834,13 +11791,20 @@ def _model_evidence_v2_has_positive_chain(utterance: str) -> bool:
     return False
 
 
+def _model_evidence_v2_has_positive_chain(utterance: str) -> bool:
+    """Return true only for a positively requested downstream operation."""
+
+    return _has_positive_chained_operation(
+        utterance,
+        operation_re=_MODEL_EVIDENCE_CHAIN_RE,
+    )
+
+
 def _sample_design_v2_has_chained_operation(utterance: str) -> bool:
-    for match in _SAMPLE_DESIGN_V2_CHAIN_RE.finditer(utterance):
-        prefix = utterance[max(0, match.start() - 10) : match.start()]
-        if re.search(r"(?:不|不要|无需|不再|别|禁止|not\s+|do\s+not\s+|don't\s+)$", prefix, re.I):
-            continue
-        return True
-    return False
+    return _has_positive_chained_operation(
+        utterance,
+        operation_re=_SAMPLE_DESIGN_V2_CHAIN_RE,
+    )
 
 
 def _sample_v2_value_grounded(utterance: str, value: object) -> bool:
@@ -10852,6 +11816,7 @@ def _sample_v2_value_grounded(utterance: str, value: object) -> bool:
 def _sample_v2_drop_policy_grounded(utterance: str, expected: bool) -> bool:
     true_match = re.search(
         r"(?:丢弃|排除|剔除|删除).{0,12}(?:NaN|nan|空标签|缺失标签)|"
+        r"(?:NaN|nan|空标签|缺失标签).{0,12}(?:丢弃|排除|剔除|删除)|"
         r"(?:drop|exclude).{0,12}(?:nan|missing)\s+labels?",
         utterance,
         re.I,
@@ -10910,9 +11875,18 @@ def _sample_v2_no_population_filters_grounded(
     utterance: str,
     labels: Sequence[str],
 ) -> bool:
+    expected_role = re.compile(
+        "|".join(
+            re.escape(label)
+            for label in sorted(labels, key=len, reverse=True)
+        ),
+        re.I,
+    )
     no_filter = re.compile(
-        r"(?:无|没有|不设|不设置|不使用|无需)\s*(?:任何)?\s*"
+        r"(?:(?:均|都)?(?:为|是)?全表)|"
+        r"(?:无|没有|不设|不设置|不使用|不做|无需)\s*(?:任何)?\s*"
         r"(?:(?:纳排|纳入\s*(?:和|及|或|/)?\s*排除|筛选|过滤)(?:条件)?|"
+        r"inclusion\s*(?:或|和|及|/|or|and)\s*exclusion\s*(?:筛选|过滤)?|"
         r"(?:额外|附加)?条件)|"
         r"(?:(?:no|without)\s+(?:population\s+)?filters?|"
         r"inclusion\s*(?:=|:)?\s*(?:none|null)\s*(?:and|,|，|、|/)\s*"
@@ -10926,6 +11900,15 @@ def _sample_v2_no_population_filters_grounded(
         r"!=|<>|>=|<=|(?<![<>!=])=(?!=)|\b(?:eq|ne|gt|gte|lt|lte)\b)",
         re.I,
     )
+    combined_population_clause = any(
+        expected_role.search(clause) is not None
+        and len(tuple(_SAMPLE_V2_POPULATION_ROLE_RE.finditer(clause))) >= 2
+        and no_filter.search(clause) is not None
+        and positive_filter.search(clause) is None
+        for clause in _sample_design_control_segments(utterance)
+    )
+    if combined_population_clause:
+        return True
     return any(
         no_filter.search(segment) is not None
         and positive_filter.search(segment) is None
@@ -11121,6 +12104,10 @@ def _sample_v2_maturity_days_grounded(
             clause,
             re.I,
         )
+        or (
+            re.search(r"(?:成熟度|maturity)", clause, re.I)
+            and re.search(r"(?:表现期|performance\s+window)", clause, re.I)
+        )
     )
     observed = {
         int(value)
@@ -11246,13 +12233,9 @@ def _sample_v2_partition_time_range_grounded(
         re.escape(label) for label in sorted(labels, key=len, reverse=True)
     )
     clauses = tuple(
-        clause
-        for clause in _sample_design_clauses(utterance)
-        if re.search(
-            rf"(?:{role}).{{0,10}}(?:时间范围|日期范围|time\s+range)",
-            clause,
-            re.I,
-        )
+        segment
+        for segment in _sample_design_control_segments(utterance)
+        if re.search(rf"(?:{role})", segment, re.I)
     )
     if len(clauses) != 1:
         return False
@@ -11292,7 +12275,7 @@ def _sample_v2_unavailable_role_grounded(
     labels: Sequence[str],
 ) -> bool:
     role = "(?:" + "|".join(re.escape(label) for label in labels) + ")"
-    unavailable = r"(?:暂时没有|暂无|没有|未提供|不可用|不适用|unavailable|not\s+available|none|null)"
+    unavailable = r"(?:暂时没有|暂无|没有|未提供|暂不可提供|不可提供|不可用|不适用|unavailable|not\s+available|none|null)"
     return (
         re.search(
             rf"{role}.{{0,12}}(?:{unavailable})|(?:{unavailable}).{{0,12}}{role}",
@@ -11331,10 +12314,10 @@ def _sample_v2_historical_score_grounded(
             return False
         direction_patterns = {
             "higher_is_riskier": (
-                r"(?:越高越风险|高分高风险|higher[_\s-]*is[_\s-]*riskier)"
+                r"(?:越高越风险|越高风险越高|高分高风险|higher[_\s-]*is[_\s-]*riskier)"
             ),
             "lower_is_riskier": (
-                r"(?:越低越风险|低分高风险|lower[_\s-]*is[_\s-]*riskier)"
+                r"(?:越低越风险|越低风险越高|低分高风险|lower[_\s-]*is[_\s-]*riskier)"
             ),
         }
         observed = {
@@ -11532,6 +12515,16 @@ def _sample_design_clauses(utterance: str) -> tuple[str, ...]:
         clause.strip()
         for clause in re.split(r"[；;。.!?？\n]+", utterance)
         if clause.strip()
+    )
+
+
+def _sample_design_control_segments(utterance: str) -> tuple[str, ...]:
+    """Split scalar controls without borrowing labels or values from neighbors."""
+
+    return tuple(
+        segment.strip()
+        for segment in re.split(r"[；;。.!?？\n，,、]+", utterance)
+        if segment.strip()
     )
 
 
@@ -11746,13 +12739,14 @@ def _sample_design_column_role_grounded(
         utterance,
         re.I,
     ):
+        separators = ("；", ";", "。", "\n", "，", ",", "、")
         left = max(
             utterance.rfind(separator, 0, match.start())
-            for separator in ("；", ";", "。", "\n")
+            for separator in separators
         ) + 1
         right_candidates = [
             position
-            for separator in ("；", ";", "。", "\n")
+            for separator in separators
             if (position := utterance.find(separator, match.end())) >= 0
         ]
         right = min(right_candidates) if right_candidates else len(utterance)
@@ -17526,6 +18520,20 @@ def _standard_workflow_confirmation_text(
                 "本步骤只生成只读稳定性证据；不会修改 Pool、入池、采纳或部署",
             ]
         )
+    elif draft.workflow == "scorecard_model_score_evidence_build":
+        details = [
+            "已识别为〔Scorecard 训练与模型评分证据 Workflow〕",
+            "建模特征：" + "、".join(inputs["features"]),
+            f"随机种子：{inputs['seed']}",
+            f"最大迭代次数：{inputs['max_iter']}",
+            f"Scorecard 最大分箱数：{inputs['scorecard_max_bins']}",
+            "平台将绑定最新完整认证的 StrategySampleDesign V2，先训练原生"
+            " Scorecard，再用同一训练证据生成完整任务级原始坏账概率向量",
+            "模型、训练证据、评分向量与评分证据均由平台发布并逐项校验",
+            "本步骤不比较、不选择、不采纳、不部署模型，也不自动选择 cutoff",
+        ]
+        if "sample_weight_col" in inputs:
+            details.append(f"样本权重列：{inputs['sample_weight_col']}")
     elif draft.workflow == "scorecard_band_build":
         if "bin_count" in inputs:
             banding = f"等频 {inputs['bin_count']} 档"

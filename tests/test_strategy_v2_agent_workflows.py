@@ -889,6 +889,134 @@ def test_native_parallel_sample_drives_univariate_on_exact_risk_development_rows
     assert len(llm.calls) == (2 if request_source == "natural_language" else 0)
 
 
+def test_manual_candidate_inherits_native_sample_drop_nan_policy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+    )
+    sample_inputs = _parallel_population_sample_v2_inputs()
+    sample_inputs["drop_nan_labels"] = True
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: _SequencedStrategyLLM(),
+    )
+
+    sample_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": _parallel_population_sample_v2_utterance().replace(
+                "不丢弃缺失标签",
+                "丢弃缺失标签",
+            ),
+            "strategy_request": {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_sample_design_v2",
+                "workflow_inputs": sample_inputs,
+            },
+        },
+    )
+    candidate_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "对 legacy_score 用 equal_width 做单变量分析，目标箱数 3，"
+                "最小箱占比 2%，放款金额列 loan_amount，"
+                "逾期金额列 overdue_amount，不设置哨兵值"
+            ),
+            "strategy_request": _univariate_payload(),
+        },
+    )
+
+    assert sample_response.status_code == 202, sample_response.text
+    assert candidate_response.status_code == 202, candidate_response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "strategy_univariate_candidate_analysis",
+    ], json.dumps(candidate_response.json()["messages"][-1], ensure_ascii=False)
+    candidate_plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert candidate_plan.steps[0].inputs["drop_nan_labels"] is True
+    assert candidate_plan.status.value == "done"
+
+
+def test_manual_adoption_inherits_native_sample_drop_nan_policy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+        parallel_populations=True,
+        nan_label=True,
+    )
+    sample_inputs = _parallel_population_sample_v2_inputs()
+    sample_inputs["drop_nan_labels"] = True
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: _SequencedStrategyLLM(),
+    )
+
+    sample_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": _parallel_population_sample_v2_utterance().replace(
+                "不丢弃缺失标签",
+                "丢弃缺失标签",
+            ),
+            "strategy_request": {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_sample_design_v2",
+                "workflow_inputs": sample_inputs,
+            },
+        },
+    )
+    strategy_id = _create_stored_approval_strategy(
+        client,
+        task_id,
+        threshold=250.0,
+    )
+    adoption_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "提交本地采纳复核",
+            "strategy_request": {
+                "request_kind": "strategy_lifecycle",
+                "operation": "adopt",
+                "strategy_type": "approval",
+                "strategy_id": strategy_id,
+                "adoption_reason": "已复核独立验证、影响测算和报告证据，同意本地采纳",
+            },
+        },
+    )
+
+    assert sample_response.status_code == 202, sample_response.text
+    assert adoption_response.status_code == 202, adoption_response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "stored_strategy_adoption",
+    ], json.dumps(adoption_response.json()["messages"][-1], ensure_ascii=False)
+    adoption_plan = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert adoption_plan.status.value == "awaiting_confirm"
+    assert adoption_plan.steps[0].status.value == "done"
+    assert adoption_plan.steps[0].inputs["drop_nan_labels"] is True
+    assert (
+        adoption_plan.steps[0].inputs["sample_design_ref"]["partition"]
+        == "risk/development"
+    )
+    assert adoption_plan.steps[1].status.value == "awaiting_confirm"
+
+
 @pytest.mark.parametrize("request_source", ["natural_language", "manual_ui"])
 def test_native_parallel_sample_drives_automatic_tree_on_risk_development(
     tmp_path: Path,
@@ -1393,7 +1521,7 @@ def test_native_parallel_sample_drives_stored_strategy_backtest_and_compare(
     assert len(llm.calls) == 1
 
 
-def test_native_parallel_sample_does_not_expand_stored_adoption_boundary(
+def test_native_parallel_sample_drives_stored_adoption_on_risk_development(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1434,14 +1562,19 @@ def test_native_parallel_sample_does_not_expand_stored_adoption_boundary(
     )
 
     assert response.status_code == 202, response.text
-    assert (
-        response.json()["code"]
-        == "strategy_sample_design_v2_native_source_unsupported"
-    )
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
-        "strategy_sample_design_v2_native"
+        "strategy_sample_design_v2_native",
+        "stored_strategy_adoption",
     ]
+    adoption = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert adoption.status.value == "awaiting_confirm"
+    assert adoption.steps[0].status.value == "done"
+    assert (
+        adoption.steps[0].inputs["sample_design_ref"]["partition"]
+        == "risk/development"
+    )
+    assert adoption.steps[1].status.value == "awaiting_confirm"
     assert len(llm.calls) == 1
 
 

@@ -1510,6 +1510,10 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
             "num_boost_round": 8,
             "learning_rate": 0.1,
             "num_leaves": 4,
+            # Tuned LightGBM parameters carry force_col_wise into the final
+            # training pass. A stale row-wise default must not make the two
+            # mutually-exclusive histogram modes true at the same time.
+            "force_col_wise": True,
             "sample_weight_col": "row_weight",
             "preprocessing_steps": [
                 {"kind": "sentinel", "columns": ["x1"], "params": {"x1": [-999.0]}}
@@ -1535,6 +1539,8 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
     assert first.artifact.score_direction is None
     assert first.artifact.points_direction is None
     assert first.artifact.params["sample_weight_col"] == "row_weight"
+    assert first.artifact.params["force_col_wise"] is True
+    assert "force_row_wise" not in first.artifact.params
     assert first.artifact.params["preprocessing_steps"][0]["kind"] == "sentinel"
     assert first.artifact.params["special_value_governance"]["x1"]["action"] == "mask"
     assert first.metrics.train_ks is None
@@ -1573,6 +1579,7 @@ def test_lgb_regressor_early_stopping_never_uses_test_rows(
             return np.zeros(1, dtype=float)
 
     def fake_train(_params, dtrain, *, valid_sets, **_kwargs):
+        captured["params"] = dict(_params)
         captured["fit"] = set(dtrain.data.index)
         captured["valid"] = set(valid_sets[0].data.index)
         return FakeBooster()
@@ -1604,6 +1611,8 @@ def test_lgb_regressor_early_stopping_never_uses_test_rows(
     assert captured["fit"].isdisjoint(captured["valid"])
     assert captured["valid"]
     assert captured["valid"].isdisjoint(test_rows)
+    assert captured["params"]["force_row_wise"] is True
+    assert "force_col_wise" not in captured["params"]
 
 
 def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tmp_path):
@@ -2035,6 +2044,56 @@ def test_build_modeling_proposal_uses_explicit_target_type_default_recipe(tmp_pa
     assert proposal.recipe == "lgb_regressor"
     assert proposal.recipes == ["lgb_regressor"]
     assert proposal.target_col == "income"
+
+
+def test_build_modeling_proposal_infers_continuous_family_from_c1_target(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "loss_amount_target": [250.0 + i * 13.5 for i in range(rows)],
+    })
+    path = tmp_path / "agent_regression_sample.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-agent-reg", path, role="sample")
+
+    proposal = build_modeling_proposal(
+        registry,
+        backend,
+        "task-agent-reg",
+        tmp_path,
+        anchor_id=dataset.id,
+        target_col="loss_amount_target",
+    )
+
+    assert proposal.target_type == "continuous"
+    assert proposal.recipes == ["lgb_regressor"]
+    assert proposal.target_col == "loss_amount_target"
+
+
+def test_build_modeling_proposal_infers_multiclass_family_from_c1_target(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "risk_grade": ["A", "B", "C"] * (rows // 3),
+    })
+    path = tmp_path / "agent_multiclass_sample.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-agent-mc", path, role="sample")
+
+    proposal = build_modeling_proposal(
+        registry,
+        backend,
+        "task-agent-mc",
+        tmp_path,
+        anchor_id=dataset.id,
+        target_col="risk_grade",
+    )
+
+    assert proposal.target_type == "multiclass"
+    assert proposal.recipes == ["lgb_multiclass"]
+    assert proposal.target_col == "risk_grade"
 
 
 def test_build_modeling_proposal_stays_binary_for_classification_recipes(tmp_path):

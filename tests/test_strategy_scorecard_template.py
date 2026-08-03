@@ -77,6 +77,44 @@ def test_scorecard_templates_are_registered_as_narrow_nongated_steps() -> None:
         assert step.decision_point is False
 
 
+def test_scorecard_model_score_evidence_template_chains_governed_tools(
+    tmp_path: Path,
+) -> None:
+    load_builtin_templates()
+    tools = _tools(tmp_path)
+    template = get_template("strategy_scorecard_model_score_evidence_build")
+
+    assert template in BUILTIN_TEMPLATES
+    assert [step.tool_ref for step in template.steps] == [
+        ToolRef("modeling", "train_model_with_evidence_v2"),
+        ToolRef("modeling", "materialize_model_score_evidence_v2"),
+    ]
+    assert template.steps[1].depends_on_titles == ("训练受治理 Scorecard",)
+    assert all(not step.needs_confirmation for step in template.steps)
+
+    plan = Planner(tools, lambda: None, PlanValidator(tools)).from_template(
+        template,
+        {
+            "sample_design_ref": SAMPLE_REF,
+            "features": ["age", "income"],
+            "params": {"max_iter": 200, "scorecard_max_bins": 4},
+            "seed": 23,
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tools).validate(plan) == []
+    assert plan.steps[0].inputs["recipe"] == "scorecard"
+    assert plan.steps[0].inputs["sample_design_ref"] == SAMPLE_REF
+    training_ref = plan.steps[1].inputs["training_evidence_ref"]
+    assert training_ref["sample_design_ref"] == (
+        f"$ref:{plan.steps[0].id}.output.sample_design_ref"
+    )
+    assert training_ref["expected_experiment_id"] == (
+        f"$ref:{plan.steps[0].id}.output.experiment_id"
+    )
+
+
 def test_scorecard_band_template_omits_default_banding_and_maps_bin_count(
     tmp_path: Path,
 ) -> None:

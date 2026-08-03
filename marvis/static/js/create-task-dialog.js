@@ -20,6 +20,26 @@ export function modelTargetTypeForRecipes(recipes = []) {
   return families.size === 1 ? [...families][0] : null;
 }
 
+export function resetCreateTaskSpecificInputs({
+  $,
+  root = document,
+} = {}) {
+  const getElement = typeof $ === "function" ? $ : () => null;
+  for (const id of [
+    "modelName",
+    "validator",
+    "sourceDir",
+    "modelOotKsMin",
+    "materialUploadInput",
+  ]) {
+    const input = getElement(id);
+    if (input) input.value = "";
+  }
+  root?.querySelectorAll?.("[data-create-report-key]").forEach((input) => {
+    input.value = "";
+  });
+}
+
 export function createCreateTaskDialogController({
   $,
   materialSourceController,
@@ -258,6 +278,7 @@ export function createCreateTaskDialogController({
 
   function openTaskDialog(taskType = defaultTaskType) {
     applyTaskTypeToDialog(taskType);
+    resetCreateTaskSpecificInputs({ $ });
     document.querySelectorAll('input[name="runMode"]').forEach((input) => {
       input.checked = false;
     });

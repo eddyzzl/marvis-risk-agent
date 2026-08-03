@@ -853,6 +853,70 @@ def test_monitoring_disposition_gate_declares_real_action_schema():
 
 
 @pytest.mark.parametrize(
+    ("overall_level", "requires_structured_input"),
+    (("green", False), ("amber", False), ("red", True)),
+)
+def test_monitoring_gate_message_carries_authoritative_input_requirement(
+    overall_level,
+    requires_structured_input,
+):
+    from marvis.agent.plan_message_composer import PlanMessageComposer
+    from marvis.orchestrator.contracts import (
+        Plan,
+        PlanStatus,
+        PlanStep,
+        StepStatus,
+    )
+
+    run = PlanStep(
+        id="run",
+        plan_id="p",
+        index=0,
+        title="执行策略监控",
+        tool_ref=ToolRef("strategy", "run_strategy_monitoring"),
+        inputs={},
+        depends_on=[],
+        post_checks=[],
+        status=StepStatus.DONE,
+    )
+    gate = PlanStep(
+        id="disposition",
+        plan_id="p",
+        index=1,
+        title="处置监控结果",
+        tool_ref=ToolRef("strategy", "apply_monitoring_disposition"),
+        inputs={"disposition": None, "reason": None, "threshold_patch": None},
+        depends_on=[run.id],
+        post_checks=[],
+        status=StepStatus.AWAITING_CONFIRM,
+    )
+    plan = Plan(
+        id="p",
+        task_id="t",
+        goal="g",
+        source="template",
+        template_id="strategy_monitoring",
+        autonomy_level=1,
+        steps=[run, gate],
+        status=PlanStatus.AWAITING_CONFIRM,
+    )
+    output = {
+        "overall_level": overall_level,
+        "checks": [],
+        "adjustable_threshold_ids": [],
+    }
+
+    message = PlanMessageComposer(
+        load_output=lambda step_id: output if step_id == run.id else None,
+    ).gate_message(plan, gate, run_seq=1)
+
+    assert message.metadata["monitoring_disposition"] == {
+        "overall_level": overall_level,
+        "requires_structured_input": requires_structured_input,
+    }
+
+
+@pytest.mark.parametrize(
     ("adjustable_ids", "expected_ids"),
     (
         (["approval_floor"], ["approval_floor"]),
@@ -1021,6 +1085,21 @@ def test_red_monitoring_gate_rejects_plain_confirm_without_complete_disposition(
         return {"overall_level": "green"} if step_id == run.id else None
 
     assert monitoring_plain_confirm_error(plan, gate, load_green) is None
+
+    def load_amber(step_id):
+        return {"overall_level": "amber"} if step_id == run.id else None
+
+    assert monitoring_plain_confirm_error(plan, gate, load_amber) is None
+
+    def load_missing(_step_id):
+        return None
+
+    assert "缺少可信" in monitoring_plain_confirm_error(plan, gate, load_missing)
+
+    def load_unknown(step_id):
+        return {"overall_level": "blue"} if step_id == run.id else None
+
+    assert "缺少可信" in monitoring_plain_confirm_error(plan, gate, load_unknown)
 
 
 def test_monitoring_structured_control_cannot_rebind_frozen_evidence():

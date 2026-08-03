@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from contextlib import contextmanager
-from dataclasses import replace
 import hashlib
 from pathlib import Path
 
@@ -45,6 +44,7 @@ from marvis.settings import build_settings
 from tests.test_model_score_evidence_tool import _run_score
 from tests.test_modeling_training_evidence_tool import (
     _fixture,
+    _native_fixture,
     _run as run_training,
 )
 
@@ -68,6 +68,41 @@ def _real_scorecard(tmp_path: Path) -> dict:
             "scorecard_max_bins": 3,
         }
     )
+    training_output = run_training(fx)
+    score_output = _run_score(fx, training_output)
+    runtime = strategy_tools._runtime(fx["ctx"])
+    score_artifacts = score_output["artifacts"]
+    band = run_build_scorecard_band_asset(
+        {
+            "score_evidence_ref": {
+                "evidence_artifact_id": score_artifacts["score_evidence"][
+                    "artifact_id"
+                ],
+                "expected_evidence_artifact_content_hash": score_artifacts[
+                    "score_evidence"
+                ]["content_hash"],
+                "score_vector_artifact_id": score_artifacts["score_vector"][
+                    "artifact_id"
+                ],
+                "expected_score_vector_artifact_content_hash": score_artifacts[
+                    "score_vector"
+                ]["content_hash"],
+            },
+            "sample_design_ref": dict(fx["sample_ref"]),
+            "banding": {"method": "equal_frequency", "bin_count": 3},
+        },
+        fx["ctx"],
+        runtime,
+    )
+    return {
+        "fx": fx,
+        "runtime": runtime,
+        "band": band,
+    }
+
+
+def _real_native_scorecard(tmp_path: Path) -> dict:
+    fx = _native_fixture(tmp_path)
     training_output = run_training(fx)
     score_output = _run_score(fx, training_output)
     runtime = strategy_tools._runtime(fx["ctx"])
@@ -279,10 +314,10 @@ def test_complete_scorecard_band_artifact_requires_pointer_selection(
 
 
 @pytest.mark.slow
-def test_native_scorecard_pool_development_fails_closed_before_legacy_binding(
+def test_native_scorecard_pool_binds_risk_development_execution(
     tmp_path: Path,
 ) -> None:
-    real = _real_scorecard(tmp_path)
+    real = _real_native_scorecard(tmp_path)
     selection = _selection(real)
     added = run_add_candidate_to_pool(
         _add_inputs(
@@ -300,41 +335,16 @@ def test_native_scorecard_pool_development_fails_closed_before_legacy_binding(
         expected_pool_revision=added["revision"],
         expected_pool_snapshot_hash=added["snapshot_hash"],
     )
-    [lineage] = current.lineages
-    sample = lineage.asset.sample_design
-    bundle = deepcopy(sample.bundle)
-    bundle["sample_design"]["compatibility"] = {
-        "source_mode": "native_active_dataset",
-        "development_partition": "risk/development",
-    }
-    native_asset = replace(
-        lineage.asset,
-        sample_design=replace(sample, bundle=bundle),
+    development = bind_strategy_pool_development_execution(
+        real["runtime"],
+        current,
     )
-    native_lineage = replace(
-        lineage,
-        selection=replace(
-            lineage.selection,
-            source_asset_binding=native_asset,
-        ),
-        asset=native_asset,
-    )
-    native_pool = replace(current, lineages=(native_lineage,))
-    repository = TaskArtifactRepository(real["fx"]["settings"].db_path)
-    records_before = repository.list_for_task(real["fx"]["task"].id)
 
-    with pytest.raises(StrategyError) as raised:
-        bind_strategy_pool_development_execution(
-            real["runtime"],
-            native_pool,
-        )
-
-    assert (
-        getattr(raised.value, "code", None)
-        == "strategy_sample_design_v2_native_source_unsupported"
-    )
-    assert getattr(raised.value, "consumer", None) == "strategy_pool_development"
-    assert repository.list_for_task(real["fx"]["task"].id) == records_before
+    assert development.sample_design.source_mode == "native_active_dataset"
+    assert development.sample_design.reference.partition == "risk/development"
+    assert development.sample_design_v2 is None
+    assert development.sample_design.target_col == "bad"
+    assert development.sample_design._native is not None
 
 
 @pytest.mark.slow

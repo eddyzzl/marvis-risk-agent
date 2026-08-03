@@ -8,6 +8,7 @@ from marvis.feature.screen import (
     screen_features_non_binary,
     sentinel_screen_notice,
 )
+from marvis.modeling_limits import normalize_n_trials
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.select import select_features
 from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET
@@ -277,9 +278,13 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
     if sample_weight_col and sample_weight_col in features:
         features = [feature for feature in features if feature != sample_weight_col]
         warnings.append("样本权重列已从入模特征中移除。")
-    n_trials_override = _optional_int(inputs.get("n_trials"))
-    if n_trials_override is not None and n_trials_override < 1:
-        raise ModelingError("n_trials must be at least 1")
+    try:
+        n_trials_override = normalize_n_trials(
+            inputs.get("n_trials"),
+            optional=True,
+        )
+    except ValueError as exc:
+        raise ModelingError(str(exc)) from exc
     cv_folds = _optional_int(inputs.get("cv_folds"))
     if cv_folds is not None and cv_folds < 2:
         raise ModelingError("cv_folds must be at least 2")

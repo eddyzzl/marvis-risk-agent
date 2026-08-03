@@ -566,6 +566,7 @@ def test_special_value_manual_http_submission_confirms_and_executes_atomically(
             json={
                 "content": "确认",
                 "ui_action": "confirm_gate",
+                "expected_plan_id": "plan-special",
                 "expected_step_id": "special",
                 "adjust_params": {
                     "decisions": {"x1": {"action": "mask"}},

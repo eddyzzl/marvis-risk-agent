@@ -9,6 +9,7 @@ the wide table in one synchronous run, no screening gate.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import unquote
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from marvis.agent.renderers import _render_feature_metrics
 from marvis.app import create_app
+from marvis.db import TaskRepository, connect
 
 
 def _sample_dir(root: Path, n: int = 3000) -> Path:
@@ -142,6 +144,63 @@ def test_feature_analysis_end_to_end(client: TestClient, tmp_path: Path):
     # VIF remains opt-in; the default metrics do not train a model.
     titles = {t["title"] for t in done["metadata"].get("tables", [])}
     assert "VIF（共线性）" not in titles
+
+
+def test_messages_recover_current_gate_when_plan_retry_did_not_append_one(
+    client: TestClient,
+    tmp_path: Path,
+):
+    """Raw plan retry can reach a gate without appending a chat turn."""
+
+    src = _sample_dir(tmp_path, n=300)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "恢复当前确认门",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "feature_analysis",
+        "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    gate = _last_assistant(messages)
+    gate_meta = gate["metadata"]
+    assert gate_meta["feature_binning"]
+    incremental = client.get(
+        f"/api/tasks/{task_id}/agent/messages?after_id={gate['id']}"
+    ).json()
+    assert incremental["incremental"] is True
+    assert incremental["messages"] == []
+
+    # Reproduce the browser-observed post-retry state: the plan is already at
+    # the next awaiting-confirm gate, but the raw plan retry path did not append
+    # that gate and a historical failure remains the latest assistant message.
+    with connect(client.app.state.settings.db_path) as conn:
+        conn.execute("DELETE FROM agent_messages WHERE id = ?", (gate["id"],))
+    plan = client.app.state.plan_repo.load_plan(gate_meta["plan_id"])
+    completed_step = next(step for step in plan.steps if step.status.value == "done")
+    TaskRepository(client.app.state.settings.db_path).add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content="历史失败",
+        metadata={
+            "error": True,
+            "kind": "gate",
+            "plan_id": plan.id,
+            "step_id": completed_step.id,
+        },
+    )
+
+    recovered = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    current = _last_assistant(recovered)
+    assert current["metadata"]["kind"] == "gate"
+    assert current["metadata"]["step_id"] == gate_meta["step_id"]
+    assert current["metadata"]["feature_binning"]
+    assert current["metadata"]["recovered_from_plan"] is True
 
 
 def test_feature_analysis_ambiguous_target_can_be_selected_and_persists(
@@ -479,6 +538,10 @@ def test_feature_report_is_downloadable_after_run(client: TestClient, tmp_path: 
     assert resp.status_code == 200, resp.text
     assert "spreadsheetml" in resp.headers["content-type"]
     assert resp.content[:2] == b"PK"  # a real .xlsx (zip) file
+    filename = unquote(resp.headers["content-disposition"]).split("''")[-1].strip('"')
+    assert filename.startswith("下载报告_特征分析报告_")
+    assert filename.endswith(".xlsx")
+    assert "模型验证报告" not in filename
 
 
 def test_feature_analysis_without_target_reports_error(client: TestClient, tmp_path: Path):

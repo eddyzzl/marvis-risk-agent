@@ -1350,6 +1350,7 @@ def test_generate_model_reports_fans_out_one_xlsx_per_experiment(tmp_path):
         ToolRef("modeling", "generate_model_reports"),
         {
             "experiment_ids": [lr_experiment, lgb_experiment],
+            "selected_experiment_id": lgb_experiment,
             "dataset_id": dataset.id,
             "project_meta": {"项目名称": "多版本报告样例"},
         },
@@ -1359,9 +1360,10 @@ def test_generate_model_reports_fans_out_one_xlsx_per_experiment(tmp_path):
     assert result.ok is True, result.error
     reports = result.output["reports"]
     assert len(reports) == 2
-    assert [report["experiment_id"] for report in reports] == [lr_experiment, lgb_experiment]
+    assert [report["experiment_id"] for report in reports] == [lgb_experiment, lr_experiment]
     assert {report["recipe"] for report in reports} == {"lr", "lgb"}
-    # report_path mirrors the first report for download-endpoint compatibility
+    # The selected Champion is first and owns the backward-compatible primary
+    # path/details, while every trained experiment still receives a report.
     assert result.output["report_path"] == reports[0]["report_path"]
     assert isinstance(result.output["section_status"], list)
     assert isinstance(result.output["scorecard_table"], list)
@@ -1394,6 +1396,25 @@ def test_generate_model_reports_rejects_empty_experiment_ids(tmp_path):
 
     assert result.ok is False
     assert "experiment_ids" in str(result.error)
+
+
+def test_generate_model_reports_rejects_selected_experiment_outside_report_set(
+    tmp_path,
+):
+    runner, _settings, task, dataset = _report_runner(tmp_path)
+
+    result = runner.invoke(
+        ToolRef("modeling", "generate_model_reports"),
+        {
+            "experiment_ids": ["experiment-in-set"],
+            "selected_experiment_id": "experiment-outside-set",
+            "dataset_id": dataset.id,
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is False
+    assert "selected_experiment_id must be one of experiment_ids" in str(result.error)
 
 
 @pytest.mark.parametrize(

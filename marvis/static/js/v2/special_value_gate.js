@@ -43,6 +43,7 @@ export function renderSpecialValueGate(message, options = {}) {
   if (!payload || !Array.isArray(payload.columns) || payload.columns.length === 0) return "";
   const interactive = options.interactive !== false;
   const disabled = interactive ? "" : " disabled";
+  const planId = String(message?.metadata?.plan_id || "");
   const stepId = String(message?.metadata?.step_id || payload.step_id || "");
   const rows = payload.columns.map((item) => {
     const column = String(item?.column || "");
@@ -66,7 +67,7 @@ export function renderSpecialValueGate(message, options = {}) {
     ].join("");
   }).join("");
   return [
-    `<section class="special-value-gate" data-special-value-step-id="${escapeHtml(stepId)}">`,
+    `<section class="special-value-gate" data-special-value-plan-id="${escapeHtml(planId)}" data-special-value-step-id="${escapeHtml(stepId)}">`,
     '<header class="special-value-gate-heading">',
     '<div><span class="special-value-kicker">Human in the loop</span><h4>确认特殊值治理策略</h4>',
     '<p>逐列选择处理方式。系统会使用检测结果中的完整值集合，界面不会回传或改写特殊值。</p></div>',
@@ -131,6 +132,7 @@ export async function submitSpecialValueDecisions(button, context = {}) {
   const values = contextValues(context);
   const wrap = button?.closest?.("[data-special-value-step-id]");
   if (!wrap || !values.taskId || typeof values.api !== "function") return;
+  const expectedPlanId = wrap.dataset.specialValuePlanId || "";
   const expectedStepId = wrap.dataset.specialValueStepId || "";
   const { decisions, errors } = collectSpecialValueDecisions(wrap);
   if (errors.length) {
@@ -150,6 +152,7 @@ export async function submitSpecialValueDecisions(button, context = {}) {
       body: JSON.stringify({
         content: "确认",
         ui_action: "confirm_gate",
+        expected_plan_id: expectedPlanId,
         expected_step_id: expectedStepId,
         adjust_params: { decisions },
       }),

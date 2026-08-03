@@ -2316,7 +2316,11 @@ def _pool_lineage_development_facts(
         ))
     if isinstance(
         lineage,
-        (_AutomaticTreeCandidateLineage, _InteractiveTreeCandidateLineage),
+        (
+            _AutomaticTreeCandidateLineage,
+            _InteractiveTreeCandidateLineage,
+            _InteractiveTreeGroupCandidateLineage,
+        ),
     ):
         tree = (
             lineage.tree
@@ -2353,9 +2357,9 @@ def _pool_lineage_development_facts(
     if isinstance(lineage, _ScorecardCandidateLineage):
         sample_v2 = lineage.asset.sample_design
         design = sample_v2.bundle["sample_design"]
-        resolve_strategy_sample_design_v2_source_mode(
+        source_mode = resolve_strategy_sample_design_v2_source_mode(
             design,
-            capability="legacy_development",
+            capability="physical_v2",
             consumer="strategy_pool_development",
         )
         source = sample_v2.source_binding
@@ -2369,9 +2373,9 @@ def _pool_lineage_development_facts(
             "scorecard strategy Pool target",
         )
         if (
-            source.legacy.target_col != target_col
-            or source.legacy.target_bad_value != target["bad_value"]
-            or source.legacy.drop_nan_labels is not target["drop_missing"]
+            source.target_col != target_col
+            or source.target_bad_value != target["bad_value"]
+            or source.drop_nan_labels is not target["drop_missing"]
         ):
             raise StrategyError(
                 "scorecard strategy Pool target semantics changed"
@@ -2383,12 +2387,28 @@ def _pool_lineage_development_facts(
             raise StrategyError(
                 "scorecard strategy Pool evidence identity changed"
             )
+        if source_mode == "legacy_anchored":
+            sample_ref = StrategyRiskDevelopmentRef.from_value(
+                source.legacy.reference.to_ref_dict()
+            )
+            projected_sample_v2 = sample_v2
+        else:
+            sample_ref = StrategyRiskDevelopmentRef.from_value(
+                {
+                    "artifact_id": sample_v2.bundle_artifact_id,
+                    "artifact_content_hash": (
+                        sample_v2.bundle_artifact_content_hash
+                    ),
+                    "sample_design_id": design["sample_design_id"],
+                    "sample_design_content_hash": design["content_hash"],
+                    "partition": "risk/development",
+                }
+            )
+            projected_sample_v2 = None
         return remember(_PoolDevelopmentLineageFacts(
             dataset=_pool_development_dataset(lineage.dataset),
-            sample_ref=StrategyRiskDevelopmentRef.from_value(
-                source.legacy.reference.to_ref_dict()
-            ),
-            sample_design_v2=sample_v2,
+            sample_ref=sample_ref,
+            sample_design_v2=projected_sample_v2,
             evidence_identity=verified_identity,
             target_col=target_col,
         ))

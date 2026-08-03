@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import import_module
+from typing import Any
 
 from marvis.orchestrator.contracts import PostCheck
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
+
+
+UNSET_SLOT_DEFAULT = object()
 
 
 @dataclass(frozen=True)
@@ -13,6 +17,7 @@ class SlotSpec:
     required: bool
     source: str
     description: str
+    default: Any = UNSET_SLOT_DEFAULT
 
 
 @dataclass(frozen=True)

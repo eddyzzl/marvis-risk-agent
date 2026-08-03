@@ -4980,6 +4980,7 @@ body[data-theme="dark"] .plan-driver-action-card {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 20px;
 }
 
@@ -4994,9 +4995,11 @@ body[data-theme="dark"] .plan-driver-action-card {
 }
 
 .feature-binning-count {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 76px;
   align-items: center;
   gap: 8px;
+  margin: 0 0 0 auto;
   white-space: nowrap;
 }
 
@@ -5011,45 +5014,95 @@ body[data-theme="dark"] .plan-driver-action-card {
 
 .feature-binning-options {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 8px;
-  max-height: 340px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+  gap: 10px;
+  max-height: 360px;
   margin-top: 16px;
-  padding: 4px;
-  overflow: auto;
+  padding: 2px 6px 2px 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .feature-binning-option {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 11px;
   min-width: 0;
-  padding: 11px 12px;
+  min-height: 64px;
+  margin: 0;
+  padding: 10px 12px;
   border: 1px solid var(--line, #e1e5ec);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--panel, #fff) 92%, var(--accent, #1677ff) 8%);
+  background: color-mix(in srgb, var(--panel, #fff) 97%, var(--accent, #1677ff) 3%);
+  color: var(--text, #1f2937);
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .feature-binning-option:hover {
   border-color: color-mix(in srgb, var(--accent, #1677ff) 45%, var(--line, #e1e5ec));
+  background: color-mix(in srgb, var(--panel, #fff) 92%, var(--accent, #1677ff) 8%);
+}
+
+.feature-binning-option:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent, #1677ff) 68%, var(--line, #e1e5ec));
+  background: color-mix(in srgb, var(--panel, #fff) 86%, var(--accent, #1677ff) 14%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #1677ff) 12%, transparent);
+}
+
+.feature-binning-option:has(input:disabled) {
+  cursor: default;
+}
+
+.feature-binning-option > input[type="checkbox"] {
+  appearance: auto;
+  inline-size: 18px;
+  block-size: 18px;
+  min-inline-size: 18px;
+  min-block-size: 18px;
+  margin: 2px 0 0;
+  padding: 0;
+  border-radius: 4px;
+  accent-color: var(--accent, #1677ff);
+  box-shadow: none;
 }
 
 .feature-binning-option-main {
   display: grid;
   min-width: 0;
-  gap: 3px;
+  gap: 5px;
 }
 
-.feature-binning-option-main strong,
-.feature-binning-option-main small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.feature-binning-option-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.feature-binning-option-main strong {
+  min-width: 0;
+  color: var(--text, #1f2937);
+  overflow-wrap: anywhere;
 }
 
 .feature-binning-option-main small {
+  display: block;
   color: var(--muted, #697386);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .feature-binning-recommendation {
@@ -5063,9 +5116,14 @@ body[data-theme="dark"] .plan-driver-action-card {
 
 .feature-binning-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
+}
+
+.feature-binning-actions:empty {
+  display: none;
 }
 
 /* Special-value HITL: read-only evidence in Agent mode, one atomic action in manual mode. */

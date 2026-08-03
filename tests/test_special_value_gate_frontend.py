@@ -168,7 +168,10 @@ def test_special_value_submit_posts_atomic_decisions_without_evidence_values():
         const submitButton = {{ disabled: false }};
         const controls = [submitButton, ...rows.flatMap((row) => row.controls)];
         const wrap = {{
-          dataset: {{ specialValueStepId: "model-special-values" }},
+          dataset: {{
+            specialValuePlanId: "plan-special-values",
+            specialValueStepId: "model-special-values",
+          }},
           querySelectorAll(selector) {{
             if (selector === "[data-special-value-row]") return rows;
             if (selector === "button, select, input") return controls;
@@ -198,6 +201,7 @@ def test_special_value_submit_posts_atomic_decisions_without_evidence_values():
         assert.deepEqual(body, {{
           content: "确认",
           ui_action: "confirm_gate",
+          expected_plan_id: "plan-special-values",
           expected_step_id: "model-special-values",
           adjust_params: {{
             decisions: {{
@@ -239,7 +243,10 @@ def test_special_value_retain_without_reason_is_rejected_before_post():
         }};
         const submitButton = {{ disabled: false }};
         const wrap = {{
-          dataset: {{ specialValueStepId: "model-special-values" }},
+          dataset: {{
+            specialValuePlanId: "plan-special-values",
+            specialValueStepId: "model-special-values",
+          }},
           querySelectorAll(selector) {{
             if (selector === "[data-special-value-row]") return [row];
             if (selector === "button, select, input") {{

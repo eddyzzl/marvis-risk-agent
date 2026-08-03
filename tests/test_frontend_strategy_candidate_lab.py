@@ -523,6 +523,60 @@ def test_v2_workflow_spine_launchers_emit_only_explicit_user_controls():
     )
 
 
+def test_sample_design_status_changes_clear_conflicting_default_reasons():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          syncSampleDesignV2StatusControls,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        function makeForm(values) {
+          const controls = new Map(
+            Object.entries(values).map(([key, value]) => [key, { value }]),
+          );
+          return {
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              return match ? controls.get(match[1]) || null : null;
+            },
+          };
+        }
+
+        const form = makeForm({
+          sample_maturity_status: "confirmed_matured",
+          sample_maturity_reason: "暂未确认成熟度",
+          sample_historical_score_status: "available",
+          sample_historical_score_reason: "暂未提供历史分",
+        });
+
+        assert.equal(
+          syncSampleDesignV2StatusControls(form, "sample_maturity_status"),
+          true,
+        );
+        assert.equal(
+          form.querySelector(
+            '[data-candidate-lab-field="sample_maturity_reason"]',
+          ).value,
+          "",
+        );
+        assert.equal(
+          syncSampleDesignV2StatusControls(
+            form,
+            "sample_historical_score_status",
+          ),
+          true,
+        );
+        assert.equal(
+          form.querySelector(
+            '[data-candidate-lab-field="sample_historical_score_reason"]',
+          ).value,
+          "",
+        );
+        """
+    )
+
+
 def test_candidate_lab_renders_seven_stage_dual_population_and_report_spine():
     run_node(
         """
@@ -886,6 +940,28 @@ def test_scorecard_launchers_submit_only_visible_projection_ids_and_user_control
             querySelectorAll() { return []; },
           };
         }
+
+        const modelScoreEvidence = collectStrategyCandidateLabRequest(makeForm(
+          "scorecard_model_score_evidence_build",
+          {
+            scorecard_model_features: "age, income",
+            scorecard_model_sample_weight_col: "weight",
+            scorecard_model_seed: "23",
+            scorecard_model_max_iter: "200",
+            scorecard_model_max_bins: "4",
+          },
+        ));
+        assert.deepEqual(modelScoreEvidence, {
+          request_kind: "standard_workflow",
+          workflow: "scorecard_model_score_evidence_build",
+          workflow_inputs: {
+            features: ["age", "income"],
+            sample_weight_col: "weight",
+            seed: 23,
+            max_iter: 200,
+            scorecard_max_bins: 4,
+          },
+        });
 
         const equalFrequency = collectStrategyCandidateLabRequest(makeForm(
           "scorecard_band_build",

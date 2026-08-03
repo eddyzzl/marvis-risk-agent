@@ -53,6 +53,7 @@ from marvis.packs.modeling.evidence import (
     MAX_TRAINING_EVIDENCE_JSON_BYTES,
     MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
     MODEL_BINARY_REF_KIND,
+    NATIVE_SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
     RAW_SCORE_PRODUCT,
     SAMPLE_DESIGN_BUNDLE_ARTIFACT_KIND,
     SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
@@ -75,11 +76,10 @@ from marvis.packs.modeling.train_tools import (
 from marvis.packs.modeling.training_dataset import TrainingDataset
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_v2_tools import (
-    StrategySampleDesignV2ArtifactBinding,
-    load_historical_strategy_sample_design_v2_artifacts,
-    load_strategy_sample_design_v2_artifacts,
-    require_historical_strategy_sample_design_v2_artifact_binding_on_connection,
-    require_strategy_sample_design_v2_artifact_binding_on_connection,
+    load_any_strategy_sample_design_v2_artifacts,
+    load_historical_any_strategy_sample_design_v2_artifacts,
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection,
+    require_historical_any_strategy_sample_design_v2_artifact_binding_on_connection,
 )
 from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
@@ -241,7 +241,7 @@ class ModelingTrainingEvidenceArtifactBinding:
     """Authenticated model-binary/training-evidence artifact pair."""
 
     task_id: str
-    sample: StrategySampleDesignV2ArtifactBinding
+    sample: Any
     experiment: Experiment
     model_artifact: ModelArtifact
     model_binary_record: dict[str, Any]
@@ -795,12 +795,12 @@ def _require_modeling_training_evidence_artifact_binding_on_connection(
         raise ModelingError("training-evidence artifact binding is invalid")
     try:
         if require_current_sample:
-            require_strategy_sample_design_v2_artifact_binding_on_connection(
+            require_any_strategy_sample_design_v2_artifact_binding_on_connection(
                 conn,
                 binding.sample,
             )
         else:
-            require_historical_strategy_sample_design_v2_artifact_binding_on_connection(
+            require_historical_any_strategy_sample_design_v2_artifact_binding_on_connection(
                 conn,
                 binding.sample,
             )
@@ -891,7 +891,7 @@ def _persist_training_evidence(
     *,
     task_id: str,
     request: Mapping[str, Any],
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
     experiment: Experiment,
     result,
     split_hashes: Mapping[str, Any],
@@ -918,7 +918,7 @@ def _persist_training_evidence(
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                require_strategy_sample_design_v2_artifact_binding_on_connection(
+                require_any_strategy_sample_design_v2_artifact_binding_on_connection(
                     conn,
                     sample,
                 )
@@ -966,7 +966,14 @@ def _persist_training_evidence(
                     sample_design_bundle=sample.bundle,
                     membership_artifact_ref=build_task_artifact_ref(
                         artifact_id=sample.membership_artifact_id,
-                        kind=SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
+                        kind=(
+                            NATIVE_SAMPLE_MEMBERSHIP_ARTIFACT_KIND
+                            if sample.bundle["sample_design"]["compatibility"].get(
+                                "source_mode"
+                            )
+                            == "native_active_dataset"
+                            else SAMPLE_MEMBERSHIP_ARTIFACT_KIND
+                        ),
                         content_hash=sample.membership_artifact_content_hash,
                     ),
                     sample_design_bundle_artifact_ref=build_task_artifact_ref(
@@ -1044,7 +1051,7 @@ def _persist_training_evidence(
                 )
                 # Recheck both source and newly-published bytes immediately
                 # before the only database commit in this Tool.
-                require_strategy_sample_design_v2_artifact_binding_on_connection(
+                require_any_strategy_sample_design_v2_artifact_binding_on_connection(
                     conn,
                     sample,
                 )
@@ -1258,7 +1265,7 @@ def _record_housekeeping_warning_best_effort(
 def _training_frame_and_masks(
     runtime,
     *,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
     request: Mapping[str, Any],
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
     source = sample.source_binding
@@ -1372,7 +1379,7 @@ def _private_split_selector_masks(
 def _training_config(
     runtime,
     *,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
     request: Mapping[str, Any],
     internal_split: Mapping[str, Any],
 ) -> TrainConfig:
@@ -1440,7 +1447,7 @@ def _training_config(
 
 
 def _governed_target_contract(
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
 ) -> dict[str, Any]:
     target = sample.bundle["sample_design"]["target_selector"]
     return build_modeling_target_contract(
@@ -1661,9 +1668,9 @@ def _load_sample(
     ref = request["sample_design_ref"]
     try:
         loader = (
-            load_strategy_sample_design_v2_artifacts
+            load_any_strategy_sample_design_v2_artifacts
             if require_current
-            else load_historical_strategy_sample_design_v2_artifacts
+            else load_historical_any_strategy_sample_design_v2_artifacts
         )
         return loader(
             runtime,
@@ -1813,7 +1820,7 @@ def _internal_split_provenance(config: TrainConfig) -> dict[str, Any]:
 def _model_provenance(
     *,
     task_id: str,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
     experiment: Experiment,
     model_artifact: ModelArtifact,
     model_hash: str,
@@ -1858,7 +1865,7 @@ def _model_provenance(
 def _evidence_provenance(
     *,
     task_id: str,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
     experiment: Experiment,
     model_artifact: ModelArtifact,
     model_record: Mapping[str, Any],

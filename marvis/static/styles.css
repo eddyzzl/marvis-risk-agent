@@ -7314,6 +7314,11 @@ body[data-theme="dark"] .agent-composer {
   display: none;
 }
 
+.agent-composer.manual-risk-intake .agent-composer-mode-controls,
+.agent-composer.manual-risk-intake .agent-composer-right-controls > .agent-composer-controls {
+  display: none;
+}
+
 /* Mask ONLY the two bottom-corner slivers that fall outside the bar's rounded
    shape (mirrors .workspace-head's top-corner masks). The center stays clear so
    the glass bar blurs the transcript scrolling behind it instead of sitting on

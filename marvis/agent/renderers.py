@@ -2682,7 +2682,8 @@ def _validated_build_voting_candidate_from_search_output(
                 "sample_design_content_hash",
                 "partition",
             }
-            or sample_ref["partition"] != "development"
+            or sample_ref["partition"]
+            not in {"development", "risk/development"}
             or any(
                 re.fullmatch(r"[0-9a-f]{64}", str(sample_ref[field])) is None
                 for field in (

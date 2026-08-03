@@ -6758,7 +6758,7 @@
           },
           "expected_asset_id": {
             "type": "string",
-            "pattern": "^(?:candidate-asset|interactive-tree)-[0-9a-f]{32}$"
+            "pattern": "^(?:candidate-asset|interactive-tree|scorecard-band-asset)-[0-9a-f]{32}$"
           },
           "expected_asset_hash": {
             "type": "string",

@@ -55,6 +55,15 @@ MODELING_TRAINING_EVIDENCE_PRODUCER_VERSION = (
     "marvis.modeling.training-evidence/2.2"
 )
 SAMPLE_MEMBERSHIP_ARTIFACT_KIND = "strategy_sample_membership_v2_binary"
+NATIVE_SAMPLE_MEMBERSHIP_ARTIFACT_KIND = (
+    "strategy_sample_membership_v2_native_binary"
+)
+SAMPLE_MEMBERSHIP_ARTIFACT_KINDS = frozenset(
+    {
+        SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
+        NATIVE_SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
+    }
+)
 SAMPLE_DESIGN_BUNDLE_ARTIFACT_KIND = "strategy_sample_design_v2_json"
 MODEL_BINARY_REF_KIND = "modeling_model_binary"
 TRAINING_MASK_HASH_ALGORITHM = "sha256-packed-bool-little-v1"
@@ -1035,10 +1044,16 @@ def _expected_sample_binding(
     bundle = context["bundle"]
     design = bundle["sample_design"]
     header = bundle["membership"]
+    compatibility = design["compatibility"]
+    membership_kind = (
+        NATIVE_SAMPLE_MEMBERSHIP_ARTIFACT_KIND
+        if compatibility.get("source_mode") == "native_active_dataset"
+        else SAMPLE_MEMBERSHIP_ARTIFACT_KIND
+    )
     membership_artifact = _task_artifact_ref(
         membership_artifact_ref,
         name="sample artifact pair membership",
-        expected_kind=SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
+        expected_kind=membership_kind,
     )
     bundle_artifact = _task_artifact_ref(
         bundle_artifact_ref,
@@ -1157,7 +1172,7 @@ def _artifact_pair(value: object) -> dict[str, dict[str, str]]:
         "membership": _task_artifact_ref(
             obj["membership"],
             name="sample artifact pair membership",
-            expected_kind=SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
+            expected_kind=SAMPLE_MEMBERSHIP_ARTIFACT_KINDS,
         ),
         "bundle": _task_artifact_ref(
             obj["bundle"],
@@ -1171,15 +1186,21 @@ def _task_artifact_ref(
     value: object,
     *,
     name: str,
-    expected_kind: str,
+    expected_kind: str | frozenset[str],
 ) -> dict[str, str]:
     obj = _object(value, name)
     _exact_fields(obj, _TASK_ARTIFACT_REF_FIELDS, name)
     artifact_id = _hash(obj["artifact_id"], f"{name}.artifact_id")
     kind = _text(obj["kind"], f"{name}.kind")
-    if kind != expected_kind:
+    accepted_kinds = (
+        frozenset({expected_kind})
+        if isinstance(expected_kind, str)
+        else expected_kind
+    )
+    if kind not in accepted_kinds:
+        expected = " or ".join(sorted(accepted_kinds))
         raise ModelingTrainingEvidenceError(
-            f"{name}.kind must be {expected_kind}"
+            f"{name}.kind must be {expected}"
         )
     return {
         "artifact_id": artifact_id,
@@ -2844,6 +2865,7 @@ __all__ = [
     "MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION",
     "MODEL_TARGET_ENCODING_RULE",
     "MODEL_BINARY_REF_KIND",
+    "NATIVE_SAMPLE_MEMBERSHIP_ARTIFACT_KIND",
     "NON_FINITE_BOUNDARY_TAG",
     "RAW_BAD_PROBABILITY_SCORE_PRODUCT",
     "RAW_SCORE_PRODUCT",

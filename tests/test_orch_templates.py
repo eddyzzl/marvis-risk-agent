@@ -351,7 +351,14 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     assert select.inputs["experiment_ids"] == f"$ref:{train.id}.output.experiment_ids"
     assert select.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
     assert select.inputs["selection_policy"] == {"require_pmml": True, "require_handoff": True}
-    assert report.inputs["experiment_ids"] == f"$ref:{train.id}.output.experiment_ids"
+    assert (
+        report.inputs["experiment_ids"]
+        == f"$ref:{select.id}.output.report_experiment_ids"
+    )
+    assert (
+        report.inputs["selected_experiment_id"]
+        == f"$ref:{select.id}.output.selected_experiment_id"
+    )
     assert report.inputs["dataset_id"] == governed_dataset_ref
     assert delivery.inputs["experiment_id"] == f"$ref:{select.id}.output.selected_experiment_id"
     assert delivery.inputs["sample_dataset_id"] == governed_dataset_ref
@@ -400,6 +407,102 @@ def test_modeling_template_validates_with_optional_slots_omitted(tmp_path):
     assert tuning_config.inputs["params"] == f"$ref:{spec.id}.output.params"
     report = plan.steps[-2]
     assert "business_columns" not in report.inputs
+
+
+@pytest.mark.parametrize(
+    ("template_id", "slots"),
+    [
+        (
+            "modeling",
+            {
+                "dataset_id": "dataset-1",
+                "target_col": "long_y",
+                "feature_cols": ["sig1", "sig2"],
+                "split_col": "model_flag",
+                "split_values": {"train": "train", "test": "test"},
+                "recipe": "lgb",
+                "recipes": ["lgb"],
+                "seed": 23,
+                "n_trials": 7,
+            },
+        ),
+        (
+            "modeling_with_join",
+            {
+                "anchor_id": "anchor-1",
+                "feature_ids": ["feature-1"],
+                "target_col": "long_y",
+                "recipe": "lgb",
+                "recipes": ["lgb"],
+                "seed": 23,
+                "n_trials": 7,
+            },
+        ),
+    ],
+)
+def test_modeling_templates_preserve_non_default_trial_budget(
+    tmp_path,
+    template_id,
+    slots,
+):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template(template_id),
+        slots,
+        task_id="task-1",
+    )
+
+    spec = next(step for step in plan.steps if step.title == "选择建模规格")
+    assert spec.inputs["n_trials"] == 7
+
+
+@pytest.mark.parametrize("template_id", ["modeling", "modeling_with_join"])
+@pytest.mark.parametrize("value", [0, 201, 1.5, True, "7"])
+def test_modeling_templates_reject_unsafe_or_coerced_trial_budget(
+    tmp_path,
+    template_id,
+    value,
+):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    validator = PlanValidator(tool_registry)
+    planner = Planner(tool_registry, lambda: None, validator)
+    slots = {
+        "target_col": "long_y",
+        "recipe": "lgb",
+        "recipes": ["lgb"],
+        "seed": 23,
+        "n_trials": value,
+    }
+    if template_id == "modeling":
+        slots.update(
+            {
+                "dataset_id": "dataset-1",
+                "feature_cols": ["sig1", "sig2"],
+                "split_col": "model_flag",
+                "split_values": {"train": "train", "test": "test"},
+            }
+        )
+    else:
+        slots.update(
+            {
+                "anchor_id": "anchor-1",
+                "feature_ids": ["feature-1"],
+            }
+        )
+
+    plan = planner.from_template(
+        get_template(template_id),
+        slots,
+        task_id="task-1",
+    )
+
+    errors = validator.validate(plan)
+    assert errors
+    assert any("n_trials" in error for error in errors)
 
 
 def test_modeling_template_does_not_shadow_standard_modeling_goal_routing(tmp_path):
@@ -489,6 +592,25 @@ def test_modeling_templates_select_step_never_binds_holdout_values(tmp_path):
             assert not step.post_checks, (
                 f"{template_id} {step.title} must surface an empty recommendation set at the gate"
             )
+
+
+def test_modeling_multi_report_templates_bind_selected_champion():
+    load_builtin_templates()
+    for template_id in ("modeling", "modeling_with_join"):
+        template = get_template(template_id)
+        report = next(
+            step
+            for step in template.steps
+            if step.tool_ref == ToolRef("modeling", "generate_model_reports")
+        )
+        assert (
+            report.inputs_template["selected_experiment_id"]
+            == "$ref:选择实验.output.selected_experiment_id"
+        )
+        assert (
+            report.inputs_template["experiment_ids"]
+            == "$ref:选择实验.output.report_experiment_ids"
+        )
 
 
 def test_data_join_template_phases_gate_and_refs(tmp_path):
@@ -1375,15 +1497,16 @@ def test_vintage_analysis_template_runs_vintage_curve(tmp_path):
     assert [step.tool_ref for step in plan.steps] == [
         ToolRef("strategy", "vintage_curve")
     ]
-    assert [step.title for step in plan.steps if step.decision_point] == [
-        "计算 Vintage 曲线"
-    ]
+    # The standalone Vintage template is already the complete deterministic
+    # delivery.  It must finish on the curve step so the done message renders
+    # the Vintage tables instead of an LLM-appended terminal step.
+    assert [step.title for step in plan.steps if step.decision_point] == []
 
 
 def test_vintage_template_threads_label_semantics_and_drop_nan_labels(tmp_path):
-    # A1: the vintage step must carry label_semantics (baked literal-null so the
-    # gate override reaches it) and drop_nan_labels so the confirmation choices
-    # thread through to tool_vintage_curve.
+    # A1: the vintage step must carry label_semantics.  An omitted basis keeps
+    # the literal-null gate default, while an explicit conversational intake
+    # value must override that default before the tool executes.
     load_builtin_templates()
     tool_registry = _tool_registry(tmp_path)
     planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
@@ -1411,6 +1534,24 @@ def test_vintage_template_threads_label_semantics_and_drop_nan_labels(tmp_path):
     assert step.inputs["label_semantics"] is None
     assert "drop_nan_labels" in step.inputs
     assert step.inputs["drop_nan_labels"] is False
+
+    declared = planner.from_template(
+        get_template("vintage_analysis"),
+        {
+            "dataset_id": "dataset-1",
+            "cohort_col": "cohort",
+            "mob_col": "mob",
+            "bad_col": "bad",
+            "label_semantics": "incremental",
+        },
+        task_id="task-1",
+    )
+    declared_step = next(
+        item
+        for item in declared.steps
+        if item.tool_ref == ToolRef("strategy", "vintage_curve")
+    )
+    assert declared_step.inputs["label_semantics"] == "incremental"
 
 
 def test_risk_analysis_report_template_runs_terminal_report_tool(tmp_path):

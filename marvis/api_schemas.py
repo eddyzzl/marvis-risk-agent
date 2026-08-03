@@ -221,6 +221,7 @@ ManualStrategyWorkflow = Literal[
     "cross_matrix_analysis",
     "automatic_tree_candidate_build",
     "univariate_candidate_refinement",
+    "scorecard_model_score_evidence_build",
     "scorecard_band_build",
     "scorecard_cutoff_selection",
     "candidate_monthly_stability",
@@ -721,6 +722,38 @@ class ManualRiskThresholdRequest(BaseModel):
 
     operator: Literal[">=", ">", "<=", "<"]
     value: StrictRatio
+
+
+class ManualScorecardModelScoreEvidenceInputs(BaseModel):
+    """Explicit user controls for one governed Scorecard evidence chain."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    features: Annotated[
+        list[StrictCanonicalNonEmptyStr],
+        Field(min_length=1, max_length=50),
+        AfterValidator(_unique_strings),
+    ]
+    sample_weight_col: StrictCanonicalNonEmptyStr | None = None
+    seed: StrictInt = Field(ge=0, le=4_294_967_295)
+    max_iter: StrictInt = Field(ge=20, le=5_000)
+    scorecard_max_bins: StrictInt = Field(ge=2, le=20)
+
+    @model_validator(mode="after")
+    def validate_optional_weight(self) -> Self:
+        if (
+            "sample_weight_col" in self.model_fields_set
+            and self.sample_weight_col is None
+        ):
+            raise ValueError(
+                "optional fields must be omitted instead of null: "
+                "sample_weight_col"
+            )
+        if self.sample_weight_col in self.features:
+            raise ValueError(
+                "sample_weight_col cannot also be a scorecard feature"
+            )
+        return self
 
 
 class ManualScorecardBandBuildInputs(BaseModel):
@@ -1676,6 +1709,9 @@ ManualUnivariateRefinementInputs = (
 _MANUAL_UNIVARIATE_REFINEMENT_INPUTS = TypeAdapter(
     ManualUnivariateRefinementInputs
 )
+_MANUAL_SCORECARD_MODEL_SCORE_EVIDENCE_INPUTS = TypeAdapter(
+    ManualScorecardModelScoreEvidenceInputs
+)
 _MANUAL_SCORECARD_BAND_BUILD_INPUTS = TypeAdapter(
     ManualScorecardBandBuildInputs
 )
@@ -1814,6 +1850,11 @@ class ManualStrategyRequest(BaseModel):
             )
         elif self.workflow == "univariate_candidate_refinement":
             _MANUAL_UNIVARIATE_REFINEMENT_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "scorecard_model_score_evidence_build":
+            _MANUAL_SCORECARD_MODEL_SCORE_EVIDENCE_INPUTS.validate_python(
                 self.workflow_inputs,
                 strict=True,
             )
@@ -2122,6 +2163,10 @@ class AgentMessageRequest(BaseModel):
     # Optional optimistic-lock token for structured gate controls. The frontend sends
     # the gate step id it rendered; the backend rejects stale tabs/buttons.
     expected_step_id: str | None = None
+    # Plan-level optimistic-lock token for both overview and per-step controls.
+    # The backend also checks the rendered plan's status, so an old overview
+    # button cannot release a later gate on the same plan.
+    expected_plan_id: str | None = None
 
 
 class AgentModelRequest(BaseModel):

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from marvis.agent.adjust_specs import adjust_param_error, normalize_adjust_params
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_payloads import screen_known_features
+from marvis.agent.gates.adapters import monitoring_verdict_error
 from marvis.agent.plan_utils import downstream_step_ids, find_step
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
 
@@ -217,12 +218,60 @@ class GateExecutionAdapter:
         )
         return turn
 
+    def is_noop_adjustment(
+        self,
+        plan: Plan,
+        gate: PlanStep,
+        params,
+    ) -> bool:
+        """Return whether every applicable normalized override already matches.
+
+        A semantic router may correctly understand an instruction such as
+        "keep every model at one trial and train them" as an ``adjust`` action.
+        Rewriting the same value must not invalidate already-reviewed upstream
+        evidence.  Keep this comparison beside ``apply_adjust`` so aliases and
+        dependency scoping are identical for both the no-op and recompute paths.
+        """
+
+        normalized = normalize_adjust_params(params)
+        if adjust_param_error(normalized):
+            return False
+        deps = [
+            step
+            for step in (
+                find_step(plan, dep_id)
+                for dep_id in (gate.depends_on or [])
+            )
+            if step is not None
+        ]
+        candidates = [*deps, gate]
+        matched_any = False
+        for candidate in candidates:
+            current_inputs = candidate.inputs or {}
+            for key, requested in normalized.items():
+                if key not in current_inputs:
+                    continue
+                matched_any = True
+                current = normalize_adjust_params(
+                    {key: current_inputs[key]}
+                ).get(key)
+                if current != requested:
+                    return False
+        return matched_any
+
     def _monitoring_adjust_error(
         self,
         plan: Plan,
         gate: PlanStep,
         params: dict,
     ) -> str | None:
+        verdict_error = monitoring_verdict_error(
+            plan,
+            gate,
+            self._safe_output,
+        )
+        if verdict_error:
+            return verdict_error
         allowed = {"disposition", "reason", "threshold_patch"}
         unexpected = sorted(set(params) - allowed)
         if unexpected:

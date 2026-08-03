@@ -37,6 +37,7 @@ class GateRenderResult:
     model_delivery: dict | None = None
     feature_binning: dict | None = None
     special_values: dict | None = None
+    monitoring_level: str | None = None
     # AGT-9: deterministic red flags for the tuning-config / select-experiment
     # gates, computed straight from those gates' dependency outputs (never from
     # the rendered table strings). Empty list when nothing tripped, or when
@@ -124,6 +125,15 @@ def render_gate_dependencies(
             tune_o = output
         elif dep.tool_ref.tool == "train_models" and isinstance(output, dict):
             train_models_o = output
+        if (
+            gate is not None
+            and gate.tool_ref.tool == "apply_monitoring_disposition"
+            and dep.tool_ref.tool == "run_strategy_monitoring"
+            and isinstance(output, dict)
+        ):
+            monitoring_level = str(output.get("overall_level") or "").strip().lower()
+            if monitoring_level in {"green", "amber", "red"}:
+                result.monitoring_level = monitoring_level
         if (
             gate is not None
             and gate.tool_ref.tool == "analyze_feature_bins"

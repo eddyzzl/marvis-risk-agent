@@ -150,11 +150,184 @@ HASH_B = "b" * 64
 HASH_C = "c" * 64
 
 
-@pytest.fixture(autouse=True)
-def _fast_scorecard_live_revalidation(
+def _install_fast_scorecard_live_revalidation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep Candidate Lab tests fast; authoritative loader has its own suite."""
+
+    load_sample_design = (
+        candidate_lab_projection.load_any_strategy_sample_design_v2_artifacts
+    )
+
+    def load_sample(runtime, **request):
+        try:
+            return load_sample_design(runtime, **request)
+        except StrategyError as exc:
+            membership_record = runtime.task_artifacts.get_for_task(
+                request["task_id"],
+                request["membership_artifact_id"],
+            )
+            bundle_record = runtime.task_artifacts.get_for_task(
+                request["task_id"],
+                request["bundle_artifact_id"],
+            )
+            if membership_record is None or bundle_record is None:
+                raise
+            membership_path = Path(membership_record["path"])
+            bundle_path = Path(bundle_record["path"])
+            membership_raw = membership_path.read_bytes()
+            bundle_raw = bundle_path.read_bytes()
+            try:
+                fixture_bundle = json.loads(bundle_raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as fixture_exc:
+                raise exc from fixture_exc
+            membership_provenance = membership_record["provenance"]
+            bundle_provenance = bundle_record["provenance"]
+            fixture_variant = (
+                fixture_bundle.get("bundle_fixture")
+                if isinstance(fixture_bundle, dict)
+                else None
+            )
+            fixture_directory = (
+                Path(runtime.settings.tasks_dir)
+                / request["task_id"]
+                / "strategy_sample_designs_v2"
+            )
+            shared_lineage_fields = (
+                "schema_version",
+                "task_id",
+                "dataset_id",
+                "dataset_content_hash",
+                "workspace_revision",
+                "workspace_generation",
+                "semantic_mapping_hash",
+                "membership_id",
+                "membership_content_hash",
+                "membership_artifact_content_hash",
+            )
+            membership_provenance_fields = set(shared_lineage_fields) | {
+                "format",
+                "artifact_role",
+            }
+            bundle_provenance_fields = membership_provenance_fields | {
+                "membership_artifact_id",
+                "bundle_id",
+                "bundle_artifact_content_hash",
+                "sample_design_id",
+                "sample_design_content_hash",
+            }
+            expected_membership = {
+                "schema_version": SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
+                "task_id": request["task_id"],
+                "format": "binary",
+                "artifact_role": "membership",
+                "membership_artifact_content_hash": membership_record[
+                    "content_hash"
+                ],
+            }
+            expected_bundle = {
+                "schema_version": SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
+                "task_id": request["task_id"],
+                "format": "json",
+                "artifact_role": "bundle",
+                "membership_id": membership_provenance.get("membership_id"),
+                "membership_content_hash": membership_provenance.get(
+                    "membership_content_hash"
+                ),
+                "membership_artifact_id": membership_record["id"],
+                "membership_artifact_content_hash": membership_record[
+                    "content_hash"
+                ],
+                "bundle_id": request["expected_bundle_id"],
+                "bundle_artifact_content_hash": bundle_record["content_hash"],
+                "sample_design_id": request["expected_sample_design_id"],
+                "sample_design_content_hash": request[
+                    "expected_sample_design_content_hash"
+                ],
+            }
+            fixture_is_valid = (
+                membership_record["kind"]
+                == SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
+                and membership_record["origin_tool"]
+                == SAMPLE_DESIGN_V2_ORIGIN_TOOL
+                and bundle_record["kind"]
+                == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+                and bundle_record["origin_tool"] == SAMPLE_DESIGN_V2_ORIGIN_TOOL
+                and membership_record["content_hash"]
+                == request["expected_membership_artifact_content_hash"]
+                and bundle_record["content_hash"]
+                == request["expected_bundle_artifact_content_hash"]
+                and hashlib.sha256(membership_raw).hexdigest()
+                == membership_record["content_hash"]
+                and hashlib.sha256(bundle_raw).hexdigest()
+                == bundle_record["content_hash"]
+                and type(fixture_variant) is int
+                and membership_raw
+                == f"membership-source-{fixture_variant}".encode()
+                and isinstance(fixture_bundle, dict)
+                and set(fixture_bundle) == {"bundle_fixture"}
+                and set(membership_provenance)
+                == membership_provenance_fields
+                and set(bundle_provenance) == bundle_provenance_fields
+                and membership_path.parent == fixture_directory
+                and bundle_path.parent == fixture_directory
+                and membership_path.name
+                == f"{membership_provenance.get('membership_id')}.bin"
+                and bundle_path.name == f"{request['expected_bundle_id']}.json"
+                and membership_provenance.get("membership_id")
+                == f"sample-membership-{fixture_variant}"
+                and request["expected_bundle_id"]
+                == f"strategy-sample-design-bundle-{fixture_variant}"
+                and all(
+                    membership_provenance.get(field)
+                    == bundle_provenance.get(field)
+                    for field in shared_lineage_fields
+                )
+                and all(
+                    membership_provenance.get(key) == value
+                    for key, value in expected_membership.items()
+                )
+                and all(
+                    bundle_provenance.get(key) == value
+                    for key, value in expected_bundle.items()
+                )
+            )
+            if not fixture_is_valid:
+                raise
+            return SimpleNamespace(
+                membership_path=membership_path,
+                bundle_path=bundle_path,
+                membership_provenance=membership_provenance,
+                provenance=bundle_provenance,
+                membership={
+                    "header": {
+                        "membership_id": membership_provenance["membership_id"],
+                        "content_hash": membership_provenance[
+                            "membership_content_hash"
+                        ],
+                    }
+                },
+                bundle={
+                    "sample_design": {
+                        "compatibility": {
+                            "legacy_development_ref": {
+                                "artifact_id": bundle_record["id"],
+                                "artifact_content_hash": bundle_record[
+                                    "content_hash"
+                                ],
+                                "sample_design_id": request[
+                                    "expected_sample_design_id"
+                                ],
+                                "sample_design_content_hash": request[
+                                    "expected_sample_design_content_hash"
+                                ],
+                                "partition": "development",
+                            },
+                            "maps_to": "risk/development",
+                        }
+                    }
+                },
+            )
 
     def load(runtime, **request):
         record = runtime.task_artifacts.get_for_task(
@@ -178,6 +351,18 @@ def _fast_scorecard_live_revalidation(
         "load_scorecard_band_asset_artifact",
         load,
     )
+    monkeypatch.setattr(
+        candidate_lab_projection,
+        "load_any_strategy_sample_design_v2_artifacts",
+        load_sample,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fast_scorecard_live_revalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fast_scorecard_live_revalidation(monkeypatch)
 
 
 def _strategy_task(app) -> str:

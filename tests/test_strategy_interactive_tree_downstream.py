@@ -22,6 +22,7 @@ from marvis.packs.strategy.interactive_tree_tools import (
     INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
 )
 from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
+from marvis.packs.strategy.pool_apply_tools import run_apply_strategy_pool
 from marvis.packs.strategy.pool_validation_tools import (
     run_measure_strategy_pool_validation,
 )
@@ -75,7 +76,7 @@ def _sample_v2_ref(fx: dict, output: dict) -> dict[str, str]:
     }
 
 
-def _frontier_pool(tmp_path: Path) -> dict:
+def _frontier_pool(tmp_path: Path, *, grouped: bool = False) -> dict:
     fx = _sample_v2_setup(tmp_path)
     sample_v2 = run_materialize_sample_design_v2(
         fx["request"],
@@ -125,18 +126,27 @@ def _frontier_pool(tmp_path: Path) -> dict:
     source_asset = json.loads(
         Path(source_record["path"]).read_text(encoding="utf-8")
     )
-    split_id = next(
-        node["node_id"]
+    split_node = next(
+        node
         for node in reversed(source_asset["tree_result"]["tree"]["nodes"])
         if node["kind"] == "split"
     )
+    revision_inputs = {
+        "source_tree_id": source_asset["asset_id"],
+        "node_id": split_node["node_id"],
+        "operation": "prune_subtree",
+        "reason": "Reviewed for governed downstream replay.",
+    }
+    if grouped:
+        revision_inputs.update(
+            {
+                "operation": "adjust_split_threshold",
+                "threshold": split_node["threshold"] + 1.0,
+                "reason": "Preserve two reviewed frontiers for governed OR replay.",
+            }
+        )
     revised = strategy_tools.tool_revise_interactive_tree(
-        {
-            "source_tree_id": source_asset["asset_id"],
-            "node_id": split_id,
-            "operation": "prune_subtree",
-            "reason": "Reviewed for governed downstream replay.",
-        },
+        revision_inputs,
         fx["ctx"],
     )
     revision_record = next(
@@ -148,17 +158,33 @@ def _frontier_pool(tmp_path: Path) -> dict:
     revision = json.loads(
         Path(revision_record["path"]).read_text(encoding="utf-8")
     )
-    fragment = revision["fragments"][0]
-    selection = (
-        strategy_tools.tool_materialize_interactive_tree_frontier_selection(
-            {
-                "revision_id": revision["revision_id"],
-                "source_node_id": fragment["source_node_id"],
-                "selection_reason": "Send this reviewed frontier downstream.",
-            },
-            fx["ctx"],
+    fragments = revision["fragments"][: 2 if grouped else 1]
+    if grouped:
+        selection = (
+            strategy_tools.tool_materialize_interactive_tree_frontier_group_selection(
+                {
+                    "revision_id": revision["revision_id"],
+                    "source_node_ids": [
+                        fragment["source_node_id"] for fragment in fragments
+                    ],
+                    "selection_reason": (
+                        "Send these reviewed frontiers downstream as one OR group."
+                    ),
+                },
+                fx["ctx"],
+            )
         )
-    )
+    else:
+        selection = (
+            strategy_tools.tool_materialize_interactive_tree_frontier_selection(
+                {
+                    "revision_id": revision["revision_id"],
+                    "source_node_id": fragments[0]["source_node_id"],
+                    "selection_reason": "Send this reviewed frontier downstream.",
+                },
+                fx["ctx"],
+            )
+        )
     selection_artifact = selection["artifacts"][0]
     pool = strategy_tools.tool_add_candidate_to_pool(
         {
@@ -193,7 +219,8 @@ def _frontier_pool(tmp_path: Path) -> dict:
         "source_asset": source_asset,
         "revision": revision,
         "revision_record": revision_record,
-        "fragment": fragment,
+        "fragment": fragments[0],
+        "fragments": fragments,
         "selection": selection,
         "pool": pool,
         "pool_ref": pool_ref,
@@ -264,6 +291,15 @@ def test_interactive_tree_frontier_pool_entry_replays_in_all_common_evidence_too
         fx["ctx"],
         fx["runtime"],
     )
+    applied = run_apply_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": fx["pool"]["revision"],
+            "expected_pool_snapshot_hash": fx["pool"]["snapshot_hash"],
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
 
     assert validation["pool_id"] == fx["pool"]["pool_id"]
     assert validation["pool_snapshot_hash"] == fx["pool"]["snapshot_hash"]
@@ -308,6 +344,61 @@ def test_interactive_tree_frontier_pool_entry_replays_in_all_common_evidence_too
         == fx["pool"]["snapshot_hash"]
     )
     assert stability["stability"]["sample_design_ref"] == fx["legacy_ref"]
+    assert applied["entry_counts"][entry["entry_id"]] > 0
+    assert applied["result"]["row_count"] == applied["source"]["row_count"]
+    assert applied["activated"] is False
+    assert applied["adopted"] is False
+    assert applied["deployed"] is False
+
+
+def test_interactive_tree_frontier_group_pool_entry_runs_stability_and_apply(
+    tmp_path: Path,
+) -> None:
+    fx = _frontier_pool(tmp_path, grouped=True)
+    [entry] = fx["pool"]["entries"]
+
+    stability = run_measure_candidate_monthly_stability(
+        resolve_candidate_monthly_stability_inputs(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            user_pointer={
+                "source_kind": "pool_entry",
+                "strategy_type": "approval",
+                "entry_id": entry["entry_id"],
+            },
+        ),
+        fx["ctx"],
+        fx["runtime"],
+    )
+    applied = run_apply_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": fx["pool"]["revision"],
+            "expected_pool_snapshot_hash": fx["pool"]["snapshot_hash"],
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    assert entry["source"]["artifact_id"] == fx["selection"]["artifacts"][0][
+        "artifact_id"
+    ]
+    assert entry["execution"]["condition"] == {
+        "op": "or",
+        "args": [fragment["condition"] for fragment in fx["fragments"]],
+    }
+    assert stability["stability"]["source_ref"]["entry_id"] == entry["entry_id"]
+    assert stability["stability"]["source_ref"]["rule_id"] == entry["rule_id"]
+    assert (
+        stability["stability"]["source_ref"]["snapshot_hash"]
+        == fx["pool"]["snapshot_hash"]
+    )
+    assert stability["stability"]["sample_design_ref"] == fx["legacy_ref"]
+    assert applied["entry_counts"][entry["entry_id"]] > 0
+    assert applied["result"]["row_count"] == applied["source"]["row_count"]
+    assert applied["activated"] is False
+    assert applied["adopted"] is False
+    assert applied["deployed"] is False
 
 
 @pytest.mark.parametrize("consumer", ["validation", "impact", "stability"])

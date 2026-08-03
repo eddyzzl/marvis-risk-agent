@@ -597,6 +597,98 @@ def load_any_strategy_sample_design_v2_artifacts(
     )
 
 
+def load_historical_any_strategy_sample_design_v2_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    membership_artifact_id: str,
+    expected_membership_artifact_content_hash: str,
+    bundle_artifact_id: str,
+    expected_bundle_artifact_content_hash: str,
+    expected_bundle_id: str,
+    expected_sample_design_id: str,
+    expected_sample_design_content_hash: str,
+):
+    """Dispatch immutable legacy or native V2 refs without requiring workspace head."""
+
+    normalized_task = _text(task_id, "task_id")
+    membership_aid = _hash(
+        membership_artifact_id,
+        "membership_artifact_id",
+    )
+    bundle_aid = _hash(bundle_artifact_id, "bundle_artifact_id")
+    membership_hash = _hash(
+        expected_membership_artifact_content_hash,
+        "expected_membership_artifact_content_hash",
+    )
+    bundle_hash = _hash(
+        expected_bundle_artifact_content_hash,
+        "expected_bundle_artifact_content_hash",
+    )
+    membership_record = _dispatch_record(
+        runtime,
+        task_id=normalized_task,
+        artifact_id=membership_aid,
+        expected_content_hash=membership_hash,
+    )
+    bundle_record = _dispatch_record(
+        runtime,
+        task_id=normalized_task,
+        artifact_id=bundle_aid,
+        expected_content_hash=bundle_hash,
+    )
+    pair = (
+        membership_record["kind"],
+        membership_record["origin_tool"],
+        bundle_record["kind"],
+        bundle_record["origin_tool"],
+    )
+    kwargs = {
+        "task_id": normalized_task,
+        "membership_artifact_id": membership_aid,
+        "expected_membership_artifact_content_hash": membership_hash,
+        "bundle_artifact_id": bundle_aid,
+        "expected_bundle_artifact_content_hash": bundle_hash,
+        "expected_bundle_id": expected_bundle_id,
+        "expected_sample_design_id": expected_sample_design_id,
+        "expected_sample_design_content_hash": (
+            expected_sample_design_content_hash
+        ),
+    }
+    legacy_pair = (
+        SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+    )
+    if pair == legacy_pair:
+        return load_historical_strategy_sample_design_v2_artifacts(
+            runtime,
+            **kwargs,
+        )
+    from marvis.packs.strategy.sample_design_v2_native_tools import (
+        SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+        load_historical_native_strategy_sample_design_v2_artifacts,
+    )
+
+    native_pair = (
+        SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    )
+    if pair == native_pair:
+        return load_historical_native_strategy_sample_design_v2_artifacts(
+            runtime,
+            **kwargs,
+        )
+    raise StrategyError(
+        "sample-design V2 artifact refs do not form one exact supported "
+        "kind/origin pair"
+    )
+
+
 def _dispatch_record(
     runtime,
     *,
@@ -696,6 +788,32 @@ def require_any_strategy_sample_design_v2_artifact_binding_on_connection(
 
     if isinstance(binding, StrategySampleDesignV2NativeArtifactBinding):
         require_native_strategy_sample_design_v2_artifact_binding_on_connection(
+            conn,
+            binding,
+        )
+        return
+    raise StrategyError("sample-design V2 artifact binding is invalid")
+
+
+def require_historical_any_strategy_sample_design_v2_artifact_binding_on_connection(
+    conn,
+    binding,
+) -> None:
+    """Re-authenticate either immutable V2 source mode without workspace head."""
+
+    if isinstance(binding, StrategySampleDesignV2ArtifactBinding):
+        require_historical_strategy_sample_design_v2_artifact_binding_on_connection(
+            conn,
+            binding,
+        )
+        return
+    from marvis.packs.strategy.sample_design_v2_native_tools import (
+        StrategySampleDesignV2NativeArtifactBinding,
+        require_historical_native_strategy_sample_design_v2_artifact_binding_on_connection,
+    )
+
+    if isinstance(binding, StrategySampleDesignV2NativeArtifactBinding):
+        require_historical_native_strategy_sample_design_v2_artifact_binding_on_connection(
             conn,
             binding,
         )
@@ -2952,10 +3070,12 @@ __all__ = [
     "SAMPLE_DESIGN_V2_ORIGIN_TOOL",
     "SAMPLE_DESIGN_V2_TOOL_SCHEMA_VERSION",
     "StrategySampleDesignV2ArtifactBinding",
+    "load_historical_any_strategy_sample_design_v2_artifacts",
     "load_historical_strategy_sample_design_v2_artifacts",
     "load_any_strategy_sample_design_v2_artifacts",
     "load_strategy_sample_design_v2_artifacts",
     "require_any_strategy_sample_design_v2_artifact_binding_on_connection",
+    "require_historical_any_strategy_sample_design_v2_artifact_binding_on_connection",
     "require_historical_strategy_sample_design_v2_artifact_binding_on_connection",
     "require_strategy_sample_design_v2_artifact_binding_on_connection",
     "resolve_strategy_sample_design_v2_source_mode",

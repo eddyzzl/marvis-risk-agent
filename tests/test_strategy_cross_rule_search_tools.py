@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.cross_rule_search_tools import (
     CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
     CROSS_RULE_SEARCH_ARTIFACT_KIND,
@@ -129,6 +130,79 @@ def test_search_missing_inclusion_is_evaluated_as_explicit_rule_branch(
         condition["feature"] == "age" and condition["include_missing"]
         for rule in output["search_result"]["rules"]
         for condition in rule["conditions"]
+    )
+
+
+def test_search_bounds_thresholds_from_ten_bin_univariate_evidence(
+    tmp_path: Path,
+) -> None:
+    """The Candidate Lab allows 10-bin univariate analysis, while Cross search
+    has a hard eight-threshold budget.  The governed tool must deterministically
+    bound the authenticated thresholds instead of exposing a selectable source
+    that can only fail after submission.
+    """
+
+    fixture = _setup(tmp_path, with_split=True)
+    source_inputs = {
+        **fixture["source_inputs"],
+        "bin_count": 10,
+    }
+    fixture["source"] = strategy_tools.tool_analyze_univariate_candidates(
+        source_inputs,
+        fixture["ctx"],
+    )
+
+    output = run_search_cross_threshold_rules(
+        _inputs(fixture, max_trials=4),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    configured = output["search_result"]["configuration"]["features"]
+    assert len(configured) == 2
+    assert all(1 <= len(item["thresholds"]) <= 8 for item in configured)
+
+
+def test_search_degrades_unpaired_amount_evidence_to_no_amount_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Loan and overdue sums form one rate metric.  If only one side is bound,
+    count/bad-rate/lift search remains valid but both amount fields must be null
+    rather than producing a half-present request that the kernel rejects.
+    """
+
+    fixture = _setup(tmp_path, with_split=True)
+    original_amount_array = __import__(
+        "marvis.packs.strategy.cross_rule_search_tools",
+        fromlist=["_amount_array"],
+    )._amount_array
+
+    def one_sided_amount_array(frame, column, label):
+        if label == "overdue_amount":
+            return None
+        return original_amount_array(frame, column, label)
+
+    monkeypatch.setattr(
+        "marvis.packs.strategy.cross_rule_search_tools._amount_array",
+        one_sided_amount_array,
+    )
+    inputs = _inputs(fixture, max_trials=4)
+    inputs["constraints"]["min_amount_lift"] = None
+
+    output = run_search_cross_threshold_rules(
+        inputs,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    population = output["search_result"]["population"]
+    assert population["loan_amount_sum"] is None
+    assert population["overdue_amount_sum"] is None
+    assert all(
+        rule["metrics"]["loan_amount_sum"] is None
+        and rule["metrics"]["overdue_amount_sum"] is None
+        for rule in output["search_result"]["rules"]
     )
 
 

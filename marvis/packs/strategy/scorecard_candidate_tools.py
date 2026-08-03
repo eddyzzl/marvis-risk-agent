@@ -41,11 +41,10 @@ from marvis.packs.modeling.score_evidence_tools import (
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_v2_tools import (
-    StrategySampleDesignV2ArtifactBinding,
-    load_historical_strategy_sample_design_v2_artifacts,
-    load_strategy_sample_design_v2_artifacts,
-    require_historical_strategy_sample_design_v2_artifact_binding_on_connection,
-    require_strategy_sample_design_v2_artifact_binding_on_connection,
+    load_any_strategy_sample_design_v2_artifacts,
+    load_historical_any_strategy_sample_design_v2_artifacts,
+    require_any_strategy_sample_design_v2_artifact_binding_on_connection,
+    require_historical_any_strategy_sample_design_v2_artifact_binding_on_connection,
 )
 from marvis.packs.strategy.scorecard_candidate import (
     MAX_SCORECARD_BANDS,
@@ -190,7 +189,7 @@ class ScorecardBandAssetArtifactBinding:
     canonical_bytes: bytes
     asset: dict[str, Any]
     score_evidence: ModelScoreEvidenceArtifactBinding
-    sample_design: StrategySampleDesignV2ArtifactBinding
+    sample_design: Any
 
     def to_domain_binding(self) -> dict[str, Any]:
         """Return the exact pure-domain artifact binding."""
@@ -248,7 +247,7 @@ def run_build_scorecard_band_asset(inputs: object, ctx, runtime) -> dict[str, An
             task_id=task_id,
             **request["score_evidence_ref"],
         )
-        sample = load_strategy_sample_design_v2_artifacts(
+        sample = load_any_strategy_sample_design_v2_artifacts(
             runtime,
             task_id=task_id,
             **request["sample_design_ref"],
@@ -697,12 +696,12 @@ def _require_scorecard_band_asset_artifact_binding_on_connection(
     except ModelingError as exc:
         raise StrategyError(str(exc)) from exc
     if require_current_sources:
-        require_strategy_sample_design_v2_artifact_binding_on_connection(
+        require_any_strategy_sample_design_v2_artifact_binding_on_connection(
             conn,
             binding.sample_design,
         )
     else:
-        require_historical_strategy_sample_design_v2_artifact_binding_on_connection(
+        require_historical_any_strategy_sample_design_v2_artifact_binding_on_connection(
             conn,
             binding.sample_design,
         )
@@ -893,7 +892,7 @@ def _validate_selection_inputs(value: object) -> dict[str, Any]:
 def _require_same_sample_binding(
     score: ModelScoreEvidenceArtifactBinding,
     *,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
 ) -> None:
     training_sample = score.training.sample
     comparisons = {
@@ -943,7 +942,7 @@ def _load_and_rebuild_band_sources(
     require_current_sources: bool,
 ) -> tuple[
     ModelScoreEvidenceArtifactBinding,
-    StrategySampleDesignV2ArtifactBinding,
+    Any,
 ]:
     refs = asset["source_refs"]
     score_ref = refs["score_evidence"]
@@ -969,9 +968,9 @@ def _load_and_rebuild_band_sources(
     except ModelingError as exc:
         raise StrategyError(str(exc)) from exc
     sample_loader = (
-        load_strategy_sample_design_v2_artifacts
+        load_any_strategy_sample_design_v2_artifacts
         if require_current_sources
-        else load_historical_strategy_sample_design_v2_artifacts
+        else load_historical_any_strategy_sample_design_v2_artifacts
     )
     sample = sample_loader(
         runtime,
@@ -1076,7 +1075,7 @@ def _require_scorecard_contract(
 def _read_governed_labels(
     runtime,
     *,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
 ) -> tuple[pd.DataFrame, np.ndarray, str]:
     design = sample.bundle["sample_design"]
     target = design["target_selector"]
@@ -1276,7 +1275,7 @@ def _dataset_stable_file_stat(
 def _scorecard_identity(
     *,
     task_id: str,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
     sample_ref: Mapping[str, Any],
     target_col: str,
     labels: np.ndarray,
@@ -1549,7 +1548,7 @@ def _persist_band_asset(
     *,
     task_id: str,
     score: ModelScoreEvidenceArtifactBinding,
-    sample: StrategySampleDesignV2ArtifactBinding,
+    sample: Any,
     asset: Mapping[str, Any],
     canonical: bytes,
 ) -> ScorecardBandAssetArtifactBinding:
@@ -1569,7 +1568,7 @@ def _persist_band_asset(
             )
         except ModelingError as exc:
             raise StrategyError(str(exc)) from exc
-        require_strategy_sample_design_v2_artifact_binding_on_connection(
+        require_any_strategy_sample_design_v2_artifact_binding_on_connection(
             conn,
             sample,
         )

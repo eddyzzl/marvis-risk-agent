@@ -144,6 +144,24 @@ def test_voting_search_selection_renderer_accepts_pool_order_normalization() -> 
     assert output["voting_candidate"]["asset_id"] in text
 
 
+def test_voting_search_selection_renderer_accepts_native_risk_development() -> None:
+    output = _output(eligible=True)
+    output["voting_candidate"]["sample_design_ref"]["partition"] = (
+        "risk/development"
+    )
+
+    text, _tables = render_tool_output(
+        "build_voting_candidate_from_search",
+        output,
+        trusted_inputs=_trusted_inputs(),
+    )
+
+    assert "完整性校验失败" not in text
+    assert SEARCH_ID in text
+    assert COMBO_ID in text
+    assert output["voting_candidate"]["asset_id"] in text
+
+
 def test_voting_search_selection_renderer_warns_when_constraints_failed() -> None:
     text, _tables = render_tool_output(
         "build_voting_candidate_from_search",

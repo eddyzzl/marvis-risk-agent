@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 import uuid
 
@@ -13,13 +14,15 @@ from marvis.orchestrator.capability import CapabilityTier, resolve_tier
 from marvis.orchestrator.context.budget import fit_to_budget, truncate_items_to_token_budget
 from marvis.orchestrator.context.ledger import build_progress_ledger
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck, StepStatus
-from marvis.orchestrator.templates import WorkflowTemplate
-from marvis.plugins.errors import PluginNotFoundError, ToolNotFoundError
+from marvis.orchestrator.templates import UNSET_SLOT_DEFAULT, WorkflowTemplate
+from marvis.plugins.errors import ManifestError, PluginNotFoundError, ToolNotFoundError
 from marvis.plugins.manifest import (
     GovernancePolicy,
     ToolRef,
     merge_governance_policies,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # LLM-10: prompt text/versions now live in marvis.llm_prompts; these module-level
@@ -30,7 +33,9 @@ _OMIT = object()
 REPLAN_SYS = _REPLAN_SYS_SPEC.text
 EXPLORE_SYS = _EXPLORE_SYS_SPEC.text
 MAX_REPLAN_PARSE_RETRY = 1
+PLANNER_MAX_OUTPUT_TOKENS = 4096
 MAX_CATALOG_FIELDS = 12
+MAX_REPLAN_LOG_MESSAGE_CHARS = 500
 
 PLANNING_EXAMPLES = (
     {
@@ -126,7 +131,13 @@ class Planner:
             raise PlanningError(f"missing required slots: {', '.join(missing)}")
 
         effective_slots = {
-            slot.name: slots[slot.name] if slot.name in slots and slots[slot.name] is not None else _OMIT
+            slot.name: (
+                slots[slot.name]
+                if slot.name in slots and slots[slot.name] is not None
+                else slot.default
+                if slot.default is not UNSET_SLOT_DEFAULT
+                else _OMIT
+            )
             for slot in template.slots
         }
         plan_id = uuid.uuid4().hex
@@ -216,6 +227,7 @@ class Planner:
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
+                max_tokens=PLANNER_MAX_OUTPUT_TOKENS,
                 caller="planner",
                 prompt_name=_PLAN_SYS_SPEC.name,
                 prompt_version=_PLAN_SYS_SPEC.version,
@@ -253,7 +265,11 @@ class Planner:
             raise ReplanError(f"replan budget exhausted ({tier.max_replan_iterations})")
 
         client = self._llm_factory()
-        catalog, catalog_truncated = _truncate_catalog(self._tools.catalog_for_planner(), client)
+        replan_catalog = _catalog_for_replan(
+            self._tools.catalog_for_planner(),
+            plan,
+        )
+        catalog, catalog_truncated = _truncate_catalog(replan_catalog, client)
         ledger = build_progress_ledger(plan, completed_summaries)
         context_items = fit_to_budget(
             [
@@ -263,7 +279,7 @@ class Planner:
             max_chars=4000,
         )
         last_error = None
-        for _attempt in range(MAX_REPLAN_PARSE_RETRY + 1):
+        for attempt in range(MAX_REPLAN_PARSE_RETRY + 1):
             prompt = build_replan_prompt(
                 plan,
                 catalog,
@@ -279,6 +295,7 @@ class Planner:
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
+                max_tokens=PLANNER_MAX_OUTPUT_TOKENS,
                 caller="planner",
                 prompt_name=_REPLAN_SYS_SPEC.name,
                 prompt_version=_REPLAN_SYS_SPEC.version,
@@ -293,13 +310,26 @@ class Planner:
                 )
                 self._apply_governance_policies(revised_remaining)
                 new_plan = _splice_remaining(plan, revised_remaining, tier)
-            except PlanningError as exc:
+            except (PlanningError, ManifestError) as exc:
                 last_error = str(exc)
+                logger.warning(
+                    "replan attempt rejected stage=parse attempt=%s "
+                    "error_type=%s message=%s",
+                    attempt + 1,
+                    exc.__class__.__name__,
+                    _safe_replan_log_message(last_error),
+                )
                 continue
             problems = self._validator.validate(new_plan)
             if not problems:
                 return new_plan
             last_error = "; ".join(problems)
+            logger.warning(
+                "replan attempt rejected stage=validator attempt=%s "
+                "error_type=PlanValidationError message=%s",
+                attempt + 1,
+                _safe_replan_log_message(last_error),
+            )
         raise ReplanError(f"replan could not produce valid plan: {last_error}")
 
     def next_explore_segment(
@@ -330,6 +360,7 @@ class Planner:
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
+                max_tokens=PLANNER_MAX_OUTPUT_TOKENS,
                 caller="planner",
                 prompt_name=_EXPLORE_SYS_SPEC.name,
                 prompt_version=_EXPLORE_SYS_SPEC.version,
@@ -507,14 +538,21 @@ def build_replan_prompt(
         "context_items": context_items,
         "observation": observation,
         "remaining_steps": [
-            {"id": step.id, "title": step.title, "status": step.status.value}
+            _source_step_contract(step)
             for step in plan.steps
             if step.status not in {StepStatus.DONE, StepStatus.SKIPPED}
         ],
         "last_error": last_error,
         "instruction": (
-            "Return only revised remaining steps. Preserve useful dependencies on "
-            "completed step ids when needed; do not include completed steps. "
+            "Treat remaining_steps as reusable source contracts: copy retained steps "
+            "field-for-field unless the user asks to change them. When removing or "
+            "replacing a step, remove or rewrite every depends_on edge and $ref that "
+            "targets it. Return the full revised remaining plan, including every "
+            "retained step; represent a deletion by omitting only the deleted step "
+            "from that complete list. When work remains, steps must be non-empty. "
+            "Preserve useful "
+            "dependencies on completed step ids when needed; do not include completed "
+            "steps. "
             "Use $ref:<step_id>.output.<field> for upstream outputs."
         ),
     }
@@ -523,6 +561,43 @@ def build_replan_prompt(
         # revised steps MUST honour it.
         payload["user_constraint"] = instruction
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _source_step_contract(step: PlanStep) -> dict[str, Any]:
+    """Expose reusable planning structure without runtime outputs or reviews."""
+    return {
+        "id": step.id,
+        "title": step.title,
+        "tool": {
+            "plugin": step.tool_ref.plugin,
+            "tool": step.tool_ref.tool,
+            "version": step.tool_ref.version,
+        },
+        "inputs": dict(step.inputs),
+        "depends_on": list(step.depends_on),
+        "post_checks": [
+            {"kind": check.kind, "spec": dict(check.spec)}
+            for check in step.post_checks
+        ],
+        "needs_confirmation": step.needs_confirmation,
+        "policy": step.policy.to_dict(),
+        "decision_point": step.decision_point,
+        "sub_agent_scope": step.sub_agent_scope,
+        "granted_tools": [
+            {
+                "plugin": tool_ref.plugin,
+                "tool": tool_ref.tool,
+                "version": tool_ref.version,
+            }
+            for tool_ref in step.granted_tools
+        ],
+    }
+
+
+def _safe_replan_log_message(value: object) -> str:
+    """Keep planner diagnostics single-line and bounded without raw LLM payloads."""
+    normalized = " ".join(str(value or "unknown").replace("\x00", "").split())
+    return (normalized or "unknown")[:MAX_REPLAN_LOG_MESSAGE_CHARS]
 
 
 def compact_catalog_for_prompt(catalog: list[dict]) -> list[dict]:
@@ -540,6 +615,29 @@ def compact_catalog_for_prompt(catalog: list[dict]) -> list[dict]:
         }
         for item in catalog
     ]
+
+
+def _catalog_for_replan(catalog: list[dict], plan: Plan) -> list[dict]:
+    """Keep sibling tools and explicitly granted cross-plugin alternatives."""
+    source_plugins = {
+        step.tool_ref.plugin
+        for step in plan.steps
+    }
+    granted_refs = {
+        (tool_ref.plugin, tool_ref.tool)
+        for step in plan.steps
+        for tool_ref in step.granted_tools
+    }
+    relevant = [
+        item
+        for item in catalog
+        if str(item.get("plugin") or "") in source_plugins
+        or (
+            str(item.get("plugin") or ""),
+            str(item.get("tool") or ""),
+        ) in granted_refs
+    ]
+    return relevant or catalog
 
 
 # LLM-5: the planner's tool catalog is one of the three named highest-volume

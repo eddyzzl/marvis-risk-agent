@@ -659,7 +659,8 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body
     assert "JSON.stringify({ inputs })" in retry_body
     assert "v2PlanCache.delete(taskId)" in retry_body
-    assert "window.setTimeout(() => retryFetch(taskId), 1000)" in retry_body
+    assert "void retryFetch(taskId)" in retry_body
+    assert "PLAN_RETRY_REFRESH_INTERVAL_MS" in retry_body
     assert "[data-plan-retry-step]" in click_body
     assert "void retryPlanStep(planRetryButton);" in click_body
     assert "[data-plan-rail-retry]" not in click_body
@@ -724,6 +725,166 @@ await new Promise((resolve) => setTimeout(resolve, 0));
 
 assert.equal(calls.length, 1);
 assert.deepEqual(calls[0].body.inputs, {{ foo: "edited", extra: 1 }});
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
+def test_plan_retry_preserves_nullable_integer_as_null():
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+import {{ createPlanRailController }} from {json.dumps(module_url)};
+
+globalThis.window = {{ setTimeout: () => {{}} }};
+globalThis.fetch = async () => ({{
+  ok: true,
+  json: async () => ({{ plans: [{{ id: "plan-1", steps: [] }}] }}),
+}});
+const calls = [];
+const controller = createPlanRailController({{
+  getSelectedTaskId: () => "task-1",
+  getSelectedTask: () => ({{ id: "task-1" }}),
+  getAgentMessages: () => [],
+  isAgentMode: () => false,
+  renderWorkflowStepper: () => {{}},
+  setActionStatus: () => {{}},
+  refreshTasks: async () => {{}},
+  loadAgentMessages: async () => {{}},
+  renderAll: () => {{}},
+  apiClient: async (url, options) => {{
+    calls.push({{ url, body: JSON.parse(options.body) }});
+    return {{ ok: true }};
+  }},
+}});
+controller.maybeFetchPlan("task-1");
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+const structuredField = {{
+  dataset: {{
+    planRetryInputKey: "early_stopping_rounds",
+    planRetryInputType: "integer",
+    planRetryInputNullable: "true",
+  }},
+  value: "",
+}};
+const jsonField = {{
+  value: '{{"early_stopping_rounds":null}}',
+  defaultValue: '{{"early_stopping_rounds":null}}',
+}};
+const form = {{
+  querySelectorAll: (selector) => selector === "[data-plan-retry-input-key]" ? [structuredField] : [],
+  querySelector: (selector) => selector === ".plan-retry-inputs" ? jsonField : null,
+}};
+const button = {{
+  dataset: {{ planRetryStep: "step-1" }},
+  disabled: false,
+  closest: () => form,
+}};
+controller.handleClick({{
+  target: {{ closest: (selector) => selector === "[data-plan-retry-step]" ? button : null }},
+  preventDefault: () => {{}},
+  stopPropagation: () => {{}},
+}});
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+assert.equal(calls.length, 1);
+assert.deepEqual(calls[0].body.inputs, {{ early_stopping_rounds: null }});
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
+def test_plan_retry_refreshes_until_the_retried_plan_is_terminal():
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+import {{ createPlanRailController }} from {json.dumps(module_url)};
+
+const timers = [];
+globalThis.window = {{ setTimeout: (callback) => timers.push(callback) }};
+let planFetchCount = 0;
+const planStates = [
+  {{ id: "plan-1", status: "failed", steps: [{{ id: "step-1", status: "failed" }}] }},
+  {{ id: "plan-1", status: "running", steps: [{{ id: "step-1", status: "running" }}] }},
+  {{ id: "plan-1", status: "done", steps: [{{ id: "step-1", status: "done" }}] }},
+];
+globalThis.fetch = async () => {{
+  const plan = planStates[Math.min(planFetchCount, planStates.length - 1)];
+  planFetchCount += 1;
+  return {{ ok: true, json: async () => ({{ plans: [plan] }}) }};
+}};
+let refreshCount = 0;
+let messageRefreshCount = 0;
+const controller = createPlanRailController({{
+  getSelectedTaskId: () => "task-1",
+  getSelectedTask: () => ({{ id: "task-1" }}),
+  getAgentMessages: () => [],
+  isAgentMode: () => false,
+  renderWorkflowStepper: () => {{}},
+  setActionStatus: () => {{}},
+  setDriverExecutionBusy: () => {{}},
+  refreshTasks: async () => {{ refreshCount += 1; }},
+  loadAgentMessages: async () => {{ messageRefreshCount += 1; }},
+  renderAll: () => {{}},
+  apiClient: async () => ({{ ok: true }}),
+}});
+controller.maybeFetchPlan("task-1");
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+const structuredField = {{
+  dataset: {{ planRetryInputKey: "seed", planRetryInputType: "integer" }},
+  value: "23",
+}};
+const jsonField = {{
+  value: '{{"seed":23}}',
+  defaultValue: '{{"seed":23}}',
+}};
+const form = {{
+  querySelectorAll: (selector) => selector === "[data-plan-retry-input-key]" ? [structuredField] : [],
+  querySelector: (selector) => selector === ".plan-retry-inputs" ? jsonField : null,
+}};
+const button = {{
+  dataset: {{ planRetryStep: "step-1" }},
+  disabled: false,
+  closest: () => form,
+}};
+controller.handleClick({{
+  target: {{ closest: (selector) => selector === "[data-plan-retry-step]" ? button : null }},
+  preventDefault: () => {{}},
+  stopPropagation: () => {{}},
+}});
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+assert.equal(planFetchCount, 2);
+assert.equal(timers.length, 1);
+timers.shift()();
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+assert.equal(planFetchCount, 3);
+assert.equal(refreshCount, 2);
+assert.equal(messageRefreshCount, 2);
+assert.equal(timers.length, 0);
 process.stdout.write("ok");
 """
     result = subprocess.run(
@@ -1549,6 +1710,61 @@ def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
     assert "checked: definition.defaultRunMode" not in apply_body
 
 
+def test_create_dialog_reopens_with_clean_task_specific_inputs_and_defaults():
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    module_url = (STATIC_DIR / "js" / "create-task-dialog.js").as_uri()
+    dialog_start = create_dialog_js.index("function openTaskDialog")
+    dialog_end = create_dialog_js.index("function openTaskDialogFromCard", dialog_start)
+    dialog_body = create_dialog_js[dialog_start:dialog_end]
+
+    assert "resetCreateTaskSpecificInputs" in dialog_body
+    assert 'document.querySelectorAll(\'input[name="runMode"]\')' in dialog_body
+    assert "input.checked = false;" in dialog_body
+    assert "materialSourceController.reset();" in dialog_body
+    assert dialog_body.index("resetCreateTaskSpecificInputs") < dialog_body.index(
+        "prefillCreateTaskReportFields"
+    )
+
+    script = f"""
+import assert from "node:assert/strict";
+import {{ resetCreateTaskSpecificInputs }} from {json.dumps(module_url)};
+
+const elements = {{
+  modelName: {{ value: "MODEL-XGB" }},
+  validator: {{ value: "上一负责人" }},
+  sourceDir: {{ value: "/tmp/previous-materials" }},
+  modelOotKsMin: {{ value: "0.42" }},
+  materialUploadInput: {{ value: "previous.csv" }},
+}};
+const reportInputs = [
+  {{ value: "上一任务模型概述" }},
+  {{ value: "上一任务适用范围" }},
+];
+const root = {{
+  querySelectorAll(selector) {{
+    assert.equal(selector, "[data-create-report-key]");
+    return reportInputs;
+  }},
+}};
+
+resetCreateTaskSpecificInputs({{
+  $: (id) => elements[id] || null,
+  root,
+}});
+
+for (const id of ["modelName", "validator", "sourceDir", "modelOotKsMin", "materialUploadInput"]) {{
+  assert.equal(elements[id].value, "", id);
+}}
+assert.deepEqual(reportInputs.map((input) => input.value), ["", ""]);
+"""
+    subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_create_task_requires_run_mode_and_allows_agent_mode():
     create_dialog_js = _read_static("js/create-task-dialog.js")
 
@@ -1851,6 +2067,195 @@ def test_risk_analysis_can_defer_materials_and_upload_from_composer():
     assert "请检查表结构和字段是否满足要求" in app_js
     assert '$("riskMaterialUploadButton").onclick' in app_js
     assert '$("riskMaterialUploadInput").addEventListener("change"' in app_js
+
+
+def test_manual_risk_analysis_intake_exposes_deterministic_composer_without_llm():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    helper_start = app_js.index("function latestRiskAnalysisIntakePhase")
+    helper_end = app_js.index("function syncRiskMaterialUploadControl", helper_start)
+    helper_body = app_js[helper_start:helper_end]
+    script = "\n".join(
+        [
+            "let selectedTask = { id: 'risk-1', task_type: 'vintage', run_mode: 'manual' };",
+            "let agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'ask_goal' } } }];",
+            helper_body,
+            "const phases = [];",
+            "phases.push(selectedTaskNeedsManualRiskIntake());",
+            "agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'request_materials' } } }];",
+            "phases.push(selectedTaskNeedsManualRiskIntake());",
+            "agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'ready' } } }];",
+            "phases.push(selectedTaskNeedsManualRiskIntake());",
+            "selectedTask = { id: 'risk-2', task_type: 'vintage', run_mode: 'agent' };",
+            "agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'ask_goal' } } }];",
+            "phases.push(selectedTaskNeedsManualRiskIntake());",
+            "process.stdout.write(JSON.stringify(phases));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == [True, True, False, False]
+
+    render = _slice_function(app_js, "function renderAgentConversation")
+    assert "selectedTaskNeedsManualRiskIntake()" in render
+    assert 'classList.toggle("manual-risk-intake"' in render
+    assert "isAgent || showManualRiskIntake" in render
+    assert ".agent-composer.manual-risk-intake .agent-composer-mode-controls" in styles_css
+    assert ".agent-composer.manual-risk-intake .agent-composer-right-controls > .agent-composer-controls" in styles_css
+
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    send_body = app_js[send_start:send_end]
+    assert "const deterministicRiskIntake = selectedTaskNeedsManualRiskIntake();" in send_body
+    assert "if (!deterministicRiskIntake)" in send_body
+    assert "const requestBody = { content };" in send_body
+    assert "requestBody.model_id = modelId || null;" in send_body
+
+
+def test_manual_risk_analysis_intake_posts_content_without_model_configuration():
+    app_js = _read_static("app.js")
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    send_body = app_js[send_start:send_end]
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'risk-1';",
+            "let selectedTask = { id: 'risk-1', task_type: 'vintage', run_mode: 'manual' };",
+            "let agentMessages = [];",
+            "const agentRequestAbortControllers = new Map();",
+            "const input = { value: '标准 Vintage', style: {} };",
+            "const posted = [];",
+            "function $(id) { if (id === 'agentComposerInput') return input; if (id === 'agentModelSelect') return { value: '' }; return null; }",
+            "function selectedTaskNeedsManualRiskIntake() { return true; }",
+            "function agentModelUnavailableMessage() { throw new Error('manual intake must not require an LLM'); }",
+            "function showAgentModelGuidance() { throw new Error('manual intake must not show LLM guidance'); }",
+            "function setAgentComposerNotice() {}",
+            "function autoGrowComposerInput() {}",
+            "function updateAgentSendDisabled() {}",
+            "function appendOptimisticAgentUserMessage() { return { id: 'optimistic-user' }; }",
+            "function appendOptimisticAgentThinkingMessage() { return { id: 'optimistic-thinking' }; }",
+            "function removeOptimisticAgentMessage() {}",
+            "function agentEffort() { throw new Error('manual intake must not send effort'); }",
+            "function agentAcceptanceModeValue() { throw new Error('manual intake must not send acceptance mode'); }",
+            "async function api(url, options) { posted.push({ url, body: JSON.parse(options.body) }); return { messages: [], status: 'ok' }; }",
+            "async function pollAgentMessagesUntilSettled(_taskId, pending) { await pending; }",
+            "function renderAgentConversation() {}",
+            "async function waitForAgentValidation() {}",
+            "async function handleAgentMaterialSelectionRequest() {}",
+            "function setActionStatus() {}",
+            send_body,
+            "await startAgentValidation();",
+            "process.stdout.write(JSON.stringify(posted));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == [
+        {
+            "url": "api/tasks/risk-1/agent/messages",
+            "body": {"content": "标准 Vintage"},
+        }
+    ]
+
+
+def test_manual_vintage_material_upload_control_runs_deterministic_intake():
+    app_js = _read_static("app.js")
+    helpers_start = app_js.index("function selectedTaskIsRiskAnalysisAgent")
+    helpers_end = app_js.index("function updateWorkspaceGreeting", helpers_start)
+    helpers_body = app_js[helpers_start:helpers_end]
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function uploadRiskAnalysisMaterials", send_start)
+    send_body = app_js[send_start:send_end]
+    upload_start = send_end
+    upload_end = app_js.index("async function dispatchAgentValidation", upload_start)
+    upload_body = app_js[upload_start:upload_end]
+    handlers_start = app_js.index('$("riskMaterialUploadButton").onclick')
+    handlers_end = app_js.index('$("sendAgentMessageButton").onclick', handlers_start)
+    handlers_body = app_js[handlers_start:handlers_end]
+    script = "\n".join(
+        [
+            'import assert from "node:assert/strict";',
+            "let selectedTaskId = 'risk-manual';",
+            "let selectedTask = { id: 'risk-manual', task_type: 'vintage', run_mode: 'manual' };",
+            "let agentMessages = [{ role: 'assistant', metadata: { risk_analysis_intake: { phase: 'request_materials' } } }];",
+            "const agentRequestAbortControllers = new Map();",
+            "const uploads = [];",
+            "const posts = [];",
+            "let pendingAction = null;",
+            "const button = { disabled: true, hidden: true, onclick: null, classList: { toggle(name, force) { if (name === 'hidden') button.hidden = force; } } };",
+            "const picker = { value: 'selected', clicks: 0, changeHandler: null, click() { this.clicks += 1; }, addEventListener(name, handler) { if (name === 'change') this.changeHandler = handler; } };",
+            "const composer = { value: '', style: {} };",
+            "function $(id) {",
+            "  if (id === 'riskMaterialUploadButton') return button;",
+            "  if (id === 'riskMaterialUploadInput') return picker;",
+            "  if (id === 'agentComposerInput') return composer;",
+            "  if (id === 'agentModelSelect') return { value: '' };",
+            "  return null;",
+            "}",
+            "function taskBusyAction() { return null; }",
+            "function requireTaskId(value) { return value; }",
+            "async function uploadDataset(taskId, file, options) { uploads.push({ taskId, name: file.name, role: options.role }); }",
+            "function setAgentComposerNotice() {}",
+            "function autoGrowComposerInput() {}",
+            "function updateAgentSendDisabled() {}",
+            "function appendOptimisticAgentUserMessage() { return { id: 'optimistic-user' }; }",
+            "function appendOptimisticAgentThinkingMessage() { return { id: 'optimistic-thinking' }; }",
+            "function removeOptimisticAgentMessage() {}",
+            "function agentModelUnavailableMessage() { throw new Error('manual intake must not require an LLM'); }",
+            "function showAgentModelGuidance() { throw new Error('manual intake must not show LLM guidance'); }",
+            "function agentModelConfigurationErrorMessage(error) { return error.message; }",
+            "function agentEffort() { throw new Error('manual intake must not send effort'); }",
+            "function agentAcceptanceModeValue() { throw new Error('manual intake must not send acceptance mode'); }",
+            "async function api(url, options) { posts.push({ url, body: JSON.parse(options.body) }); return { messages: [], status: 'ok' }; }",
+            "async function pollAgentMessagesUntilSettled(_taskId, pending) { await pending; }",
+            "function renderAgentConversation() {}",
+            "async function waitForAgentValidation() {}",
+            "async function handleAgentMaterialSelectionRequest() {}",
+            "function setActionStatus() {}",
+            "function runAction(action) { pendingAction = action(); return pendingAction; }",
+            helpers_body,
+            send_body,
+            upload_body,
+            handlers_body,
+            "syncRiskMaterialUploadControl();",
+            "assert.equal(button.hidden, false);",
+            "assert.equal(button.disabled, false);",
+            "button.onclick();",
+            "assert.equal(picker.clicks, 1);",
+            "picker.changeHandler({ currentTarget: { files: [{ name: 'vintage.csv' }] } });",
+            "await pendingAction;",
+            "assert.deepEqual(uploads, [{ taskId: 'risk-manual', name: 'vintage.csv', role: 'sample' }]);",
+            "assert.deepEqual(posts, [{ url: 'api/tasks/risk-manual/agent/messages', body: { content: '已上传材料：vintage.csv。请检查表结构和字段是否满足要求，并继续分析。' } }]);",
+            "assert.equal(button.disabled, false);",
+            "assert.equal(picker.value, '');",
+            "selectedTask = { id: 'risk-agent', task_type: 'vintage', run_mode: 'agent' };",
+            "selectedTaskId = 'risk-agent';",
+            "button.hidden = true;",
+            "button.disabled = true;",
+            "syncRiskMaterialUploadControl();",
+            "assert.equal(button.hidden, false);",
+            "assert.equal(button.disabled, false);",
+            'process.stdout.write("ok");',
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
 
 
 def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
@@ -2640,6 +3045,25 @@ def test_refresh_restores_selected_task_before_async_detail_loads():
     assert message_load < first_render
     assert first_render < restore_scroll < finish_boot
     assert "if (selectedTaskId) renderAll();" not in init_body
+
+
+def test_boot_initializes_restored_strategy_candidate_lab_once_outside_polling():
+    app_js = _read_static("app.js")
+    init_body = _slice_function(app_js, "async function initializeApp")
+    sync_body = _slice_function(app_js, "function syncSelectedTaskFromCache")
+    refresh_body = _slice_function(app_js, "async function refreshTasks")
+
+    start = (
+        "const candidateLabLoadPromise = "
+        "strategyCandidateLabController.selectTask(selectedTask);"
+    )
+    assert init_body.count(start) == 1
+    assert init_body.index("await refreshTasks();") < init_body.index(start)
+    assert init_body.index("await loadAgentMessages();") < init_body.index(
+        "await candidateLabLoadPromise;"
+    )
+    assert "strategyCandidateLabController" not in sync_body
+    assert "strategyCandidateLabController" not in refresh_body
 
 
 def test_workspace_cards_float_on_one_background_with_top_step_rail():
@@ -6714,9 +7138,135 @@ def test_driver_manual_analysis_omits_plan_overview_messages():
     app_js = _read_static("app.js")
     module_js = _read_static("js/v2/driver_manual_analysis.js")
     body = _slice_function(module_js, "export function driverManualAnalysisHtml")
+    wrapper = _slice_function(app_js, "function driverManualAnalysisHtml")
+    render = _slice_function(app_js, "function renderDriverManualAnalysis")
 
     assert 'meta.kind === "overview" || meta.kind === "plan_overview"' in body
     assert "driverManualAnalysisHtmlController(messages" in app_js
+    assert "visibleMessages" in body
+    assert "filterRecoveredWorkflowFailures(messages, stepStatus)" in body
+    assert "driverManualMessageStepStatus" in wrapper
+    assert "planStepStatuses" in render
+    assert "currentPlanId" in render
+    assert "planStepStatuses," in render
+
+
+def test_driver_manual_analysis_preserves_failures_from_previous_plans_as_history():
+    app_js = _read_static("app.js")
+    plan_rail_js = _read_static("js/v2/plan_rail_controller.js")
+    render = _slice_function(app_js, "function renderDriverManualAnalysis")
+
+    assert "function driverManualMessageStepStatus" in app_js
+    assert "metadata.failure_envelope?.failed_step_id" in app_js
+    assert 'return "historical";' in app_js
+    assert "planRailController.planId" in app_js
+    assert "function planId" in plan_rail_js
+    assert "planId," in plan_rail_js
+    assert "currentPlanId" in render
+    assert "driverManualMessageStepStatus(message)" in render
+    assert "historicalWorkflowFailureHtml" in _read_static("js/v2/driver_manual_analysis.js")
+
+
+def test_agent_driver_timeline_hides_recovered_failures_and_tracks_plan_status():
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_manual_analysis.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ filterRecoveredWorkflowFailures }} from {json.dumps(module_url)};",
+            "const messages = [",
+            "  { id: 'u1', role: 'user', content: '开始' },",
+            "  { id: 'failure', role: 'assistant', metadata: { error: true, step_id: 'step-1' } },",
+            "  { id: 'done', role: 'assistant', content: '完成' },",
+            "];",
+            "const ids = (status) => filterRecoveredWorkflowFailures(messages, () => status).map((message) => message.id);",
+            "process.stdout.write(JSON.stringify({ done: ids('done'), failed: ids('failed'), historical: ids('historical'), unknown: ids('') }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["done"] == ["u1", "done"]
+    assert payload["failed"] == ["u1", "failure", "done"]
+    assert payload["historical"] == ["u1", "failure", "done"]
+    assert payload["unknown"] == ["u1", "failure", "done"]
+
+    app_js = _read_static("app.js")
+    render = _slice_function(app_js, "function renderAgentConversation")
+    assert "filterRecoveredWorkflowFailures(reportMessages, driverManualMessageStepStatus)" in render
+    assert "driverPlanSignature" in render
+    assert "driverManualMessageStepStatus(message)" in render
+
+
+def test_modeling_gate_only_mounts_screen_picker_for_feature_selection():
+    manual_url = (STATIC_DIR / "js" / "v2" / "driver_manual_analysis.js").as_uri()
+    confirm_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ driverManualAnalysisHtml }} from {json.dumps(manual_url)};",
+            f"import {{ renderDriverGateButton }} from {json.dumps(confirm_url)};",
+            "const base = { id: 'gate', role: 'assistant', content: '结果已生成', metadata: { kind: 'gate', step_id: 'step-7', screen: { selected: ['sig1'] } } };",
+            "const renderers = {",
+            "  renderAgentMarkdown: (value) => value,",
+            "  renderScreenTable: () => '<div data-screen-picker=\"1\"></div>',",
+            "  renderGateConfirm: (message) => renderDriverGateButton(message, { gateStepTool: message.metadata.gate_source_tool }),",
+            "};",
+            "const tuning = driverManualAnalysisHtml([{ ...base, metadata: { ...base.metadata, gate_source_tool: 'tune_hyperparameters' } }], renderers);",
+            "const selection = driverManualAnalysisHtml([{ ...base, metadata: { ...base.metadata, gate_source_tool: 'select_features' } }], renderers);",
+            "process.stdout.write(JSON.stringify({ tuning, selection }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    assert 'data-screen-picker="1"' not in payload["tuning"]
+    assert "确认并开始调参" in payload["tuning"]
+    assert 'data-screen-picker="1"' in payload["selection"]
+    assert "确认并开始调参" not in payload["selection"]
+
+    app_js = _read_static("app.js")
+    assert "message = gateMessageForCurrentTool(message);" in app_js
+
+
+def test_select_experiment_gate_does_not_resurrect_modeling_setup_controls():
+    manual_url = (STATIC_DIR / "js" / "v2" / "driver_manual_analysis.js").as_uri()
+    confirm_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ driverManualAnalysisHtml }} from {json.dumps(manual_url)};",
+            f"import {{ renderDriverGateButton }} from {json.dumps(confirm_url)};",
+            "const message = {",
+            "  id: 'select-gate', role: 'assistant', content: '实验对比完成',",
+            "  metadata: {",
+            "    kind: 'gate', step_id: 'step-10', gate_source_tool: 'select_experiment',",
+            "    modeling_setup: { recipe: ['lgb'] },",
+            "    model_delivery: { selected_experiment_id: 'exp-lgb' },",
+            "  },",
+            "};",
+            "const html = driverManualAnalysisHtml([message], {",
+            "  renderAgentMarkdown: (value) => value,",
+            "  renderModelingSetup: () => '<div data-modeling-setup=\"1\"></div>',",
+            "  renderModelDelivery: () => '<div data-model-delivery=\"1\"></div>',",
+            "  renderGateConfirm: (current) => renderDriverGateButton(current, { gateStepTool: current.metadata.gate_source_tool }),",
+            "});",
+            "process.stdout.write(html);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert 'data-modeling-setup="1"' not in result.stdout
+    assert 'data-model-delivery="1"' in result.stdout
+    assert "确认所选实验" in result.stdout
 
 
 def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
@@ -8795,6 +9345,7 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
             "let selectedTaskId = 'task-1';",
             "let selectedTask = { task_type: 'validation' };",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
+            "function selectedTaskNeedsManualRiskIntake() { return false; }",
             "let llmSettings = { enabled_models: [] };",
             "let apiCalls = 0;",
             "let focusedModel = false;",
@@ -8929,7 +9480,9 @@ def test_agent_running_composer_only_submits_explicit_stop_intent():
             "  agentComposerStopIntent('cancel'),",
             "  agentComposerStopIntent('不要停止'),",
             "  agentComposerStopIntent('继续执行'),",
-            "  agentComposerStopIntent('为什么停止了？')",
+            "  agentComposerStopIntent('为什么停止了？'),",
+            "  agentComposerStopIntent('开始执行这个计划，先到数据划分确认处停下。'),",
+            "  agentComposerStopIntent('确认开始执行这个计划，并在数据划分确认处停下。')",
             "]));",
         ]
     )
@@ -8940,7 +9493,7 @@ def test_agent_running_composer_only_submits_explicit_stop_intent():
         text=True,
     )
 
-    assert json.loads(result.stdout) == [True, True, False, False, False]
+    assert json.loads(result.stdout) == [True, True, False, False, False, False, False]
 
 
 def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status_is_mid_stage():
@@ -8967,6 +9520,7 @@ def test_agent_send_shows_thinking_message_before_network_wait():
             "let selectedTaskId = 'task-1';",
             "let selectedTask = { task_type: 'validation' };",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
+            "function selectedTaskNeedsManualRiskIntake() { return false; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
             "const agentRequestAbortControllers = new Map();",
@@ -9035,6 +9589,7 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
             "let selectedTaskId = 'task-1';",
             "let selectedTask = { task_type: 'validation' };",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
+            "function selectedTaskNeedsManualRiskIntake() { return false; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
             "const agentRequestAbortControllers = new Map();",
@@ -9098,6 +9653,7 @@ def test_agent_stop_aborts_in_flight_message_request_and_clears_optimistic_state
             "const statuses = [];",
             "let messageSignal = null;",
             "let stopCalled = false;",
+            "function selectedTaskNeedsManualRiskIntake() { return false; }",
             "const input = { value: '开始', style: {}, classList: { toggle() {} } };",
             "const modelSelect = { value: 'model-1' };",
             "function $(id) { return id === 'agentComposerInput' ? input : modelSelect; }",
@@ -11434,6 +11990,9 @@ def test_gate_confirm_button_states_consequence_by_tool():
     assert 'execute_join: "确认并执行拼接"' in driver_gate_js
     assert 'screen_features: "确认所选特征"' in driver_gate_js
     assert 'train_model: "确认并开始训练"' in driver_gate_js
+    assert 'configure_tuning: "确认调参配置"' in driver_gate_js
+    assert 'generate_model_reports: "确认并生成报告"' in driver_gate_js
+    assert 'post_training_action: "确认模型交付"' in driver_gate_js
 
     module_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
     script = "\n".join(
@@ -11441,8 +12000,10 @@ def test_gate_confirm_button_states_consequence_by_tool():
             f"import {{ renderDriverGateButton }} from {json.dumps(module_url)};",
             "const message = { metadata: { kind: 'gate', step_id: 'gate-1' } };",
             "const joinHtml = renderDriverGateButton(message, { gateStepTool: 'execute_join' });",
+            "const reportHtml = renderDriverGateButton(message, { gateStepTool: 'generate_model_reports' });",
+            "const deliveryHtml = renderDriverGateButton(message, { gateStepTool: 'post_training_action' });",
             "const genericHtml = renderDriverGateButton(message, {});",
-            "process.stdout.write(JSON.stringify({ joinHtml, genericHtml }));",
+            "process.stdout.write(JSON.stringify({ joinHtml, reportHtml, deliveryHtml, genericHtml }));",
         ]
     )
     result = subprocess.run(
@@ -11454,6 +12015,8 @@ def test_gate_confirm_button_states_consequence_by_tool():
     payload = json.loads(result.stdout)
 
     assert "确认并执行拼接" in payload["joinHtml"]
+    assert "确认并生成报告" in payload["reportHtml"]
+    assert "确认模型交付" in payload["deliveryHtml"]
     assert ">确认<" in payload["genericHtml"]
 
 
@@ -11501,6 +12064,40 @@ def test_strategy_create_dialog_captures_governed_business_input():
     assert "objective," in create_dialog_js
     assert "完整策略开发至少需要一个坏率上限或通过率下限" in create_dialog_js
     assert "利润最大化需要填写 EAD/PD 列和完整收益参数" in create_dialog_js
+
+
+def test_manual_analysis_mounts_structured_adoption_gate_in_middle_workspace():
+    module_url = (
+        STATIC_DIR / "js" / "v2" / "driver_manual_analysis.js"
+    ).as_uri()
+    script = "\n".join(
+        [
+            (
+                "import { driverManualAnalysisHtml } from "
+                f"{json.dumps(module_url)};"
+            ),
+            "const message = { id: 'adopt-gate', role: 'assistant', content: '回测完成。', metadata: {",
+            "  kind: 'gate', step_id: 'adopt-step', gate_source_tool: 'adopt_strategy',",
+            "  editable_input_schema: { type: 'object', properties: { adoption_reason: { type: 'string', minLength: 2 } }, required: ['adoption_reason'] },",
+            "} };",
+            "const html = driverManualAnalysisHtml([message], {",
+            "  renderAgentMarkdown: (value) => value,",
+            "  renderAdoptionGate: (_message, options) => `<div data-adoption-widget data-interactive=\"${options.interactive}\"></div>`,",
+            "  renderGateConfirm: () => '<button data-generic-confirm></button>',",
+            "});",
+            "process.stdout.write(html);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert 'data-adoption-widget' in result.stdout
+    assert 'data-interactive="true"' in result.stdout
+    assert "data-generic-confirm" not in result.stdout
 
 
 def test_adoption_gate_requires_reason_and_submits_gate_bound_payload():
@@ -11890,7 +12487,9 @@ def test_all_rail_interactions_move_to_middle_workspace():
             "let messages = [];",
             "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
             "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
-            "const controller = createPlanRailController({ $, getSelectedTask: () => ({ task_type: 'modeling' }), getSelectedTaskId: () => 'task-A', getAgentMessages: () => messages, isAgentMode: () => false, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "let agentMode = false;",
+            "let selectedTask = { task_type: 'modeling', active_job_kind: null };",
+            "const controller = createPlanRailController({ $, getSelectedTask: () => selectedTask, getSelectedTaskId: () => 'task-A', getAgentMessages: () => messages, isAgentMode: () => agentMode, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
             "const rs = {};",
             "// Plan built but not started -> middle panel shows 开始执行.",
             "plan = { id: 'plan-1', status: 'validated', steps: [",
@@ -11922,8 +12521,77 @@ def test_all_rail_interactions_move_to_middle_workspace():
             "messages = [{ role: 'assistant', metadata: { report_download: { download_url: '/api/tasks/task-A/driver-report/download' } } }];",
             "controller.render({ force: true, renderSignatures: rs });",
             "const duplicateDlBtn = planDriverActions.querySelector('.plan-step-download');",
+            "// Agent mode: a plain authoritative awaiting-confirm step exposes a",
+            "// visible plan+step-bound authorization button only after the matching",
+            "// gate message has arrived. Structured gates must never get this",
+            "// generic button because it cannot supply their required inputs.",
+            "agentMode = true;",
+            "selectedTask = { task_type: 'modeling', active_job_kind: 'driver' };",
+            "messages = [];",
+            "plan = { id: 'plan-agent', status: 'running', steps: [",
+            "  { id: 'report-gate', index: 0, phase: '报告', title: '生成模型开发报告', status: 'awaiting_confirm', needs_confirmation: true, tool_ref: { plugin: 'modeling', tool: 'generate_model_reports' }, depends_on: [] },",
+            "  { id: 'delivery', index: 1, phase: '交付', title: '模型交付动作', status: 'pending', tool_ref: { plugin: 'modeling', tool: 'post_training_action' }, depends_on: ['report-gate'] },",
+            "] };",
+            "controller.resetFetchThrottle('task-A');",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const pendingMessageGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "messages = [{ id: 'report-message', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-agent', step_id: 'report-gate', gate_source_tool: 'generate_model_reports' } }];",
+            "controller.render({ renderSignatures: rs });",
+            "const agentGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "const agentGateDisabledWhileBusy = agentGateBtn ? agentGateBtn.getAttribute('disabled') != null : null;",
+            "// Once task polling reports the prior driver job cleared, the same",
+            "// gate must be rebuilt as enabled even though its plan step is unchanged.",
+            "selectedTask = { task_type: 'modeling', active_job_kind: null };",
+            "controller.render({ renderSignatures: rs });",
+            "const readyAgentGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "// Special-value, adoption, and red-monitoring gates require",
+            "// structured decisions. Their matching messages suppress the",
+            "// misleading generic confirm.",
+            "plan = { id: 'plan-special', status: 'awaiting_confirm', steps: [",
+            "  { id: 'special-gate', index: 0, phase: '特征', title: '治理特殊值', status: 'awaiting_confirm', needs_confirmation: true, tool_ref: { plugin: 'modeling', tool: 'resolve_special_values' }, depends_on: [] },",
+            "] };",
+            "messages = [{ id: 'special-message', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-special', step_id: 'special-gate', gate_source_tool: 'resolve_special_values', special_values: { columns: [{ column: 'x1', values: [{ value: -999 }] }] } } }];",
+            "controller.resetFetchThrottle('task-A');",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const structuredSpecialGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "plan = { id: 'plan-adopt', status: 'awaiting_confirm', steps: [",
+            "  { id: 'adopt-gate', index: 0, phase: '采纳', title: '采纳策略', status: 'awaiting_confirm', needs_confirmation: true, tool_ref: { plugin: 'strategy', tool: 'adopt_strategy' }, depends_on: [] },",
+            "] };",
+            "messages = [{ id: 'adopt-message', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-adopt', step_id: 'adopt-gate', gate_source_tool: 'adopt_strategy', editable_input_schema: { properties: { adoption_reason: { type: 'string' } } } } }];",
+            "controller.resetFetchThrottle('task-A');",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const structuredAdoptionGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "plan = { id: 'plan-monitoring', status: 'awaiting_confirm', steps: [",
+            "  { id: 'monitoring-gate', index: 0, phase: '处置', title: '处置监控结果', status: 'awaiting_confirm', needs_confirmation: true, tool_ref: { plugin: 'strategy', tool: 'apply_monitoring_disposition' }, depends_on: [] },",
+            "] };",
+            "const monitoringSchema = { properties: { disposition: { type: 'string', enum: ['observe', 'adjust_threshold', 'new_version'] }, reason: { type: 'string' }, threshold_patch: { type: 'object' } } };",
+            "messages = [{ id: 'monitoring-green', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-monitoring', step_id: 'monitoring-gate', gate_source_tool: 'apply_monitoring_disposition', monitoring_disposition: { overall_level: 'green', requires_structured_input: false }, editable_input_schema: monitoringSchema } }];",
+            "controller.resetFetchThrottle('task-A');",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const greenMonitoringGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "messages = [{ id: 'monitoring-amber', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-monitoring', step_id: 'monitoring-gate', gate_source_tool: 'apply_monitoring_disposition', monitoring_disposition: { overall_level: 'amber', requires_structured_input: false }, editable_input_schema: monitoringSchema } }];",
+            "controller.render({ renderSignatures: rs });",
+            "const amberMonitoringGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "messages = [{ id: 'monitoring-red', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-monitoring', step_id: 'monitoring-gate', gate_source_tool: 'apply_monitoring_disposition', monitoring_disposition: { overall_level: 'red', requires_structured_input: true }, editable_input_schema: monitoringSchema } }];",
+            "controller.render({ renderSignatures: rs });",
+            "const redMonitoringGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "messages = [{ id: 'monitoring-unknown', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-monitoring', step_id: 'monitoring-gate', gate_source_tool: 'apply_monitoring_disposition', monitoring_disposition: { overall_level: 'unknown', requires_structured_input: false }, editable_input_schema: monitoringSchema } }];",
+            "controller.render({ renderSignatures: rs });",
+            "const unknownMonitoringGateBtn = planDriverActions.querySelector('.driver-confirm');",
+            "messages = [{ id: 'monitoring-conflict', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-monitoring', step_id: 'monitoring-gate', gate_source_tool: 'apply_monitoring_disposition', monitoring_disposition: { overall_level: 'green', requires_structured_input: true }, editable_input_schema: monitoringSchema } }];",
+            "controller.render({ renderSignatures: rs });",
+            "const conflictingMonitoringGateBtn = planDriverActions.querySelector('.driver-confirm');",
             "process.stdout.write(JSON.stringify({",
             "  startPanelConfirm: startBtn ? (startBtn.dataset.driverConfirm || '') : null,",
+            "  startPanelExpectedPlan: startBtn ? (startBtn.dataset.expectedPlanId || '') : null,",
             "  startPanelLabel: startBtn ? startBtn.textContent : '',",
             "  railHasConfirm: startRailBtn != null,",
             "  railHasLocate: startLocate != null,",
@@ -11933,6 +12601,21 @@ def test_all_rail_interactions_move_to_middle_workspace():
             "  railHasReadyBadge: railReady != null,",
             "  railReadyText: railReady ? railReady.textContent : '',",
             "  duplicateReportDownload: duplicateDlBtn != null,",
+            "  pendingMessageHasConfirm: pendingMessageGateBtn != null,",
+            "  agentGateConfirm: agentGateBtn ? (agentGateBtn.dataset.driverConfirm || '') : null,",
+            "  agentGateExpectedPlan: agentGateBtn ? (agentGateBtn.dataset.expectedPlanId || '') : null,",
+            "  agentGateExpectedStep: agentGateBtn ? (agentGateBtn.dataset.expectedStepId || '') : null,",
+            "  agentGateLabel: agentGateBtn ? agentGateBtn.textContent : '',",
+            "  agentGateDisabledWhileBusy,",
+            "  agentGateEnabledAfterIdle: readyAgentGateBtn ? readyAgentGateBtn.getAttribute('disabled') == null : null,",
+            "  structuredSpecialHasConfirm: structuredSpecialGateBtn != null,",
+            "  structuredAdoptionHasConfirm: structuredAdoptionGateBtn != null,",
+            "  greenMonitoringHasConfirm: greenMonitoringGateBtn != null,",
+            "  greenMonitoringLabel: greenMonitoringGateBtn ? greenMonitoringGateBtn.textContent : '',",
+            "  amberMonitoringHasConfirm: amberMonitoringGateBtn != null,",
+            "  redMonitoringHasConfirm: redMonitoringGateBtn != null,",
+            "  unknownMonitoringHasConfirm: unknownMonitoringGateBtn != null,",
+            "  conflictingMonitoringHasConfirm: conflictingMonitoringGateBtn != null,",
             "}));",
         ]
     )
@@ -11940,6 +12623,7 @@ def test_all_rail_interactions_move_to_middle_workspace():
 
     # Middle panel: real actionable buttons wired to the document-level handlers.
     assert data["startPanelConfirm"] == "1", data
+    assert data["startPanelExpectedPlan"] == "plan-1", data
     assert "开始执行" in data["startPanelLabel"]
     assert data["reportPanelDownload"] == "1", data
     assert "下载报告" in data["reportPanelLabel"]
@@ -11951,6 +12635,21 @@ def test_all_rail_interactions_move_to_middle_workspace():
     assert data["railHasReadyBadge"] is False, data
     assert data["railReadyText"] == "", data
     assert data["duplicateReportDownload"] is False, data
+    assert data["pendingMessageHasConfirm"] is False, data
+    assert data["agentGateConfirm"] == "1", data
+    assert data["agentGateExpectedPlan"] == "plan-agent", data
+    assert data["agentGateExpectedStep"] == "report-gate", data
+    assert "确认并生成报告" in data["agentGateLabel"], data
+    assert data["agentGateDisabledWhileBusy"] is True, data
+    assert data["agentGateEnabledAfterIdle"] is True, data
+    assert data["structuredSpecialHasConfirm"] is False, data
+    assert data["structuredAdoptionHasConfirm"] is False, data
+    assert data["greenMonitoringHasConfirm"] is True, data
+    assert "确认知悉" in data["greenMonitoringLabel"], data
+    assert data["amberMonitoringHasConfirm"] is True, data
+    assert data["redMonitoringHasConfirm"] is False, data
+    assert data["unknownMonitoringHasConfirm"] is False, data
+    assert data["conflictingMonitoringHasConfirm"] is False, data
 
 
 def test_acceptance_mode_chip_explains_auto_mode_scope():
@@ -12611,8 +13310,7 @@ def test_explicit_driver_execute_promotes_only_the_current_plan_step():
 
 
 def test_task_hero_click_collapses_to_title_and_status_only():
-    """Clicking the top card folds everything below the name+status row down to
-    zero height, and clicking again expands it back."""
+    """The top card starts folded and remains manually expandable/collapsible."""
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
@@ -12622,9 +13320,13 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     hero_start = index_html.index('id="taskHero"')
     hero_markup = index_html[hero_start:index_html.index("</header>", hero_start)]
     assert 'class="task-hero-top-right"' in hero_markup
+    assert 'class="task-hero is-collapsed"' in index_html[
+        max(0, hero_start - 80):hero_start + 40
+    ]
     assert 'id="taskHeroToggle"' in hero_markup
     assert 'aria-controls="taskHeroDetails"' in hero_markup
-    assert 'aria-expanded="true"' in hero_markup
+    assert 'aria-expanded="false"' in hero_markup
+    assert 'aria-label="展开任务详情"' in hero_markup
     assert 'class="task-hero-details"' in hero_markup
     assert 'id="taskHeroDetails"' in hero_markup
     assert 'class="task-hero-details-inner"' in hero_markup

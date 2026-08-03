@@ -652,6 +652,14 @@ def is_stop_validation_intent(content: str) -> bool:
         return False
     if re.search(r"[?？]|为什么|为何|怎么|如何|是否|有没有|停止了没|停止了吗", text):
         return False
+    if re.search(
+        r"(?:"
+        r"(?:到|等到|待|运行到|执行到).{1,40}(?:处|后|时)?"
+        r"|在.{1,40}(?:处|时)"
+        r")(?:停止|停下|暂停|中止)",
+        text,
+    ):
+        return False
     keywords = (
         "停止",
         "停下",

@@ -11,6 +11,9 @@ from marvis.agent.turn_handlers import (
 )
 from marvis.packs.strategy import tools as strategy_tools
 from tests.test_strategy_interactive_tree_frontier_group_tool import _revision
+from tests.test_strategy_interactive_tree_threshold_adjustment import (
+    _threshold_revision,
+)
 
 
 pytest_plugins = ("tests.test_strategy_interactive_tree_tool",)
@@ -78,3 +81,36 @@ def test_frontier_group_resolves_live_artifact_and_replayed_fragment(
     } == verified_slots
     assert "selection_id" not in plan_slots
     assert "fragment_id" not in plan_slots
+
+
+def test_v2_frontier_group_resolves_into_pool_turn_slots(scenario) -> None:
+    _result, revision = _threshold_revision(scenario)
+    selected = revision["fragments"][:2]
+    materialized = (
+        strategy_tools.tool_materialize_interactive_tree_frontier_group_selection(
+            {
+                "revision_id": revision["revision_id"],
+                "source_node_ids": [
+                    item["source_node_id"] for item in selected
+                ],
+                "selection_reason": "Combine reviewed v2 frontiers.",
+            },
+            scenario.ctx,
+        )
+    )
+
+    verified_slots, fragment_id = _candidate_selection_artifact_slots(
+        SimpleNamespace(settings=scenario.settings),
+        task_id=scenario.task.id,
+        selection_id=materialized["selection_id"],
+    )
+
+    assert verified_slots == {
+        "source_artifact_id": materialized["artifacts"][0]["artifact_id"],
+        "expected_artifact_content_hash": materialized["artifacts"][0][
+            "content_hash"
+        ],
+        "expected_asset_id": materialized["semantic_tree_id"],
+        "expected_asset_hash": materialized["tree_hash"],
+    }
+    assert fragment_id == materialized["fragment_id"]

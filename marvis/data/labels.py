@@ -2,17 +2,47 @@
 
 A NaN target carries no supervision signal and must NEVER be silently coerced to a
 class (INV-1 / INV-2). These helpers either raise ``NanLabelNotConfirmedError`` with
-structured diagnostics (default) or drop the offending rows (opt-in). Non-numeric
-targets remain a hard error (mirrors ``marvis/validation/checks.py``), kept separate
-from the NaN case. Feature NaN handling is intentionally untouched.
+structured diagnostics (default) or drop the offending rows (opt-in). Continuous
+and binary targets remain numeric; named multiclass labels are deterministically
+encoded only when the caller explicitly declares ``target_type="multiclass"``.
+Feature NaN handling is intentionally untouched.
 """
 
 from __future__ import annotations
+
+from numbers import Real
 
 import numpy as np
 import pandas as pd
 
 from marvis.data.errors import NanLabelNotConfirmedError
+
+
+def non_binary_target_values(
+    target: pd.Series,
+    *,
+    target_type: str,
+) -> np.ndarray:
+    """Return numeric association labels while preserving multiclass names."""
+
+    if str(target_type) == "multiclass":
+        # ``factorize`` treats +/-inf as ordinary categories. They are numeric
+        # missing/invalid labels, however, and must reach the same confirmation
+        # gate as NaN. Do not coerce the whole series to numeric: named string
+        # classes (for example low/mid/high) are valid multiclass labels.
+        invalid_numeric = target.map(
+            lambda value: isinstance(value, Real) and not np.isfinite(value)
+        )
+        factorize_target = target.mask(invalid_numeric)
+        codes, _classes = pd.factorize(
+            factorize_target,
+            sort=False,
+            use_na_sentinel=True,
+        )
+        values = codes.astype(float)
+        values[codes < 0] = np.nan
+        return values
+    return pd.to_numeric(target, errors="raise").to_numpy(dtype=float)
 
 
 def nan_label_mask(frame: pd.DataFrame, target_col: str) -> np.ndarray:

@@ -185,6 +185,17 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "params" in configure_tool.input_schema["properties"]
     assert "params" in configure_tool.output_schema["required"]
     assert "params" in tune_tool.input_schema["properties"]
+    assert choose_tool.input_schema["properties"]["n_trials"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200,
+    }
+    for tool in (configure_tool, tune_tool):
+        assert tool.input_schema["properties"]["n_trials"]["minimum"] == 1
+        assert tool.input_schema["properties"]["n_trials"]["maximum"] == 200
+        per_recipe = tool.input_schema["properties"]["n_trials_by_recipe"]
+        assert per_recipe["additionalProperties"]["minimum"] == 1
+        assert per_recipe["additionalProperties"]["maximum"] == 200
     # Full-data, multi-recipe searches are deliberately multi-hour jobs.  The
     # current 120-trial workload can exceed six hours, and completed algorithms
     # now persist task-scoped checkpoints during that longer window.
@@ -215,6 +226,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "warnings" in select_tool.output_schema["required"]
     assert "selection_policy" in select_experiment_tool.input_schema["properties"]
     assert "selected_experiment_id" in select_experiment_tool.output_schema["required"]
+    assert "report_experiment_ids" in select_experiment_tool.output_schema["required"]
     assert "policy_decision" in select_experiment_tool.output_schema["required"]
     assert "write:experiment" in select_experiment_tool.side_effects
     assert "LR modeling artifact" not in export_tool.summary
@@ -1385,6 +1397,50 @@ def test_train_model_gates_nan_train_label(tmp_path):
     assert confirmed.output["nan_labels_dropped"] == 1
 
 
+def test_modeling_screen_features_accepts_named_multiclass_labels(tmp_path):
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    rows = 90
+    labels = np.resize(["low", "mid", "high"], rows)
+    levels = {"low": 0.0, "mid": 1.0, "high": 2.0}
+    frame = pd.DataFrame(
+        {
+            "signal": [
+                levels[label] + (index % 5) / 100
+                for index, label in enumerate(labels)
+            ],
+            "noise": np.random.RandomState(23).normal(size=rows),
+            "risk_band_target": labels,
+            "split": ["train"] * 60 + ["test"] * 30,
+        }
+    )
+    path = tmp_path / "screen_named_multiclass.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(
+        path,
+        task_id=task.id,
+        role="modeling_sample",
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["noise", "signal"],
+            "target_col": "risk_band_target",
+            "target_type": "multiclass",
+            "split_col": "split",
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["selected"][0] == "signal"
+    assert (
+        result.output["scores"]["signal"]["assoc_score"]
+        > result.output["scores"]["noise"]["assoc_score"]
+    )
+
+
 def test_train_model_allows_scoring_only_oot(tmp_path):
     runner, _plugin_registry, registry, _backend, _settings, task = _runtime(tmp_path)
     rows = 240
@@ -1512,6 +1568,50 @@ def test_choose_modeling_spec_validates_family_and_sample_weight_controls():
             {"recipe": "lgb", "recipes": ["lgb", "lgb_regressor"], "seed": 17},
             SimpleNamespace(seed=None),
         )
+
+
+@pytest.mark.parametrize("value", [0, 201, 1.5, True, "7"])
+def test_modeling_tools_reject_unsafe_or_coerced_scalar_trial_budgets(value):
+    from marvis.packs.modeling.errors import ModelingError
+    from marvis.packs.modeling.tools import (
+        tool_choose_modeling_spec,
+        tool_configure_tuning,
+        tool_tune_hyperparameters,
+    )
+
+    ctx = SimpleNamespace(seed=None)
+    for tool, inputs in (
+        (
+            tool_choose_modeling_spec,
+            {"recipe": "lgb", "recipes": ["lgb"], "seed": 17},
+        ),
+        (tool_configure_tuning, {"recipe": "lgb", "seed": 17}),
+        (tool_tune_hyperparameters, {"recipe": "lgb", "seed": 17}),
+    ):
+        with pytest.raises(ModelingError, match="between 1 and 200"):
+            tool({**inputs, "n_trials": value}, ctx)
+
+
+@pytest.mark.parametrize("value", [0, 201, 1.5, True, "7"])
+def test_modeling_tools_reject_unsafe_or_coerced_per_recipe_budgets(value):
+    from marvis.packs.modeling.errors import ModelingError
+    from marvis.packs.modeling.tools import (
+        tool_configure_tuning,
+        tool_tune_hyperparameters,
+    )
+
+    ctx = SimpleNamespace(seed=None)
+    for tool in (tool_configure_tuning, tool_tune_hyperparameters):
+        with pytest.raises(ModelingError, match="between 1 and 200"):
+            tool(
+                {
+                    "recipe": "lgb",
+                    "recipes": ["lgb"],
+                    "seed": 17,
+                    "n_trials_by_recipe": {"lgb": value},
+                },
+                ctx,
+            )
 
 
 def test_configure_tuning_preserves_manual_controls_and_enables_every_recipe():
@@ -2185,6 +2285,10 @@ def test_select_experiment_refits_champion_on_train_plus_test_by_default(refit_c
     # saw train, the refit artifact additionally saw test.
     assert selected["artifact_id"] != trained["artifact_id"]
     assert selected["selected_experiment_id"] != trained["experiment_id"]
+    assert selected["report_experiment_ids"] == [
+        selected["selected_experiment_id"],
+        trained["experiment_id"],
+    ]
     assert "oot_ks_before_refit" in refit
     assert "oot_ks_after_refit" in refit
     # pre-refit metrics are the honest train-split champion's held-out test values.
@@ -2390,6 +2494,7 @@ def test_select_experiment_refit_on_train_plus_test_false_keeps_original_champio
     }
     assert selected["artifact_id"] == trained["artifact_id"]
     assert selected["selected_experiment_id"] == trained["experiment_id"]
+    assert selected["report_experiment_ids"] == [trained["experiment_id"]]
 
 
 @pytest.mark.slow

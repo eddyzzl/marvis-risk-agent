@@ -7,6 +7,13 @@ from marvis.db import TaskRepository
 from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
     TASK_STATUS_REASON_USER_CANCELLED,
+    TASK_TYPE_DATA_JOIN,
+    TASK_TYPE_FEATURE_ANALYSIS,
+    TASK_TYPE_MODELING,
+    TASK_TYPE_PORTFOLIO,
+    TASK_TYPE_STRATEGY,
+    TASK_TYPE_VALIDATION,
+    TASK_TYPE_VINTAGE,
     TaskRecord,
     TaskStatus,
 )
@@ -14,6 +21,15 @@ from marvis.repositories.plans import PlanRepository
 from marvis.safe_paths import safe_filename_component
 
 _UNSET = object()
+_TASK_REPORT_LABELS = {
+    TASK_TYPE_VALIDATION: "模型验证报告",
+    TASK_TYPE_FEATURE_ANALYSIS: "特征分析报告",
+    TASK_TYPE_DATA_JOIN: "数据处理报告",
+    TASK_TYPE_MODELING: "模型开发报告",
+    TASK_TYPE_STRATEGY: "策略分析报告",
+    TASK_TYPE_VINTAGE: "风险分析报告",
+    TASK_TYPE_PORTFOLIO: "组合分析报告",
+}
 
 
 def _latest_workflow_statuses(
@@ -113,7 +129,11 @@ def task_report_available(tasks_dir: Path | None, task_id: str) -> bool:
 
 def task_report_download_filename(task: TaskRecord, suffix: str) -> str:
     model_name = safe_filename_component(task.model_name, fallback="模型")
-    return f"{model_name}_模型验证报告_{task_created_date_for_filename(task)}{suffix}"
+    report_label = _TASK_REPORT_LABELS.get(task.task_type, "模型验证报告")
+    return (
+        f"{model_name}_{report_label}_"
+        f"{task_created_date_for_filename(task)}{suffix}"
+    )
 
 
 def task_created_date_for_filename(task: TaskRecord) -> str:

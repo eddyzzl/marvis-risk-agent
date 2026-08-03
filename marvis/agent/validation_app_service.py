@@ -273,6 +273,7 @@ def dispatch_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    expected_plan_id: str | None = None,
     ui_action: str | None = None,
     strategy_input: StrategyTaskInput | None = None,
     strategy_request: Mapping[str, object] | None = None,
@@ -320,7 +321,15 @@ def dispatch_driver_turn(
             plan_executor=request.app.state.plan_executor,
             planner=request.app.state.planner,
             plan_validator=request.app.state.plan_validator,
-            llm_client=driver_llm_client(request, task),
+            # The composer model is a request-level user choice. Reuse that
+            # already-resolved client for free-text routing and Strategy
+            # compilation; otherwise these calls silently fall back to the
+            # router-role default even though the UI shows a different model.
+            llm_client=(
+                agent_client
+                if recovery_model_id is not None
+                else driver_llm_client(request, task)
+            ),
             tier=task_tier(request, task),
             governance_service=getattr(request.app.state, "governance_service", None),
             local_principal=getattr(request.state, "local_principal", None),
@@ -338,6 +347,7 @@ def dispatch_driver_turn(
             auto_accept_enabled=agent_auto_accept(acceptance_mode), selection=selection,
             dedup_strategies=dedup_strategies, adjust_params=adjust_params,
             expected_step_id=expected_step_id,
+            expected_plan_id=expected_plan_id,
             strategy_request=strategy_request,
             ui_action=ui_action,
             confirmation_source=CONFIRMATION_SOURCE_HUMAN,

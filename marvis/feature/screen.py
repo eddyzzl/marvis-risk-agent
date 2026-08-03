@@ -21,7 +21,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from marvis.data.labels import require_labels_confirmed
+from marvis.data.labels import non_binary_target_values, require_labels_confirmed
 from marvis.feature.binning import equal_frequency_edges
 from marvis.feature.correlation import safe_correlation
 from marvis.feature.metrics import (
@@ -728,13 +728,18 @@ def screen_features_non_binary(
     base_cols = [target_col] + ([split_col] if split_col else [])
     base = backend.read_frame(dataset_path, columns=base_cols)
     dev = _fit_mask(base, split_col, holdout_values)
+    target_values = non_binary_target_values(
+        base[target_col],
+        target_type=target_type,
+    )
+    label_frame = pd.DataFrame({target_col: target_values}, index=base.index)
     nan_labels_dropped = require_labels_confirmed(
-        base.loc[dev],
+        label_frame.loc[dev],
         target_col,
         drop_nan_labels=drop_nan_labels,
         scope="screen",
     )
-    target_dev = base[target_col].to_numpy(dtype=float)[dev]
+    target_dev = target_values[dev]
 
     scores: dict[str, dict[str, float | None]] = {}
     unusable: list[tuple[str, str]] = list(hard_unusable)

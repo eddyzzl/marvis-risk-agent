@@ -3,10 +3,16 @@ import { escapeHtml } from "../ui-utils.js";
 import { skeletonRowsHtml } from "../skeleton.js";
 import { listPluginTools, listStrategyArtifacts, listTaskArtifacts } from "./api_v2.js";
 import { gateConfirmLabel } from "./driver_gate_confirm.js";
+import {
+  driverGateHasWidget,
+  gateMessageForCurrentTool,
+} from "./driver_manual_analysis.js";
 import { renderModelTuningProgress } from "./model_tuning_progress.js";
 
 // Wired driver task types drive the plan rail / analysis flow.
 export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);
+const PLAN_RETRY_REFRESH_MAX_ATTEMPTS = 300;
+const PLAN_RETRY_REFRESH_INTERVAL_MS = 1000;
 
 export function taskUsesPlanRail(task) {
   return PLAN_RAIL_TASK_TYPES.has(task?.task_type);
@@ -225,8 +231,14 @@ function planRetryFieldValue(value) {
 }
 
 function planRetryFieldType(spec) {
-  const type = Array.isArray(spec?.type) ? spec.type[0] : spec?.type;
+  const types = Array.isArray(spec?.type) ? spec.type : [spec?.type];
+  const type = types.find((item) => item && item !== "null") || types[0];
   return String(type || "string");
+}
+
+function planRetryFieldNullable(spec, defaultValue) {
+  const types = Array.isArray(spec?.type) ? spec.type : [spec?.type];
+  return defaultValue === null || types.includes("null");
 }
 
 function planRetrySchemaFieldsHtml(step, realSchema = null) {
@@ -247,7 +259,8 @@ function planRetrySchemaFieldsHtml(step, realSchema = null) {
     const required = requiredKeys.has(key);
     const label = escapeHtml(mergedSpec.title || key) + (required ? '<span class="plan-retry-required">*</span>' : "");
     const typeLabel = escapeHtml(type);
-    const baseAttrs = `data-plan-retry-input-key="${encodedKey}" data-plan-retry-input-type="${typeLabel}"`;
+    const nullable = planRetryFieldNullable(mergedSpec, defaultValue);
+    const baseAttrs = `data-plan-retry-input-key="${encodedKey}" data-plan-retry-input-type="${typeLabel}" data-plan-retry-input-nullable="${nullable ? "true" : "false"}"`;
     if (Array.isArray(mergedSpec.enum) && mergedSpec.enum.length) {
       const current = planRetryFieldValue(defaultValue);
       const options = mergedSpec.enum.map((item) => {
@@ -321,6 +334,10 @@ function planRetryCardHtml(step, realSchema = null) {
 function parsePlanRetryStructuredValue(field) {
   const type = String(field?.dataset?.planRetryInputType || "string");
   const raw = String(field?.value ?? "");
+  const nullable = field?.dataset?.planRetryInputNullable === "true";
+  if (nullable && raw.trim() === "") {
+    return null;
+  }
   if (type === "boolean") {
     return raw === "true";
   }
@@ -605,15 +622,17 @@ export function createPlanRailController({
   }
 
   function maybeFetchPlan(taskId = selectedTaskId()) {
-    if (!taskId) return;
+    if (!taskId) return Promise.resolve(null);
     // Note: we intentionally do NOT short-circuit on a terminal cached plan. Re-engaging
     // a finished driver task now builds a FRESH plan (see _active_plan in api.py), so the
     // rail must be able to pick that new plan up. Driver tasks aren't on a polling loop,
     // so this only fetches on render events (throttled below), not continuously.
     const now = Date.now();
-    if (now - (v2PlanLastFetch.get(taskId) || 0) < 900) return;
+    if (now - (v2PlanLastFetch.get(taskId) || 0) < 900) {
+      return Promise.resolve(v2PlanCache.get(taskId) || null);
+    }
     v2PlanLastFetch.set(taskId, now);
-    fetch(`/api/tasks/${encodeURIComponent(taskId)}/plans`)
+    return fetch(`/api/tasks/${encodeURIComponent(taskId)}/plans`)
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -625,19 +644,35 @@ export function createPlanRailController({
         const changed = hadError || JSON.stringify(v2PlanCache.get(taskId)) !== JSON.stringify(next);
         v2PlanCache.set(taskId, next);
         if (changed && selectedTaskId() === taskId) renderAll?.();
+        return next;
       })
       .catch((error) => {
         v2PlanFetchErrors.set(taskId, error?.message || "network");
         if (selectedTaskId() === taskId) renderWorkflowStepper?.({ force: true });
+        return null;
       });
   }
 
-  function retryFetch(taskId = selectedTaskId()) {
-    if (!taskId) return;
+  async function retryFetch(taskId = selectedTaskId(), attempt = 0) {
+    if (!taskId || selectedTaskId() !== taskId) return;
     v2PlanLastFetch.delete(taskId);
     v2PlanFetchErrors.delete(taskId);
-    maybeFetchPlan(taskId);
+    const [planResult] = await Promise.allSettled([
+      maybeFetchPlan(taskId),
+      refreshTasks?.(),
+      loadAgentMessages?.(taskId, { preserveOptimistic: true }),
+    ]);
+    const nextPlan = planResult.status === "fulfilled" ? planResult.value : null;
+    if (selectedTaskId() === taskId) renderAll?.();
     renderWorkflowStepper?.({ force: true });
+    const status = String(nextPlan?.status || "");
+    const stillRunning = !nextPlan || ["confirmed", "running"].includes(status);
+    if (stillRunning && attempt < PLAN_RETRY_REFRESH_MAX_ATTEMPTS) {
+      window.setTimeout(
+        () => { void retryFetch(taskId, attempt + 1); },
+        PLAN_RETRY_REFRESH_INTERVAL_MS,
+      );
+    }
   }
 
   function resetFetchThrottle(taskId = selectedTaskId()) {
@@ -677,7 +712,10 @@ export function createPlanRailController({
       if (selectedTaskId() === taskId) {
         renderAll?.();
         maybeFetchPlan(taskId);
-        window.setTimeout(() => retryFetch(taskId), 1000);
+        window.setTimeout(
+          () => { void retryFetch(taskId); },
+          PLAN_RETRY_REFRESH_INTERVAL_MS,
+        );
       }
     } catch (error) {
       button.disabled = false;
@@ -1012,23 +1050,96 @@ export function createPlanRailController({
     ));
   }
 
-  // Builds the middle-workspace driver-actions panel body: the 开始执行 control
-  // (plan built but not started, manual mode) and/or the 下载报告 control (a
-  // report step has completed). Both reuse the existing document-level handlers
+  function matchingAgentGateMessage(plan, gate) {
+    const messages = getAgentMessages?.();
+    if (!Array.isArray(messages) || !gate) return null;
+    const planId = String(plan?.id || "");
+    const stepId = String(gate?.id || "");
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      const meta = message?.metadata || {};
+      if (message?.role !== "assistant" || meta.kind !== "gate") continue;
+      if (String(meta.plan_id || "") !== planId) continue;
+      if (String(meta.step_id || "") !== stepId) continue;
+      return message;
+    }
+    return null;
+  }
+
+  function agentGateNeedsStructuredInput(message) {
+    if (!message) return true;
+    const currentMessage = gateMessageForCurrentTool(message);
+    const meta = currentMessage?.metadata || {};
+    if (String(meta.gate_source_tool || "") === "apply_monitoring_disposition") {
+      // Monitoring always exposes a disposition schema, but only a
+      // deterministic red verdict requires that structured choice. Green and
+      // amber runs are explicitly acknowledgeable with a plain confirmation.
+      // Missing legacy evidence fails closed.
+      const monitoringContract = meta.monitoring_disposition || {};
+      const overallLevel = String(monitoringContract.overall_level || "").toLowerCase();
+      return !(
+        ["green", "amber"].includes(overallLevel)
+        && monitoringContract.requires_structured_input === false
+      );
+    }
+    const properties = meta.editable_input_schema?.properties;
+    return driverGateHasWidget(currentMessage) || Boolean(
+      properties
+      && typeof properties === "object"
+      && Object.keys(properties).length,
+    );
+  }
+
+  // Builds the middle-workspace driver-actions panel body: explicit human
+  // authorization for the latest Agent gate, the 开始执行 control (plan built but
+  // not started), and/or the 下载报告 control (a report step has completed).
+  // They reuse the existing document-level handlers
   // (data-driver-confirm / data-driver-report-download) — only the mount moves
   // out of the narrow rail into the roomy middle region. Returns "" when there is
   // no driver action to surface (the caller then hides the panel).
   function planDriverActionsHtml(plan, strategyArtifactState = null) {
     const cards = [];
-    const awaitingStart = plan?.status === "validated" && !isAgentMode?.();
+    const agentMode = Boolean(isAgentMode?.());
+    const activeJobKind = String(selectedTask()?.active_job_kind || "").trim();
+    const authorizationBusy = Boolean(activeJobKind);
+    const authorizationBusyAttrs = authorizationBusy
+      ? ' disabled aria-disabled="true" title="上一步正在收尾，完成后可继续授权"'
+      : "";
+    const agentGate = agentMode && Array.isArray(plan?.steps)
+      ? plan.steps.find((step) => String(step?.status || "") === "awaiting_confirm")
+      : null;
+    const agentGateMessage = matchingAgentGateMessage(plan, agentGate);
+    // Agent-mode structured gates already explain the exact inputs required in
+    // the conversation (special-value decisions, adoption reason, screening,
+    // etc.). Their widgets are evidence-only in Agent mode and the composer is
+    // the single governed input channel. Never add a generic confirm button
+    // that cannot supply those required values. Also wait for the matching gate
+    // message before exposing a plain action, avoiding a transient unsafe
+    // button while plan polling is ahead of message polling.
+    const agentGateHasStructuredInput = agentGateNeedsStructuredInput(agentGateMessage);
+    if (agentGate && !agentGateHasStructuredInput) {
+      const planId = String(plan?.id || "");
+      const stepId = String(agentGate?.id || "");
+      const toolName = String(agentGate?.tool_ref?.tool || "");
+      cards.push([
+        '<section class="plan-driver-action-card" data-driver-action="agent-gate">',
+        '<header class="plan-driver-action-head">',
+        `<span class="plan-driver-action-pill">${authorizationBusy ? "正在收尾" : "需要人工授权"}</span>`,
+        `<span class="plan-driver-action-title">${authorizationBusy ? "上一步仍在收尾，完成后即可授权" : "Agent 已理解你的意图；请复核并授权"}「${escapeHtml(agentGate?.title || "当前步骤")}」。</span>`,
+        "</header>",
+        `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1" data-expected-plan-id="${escapeHtml(planId)}" data-expected-step-id="${escapeHtml(stepId)}"${authorizationBusyAttrs}>${escapeHtml(gateConfirmLabel(toolName))}</button>`,
+        "</section>",
+      ].join(""));
+    }
+    const awaitingStart = plan?.status === "validated";
     if (awaitingStart) {
       cards.push([
         '<section class="plan-driver-action-card" data-driver-action="start">',
         '<header class="plan-driver-action-head">',
-        '<span class="plan-driver-action-pill">开始执行</span>',
-        '<span class="plan-driver-action-title">计划已生成，确认后开始逐步执行。</span>',
+        `<span class="plan-driver-action-pill">${agentMode ? "需要人工授权" : "开始执行"}</span>`,
+        `<span class="plan-driver-action-title">${agentMode ? "Agent 已生成执行计划；请复核后授权开始。" : "计划已生成，确认后开始逐步执行。"}</span>`,
         "</header>",
-        '<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">开始执行</button>',
+        `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1" data-expected-plan-id="${escapeHtml(String(plan?.id || ""))}"${authorizationBusyAttrs}>开始执行</button>`,
         "</section>",
       ].join(""));
     }
@@ -1061,8 +1172,24 @@ export function createPlanRailController({
   function planDriverActionsSignature(plan, strategyArtifactState = null) {
     const report = doneReportStep(plan);
     const conversationReport = hasConversationReportDownload();
+    const agentGate = isAgentMode?.() && Array.isArray(plan?.steps)
+      ? plan.steps.find((step) => String(step?.status || "") === "awaiting_confirm")
+      : null;
+    const agentGateMessage = matchingAgentGateMessage(plan, agentGate);
+    const agentGateControl = agentGate
+      ? (
+        agentGateMessage
+          ? (agentGateNeedsStructuredInput(agentGateMessage) ? "structured" : "plain")
+          : "pending-message"
+      )
+      : "";
     return JSON.stringify({
-      start: plan?.status === "validated" && !isAgentMode?.(),
+      plan_id: String(plan?.id || ""),
+      start: plan?.status === "validated",
+      authorization_busy: String(selectedTask()?.active_job_kind || ""),
+      agent_gate: agentGate
+        ? `${String(agentGate?.id || "")}:${String(agentGate?.tool_ref?.tool || "")}:${String(agentGateMessage?.id || "")}:${agentGateControl}`
+        : "",
       report: report && !conversationReport ? String(report.id || report.output_ref || "1") : "",
       conversationReport,
       strategy_artifacts: strategyArtifactState,
@@ -1070,7 +1197,7 @@ export function createPlanRailController({
   }
 
   // Mounts the driver-actions panel into the middle workspace (#planDriverActions).
-  // Shows it only when there is at least one driver action (开始执行 / 下载报告);
+  // Shows it only when there is at least one driver action (授权 / 开始执行 / 下载报告);
   // otherwise clears and hides it so a healthy in-progress plan never leaves a
   // stale action card in the middle region.
   function renderDriverActionsPanel(plan) {
@@ -1343,6 +1470,10 @@ export function createPlanRailController({
     return steps.find((step) => String(step?.id || "") === stepId) || null;
   }
 
+  function planId(taskId = selectedTaskId()) {
+    return String(v2PlanCache.get(taskId)?.id || "");
+  }
+
   // VD-2: the gate card's consequence line ("确认后将执行:<下一步>") reads the
   // step that depends on the gate step, so it can name what happens next
   // without the caller re-deriving plan topology.
@@ -1368,6 +1499,7 @@ export function createPlanRailController({
     handleClick,
     maybeFetchPlan,
     nextStepAfter,
+    planId,
     planStep,
     render,
     resetFetchThrottle,

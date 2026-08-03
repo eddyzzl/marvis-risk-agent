@@ -47,7 +47,12 @@ from marvis.agent.workflow_insights import (
     build_workflow_insight_context,
     render_workflow_insight,
 )
-from marvis.agent.modeling_setup import ModelingSetupError, build_modeling_proposal
+from marvis.agent.instruction_router import route_instruction
+from marvis.agent.modeling_setup import (
+    ModelingSetupError,
+    build_modeling_proposal,
+    supported_modeling_recipes,
+)
 from marvis.agent.plan_driver import (
     CONFIRMATION_SOURCE_AUTO,
     CONFIRMATION_SOURCE_HUMAN,
@@ -172,11 +177,13 @@ from marvis.packs.strategy.automatic_tree_leaf_tools import (
 from marvis.packs.strategy.interactive_tree_frontier_selection import (
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
     INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
 )
 from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
     INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL,
     interactive_tree_frontier_group_selection_to_verified_candidate_fragment,
 )
@@ -501,6 +508,7 @@ def run_join_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    expected_plan_id: str | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
@@ -514,6 +522,7 @@ def run_join_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        expected_plan_id=expected_plan_id,
         confirmation_source=confirmation_source,
         ui_action=ui_action,
     )
@@ -529,6 +538,7 @@ def run_feature_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    expected_plan_id: str | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
@@ -542,6 +552,7 @@ def run_feature_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        expected_plan_id=expected_plan_id,
         confirmation_source=confirmation_source,
         ui_action=ui_action,
     )
@@ -557,6 +568,7 @@ def run_strategy_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    expected_plan_id: str | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
@@ -570,6 +582,7 @@ def run_strategy_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        expected_plan_id=expected_plan_id,
         confirmation_source=confirmation_source,
         ui_action=ui_action,
     )
@@ -585,6 +598,7 @@ def run_vintage_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    expected_plan_id: str | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
@@ -598,6 +612,7 @@ def run_vintage_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        expected_plan_id=expected_plan_id,
         confirmation_source=confirmation_source,
         ui_action=ui_action,
     )
@@ -613,6 +628,7 @@ def run_portfolio_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    expected_plan_id: str | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
@@ -626,6 +642,7 @@ def run_portfolio_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        expected_plan_id=expected_plan_id,
         confirmation_source=confirmation_source,
         ui_action=ui_action,
     )
@@ -641,6 +658,7 @@ def run_modeling_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    expected_plan_id: str | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
@@ -654,6 +672,7 @@ def run_modeling_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        expected_plan_id=expected_plan_id,
         confirmation_source=confirmation_source,
         ui_action=ui_action,
     )
@@ -670,44 +689,27 @@ def _run_driver_turn(
     dedup_strategies: dict | None,
     adjust_params: dict | None,
     expected_step_id: str | None,
+    expected_plan_id: str | None,
     confirmation_source: str,
     ui_action: str | None = None,
 ) -> dict:
-    if user_text is not None:
-        message_metadata = {"intent": spec.intent}
-        if ui_action:
-            message_metadata.update({
-                "ui_action": ui_action,
-                "display_in_timeline": False,
-            })
+    if user_text is not None and not ui_action:
         repo.add_agent_message(
             task.id,
             role="user",
             stage="chat",
             content=spec.format_user_display(user_text),
-            metadata=message_metadata,
+            metadata={"intent": spec.intent},
         )
-        if ui_action:
-            acknowledgements = {
-                "confirm_roles": "收到角色与目标列确认，开始生成执行计划。",
-                "confirm_dedup": "收到去重策略确认，开始继续拼接。",
-                "apply_join_keys": "收到拼接键选择，正在重新诊断拼接方案。",
-                "confirm_features": "收到特征选择确认，开始执行下一步。",
-                "confirm_feature_binning": "收到分箱选择，开始生成分箱结果和特征分析报告。",
-                "apply_modeling_setup": "收到建模设置，开始重算后续步骤。",
-                "confirm_adoption": "收到采纳确认，开始绑定理由并生成审计记录。",
-                "confirm_gate": "收到确认，开始执行下一步。",
-                "start_plan": "收到确认，开始按计划执行。",
-            }
-            repo.add_agent_message(
-                task.id,
-                role="assistant",
-                stage="chat",
-                content=acknowledgements.get(ui_action, "收到确认，开始执行下一步。"),
-                metadata={"intent": "ui_action_ack", "ui_action": ui_action},
-            )
     try:
         active = _active_plan(runtime.plan_repo, task.id)
+        _validate_typed_ui_action_target(
+            active,
+            ui_action=ui_action,
+            user_text=user_text,
+            expected_plan_id=expected_plan_id,
+            expected_step_id=expected_step_id,
+        )
         if active is not None:
             stale_response = _terminate_stale_strategy_sample_plan(
                 spec,
@@ -728,6 +730,15 @@ def _run_driver_turn(
                 expected_step_id=expected_step_id,
                 confirmation_source=confirmation_source,
             )
+            _append_successful_ui_action_messages(
+                spec,
+                repo,
+                task,
+                user_text=user_text,
+                ui_action=ui_action,
+                expected_plan_id=expected_plan_id,
+                expected_step_id=expected_step_id,
+            )
             _append_spec_messages(spec, repo, task, turn, runtime)
             return join_turn_response(repo, task.id)
         setup_result = spec.run_setup(runtime, repo, task, user_text)
@@ -745,6 +756,15 @@ def _run_driver_turn(
             slots=slots,
             tier=runtime.tier,
             **start_kwargs,
+        )
+        _append_successful_ui_action_messages(
+            spec,
+            repo,
+            task,
+            user_text=user_text,
+            ui_action=ui_action,
+            expected_plan_id=expected_plan_id,
+            expected_step_id=expected_step_id,
         )
         _append_spec_messages(spec, repo, task, turn, runtime)
         return join_turn_response(repo, task.id)
@@ -764,6 +784,111 @@ def _run_driver_turn(
         raise
     except Exception as exc:
         return append_workflow_error(repo, task, spec, exc)
+
+
+def _validate_typed_ui_action_target(
+    plan: Plan | None,
+    *,
+    ui_action: str | None,
+    user_text: str | None,
+    expected_plan_id: str | None,
+    expected_step_id: str | None,
+) -> None:
+    """Fail closed when a rendered authorization control is stale.
+
+    This executes inside the task's driver-job lock and before any success audit
+    message is persisted. A plan id alone is insufficient for ``start_plan``:
+    the same plan may already have advanced to a per-step gate in another tab.
+    """
+
+    if ui_action not in {"start_plan", "confirm_gate"}:
+        return
+    if not is_confirm(user_text or ""):
+        raise DriverError("该授权操作必须使用明确、无歧义的确认内容。")
+    rendered_plan_id = str(expected_plan_id or "").strip()
+    if plan is None or not rendered_plan_id or rendered_plan_id != plan.id:
+        raise DriverError("该操作对应的计划已变化，请刷新页面后重试。")
+    plan_status = PlanStatus(getattr(plan.status, "value", plan.status))
+    if ui_action == "start_plan":
+        if plan_status != PlanStatus.VALIDATED:
+            raise DriverError("该开始按钮已过期，请刷新页面后操作当前步骤。")
+        return
+    if plan_status != PlanStatus.AWAITING_CONFIRM:
+        raise DriverError("该确认按钮已过期，请刷新页面后操作当前步骤。")
+    rendered_step_id = str(expected_step_id or "").strip()
+    current_gate = next(
+        (
+            step
+            for step in plan.steps
+            if getattr(step.status, "value", step.status)
+            == StepStatus.AWAITING_CONFIRM.value
+        ),
+        None,
+    )
+    if (
+        current_gate is None
+        or not rendered_step_id
+        or rendered_step_id != current_gate.id
+    ):
+        raise DriverError("该确认按钮对应的步骤已变化，请刷新页面后重试。")
+
+
+def _append_successful_ui_action_messages(
+    spec: _TurnHandlerSpec,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    user_text: str | None,
+    ui_action: str | None,
+    expected_plan_id: str | None,
+    expected_step_id: str | None,
+) -> None:
+    """Persist UI authorization evidence only after the command succeeds."""
+
+    if user_text is None or not ui_action:
+        return
+    message_metadata: dict[str, object] = {
+        "intent": spec.intent,
+        "ui_action": ui_action,
+        "display_in_timeline": False,
+    }
+    if expected_plan_id:
+        message_metadata["expected_plan_id"] = expected_plan_id
+    if expected_step_id:
+        message_metadata["expected_step_id"] = expected_step_id
+    repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=spec.format_user_display(user_text),
+        metadata=message_metadata,
+    )
+    acknowledgements = {
+        "confirm_roles": "收到角色与目标列确认，开始生成执行计划。",
+        "confirm_dedup": "收到去重策略确认，开始继续拼接。",
+        "apply_join_keys": "收到拼接键选择，正在重新诊断拼接方案。",
+        "confirm_features": "收到特征选择确认，开始执行下一步。",
+        "confirm_feature_binning": "收到分箱选择，开始生成分箱结果和特征分析报告。",
+        "apply_modeling_setup": "收到建模设置，开始重算后续步骤。",
+        "confirm_adoption": "收到采纳确认，开始绑定理由并生成审计记录。",
+        "confirm_gate": "收到确认，开始执行下一步。",
+        "start_plan": "收到确认，开始按计划执行。",
+    }
+    acknowledgement_metadata: dict[str, object] = {
+        "intent": "ui_action_ack",
+        "ui_action": ui_action,
+    }
+    if expected_plan_id:
+        acknowledgement_metadata["expected_plan_id"] = expected_plan_id
+    if expected_step_id:
+        acknowledgement_metadata["expected_step_id"] = expected_step_id
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=acknowledgements.get(ui_action, "收到确认，开始执行下一步。"),
+        metadata=acknowledgement_metadata,
+    )
 
 
 def _terminate_stale_strategy_sample_plan(
@@ -1590,6 +1715,18 @@ def _run_modeling_setup(
         and anchor_file is not None
         and len(getattr(anchor_file, "target_candidates", None) or []) > 1
     )
+    if c1_state is None and c1_proposal.skip:
+        # A single-table Agent turn can already carry the exact target column
+        # in ordinary language.  Do not discard that governed schema binding
+        # merely because there is no join role to confirm.  The downstream
+        # modeling setup profiles the bound column and derives binary,
+        # continuous, or multiclass deterministically.
+        natural_assignment = _parse_c1_reply(
+            user_text,
+            _c1_state_from_proposal(c1_proposal),
+        )
+        if natural_assignment and natural_assignment.get("target_col"):
+            c1_assignment = natural_assignment
     if not c1_proposal.skip or ambiguous_single_target:
         if c1_state is None:
             _append_c1_message(repo, task.id, c1_proposal)
@@ -1616,14 +1753,31 @@ def _run_modeling_setup(
                 + (f"（候选：{candidate_text}）" if candidate_text else "")
                 + "。",
             )
+    intake_params = _modeling_intake_params(runtime, task, user_text)
+    intake_recipes = intake_params.get("recipes")
+    intake_target_type = str(intake_params.get("target_type") or "").strip()
+    intake_weight_col = (
+        str(intake_params.get("sample_weight_col") or "").strip()
+        if "sample_weight_col" in intake_params
+        else None
+    )
     proposal = build_modeling_proposal(
         registry,
         backend,
         task.id,
         task.source_dir,
-        target_type=_modeling_target_type(task),
-        recipes=_modeling_recipes(task),
-        sample_weight_col=getattr(task, "sample_weight_col", "") or None,
+        target_type=intake_target_type or _modeling_target_type(task),
+        n_trials=intake_params.get("n_trials"),
+        recipes=(
+            [str(item).strip() for item in intake_recipes if str(item).strip()]
+            if isinstance(intake_recipes, list)
+            else _modeling_recipes(task)
+        ),
+        sample_weight_col=(
+            intake_weight_col
+            if intake_weight_col is not None
+            else (getattr(task, "sample_weight_col", "") or None)
+        ),
         time_col=getattr(task, "time_col", "") or None,
         anchor_id=(c1_assignment or {}).get("anchor_id"),
         join_feature_ids=(c1_assignment or {}).get("feature_ids"),
@@ -1651,6 +1805,9 @@ def _run_modeling_setup(
         metadata={"intent": "modeling", "ingest_notices": notices},
     )
     slots = proposal.template_slots()
+    split_config = intake_params.get("split_config")
+    if isinstance(split_config, dict):
+        slots["split_config"] = dict(split_config)
     slots.setdefault("project_meta", _modeling_project_meta(task))
     return (
         proposal.template_id,
@@ -1738,6 +1895,7 @@ def dispatch_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    expected_plan_id: str | None = None,
     strategy_request: Mapping[str, object] | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
@@ -1754,6 +1912,29 @@ def dispatch_driver_turn(
             user_text=user_text,
             strategy_request=strategy_request,
         )
+    # UI controls are already typed, governed commands. Route them directly to
+    # the task driver so generic recovery/analysis/strategy text classifiers
+    # cannot reinterpret their display copy before optimistic-lock validation.
+    if ui_action is not None:
+        result = DRIVER_TURN_FUNCS[task.task_type](
+            runtime,
+            repo,
+            task,
+            user_text=user_text,
+            selection=selection,
+            dedup_strategies=dedup_strategies,
+            adjust_params=adjust_params,
+            expected_step_id=expected_step_id,
+            expected_plan_id=expected_plan_id,
+            confirmation_source=confirmation_source,
+            ui_action=ui_action,
+        )
+        if result.get("status") == "clarification_required":
+            return result
+        if agent_client is not None and auto_accept_enabled:
+            agent_autodrive_turn(runtime, repo, task, client=agent_client)
+            return join_turn_response(repo, task.id)
+        return result
     # An unresolved structured failure owns ordinary conversation first.  In
     # particular, “为什么策略分析失败” is a question about existing evidence,
     # not authorization to compile and run a new strategy request.
@@ -1770,6 +1951,26 @@ def dispatch_driver_turn(
     )
     if recovery is not None:
         return recovery
+    text = str(user_text or "")
+    # A positive command to create StrategySampleDesign owns phrases such as
+    # "不设筛选" and "不丢弃缺失标签": those are sample-design contract fields,
+    # not authorization to mutate the dataset.  Give only this narrowly
+    # recognized Strategy workflow first refusal before the generic transform
+    # detector.  References to an already-fixed SampleDesign do not match
+    # utterance_targets_strategy_sample_design(), so genuine data-processing
+    # requests retain the transform route and its existing safety checks.
+    if (
+        task.task_type == TASK_TYPE_STRATEGY
+        and utterance_targets_strategy_sample_design(text)
+    ):
+        strategy_sample_design_request = _maybe_handle_strategy_request_turn(
+            runtime,
+            repo,
+            task,
+            user_text=user_text,
+        )
+        if strategy_sample_design_request is not None:
+            return strategy_sample_design_request
     # Dataset changes get first refusal over descriptive analysis.  Phrases
     # such as "填充缺失值" describe a governed mutation, not a request for a
     # missing-value report; the transform always creates an immutable child.
@@ -1789,7 +1990,6 @@ def dispatch_driver_turn(
     )
     if dataset_export is not None:
         return dataset_export
-    text = str(user_text or "")
     if task.task_type == TASK_TYPE_STRATEGY and (
         utterance_targets_candidate_monthly_stability(text)
         or utterance_targets_interactive_tree_frontier_group_materialization(
@@ -1847,6 +2047,7 @@ def dispatch_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        expected_plan_id=expected_plan_id,
         confirmation_source=confirmation_source,
         ui_action=ui_action,
     )
@@ -2502,6 +2703,14 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
     }
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
+_STRATEGY_SAMPLE_BOUND_CANDIDATE_WORKFLOWS = frozenset(
+    {
+        "univariate_candidate_analysis",
+        "univariate_candidate_refinement",
+        "automatic_tree_candidate_build",
+        "cross_matrix_analysis",
+    }
+)
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
     r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|汇总|归集|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|验证|回放|应用|执行|写回|回写|回填|打标|"
     r"对比|比较|搜索|查找|检索|枚举|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
@@ -2683,6 +2892,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "cross_matrix_analysis",
         "automatic_tree_candidate_build",
         "univariate_candidate_refinement",
+        "scorecard_model_score_evidence_build",
         "scorecard_band_build",
         "scorecard_cutoff_selection",
         "candidate_monthly_stability",
@@ -2775,7 +2985,17 @@ def _handle_structured_strategy_request_turn(
     preview = None
     preview_error = None
     try:
-        preview = _strategy_dataset_preview(runtime, task)
+        preview = (
+            _strategy_sample_design_dataset_preview(runtime, task)
+            if request_kind == "standard_workflow"
+            and workflow in {"strategy_sample_design", "strategy_sample_design_v2"}
+            else (
+                _strategy_impact_cube_dataset_preview(runtime, task)
+                if request_kind == "standard_workflow"
+                and workflow == "strategy_impact_cube"
+                else _strategy_dataset_preview(runtime, task)
+            )
+        )
     except StrategySetupError as exc:
         preview_error = str(exc)
 
@@ -2837,6 +3057,28 @@ def _handle_structured_strategy_request_turn(
         content=str(user_text or "").strip(),
         metadata=source_metadata,
     )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow
+        in {"strategy_sample_design", "strategy_sample_design_v2"}
+    ):
+        try:
+            _confirm_manual_sample_design_time_semantics(
+                runtime,
+                task,
+                draft=draft,
+                preview=preview,
+            )
+            preview = _strategy_sample_design_dataset_preview(runtime, task)
+        except StrategySetupError as exc:
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_sample_design_time_semantics_invalid",
+                message=str(exc),
+                fields=("field_bindings.time_field",),
+            )
 
     preflight = _strategy_request_preflight(runtime, task, draft)
     if preflight is not None:
@@ -3162,7 +3404,34 @@ def _maybe_handle_strategy_request_turn(
             message=compilation.clarification or "请补充策略操作、策略类型和业务口径。",
             fields=compilation.clarification_fields,
         )
-    preflight = _strategy_request_preflight(runtime, task, compilation.draft)
+    draft = compilation.draft
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow
+        in {"strategy_sample_design", "strategy_sample_design_v2"}
+    ):
+        # Natural-language and Candidate Lab requests share the same validated
+        # draft contract.  Once the exact time_field has passed grounding and
+        # column validation, persist its date role before preflight so the
+        # deterministic materializer sees the same confirmed semantics in both
+        # entry paths.
+        try:
+            _confirm_manual_sample_design_time_semantics(
+                runtime,
+                task,
+                draft=draft,
+                preview=preview,
+            )
+            preview = _strategy_sample_design_dataset_preview(runtime, task)
+        except StrategySetupError as exc:
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_sample_design_time_semantics_invalid",
+                message=str(exc),
+                fields=("field_bindings.time_field",),
+            )
+    preflight = _strategy_request_preflight(runtime, task, draft)
     if preflight is not None:
         code, message = preflight
         return _strategy_request_clarification_response(
@@ -3171,7 +3440,7 @@ def _maybe_handle_strategy_request_turn(
             code=code,
             message=message,
         )
-    requires_dataset = _strategy_request_requires_dataset(compilation.draft)
+    requires_dataset = _strategy_request_requires_dataset(draft)
     if requires_dataset and preview is None:
         return _strategy_request_clarification_response(
             repo,
@@ -3179,7 +3448,7 @@ def _maybe_handle_strategy_request_turn(
             code="strategy_dataset_context_required",
             message=preview_error or "当前策略操作需要一个任务内样本。",
         )
-    if _strategy_request_requires_target(compilation.draft) and (
+    if _strategy_request_requires_target(draft) and (
         preview is None or not preview.target_col
     ):
         return _strategy_request_clarification_response(
@@ -3193,7 +3462,7 @@ def _maybe_handle_strategy_request_turn(
         runtime,
         repo,
         task,
-        compilation.draft,
+        draft,
         preview=preview,
         auto_start=True,
         source_message=source_message,
@@ -3427,6 +3696,26 @@ def _prepare_and_run_validated_strategy_request(
                 ),
             )
 
+    if (
+        isinstance(draft, StrategyRequestDraft)
+        and draft.operation == "adopt"
+    ):
+        try:
+            drop_nan_labels = _inherit_strategy_sample_drop_nan_policy(
+                runtime,
+                task,
+                context=context,
+            )
+        except _StrategyV2EvidenceSetupError as exc:
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code=exc.code,
+                message=str(exc),
+            )
+        except StrategySetupError as exc:
+            return append_join_error(repo, task.id, str(exc))
+
     if _strategy_request_requires_complete_labels(draft):
         assert context is not None and context.target_col
         try:
@@ -3449,6 +3738,29 @@ def _prepare_and_run_validated_strategy_request(
                 n_total=n_total,
                 n_nan=n_nan,
             )
+        inherits_sample_drop_nan_policy = (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow in _STRATEGY_SAMPLE_BOUND_CANDIDATE_WORKFLOWS
+            and "drop_nan_labels" not in draft.workflow_inputs
+        )
+        if inherits_sample_drop_nan_policy:
+            try:
+                drop_nan_labels = (
+                    _inherit_strategy_sample_drop_nan_policy(
+                        runtime,
+                        task,
+                        context=context,
+                    )
+                )
+            except _StrategyV2EvidenceSetupError as exc:
+                return _strategy_request_clarification_response(
+                    repo,
+                    task,
+                    code=exc.code,
+                    message=str(exc),
+                )
+            except StrategySetupError as exc:
+                return append_join_error(repo, task.id, str(exc))
 
     try:
         return _run_validated_strategy_request(
@@ -3845,6 +4157,23 @@ def _run_validated_strategy_request(
             task,
             template_id="strategy_candidate_monthly_stability",
             slots=_candidate_monthly_stability_plan_slots(
+                runtime,
+                task,
+                draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "scorecard_model_score_evidence_build"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_scorecard_model_score_evidence_build",
+            slots=_scorecard_model_score_evidence_plan_slots(
                 runtime,
                 task,
                 draft,
@@ -4292,6 +4621,7 @@ def _run_validated_strategy_request(
             task,
             context=context,
             drop_nan_labels=bool(drop_nan_labels),
+            allow_native_risk_development=True,
         )
         return _start_confirmed_strategy_plan(
             runtime,
@@ -4983,6 +5313,14 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("strategy_model_evidence_v2_binding_required", str(exc))
         return None
+    if draft.workflow == "scorecard_model_score_evidence_build":
+        try:
+            _scorecard_model_score_evidence_plan_slots(runtime, task, draft)
+        except _StrategyV2EvidenceSetupError as exc:
+            return (exc.code, str(exc))
+        except StrategySetupError as exc:
+            return ("scorecard_model_score_evidence_binding_required", str(exc))
+        return None
     if draft.workflow == "candidate_monthly_stability":
         try:
             _candidate_monthly_stability_plan_slots(runtime, task, draft)
@@ -5448,6 +5786,54 @@ def _scorecard_score_evidence_contract(score: object) -> bool:
             " scorecard_table。",
         )
     return True
+
+
+def _scorecard_model_score_evidence_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind the latest SampleDesign V2 and bounded user-owned training controls."""
+
+    if draft.workflow != "scorecard_model_score_evidence_build":
+        raise StrategySetupError("评分卡模型评分证据请求类型无效。")
+    read_runtime = _strategy_v2_read_runtime(runtime)
+    artifacts = _strategy_v2_artifact_snapshot(
+        read_runtime,
+        task_id=task.id,
+    )
+    sample = _latest_verified_strategy_sample_design_v2_binding(
+        read_runtime,
+        task_id=task.id,
+        artifacts=artifacts,
+    )
+    design = sample.bundle["sample_design"]
+    sample_design_ref = {
+        "membership_artifact_id": sample.membership_artifact_id,
+        "expected_membership_artifact_content_hash": (
+            sample.membership_artifact_content_hash
+        ),
+        "bundle_artifact_id": sample.bundle_artifact_id,
+        "expected_bundle_artifact_content_hash": (
+            sample.bundle_artifact_content_hash
+        ),
+        "expected_bundle_id": sample.bundle["bundle_id"],
+        "expected_sample_design_id": design["sample_design_id"],
+        "expected_sample_design_content_hash": design["content_hash"],
+    }
+    inputs = draft.to_dict()["workflow_inputs"]
+    params: dict[str, object] = {
+        "max_iter": inputs["max_iter"],
+        "scorecard_max_bins": inputs["scorecard_max_bins"],
+    }
+    if "sample_weight_col" in inputs:
+        params["sample_weight_col"] = inputs["sample_weight_col"]
+    return {
+        "sample_design_ref": sample_design_ref,
+        "features": list(inputs["features"]),
+        "params": params,
+        "seed": inputs["seed"],
+    }
 
 
 def _scorecard_band_build_plan_slots(
@@ -7923,13 +8309,7 @@ def _strategy_project_context_plan_slots(
 
     inputs = draft.to_dict()["workflow_inputs"]
     new_business = dict(inputs.get("business_context") or {})
-    explicit_unavailable = set(inputs.get("explicit_unavailable") or [])
-    explicit_unavailable.update(
-        field_path for field_path, value in new_business.items() if value is None
-    )
-    explicit_unavailable.difference_update(
-        field_path for field_path, value in new_business.items() if value is not None
-    )
+    explicit_unavailable = list(inputs.get("explicit_unavailable") or [])
     user_message_ref = {
         "message_id": message_id,
         "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
@@ -7977,7 +8357,7 @@ def _strategy_project_context_plan_slots(
         "as_of": inputs["as_of"],
         "scope": inputs.get("scope"),
         "business_context": new_business,
-        "explicit_unavailable": sorted(explicit_unavailable),
+        "explicit_unavailable": explicit_unavailable,
         "external_report_filenames": list(
             inputs.get("external_report_filenames") or []
         ),
@@ -10282,6 +10662,41 @@ def _strategy_report_identity(
     )
 
 
+def _inherit_strategy_sample_drop_nan_policy(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    *,
+    context,
+) -> bool:
+    """Reuse the exact missing-label policy already fixed by SampleDesign.
+
+    Candidate Lab forms do not ask the user to restate this governed sample
+    policy.  Probe both boolean identities through the normal authenticated
+    loader and return the one owned by the newest exact sample design.  A
+    corrupt or unsupported newest native record remains fail-closed.
+    """
+
+    failures: list[StrategySetupError] = []
+    for candidate_policy in (False, True):
+        try:
+            _latest_matching_strategy_sample_design_ref(
+                runtime,
+                task,
+                context=context,
+                drop_nan_labels=candidate_policy,
+                allow_native_risk_development=True,
+            )
+        except StrategySetupError as exc:
+            failures.append(exc)
+            continue
+        return candidate_policy
+
+    for failure in failures:
+        if not isinstance(failure, _StrategySampleDesignRequiredError):
+            raise failure
+    return False
+
+
 def _latest_matching_strategy_sample_design_ref(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
@@ -11252,12 +11667,10 @@ def _interactive_tree_frontier_group_selection_artifact_slots(
                     "对应多个 group selection artifact，当前不能安全绑定来源。"
                 )
             row, provenance = matches[0]
-            if (
-                provenance.get("schema_version")
-                != (
-                    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION
-                )
-            ):
+            if provenance.get("schema_version") not in {
+                INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION,
+                INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
+            }:
                 raise StrategySetupError(
                     "interactive-tree frontier group selection artifact "
                     "schema 无效。"
@@ -11419,10 +11832,10 @@ def _interactive_tree_frontier_selection_artifact_slots(
                     "对应多个 frontier selection artifact，当前不能安全绑定来源。"
                 )
             row, provenance = matches[0]
-            if (
-                provenance.get("schema_version")
-                != INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
-            ):
+            if provenance.get("schema_version") not in {
+                INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+                INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
+            }:
                 raise StrategySetupError(
                     "interactive-tree frontier selection artifact schema 无效。"
                 )
@@ -12043,6 +12456,7 @@ def _strategy_sample_design_dataset_preview(
 ):
     """Preview the exact active sample and its confirmed workspace target."""
 
+    _ensure_strategy_sample_design_active_workspace(runtime, task)
     _require_strategy_sample_design_workspace(runtime, task)
     backend, registry = _modeling_data_runtime(runtime.settings)
     preview = preview_strategy_dataset_context(
@@ -12059,6 +12473,217 @@ def _strategy_sample_design_dataset_preview(
         target_col=preview.target_col,
     )
     return preview
+
+
+def _confirm_manual_sample_design_time_semantics(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    *,
+    draft: StandardWorkflowRequestDraft,
+    preview,
+) -> None:
+    """Persist the date role explicitly confirmed by the Candidate Lab form."""
+
+    bindings = draft.workflow_inputs.get("field_bindings")
+    time_field = (
+        bindings.get("time_field")
+        if isinstance(bindings, Mapping)
+        else None
+    )
+    if time_field is None:
+        return
+    if (
+        not isinstance(time_field, str)
+        or not time_field
+        or preview is None
+        or time_field not in tuple(preview.columns)
+    ):
+        raise StrategySetupError(
+            "双人群样本设计的时间字段不在当前活动样本中，请重新选择。"
+        )
+
+    repository = DataWorkspaceRepository(runtime.settings.db_path)
+    try:
+        snapshot = repository.get_or_default(task.id)
+        if (
+            snapshot.active_dataset_id is None
+            or snapshot.active_dataset_content_hash is None
+            or not snapshot.semantic_mapping.target_col
+        ):
+            raise StrategySetupError(
+                "双人群样本设计需要已绑定活动样本和二元目标列。"
+            )
+        if time_field == snapshot.semantic_mapping.target_col:
+            raise StrategySetupError(
+                "双人群样本设计的时间字段不能与目标列相同。"
+            )
+        roles = dict(snapshot.semantic_mapping.field_roles)
+        roles[time_field] = "date"
+        repository.save(
+            task.id,
+            DataWorkspaceDraft(
+                active_dataset_id=snapshot.active_dataset_id,
+                active_dataset_content_hash=(
+                    snapshot.active_dataset_content_hash
+                ),
+                page=snapshot.page,
+                selected_field=snapshot.selected_field,
+                semantic_mapping=DataSemanticMapping(
+                    target_col=snapshot.semantic_mapping.target_col,
+                    field_roles=roles,
+                    business_names=(
+                        snapshot.semantic_mapping.business_names
+                    ),
+                ),
+            ),
+            expected_revision=snapshot.revision,
+            audit={
+                "actor": "user:strategy-candidate-lab",
+                "detail": {
+                    "reason": (
+                        "confirm explicit sample-design time field "
+                        "with date semantic role"
+                    ),
+                    "time_field": time_field,
+                },
+            },
+        )
+    except StrategySetupError:
+        raise
+    except (
+        DataWorkspaceDataError,
+        DataWorkspaceDatasetNotFound,
+        DataWorkspaceRevisionConflict,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise StrategySetupError(
+            "双人群样本设计的时间字段确认期间 DataWorkspace 发生变化，"
+            "请刷新后重试。"
+        ) from exc
+
+
+def _ensure_strategy_sample_design_active_workspace(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+) -> None:
+    """Atomically bind one unambiguous sample and binary target on a fresh task."""
+
+    repository = DataWorkspaceRepository(runtime.settings.db_path)
+    try:
+        snapshot = repository.get_or_default(task.id)
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "策略样本设计需要有效且已确认的活动 DataWorkspace。"
+        ) from exc
+    if snapshot.active_dataset_id is not None:
+        if not snapshot.semantic_mapping.target_col:
+            raise StrategySetupError(
+                "策略样本设计要求先在 DataWorkspace 确认二元目标列。"
+            )
+        return
+
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    registered = [
+        dataset
+        for dataset in registry.list_for_task(task.id)
+        if str(dataset.task_id) == task.id
+        and dataset.role in {"sample", "strategy_sample"}
+    ]
+    if len(registered) > 1:
+        raise StrategySetupError(
+            "策略样本设计需要一个明确的活动样本；当前存在多个已注册数据集，"
+            "请先在 DataWorkspace 选择并保存本次样本。"
+        )
+
+    try:
+        preview = _strategy_dataset_preview(runtime, task)
+    except StrategySetupError as exc:
+        raise StrategySetupError(
+            "策略样本设计要求先在 DataWorkspace 选择唯一活动样本："
+            f"{exc}"
+        ) from exc
+    if not preview.target_col:
+        raise StrategySetupError(
+            "策略样本设计要求可唯一确定的二元目标列，请先确认 target_col。"
+        )
+    try:
+        context = _strategy_dataset_context(runtime, task, require_target=True)
+    except StrategySetupError as exc:
+        raise StrategySetupError(
+            "策略样本设计无法从当前 DataWorkspace 候选建立稳定绑定："
+            f"{exc}"
+        ) from exc
+    registered = [
+        dataset
+        for dataset in registry.list_for_task(task.id)
+        if str(dataset.task_id) == task.id
+        and dataset.role in {"sample", "strategy_sample"}
+    ]
+    if (
+        len(registered) != 1
+        or registered[0].id != context.dataset_id
+        or (
+            preview.dataset_id is not None
+            and preview.dataset_id != context.dataset_id
+        )
+        or tuple(preview.columns) != tuple(context.columns)
+        or preview.target_col != context.target_col
+    ):
+        raise StrategySetupError(
+            "策略样本设计需要一个明确且稳定的活动样本；"
+            "当前存在多个或变化中的数据集，请先在 DataWorkspace 明确选择。"
+        )
+    if (
+        not isinstance(context.dataset_content_hash, str)
+        or not context.dataset_content_hash
+        or not context.target_col
+    ):
+        raise StrategySetupError(
+            "策略样本设计无法绑定样本哈希或二元目标列，请先确认数据与 target_col。"
+        )
+    _validate_strategy_sample_design_target(
+        registry,
+        backend,
+        dataset_id=context.dataset_id,
+        target_col=context.target_col,
+    )
+
+    try:
+        repository.save_initial_binding(
+            task.id,
+            DataWorkspaceDraft(
+                active_dataset_id=context.dataset_id,
+                active_dataset_content_hash=context.dataset_content_hash,
+                semantic_mapping=DataSemanticMapping(
+                    target_col=context.target_col,
+                    field_roles={context.target_col: "target"},
+                ),
+            ),
+            expected_revision=snapshot.revision,
+            audit={
+                "actor": "agent:strategy-sample-design",
+                "detail": {
+                    "reason": (
+                        "atomically bind sole task sample and target "
+                        "for strategy sample design"
+                    )
+                },
+            },
+        )
+    except (
+        DataWorkspaceDataError,
+        DataWorkspaceDatasetNotFound,
+        DataWorkspaceRevisionConflict,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise StrategySetupError(
+            "策略样本设计的数据工作区在计划创建前发生变化，"
+            "请重新确认活动样本和目标列。"
+        ) from exc
 
 
 def _validate_strategy_sample_design_target(
@@ -12522,6 +13147,7 @@ def _strategy_request_requires_dataset(
             "strategy_pool_materialize",
             "strategy_pool_validation",
             "candidate_monthly_stability",
+            "scorecard_model_score_evidence_build",
             "scorecard_band_build",
             "scorecard_cutoff_selection",
             "automatic_tree_leaf_materialization",
@@ -12918,6 +13544,15 @@ def _maybe_handle_dataset_transform_turn(
     if not text:
         return None
     conversation = repo.list_agent_messages(task.id)
+    # Risk-analysis material confirmations often describe scope by saying that
+    # no extra filtering or other row processing is required.  Those phrases
+    # match the generic transform detector, but while typed risk intake is
+    # still open they are contract details, not a request to mutate a bound
+    # DataWorkspace sample.
+    if task.task_type == TASK_TYPE_VINTAGE:
+        risk_intake = latest_risk_analysis_intake(conversation)
+        if risk_intake is not None and risk_intake.get("phase") != "ready":
+            return None
     if _active_plan(runtime.plan_repo, task.id) is not None:
         return None
     if latest_open_gate(conversation) is not None:
@@ -13281,6 +13916,15 @@ def _maybe_handle_dataset_analysis_turn(
     if not detect_dataset_analysis_intent(user_text):
         return None
     conversation = repo.list_agent_messages(task.id)
+    # Risk-analysis material confirmations naturally mention phrases such as
+    # “无缺失” and “字段分布”.  While that typed intake is still open, those
+    # words describe its input contract rather than a new generic
+    # profile_dataset request.  Let the risk state machine consume the turn;
+    # after it reaches ready, explicit dataset diagnostics remain available.
+    if task.task_type == TASK_TYPE_VINTAGE:
+        risk_intake = latest_risk_analysis_intake(conversation)
+        if risk_intake is not None and risk_intake.get("phase") != "ready":
+            return None
     if _active_plan(runtime.plan_repo, task.id) is not None:
         return None
     if latest_open_gate(conversation) is not None:
@@ -14005,7 +14649,23 @@ def _append_c1_message(repo: TaskRepository, task_id: str, proposal) -> None:
         )
     notices = list(getattr(proposal, "ingest_notices", None) or [])
     text += _ingest_notice_text(notices)
-    c1_state = {
+    c1_state = _c1_state_from_proposal(proposal)
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content=text,
+        metadata={
+            "join_c1": c1_state,
+            "tables": _c1_table(c1_state),
+            "ingest_notices": notices,
+        },
+    )
+
+
+def _c1_state_from_proposal(proposal) -> dict:
+    files = proposal.files
+    return {
         "files": [
             {
                 "dataset_id": f.dataset_id,
@@ -14025,17 +14685,6 @@ def _append_c1_message(repo: TaskRepository, task_id: str, proposal) -> None:
         "target_col": proposal.target_col,
         "skip": proposal.skip,
     }
-    repo.add_agent_message(
-        task_id,
-        role="assistant",
-        stage="chat",
-        content=text,
-        metadata={
-            "join_c1": c1_state,
-            "tables": _c1_table(c1_state),
-            "ingest_notices": notices,
-        },
-    )
 
 
 def _ingest_notice_text(notices: list[dict]) -> str:
@@ -14095,6 +14744,9 @@ def _parse_c1_reply(user_text: str | None, c1_state: dict) -> dict | None:
             "feature_ids": list(c1_state.get("feature_ids") or []),
             "target_col": c1_state.get("target_col"),
         }
+    natural_assignment = _natural_language_c1_assignment(text, c1_state)
+    if natural_assignment:
+        return natural_assignment
     natural_target = _natural_language_c1_target(text, c1_state)
     if natural_target:
         return {
@@ -14105,12 +14757,96 @@ def _parse_c1_reply(user_text: str | None, c1_state: dict) -> dict | None:
     return None
 
 
-def _natural_language_c1_target(text: str, c1_state: dict) -> str | None:
+def _natural_language_c1_assignment(text: str, c1_state: dict) -> dict | None:
+    """Resolve Agent-mode file-role changes expressed in ordinary language.
+
+    Agent mode intentionally makes the structured C1 controls evidence-only and
+    tells users to describe role changes in chat.  Keep this parser narrow and
+    deterministic: an exact file name must be mentioned next to a role term.
+    """
+
+    if not text:
+        return None
+    files = [item for item in c1_state.get("files") or [] if isinstance(item, dict)]
+    anchor_matches = [
+        item
+        for item in files
+        if _c1_file_role_is_mentioned(
+            text,
+            str(item.get("name") or ""),
+            ("样本主表", "主样本", "主表", "锚点表"),
+        )
+    ]
+    if len(anchor_matches) != 1:
+        return None
+    anchor_id = anchor_matches[0].get("dataset_id")
+    if not anchor_id:
+        return None
+
+    explicit_feature_ids = [
+        item.get("dataset_id")
+        for item in files
+        if item.get("dataset_id") != anchor_id
+        and _c1_file_role_is_mentioned(
+            text,
+            str(item.get("name") or ""),
+            ("特征表",),
+        )
+    ]
+    ignores_remaining = bool(
+        re.search(
+            r"(?:其余|其他|剩余)[^。；\n]{0,80}(?:忽略|不使用|排除)"
+            r"|(?:不要|不再)[^。；\n]{0,40}作为特征表",
+            text,
+        )
+    )
+    if ignores_remaining:
+        feature_ids = explicit_feature_ids
+    else:
+        feature_ids = [
+            dataset_id
+            for dataset_id in c1_state.get("feature_ids") or []
+            if dataset_id and dataset_id != anchor_id
+        ]
+        feature_ids.extend(explicit_feature_ids)
+
+    current_anchor_id = c1_state.get("anchor_id")
+    target_col = _natural_language_c1_target(text, c1_state, anchor_id=anchor_id)
+    if target_col is None and anchor_id == current_anchor_id:
+        target_col = c1_state.get("target_col")
+    return {
+        "anchor_id": anchor_id,
+        "feature_ids": list(dict.fromkeys(feature_ids)),
+        "target_col": target_col,
+    }
+
+
+def _c1_file_role_is_mentioned(text: str, file_name: str, role_terms: tuple[str, ...]) -> bool:
+    if not file_name:
+        return False
+    name_pattern = re.escape(file_name)
+    role_pattern = "(?:" + "|".join(re.escape(term) for term in role_terms) + ")"
+    return bool(
+        re.search(
+            rf"{name_pattern}[^，,。；;\n]{{0,48}}{role_pattern}"
+            rf"|{role_pattern}[^，,。；;\n]{{0,48}}{name_pattern}",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _natural_language_c1_target(
+    text: str,
+    c1_state: dict,
+    *,
+    anchor_id: str | None = None,
+) -> str | None:
     """Resolve an exact schema column mentioned in an Agent-mode reply."""
 
     if not text:
         return None
-    anchor_id = c1_state.get("anchor_id")
+    anchor_id = anchor_id or c1_state.get("anchor_id")
     anchor = next(
         (item for item in c1_state.get("files") or [] if item.get("dataset_id") == anchor_id),
         None,
@@ -14174,6 +14910,84 @@ def _modeling_recipes(task: TaskRecord) -> list[str] | None:
         if str(item).strip()
     ]
     return recipes or None
+
+
+def _modeling_intake_params(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    user_text: str | None,
+) -> dict[str, object]:
+    """Let the configured LLM bind first-turn modeling controls before planning.
+
+    This reuses the same structured, declared-control router used at later
+    confirmation gates. The deterministic modeling setup still validates target
+    family, recipe ids, columns, and split behavior before a plan is created.
+    """
+
+    text = str(user_text or "").strip()
+    if (
+        str(getattr(task, "run_mode", "") or "") != "agent"
+        or runtime.llm_client is None
+        or not text
+    ):
+        return {}
+    current_recipes = _modeling_recipes(task) or []
+    try:
+        route = route_instruction(
+            runtime.llm_client,
+            gate_context=(
+                "首轮建模规格收集：在创建计划前理解用户完整要求，只抽取当前"
+                "声明的建模控件；不新增、删除或重排工作流步骤。"
+            ),
+            instruction=text,
+            param_schema=[
+                {
+                    "name": "target_type",
+                    "type": "string",
+                    "current": _modeling_target_type(task) or "",
+                    "bounds": {
+                        "enum": ["binary", "continuous", "multiclass"],
+                    },
+                },
+                {
+                    "name": "recipes",
+                    "type": "array",
+                    "current": current_recipes,
+                    "bounds": {"enum": supported_modeling_recipes()},
+                },
+                {
+                    "name": "split_config",
+                    "type": "object",
+                    "current": {},
+                },
+                {
+                    "name": "n_trials",
+                    "type": "integer",
+                    "current": 1,
+                    "bounds": {"min": 1, "max": 200},
+                },
+                {
+                    "name": "sample_weight_col",
+                    "type": "string",
+                    "current": getattr(task, "sample_weight_col", "") or "",
+                },
+            ],
+        )
+    except LLMClientError:
+        return {}
+    if route.get("action") != "adjust":
+        return {}
+    params = route.get("params")
+    if not isinstance(params, dict):
+        return {}
+    allowed = {
+        "target_type",
+        "recipes",
+        "split_config",
+        "n_trials",
+        "sample_weight_col",
+    }
+    return {key: value for key, value in params.items() if key in allowed}
 
 
 def _modeling_target_type(task: TaskRecord) -> str | None:

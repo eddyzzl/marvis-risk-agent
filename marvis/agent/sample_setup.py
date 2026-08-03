@@ -37,7 +37,8 @@ _CONTINUOUS_TARGET_TOKENS = (
 )
 # Preferred multiclass-target name tokens (case-insensitive).
 _MULTICLASS_TARGET_TOKENS = (
-    "risk_grade", "grade", "rating", "class", "level", "等级", "评级", "类别",
+    "risk_grade", "risk_band", "grade", "rating", "class", "level", "target",
+    "等级", "评级", "类别",
 )
 # A multiclass target must have between this many distinct classes (inclusive).
 _MULTICLASS_MIN_CLASSES = 3

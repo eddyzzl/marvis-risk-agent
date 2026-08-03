@@ -201,16 +201,20 @@ def test_interactive_tree_frontier_template_omits_optional_reason(
     assert "selection_reason" not in plan.steps[0].inputs
 
 
-def test_pool_manifest_accepts_only_candidate_or_interactive_tree_asset_ids(
+def test_pool_manifest_accepts_only_supported_candidate_asset_ids(
     tmp_path: Path,
 ) -> None:
     tools = _tool_registry(tmp_path)
     pool_tool = tools.resolve(ToolRef("strategy", "add_candidate_to_pool"))
     pattern = pool_tool.input_schema["properties"]["expected_asset_id"]["pattern"]
 
-    assert pattern == "^(?:candidate-asset|interactive-tree)-[0-9a-f]{32}$"
+    assert pattern == (
+        "^(?:candidate-asset|interactive-tree|scorecard-band-asset)"
+        "-[0-9a-f]{32}$"
+    )
     compiled = re.compile(pattern)
     assert compiled.fullmatch("candidate-asset-" + "a" * 32)
     assert compiled.fullmatch("interactive-tree-" + "b" * 32)
+    assert compiled.fullmatch("scorecard-band-asset-" + "c" * 32)
     assert compiled.fullmatch("interactive-tree-revision-" + "c" * 32) is None
     assert compiled.fullmatch("arbitrary-asset-id") is None

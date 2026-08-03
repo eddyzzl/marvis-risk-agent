@@ -317,6 +317,172 @@ def test_sample_design_requires_confirmed_active_workspace_before_llm(
     assert llm.calls == []
 
 
+def test_sample_design_auto_binds_unique_source_sample_before_compilation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_task(client, tmp_path)
+    source_dir = client.app.state.settings.workspace / f"source-{tmp_path.name}"
+    pd.DataFrame(
+        {
+            "sample_role": ["dev", "dev", "validation", "validation", "oot", "oot"],
+            "customer_id": ["a", "b", "c", "d", "e", "f"],
+            "apply_date": [
+                "2025-01-15",
+                "2025-02-15",
+                "2025-03-15",
+                "2025-04-15",
+                "2025-05-15",
+                "2025-06-15",
+            ],
+            "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
+            "legacy_score": [610, 580, 640, 570, 660, 550],
+            "weight": [1.0, 1.0, 2.0, 2.0, 1.5, 1.5],
+            "loan_amount": [100.0, 120.0, 130.0, 140.0, 150.0, 160.0],
+            "overdue_amount": [0.0, 12.0, 0.0, 14.0, 0.0, 16.0],
+            "bad": [0, 1, 0, 1, 0, 1],
+        }
+    ).to_parquet(source_dir / "strategy_sample.parquet", index=False)
+    llm = _SampleDesignLLM()
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _utterance()},
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == ["strategy_sample_design_v2"]
+    workspace = DataWorkspaceRepository(
+        client.app.state.settings.db_path
+    ).get_or_default(task_id)
+    datasets = client.get(f"/api/tasks/{task_id}/datasets").json()["datasets"]
+    assert len(datasets) == 1
+    assert workspace.active_dataset_id == datasets[0]["id"]
+    assert workspace.active_dataset_content_hash == datasets[0]["content_hash"]
+    assert workspace.semantic_mapping.target_col == "bad"
+    assert workspace.semantic_mapping.field_roles == {
+        "bad": "target",
+        "apply_date": "date",
+    }
+    assert len(llm.calls) == 1
+
+
+def test_sample_design_with_no_filter_and_missing_label_language_routes_before_transform(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_task(client, tmp_path)
+    source_dir = client.app.state.settings.workspace / f"source-{tmp_path.name}"
+    pd.DataFrame(
+        {
+            "sample_role": ["dev", "dev", "validation", "validation", "oot", "oot"],
+            "customer_id": ["a", "b", "c", "d", "e", "f"],
+            "apply_date": [
+                "2025-01-15",
+                "2025-02-15",
+                "2025-03-15",
+                "2025-04-15",
+                "2025-05-15",
+                "2025-06-15",
+            ],
+            "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
+            "legacy_score": [610, 580, 640, 570, 660, 550],
+            "weight": [1.0, 1.0, 2.0, 2.0, 1.5, 1.5],
+            "loan_amount": [100.0, 120.0, 130.0, 140.0, 150.0, 160.0],
+            "overdue_amount": [0.0, 12.0, 0.0, 14.0, 0.0, 16.0],
+            "bad": [0, 1, 0, 1, 0, 1],
+        }
+    ).to_parquet(source_dir / "strategy_sample.parquet", index=False)
+    llm = _SampleDesignLLM()
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "审批总体和风险总体都用全表，不设筛选；" + _utterance()
+            )
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json().get("code") != "active_dataset_required"
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2"
+    ], response.json()
+    assert plans[0]["status"] == "done"
+    assert len(llm.calls) == 1
+
+
+def test_manual_sample_design_confirms_explicit_time_field_semantics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_task(client, tmp_path)
+    source_dir = client.app.state.settings.workspace / f"source-{tmp_path.name}"
+    pd.DataFrame(
+        {
+            "sample_role": ["dev", "dev", "validation", "validation", "oot", "oot"],
+            "customer_id": ["a", "b", "c", "d", "e", "f"],
+            "apply_date": [
+                "2025-01-15",
+                "2025-02-15",
+                "2025-03-15",
+                "2025-04-15",
+                "2025-05-15",
+                "2025-06-15",
+            ],
+            "month": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"],
+            "legacy_score": [610, 580, 640, 570, 660, 550],
+            "weight": [1.0, 1.0, 2.0, 2.0, 1.5, 1.5],
+            "loan_amount": [100.0, 120.0, 130.0, 140.0, 150.0, 160.0],
+            "overdue_amount": [0.0, 12.0, 0.0, 14.0, 0.0, 16.0],
+            "bad": [0, 1, 0, 1, 0, 1],
+        }
+    ).to_parquet(source_dir / "strategy_sample.parquet", index=False)
+    llm = _SampleDesignLLM()
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "从界面创建双人群样本设计",
+            "strategy_request": {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_sample_design_v2",
+                "workflow_inputs": _SampleDesignLLM().workflow_inputs,
+            },
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == ["strategy_sample_design_v2"]
+    assert plans[0]["status"] == "done"
+    workspace = DataWorkspaceRepository(
+        client.app.state.settings.db_path
+    ).get_or_default(task_id)
+    assert workspace.semantic_mapping.target_col == "bad"
+    assert workspace.semantic_mapping.field_roles["bad"] == "target"
+    assert workspace.semantic_mapping.field_roles["apply_date"] == "date"
+    assert llm.calls == []
+
+
 def test_sample_design_nan_labels_use_existing_snapshot_bound_confirmation(
     tmp_path: Path,
     monkeypatch,

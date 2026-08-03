@@ -10,6 +10,7 @@ These tests run real screening/tuning/training, so they are slow.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -18,8 +19,11 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
+from marvis.agent.modeling_setup import ModelingSetupError, build_modeling_proposal
 from marvis.app import create_app
-from marvis.db import ModelingRepository
+from marvis.data.backend import DataBackend
+from marvis.data.registry import DatasetRegistry
+from marvis.db import DatasetRepository, ModelingRepository, TaskRepository, connect
 from marvis.plugins.manifest import ToolRef
 
 
@@ -130,6 +134,279 @@ def _modeling_setup_message(messages: list[dict]) -> dict:
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path))
+
+
+def test_modeling_messages_recover_next_gate_after_raw_plan_retry(
+    client: TestClient,
+    tmp_path: Path,
+):
+    src = _sample_dir(tmp_path, n=300)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "建模恢复确认门",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lr"],
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    gate = _last_assistant(messages)
+    gate_meta = gate["metadata"]
+    assert gate_meta["kind"] == "gate"
+
+    with connect(client.app.state.settings.db_path) as conn:
+        conn.execute("DELETE FROM agent_messages WHERE id = ?", (gate["id"],))
+    plan = client.app.state.plan_repo.load_plan(gate_meta["plan_id"])
+    completed_step = next(step for step in plan.steps if step.status.value == "done")
+    TaskRepository(client.app.state.settings.db_path).add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content="历史建模失败",
+        metadata={
+            "error": True,
+            "kind": "gate",
+            "plan_id": plan.id,
+            "step_id": completed_step.id,
+        },
+    )
+
+    recovered = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    current = _last_assistant(recovered)
+    assert current["metadata"]["kind"] == "gate"
+    assert current["metadata"]["step_id"] == gate_meta["step_id"]
+    assert current["metadata"]["recovered_from_plan"] is True
+
+
+def test_modeling_messages_recover_gate_after_noop_consumption_attempt(
+    client: TestClient,
+    tmp_path: Path,
+):
+    """A stale confirm attempt must not leave an awaiting gate read-only."""
+
+    src = _sample_dir(tmp_path, n=300)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "建模确认恢复入口",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lr"],
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    gate = _last_assistant(messages)
+    gate_meta = gate["metadata"]
+    plan = client.app.state.plan_repo.load_plan(gate_meta["plan_id"])
+    assert plan.status.value == "awaiting_confirm"
+
+    repo = TaskRepository(client.app.state.settings.db_path)
+    repo.add_agent_message(
+        task_id,
+        role="user",
+        stage="chat",
+        content="确认建模设置",
+        metadata={
+            "ui_action": "confirm_gate",
+            "expected_step_id": gate_meta["step_id"],
+        },
+    )
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content="收到。确认当前结果请回复「确认」继续。",
+        metadata={"plan_id": plan.id},
+    )
+
+    recovered = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    current = _last_assistant(recovered)
+    assert current["id"] != gate["id"]
+    assert current["metadata"]["kind"] == "gate"
+    assert current["metadata"]["step_id"] == gate_meta["step_id"]
+    assert current["metadata"]["recovered_from_plan"] is True
+
+
+def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
+    client: TestClient,
+    tmp_path: Path,
+):
+    """Typed UI actions are optimistic commands, not generic confirmation text.
+
+    A stale overview button must not release a later gate reached in another
+    tab, and either stale action must leave no successful-looking user/assistant
+    authorization messages behind when the request returns 409.
+    """
+
+    src = _sample_dir(tmp_path, n=300)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "建模旧标签页授权防护",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lr"],
+    }).json()["id"]
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert started.status_code == 202, started.text
+    messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    overview = _last_assistant(messages)
+    plan_id = overview["metadata"]["plan_id"]
+
+    missing_plan_token = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "start_plan"},
+    )
+    assert missing_plan_token.status_code == 409, missing_plan_token.text
+    wrong_plan_token = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "确认",
+            "ui_action": "start_plan",
+            "expected_plan_id": "stale-plan",
+        },
+    )
+    assert wrong_plan_token.status_code == 409, wrong_plan_token.text
+    contradictory_start = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "先别执行",
+            "ui_action": "start_plan",
+            "expected_plan_id": plan_id,
+        },
+    )
+    assert contradictory_start.status_code == 409, contradictory_start.text
+    stop_start = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "停止",
+            "ui_action": "start_plan",
+            "expected_plan_id": plan_id,
+        },
+    )
+    assert stop_start.status_code == 409, stop_start.text
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == messages
+
+    first_start = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "确认",
+            "ui_action": "start_plan",
+            "expected_plan_id": plan_id,
+        },
+    )
+    assert first_start.status_code == 202, first_start.text
+    messages_at_gate = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    gate = _last_assistant(messages_at_gate)
+    assert gate["metadata"]["kind"] == "gate"
+    current_plan = client.app.state.plan_repo.load_plan(plan_id)
+    assert current_plan.status.value == "awaiting_confirm"
+
+    stale_overview = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "确认",
+            "ui_action": "start_plan",
+            "expected_plan_id": plan_id,
+        },
+    )
+    assert stale_overview.status_code == 409, stale_overview.text
+
+    stale_gate = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "确认",
+            "ui_action": "confirm_gate",
+            "expected_plan_id": plan_id,
+            "expected_step_id": "stale-gate",
+        },
+    )
+    assert stale_gate.status_code == 409, stale_gate.text
+    contradictory_gate = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "先别执行",
+            "ui_action": "confirm_gate",
+            "expected_plan_id": plan_id,
+            "expected_step_id": gate["metadata"]["step_id"],
+        },
+    )
+    assert contradictory_gate.status_code == 409, contradictory_gate.text
+    stop_gate = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "停止",
+            "ui_action": "confirm_gate",
+            "expected_plan_id": plan_id,
+            "expected_step_id": gate["metadata"]["step_id"],
+        },
+    )
+    assert stop_gate.status_code == 409, stop_gate.text
+
+    after_rejections = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert len(after_rejections) == len(messages_at_gate)
+    assert sum(
+        (message.get("metadata") or {}).get("ui_action") == "start_plan"
+        and message["role"] == "user"
+        for message in after_rejections
+    ) == 1
+    assert sum(
+        (message.get("metadata") or {}).get("intent") == "ui_action_ack"
+        and (message.get("metadata") or {}).get("ui_action") == "start_plan"
+        for message in after_rejections
+    ) == 1
+    assert not any(
+        (message.get("metadata") or {}).get("ui_action") == "confirm_gate"
+        for message in after_rejections
+    )
+    unchanged_plan = client.app.state.plan_repo.load_plan(plan_id)
+    assert unchanged_plan.status.value == "awaiting_confirm"
+    assert next(
+        step
+        for step in unchanged_plan.steps
+        if step.status.value == "awaiting_confirm"
+    ).id == gate["metadata"]["step_id"]
+
+    valid_gate = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "确认",
+            "ui_action": "confirm_gate",
+            "expected_plan_id": plan_id,
+            "expected_step_id": gate["metadata"]["step_id"],
+        },
+    )
+    assert valid_gate.status_code == 202, valid_gate.text
+    messages_after_valid_gate = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert sum(
+        (message.get("metadata") or {}).get("ui_action") == "confirm_gate"
+        and message["role"] == "user"
+        for message in messages_after_valid_gate
+    ) == 1
+    assert sum(
+        (message.get("metadata") or {}).get("intent") == "ui_action_ack"
+        and (message.get("metadata") or {}).get("ui_action") == "confirm_gate"
+        for message in messages_after_valid_gate
+    ) == 1
 
 
 @pytest.mark.slow
@@ -968,10 +1245,253 @@ def test_modeling_single_file_ambiguous_targets_accepts_agent_language_choice(
     )
     assert response.status_code == 202, response.text
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
-    assert plans
+    assert plans, response.json()
     split_step = next(step for step in plans[-1].steps if step.title == "切分样本")
     assert split_step.inputs["target_col"] == "label_sqandzy_new"
     assert split_step.inputs["split_col"] == "split_tag"
+
+
+def test_modeling_single_file_agent_language_binds_multiclass_target_on_first_turn(
+    client: TestClient, tmp_path: Path
+):
+    src = tmp_path / "single_multiclass_agent_language"
+    src.mkdir()
+    n = 120
+    pd.DataFrame(
+        {
+            "application_id": np.arange(n),
+            "signal_a": np.linspace(-1.0, 1.0, n),
+            "signal_b": np.sin(np.arange(n) / 9.0),
+            "risk_band_target": np.resize(["low", "mid", "high"], n),
+        }
+    ).to_parquet(src / "MODEL-MULTICLASS-NO-OOT.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "单表多分类自然语言目标",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        # Manual keeps this deterministic test independent of an external LLM;
+        # Agent mode reaches the same setup parser with the user's first turn.
+        "run_mode": "manual",
+    }).json()["id"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "MODEL-MULTICLASS-NO-OOT.parquet 是唯一的样本主表，"
+                "risk_band_target 是三分类目标列；没有特征表。"
+            )
+        },
+    )
+    assert response.status_code == 202, response.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    last = _last_assistant(response.json()["messages"])
+    assert plans, last["metadata"].get("error_diagnostic") or last
+    plan = plans[-1]
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    spec_step = next(step for step in plan.steps if step.title == "选择建模规格")
+    assert split_step.inputs["target_col"] == "risk_band_target"
+    assert spec_step.inputs["target_type"] == "multiclass"
+    assert spec_step.inputs["recipes"] == ["lgb_multiclass"]
+
+
+def test_modeling_agent_first_turn_binds_all_llm_decided_multiclass_controls(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The intake LLM decision must reach the first plan, not only its target."""
+
+    recipes = [
+        "lgb_multiclass",
+        "xgb_multiclass",
+        "lr_multiclass",
+        "mlp_multiclass",
+    ]
+
+    class _IntakeLLM:
+        def complete(self, **_kwargs):
+            return json.dumps(
+                {
+                    "action": "adjust",
+                    "params": {
+                        "target_type": "multiclass",
+                        "recipes": recipes,
+                        "split_config": {"test_size": 0.25},
+                        "n_trials": 7,
+                    },
+                    "constraint": "",
+                    "reason": "用户明确指定多分类、四种算法、无 OOT 与七轮调参",
+                    "confidence": "high",
+                    "explicit_authorization": False,
+                },
+                ensure_ascii=False,
+            )
+
+    intake_llm = _IntakeLLM()
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: intake_llm,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda _request, _task: intake_llm,
+    )
+
+    src = tmp_path / "single_multiclass_agent_controls"
+    src.mkdir()
+    n = 120
+    pd.DataFrame(
+        {
+            "application_id": np.arange(n),
+            "signal_a": np.linspace(-1.0, 1.0, n),
+            "signal_b": np.sin(np.arange(n) / 9.0),
+            "risk_band_target": np.resize(["low", "mid", "high"], n),
+        }
+    ).to_parquet(src / "MODEL-MULTICLASS-NO-OOT.parquet")
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "Agent 首轮多分类四算法",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "modeling",
+            "run_mode": "agent",
+        },
+    ).json()["id"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "请用当前单个 CSV 做三分类建模，risk_band_target 是 low/mid/high "
+                "三分类目标列；没有特征表，不需要 OOT；使用 lgb_multiclass、"
+                "xgb_multiclass、lr_multiclass、mlp_multiclass，每个调参 7 轮。"
+            ),
+            "acceptance_mode": "normal",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    spec_step = next(step for step in plan.steps if step.title == "选择建模规格")
+    assert split_step.inputs["target_col"] == "risk_band_target"
+    assert split_step.inputs["split_config"] == {"test_size": 0.25}
+    assert "oot_by_time" not in split_step.inputs["split_config"]
+    assert "random_oot" not in split_step.inputs["split_config"]
+    assert spec_step.inputs["target_type"] == "multiclass"
+    assert spec_step.inputs["recipes"] == recipes
+    assert spec_step.inputs["n_trials"] == 7
+
+
+def test_modeling_proposal_infers_rare_class_beyond_fixed_sample(
+    client: TestClient,
+    tmp_path: Path,
+):
+    """A rare third class omitted by the legacy 4,000-row probe remains multiclass."""
+
+    src = tmp_path / "rare_multiclass_target"
+    src.mkdir()
+    rows = 4001
+    sampled_indices = set(
+        pd.Series(np.arange(rows)).sample(n=4000, random_state=0).index.tolist()
+    )
+    rare_index = next(index for index in range(rows) if index not in sampled_indices)
+    target = np.arange(rows) % 2
+    target[rare_index] = 2
+    split = np.resize(["train", "test", "oot"], rows)
+    pd.DataFrame(
+        {
+            "application_id": np.arange(rows),
+            "signal": np.linspace(-1.0, 1.0, rows),
+            "label_sqandzy": np.arange(rows) % 2,
+            "label_sqandzy_new": target,
+            "split_tag": split,
+        }
+    ).to_parquet(src / "rare-multiclass.parquet")
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "稀有第三类完整基数识别",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "modeling",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+
+    settings = client.app.state.settings
+    backend = DataBackend(settings.datasets_dir)
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        backend,
+        settings.datasets_dir,
+    )
+    proposal = build_modeling_proposal(
+        registry,
+        backend,
+        task_id,
+        src,
+        target_col="label_sqandzy_new",
+    )
+
+    assert proposal.target_type == "multiclass"
+    assert proposal.recipes == ["lgb_multiclass"]
+    assert proposal.template_slots()["target_type"] == "multiclass"
+    with pytest.raises(ModelingSetupError, match="1-200"):
+        build_modeling_proposal(
+            registry,
+            backend,
+            task_id,
+            src,
+            target_col="label_sqandzy_new",
+            n_trials=201,
+        )
+
+
+def test_modeling_manual_multiclass_recipes_detect_generic_target_suffix(
+    client: TestClient, tmp_path: Path
+):
+    src = tmp_path / "single_multiclass_manual"
+    src.mkdir()
+    n = 120
+    pd.DataFrame(
+        {
+            "application_id": np.arange(n),
+            "signal_a": np.linspace(-1.0, 1.0, n),
+            "signal_b": np.cos(np.arange(n) / 7.0),
+            "risk_band_target": np.resize(["low", "mid", "high"], n),
+        }
+    ).to_parquet(src / "sample.parquet")
+    recipes = [
+        "lgb_multiclass",
+        "xgb_multiclass",
+        "lr_multiclass",
+        "mlp_multiclass",
+    ]
+    task_id = client.post("/api/tasks", json={
+        "model_name": "手动四算法多分类",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "target_type": "multiclass",
+        "recipes": recipes,
+    }).json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    last = _last_assistant(response.json()["messages"])
+    assert plans, last["metadata"].get("error_diagnostic") or last
+    plan = plans[-1]
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    spec_step = next(step for step in plan.steps if step.title == "选择建模规格")
+    assert split_step.inputs["target_col"] == "risk_band_target"
+    assert spec_step.inputs["target_type"] == "multiclass"
+    assert spec_step.inputs["recipes"] == recipes
 
 
 @pytest.mark.slow

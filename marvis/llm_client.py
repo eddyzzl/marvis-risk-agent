@@ -323,6 +323,28 @@ class OpenAICompatibleLLMClient:
                     truncated=truncated,
                 )
                 raise LLMClientError(f"LLM stream interrupted: {exc}") from exc
+            content = strip_thinking(content).strip()
+            if not content:
+                if not delta_fired["value"] and retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder,
+                    caller=caller,
+                    model_name=model_name,
+                    prompt_chars=prompt_chars,
+                    usage=usage,
+                    started=started,
+                    streamed=bool(stream),
+                    ok=False,
+                    error_kind="empty_response",
+                    retry_count=retry_count,
+                    prompt_name=prompt_name,
+                    prompt_version=prompt_version,
+                    truncated=truncated,
+                )
+                raise LLMClientError("LLM returned an empty response")
             self._record_call(
                 recorder, caller=caller, model_name=model_name,
                 prompt_chars=prompt_chars, usage=usage, started=started,
@@ -330,7 +352,7 @@ class OpenAICompatibleLLMClient:
                 retry_count=retry_count, prompt_name=prompt_name,
                 prompt_version=prompt_version, truncated=truncated,
             )
-            return strip_thinking(content).strip()
+            return content
 
     def _record_call(
         self,
@@ -355,13 +377,27 @@ class OpenAICompatibleLLMClient:
         # an on_call_recorded callback happens to be wired for this caller.
         if ok:
             logger.debug(
-                "llm call ok caller=%s model=%s latency_ms=%d retry_count=%d",
-                caller, model_name, latency_ms, retry_count,
+                "llm call ok caller=%s model=%s latency_ms=%d retry_count=%d "
+                "finish_reason=%s reasoning_tokens=%s reasoning_chars=%s",
+                caller,
+                model_name,
+                latency_ms,
+                retry_count,
+                usage.get("finish_reason"),
+                _usage_int(usage, "reasoning_tokens"),
+                _usage_int(usage, "reasoning_chars"),
             )
         else:
             logger.warning(
-                "llm call failed caller=%s model=%s error_kind=%s retry_count=%d",
-                caller, model_name, error_kind, retry_count,
+                "llm call failed caller=%s model=%s error_kind=%s retry_count=%d "
+                "finish_reason=%s reasoning_tokens=%s reasoning_chars=%s",
+                caller,
+                model_name,
+                error_kind,
+                retry_count,
+                usage.get("finish_reason"),
+                _usage_int(usage, "reasoning_tokens"),
+                _usage_int(usage, "reasoning_chars"),
             )
         if on_call_recorded is None:
             return
@@ -372,6 +408,9 @@ class OpenAICompatibleLLMClient:
             "prompt_chars": prompt_chars,
             "prompt_tokens": _usage_int(usage, "prompt_tokens"),
             "completion_tokens": _usage_int(usage, "completion_tokens"),
+            "finish_reason": usage.get("finish_reason"),
+            "reasoning_tokens": _usage_int(usage, "reasoning_tokens"),
+            "reasoning_chars": _usage_int(usage, "reasoning_chars"),
             "latency_ms": latency_ms,
             "ok": ok,
             "error_kind": error_kind,
@@ -549,7 +588,7 @@ def _content_from_stream_event(event_data: str, *, usage_out: dict | None = None
     try:
         data = json.loads(event_data)
         if usage_out is not None:
-            _merge_usage(usage_out, data.get("usage"))
+            _merge_response_telemetry(usage_out, data)
         choices = data.get("choices") or []
         choice = choices[0] if choices else {}
         delta = choice.get("delta") or {}
@@ -572,7 +611,7 @@ def _content_from_json_response(raw: str, *, usage_out: dict | None = None) -> s
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise LLMClientError("LLM response did not contain message content") from exc
     if usage_out is not None:
-        _merge_usage(usage_out, data.get("usage"))
+        _merge_response_telemetry(usage_out, data)
     return str(content or "")
 
 
@@ -581,3 +620,49 @@ def _merge_usage(usage_out: dict, usage) -> None:
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             if usage.get(key) is not None:
                 usage_out[key] = usage[key]
+        completion_details = usage.get("completion_tokens_details")
+        if isinstance(completion_details, dict):
+            reasoning_tokens = completion_details.get("reasoning_tokens")
+            if reasoning_tokens is not None:
+                usage_out["reasoning_tokens"] = reasoning_tokens
+
+
+_SAFE_FINISH_REASONS = frozenset(
+    {
+        "stop",
+        "length",
+        "content_filter",
+        "tool_calls",
+        "function_call",
+        "insufficient_system_resource",
+    }
+)
+
+
+def _merge_response_telemetry(usage_out: dict, data) -> None:
+    """Collect only bounded completion metadata, never raw model reasoning."""
+
+    if not isinstance(data, dict):
+        return
+    _merge_usage(usage_out, data.get("usage"))
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return
+    finish_reason = str(choice.get("finish_reason") or "").strip().lower()
+    if finish_reason:
+        usage_out["finish_reason"] = (
+            finish_reason if finish_reason in _SAFE_FINISH_REASONS else "other"
+        )
+    container = choice.get("delta")
+    if not isinstance(container, dict):
+        container = choice.get("message")
+    if not isinstance(container, dict):
+        return
+    reasoning_content = container.get("reasoning_content")
+    if reasoning_content is None:
+        return
+    previous_chars = _usage_int(usage_out, "reasoning_chars") or 0
+    usage_out["reasoning_chars"] = previous_chars + len(str(reasoning_content))

@@ -60,9 +60,15 @@ def prepare_modeling_frame(
     requested = _requested_columns(feature_cols, target_col, split_col, split_config, passthrough)
     _assert_columns_exist(dataset, requested)
 
-    prepared_columns = _unique([*feature_cols, *passthrough, target_col, split_col or SPLIT_COLUMN])
+    # A non-empty split_config is an explicit UI/Agent override of an uploaded
+    # split column.  Keep the zero-config fast projection path for the common
+    # pass-through case, but generate the canonical ``split`` column whenever a
+    # user selected time OOT, random OOT, no OOT, grouping, or rules.
+    override_existing_split = bool(split_col and split_config)
+    effective_split_col = SPLIT_COLUMN if override_existing_split else (split_col or SPLIT_COLUMN)
+    prepared_columns = _unique([*feature_cols, *passthrough, target_col, effective_split_col])
     prepared = None
-    if split_col:
+    if split_col and not override_existing_split:
         # An existing train/test/OOT column only needs a projection.  Stream it
         # directly to parquet so wide production datasets are not materialized
         # twice in a worker process merely to preserve an unchanged split.

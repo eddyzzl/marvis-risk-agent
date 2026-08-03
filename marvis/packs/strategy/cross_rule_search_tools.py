@@ -290,6 +290,7 @@ def run_search_cross_threshold_rules(inputs, ctx, runtime) -> dict[str, Any]:
         projection["overdue_amount_col"],
         "overdue_amount",
     )
+    loan, overdue = _coherent_amount_arrays(loan, overdue)
     trials = [
         _measure_trial(
             conditions,
@@ -492,6 +493,7 @@ def replay_cross_rule_search_binding(
         projection["overdue_amount_col"],
         "overdue_amount",
     )
+    loan, overdue = _coherent_amount_arrays(loan, overdue)
     trials = [
         _measure_trial(
             conditions,
@@ -1041,6 +1043,32 @@ def require_cross_rule_search_artifact_binding_on_connection(
         raise StrategyError("Cross rule search registry binding changed")
 
 
+def _bounded_thresholds(values: Sequence[float]) -> list[float]:
+    """Keep a deterministic, evenly spread prefix within the search budget."""
+
+    ordered = list(values)
+    if len(ordered) <= MAX_THRESHOLDS_PER_FEATURE:
+        return ordered
+    last = len(ordered) - 1
+    denominator = MAX_THRESHOLDS_PER_FEATURE - 1
+    indices = [
+        (index * last) // denominator
+        for index in range(MAX_THRESHOLDS_PER_FEATURE)
+    ]
+    return [ordered[index] for index in indices]
+
+
+def _coherent_amount_arrays(
+    loan: np.ndarray | None,
+    overdue: np.ndarray | None,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Amount lift is defined only when both numerator and denominator exist."""
+
+    if loan is None or overdue is None:
+        return None, None
+    return loan, overdue
+
+
 def _select_rule_features(
     evidence: Mapping[str, Any],
     *,
@@ -1129,6 +1157,7 @@ def _select_rule_features(
                 and math.isfinite(float(bound))
             }
         )
+        thresholds = _bounded_thresholds(thresholds)
         if not 1 <= len(thresholds) <= MAX_THRESHOLDS_PER_FEATURE:
             raise StrategyError(
                 "Cross rule search feature thresholds must contain 1..8 "
@@ -1277,6 +1306,7 @@ def _require_candidate_replays(
         overdue_amount_col,
         "overdue_amount",
     )
+    loan, overdue = _coherent_amount_arrays(loan, overdue)
     metrics = asset["metrics"]
     expected = {
         "count": count,

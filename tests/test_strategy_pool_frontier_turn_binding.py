@@ -22,8 +22,15 @@ from marvis.packs.strategy.interactive_tree_frontier_selection import (
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
     INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
 )
+from marvis.packs.strategy import tools as strategy_tools
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
+from tests.test_strategy_interactive_tree_threshold_adjustment import (
+    _threshold_revision,
+)
+
+
+pytest_plugins = ("tests.test_strategy_interactive_tree_tool",)
 
 
 SELECTION_ID = "interactive-tree-frontier-selection-" + "a" * 32
@@ -211,3 +218,34 @@ def test_frontier_selection_rejects_duplicate_task_registry_identity(
             _draft(SELECTION_ID),
         )
     assert fx.calls == []
+
+
+def test_v2_frontier_selection_resolves_into_pool_turn_slots(scenario) -> None:
+    _result, revision = _threshold_revision(scenario)
+    fragment = revision["fragments"][0]
+    materialized = (
+        strategy_tools.tool_materialize_interactive_tree_frontier_selection(
+            {
+                "revision_id": revision["revision_id"],
+                "source_node_id": fragment["source_node_id"],
+                "selection_reason": "Use reviewed v2 frontier.",
+            },
+            scenario.ctx,
+        )
+    )
+
+    verified_slots, fragment_id = _candidate_selection_artifact_slots(
+        SimpleNamespace(settings=scenario.settings),
+        task_id=scenario.task.id,
+        selection_id=materialized["selection_id"],
+    )
+
+    assert verified_slots == {
+        "source_artifact_id": materialized["artifacts"][0]["artifact_id"],
+        "expected_artifact_content_hash": materialized["artifacts"][0][
+            "content_hash"
+        ],
+        "expected_asset_id": materialized["semantic_tree_id"],
+        "expected_asset_hash": materialized["tree_hash"],
+    }
+    assert fragment_id == materialized["fragment_id"]

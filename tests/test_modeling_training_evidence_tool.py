@@ -36,6 +36,11 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     run_materialize_sample_design_v2,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    run_materialize_sample_design_v2_native,
+)
 from marvis.plugins.contracts import ToolContext
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
@@ -380,9 +385,85 @@ def _fixture(
         "ctx": ctx,
         "runtime": modeling_tools._runtime(ctx),
         "sample": sample,
+        "sample_request": sample_request,
         "sample_ref": sample_ref,
         "inputs": inputs,
     }
+
+
+def _native_fixture(tmp_path: Path) -> dict:
+    fx = _fixture(tmp_path)
+    native_request = deepcopy(fx["sample_request"])
+    native_request.pop("legacy_sample_design_ref")
+    native_request.update(
+        {
+            "source_mode": "native_active_dataset",
+            "dataset_id": fx["dataset"].id,
+            "expected_dataset_content_hash": fx["dataset"].content_hash,
+            "workspace_revision": fx["workspace"].revision,
+            "workspace_generation": fx["workspace"].analysis_generation,
+            "semantic_mapping_hash": strategy_tools.data_semantic_mapping_hash(
+                fx["workspace"].semantic_mapping
+            ),
+            "target_col": "bad",
+            "target_bad_value": 1,
+            "drop_nan_labels": False,
+        }
+    )
+    native = run_materialize_sample_design_v2_native(
+        native_request,
+        fx["ctx"],
+        strategy_tools._runtime(fx["ctx"]),
+    )
+    native_records = [
+        record
+        for record in TaskArtifactRepository(
+            fx["settings"].db_path
+        ).list_for_task(fx["task"].id)
+        if record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    ]
+    membership_record = next(
+        record
+        for record in native_records
+        if record["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+    )
+    bundle_record = next(
+        record
+        for record in native_records
+        if record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+    )
+    native_ref = {
+        "membership_artifact_id": membership_record["id"],
+        "expected_membership_artifact_content_hash": membership_record[
+            "content_hash"
+        ],
+        "bundle_artifact_id": bundle_record["id"],
+        "expected_bundle_artifact_content_hash": bundle_record["content_hash"],
+        "expected_bundle_id": native["bundle_id"],
+        "expected_sample_design_id": native["sample_design_id"],
+        "expected_sample_design_content_hash": native[
+            "sample_design_content_hash"
+        ],
+    }
+    fx.update(
+        {
+            "sample": native,
+            "sample_ref": native_ref,
+            "inputs": {
+                "sample_design_ref": native_ref,
+                "recipe": "scorecard",
+                "features": ["x1", "x2"],
+                "params": {
+                    "max_iter": 200,
+                    "scorecard_max_bins": 4,
+                    "sample_weight_col": "weight",
+                },
+                "seed": 23,
+                "early_stopping_rounds": None,
+            },
+        }
+    )
+    return fx
 
 
 def _run(fx: dict) -> dict:
@@ -402,8 +483,13 @@ def _governed_records(fx: dict) -> list[dict]:
     ]
 
 
-def _binding(fx: dict, output: dict):
-    return evidence_tools.load_modeling_training_evidence_artifacts(
+def _binding(fx: dict, output: dict, *, historical: bool = False):
+    loader = (
+        evidence_tools.load_historical_modeling_training_evidence_artifacts
+        if historical
+        else evidence_tools.load_modeling_training_evidence_artifacts
+    )
+    return loader(
         fx["runtime"],
         task_id=fx["task"].id,
         sample_design_ref=fx["sample_ref"],
@@ -506,6 +592,37 @@ def test_lr_success_publishes_exact_pair_and_risk_subset(tmp_path: Path) -> None
         name: row["sample_count"]
         for name, row in baseline["score_distribution"].items()
     } == {"train": 6, "test": 6, "oot": 6}
+
+
+def test_native_sample_design_trains_scorecard_and_reloads_evidence(
+    tmp_path: Path,
+) -> None:
+    fx = _native_fixture(tmp_path)
+
+    output = _run(fx)
+    binding = _binding(fx, output)
+    historical = _binding(fx, output, historical=True)
+
+    assert binding.sample.bundle["sample_design"]["compatibility"] == {
+        "source_mode": "native_active_dataset",
+        "development_partition": "risk/development",
+    }
+    assert binding.model_artifact.algorithm == "scorecard"
+    assert historical.sample.membership_artifact_id == (
+        binding.sample.membership_artifact_id
+    )
+    assert binding.evidence["sample_design_binding"]["artifact_pair"][
+        "membership"
+    ]["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+    assert binding.evidence["sample_design_binding"]["sample_design_ref"] == {
+        "sample_design_id": fx["sample"]["sample_design_id"],
+        "content_hash": fx["sample"]["sample_design_content_hash"],
+    }
+    assert evidence_tools.validate_train_model_with_evidence_v2_tool_output(
+        output,
+        runtime=fx["runtime"],
+        task_id=fx["task"].id,
+    ) == output
 
 
 def test_reversed_raw_target_is_encoded_before_real_lr_training(

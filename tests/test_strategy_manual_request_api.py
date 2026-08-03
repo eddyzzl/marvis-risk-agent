@@ -180,7 +180,13 @@ def test_manual_project_context_binds_typed_external_report_without_rewriting_la
             "as_of": "2026-07-27",
             "scope": "存量复借策略",
             "business_context": {"project.channel": "自营"},
-            "explicit_unavailable": ["historical_strategy_reviews"],
+            "explicit_unavailable": [
+                "current.status_fields.volume",
+                "current.status_fields.approval",
+                "current.status_fields.risk",
+                "current.status_fields.economics",
+                "current.maturity_summary",
+            ],
             "external_report_filenames": [report_path.name],
         },
     )
@@ -208,6 +214,9 @@ def test_manual_project_context_binds_typed_external_report_without_rewriting_la
     assert stored.steps[0].inputs["user_message_ref"][
         "structured_request_sha256"
     ] == request_sha256
+    assert stored.steps[0].inputs["explicit_unavailable"] == body[
+        "strategy_request"
+    ]["workflow_inputs"]["explicit_unavailable"]
     output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
     assert output["external_artifacts"][0]["kind"] == (
         "strategy_history_external_source"
@@ -756,6 +765,16 @@ def test_voting_search_selection_manual_pointer_reaches_preflight_without_llm(
 @pytest.mark.parametrize(
     ("workflow", "workflow_inputs"),
     [
+        (
+            "scorecard_model_score_evidence_build",
+            {
+                "features": ["age", "income"],
+                "sample_weight_col": "weight",
+                "seed": 23,
+                "max_iter": 200,
+                "scorecard_max_bins": 4,
+            },
+        ),
         ("scorecard_band_build", {}),
         ("scorecard_band_build", {"bin_count": 10}),
         (
@@ -792,6 +811,34 @@ def test_scorecard_manual_request_schema_accepts_only_user_owned_controls(
 @pytest.mark.parametrize(
     ("workflow", "workflow_inputs"),
     [
+        (
+            "scorecard_model_score_evidence_build",
+            {
+                "features": ["age", "age"],
+                "seed": 23,
+                "max_iter": 200,
+                "scorecard_max_bins": 4,
+            },
+        ),
+        (
+            "scorecard_model_score_evidence_build",
+            {
+                "features": ["age"],
+                "sample_weight_col": "age",
+                "seed": 23,
+                "max_iter": 200,
+                "scorecard_max_bins": 4,
+            },
+        ),
+        (
+            "scorecard_model_score_evidence_build",
+            {
+                "features": ["age"],
+                "seed": 23,
+                "max_iter": 19,
+                "scorecard_max_bins": 4,
+            },
+        ),
         (
             "scorecard_band_build",
             {"bin_count": 10, "raw_pd_band_edges": [0, 0.5, 1]},

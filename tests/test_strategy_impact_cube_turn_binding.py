@@ -278,3 +278,44 @@ def test_natural_language_impact_cube_executes_exact_read_only_plan(
     assert output["not_adopted"] is True
     assert output["not_promoted"] is True
     assert output["not_deployed"] is True
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_manual_ui_impact_cube_uses_authenticated_sample_preview(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    client = TestClient(create_app(fx["settings"].workspace))
+
+    response = client.post(
+        f"/api/tasks/{fx['task'].id}/agent/messages",
+        json={
+            "content": "从 Candidate Lab 生成 approval Pool 的统一 ImpactCube",
+            "strategy_request": {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_impact_cube",
+                "workflow_inputs": {
+                    "strategy_type": "approval",
+                    "partitions": ["development", "validation", "oot"],
+                    "month_col": "apply_month",
+                    "group_col": "channel",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(
+        f"/api/tasks/{fx['task'].id}/plans"
+    ).json()["plans"]
+    assert plans, response.json()["messages"][-1]
+    assert plans[-1]["template_id"] == "strategy_impact_cube"
+    assert plans[-1]["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plans[-1]["id"])
+    assert stored.steps[0].inputs["sample_design_ref"] == fx["sample_ref"]
+    assert stored.steps[0].inputs["dimension_bindings"] == {
+        "month_col": "apply_month",
+        "group_col": "channel",
+        "segment_col": "sample_split",
+    }

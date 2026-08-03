@@ -1234,7 +1234,7 @@
                   <span class="welcome-task-sheen" aria-hidden="true"></span>
                 </span>
                 <strong>风险分析</strong>
-                <span>Vintage、滚动率、VTG 年化不良与收益测算</span>
+                <span>Vintage、VTG 年化不良与收益测算</span>
               </button>
               <button
                 id="welcomeModelDevelopmentCard"
@@ -1341,7 +1341,7 @@
         <div class="workspace-body">
           <section id="resultWorkspace" class="result-workspace" aria-label="验证输出">
             <header class="workspace-head">
-              <div class="task-hero" id="taskHero">
+              <div class="task-hero is-collapsed" id="taskHero">
                 <div class="task-hero-top">
                   <h2 id="currentTaskTitle" class="task-hero-name">验证任务</h2>
                   <div class="task-hero-top-right">
@@ -1350,10 +1350,10 @@
                       type="button"
                       id="taskHeroToggle"
                       class="task-hero-toggle"
-                      aria-expanded="true"
+                      aria-expanded="false"
                       aria-controls="taskHeroDetails"
-                      aria-label="收起任务详情"
-                      title="收起任务详情"
+                      aria-label="展开任务详情"
+                      title="展开任务详情"
                     >
                       <svg class="task-hero-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
                         <path d="M6 9l6 6 6-6" />
@@ -2701,6 +2701,70 @@
                         </p>
                         <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
                         <button type="submit" class="button compact primary">确认创建不可变 Revision</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>评分卡模型与评分证据</strong><small>在当前 SampleDesign V2 上训练 Scorecard 并生成受治理模型分</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="scorecard_model_score_evidence_build">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>建模特征 <b aria-hidden="true">*</b></span>
+                          <textarea
+                            rows="2"
+                            data-candidate-lab-field="scorecard_model_features"
+                            placeholder="逗号或换行分隔，例如：age, income, debt_ratio"
+                          ></textarea>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>样本权重列</span>
+                          <input
+                            type="text"
+                            data-candidate-lab-field="scorecard_model_sample_weight_col"
+                            placeholder="可选；不能与建模特征重复"
+                          >
+                        </label>
+                        <div class="candidate-lab-field-grid">
+                          <label class="candidate-lab-field">
+                            <span>随机种子</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="4294967295"
+                              step="1"
+                              value="23"
+                              data-candidate-lab-field="scorecard_model_seed"
+                            >
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最大迭代次数</span>
+                            <input
+                              type="number"
+                              min="20"
+                              max="5000"
+                              step="1"
+                              value="200"
+                              data-candidate-lab-field="scorecard_model_max_iter"
+                            >
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最大分箱数</span>
+                            <input
+                              type="number"
+                              min="2"
+                              max="20"
+                              step="1"
+                              value="4"
+                              data-candidate-lab-field="scorecard_model_max_bins"
+                            >
+                          </label>
+                        </div>
+                        <p class="candidate-lab-boundary-note">
+                          平台只训练原生 Scorecard 并物化完整原始坏账概率证据；不会比较、选择、采纳或部署模型，也不会自动选择 Cutoff。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">训练并生成评分证据</button>
                       </form>
                     </details>
 

@@ -29,11 +29,19 @@ from marvis.orchestrator.validator import METRIC_FIELDS
 from marvis.plugins.manifest import manifest_to_dict
 from marvis.plugins.runner import ToolResult
 from marvis.repositories.tasks import TaskRepository
+from marvis.state_machine import ConflictError
 
 
 MAX_STEP_RETRIES = 1
 NO_PROGRESS_WINDOW = 4
 NO_PROGRESS_THRESHOLD = 2
+_DETERMINISTIC_TEMPLATE_IDS = frozenset(
+    {
+        "risk_analysis_report",
+        "strategy_project_context",
+        "strategy_roll_rate_analysis",
+    }
+)
 
 
 def _accepts_progress_callback(invoke) -> bool:
@@ -844,6 +852,13 @@ class PlanExecutor:
     ) -> bool:
         if self._planner is None:
             return False
+        # These templates have already bound a deterministic, governed business
+        # contract. A generic LLM replan after an execution/environment failure
+        # must not replace that Tool family with an unrelated search, portfolio,
+        # or modeling workflow; leave the exact failed step in place so the
+        # explicit recovery turn can retry it.
+        if plan.template_id in _DETERMINISTIC_TEMPLATE_IDS:
+            return False
         if self._is_governed_step(step):
             return False
         if not tier.failure_driven_replan:
@@ -888,7 +903,13 @@ class PlanExecutor:
                 task_id=plan.task_id,
             )
             return True
-        except (KeyError, PlanningError, LLMClientError, LLMSettingsError):
+        except (
+            KeyError,
+            PlanningError,
+            LLMClientError,
+            LLMSettingsError,
+            ConflictError,
+        ):
             # Replan is a best-effort enhancement. In manual mode (no LLM configured) the
             # planner cannot replan — that is NOT a flow error; swallow it and let the plan
             # continue to its confirmation gate. PlanningError covers ReplanError + invalid
@@ -901,7 +922,11 @@ class PlanExecutor:
         review: FinalReview,
         tier: CapabilityTier,
     ) -> bool:
-        if self._planner is None or not tier.decision_point_replan:
+        if (
+            self._planner is None
+            or not tier.decision_point_replan
+            or plan.template_id in _DETERMINISTIC_TEMPLATE_IDS
+        ):
             return False
         if plan.replan_count >= tier.max_replan_iterations:
             return False
@@ -938,7 +963,13 @@ class PlanExecutor:
                 task_id=plan.task_id,
             )
             return True
-        except (KeyError, PlanningError, LLMClientError, LLMSettingsError):
+        except (
+            KeyError,
+            PlanningError,
+            LLMClientError,
+            LLMSettingsError,
+            ConflictError,
+        ):
             return False
 
     def replan_from_instruction(self, plan_id: str, instruction: str) -> bool:
@@ -976,7 +1007,13 @@ class PlanExecutor:
                 task_id=plan.task_id,
             )
             return True
-        except (KeyError, PlanningError, LLMClientError, LLMSettingsError):
+        except (
+            KeyError,
+            PlanningError,
+            LLMClientError,
+            LLMSettingsError,
+            ConflictError,
+        ):
             # Replan is a best-effort enhancement. In manual mode (no LLM configured) the
             # planner cannot replan — that is NOT a flow error; swallow it and let the plan
             # continue to its confirmation gate. PlanningError covers ReplanError + invalid

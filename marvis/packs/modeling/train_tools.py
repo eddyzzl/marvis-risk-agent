@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from marvis.feature.preprocessing import read_preprocessing_chain, sidecar_path
 from marvis.files import sha256_file
+from marvis.modeling_limits import normalize_n_trials, normalize_n_trials_by_recipe
 from marvis.packs.modeling.artifact import persist_model_meta
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.errors import ModelingError, SpecialValueDecisionRequiredError
@@ -206,17 +207,16 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
     recipe = str(inputs.get("recipe") or "lgb")
     recipes = _normalize_recipe_list(inputs.get("recipes") or [recipe])
     target_type = _validated_target_type(recipes, inputs.get("target_type"))
-    n_trials_override = _optional_int(inputs.get("n_trials"))
-    if n_trials_override is not None and n_trials_override < 1:
-        raise ModelingError("n_trials must be at least 1")
-    explicit_budgets = {
-        str(k): int(v)
-        for k, v in dict(inputs.get("n_trials_by_recipe") or {}).items()
-        if v is not None
-    }
-    for item, value in explicit_budgets.items():
-        if value < 1:
-            raise ModelingError("n_trials must be at least 1")
+    try:
+        n_trials_override = normalize_n_trials(
+            inputs.get("n_trials"),
+            optional=True,
+        )
+        explicit_budgets = normalize_n_trials_by_recipe(
+            inputs.get("n_trials_by_recipe")
+        )
+    except ValueError as exc:
+        raise ModelingError(str(exc)) from exc
     cv_folds = _optional_int(inputs.get("cv_folds"))
     if cv_folds is not None and cv_folds < 2:
         raise ModelingError("cv_folds must be at least 2")
@@ -303,16 +303,19 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
             preprocessing_steps=read_preprocessing_chain(dataset_path),
             governance=inputs.get("special_value_governance"),
         )
-    n_trials_override = _optional_int(inputs.get("n_trials"))
+    try:
+        n_trials_override = normalize_n_trials(
+            inputs.get("n_trials"),
+            optional=True,
+        )
+        explicit_budgets = normalize_n_trials_by_recipe(
+            inputs.get("n_trials_by_recipe")
+        )
+    except ValueError as exc:
+        raise ModelingError(str(exc)) from exc
     cv_folds = _optional_int(inputs.get("cv_folds"))
     if cv_folds is not None and cv_folds < 2:
         raise ModelingError("cv_folds must be at least 2")
-    explicit_budgets = {
-        str(k): int(v)
-        for k, v in dict(inputs.get("n_trials_by_recipe") or {}).items()
-        if v is not None
-    }
-
     def _budget_for(item: str) -> int:
         if item in explicit_budgets:
             return explicit_budgets[item]
@@ -322,9 +325,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
 
     non_tunable = [item for item in recipes if item not in DEFAULT_TRIAL_BUDGET]
     tunable = [item for item in recipes if item in DEFAULT_TRIAL_BUDGET]
-    # tune_hyperparameters historically resolves a zero override to one real
-    # trial; mirror that effective budget in progress without changing search.
-    budgets = {item: max(1, _budget_for(item)) for item in tunable}
+    budgets = {item: _budget_for(item) for item in tunable}
     total_trials = sum(budgets.values())
     per_recipe: dict[str, dict] = {}
     best_by_algorithm: dict[str, dict] = {}

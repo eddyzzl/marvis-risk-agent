@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
@@ -32,6 +30,7 @@ from tests.test_strategy_interactive_tree_frontier_tool import (
     _materialized_selection,
 )
 from tests.test_strategy_candidate_lab_api import (
+    _install_fast_scorecard_live_revalidation,
     _register_refined_asset,
     _register_scorecard_candidate,
     _register_scorecard_selection,
@@ -46,28 +45,7 @@ pytest_plugins = ("tests.test_strategy_interactive_tree_tool",)
 def _fast_scorecard_live_revalidation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def load(runtime, **request):
-        record = runtime.task_artifacts.get_for_task(
-            request["task_id"],
-            request["artifact_id"],
-        )
-        assert record is not None
-        raw = Path(record["path"]).read_bytes()
-        asset = candidate_lab_projection.validate_scorecard_band_asset(
-            json.loads(raw)
-        )
-        assert record["content_hash"] == request[
-            "expected_artifact_content_hash"
-        ]
-        assert asset["asset_id"] == request["expected_asset_id"]
-        assert asset["asset_hash"] == request["expected_asset_hash"]
-        return SimpleNamespace(asset=asset, canonical_bytes=raw)
-
-    monkeypatch.setattr(
-        candidate_lab_projection,
-        "load_scorecard_band_asset_artifact",
-        load,
-    )
+    _install_fast_scorecard_live_revalidation(monkeypatch)
 
 
 def test_candidate_lab_projects_one_verified_univariate_asset_for_pool_add(

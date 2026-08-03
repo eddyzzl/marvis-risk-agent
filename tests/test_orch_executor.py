@@ -1167,6 +1167,52 @@ def test_plan_executor_replans_after_failed_success_criteria_and_continues(tmp_p
     ]
 
 
+def test_plan_executor_does_not_final_review_replan_roll_rate_template(tmp_path):
+    plan = _plan(
+        _step(
+            "step-1",
+            plugin="strategy",
+            tool="roll_rate_matrix",
+            inputs={"time_col": "mob"},
+        ),
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": 0.3331,
+                "label": "OOT KS",
+                "target_type": "binary",
+            }
+        ],
+    )
+    plan.template_id = "strategy_roll_rate_analysis"
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner(
+        [_ok({"target_type": "binary", "metrics": {"oot_ks": 0.2}})]
+    )
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[
+            _step(
+                "step-2",
+                index=1,
+                plugin="strategy",
+                tool="render_strategy_doc",
+                inputs={"strategy_id": "strategy_placeholder"},
+            )
+        ]
+    )
+
+    result = _adaptive_executor(repo, runner, planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert loaded.replan_count == 0
+    assert [step.tool_ref.label() for step in loaded.steps] == [
+        "strategy.roll_rate_matrix"
+    ]
+    assert loaded.steps[0].inputs == {"time_col": "mob"}
+    assert planner.replan_calls == []
+
+
 def test_plan_executor_does_not_replan_invalid_success_criterion_threshold(tmp_path):
     plan = _plan(
         _step("step-1"),
@@ -1859,6 +1905,50 @@ def test_plan_executor_replan_from_instruction(tmp_path):
     assert _executor(repo, FakeRunner([])).replan_from_instruction("plan-1", "x") is False
 
 
+def test_plan_executor_user_instruction_cannot_remove_unrun_human_only_gate(tmp_path):
+    plan = _plan(
+        _step("step-metrics"),
+        _step(
+            "step-optional-gate",
+            index=1,
+            needs_confirmation=True,
+            policy=_protected_human_policy(),
+            depends_on=["step-metrics"],
+        ),
+        _step(
+            "step-report",
+            index=2,
+            depends_on=["step-metrics", "step-optional-gate"],
+        ),
+    )
+    repo = _repo(tmp_path, plan)
+    planner = FakeAdaptivePlanner(
+        replanned_steps=lambda loaded: [
+            loaded.steps[0],
+            _step(
+                "step-report",
+                index=1,
+                depends_on=["step-metrics"],
+            ),
+        ]
+    )
+
+    ok = _adaptive_executor(repo, FakeRunner([]), planner).replan_from_instruction(
+        "plan-1",
+        "删除可选分析，只保留指标和报告",
+    )
+
+    assert ok is False
+    loaded = repo.load_plan("plan-1")
+    assert [step.id for step in loaded.steps] == [
+        "step-metrics",
+        "step-optional-gate",
+        "step-report",
+    ]
+    assert loaded.replan_count == 0
+    assert loaded.loop_events == []
+
+
 def test_plan_executor_replans_after_decision_point(tmp_path):
     plan = _plan(
         _step("step-1", decision_point=True),
@@ -1894,6 +1984,44 @@ def test_plan_executor_replans_after_decision_point(tmp_path):
     ]
 
 
+def test_decision_point_replan_conflict_preserves_governed_human_gate(tmp_path):
+    plan = _plan(
+        _step("step-1", decision_point=True),
+        _step(
+            "step-adopt",
+            index=1,
+            tool="adopt",
+            inputs={"strategy_id": "strategy-1"},
+            depends_on=["step-1"],
+            needs_confirmation=True,
+            policy=_protected_effect_policy(),
+        ),
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"echoed": "first"})])
+    planner = FakeAdaptivePlanner(
+        replanned_steps=lambda loaded: [
+            loaded.steps[0],
+            _step(
+                "step-adopt",
+                index=1,
+                tool="echo",
+                depends_on=["step-1"],
+            ),
+        ]
+    )
+
+    result = _adaptive_executor(repo, runner, planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.AWAITING_CONFIRM
+    assert loaded.status == PlanStatus.AWAITING_CONFIRM
+    assert loaded.replan_count == 0
+    assert loaded.steps[1].tool_ref == ToolRef("_sample", "adopt")
+    assert loaded.steps[1].status == StepStatus.AWAITING_CONFIRM
+    assert planner.replan_calls[0][3] == "decision_point"
+
+
 def test_plan_executor_replans_execution_failure_and_continues(tmp_path):
     plan = _plan(_step("step-1", tool="fail_tool"))
     repo = _repo(tmp_path, plan)
@@ -1915,6 +2043,134 @@ def test_plan_executor_replans_execution_failure_and_continues(tmp_path):
     assert loaded.loop_events[0].tool_ref == "_sample.fail_tool"
     assert planner.replan_calls[0][3] == "failure"
     assert len(runner.calls) == 2
+
+
+def test_plan_executor_keeps_risk_analysis_template_on_failure_for_explicit_retry(
+    tmp_path,
+):
+    plan = _plan(
+        _step(
+            "step-1",
+            plugin="risk_analysis",
+            tool="generate_risk_analysis_report",
+        )
+    )
+    plan.template_id = "risk_analysis_report"
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner(
+        [
+            _fail("cannot import name 'UTC' from 'datetime'"),
+            _ok({"report_path": "/wrong/portfolio_report.xlsx"}),
+        ]
+    )
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[
+            _step(
+                "step-2",
+                plugin="analysis",
+                tool="portfolio_report",
+            )
+        ]
+    )
+
+    result = _adaptive_executor(repo, runner, planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert loaded.replan_count == 0
+    assert [step.tool_ref.label() for step in loaded.steps] == [
+        "risk_analysis.generate_risk_analysis_report"
+    ]
+    assert planner.replan_calls == []
+    assert len(runner.calls) == 1
+
+
+def test_plan_executor_keeps_project_context_materializer_on_failure(tmp_path):
+    plan = _plan(
+        _step(
+            "step-1",
+            plugin="strategy",
+            tool="materialize_project_context",
+        )
+    )
+    plan.template_id = "strategy_project_context"
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner(
+        [
+            _fail("manual project-context structured request changed"),
+            _ok({"search_results": []}),
+        ]
+    )
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[
+            _step(
+                "step-2",
+                plugin="drafts",
+                tool="web_search",
+            )
+        ]
+    )
+
+    result = _adaptive_executor(repo, runner, planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert loaded.replan_count == 0
+    assert [step.tool_ref.label() for step in loaded.steps] == [
+        "strategy.materialize_project_context"
+    ]
+    assert planner.replan_calls == []
+    assert len(runner.calls) == 1
+
+
+def test_plan_executor_keeps_roll_rate_template_bindings_on_failure(tmp_path):
+    plan = _plan(
+        _step(
+            "step-1",
+            plugin="strategy",
+            tool="roll_rate_matrix",
+            inputs={
+                "id_col": "account_id",
+                "time_col": "mob",
+                "status_col": "bad",
+            },
+        )
+    )
+    plan.template_id = "strategy_roll_rate_analysis"
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner(
+        [
+            _fail("time_col could not be parsed as dates"),
+            _ok({"matrix": []}),
+        ]
+    )
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[
+            _step(
+                "step-2",
+                plugin="strategy",
+                tool="roll_rate_matrix",
+                inputs={
+                    "id_col": "account_id",
+                    "time_col": "date",
+                    "status_col": "bad",
+                },
+            )
+        ]
+    )
+
+    result = _adaptive_executor(repo, runner, planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert loaded.replan_count == 0
+    assert loaded.steps[0].inputs == {
+        "id_col": "account_id",
+        "time_col": "mob",
+        "status_col": "bad",
+    }
+    assert planner.replan_calls == []
+    assert len(runner.calls) == 1
 
 
 def test_plan_executor_llm_replan_failure_does_not_leave_plan_running(tmp_path):

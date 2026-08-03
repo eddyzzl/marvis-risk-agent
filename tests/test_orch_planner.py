@@ -16,7 +16,12 @@ from marvis.orchestrator.planner import (
     PlanningError,
     ReplanError,
 )
-from marvis.orchestrator.templates import SlotSpec, StepTemplate, WorkflowTemplate
+from marvis.orchestrator.templates import (
+    SlotSpec,
+    StepTemplate,
+    WorkflowTemplate,
+)
+from marvis.orchestrator.templates.feature import FEATURE_ANALYSIS
 from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -102,6 +107,49 @@ def _replanned_steps(tool: dict | None = None, ref_id: str = "step-1") -> str:
     })
 
 
+def _feature_replan_without_binning() -> str:
+    return json.dumps({
+        "steps": [
+            {
+                "id": "feature-metrics-revised",
+                "title": "特征指标",
+                "tool": {
+                    "plugin": "feature",
+                    "tool": "compute_feature_metrics",
+                },
+                "inputs": {
+                    "dataset_id": "dataset-1",
+                    "features": ["sig1", "sig2"],
+                    "target_col": "bad_flag",
+                    "metrics": ["iv", "ks", "auc", "coverage"],
+                    "meaning_directions": {},
+                    "bins": 10,
+                },
+                "depends_on": [],
+                "post_checks": [
+                    {"kind": "nonempty", "spec": {"field": "metrics"}},
+                ],
+            },
+            {
+                "id": "feature-report-revised",
+                "title": "生成特征分析报告",
+                "tool": {
+                    "plugin": "feature",
+                    "tool": "generate_feature_report",
+                },
+                "inputs": {
+                    "metrics": "$ref:feature-metrics-revised.output.metrics",
+                    "collinear": "$ref:feature-metrics-revised.output.collinear",
+                },
+                "depends_on": ["feature-metrics-revised"],
+                "post_checks": [
+                    {"kind": "nonempty", "spec": {"field": "report_path"}},
+                ],
+            },
+        ],
+    })
+
+
 def _multi_step_plan(count: int) -> str:
     return json.dumps({
         "steps": [
@@ -172,6 +220,7 @@ def test_planner_generate_accepts_valid_llm_plan(tmp_path):
     assert plan.source == "generated"
     assert plan.steps[0].tool_ref == ToolRef("_sample", "echo")
     assert llm.calls[0]["response_format"] == {"type": "json_object"}
+    assert llm.calls[0]["max_tokens"] == 4096
 
 
 def test_planner_applies_manifest_governance_when_llm_omits_policy(tmp_path):
@@ -458,7 +507,7 @@ def test_planner_replan_accepts_steps_wrapped_in_json_fence(tmp_path):
     assert len(llm.calls) == 1
 
 
-def test_planner_replan_retries_after_validator_failure(tmp_path):
+def test_planner_replan_retries_after_validator_failure(tmp_path, caplog):
     llm = FakeLLM([])
     planner = _planner(tmp_path, llm)
     plan = planner.from_template(
@@ -469,21 +518,149 @@ def test_planner_replan_retries_after_validator_failure(tmp_path):
     done_id = plan.steps[0].id
     plan.steps[0].status = StepStatus.DONE
     llm.responses = [
-        _replanned_steps({"plugin": "missing", "tool": "echo"}, ref_id=done_id),
+        _replanned_steps(
+            {"plugin": "missing\nraw-marker", "tool": "echo"},
+            ref_id=done_id,
+        ),
+        _replanned_steps(ref_id=done_id),
+    ]
+
+    with caplog.at_level("WARNING", logger="marvis.orchestrator.planner"):
+        replanned = planner.replan(
+            plan,
+            completed_summaries={done_id: {"echoed": "hello"}},
+            observation={"error_kind": "execution"},
+            reason="failure",
+            tier=resolve_tier("balanced"),
+        )
+
+    assert replanned.steps[1].tool_ref == ToolRef("_sample", "echo")
+    assert len(llm.calls) == 2
+    assert "missing" in llm.calls[1]["user_prompt"]
+    assert (
+        "replan attempt rejected stage=validator attempt=1 "
+        "error_type=PlanValidationError "
+        "message=step Revised Echo: missing raw-marker"
+    ) in caplog.text
+    assert "\nraw-marker" not in caplog.text
+
+
+def test_planner_replan_retries_invalid_llm_governance_policy(tmp_path):
+    llm = FakeLLM([])
+    planner = _planner(tmp_path, llm)
+    plan = planner.from_template(
+        _template(),
+        {"message": "hello"},
+        task_id="task-1",
+    )
+    done_id = plan.steps[0].id
+    plan.steps[0].status = StepStatus.DONE
+    malformed = json.loads(_replanned_steps(ref_id=done_id))
+    malformed["steps"][0]["policy"] = {
+        "human_decision_gate": "sometimes",
+    }
+    llm.responses = [
+        json.dumps(malformed),
         _replanned_steps(ref_id=done_id),
     ]
 
     replanned = planner.replan(
         plan,
         completed_summaries={done_id: {"echoed": "hello"}},
-        observation={"error_kind": "execution"},
-        reason="failure",
+        observation={"error_kind": "user_instruction"},
+        reason="user_instruction",
         tier=resolve_tier("balanced"),
+        instruction="keep the second echo",
     )
 
-    assert replanned.steps[1].tool_ref == ToolRef("_sample", "echo")
+    assert replanned.steps[1].title == "Revised Echo"
     assert len(llm.calls) == 2
-    assert "missing" in llm.calls[1]["user_prompt"]
+    assert "human_decision_gate" in llm.calls[1]["user_prompt"]
+
+
+def test_planner_replan_retries_truncated_feature_plan_with_explicit_output_budget(
+    tmp_path,
+):
+    llm = FakeLLM([
+        '{"steps":[{"title":"特征指标"',
+        _feature_replan_without_binning(),
+    ])
+    planner = _planner(tmp_path, llm)
+    plan = planner.from_template(
+        FEATURE_ANALYSIS,
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "features": ["sig1", "sig2"],
+            "metrics": ["iv", "ks", "auc", "coverage"],
+            "meaning_directions": {},
+        },
+        task_id="task-1",
+    )
+    plan.steps[0].granted_tools = [ToolRef("data_ops", "profile_dataset")]
+    plan.steps[0].output_ref = "private-runtime-output"
+    plan.steps[0].error = "private-runtime-error"
+    plan.steps[0].sub_agent_id = "private-runtime-agent"
+
+    replanned = planner.replan(
+        plan,
+        completed_summaries={},
+        observation={
+            "reason": "user_instruction",
+            "instruction": "删掉分箱分析，只保留特征指标和最终报告。",
+        },
+        reason="user_instruction",
+        tier=resolve_tier("balanced"),
+        instruction="删掉分箱分析，只保留特征指标和最终报告。",
+    )
+
+    assert [step.title for step in replanned.steps] == [
+        "特征指标",
+        "生成特征分析报告",
+    ]
+    assert replanned.steps[1].depends_on == ["feature-metrics-revised"]
+    assert "binning" not in replanned.steps[1].inputs
+    assert [call["max_tokens"] for call in llm.calls] == [4096, 4096]
+    replan_prompt = json.loads(llm.calls[0]["user_prompt"])
+    available_tools = replan_prompt["available_tools"]
+    available_refs = {
+        (item["plugin"], item["tool"])
+        for item in available_tools
+    }
+    assert ("feature", "screen_features") in available_refs
+    assert ("data_ops", "profile_dataset") in available_refs
+    assert {
+        tool
+        for plugin, tool in available_refs
+        if plugin == "data_ops"
+    } == {"profile_dataset"}
+    assert {plugin for plugin, _tool in available_refs} == {"feature", "data_ops"}
+    source_metrics, source_binning, source_report = replan_prompt["remaining_steps"]
+    assert source_metrics["tool"] == {
+        "plugin": "feature",
+        "tool": "compute_feature_metrics",
+        "version": "",
+    }
+    assert source_metrics["inputs"]["dataset_id"] == "dataset-1"
+    assert source_metrics["inputs"]["features"] == ["sig1", "sig2"]
+    assert source_metrics["inputs"]["metrics"] == ["iv", "ks", "auc", "coverage"]
+    assert source_binning["depends_on"] == [source_metrics["id"]]
+    assert source_report["depends_on"] == [
+        source_metrics["id"],
+        source_binning["id"],
+    ]
+    assert source_report["inputs"]["metrics"] == (
+        f"$ref:{source_metrics['id']}.output.metrics"
+    )
+    assert "output_ref" not in source_metrics
+    assert "review_verdicts" not in source_metrics
+    assert "error" not in source_metrics
+    assert "sub_agent_id" not in source_metrics
+    assert "private-runtime" not in llm.calls[0]["user_prompt"]
+    assert "copy retained steps" in replan_prompt["instruction"]
+    assert "depends_on edge and $ref" in replan_prompt["instruction"]
+    assert "full revised remaining plan" in replan_prompt["instruction"]
+    assert "steps must be non-empty" in replan_prompt["instruction"]
 
 
 def test_planner_replan_wraps_malformed_field_types_and_retries(tmp_path):
@@ -561,6 +738,7 @@ def test_planner_next_explore_segment_returns_valid_segment(tmp_path):
     assert segment[0].index == 2
     assert segment[0].depends_on == [done_id]
     assert "Two Step Echo" in llm.calls[0]["user_prompt"]
+    assert llm.calls[0]["max_tokens"] == 4096
 
 
 def test_planner_next_explore_segment_accepts_steps_wrapped_in_json_fence(tmp_path):
