@@ -63,15 +63,17 @@ from pathlib import Path
 # empty ``.staging`` when one artifact promotes/rolls back, which could delete
 # the shared folder out from under a peer that had already been handed a stage
 # path (mkdir done) but had not yet opened it for writing -- the peer's
-# ``open()`` then failed with ``FileNotFoundError(2)``. Two guards close this:
+# ``open()`` then failed with ``FileNotFoundError(2)``. Three guards close this:
 # (1) ``stage()`` *reserves* its slot by creating the stage entry immediately
 # (touch a file / mkdir a directory), so ``.staging`` is non-empty for the whole
 # stage->write->promote window and any concurrent rmdir simply no-ops on a
 # non-empty dir; (2) reservation and teardown are serialized under this lock so
-# a teardown can never interleave between a reservation's parent-mkdir and its
-# entry-creation. The lock is held only for O(1) filesystem metadata ops, never
-# across a caller's data write.
+# an in-process teardown cannot interleave between a reservation's parent-mkdir
+# and entry-creation; (3) subprocess workers do not share this threading lock,
+# so a missing parent during touch is retried with a fresh mkdir. The lock is
+# held only for O(1) filesystem metadata ops, never across a caller's data write.
 _STAGING_LOCK = threading.Lock()
+_STAGING_RESERVATION_ATTEMPTS = 8
 
 
 class ArtifactTransactionError(RuntimeError):
@@ -234,14 +236,25 @@ class TransactionalArtifactStore:
         token = uuid.uuid4().hex
         stage_path = self.staging_dir / f"{final_path.stem}.{token}{final_path.suffix}"
         backup_path = self.root / f".{final_path.name}.{token}.bak"
-        # Reserve the slot atomically w.r.t. concurrent teardown: create the
-        # parent then the (empty) stage file under _STAGING_LOCK so a peer's
-        # _remove_empty_parents can neither delete the just-made .staging dir
-        # before this touch nor rmdir it afterwards (now non-empty). The caller
-        # overwrites this placeholder with real content.
-        with _STAGING_LOCK:
-            stage_path.parent.mkdir(parents=True, exist_ok=True)
-            stage_path.touch(exist_ok=True)
+        # Reserve the slot atomically w.r.t. in-process teardown. ToolRunner
+        # subprocesses do not share _STAGING_LOCK, so another process may still
+        # remove an empty .staging between mkdir and touch; retry that exact
+        # race. Once touch succeeds, the unique placeholder keeps the parent
+        # non-empty until the caller overwrites and promotes it.
+        missing_parent_error: FileNotFoundError | None = None
+        for _attempt in range(_STAGING_RESERVATION_ATTEMPTS):
+            with _STAGING_LOCK:
+                stage_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    stage_path.touch(exist_ok=False)
+                except FileNotFoundError as exc:
+                    missing_parent_error = exc
+                    continue
+            break
+        else:  # pragma: no cover - requires sustained hostile teardown
+            raise ArtifactTransactionError(
+                f"could not reserve artifact staging path: {stage_path}"
+            ) from missing_parent_error
         final_path.parent.mkdir(parents=True, exist_ok=True)
         return StagedArtifact(stage_path=stage_path, final_path=final_path, backup_path=backup_path)
 

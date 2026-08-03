@@ -27,6 +27,31 @@ def test_staged_artifact_promotes_atomically_and_commit_keeps_final(tmp_path: Pa
     assert final_path.exists()
 
 
+def test_stage_retries_when_peer_removes_parent_before_reservation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    store = TransactionalArtifactStore(tmp_path / "artifacts")
+    original_touch = Path.touch
+    removed_once = False
+
+    def remove_parent_once(path: Path, *args, **kwargs):
+        nonlocal removed_once
+        if not removed_once and path.parent.name == ".staging":
+            path.parent.rmdir()
+            removed_once = True
+        return original_touch(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "touch", remove_parent_once)
+
+    artifact = store.stage("report.txt")
+
+    assert removed_once is True
+    assert artifact.path.is_file()
+    artifact.rollback()
+    assert not (tmp_path / "artifacts" / ".staging").exists()
+
+
 def test_staged_artifact_rollback_removes_stage_and_promoted_file(tmp_path: Path):
     store = TransactionalArtifactStore(tmp_path / "artifacts")
     staged = store.stage("model.pkl")

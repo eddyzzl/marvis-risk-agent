@@ -732,22 +732,20 @@ def tool_transform_dataset(inputs: dict, ctx) -> dict:
             output_dir,
             f"{identity.run_id}.{attempt_token}.parquet",
         )
-        # stage_file reserves its path with a placeholder.  The transform core
-        # intentionally refuses pre-existing outputs, so move the already
-        # computed unique result into that reserved stage path.
-        parquet_artifact.path.unlink(missing_ok=True)
-        shutil.move(computed_path, parquet_artifact.path)
-        evidence_dir = _safe_task_artifact_directory(
-            runtime.settings,
-            task_id,
-            "data_transforms",
-        )
-        evidence_artifact = uow.stage_file(
-            evidence_dir,
-            f"{identity.run_id}.{attempt_token}.evidence.json",
-        )
-
         try:
+            # Keep stage_file's placeholder until an atomic same-filesystem
+            # replace publishes the computed file. Removing the reservation
+            # lets a concurrent winner delete the shared .staging directory.
+            computed_path.replace(parquet_artifact.path)
+            evidence_dir = _safe_task_artifact_directory(
+                runtime.settings,
+                task_id,
+                "data_transforms",
+            )
+            evidence_artifact = uow.stage_file(
+                evidence_dir,
+                f"{identity.run_id}.{attempt_token}.evidence.json",
+            )
             # Close the compute/commit TOCTOU window before promoting anything.
             verified_source = runtime.registry.resolve_verified_path(dataset.id)
             if verified_source != source_path:
@@ -1209,10 +1207,11 @@ def tool_export_dataset(inputs: dict, ctx) -> dict:
         )
         uow = ArtifactUnitOfWork()
         staged = uow.stage_file(export_dir, filename)
-        staged.path.unlink(missing_ok=True)
-        shutil.move(computed_path, staged.path)
-
         try:
+            # Preserve the reservation until an atomic same-filesystem replace;
+            # otherwise a replay can remove the shared parent after committing
+            # its winner and make this publication fail with ENOENT.
+            computed_path.replace(staged.path)
             verified_source = runtime.registry.resolve_verified_path(dataset.id)
             if verified_source != source_path:
                 raise ValueError("source dataset path changed during export")

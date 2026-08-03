@@ -3,7 +3,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
-import threading
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -18,6 +17,7 @@ from marvis.data.workspace import (
 from marvis.db import DatasetRepository, PluginRepository, init_db
 from marvis.db_schema import connect
 from marvis.files import sha256_file
+from marvis.plugins.contracts import ToolContext
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -232,20 +232,11 @@ def test_export_dataset_tool_fails_closed_for_stale_or_foreign_binding(tmp_path)
     ) == []
 
 
-def test_concurrent_identical_exports_commit_one_intact_artifact(tmp_path, monkeypatch):
+def test_concurrent_identical_exports_commit_one_intact_artifact(tmp_path):
     settings, runner, _backend, registry = _runtime(tmp_path)
     dataset = _dataset(tmp_path, registry)
     workspace = _workspace(settings, dataset)
     inputs = _inputs(dataset, workspace, "csv")
-    original_export = data_ops_tools.export_dataset
-    both_computed = threading.Barrier(2)
-
-    def synchronized_export(*args, **kwargs):
-        result = original_export(*args, **kwargs)
-        both_computed.wait(timeout=15)
-        return result
-
-    monkeypatch.setattr(data_ops_tools, "export_dataset", synchronized_export)
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
             executor.submit(
@@ -268,6 +259,35 @@ def test_concurrent_identical_exports_commit_one_intact_artifact(tmp_path, monke
     assert path.is_file()
     assert sha256_file(path) == artifacts[0]["content_hash"]
     assert not list(settings.tasks_dir.rglob("*.bak"))
+
+
+def test_export_replaces_reserved_staging_path(tmp_path, monkeypatch):
+    settings, _runner, _backend, registry = _runtime(tmp_path)
+    dataset = _dataset(tmp_path, registry)
+    workspace = _workspace(settings, dataset)
+    original_replace = Path.replace
+    reserved_replacements = []
+
+    def require_reserved_destination(source, destination):
+        destination = Path(destination)
+        if destination.parent.name == ".staging":
+            assert destination.is_file()
+            reserved_replacements.append(destination.name)
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", require_reserved_destination)
+    result = data_ops_tools.tool_export_dataset(
+        _inputs(dataset, workspace, "csv"),
+        ToolContext(
+            task_id="task-export",
+            seed=0,
+            datasets_root=settings.datasets_dir,
+            workspace=settings.workspace,
+        ),
+    )
+
+    assert result["cached"] is False
+    assert len(reserved_replacements) == 1
 
 
 def test_export_dataset_rejects_symlinked_task_artifact_directory(tmp_path):

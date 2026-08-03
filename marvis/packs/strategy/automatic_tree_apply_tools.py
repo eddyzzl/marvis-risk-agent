@@ -15,6 +15,7 @@ import hmac
 import json
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -180,16 +181,23 @@ def run_apply_automatic_tree(inputs: object, ctx, runtime) -> dict[str, Any]:
     staged_result = uow.stage_file(result_dir, result_path.name)
     staged_evidence = None
     try:
-        # The pure kernel deliberately rejects a pre-existing output, including
-        # the reservation created by stage_file.
-        staged_result.path.unlink(missing_ok=True)
-        kernel_result = apply_automatic_tree_to_parquet(
-            source.asset,
-            source_path,
-            staged_result.path,
-            leaf_id_column=identity.output_leaf_column,
-            rule_id_column=identity.output_rule_column,
-        )
+        # The pure kernel deliberately rejects a pre-existing output. Compute
+        # beside the destination, then atomically replace stage_file's reserved
+        # placeholder so concurrent workers can never tear down .staging while
+        # this attempt is still writing.
+        with tempfile.TemporaryDirectory(
+            prefix=".automatic_tree_apply_compute_",
+            dir=result_dir,
+        ) as scratch_name:
+            computed_path = Path(scratch_name) / result_path.name
+            kernel_result = apply_automatic_tree_to_parquet(
+                source.asset,
+                source_path,
+                computed_path,
+                leaf_id_column=identity.output_leaf_column,
+                rule_id_column=identity.output_rule_column,
+            )
+            computed_path.replace(staged_result.path)
         _require_kernel_result(kernel_result, identity=identity, dataset=dataset)
         evidence_bytes = _canonical_json(kernel_result.to_dict()).encode("utf-8")
         staged_evidence = uow.stage_file(evidence_dir, evidence_path.name)

@@ -3,7 +3,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
-import threading
 
 import pandas as pd
 
@@ -17,6 +16,7 @@ from marvis.data.workspace import (
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.db_schema import connect
 from marvis.files import sha256_file
+from marvis.plugins.contracts import ToolContext
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -438,7 +438,6 @@ def test_task_purge_counts_and_removes_transform_lineage_before_datasets(tmp_pat
 
 def test_concurrent_identical_transform_attempts_cannot_corrupt_winner_artifacts(
     tmp_path,
-    monkeypatch,
 ):
     settings, runner, _backend, registry = _runtime(tmp_path)
     source = _source_dataset(tmp_path, registry)
@@ -448,15 +447,6 @@ def test_concurrent_identical_transform_attempts_cannot_corrupt_winner_artifacts
         workspace,
         [{"op": "drop_columns", "columns": ["amount"]}],
     )
-    original_transform = data_ops_tools.transform_parquet
-    both_computed = threading.Barrier(2)
-
-    def synchronized_transform(*args, **kwargs):
-        result = original_transform(*args, **kwargs)
-        both_computed.wait(timeout=15)
-        return result
-
-    monkeypatch.setattr(data_ops_tools, "transform_parquet", synchronized_transform)
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
             executor.submit(
@@ -470,7 +460,16 @@ def test_concurrent_identical_transform_attempts_cannot_corrupt_winner_artifacts
         results = [future.result(timeout=30) for future in futures]
 
     succeeded = [result for result in results if result.ok]
+    failed = [result for result in results if not result.ok]
     assert succeeded, [result.error for result in results]
+    assert all(
+        result.error
+        == (
+            "stale data workspace revision: "
+            f"expected {workspace.revision}, found {workspace.revision + 1}"
+        )
+        for result in failed
+    )
     repo = DataTransformRepository(settings.db_path)
     lineage = repo.list_lineage("task-1")
     assert len(lineage) == 1
@@ -488,3 +487,36 @@ def test_concurrent_identical_transform_attempts_cannot_corrupt_winner_artifacts
     assert sha256_file(artifact_path) == artifact["content_hash"] == record.result_hash
     assert not list(settings.datasets_dir.rglob("*.bak"))
     assert not list(settings.tasks_dir.rglob("*.bak"))
+
+
+def test_transform_replaces_reserved_staging_path(tmp_path, monkeypatch):
+    settings, _runner, _backend, registry = _runtime(tmp_path)
+    source = _source_dataset(tmp_path, registry)
+    workspace = _workspace(settings, source)
+    original_replace = Path.replace
+    reserved_replacements = []
+
+    def require_reserved_destination(source_path, destination):
+        destination = Path(destination)
+        if destination.parent.name == ".staging":
+            assert destination.is_file()
+            reserved_replacements.append(destination.name)
+        return original_replace(source_path, destination)
+
+    monkeypatch.setattr(Path, "replace", require_reserved_destination)
+    result = data_ops_tools.tool_transform_dataset(
+        _inputs(
+            source,
+            workspace,
+            [{"op": "drop_columns", "columns": ["amount"]}],
+        ),
+        ToolContext(
+            task_id="task-1",
+            seed=0,
+            datasets_root=settings.datasets_dir,
+            workspace=settings.workspace,
+        ),
+    )
+
+    assert result["cached"] is False
+    assert len(reserved_replacements) == 1

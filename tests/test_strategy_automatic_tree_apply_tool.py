@@ -20,7 +20,9 @@ from marvis.data.workspace import (
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.db_schema import connect
 from marvis.domain import TaskCreate
+from marvis.files import sha256_file
 from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy import automatic_tree_apply_tools
 from marvis.packs.strategy.automatic_tree_leaf_fragment import (
     AUTOMATIC_TREE_ASSET_ARTIFACT_KIND,
 )
@@ -379,10 +381,26 @@ def test_apply_rejects_case_insensitive_output_column_collisions(
 
 def test_apply_concurrent_same_input_commits_one_facts_set(
     scenario: _Scenario,
+    monkeypatch,
 ) -> None:
     barrier = threading.Barrier(2)
+    both_computed = threading.Barrier(2)
     outputs: list[dict] = []
     errors: list[BaseException] = []
+    original_apply = automatic_tree_apply_tools.apply_automatic_tree_to_parquet
+
+    def synchronized_apply(*args, **kwargs):
+        output_path = Path(args[2])
+        assert output_path.parent.name.startswith(".automatic_tree_apply_compute_")
+        result = original_apply(*args, **kwargs)
+        both_computed.wait(timeout=15)
+        return result
+
+    monkeypatch.setattr(
+        automatic_tree_apply_tools,
+        "apply_automatic_tree_to_parquet",
+        synchronized_apply,
+    )
 
     def invoke() -> None:
         try:
@@ -403,6 +421,7 @@ def test_apply_concurrent_same_input_commits_one_facts_set(
 
     assert not errors
     assert len(outputs) == 2
+    assert sorted(result["cached"] for result in outputs) == [False, True]
     assert {result["run_id"] for result in outputs} == {outputs[0]["run_id"]}
     assert {result["result"]["dataset_id"] for result in outputs} == {
         outputs[0]["result"]["dataset_id"]
@@ -410,6 +429,26 @@ def test_apply_concurrent_same_input_commits_one_facts_set(
     assert {result["evidence"]["artifact_id"] for result in outputs} == {
         outputs[0]["evidence"]["artifact_id"]
     }
+    result_path = scenario.registry.resolve_verified_path(
+        outputs[0]["result"]["dataset_id"]
+    )
+    assert sha256_file(result_path) == outputs[0]["result"]["dataset_content_hash"]
+    result_frame = pd.read_parquet(result_path)
+    assert len(result_frame) == 24
+    assert {"automatic_tree_leaf_id", "automatic_tree_rule_id"}.issubset(
+        result_frame.columns
+    )
+    evidence = TaskArtifactRepository(scenario.settings.db_path).get_for_task(
+        scenario.task.id,
+        outputs[0]["evidence"]["artifact_id"],
+    )
+    assert evidence is not None
+    evidence_path = Path(evidence["path"])
+    assert evidence_path.is_file()
+    assert sha256_file(evidence_path) == outputs[0]["evidence"]["content_hash"]
+    assert json.loads(evidence_path.read_text(encoding="utf-8"))["result_hash"] == (
+        outputs[0]["result"]["result_hash"]
+    )
     assert (
         len(
             AutomaticTreeApplyRepository(scenario.settings.db_path)
