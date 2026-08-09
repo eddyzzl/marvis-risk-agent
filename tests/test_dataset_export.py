@@ -19,6 +19,7 @@ from marvis.data.dataset_export import (
     DatasetExportBudgetError,
     DatasetExportConfig,
     DatasetExportConfigError,
+    DatasetExportExecutionError,
     DatasetExportInputError,
     export_dataset,
 )
@@ -337,7 +338,42 @@ def test_xlsx_bytes_and_hash_are_deterministic_across_creation_clocks(
             (1980, 1, 1, 0, 0, 0)
         }
         core_xml = archive.read("docProps/core.xml")
-    assert b"2000-01-01T00:00:00Z" in core_xml
+    assert core_xml.count(b"2000-01-01T00:00:00Z") == 2
+
+
+def test_xlsx_canonicalization_rejects_missing_core_properties(tmp_path: Path) -> None:
+    workbook = tmp_path / "missing-core.xlsx"
+    with ZipFile(workbook, "w") as archive:
+        archive.writestr("xl/workbook.xml", b"<workbook/>")
+    original = workbook.read_bytes()
+
+    with pytest.raises(DatasetExportExecutionError, match="exactly one"):
+        dataset_export._canonicalize_xlsx_archive(workbook)
+
+    assert workbook.read_bytes() == original
+    assert list(tmp_path.glob(".missing-core.xlsx.*.canonical")) == []
+
+
+def test_xlsx_canonicalization_rejects_duplicate_core_properties(tmp_path: Path) -> None:
+    workbook = tmp_path / "duplicate-core.xlsx"
+    core_xml = (
+        b'<cp:coreProperties xmlns:cp="core" xmlns:dcterms="terms">'
+        b'<dcterms:created xsi:type="dcterms:W3CDTF">2020-01-02T03:04:05Z'
+        b"</dcterms:created>"
+        b'<dcterms:modified xsi:type="dcterms:W3CDTF">2020-01-02T03:04:05Z'
+        b"</dcterms:modified></cp:coreProperties>"
+    )
+    with ZipFile(workbook, "w") as archive:
+        archive.writestr("docProps/core.xml", core_xml)
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            archive.writestr("docProps/core.xml", core_xml)
+    original = workbook.read_bytes()
+
+    with pytest.raises(DatasetExportExecutionError, match="exactly one"):
+        dataset_export._canonicalize_xlsx_archive(workbook)
+
+    assert workbook.read_bytes() == original
+    assert list(tmp_path.glob(".duplicate-core.xlsx.*.canonical")) == []
 
 
 @pytest.mark.parametrize("format_name,suffix", [("csv", ".csv"), ("xlsx", ".xlsx")])

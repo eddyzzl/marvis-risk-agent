@@ -40,6 +40,13 @@ _EXCEL_MAX_COLUMNS = 16_384
 _EXCEL_MAX_DATA_ROWS = _EXCEL_MAX_ROWS - 1  # one row is reserved for headers
 _FIXED_WORKBOOK_DATETIME = datetime(2000, 1, 1)
 _FIXED_ZIP_DATETIME = (1980, 1, 1, 0, 0, 0)
+_CORE_CREATED_TIMESTAMP = re.compile(
+    rb"(<dcterms:created\b[^>]*>)[^<]*(</dcterms:created>)"
+)
+_CORE_MODIFIED_TIMESTAMP = re.compile(
+    rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)"
+)
+_FIXED_CORE_TIMESTAMP = rb"\g<1>2000-01-01T00:00:00Z\g<2>"
 _XLSX_ILLEGAL_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _EXCEL_NUMERIC_TEXT = re.compile(
     r"^[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)"
@@ -508,6 +515,13 @@ def _canonicalize_xlsx_archive(path: Path) -> None:
             source_members = sorted(
                 source_archive.infolist(), key=lambda member: member.filename
             )
+            core_member_count = sum(
+                member.filename == "docProps/core.xml" for member in source_members
+            )
+            if core_member_count != 1:
+                raise DatasetExportExecutionError(
+                    "generated workbook must contain exactly one docProps/core.xml"
+                )
             with ZipFile(
                 canonical,
                 "w",
@@ -517,6 +531,20 @@ def _canonicalize_xlsx_archive(path: Path) -> None:
             ) as output_archive:
                 for source_member in source_members:
                     payload = source_archive.read(source_member.filename)
+                    if source_member.filename == "docProps/core.xml":
+                        for field_name, pattern in (
+                            ("created", _CORE_CREATED_TIMESTAMP),
+                            ("modified", _CORE_MODIFIED_TIMESTAMP),
+                        ):
+                            payload, replacements = pattern.subn(
+                                _FIXED_CORE_TIMESTAMP,
+                                payload,
+                            )
+                            if replacements != 1:
+                                raise DatasetExportExecutionError(
+                                    "generated workbook has an invalid "
+                                    f"{field_name} timestamp contract"
+                                )
                     member = ZipInfo(
                         filename=source_member.filename,
                         date_time=_FIXED_ZIP_DATETIME,
