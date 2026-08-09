@@ -269,7 +269,6 @@ from marvis.packs.modeling.select_tools import (  # noqa: F401
     _pick_best_comparison_row_with_policy,
     _policy_bool,
     _policy_metric_name,
-    _row_has_monotonic_policy,
     _row_policy_profile,
     _selection_metric_basis,
     _selection_policy_block_message,

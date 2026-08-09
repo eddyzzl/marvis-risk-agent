@@ -16,7 +16,6 @@ from io import BytesIO
 from itertools import islice
 import json
 import re
-import unicodedata
 from typing import Any
 from xml.etree import ElementTree
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -40,6 +39,7 @@ from marvis.packs.strategy.report_bundle import (
     canonical_strategy_report_bundle_json,
     validate_strategy_report_bundle,
 )
+from marvis.spreadsheet_safety import looks_like_excel_formula
 
 
 STRATEGY_REPORT_OUTPUT_SCHEMA_VERSION = "strategy.report-output.v2"
@@ -101,7 +101,6 @@ _FIXED_WORKBOOK_DATETIME = datetime(2000, 1, 1)
 _FIXED_DOCX_DATETIME = datetime(2000, 1, 1)
 _FIXED_ZIP_DATETIME = (1980, 1, 1, 0, 0, 0)
 _FIXED_ZIP_EXTERNAL_ATTR = 0o600 << 16
-_FORMULA_PREFIXES = frozenset("=+-@")
 _ILLEGAL_PRESENTATION_CONTROL = re.compile(
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff\ufffe\uffff]"
 )
@@ -2256,21 +2255,13 @@ def _xlsx_cell(value: object) -> object:
             f"report cell contains unsupported {type(value).__name__}"
         )
     text = _safe_text_projection(value)
-    if _looks_like_formula(text):
+    if looks_like_excel_formula(text):
         text = "'" + text
     if len(text) > _MAX_XLSX_CELL_CHARACTERS:
         raise StrategyReportOutputError(
             "report cell exceeds Excel's 32767 character limit"
         )
     return text
-
-
-def _looks_like_formula(value: str) -> bool:
-    for character in value:
-        if character.isspace() or unicodedata.category(character).startswith("C"):
-            continue
-        return character in _FORMULA_PREFIXES
-    return False
 
 
 def _markdown_cell(value: object) -> str:

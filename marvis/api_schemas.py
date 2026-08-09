@@ -16,6 +16,8 @@ from pydantic import (
 )
 
 from marvis.domain import TASK_TYPE_VALIDATION
+from marvis.agent.strategy_workflows import MANUAL_STANDARD_STRATEGY_WORKFLOWS
+from marvis.packs.labeling.contracts import LabelingRequest as LabelingContractRequest
 
 
 StrictJsonScalar = StrictStr | StrictInt | StrictFloat | StrictBool | None
@@ -41,6 +43,29 @@ StrictCanonicalNonEmptyStr = Annotated[
     StrictStr,
     AfterValidator(_canonical_non_empty_string),
 ]
+
+
+class PlanConfirmationRequest(BaseModel):
+    """Bind a public confirmation to the exact plan the operator reviewed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    expected_plan_status: StrictCanonicalNonEmptyStr
+    expected_plan_revision: StrictInt = Field(ge=0)
+    expected_plan_fingerprint: StrictSha256
+
+
+class StepConfirmationRequest(PlanConfirmationRequest):
+    """Bind a step action to both the complete plan and target step snapshots."""
+
+    expected_step_fingerprint: StrictSha256
+
+
+class HumanPlanStepDecisionRequest(StepConfirmationRequest):
+    """Typed, snapshot-bound human decision for one governed plan gate."""
+
+    decision: Literal["approve", "reject"]
+    reason: StrictCanonicalNonEmptyStr = Field(max_length=4000)
 DataWorkspacePage = Literal[
     "overview",
     "fields",
@@ -214,42 +239,7 @@ class ReportFieldsUpdateRequest(BaseModel):
     text_values: dict[str, str] = Field(default_factory=dict)
 
 
-ManualStrategyWorkflow = Literal[
-    "strategy_project_context",
-    "strategy_sample_design_v2",
-    "univariate_candidate_analysis",
-    "cross_matrix_analysis",
-    "automatic_tree_candidate_build",
-    "univariate_candidate_refinement",
-    "scorecard_model_score_evidence_build",
-    "scorecard_band_build",
-    "scorecard_cutoff_selection",
-    "candidate_monthly_stability",
-    "voting_candidate_search",
-    "voting_candidate_build_from_search",
-    "cross_matrix_candidate_search",
-    "cross_matrix_candidate_build_from_search",
-    "cross_rule_search",
-    "cross_rule_candidate_build_from_search",
-    "interactive_tree_split_search",
-    "interactive_tree_auto_continuation",
-    "interactive_tree_revision",
-    "interactive_tree_frontier_group_materialization",
-    "interactive_tree_frontier_materialization",
-    "strategy_pool_add_candidate",
-    "strategy_pool_compile",
-    "strategy_pool_materialize",
-    "strategy_pool_remove_entry",
-    "strategy_pool_set_action",
-    "strategy_pool_reorder",
-    "strategy_pool_apply",
-    "strategy_pool_impact",
-    "strategy_impact_cube",
-    "strategy_pool_validation",
-    "strategy_pool_stability",
-    "strategy_dsl_delivery",
-    "strategy_report_bundle_v2",
-]
+ManualStrategyWorkflow = Literal[*MANUAL_STANDARD_STRATEGY_WORKFLOWS]
 
 
 def _finite_sample_v2_literal(value: str | int | float | bool):
@@ -754,6 +744,15 @@ class ManualScorecardModelScoreEvidenceInputs(BaseModel):
                 "sample_weight_col cannot also be a scorecard feature"
             )
         return self
+
+
+class ManualModelScoreComparisonV2Inputs(BaseModel):
+    """Business slice only; evidence identity and CAS stay server-owned."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    population: Literal["approval", "risk"]
+    partition: Literal["overall", "development", "validation", "oot"]
 
 
 class ManualScorecardBandBuildInputs(BaseModel):
@@ -1712,6 +1711,9 @@ _MANUAL_UNIVARIATE_REFINEMENT_INPUTS = TypeAdapter(
 _MANUAL_SCORECARD_MODEL_SCORE_EVIDENCE_INPUTS = TypeAdapter(
     ManualScorecardModelScoreEvidenceInputs
 )
+_MANUAL_MODEL_SCORE_COMPARISON_V2_INPUTS = TypeAdapter(
+    ManualModelScoreComparisonV2Inputs
+)
 _MANUAL_SCORECARD_BAND_BUILD_INPUTS = TypeAdapter(
     ManualScorecardBandBuildInputs
 )
@@ -1855,6 +1857,11 @@ class ManualStrategyRequest(BaseModel):
             )
         elif self.workflow == "scorecard_model_score_evidence_build":
             _MANUAL_SCORECARD_MODEL_SCORE_EVIDENCE_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_model_score_comparison_v2":
+            _MANUAL_MODEL_SCORE_COMPARISON_V2_INPUTS.validate_python(
                 self.workflow_inputs,
                 strict=True,
             )
@@ -2135,7 +2142,72 @@ ManualAgentStrategyRequest = Annotated[
 ]
 
 
+class PortfolioSetupRequest(BaseModel):
+    """Human-owned portfolio semantics; never inferred from free text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    id_col: StrictCanonicalNonEmptyStr
+    snapshot_col: StrictCanonicalNonEmptyStr
+    bucket_col: StrictCanonicalNonEmptyStr
+    balance_col: StrictCanonicalNonEmptyStr
+    segment_col: StrictCanonicalNonEmptyStr
+    loss_state: StrictCanonicalNonEmptyStr
+    lgd: StrictRatio
+    horizon_months: StrictInt = Field(gt=0)
+    score_col: StrictCanonicalNonEmptyStr | None = None
+    experiment_id: StrictCanonicalNonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def _trend_contract_is_complete(self) -> Self:
+        if (self.score_col is None) != (self.experiment_id is None):
+            raise ValueError(
+                "score_col and experiment_id must be supplied together for trend analysis"
+            )
+        return self
+
+
+class LabelingSetupRequest(BaseModel):
+    """Source-bound human semantics for governed label construction."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        allow_inf_nan=False,
+    )
+
+    dataset_id: StrictCanonicalNonEmptyStr
+    expected_content_hash: StrictSha256
+    workspace_revision: StrictInt = Field(ge=0)
+    analysis_generation: StrictInt = Field(ge=0)
+    id_col: StrictCanonicalNonEmptyStr
+    mob_col: StrictCanonicalNonEmptyStr
+    cohort_col: StrictCanonicalNonEmptyStr
+    date_col: StrictCanonicalNonEmptyStr
+    as_of_date: StrictCanonicalNonEmptyStr
+    target_col: StrictCanonicalNonEmptyStr
+    observation_window: StrictInt = Field(ge=0)
+    performance_window: StrictInt = Field(gt=0)
+    at_mob: StrictInt = Field(gt=0)
+    rule_kind: Literal["dpd", "status"]
+    dpd_col: StrictCanonicalNonEmptyStr | None = None
+    threshold_dpd: StrictNonNegativeNumber | None = None
+    status_col: StrictCanonicalNonEmptyStr | None = None
+    threshold_status: StrictCanonicalNonEmptyStr | None = None
+    states: list[StrictCanonicalNonEmptyStr] | None = None
+
+    @model_validator(mode="after")
+    def _explicit_contract_is_complete_and_unmixed(self) -> Self:
+        # Keep HTTP validation and the deterministic tool on one canonical
+        # business contract. ValueError is surfaced by FastAPI as a typed 422.
+        LabelingContractRequest(**self.model_dump(mode="python"))
+        return self
+
+
 class AgentMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     content: str
     # Set only by an explicit UI control. The backend keeps the action as an
     # audit message but does not render it as if the user had typed "确认".
@@ -2151,6 +2223,14 @@ class AgentMessageRequest(BaseModel):
     # execution kernel as natural-language strategy requests. The free-text
     # content remains a user-visible action label, not executable business input.
     strategy_request: ManualAgentStrategyRequest | None = None
+    # Portfolio is a separate high-risk business contract. The user supplies
+    # all column roles and EL assumptions through a strict typed form; the Agent
+    # cannot infer these semantics from prose.
+    portfolio_request: PortfolioSetupRequest | None = None
+    # Label construction remains a high-risk workflow inside data processing.
+    # This strict, source-bound form builds a read-only proposal first; it never
+    # creates a plan until a later explicit human confirmation turn.
+    labeling_request: LabelingSetupRequest | None = None
     # Optional edited feature set from the §4 interactive screening table; when a
     # screening gate is confirmed this overrides the screen's proposed `selected`.
     selection: list[str] | None = None
@@ -2167,6 +2247,12 @@ class AgentMessageRequest(BaseModel):
     # The backend also checks the rendered plan's status, so an old overview
     # button cannot release a later gate on the same plan.
     expected_plan_id: str | None = None
+    # Exact rendered snapshot binding for plan/gate UI confirmations. IDs alone
+    # cannot detect same-plan, same-revision edits made in another tab.
+    expected_plan_status: StrictCanonicalNonEmptyStr | None = None
+    expected_plan_revision: StrictInt | None = Field(default=None, ge=0)
+    expected_plan_fingerprint: StrictSha256 | None = None
+    expected_step_fingerprint: StrictSha256 | None = None
 
 
 class AgentModelRequest(BaseModel):

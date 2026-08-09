@@ -20,6 +20,7 @@ import {
 } from "./js/agent-conversation-mount.js";
 import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createCreateTaskDialogController } from "./js/create-task-dialog.js";
+import { createValidationBatchCreateController } from "./js/validation-batch-create.js";
 import {
   bindDialogBackdropDismissal,
   createMaterialSourceController,
@@ -57,7 +58,22 @@ import { createTaskSearchController } from "./js/task-search.js";
 import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
+import {
+  createValidationBatchPanelController,
+  isValidationBatchTask,
+  parseTaskDeepLink,
+  preferredStartupTaskId,
+} from "./js/validation-batch.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
+import { createDataWorkspaceController } from "./js/v2/data_workspace_controller.js";
+import { createDataWorkspacePanel } from "./js/v2/data_workspace_panel.js";
+import {
+  createLabelingSetupPanel,
+} from "./js/v2/labeling_setup_panel.js";
+import {
+  createPortfolioSetupPanel,
+  portfolioTurnUsesDeterministicRoute,
+} from "./js/v2/portfolio_setup_panel.js";
 import { uploadDataset } from "./js/v2/api_v2.js";
 import {
   handleAdoptionConfirmClick as handleAdoptionConfirmClickController,
@@ -79,7 +95,12 @@ import {
   workflowMessageContentHtml,
 } from "./js/v2/workflow_error_card.js";
 import {
+  confirmationSnapshotsEqual,
+  createDriverGateApi,
+  driverGateActionable,
+  driverGatePendingClaimSignature,
   handleDriverConfirmClick as handleDriverConfirmClickController,
+  reconcileDriverGateSubmissions,
   renderDriverGateButton,
   submitDriverConfirm as submitDriverConfirmController,
 } from "./js/v2/driver_gate_confirm.js";
@@ -91,6 +112,7 @@ import {
 import {
   handleC1ConfirmClick as handleC1ConfirmClickController,
   handleC1PreviewClick as handleC1PreviewClickController,
+  handleC1RoleChange as handleC1RoleChangeController,
   handleDedupConfirmClick as handleDedupConfirmClickController,
   handleDedupExcludeClick as handleDedupExcludeClickController,
   handleJoinKeyConfirmClick as handleJoinKeyConfirmClickController,
@@ -175,6 +197,8 @@ import {
   explicitPetNoneStorageKey,
   metricOverviewCompleteStatuses,
   notebookReproducibilityCompleteStatuses,
+  petPositionStorageKey,
+  petPreferenceStorageKey,
   requiredMaterialRoles,
   resultScrollPositionsStorageKey,
   roleLabels,
@@ -196,6 +220,7 @@ import {
 let selectedTaskId = null;
 let selectedTask = null;
 let taskCache = [];
+const initialTaskDeepLink = parseTaskDeepLink(window.location.search);
 let lastMetricValues = {};
 let lastMetricValuesTaskId = null;
 let lastMetricTableSections = [];
@@ -257,6 +282,9 @@ let pendingTaskContentLoadTaskId = null;
 let taskContentSettleTimer = null;
 let latestNotebookSteps = [];
 let latestValidationInputContract = null;
+let latestValidationInputContractTaskId = "";
+let latestValidationInputContractContext = null;
+let validationInputContractLoadVersion = 0;
 let sidebarCollapsed = false;
 let sidebarSlideTimer = null;
 let scanAbortController = null;
@@ -290,6 +318,119 @@ const createTaskDialog = createCreateTaskDialogController({
   },
 });
 const materialBindingDialog = createMaterialBindingDialogController({ $, api });
+const validationBatchErrorTitle = "批次操作失败。";
+
+function restoreValidationBatchActionStatusAfterRecovery({ parentTaskId, message } = {}) {
+  const normalizedParentTaskId = String(parentTaskId || "");
+  if (!normalizedParentTaskId || selectedTaskId !== normalizedParentTaskId) return false;
+  const transientErrorSignature = signatureFromParts([
+    selectedTaskId,
+    validationBatchErrorTitle,
+    "error",
+    message || "",
+  ]);
+  if (renderSignatures.actionStatus !== transientErrorSignature) return false;
+  const snapshot = taskActionStatusSnapshot(selectedTask);
+  setActionStatus(snapshot.message, snapshot.kind, snapshot.detail);
+  return true;
+}
+
+const validationBatchPanelController = createValidationBatchPanelController({
+  api,
+  getElementById: $,
+  getSelectedTask: () => selectedTask,
+  deepLink: initialTaskDeepLink,
+  confirmStart: ({ status, itemCount }) => {
+    const continuingAfterContractReview = status === "awaiting_confirmation";
+    const continuingPartialBatch = status === "partial_failure";
+    return showPlatformConfirm({
+      title: continuingAfterContractReview
+        ? "确认已逐项核对输入合同？"
+        : continuingPartialBatch
+          ? "继续模型验证批次？"
+          : "启动模型验证批次？",
+      message: continuingAfterContractReview
+        ? "所有模型输入合同已逐项确认；平台不会自动启动，请确认继续按批次顺序运行。"
+        : continuingPartialBatch
+          ? "平台会重开失败或未完成项；已通过项及其审计记录会保留。"
+          : `平台将按顺序运行 ${itemCount || 0} 个模型；单项失败不会中断其余模型。`,
+      confirmText: continuingAfterContractReview ? "确认合同已核对并继续" : "确认启动",
+      cancelText: "取消",
+    });
+  },
+  openContract: async ({ parentTaskId, childTaskId, itemId, modelName, modelVersion }) => {
+    if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;
+    await loadValidationInputContract(childTaskId, {
+      parentTaskId,
+      item: { id: itemId, modelName, modelVersion },
+      throwOnError: true,
+    });
+  },
+  refreshParentTask: async ({ parentTaskId } = {}) => {
+    await refreshTasks();
+    renderChangedValidationViews();
+    if (!parentTaskId || selectedTaskId !== parentTaskId) return true;
+    return taskServerBusyAction(selectedTask) !== "validation_batch";
+  },
+  onRecovered: restoreValidationBatchActionStatusAfterRecovery,
+  onError: (message) => {
+    setActionStatus(validationBatchErrorTitle, "error", message);
+  },
+});
+const validationBatchCreateController = createValidationBatchCreateController({
+  api,
+  getElementById: $,
+  onCreated: async (payload) => {
+    const parentTaskId = payload && payload.batch ? payload.batch.parent_task_id : "";
+    if (!parentTaskId) throw new Error("批次创建响应缺少父任务 ID。");
+    await refreshTasks();
+    const parentTask = findTaskInCache(parentTaskId);
+    if (!parentTask) throw new Error("批次已创建，但任务列表中尚未找到父任务。");
+    selectTask(parentTask);
+  },
+});
+const dataWorkspaceController = createDataWorkspaceController();
+const dataWorkspacePanel = createDataWorkspacePanel({
+  getElementById: $,
+  controller: dataWorkspaceController,
+  resolveNavigationChoice: resolveDataWorkspaceNavigationChoice,
+  onError: reportDataWorkspaceError,
+});
+const labelingSetupPanel = createLabelingSetupPanel({
+  getElementById: $,
+  api,
+  workspaceController: dataWorkspaceController,
+  getSelectedTask: () => selectedTask,
+  getAgentMessages: () => agentMessages,
+  onMessages: (messages) => {
+    if (Array.isArray(messages)) agentMessages = messages;
+  },
+  onSubmitted: async () => {
+    renderAll();
+    await reloadDataWorkspace(selectedTaskId, { silent: true });
+    setActionStatus("标签构造口径已更新。", "success");
+  },
+  onError: (error) => {
+    setActionStatus("标签构造口径处理失败。", "error", String(error?.message || error || ""));
+  },
+});
+const portfolioSetupPanel = createPortfolioSetupPanel({
+  getElementById: $,
+  api,
+  getSelectedTask: () => selectedTask,
+  getAgentMessages: () => agentMessages,
+  onMessages: (messages) => {
+    if (Array.isArray(messages)) agentMessages = messages;
+  },
+  onSubmitted: async () => {
+    renderAll();
+    await reloadDataWorkspace(selectedTaskId, { silent: true });
+    setActionStatus("组合口径已校验，请确认逾期桶由好到坏的顺序。", "success");
+  },
+  onError: (error) => {
+    setActionStatus("组合分析口径提交失败。", "error", String(error?.message || error || ""));
+  },
+});
 const agentMemoryPanel = createAgentMemoryPanelController({
   $,
   api,
@@ -328,6 +469,20 @@ const planRailController = createPlanRailController({
   loadAgentMessages,
   renderAll,
   fillComposer: focusAgentComposerForIntervene,
+});
+const driverGateApi = createDriverGateApi({
+  api,
+  getLocalBusyAction: (taskId) => taskBusyActions.get(taskId) || "",
+  setDriverExecutionBusy: (active, taskId) => setBusy(
+    active ? "driver_execute" : null,
+    active ? "正在执行下一步…" : "",
+    taskId,
+  ),
+  onSubmissionStateChange: (binding) => {
+    if (selectedTaskId !== binding.taskId) return;
+    renderAgentConversation();
+    renderWorkflowStepper({ force: true });
+  },
 });
 const strategyCandidateLabController = createStrategyCandidateLabController({
   $,
@@ -404,69 +559,8 @@ const restoreLayoutWidths = layoutResizeController.restoreLayoutWidths;
 const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);
 const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);
 const petReactionMoods = new Set(["success", "failed", "complete", "review"]);
-
-const petDefinitions = {
-  naitang: {
-    name: "蛋黄",
-    label: "奶油色长毛蓝眼猫，黑色领结",
-    kind: "spritesheet",
-    asset: "static/pets/naitang/spritesheet.webp",
-  },
-  xiaojiu: {
-    name: "小九",
-    label: "贪吃、呆萌、胆小的小猫",
-    kind: "spritesheet",
-    asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f",
-  },
-  auditbot: {
-    name: "MARVIS",
-    label: "3D 玩具审计机器人，青色护目镜眼睛和铜色耳机",
-    kind: "spritesheet",
-    asset: "static/pets/auditbot/spritesheet.webp",
-  },
-  "auditbot-pro": {
-    name: "MARVIS Pro",
-    label: "专业风格 3D 审计机器人",
-    kind: "spritesheet",
-    asset: "static/pets/auditbot-pro/spritesheet.webp",
-  },
-  "auditbot-poly": {
-    name: "MARVIS Poly",
-    label: "低多边形硬表面审计机器人",
-    kind: "spritesheet",
-    asset: "static/pets/auditbot-poly/spritesheet.webp",
-  },
-  "auditbot-ink": {
-    name: "MARVIS Ink",
-    label: "技术线稿风格审计机器人",
-    kind: "spritesheet",
-    asset: "static/pets/auditbot-ink/spritesheet.webp",
-  },
-  "auditbot-clay": {
-    name: "MARVIS Clay",
-    label: "黏土与乙烯基质感审计机器人",
-    kind: "spritesheet",
-    asset: "static/pets/auditbot-clay/spritesheet.webp",
-  },
-  "auditbot-comic": {
-    name: "MARVIS Comic",
-    label: "漫画描边风格审计机器人",
-    kind: "spritesheet",
-    asset: "static/pets/auditbot-comic/spritesheet.webp",
-  },
-  "auditbot-pixel": {
-    name: "MARVIS Pixel",
-    label: "像素风审计机器人",
-    kind: "spritesheet",
-    asset: "static/pets/auditbot-pixel/spritesheet.webp",
-  },
-};
-
-const legacyPetPreferences = {
-  danhuang: "naitang",
-  buou: "xiaojiu",
-  "ragdoll-cat": "xiaojiu",
-};
+const petCatalog = globalThis.MarvisPetCatalog;
+const petDefinitions = petCatalog.definitions;
 
 executionEnvironmentSettings = { ...defaultExecutionEnvironment };
 
@@ -493,6 +587,7 @@ function taskServerBusyAction(task = selectedTask) {
   // every other long-running kind below.
   if (kind === "driver") return "agent";
   if (kind === "join") return "join";
+  if (kind === "validation_batch") return "validation_batch";
   if (kind === "pipeline" || kind === "notebook") return "notebook";
   if (kind === "metrics") return "metrics";
   if (kind === "report") return "report";
@@ -683,12 +778,20 @@ function openTaskDialog(taskType = defaultTaskType) {
 }
 
 function openTaskDialogFromCard(event) {
+  const card = event.target.closest("[data-task-kind]");
+  if (card?.dataset.taskKind === "validation_batch") {
+    event.preventDefault();
+    validationBatchCreateController.open();
+    return;
+  }
   createTaskDialog.openTaskDialogFromCard(event);
 }
 
 function openTaskTypeWelcome() {
   const taskDialog = $("taskDialog");
   if (taskDialog?.open) closeTaskDialog();
+  const batchCreateDialog = $("validationBatchCreateDialog");
+  if (batchCreateDialog?.open) validationBatchCreateController.close();
   if (selectedTaskId || selectedTask) {
     deselectCurrentTask();
     return;
@@ -1094,15 +1197,13 @@ function petMoodFromTask() {
 }
 
 function normalizePetPreference(value) {
-  if (value === "none") return "none";
-  const normalized = legacyPetPreferences[value] || value;
-  return petDefinitions[normalized] ? normalized : defaultPetPreference;
+  return petCatalog.normalizePreference(value);
 }
 
 function persistPetPreference(value, explicitNone = false) {
   try {
-    localStorage.setItem("marvis_pet", value);
-    if (value === "none" && explicitNone) {
+    localStorage.setItem(petPreferenceStorageKey, value);
+    if (value === petCatalog.noneId && explicitNone) {
       localStorage.setItem(explicitPetNoneStorageKey, "1");
     } else {
       localStorage.removeItem(explicitPetNoneStorageKey);
@@ -1126,18 +1227,10 @@ function applyPetPreference(value, options = {}) {
 
 function restorePetPreference() {
   try {
-    const stored = localStorage.getItem("marvis_pet");
+    const stored = localStorage.getItem(petPreferenceStorageKey);
     const explicitNone = localStorage.getItem(explicitPetNoneStorageKey) === "1";
-    if (!stored || (stored === "none" && !explicitNone)) {
-      applyPetPreference(defaultPetPreference, { persist: stored === "none" });
-      return;
-    }
-    if (stored === "none") {
-      applyPetPreference("none", { persist: false });
-      return;
-    }
-    const normalized = normalizePetPreference(stored);
-    applyPetPreference(normalized, { persist: normalized !== stored });
+    const normalized = petCatalog.resolveStoredPreference(stored, explicitNone);
+    applyPetPreference(normalized, { persist: Boolean(stored) && normalized !== stored });
   } catch (_) {
     applyPetPreference(defaultPetPreference, { persist: false });
   }
@@ -1160,7 +1253,7 @@ function savePetPosition(left, top) {
     const workspace = $("validationWorkspace")?.getBoundingClientRect();
     const payload = { left, top };
     if (workspace) payload.workspaceOffsetLeft = left - workspace.left;
-    localStorage.setItem("marvis_pet_position", JSON.stringify(payload));
+    localStorage.setItem(petPositionStorageKey, JSON.stringify(payload));
   } catch (_) {
     // Drag position persistence is optional in restricted notebook browsers.
   }
@@ -1168,7 +1261,7 @@ function savePetPosition(left, top) {
 
 function restorePetPosition() {
   try {
-    const stored = JSON.parse(localStorage.getItem("marvis_pet_position") || "{}");
+    const stored = JSON.parse(localStorage.getItem(petPositionStorageKey) || "{}");
     const workspace = $("validationWorkspace")?.getBoundingClientRect();
     const storedLeft =
       workspace && Number.isFinite(stored.workspaceOffsetLeft)
@@ -1265,7 +1358,7 @@ function renderPetState() {
   const sticker = $("petSticker");
   if (!pet || !sticker) return;
 
-  const definition = petDefinitions[petPreference];
+  const definition = petPreference === petCatalog.noneId ? null : petDefinitions[petPreference];
   pet.classList.toggle("hidden", !definition);
   pet.dataset.petId = petPreference;
   if (!definition) {
@@ -1420,7 +1513,11 @@ function setExecutionEnvironmentStatus(message, kind = "info") {
   status.className = `status ${kind}`;
 }
 
-function actionStatusPill(message, kind) {
+function actionStatusPill(
+  message,
+  kind,
+  task = typeof selectedTask !== "undefined" ? selectedTask : null,
+) {
   if (!message) return null;
   if (kind === "error") {
     return /复核/.test(message)
@@ -1429,8 +1526,23 @@ function actionStatusPill(message, kind) {
   }
   if (kind === "stopped") return { label: "停止", tone: "neutral" };
   if (kind === "busy") return { label: "进行中", tone: "run" };
-  if (kind === "success") return { label: "已完成", tone: "ok" };
-  if (kind === "info" && /(?:等待|待).*确认/.test(message)) {
+  if (kind === "success") {
+    if (taskStopped(task)) return { label: "停止", tone: "neutral" };
+    const planSnapshot = task && taskUsesPlanRail(task)
+      ? taskPlanWorkflowStatusSnapshot(task)
+      : null;
+    const wholeTaskComplete = task
+      ? (taskUsesPlanRail(task)
+        ? ["已完成", "待复核"].includes(String(planSnapshot?.label || ""))
+        : ["succeeded", "review_required"].includes(String(task?.status || "")))
+      : true;
+    if (wholeTaskComplete) return { label: "已完成", tone: "ok" };
+    if (/(?:等待|请).*确认|待确认/.test(message)) {
+      return { label: "待确认", tone: "review" };
+    }
+    return { label: "待继续", tone: "review" };
+  }
+  if (kind === "info" && /(?:等待|待|请).*确认/.test(message)) {
     return { label: "待确认", tone: "review" };
   }
   return { label: "待处理", tone: "neutral" };
@@ -1459,17 +1571,19 @@ function setActionErrorDetail(message = "", kind = "info") {
 }
 
 function setActionStatus(message, kind = "info", detail = "") {
+  const info = actionStatusPill(message, kind, selectedTask);
   const nextSignature = signatureFromParts([
     selectedTaskId || "",
     message || "",
     kind || "info",
     detail || "",
+    info?.label || "",
+    info?.tone || "",
   ]);
   if (renderSignatures.actionStatus === nextSignature) return;
   renderSignatures.actionStatus = nextSignature;
 
   const pill = $("actionStatus");
-  const info = actionStatusPill(message, kind);
   if (pill) {
     pill.textContent = info ? info.label : "";
     pill.className = `task-pill ${info ? info.tone : ""}`.trim();
@@ -1650,6 +1764,13 @@ function taskActionStatusSnapshot(task = selectedTask) {
   if (task.active_job_kind === "plan") {
     return { message: "计划执行进行中。", kind: "busy", detail: "当前步骤：执行已确认计划。" };
   }
+  if (task.active_job_kind === "validation_batch") {
+    return {
+      message: "批次模型验证进行中。",
+      kind: "busy",
+      detail: "平台正在按顺序处理批次中的模型。",
+    };
+  }
   // REL-1/UX-1: V2 driver-turn task (data_join/feature_analysis/modeling/
   // strategy/vintage) job — these task types don't carry the V1.1 validation
   // task.status values the switch below keys on, so without this the busy pill
@@ -1657,8 +1778,20 @@ function taskActionStatusSnapshot(task = selectedTask) {
   if (task.active_job_kind === "driver") {
     return { message: "正在执行下一步…", kind: "busy", detail: "当前步骤：执行工作流任务。" };
   }
+  const usesPlanWorkflow = typeof taskUsesPlanRail === "function" && taskUsesPlanRail(task);
   const workflowSnapshot = taskPlanWorkflowStatusSnapshot(task);
   if (workflowSnapshot) return workflowSnapshot;
+  // Driver/portfolio task.status reuses the shared task record and can look
+  // terminal after a setup/contract sub-stage. Until an authoritative plan or
+  // workflow_status says `done`, never feed that value into the validation-only
+  // switch below (which would claim the whole task/report is complete).
+  if (usesPlanWorkflow) {
+    return {
+      message: "等待下一步确认。",
+      kind: "info",
+      detail: "请在中间信息流完成当前工作流输入或确认。",
+    };
+  }
   switch (task.status) {
     case "created":
       return { message: "任务已创建。", kind: "info", detail: "当前步骤：等待材料识别。" };
@@ -1735,6 +1868,18 @@ function statusLabel(status) {
   return statusLabels[status] || status || "未知";
 }
 
+function planWorkflowCompletionIsUnproven(task, planSnapshot) {
+  if (planSnapshot || !taskUsesPlanRail(task)) return false;
+  return [
+    "scanned",
+    "configured",
+    "executed",
+    "writing_artifacts",
+    "succeeded",
+    "review_required",
+  ].includes(String(task?.status || ""));
+}
+
 function taskPlanWorkflowStatusSnapshot(task) {
   if (
     typeof taskUsesPlanRail === "function"
@@ -1751,6 +1896,10 @@ function taskStatusLabel(task) {
   if (taskStopped(task)) return "停止";
   const planSnapshot = taskPlanWorkflowStatusSnapshot(task);
   if (planSnapshot?.label) return planSnapshot.label;
+  if (
+    typeof planWorkflowCompletionIsUnproven === "function"
+    && planWorkflowCompletionIsUnproven(task, planSnapshot)
+  ) return "待确认";
   return statusLabel(task?.status);
 }
 
@@ -1766,6 +1915,10 @@ function taskStatusTone(task) {
   if (taskStopped(task)) return "";
   const planSnapshot = taskPlanWorkflowStatusSnapshot(task);
   if (planSnapshot) return planSnapshot.tone || "";
+  if (
+    typeof planWorkflowCompletionIsUnproven === "function"
+    && planWorkflowCompletionIsUnproven(task, planSnapshot)
+  ) return "";
   if (task?.status === "writing_artifacts") {
     return task.active_job_kind === "report" ? "run" : "success";
   }
@@ -1786,6 +1939,10 @@ function shouldShowReproducibilitySection() {
 }
 
 function renderReproducibilitySectionVisibility() {
+  if (selectedTaskIsValidationBatch()) {
+    $("notebookSection")?.classList.add("hidden");
+    return;
+  }
   // Driver tasks (data_join / feature / modeling) have no validation notebook
   // section — they run through the conversation + plan rail.
   if (taskUsesPlanRail(selectedTask)) {
@@ -1809,6 +1966,10 @@ function shouldShowMetricSection() {
 }
 
 function renderMetricSectionVisibility() {
+  if (selectedTaskIsValidationBatch()) {
+    $("metricSection")?.classList.add("hidden");
+    return;
+  }
   // Driver tasks render metrics inline in the conversation, not in the validation
   // metric section.
   if (taskUsesPlanRail(selectedTask)) {
@@ -2776,6 +2937,7 @@ function findTaskInCache(taskId) {
 
 function ensureActiveTaskProgressPolling(task = selectedTask) {
   const taskId = task?.id || selectedTaskId;
+  if (isValidationBatchTask(task)) return;
   if (!taskId || !taskServerBusyAction(task)) return;
   if (progressPolls.has(taskId)) return;
   pollValidationProgress(terminalTaskStatuses, taskId, { background: true }).catch(() => null);
@@ -2787,6 +2949,10 @@ function runModeLabel(mode) {
 
 function selectedTaskIsAgentMode(task = selectedTask) {
   return task?.run_mode === "agent";
+}
+
+function selectedTaskIsValidationBatch(task = selectedTask) {
+  return isValidationBatchTask(task);
 }
 
 function selectedTaskIsRiskAnalysisAgent(task = selectedTask) {
@@ -2807,6 +2973,14 @@ function selectedTaskNeedsManualRiskIntake(
 ) {
   if (task?.run_mode !== "manual" || task?.task_type !== "vintage") return false;
   return latestRiskAnalysisIntakePhase(messages) !== "ready";
+}
+
+function selectedTaskNeedsDeterministicPortfolioTurn(
+  task = selectedTask,
+  messages = agentMessages,
+) {
+  if (task?.task_type !== "portfolio") return false;
+  return portfolioTurnUsesDeterministicRoute(task, messages);
 }
 
 function syncRiskMaterialUploadControl() {
@@ -3040,6 +3214,11 @@ function setTaskHeroCollapsed(collapsed) {
   const hero = $("taskHero");
   if (!hero) return;
   hero.classList.toggle("is-collapsed", collapsed);
+  const details = $("taskHeroDetails");
+  if (details) {
+    details.setAttribute("aria-hidden", collapsed ? "true" : "false");
+    details.toggleAttribute("inert", collapsed);
+  }
   const toggle = $("taskHeroToggle");
   if (toggle) {
     const label = collapsed ? "展开任务详情" : "收起任务详情";
@@ -3618,6 +3797,14 @@ function refreshWorkflowStepperElapsedTimes() {
 function renderWorkflowStepper({ force = false } = {}) {
   const progressRail = $("progressRail");
   const railTitle = document.querySelector("#progressRail .step-rail-head h3");
+  if (selectedTaskIsValidationBatch()) {
+    progressRail?.classList.add("hidden");
+    const stepper = $("workflowStepper");
+    if (stepper) stepper.innerHTML = "";
+    renderSignatures.workflowStepper = "validation_batch";
+    return;
+  }
+  progressRail?.classList.remove("hidden");
   if (planRailController.render({ force, renderSignatures })) {
     return;
   }
@@ -3761,7 +3948,7 @@ function applyTaskFilters(tasks = taskCache) {
     .sort(compareTasks);
 }
 
-// Layered, multi-tone glyphs for the six task kinds — one shared source used by
+// Layered, multi-tone glyphs for task kinds — one shared source used by
 // the sidebar rows and the task-hero snapshot. Mirrors the welcome-card icons
 // in index.html; classes (back/mid/cut/cs/cst/ln) are themed in styles.css.
 const TASK_KIND_GLYPHS = {
@@ -3775,8 +3962,12 @@ const TASK_KIND_GLYPHS = {
     '<rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2.6"></rect><path class="mid" d="M2.6 8 V7 Q2.6 4.6 5 4.6 H19 Q21.4 4.6 21.4 7 V8 Z"></path><circle class="cut" cx="5.5" cy="6.2" r="0.82"></circle><circle class="cut" cx="7.7" cy="6.2" r="0.82"></circle><circle class="cut" cx="9.9" cy="6.2" r="0.82"></circle><path class="cs" d="M8.2 11.2 11 13.8 8.2 16.4"></path><rect class="cut" x="12" y="14.9" width="4" height="1.5" rx="0.75"></rect>',
   validation:
     '<rect class="back" x="7" y="3.5" width="11.5" height="16" rx="2.2"></rect><rect x="5" y="5" width="11.5" height="15.5" rx="2.2"></rect><rect class="mid" x="7.75" y="3.7" width="6" height="2.2" rx="1.1"></rect><rect class="cut" x="7.4" y="9" width="6.6" height="1.2" rx="0.6"></rect><rect class="cut" x="7.4" y="12" width="6.6" height="1.2" rx="0.6"></rect><rect class="cut" x="7.4" y="15" width="4.4" height="1.2" rx="0.6"></rect><circle class="cut" cx="16.6" cy="17.6" r="4.9"></circle><circle cx="16.6" cy="17.6" r="4"></circle><path class="cst" d="M14.8 17.7 16 18.9 18.4 16.4"></path>',
+  validation_batch:
+    '<rect class="back" x="3.5" y="5" width="14" height="14" rx="2.2"></rect><rect class="mid" x="6.5" y="3" width="14" height="14" rx="2.2"></rect><rect x="5" y="6.5" width="14" height="14" rx="2.2"></rect><path class="cs" d="M8 10h7M8 13.5h7M8 17h4"></path><circle class="cut" cx="18" cy="17.7" r="4"></circle><path class="cst" d="m16.4 17.7 1.1 1.1 2.1-2.2"></path>',
   strategy:
     '<rect class="back" x="4" y="13.8" width="16" height="4.6" rx="1.8"></rect><rect class="mid" x="4" y="9.6" width="16" height="4.6" rx="1.8"></rect><rect x="4" y="5" width="16" height="5.6" rx="1.8"></rect><rect class="cut" x="6.6" y="6.2" width="7.2" height="1.3" rx="0.65"></rect><rect class="cut" x="6.6" y="8.1" width="4.6" height="1.3" rx="0.65"></rect>',
+  portfolio:
+    '<circle class="back" cx="10" cy="12" r="7.2"></circle><path class="mid" d="M10 4.8a7.2 7.2 0 0 1 6.24 10.8L10 12Z"></path><path d="M11.5 3.5a8.7 8.7 0 0 1 7.53 13.05l-2.79-.95A7.2 7.2 0 0 0 10 4.8Z"></path><circle class="cut" cx="10" cy="12" r="2.35"></circle>',
 };
 
 function taskKindIconHtml(taskOrType = selectedTask, extraClass = "") {
@@ -3842,7 +4033,7 @@ function createTaskRowShell(task) {
   row.className = "task-row" + (task.id === selectedTaskId ? " selected" : "");
   row.setAttribute("aria-current", task.id === selectedTaskId ? "true" : "false");
   row.innerHTML = taskRowInnerHtml(task);
-  row.onclick = () => selectTask(task);
+  row.onclick = () => requestTaskSelection(task);
 
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
@@ -3876,9 +4067,9 @@ function updateTaskRowShell(item, task) {
   const nextSignature = taskRowContentSignature(task);
   const row = item.querySelector(".task-row");
   // The click closure captures the task object; refresh it every tick so a
-  // click always fires selectTask with the latest task snapshot even when the
-  // visible signature is unchanged.
-  if (row) row.onclick = () => selectTask(task);
+  // click always requests the latest task snapshot through the workspace
+  // navigation guard even when the visible signature is unchanged.
+  if (row) row.onclick = () => requestTaskSelection(task);
   const deleteButton = item.querySelector(".delete-task-button");
   if (deleteButton) {
     deleteButton.onclick = (event) => {
@@ -4068,14 +4259,73 @@ function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } =
   reconcileTaskListGroups(list, taskListGroupPlan(tasks));
 }
 
+function reportDataWorkspaceError(error) {
+  const detail = error?.message || "数据工作区同步失败。";
+  if (Number(error?.status) === 412) {
+    setActionStatus("数据工作区版本冲突。", "error", detail);
+    return;
+  }
+  setActionStatus("数据工作区同步失败。", "error", detail);
+}
+
+async function resolveDataWorkspaceNavigationChoice() {
+  const saveFirst = await showPlatformConfirm({
+    title: "数据工作区有未保存修改",
+    message: "切换任务前保存当前字段语义吗？",
+    confirmText: "保存并切换",
+    cancelText: "其他选项",
+  });
+  if (saveFirst) return "save";
+  // <dialog> dispatches its close event after the first confirmation promise
+  // resolves. Opening the discard confirmation in the same turn lets that
+  // stale close event immediately close the new dialog. Cross one render frame
+  // so the second choice remains visible and the user can still abort the task
+  // switch without losing the draft.
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  const discard = await showPlatformConfirm({
+    title: "放弃数据工作区修改？",
+    message: "放弃后，本次目标字段、字段角色和业务名称修改不会保存。",
+    confirmText: "放弃并切换",
+    cancelText: "留在当前任务",
+    tone: "danger",
+  });
+  return discard ? "discard" : "cancel";
+}
+
+async function reloadDataWorkspace(taskId = selectedTaskId, options = {}) {
+  const normalizedTaskId = String(taskId || "").trim();
+  if (!normalizedTaskId) {
+    dataWorkspacePanel.clear();
+    return false;
+  }
+  if (selectedTaskId !== normalizedTaskId) return false;
+  return dataWorkspacePanel.reload(normalizedTaskId, options);
+}
+
+async function requestTaskSelection(task) {
+  if (!task?.id) return false;
+  try {
+    return await dataWorkspacePanel.requestNavigation(async () => {
+      selectTask(task);
+      await dataWorkspacePanel.selectTask(task.id);
+    });
+  } catch (error) {
+    reportDataWorkspaceError(error);
+    return false;
+  }
+}
+
 function selectTask(task) {
   rememberResultScrollPosition();
   if (selectedTaskId === task.id && selectedTask) {
     selectedTask = task;
     rememberSelectedTaskId(task.id);
+    void validationBatchPanelController.selectTask(task);
     renderCurrentTask();
     renderTaskList();
     strategyCandidateLabController.renderAvailability();
+    labelingSetupPanel.renderAvailability();
+    portfolioSetupPanel.renderAvailability();
     if (task.task_type === "strategy") {
       void strategyCandidateLabController.refresh(task.id, { silent: true });
     }
@@ -4094,6 +4344,7 @@ function selectTask(task) {
   ensureActiveTaskProgressPolling(task);
   renderMetricPreview({});
   renderStoredStateSummaries();
+  const validationBatchLoadPromise = validationBatchPanelController.selectTask(task);
   const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   runAction(async () => {
     try {
@@ -4101,10 +4352,12 @@ function selectTask(task) {
       await loadTaskEvidence();
       await loadReportFields();
       await loadAgentMessages(task.id);
+      await validationBatchLoadPromise;
       await candidateLabLoadPromise;
     } finally {
       renderAll();
       await restoreResultScrollPositionAfterRender(task.id);
+      validationBatchPanelController.focusRequestedItem();
       finishTaskContentLoad(task.id);
     }
   }, { renderAfter: false });
@@ -4116,6 +4369,8 @@ function deselectCurrentTask() {
   selectedTaskId = null;
   selectedTask = null;
   rememberSelectedTaskId(null);
+  validationBatchPanelController.clear();
+  dataWorkspacePanel.clear();
   latestNotebookSteps = [];
   agentMessages = [];
   strategyCandidateLabController.clear();
@@ -4281,10 +4536,11 @@ function validationContractCandidates(contract, key) {
   return values;
 }
 
-function validationContractSelectHtml(contract, key, label) {
+function validationContractSelectHtml(contract, key, label, { requireExplicit = false } = {}) {
   const values = validationContractCandidates(contract, key);
   return [
-    `<label>${escapeHtml(label)}<select name="${escapeHtml(key)}">`,
+    `<label>${escapeHtml(label)}<select name="${escapeHtml(key)}"${requireExplicit ? " required" : ""}>`,
+    requireExplicit ? '<option value="" selected disabled>请选择候选值</option>' : "",
     ...values.map((value, index) => {
       const text = typeof value === "object" ? JSON.stringify(value) : String(value);
       return `<option value="${index}">${escapeHtml(text)}</option>`;
@@ -4294,7 +4550,10 @@ function validationContractSelectHtml(contract, key, label) {
 }
 
 function validationContractCandidateValue(form, contract, key) {
-  const index = Number(form.elements.namedItem(key)?.value || 0);
+  const rawIndex = form.elements.namedItem(key)?.value;
+  if (rawIndex === undefined || rawIndex === null || rawIndex === "") return undefined;
+  const index = Number(rawIndex);
+  if (!Number.isInteger(index) || index < 0) return undefined;
   return validationContractCandidates(contract, key)[index];
 }
 
@@ -4308,74 +4567,183 @@ function validationContractScalar(value) {
   }
 }
 
-function renderValidationInputContract(record) {
-  const panel = $("validationContractPanel");
+function renderValidationInputContract(record, options = {}) {
+  const taskId = String(options.taskId || selectedTaskId || "");
+  const parentTaskId = String(options.parentTaskId || "");
+  const item = options.item || null;
+  const panelId = options.panelId || (
+    parentTaskId ? "batchValidationContractPanel" : "validationContractPanel"
+  );
+  const panel = $(panelId);
   if (!panel) return;
-  latestValidationInputContract = record;
-  if (!usesPmmlScoringWorkflow() || !record) {
+  const batchMode = Boolean(parentTaskId);
+  const matchesWorkspace = batchMode
+    ? selectedTaskId === parentTaskId && selectedTaskIsValidationBatch()
+    : usesPmmlScoringWorkflow();
+  if (!record || !matchesWorkspace) {
     panel.classList.add("hidden");
     panel.innerHTML = "";
+    if (latestValidationInputContractContext?.panelId === panelId) {
+      latestValidationInputContract = null;
+      latestValidationInputContractTaskId = "";
+      latestValidationInputContractContext = null;
+    }
     return;
   }
+  latestValidationInputContract = record;
+  latestValidationInputContractTaskId = taskId;
+  latestValidationInputContractContext = {
+    taskId,
+    parentTaskId,
+    item,
+    panelId,
+  };
   panel.classList.remove("hidden");
+  const modelLabel = [item?.modelName, item?.modelVersion].filter(Boolean).join(" · ");
+  const batchHead = batchMode
+    ? [
+      '<div class="validation-batch-contract-head">',
+      '<div><span class="validation-batch-contract-eyebrow">BATCH CHILD INPUT CONTRACT</span>',
+      `<h4>确认验证字段${modelLabel ? ` · ${escapeHtml(modelLabel)}` : ""}</h4></div>`,
+      '<button type="button" class="button compact secondary" data-validation-contract-close>收起合同</button>',
+      "</div>",
+    ].join("")
+    : '<h4>确认验证字段</h4>';
   if (record.status === "ready") {
-    panel.innerHTML = '<h4>验证字段已确认</h4><p>契约已就绪，可以执行 PMML 打分测试。</p>';
+    if (batchMode) validationBatchPanelController.markContractConfirmed?.(taskId);
+    panel.innerHTML = batchMode
+      ? `${batchHead}<p>此模型的验证字段已经确认。</p>`
+      : '<h4>验证字段已确认</h4><p>契约已就绪，可以执行 PMML 打分测试。</p>';
     return;
   }
   if (record.status !== "pending_confirmation") {
-    panel.innerHTML = `<h4>验证字段暂不可确认</h4><p>${escapeHtml(record.status || "未知状态")}</p>`;
+    panel.innerHTML = batchMode
+      ? `${batchHead}<p>验证字段暂不可确认：${escapeHtml(record.status || "未知状态")}</p>`
+      : `<h4>验证字段暂不可确认</h4><p>${escapeHtml(record.status || "未知状态")}</p>`;
     return;
   }
   const contract = record.contract || {};
   const timeField = validationContractCandidates(contract, "time_col")[0] || "";
-  const timeGranularity = /date|day|dt/i.test(String(timeField)) ? "date" : "month";
+  const timeGranularity = batchMode
+    ? ""
+    : /date|day|dt/i.test(String(timeField)) ? "date" : "month";
   const algorithm = validationContractCandidates(contract, "algorithm")[0]
     || contract.pmml_manifest?.algorithm
     || "-";
+  const formContextAttributes = [
+    ` data-validation-contract-task-id="${escapeHtml(taskId)}"`,
+    ` data-validation-contract-parent-task-id="${escapeHtml(parentTaskId)}"`,
+    ` data-validation-contract-panel-id="${escapeHtml(panelId)}"`,
+  ].join("");
+  const explicitChoice = { requireExplicit: batchMode };
   panel.innerHTML = [
-    '<form id="validationContractForm">',
-    '<h4>确认验证字段</h4>',
-    `<p>已从 Notebook、PMML、样本和数据字典识别候选。算法：${escapeHtml(algorithm)}。请确认后继续。</p>`,
+    `<form id="validationContractForm"${formContextAttributes}>`,
+    batchHead,
+    batchMode
+      ? `<p>已从此模型的 Notebook、PMML、样本和数据字典识别候选。算法：${escapeHtml(algorithm)}。请逐项主动选择并提交；平台不会自动选择或确认。</p>`
+      : `<p>已从 Notebook、PMML、样本和数据字典识别候选。算法：${escapeHtml(algorithm)}。请确认后继续。</p>`,
     '<div class="validation-contract-grid">',
-    validationContractSelectHtml(contract, "target_col", "目标字段"),
+    validationContractSelectHtml(contract, "target_col", "目标字段", explicitChoice),
     '<label>坏样本值<input name="positive_label" value="1" /></label>',
     '<label>好样本值<input name="negative_label" value="0" /></label>',
-    validationContractSelectHtml(contract, "split_col", "样本划分字段"),
+    validationContractSelectHtml(contract, "split_col", "样本划分字段", explicitChoice),
     '<label>训练集取值<input name="split_train" value="train" /></label>',
     '<label>测试集取值<input name="split_test" value="test" /></label>',
     '<label>时间外样本取值<input name="split_oot" value="oot" /></label>',
-    validationContractSelectHtml(contract, "time_col", "时间字段"),
-    `<label>时间粒度<select name="time_granularity"><option value="date"${timeGranularity === "date" ? " selected" : ""}>日</option><option value="month"${timeGranularity === "month" ? " selected" : ""}>月</option></select></label>`,
-    validationContractSelectHtml(contract, "pmml_output_field", "PMML 分数字段"),
-    validationContractSelectHtml(contract, "model_params", "模型参数来源"),
-    validationContractSelectHtml(contract, "feature_metadata_selection", "特征元数据列"),
+    validationContractSelectHtml(contract, "time_col", "时间字段", explicitChoice),
+    `<label>时间粒度<select name="time_granularity"${batchMode ? " required" : ""}>${batchMode ? '<option value="" selected disabled>请选择时间粒度</option>' : ""}<option value="date"${timeGranularity === "date" ? " selected" : ""}>日</option><option value="month"${timeGranularity === "month" ? " selected" : ""}>月</option></select></label>`,
+    validationContractSelectHtml(contract, "pmml_output_field", "PMML 分数字段", explicitChoice),
+    validationContractSelectHtml(contract, "model_params", "模型参数来源", explicitChoice),
+    validationContractSelectHtml(contract, "feature_metadata_selection", "特征元数据列", explicitChoice),
     "</div>",
     '<div class="validation-contract-actions">',
-    '<button class="button primary" type="submit" data-validation-contract-submit>确认字段并继续</button>',
+    `<button class="button primary" type="submit" data-validation-contract-submit>${batchMode ? "确认此模型字段" : "确认字段并继续"}</button>`,
     '<span class="status" data-validation-contract-status></span>',
     "</div>",
     "</form>",
   ].join("");
+  if (batchMode) {
+    window.requestAnimationFrame(() => panel.scrollIntoView?.({ block: "nearest", behavior: "smooth" }));
+  }
 }
 
-async function loadValidationInputContract(taskId = selectedTaskId) {
-  if (!taskId || !usesPmmlScoringWorkflow()) return;
+async function loadValidationInputContract(taskId = selectedTaskId, options = {}) {
+  const parentTaskId = String(options.parentTaskId || "");
+  const batchMode = Boolean(parentTaskId);
+  if (!taskId || (!batchMode && !usesPmmlScoringWorkflow())) return null;
+  const loadVersion = ++validationInputContractLoadVersion;
+  const renderOptions = { ...options, taskId, parentTaskId };
+  if (batchMode && selectedTaskId === parentTaskId) {
+    const panel = $("batchValidationContractPanel");
+    panel?.classList.remove("hidden");
+    if (panel) panel.innerHTML = '<div class="validation-batch-loading" role="status">正在读取此模型的验证字段合同…</div>';
+  }
   try {
     const record = await api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`);
-    if (selectedTaskId === taskId) renderValidationInputContract(record);
-  } catch (_) {
+    if (loadVersion !== validationInputContractLoadVersion) return null;
+    if (batchMode) {
+      if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return null;
+      renderValidationInputContract(record, renderOptions);
+    } else if (selectedTaskId === taskId) {
+      renderValidationInputContract(record, renderOptions);
+    }
+    return record;
+  } catch (error) {
+    if (loadVersion !== validationInputContractLoadVersion) return null;
+    if (batchMode && selectedTaskId === parentTaskId) {
+      const panel = $("batchValidationContractPanel");
+      panel?.classList.remove("hidden");
+      if (panel) {
+        panel.innerHTML = `<div class="validation-batch-load-error" role="alert"><strong>验证字段合同读取失败</strong><span>${escapeHtml(error?.message || "请稍后重试。")}</span></div>`;
+      }
+    }
+    if (options.throwOnError) throw error;
     // The scan result remains the fallback until a contract record exists.
+    return null;
   }
 }
 
 async function submitValidationInputContract(form) {
   const record = latestValidationInputContract;
-  const taskId = selectedTaskId;
-  if (!record || !taskId || record.status !== "pending_confirmation") return;
+  const taskId = form.dataset.validationContractTaskId || selectedTaskId;
+  const parentTaskId = form.dataset.validationContractParentTaskId || "";
+  const context = latestValidationInputContractContext || {};
+  if (
+    !record
+    || !taskId
+    || latestValidationInputContractTaskId !== taskId
+    || record.status !== "pending_confirmation"
+  ) return;
+  if (parentTaskId) {
+    if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;
+  } else if (selectedTaskId !== taskId) {
+    return;
+  }
   const contract = record.contract || {};
-  const metadata = validationContractCandidateValue(form, contract, "feature_metadata_selection") || {};
   const status = form.querySelector("[data-validation-contract-status]");
   const button = form.querySelector("[data-validation-contract-submit]");
+  const candidateKeys = [
+    "target_col",
+    "split_col",
+    "time_col",
+    "pmml_output_field",
+    "model_params",
+    "feature_metadata_selection",
+  ];
+  const selectedCandidates = Object.fromEntries(
+    candidateKeys.map((key) => [key, validationContractCandidateValue(form, contract, key)]),
+  );
+  if (
+    parentTaskId
+    && (
+      candidateKeys.some((key) => selectedCandidates[key] === undefined)
+      || !form.elements.time_granularity.value
+    )
+  ) {
+    if (status) status.textContent = "请逐项选择所有候选字段和时间粒度。";
+    return;
+  }
+  const metadata = selectedCandidates.feature_metadata_selection || {};
   button.disabled = true;
   if (status) status.textContent = "正在校验字段…";
   try {
@@ -4383,19 +4751,19 @@ async function submitValidationInputContract(form) {
       method: "PUT",
       body: JSON.stringify({
         revision: record.revision,
-        target_col: validationContractCandidateValue(form, contract, "target_col"),
+        target_col: selectedCandidates.target_col,
         positive_label: validationContractScalar(form.elements.positive_label.value),
         negative_label: validationContractScalar(form.elements.negative_label.value),
-        split_col: validationContractCandidateValue(form, contract, "split_col"),
+        split_col: selectedCandidates.split_col,
         split_value_mapping: {
           train: validationContractScalar(form.elements.split_train.value),
           test: validationContractScalar(form.elements.split_test.value),
           oot: validationContractScalar(form.elements.split_oot.value),
         },
-        time_col: validationContractCandidateValue(form, contract, "time_col"),
+        time_col: selectedCandidates.time_col,
         time_granularity: form.elements.time_granularity.value,
-        pmml_output_field: validationContractCandidateValue(form, contract, "pmml_output_field"),
-        model_params: validationContractCandidateValue(form, contract, "model_params") || {},
+        pmml_output_field: selectedCandidates.pmml_output_field,
+        model_params: selectedCandidates.model_params || {},
         metadata_sheet: metadata.metadata_sheet ?? null,
         feature_col: metadata.feature_col,
         category_col: metadata.category_col,
@@ -4403,8 +4771,34 @@ async function submitValidationInputContract(form) {
         transformations: contract.transformations || [],
       }),
     });
+    if (parentTaskId) {
+      if (selectedTaskId !== parentTaskId) return;
+      await validationBatchPanelController.selectTask(selectedTask, { force: true });
+      if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;
+      const remaining = validationBatchPanelController.markContractConfirmed(taskId);
+      if (latestValidationInputContractTaskId === taskId) {
+        renderValidationInputContract(confirmed, context);
+      }
+      const modelLabel = [context.item?.modelName, context.item?.modelVersion]
+        .filter(Boolean)
+        .join(" · ");
+      if (remaining > 0) {
+        setActionStatus(
+          `${modelLabel || "当前模型"}合同已确认，还有 ${remaining} 个模型需要确认。`,
+          "success",
+          "请继续点击其他待确认模型的“确认合同”。",
+        );
+      } else {
+        setActionStatus(
+          "当前批次所有待确认合同均已确认。",
+          "success",
+          "请点击“逐项确认合同后继续”，平台不会自动启动批次。",
+        );
+      }
+      return;
+    }
     if (selectedTaskId !== taskId) return;
-    renderValidationInputContract(confirmed);
+    renderValidationInputContract(confirmed, { taskId });
     setActionStatus("验证字段已确认，正在继续 PMML 打分测试。", "success");
     if (selectedTaskIsAgentMode()) {
       const input = $("agentComposerInput");
@@ -4419,6 +4813,14 @@ async function submitValidationInputContract(form) {
 }
 
 if (typeof document !== "undefined") {
+  document.addEventListener("click", (event) => {
+    if (!event.target?.closest?.("[data-validation-contract-close]")) return;
+    validationInputContractLoadVersion += 1;
+    renderValidationInputContract(null, {
+      panelId: "batchValidationContractPanel",
+      parentTaskId: selectedTaskId,
+    });
+  });
   document.addEventListener("submit", (event) => {
     const form = event.target?.closest?.("#validationContractForm");
     if (!form) return;
@@ -4805,6 +5207,10 @@ function scanSummaryHasResult() {
 function updateAgentScanSectionVisibility() {
   const scanSection = $("scanSection");
   if (!scanSection) return;
+  if (selectedTaskIsValidationBatch()) {
+    scanSection.classList.add("hidden");
+    return;
+  }
   // Driver tasks (data_join / feature / modeling) never use the validation
   // scan→notebook→metrics flow — they drive everything through the conversation +
   // plan rail. Hide the scan section entirely so a manual driver task doesn't show
@@ -4835,7 +5241,9 @@ function renderStoredStateSummaries() {
   const scanEmptyText = selectedTaskId ? "点击\"扫描材料\"开始" : "选择任务后点击\"扫描材料\"开始";
   $("scanSummary").className = "result-summary empty";
   $("scanSummary").textContent = selectedTaskIsAgentMode() ? "" : scanEmptyText;
+  validationInputContractLoadVersion += 1;
   renderValidationInputContract(null);
+  renderValidationInputContract(null, { panelId: "batchValidationContractPanel" });
   updateAgentScanSectionVisibility();
   resetEvidenceSummaries();
   updateAgentReportSectionVisibility();
@@ -4844,6 +5252,7 @@ function renderStoredStateSummaries() {
 
 function renderAll() {
   renderCurrentTask({ force: true });
+  validationBatchPanelController.renderVisibility(selectedTask);
   renderReproducibilitySectionVisibility();
   renderMetricSectionVisibility();
   renderWorkflowStepper({ force: true });
@@ -4851,6 +5260,8 @@ function renderAll() {
   renderSettingsState();
   renderAgentConversation();
   strategyCandidateLabController.renderAvailability();
+  labelingSetupPanel.renderAvailability();
+  portfolioSetupPanel.renderAvailability();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -4860,6 +5271,7 @@ function renderAll() {
 // keep their existing nodes (and animations) intact.
 function renderChangedValidationViews() {
   renderCurrentTask();
+  validationBatchPanelController.renderVisibility(selectedTask);
   renderReproducibilitySectionVisibility();
   renderMetricSectionVisibility();
   renderWorkflowStepper();
@@ -4867,6 +5279,8 @@ function renderChangedValidationViews() {
   renderSettingsState();
   renderAgentConversation();
   strategyCandidateLabController.renderAvailability();
+  labelingSetupPanel.renderAvailability();
+  portfolioSetupPanel.renderAvailability();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -4995,6 +5409,8 @@ function autoAcceptLabel(taskType) {
       return "自动分析";
     case "modeling":
       return "自动建模";
+    case "portfolio":
+      return "自动组合分析";
     default:
       return "自动审查";
   }
@@ -5088,6 +5504,7 @@ function renderAgentConversation() {
       stepStatuses: agentMessages.map((message) => [
         String(message?.id || ""),
         String(driverManualMessageStepStatus(message)),
+        driverGateMessageInteractionState(message),
       ]),
     }
     : null;
@@ -5202,6 +5619,9 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
           }
           : null,
         is_latest_gate: Boolean(latestGateId) && String(message?.id || "") === latestGateId,
+        gate_actionable: (metadata.kind === "gate" || metadata.join_c1)
+          ? driverGateMessageIsActionable(message)
+          : false,
         memory_references: Array.isArray(metadata.memory_references)
           ? metadata.memory_references.map((reference) => [
             reference.id || "",
@@ -5344,6 +5764,7 @@ function createAgentFrozenSnapshotElement(snapshot) {
 
 function agentPersistentTimelineElementIds() {
   return [
+    "batchOverviewPanel",
     "scanSection",
     "notebookSection",
     "metricSection",
@@ -5447,10 +5868,9 @@ function renderAgentTimeline(messages = []) {
     createFrozenSnapshotElement: createAgentFrozenSnapshotElement,
     persistentElementIds: agentPersistentTimelineElementIds(),
     agentStageLabel,
-    // Agent mode has exactly one continuation channel: natural-language chat.
-    // Manual driver mode never reaches this timeline (it uses
-    // renderDriverManualAnalysis), so mark every message rendered here as
-    // conversation-only and keep gate widgets evidence-only.
+    // Agent mode keeps natural-language chat, while agentMessageHtml promotes
+    // only the latest typed gate to an interactive control. Historical gates
+    // remain conversation-only evidence so stale actions cannot be replayed.
     agentMessageHtml: (message, labelStage, options = {}) => agentMessageHtml(
       message,
       labelStage,
@@ -5483,6 +5903,58 @@ function driverManualMessageStepStatus(message) {
   )?.status || "";
 }
 
+function driverGateMessageInteractionState(message) {
+  const metadata = message?.metadata || {};
+  const taskId = selectedTaskId || "";
+  const planId = String(metadata.plan_id || "");
+  const stepId = String(metadata.step_id || "");
+  const localBusyAction = String(taskBusyActions.get(taskId) || "");
+  const localBusy = ["driver_execute", "agent"].includes(localBusyAction);
+  const currentTask = findTaskInCache(taskId) || selectedTask;
+  const serverBusy = Boolean(currentTask?.active_job_kind);
+
+  // C1 material-role assignment can be opened before a plan exists. It has no
+  // CAS binding yet, but it must still respect task-level execution ownership.
+  if (!planId || !stepId) {
+    const prePlanC1 = Boolean(metadata.join_c1) && !planId && !stepId;
+    return {
+      actionable: prePlanC1 && !localBusy && !serverBusy,
+      localBusy,
+      serverBusy,
+      pendingClaim: "",
+      stepStatus: "",
+    };
+  }
+
+  const step = planRailController.planStep(metadata, taskId);
+  const stepStatus = String(step?.status || driverManualMessageStepStatus(message));
+  const messageSnapshot = metadata.confirmation_snapshot || {};
+  const snapshot = step?.confirmation_snapshot || {};
+  const snapshotCurrent = confirmationSnapshotsEqual(messageSnapshot, snapshot, {
+    requireStep: true,
+  });
+  const gate = {
+    taskId,
+    planId,
+    stepId,
+    stepStatus,
+    snapshot,
+    localBusy,
+    serverBusy,
+  };
+  return {
+    actionable: snapshotCurrent && driverGateActionable(gate),
+    localBusy,
+    serverBusy,
+    pendingClaim: driverGatePendingClaimSignature(gate),
+    stepStatus,
+  };
+}
+
+function driverGateMessageIsActionable(message) {
+  return driverGateMessageInteractionState(message).actionable;
+}
+
 function driverManualAnalysisHtml(messages) {
   return driverManualAnalysisHtmlController(messages, {
     renderAgentMarkdown,
@@ -5508,6 +5980,7 @@ function driverManualAnalysisHtml(messages) {
     // message's step against the current plan so recovered failures cannot steal
     // the interactive slot from the newly-opened gate.
     stepStatus: driverManualMessageStepStatus,
+    isGateActionable: driverGateMessageIsActionable,
   });
 }
 
@@ -5530,6 +6003,7 @@ function renderDriverManualAnalysis(messages) {
       String(message?.id || ""),
       String(metadata.step_id || metadata.failure_envelope?.failed_step_id || ""),
       String(driverManualMessageStepStatus(message)),
+      driverGateMessageInteractionState(message),
     ];
   });
   const signature = JSON.stringify({
@@ -5865,6 +6339,24 @@ function agentMessageStrategyClarificationHtml(message, options = {}) {
   return renderStrategyClarification(message, options);
 }
 
+async function refreshDriverGateState(taskId) {
+  if (!taskId) return;
+  planRailController.resetFetchThrottle(taskId);
+  try {
+    const [, , plan] = await Promise.all([
+      loadAgentMessages(taskId),
+      refreshTasks(),
+      planRailController.maybeFetchPlan(taskId),
+    ]);
+    if (!plan) throw new Error("最新执行计划加载失败。");
+  } finally {
+    if (selectedTaskId === taskId) {
+      renderAgentConversation();
+      renderWorkflowStepper({ force: true });
+    }
+  }
+}
+
 function handleStrategyClarificationSubmit(event) {
   return handleStrategyClarificationSubmitController(
     event,
@@ -5879,7 +6371,7 @@ function handleStrategyClarificationChange(event) {
 function strategyClarificationControllerContext() {
   return {
     ...driverConfirmControllerContext(),
-    refreshAgentMessages: (taskId) => loadAgentMessages(taskId),
+    refreshAgentMessages: refreshDriverGateState,
   };
 }
 
@@ -5907,11 +6399,11 @@ function handleModelingWeightAdjustClick(event) {
   return handleModelingWeightAdjustClickController(event, modelingSetupControllerContext());
 }
 
-function modelingSetupControllerContext() {
+function agentAcceptanceControllerContext() {
   const capturedTaskId = selectedTaskId;
   return {
     getSelectedTaskId: () => selectedTaskId,
-    api,
+    api: typeof driverGateApi === "function" ? driverGateApi : api,
     agentAcceptanceModeValue,
     setActionStatus,
     setAgentMessages: (messages) => {
@@ -5923,6 +6415,9 @@ function modelingSetupControllerContext() {
     // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
     // runs, instead of freezing until the request finally resolves.
     pollAgentMessagesUntilSettled,
+    refreshAgentMessages: typeof refreshDriverGateState === "function"
+      ? refreshDriverGateState
+      : async () => {},
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
     setDriverExecutionBusy: (active, taskId) => setBusy(
@@ -5931,6 +6426,10 @@ function modelingSetupControllerContext() {
       taskId,
     ),
   };
+}
+
+function modelingSetupControllerContext() {
+  return agentAcceptanceControllerContext();
 }
 if (typeof document !== "undefined") {
   mountWorkflowWidgetInteractions(document);
@@ -5960,34 +6459,17 @@ function handleC1PreviewClick(event) {
   return handleC1PreviewClickController(event, joinGateControllerContext());
 }
 
+function handleC1RoleChange(event) {
+  return handleC1RoleChangeController(event);
+}
+
 function joinGateControllerContext() {
-  const capturedTaskId = selectedTaskId;
-  return {
-    getSelectedTaskId: () => selectedTaskId,
-    api,
-    agentAcceptanceModeValue,
-    setActionStatus,
-    setAgentMessages: (messages) => {
-      if (selectedTaskId !== capturedTaskId) return;
-      agentMessages = messages || agentMessages;
-    },
-    renderAgentConversation,
-    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
-    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
-    // runs, instead of freezing until the request finally resolves.
-    pollAgentMessagesUntilSettled,
-    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
-    renderWorkflowStepper,
-    setDriverExecutionBusy: (active, taskId) => setBusy(
-      active ? "driver_execute" : null,
-      active ? "正在执行下一步…" : "",
-      taskId,
-    ),
-  };
+  return agentAcceptanceControllerContext();
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleC1ConfirmClick);
   document.addEventListener("click", handleC1PreviewClick);
+  document.addEventListener("change", handleC1RoleChange);
   document.addEventListener("mouseover", handleDatasetTablePointerOver);
   document.addEventListener("mouseout", handleDatasetTablePointerOut);
 }
@@ -6020,7 +6502,7 @@ function screenGateControllerContext() {
     // table client-side (no backend round trip), so they need to look the
     // message back up by id from the live conversation state.
     getAgentMessages: () => agentMessages,
-    api,
+    api: typeof driverGateApi === "function" ? driverGateApi : api,
     agentAcceptanceModeValue,
     setActionStatus,
     setAgentMessages: (messages) => {
@@ -6032,6 +6514,9 @@ function screenGateControllerContext() {
     // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
     // runs, instead of freezing until the request finally resolves.
     pollAgentMessagesUntilSettled,
+    refreshAgentMessages: typeof refreshDriverGateState === "function"
+      ? refreshDriverGateState
+      : async () => {},
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
     setDriverExecutionBusy: (active, taskId) => setBusy(
@@ -6119,7 +6604,10 @@ function agentMessageGateButtonHtml(message) {
   // UX-10: resolve the gate step's own tool (the step it is confirming) so the
   // button copy can state the consequence (确认并执行拼接/确认所选特征/...).
   const step = planRailController.planStep(message?.metadata || {});
-  return renderDriverGateButton(message, { gateStepTool: step?.tool_ref?.tool || "" });
+  return renderDriverGateButton(message, {
+    gateStepTool: step?.tool_ref?.tool || "",
+    interactive: driverGateMessageIsActionable(message),
+  });
 }
 
 async function submitDriverConfirm(button) {
@@ -6134,7 +6622,7 @@ function driverConfirmControllerContext() {
   const capturedTaskId = selectedTaskId;
   return {
     getSelectedTaskId: () => selectedTaskId,
-    api,
+    api: typeof driverGateApi === "function" ? driverGateApi : api,
     setActionStatus,
     setAgentMessages: (messages) => {
       if (selectedTaskId !== capturedTaskId) return;
@@ -6145,6 +6633,9 @@ function driverConfirmControllerContext() {
     // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
     // runs, instead of freezing until the request finally resolves.
     pollAgentMessagesUntilSettled,
+    refreshAgentMessages: typeof refreshDriverGateState === "function"
+      ? refreshDriverGateState
+      : async () => {},
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
     setDriverExecutionBusy: (active, taskId) => setBusy(
@@ -6169,21 +6660,28 @@ function agentMessageResultDatasetHtml(message) {
   const result = message?.metadata?.result_dataset;
   const datasetId = String(result?.dataset_id || "").trim();
   if (!datasetId) return "";
-  const scopedHref = selectedTaskId
-    ? `/api/tasks/${encodeURIComponent(selectedTaskId)}/datasets/${encodeURIComponent(datasetId)}/download`
-    : "";
   const persistedHref = String(result?.download_url || "");
-  const href = persistedHref.startsWith("/api/tasks/")
+  const expectedPrefix = selectedTaskId
+    ? `/api/tasks/${encodeURIComponent(selectedTaskId)}/datasets/${encodeURIComponent(datasetId)}/download?`
+    : "";
+  const href = expectedPrefix
+    && persistedHref.startsWith(expectedPrefix)
+    && persistedHref.includes("plan_id=")
+    && persistedHref.includes("step_id=")
+    && persistedHref.includes("output_ref=")
+    && persistedHref.includes("expected_content_hash=")
     ? persistedHref
-    : scopedHref;
+    : "";
   if (!href) return "";
+  const title = String(result?.title || "结果数据集已生成");
+  const downloadLabel = String(result?.download_label || "下载结果数据集");
   return [
     '<section class="result-dataset-download">',
     '<div class="result-dataset-download-copy">',
-    '<strong>拼接结果已生成</strong>',
+    `<strong>${escapeHtml(title)}</strong>`,
     `<span>数据集 ${escapeHtml(datasetId)}</span>`,
     '</div>',
-    `<a class="button compact primary" data-result-dataset-download href="${escapeHtml(href)}" download>下载拼接结果</a>`,
+    `<a class="button compact primary" data-result-dataset-download href="${escapeHtml(href)}" download>${escapeHtml(downloadLabel)}</a>`,
     '</section>',
   ].join("");
 }
@@ -6198,7 +6696,18 @@ function agentMessageReportDownloadHtml(message) {
   if (!reports.length) return "";
   const links = reports.map((report) => {
     const href = String(report.download_url || "").trim();
-    const label = String(report.label || "下载分析报告");
+    const storedLabel = String(report.label || "下载分析报告");
+    const activeTaskType = typeof selectedTask === "undefined"
+      ? ""
+      : String(selectedTask?.task_type || "");
+    // Historical Portfolio completion messages persisted before the typed
+    // label existed. Keep those immutable messages, but render their legacy
+    // modeling fallback with the task's actual report type.
+    const label = activeTaskType === "portfolio"
+      && storedLabel === "下载模型开发报告"
+      && href.includes("/driver-report/download")
+      ? "下载组合分析报告"
+      : storedLabel;
     const detail = [report.recipe, report.experiment_id].filter(Boolean).join(" · ");
     return [
       '<div class="report-result-download-item">',
@@ -6281,11 +6790,10 @@ function agentGateUsesConversationOnly(options = {}) {
 }
 
 function stripGateButtonsHtml(html) {
-  // Gate widgets remain valuable evidence in Agent mode, but every clickable
-  // continuation/adjustment must go through chat. Passive component controls
-  // (collapse, local inspection) do not advance the workflow and remain useful.
-  // The markup is generated by our own renderers, so this allow-list stays
-  // deterministic and keeps the manual-mode components unchanged.
+  // Historical gate widgets remain valuable evidence, but stale continuation
+  // buttons must not survive after a newer gate appears. Passive component
+  // controls (collapse, local inspection) do not advance the workflow and stay
+  // useful. The latest typed gate bypasses this filter and remains actionable.
   return String(html || "").replace(
     /<button\b(?![^>]*\bdata-gate-passive-control\b)[^>]*>[\s\S]*?<\/button>/gi,
     "",
@@ -6296,11 +6804,35 @@ function normalizeAgentConversationGateContent(content) {
   return String(content || "")
     .replace(
       /确认请回复「确认」继续；可直接操作下方控件，或用文字说明要调整的参数。/g,
-      "Agent 模式请回复「继续」或「确认」；如需调整，直接用自然语言说明。",
+      "如认可当前结果，可直接用自然语言表达同意并继续；也可直接操作下方控件，或说明具体调整。",
     )
     .replace(
       /确认无误回复「确认」；要改就用下方控件选好角色\/目标列后点「确认角色」。/g,
-      "确认无误请回复「确认」；如需修改角色或目标列，请直接说明。",
+      "若角色与目标列无误，可直接用自然语言表达同意并继续；如需修改，请直接说明或使用下方控件。",
+    )
+    .replace(
+      /Agent 模式请回复「继续」或「确认」；如需调整，直接用自然语言说明。/g,
+      "Agent 模式可直接用自然语言表达同意并继续；如需调整，请说明具体要求。",
+    )
+    .replace(
+      /上一步已完成。请回复「继续」或说明需要调整的内容。/g,
+      "上一步已完成。可直接用自然语言表达同意并继续；如需调整，请说明具体要求。",
+    )
+    .replace(
+      /手动模式请点击「开始执行」；Agent 模式请回复「开始」或「继续」。/g,
+      "手动模式可点击「开始执行」；Agent 模式可直接用自然语言表达同意并开始执行。",
+    )
+    .replace(
+      /收到。确认当前结果请回复「确认」继续。/g,
+      "收到。如认可当前结果，可直接用自然语言表达同意并继续。",
+    )
+    .replace(
+      /无误就回复「确认」，或用下方控件调整后点「确认角色」。/g,
+      "若无误，可直接用自然语言表达同意并继续；如需调整，也可使用下方控件。",
+    )
+    .replace(
+      /请查看当前节点并回复「确认」或给出调整指令以继续。/g,
+      "请查看当前节点；认可后可直接用自然语言表达同意并继续，或说明具体调整。",
     );
 }
 
@@ -6343,14 +6875,15 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     && !hasWorkflowError
     && (message?.metadata?.kind === "gate" || Boolean(message?.metadata?.join_c1));
   const hasWidget = isGate && driverGateHasWidgetController(message);
-  const agentConversationOnly = agentGateUsesConversationOnly(options);
+  const agentConversationOnly = agentGateUsesConversationOnly(options)
+    && !(hasWidget && Boolean(options.isLatestGate));
   const conversationOnly = isGate && agentConversationOnly;
   const className = role === "user"
     ? "agent-message user"
     : `agent-message assistant${isGate ? " has-gate" : ""}${conversationOnly ? " conversation-only-gate" : ""}${isStrategyClarification ? " has-strategy-clarification" : ""}${hasWorkflowError ? " has-workflow-error" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
-  const visibleContent = agentConversationOnly && isGate
+  const visibleContent = role === "assistant" && agentGateUsesConversationOnly(options)
     ? normalizeAgentConversationGateContent(agentVisibleContent(message))
     : agentVisibleContent(message);
   const legacyContentHtml = thinking
@@ -6369,12 +6902,15 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const stageAttr = message?.stage
     ? ` data-agent-stage="${escapeHtml(String(message.stage))}"`
     : "";
-  // VD-2/UX-2: only the latest gate (stale-protection identical to manual
+  // VD-2/UX-2: only the latest typed gate (stale-protection identical to manual
   // mode's latestInteractiveScreenMessageId / lastAssistantMessageId) renders
   // its widgets as interactive; earlier gate cards render the same widgets as
   // read-only snapshots so a stale card cannot be actioned against an
   // already-advanced step.
-  const interactive = hasWidget && Boolean(options.isLatestGate) && !conversationOnly;
+  const interactive = hasWidget
+    && Boolean(options.isLatestGate)
+    && !conversationOnly
+    && driverGateMessageIsActionable(message);
   const clarificationInteractive = !agentConversationOnly && isStrategyClarification
     && Boolean(messageId)
     && messageId === lastAssistantMessageIdController(agentMessages);
@@ -6559,6 +7095,7 @@ async function pollAgentMessagesUntilSettled(taskId, pendingPromise, { preserveO
       unchangedForMs += delay;
     }
   }
+  await reloadDataWorkspace(taskId, { silent: true });
 }
 
 async function handleAgentMaterialSelectionRequest(taskId) {
@@ -6576,6 +7113,7 @@ async function handleAgentMaterialSelectionRequest(taskId) {
   selectedTask = selectedMaterialsTask;
   rememberSelectedTaskId(selectedMaterialsTask.id);
   await refreshTasks();
+  await reloadDataWorkspace(taskId, { silent: true });
   if (selectedTaskId === taskId) {
     setActionStatus("材料选择已保存。", "success", "下一步：请重新扫描材料。");
   }
@@ -6597,12 +7135,16 @@ async function startAgentValidation() {
   // existing risk state machine parses the operator's explicit analysis type and
   // material contract without invoking an LLM.
   const deterministicRiskIntake = selectedTaskNeedsManualRiskIntake();
-  if (!deterministicRiskIntake) {
+  const deterministicPortfolioTurn = deterministicRiskIntake
+    ? false
+    : selectedTaskNeedsDeterministicPortfolioTurn();
+  const deterministicTurn = deterministicRiskIntake || deterministicPortfolioTurn;
+  if (!deterministicTurn) {
     const unavailableModelMessage = agentModelUnavailableMessage();
     if (showAgentModelGuidance(unavailableModelMessage)) return;
   }
   setAgentComposerNotice("");
-  const modelId = deterministicRiskIntake ? "" : ($("agentModelSelect")?.value || "");
+  const modelId = deterministicTurn ? "" : ($("agentModelSelect")?.value || "");
   input.value = "";
   autoGrowComposerInput();
   updateAgentSendDisabled();
@@ -6613,7 +7155,7 @@ async function startAgentValidation() {
   let result;
   try {
     const requestBody = { content };
-    if (!deterministicRiskIntake) {
+    if (!deterministicTurn) {
       requestBody.model_id = modelId || null;
       requestBody.effort = agentEffort();
       requestBody.acceptance_mode = agentAcceptanceModeValue();
@@ -6679,6 +7221,7 @@ async function uploadRiskAnalysisMaterials(files) {
     for (const file of selectedFiles) {
       await uploadDataset(taskId, file, { role: "sample" });
     }
+    await reloadDataWorkspace(taskId, { silent: true });
     const names = selectedFiles.map((file) => file.name).join("、");
     const input = $("agentComposerInput");
     input.value = `已上传材料：${names}。请检查表结构和字段是否满足要求，并继续分析。`;
@@ -6827,6 +7370,7 @@ async function createTask() {
   renderStoredStateSummaries();
   const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   await refreshTasks();
+  await reloadDataWorkspace(task.id, { silent: true });
   await loadReportFields();
   await candidateLabLoadPromise;
   setCreateStatus("任务已创建。");
@@ -6838,6 +7382,13 @@ async function createTask() {
 async function refreshTasks() {
   taskCache = await api("api/tasks");
   syncSelectedTaskFromCache();
+  for (const task of taskCache) {
+    if (typeof reconcileDriverGateSubmissions === "function") {
+      reconcileDriverGateSubmissions(task?.id, {
+        serverBusy: Boolean(task?.active_job_kind),
+      });
+    }
+  }
   ensureActiveTaskProgressPolling();
 }
 
@@ -6911,6 +7462,12 @@ async function createTaskAndScan() {
         setActionStatus("风险分析任务已创建，请先告诉 Agent 要分析什么。", "success");
         return;
       }
+      if (!isValidationTask && task.task_type === "portfolio") {
+        await dispatchDriverStart(taskId);
+        renderAll();
+        setActionStatus("组合分析任务已创建，请填写经业务确认的组合口径。", "success");
+        return;
+      }
       if (!isValidationTask && definition.initialGoal) {
         // createTask() already seeded the conversation composer via
         // prefillAgentTaskInstruction; just focus it (the V2 plan dialog is retired).
@@ -6956,6 +7513,7 @@ async function dispatchDriverStart(taskId = selectedTaskId) {
   });
   agentMessages = result.messages || agentMessages;
   renderAgentConversation();
+  await reloadDataWorkspace(normalizedTaskId, { silent: true });
 }
 
 async function refreshStrategyCandidateLabAfterSettled(taskId, task) {
@@ -7205,12 +7763,59 @@ const PURGE_SUMMARY_FIELDS = [
   ["experiments", "实验"],
   ["model_artifacts", "模型产物"],
   ["strategies", "策略"],
+  ["child_tasks", "子验证任务"],
+  ["owned_batch_material_trees", "平台持有的批次上传材料"],
 ];
 
-async function loadTaskPurgeSummary(taskId) {
+function taskPurgeApiBase(task) {
+  if (isValidationBatchTask(task)) return `api/validation-batches/${task.id}`;
+  return `api/tasks/${task.id}`;
+}
+
+function validatedValidationBatchPurgeSummary(preview) {
+  const invalid = () => {
+    throw new Error("invalid validation batch purge preview");
+  };
+  if (!preview || typeof preview !== "object" || Array.isArray(preview)) invalid();
+  const summary = preview.purge_summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) invalid();
+  const requiredCounts = [
+    preview.task_count,
+    preview.child_task_count,
+    preview.active_job_count,
+    preview.owned_batch_material_tree_count,
+    summary.child_tasks,
+    summary.owned_batch_material_trees,
+  ];
+  if (!requiredCounts.every((value) => Number.isSafeInteger(value) && value >= 0)) {
+    invalid();
+  }
+  if (
+    preview.child_task_count < 1
+    || preview.child_task_count > 10
+    || preview.task_count !== preview.child_task_count + 1
+    || preview.child_task_count !== summary.child_tasks
+    || preview.owned_batch_material_tree_count !== summary.owned_batch_material_trees
+    || preview.owned_batch_material_tree_count > 1
+  ) {
+    invalid();
+  }
+  if (
+    !Object.values(summary).every(
+      (value) => Number.isSafeInteger(value) && value >= 0,
+    )
+  ) {
+    invalid();
+  }
+  return summary;
+}
+
+async function loadTaskPurgeSummary(task) {
   try {
-    const preview = await api(`api/tasks/${taskId}/purge-preview`);
-    const summary = preview && preview.purge_summary ? preview.purge_summary : null;
+    const preview = await api(`${taskPurgeApiBase(task)}/purge-preview`);
+    const summary = isValidationBatchTask(task)
+      ? validatedValidationBatchPurgeSummary(preview)
+      : preview && preview.purge_summary ? preview.purge_summary : null;
     if (!summary) return [];
     const items = [];
     for (const [key, label] of PURGE_SUMMARY_FIELDS) {
@@ -7218,6 +7823,9 @@ async function loadTaskPurgeSummary(taskId) {
     }
     return items;
   } catch (error) {
+    // A batch DELETE cascades to child tasks and owned uploads.  Never fall
+    // back to an empty confirmation scope if its dedicated preview is down.
+    if (isValidationBatchTask(task)) throw error;
     return [];
   }
 }
@@ -7258,15 +7866,37 @@ async function deleteTask(task) {
     setActionStatus("运行中的任务不能删除。", "error");
     return;
   }
-  const purgeItems = await loadTaskPurgeSummary(targetTask.id);
+  let purgeItems = [];
+  try {
+    purgeItems = await loadTaskPurgeSummary(targetTask);
+  } catch (error) {
+    setActionStatus(
+      "无法读取批次删除范围，已停止删除。",
+      "error",
+      String(error?.message || error || "请稍后重试。"),
+    );
+    return;
+  }
   const taskName = taskDisplayName(targetTask);
+  const deletingBatch = isValidationBatchTask(targetTask);
+  const childTaskCount = Number(
+    purgeItems.find((item) => item.key === "child_tasks")?.count || 0,
+  );
+  const ownedMaterialTreeCount = Number(
+    purgeItems.find((item) => item.key === "owned_batch_material_trees")?.count || 0,
+  );
+  const batchDeleteScope = deletingBatch
+    ? `将级联删除 ${childTaskCount} 个子验证任务、任务记录和本地输出文件${
+        ownedMaterialTreeCount ? "，以及平台持有的批次上传材料" : ""
+      }；外部手动材料路径不会删除，操作不能撤销。`
+    : "任务记录与本地输出文件将被移除，不能撤销。";
   const confirmed = await showPlatformConfirm({
     title: "删除任务",
-    message: `确认删除任务「${taskName}」？任务记录与本地输出文件将被移除，不能撤销。`,
+    message: `确认删除${deletingBatch ? "验证批次" : "任务"}「${taskName}」？${batchDeleteScope}`,
     messageParts: [
-      { text: "确认删除任务" },
+      { text: deletingBatch ? "确认删除验证批次" : "确认删除任务" },
       { text: `「${taskName}」`, strong: true },
-      { text: "？任务记录与本地输出文件将被移除，不能撤销。" },
+      { text: `？${batchDeleteScope}` },
     ],
     purgeItems,
     confirmText: "删除",
@@ -7282,7 +7912,7 @@ async function deleteTask(task) {
     setBusy("delete", "正在删除任务...", targetTask.id);
     setActionStatus("正在删除任务...", "busy");
     renderAll();
-    await api(`api/tasks/${targetTask.id}`, { method: "DELETE" });
+    await api(taskPurgeApiBase(targetTask), { method: "DELETE" });
     if (selectedTaskId === targetTask.id) {
       selectedTaskId = null;
       selectedTask = null;
@@ -7712,6 +8342,7 @@ function agentAcceptanceModeValue() {
   return agentAcceptanceMode;
 }
 bindRunModeDeselectableCards();
+validationBatchCreateController.bind();
 bindDialogBackdropDismissal();
 bindPlatformConfirmDialog();
 materialBindingDialog.bind();
@@ -7770,6 +8401,7 @@ installFormControlFocusRingGuard();
 themeController.restoreTheme();
 themeController.watchSystemTheme();
 restoreTaskListSettings();
+petCatalog.populateSelect($("settingsPetSelect"), document);
 restorePetPreference();
 restorePetPosition();
 restoreLayoutWidths();
@@ -7781,6 +8413,10 @@ loadBranding();
 loadExecutionEnvironmentSettings({ silent: true });
 loadLLMSettings({ silent: true });
 loadResultScrollPositions();
+selectedTaskId = preferredStartupTaskId(
+  initialTaskDeepLink,
+  storedSelectedTaskId(),
+) || null;
 restoreSelectedTaskPlaceholder();
 renderCurrentTask({ force: true });
 renderMetricPreview({});
@@ -7803,11 +8439,14 @@ function finishAppBoot() {
 async function initializeApp() {
   try {
     await refreshTasks();
+    await reloadDataWorkspace(selectedTaskId, { silent: true });
+    const validationBatchLoadPromise = validationBatchPanelController.selectTask(selectedTask);
     const candidateLabLoadPromise = strategyCandidateLabController.selectTask(selectedTask);
     renderStoredStateSummaries();
     await loadReportFields();
     await loadTaskEvidence();
     await loadAgentMessages();
+    await validationBatchLoadPromise;
     await candidateLabLoadPromise;
   } catch (error) {
     const detail = error?.message || "";
@@ -7816,6 +8455,7 @@ async function initializeApp() {
   } finally {
     renderAll();
     await restoreResultScrollPositionAfterRender(selectedTaskId);
+    validationBatchPanelController.focusRequestedItem();
     finishAppBoot();
   }
 }

@@ -19,10 +19,18 @@ from __future__ import annotations
 import json
 
 from marvis.agent.adjust_specs import normalize_adjust_params
-from marvis.agent.json_reply import load_json_object
+from marvis.agent.json_reply import load_json_object, rejects_positive_decision
 from marvis.llm_prompts import GATE_INSTRUCTION_ROUTER_SYS as _GATE_INSTRUCTION_ROUTER_SYS_SPEC
 
 _ACTIONS = ("confirm", "adjust", "replan", "clarify")
+_ROUTE_FIELDS = (
+    "action",
+    "params",
+    "constraint",
+    "reason",
+    "confidence",
+    "explicit_authorization",
+)
 
 # LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
 # constant so existing imports of _SYSTEM from here keep working unchanged.
@@ -30,7 +38,7 @@ _SYSTEM = _GATE_INSTRUCTION_ROUTER_SYS_SPEC.text
 
 _ROUTE_SCHEMA = {
     "name": "gate_instruction_route",
-    "strict": False,
+    "strict": True,
     "schema": {
         "type": "object",
         "properties": {
@@ -44,20 +52,21 @@ _ROUTE_SCHEMA = {
             },
             "explicit_authorization": {"type": "boolean"},
         },
-        "required": [
-            "action",
-            "params",
-            "constraint",
-            "reason",
-            "confidence",
-            "explicit_authorization",
-        ],
-        "additionalProperties": True,
+        "required": list(_ROUTE_FIELDS),
+        "additionalProperties": False,
     },
 }
 
 
-def route_instruction(client, *, gate_context, instruction, tables=None, param_schema=None):
+def route_instruction(
+    client,
+    *,
+    gate_context,
+    instruction,
+    tables=None,
+    param_schema=None,
+    strict_contract=False,
+):
     """Ask the injected LLM to classify one free-text gate instruction.
 
     ``param_schema`` (optional, AGT-5): the current gate's adjustable-parameter
@@ -78,7 +87,7 @@ def route_instruction(client, *, gate_context, instruction, tables=None, param_s
         prompt_name=_GATE_INSTRUCTION_ROUTER_SYS_SPEC.name,
         prompt_version=_GATE_INSTRUCTION_ROUTER_SYS_SPEC.version,
     )
-    route, ok = _parse_route(raw)
+    route, ok = _parse_route(raw, strict_contract=strict_contract)
     if ok:
         route = _recover_declared_parameter_adjustment(
             client,
@@ -93,6 +102,8 @@ def route_instruction(client, *, gate_context, instruction, tables=None, param_s
             prompt=prompt,
             param_schema=param_schema or [],
         )
+    if strict_contract:
+        return route
     retry_prompt = (
         f"{prompt}\n\n"
         f"【上一次返回无法解析】\n{raw}\n\n"
@@ -597,14 +608,36 @@ def parse_route(raw):
     return route
 
 
-def _parse_route(raw) -> tuple[dict, bool]:
-    data, error = load_json_object(raw)
+def _parse_route(raw, *, strict_contract=False) -> tuple[dict, bool]:
+    if strict_contract:
+        data, error = _load_strict_route_object(raw)
+    else:
+        data, error = load_json_object(raw)
     if data is None:
         return {
             "action": "clarify",
             "params": {},
             "constraint": "",
             "reason": "无法解析指令，请换种说法。",
+            "confidence": "low",
+            "explicit_authorization": False,
+        }, False
+    if strict_contract and (
+        set(data) != set(_ROUTE_FIELDS)
+        or not isinstance(data.get("action"), str)
+        or data.get("action") not in _ACTIONS
+        or not isinstance(data.get("params"), dict)
+        or not isinstance(data.get("constraint"), str)
+        or not isinstance(data.get("reason"), str)
+        or not isinstance(data.get("confidence"), str)
+        or data.get("confidence") not in {"high", "medium", "low"}
+        or type(data.get("explicit_authorization")) is not bool
+    ):
+        return {
+            "action": "clarify",
+            "params": {},
+            "constraint": "",
+            "reason": "指令路由返回结构不完整，已按未授权处理。",
             "confidence": "low",
             "explicit_authorization": False,
         }, False
@@ -618,6 +651,15 @@ def _parse_route(raw) -> tuple[dict, bool]:
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
     explicit_authorization = data.get("explicit_authorization") is True
+    if action == "confirm" and rejects_positive_decision(reason):
+        return {
+            "action": "clarify",
+            "params": {},
+            "constraint": "",
+            "reason": "模型动作与理由矛盾，请用户重新确认是否继续。",
+            "confidence": "low",
+            "explicit_authorization": False,
+        }, False
     # An "adjust" with no extractable parameters is not actionable → clarify.
     if action == "adjust" and not params:
         action = "clarify"
@@ -630,6 +672,29 @@ def _parse_route(raw) -> tuple[dict, bool]:
         "confidence": confidence,
         "explicit_authorization": explicit_authorization,
     }, error is None
+
+
+def _load_strict_route_object(raw) -> tuple[dict | None, str | None]:
+    """Load one exact JSON object and reject wrappers or duplicate keys."""
+
+    if not isinstance(raw, str):
+        return None, "reply is not text"
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        data = json.loads(raw.strip(), object_pairs_hook=unique_object)
+    except (TypeError, ValueError) as exc:
+        return None, str(exc)
+    if not isinstance(data, dict):
+        return None, "JSON value is not an object"
+    return data, None
 
 
 __all__ = ["route_instruction", "parse_route"]

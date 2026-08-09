@@ -24,12 +24,17 @@ from marvis.data.label_construction import (
 def _dpd_long_frame() -> pd.DataFrame:
     # 3 loans观测 mob 0..6. A 在 mob4 逾期 95 天 (命中 90+); B 全程正常; C 逾期 35/40
     # 天但从不到 90 天. 全部观测到 mob6.
-    return pd.DataFrame({
+    frame = pd.DataFrame({
         "loan_id": ["A"] * 7 + ["B"] * 7 + ["C"] * 7,
         "mob": list(range(7)) * 3,
         "dpd": [0, 0, 0, 0, 95, 120, 150, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 35, 40, 0, 0],
         "cohort": ["2026-01"] * 14 + ["2026-02"] * 7,
     })
+    frame["snapshot_date"] = [
+        (pd.Period(cohort, freq="M") + int(mob)).to_timestamp(how="end").normalize()
+        for cohort, mob in zip(frame["cohort"], frame["mob"], strict=True)
+    ]
+    return frame
 
 
 def test_construct_label_dpd_threshold_hand_computed():
@@ -366,7 +371,7 @@ def _runtime(tmp_path):
             score_col="score",
         )
     )
-    return runner, registry, task, backend
+    return settings, runner, registry, task, backend
 
 
 def _register(registry, tmp_path, frame: pd.DataFrame, name: str, task_id: str):
@@ -375,56 +380,102 @@ def _register(registry, tmp_path, frame: pd.DataFrame, name: str, task_id: str):
     return registry.register_existing(path, task_id=task_id, role="labeling_sample")
 
 
+def _formal_request(settings, dataset, task_id):
+    from marvis.data.workspace import DataWorkspaceDraft
+    from marvis.packs.labeling.contracts import LabelingRequest
+    from marvis.repositories.data_workspace import DataWorkspaceRepository
+
+    workspace = DataWorkspaceRepository(settings.db_path).save_initial_binding(
+        task_id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+        ),
+        expected_revision=0,
+        audit={"actor": "test:labeling"},
+    )
+    return LabelingRequest(
+        dataset_id=dataset.id,
+        expected_content_hash=dataset.content_hash,
+        workspace_revision=workspace.revision,
+        analysis_generation=workspace.analysis_generation,
+        id_col="loan_id",
+        mob_col="mob",
+        cohort_col="cohort",
+        date_col="snapshot_date",
+        as_of_date="2026-08-31",
+        target_col="target",
+        observation_window=0,
+        performance_window=6,
+        at_mob=6,
+        rule_kind="dpd",
+        dpd_col="dpd",
+        threshold_dpd=90,
+    )
+
+
 @pytest.mark.slow
 def test_tool_define_label_gates_immature_cohorts(tmp_path):
-    from marvis.plugins.manifest import ToolRef
+    from types import SimpleNamespace
 
-    runner, registry, task, _backend = _runtime(tmp_path)
+    from marvis.data.errors import CohortMaturityNotConfirmedError
+    from marvis.packs.labeling.tools import tool_define_label
+
+    settings, _runner, registry, task, _backend = _runtime(tmp_path)
     frame = _dpd_long_frame()
     # cohort 2026-02 (loan C) 只观测到 mob3; 定坏需 mob6 -> 未成熟 -> 应触发确认门.
     frame = frame[~((frame["loan_id"] == "C") & (frame["mob"] > 3))]
     dataset = _register(registry, tmp_path, frame, "immature", task.id)
-    base = {
-        "dataset_id": dataset.id, "id_col": "loan_id", "mob_col": "mob",
-        "cohort_col": "cohort", "observation_window": 0, "performance_window": 6,
-        "dpd_col": "dpd", "threshold_dpd": 90,
-    }
-    blocked = runner.invoke(ToolRef("labeling", "define_label"), dict(base), task_id=task.id)
-    assert blocked.ok is False
-    assert blocked.error_kind == "cohort_maturity_not_confirmed"
-
-    confirmed = runner.invoke(
-        ToolRef("labeling", "define_label"),
-        {**base, "confirm_immature_cohorts": True},
+    request = _formal_request(settings, dataset, task.id)
+    base = {**request.to_dict(), "proposal_hash": request.contract_hash}
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
         task_id=task.id,
+        seed=0,
     )
-    assert confirmed.ok is True, confirmed.error
-    assert confirmed.output["target_col"] == "target"
-    assert confirmed.output["bad_definition"]["at_mob"] == 6
-    assert confirmed.output["maturity"]["immature_cohorts"] == ["2026-02"]
+    with pytest.raises(CohortMaturityNotConfirmedError):
+        tool_define_label(
+            {**base, "confirm_immature_cohorts": False},
+            ctx,
+        )
+
+    confirmed = tool_define_label(
+        {**base, "confirm_immature_cohorts": True},
+        ctx,
+    )
+    assert confirmed["target_col"] == "target"
+    assert confirmed["bad_definition"]["at_mob"] == 6
+    assert confirmed["maturity"]["immature_cohorts"] == ["2026-02"]
 
 
 @pytest.mark.slow
 def test_tool_define_label_round_trip_writes_labeled_dataset(tmp_path):
-    from marvis.plugins.manifest import ToolRef
+    from types import SimpleNamespace
 
-    runner, registry, task, backend = _runtime(tmp_path)
+    from marvis.packs.labeling.tools import tool_define_label
+
+    settings, _runner, registry, task, backend = _runtime(tmp_path)
     dataset = _register(registry, tmp_path, _dpd_long_frame(), "mature", task.id)
-    out = runner.invoke(
-        ToolRef("labeling", "define_label"),
+    request = _formal_request(settings, dataset, task.id)
+    out = tool_define_label(
         {
-            "dataset_id": dataset.id, "id_col": "loan_id", "mob_col": "mob",
-            "cohort_col": "cohort", "observation_window": 0, "performance_window": 6,
-            "dpd_col": "dpd", "threshold_dpd": 90,
+            **request.to_dict(),
+            "proposal_hash": request.contract_hash,
+            "confirm_immature_cohorts": False,
         },
-        task_id=task.id,
+        SimpleNamespace(
+            workspace=settings.workspace,
+            datasets_root=settings.datasets_dir,
+            task_id=task.id,
+            seed=0,
+        ),
     )
-    assert out.ok is True, out.error
-    assert out.output["n_bad"] == 1
-    assert out.output["n_good"] == 2
-    assert out.output["maturity"]["all_matured"] is True
+    assert out["n_bad"] == 1
+    assert out["n_good"] == 2
+    assert out["maturity"]["all_matured"] is True
     # 衍生数据集应可读回, 且带 target 列.
-    result_id = out.output["result_dataset_id"]
+    result_id = out["result_dataset_id"]
     labeled = registry.get(result_id)
     frame = backend.read_frame(registry.resolve_path(labeled.id))
     assert "target" in frame.columns
@@ -435,7 +486,7 @@ def test_tool_define_label_round_trip_writes_labeled_dataset(tmp_path):
 def test_tool_suggest_bad_definition_bridges_roll_rate(tmp_path):
     from marvis.plugins.manifest import ToolRef
 
-    runner, _registry, task, _backend = _runtime(tmp_path)
+    _settings, runner, _registry, task, _backend = _runtime(tmp_path)
     out = runner.invoke(
         ToolRef("labeling", "suggest_bad_definition"),
         {

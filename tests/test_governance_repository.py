@@ -21,8 +21,13 @@ from marvis.governance import (
     PrincipalInactive,
     canonical_payload_hash,
 )
+from marvis.orchestrator.contracts import (
+    plan_fingerprint,
+    plan_step_confirmation_fingerprint,
+)
 from marvis.repositories.plans import PlanRepository
 from marvis.state_machine import ConflictError
+from tests.schema_fixture_support import install_v1_plan_step_runs_predecessor
 
 
 class _Clock:
@@ -156,6 +161,101 @@ def test_local_session_cookie_is_opaque_hashed_and_resolved_server_side(tmp_path
     assert row["session_token_hash"] != session.token
 
 
+def test_local_session_resolution_stays_read_only_when_another_writer_is_busy(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    clock = _Clock()
+    repo = GovernanceRepository(db_path, clock=clock)
+    session = repo.create_local_session(display_name="浏览器本地用户")
+    clock.advance(minutes=1)
+
+    resolved = []
+    errors = []
+
+    def resolve() -> None:
+        try:
+            resolved.append(repo.resolve_local_session(session.token))
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=resolve)
+    with connect(db_path) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "UPDATE local_principals SET display_name = display_name WHERE id = ?",
+            (session.principal.id,),
+        )
+        thread.start()
+        thread.join(timeout=0.75)
+        completed_while_busy = not thread.is_alive()
+
+    thread.join(timeout=6)
+    assert completed_while_busy, "session resolution waited for an unrelated writer"
+    assert not thread.is_alive()
+    assert errors == []
+    assert [principal.id for principal in resolved] == [session.principal.id]
+
+    refreshed = repo.resolve_local_session(session.token)
+    assert refreshed.last_seen_at == clock.now.isoformat()
+
+
+def test_local_session_touch_defers_when_delete_journal_commit_is_busy(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    clock = _Clock()
+    repo = GovernanceRepository(db_path, clock=clock)
+    session = repo.create_local_session(display_name="浏览器本地用户")
+    original_last_seen = session.principal.last_seen_at
+    clock.advance(minutes=1)
+
+    with sqlite3.connect(db_path) as mode_conn:
+        assert mode_conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+
+    reader = sqlite3.connect(db_path, isolation_level="DEFERRED")
+    try:
+        reader.execute("BEGIN")
+        reader.execute(
+            "SELECT id FROM local_principals WHERE id = ?",
+            (session.principal.id,),
+        ).fetchone()
+
+        resolved = repo.resolve_local_session(session.token)
+    finally:
+        reader.rollback()
+        reader.close()
+
+    assert resolved.id == session.principal.id
+    assert repo.get_local_principal(session.principal.id).last_seen_at == original_last_seen
+
+
+def test_expired_local_session_denial_survives_delete_journal_commit_contention(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    clock = _Clock()
+    repo = GovernanceRepository(db_path, clock=clock)
+    session = repo.create_local_session(ttl_seconds=1)
+    clock.advance(seconds=2)
+
+    with sqlite3.connect(db_path) as mode_conn:
+        assert mode_conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+
+    reader = sqlite3.connect(db_path, isolation_level="DEFERRED")
+    try:
+        reader.execute("BEGIN")
+        reader.execute(
+            "SELECT id FROM local_principals WHERE id = ?",
+            (session.principal.id,),
+        ).fetchone()
+
+        with pytest.raises(PrincipalInactive, match="expired"):
+            repo.resolve_local_session(session.token)
+    finally:
+        reader.rollback()
+        reader.close()
+
+    assert repo.get_local_principal(session.principal.id).status == "active"
+
+
 def test_expired_local_session_cannot_resolve_or_authorize(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -173,6 +273,7 @@ def test_expired_local_session_cannot_resolve_or_authorize(tmp_path):
 def test_migration_backfills_pre_v5_confirmation_gates_as_required(tmp_path):
     db_path = tmp_path / "app.sqlite"
     with connect(db_path) as conn:
+        install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             "CREATE TABLE plan_steps (id TEXT PRIMARY KEY, needs_confirmation INTEGER NOT NULL)"
         )
@@ -533,6 +634,146 @@ def test_authorize_step_guards_raw_plan_inputs_while_binding_resolved_values(tmp
 
     assert grant.approval is not None
     assert grant.approval.binding.input_hash == canonical_payload_hash(resolved_inputs)
+
+
+def test_authorize_step_accepts_matching_plan_and_step_snapshots(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = GovernanceRepository(db_path)
+    principal = repo.create_local_principal()
+    inputs = {"strategy_id": "strategy-7", "reason": "人工采用"}
+    _seed_plan_gate(db_path, inputs)
+    plan = PlanRepository(db_path).load_plan("plan-1")
+    step = next(item for item in plan.steps if item.id == "step-adopt")
+
+    grant = repo.authorize_step(
+        _binding(input_hash=canonical_payload_hash(inputs)),
+        principal=principal,
+        reason="确认采用策略",
+        issue_effect_approval=True,
+        expected_plan_status=plan.status.value,
+        expected_plan_fingerprint=plan_fingerprint(plan),
+        expected_step_fingerprint=plan_step_confirmation_fingerprint(
+            step,
+            confirmed=False,
+        ),
+    )
+
+    assert grant.approval is not None
+    assert repo.list_decisions_by_step("plan-1", "step-adopt") == [grant.decision]
+    with connect(db_path) as conn:
+        confirmed = conn.execute(
+            "SELECT confirmed FROM plan_steps WHERE id = 'step-adopt'"
+        ).fetchone()["confirmed"]
+    assert confirmed == 1
+
+
+def test_authorize_step_rejects_stale_plan_status_without_partial_decision(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = GovernanceRepository(db_path)
+    principal = repo.create_local_principal()
+    inputs = {"strategy_id": "strategy-7"}
+    _seed_plan_gate(db_path, inputs)
+    with connect(db_path) as conn:
+        conn.execute("UPDATE plans SET status = 'running' WHERE id = 'plan-1'")
+
+    with pytest.raises(ApprovalStateError, match="plan status"):
+        repo.authorize_step(
+            _binding(input_hash=canonical_payload_hash(inputs)),
+            principal=principal,
+            reason="过期状态不得授权",
+            issue_effect_approval=True,
+            expected_plan_status="awaiting_confirm",
+        )
+
+    assert repo.list_decisions_by_step("plan-1", "step-adopt") == []
+    with connect(db_path) as conn:
+        confirmed = conn.execute(
+            "SELECT confirmed FROM plan_steps WHERE id = 'step-adopt'"
+        ).fetchone()["confirmed"]
+    assert confirmed == 0
+
+
+def test_authorize_step_rejects_stale_target_step_fingerprint_atomically(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = GovernanceRepository(db_path)
+    principal = repo.create_local_principal()
+    inputs = {"strategy_id": "strategy-7"}
+    _seed_plan_gate(db_path, inputs)
+    plan = PlanRepository(db_path).load_plan("plan-1")
+    step = next(item for item in plan.steps if item.id == "step-adopt")
+    expected_step_fingerprint = plan_step_confirmation_fingerprint(
+        step,
+        confirmed=False,
+    )
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE plan_steps SET title = 'concurrently changed' WHERE id = 'step-adopt'"
+        )
+
+    with pytest.raises(ApprovalBindingError, match="step snapshot changed"):
+        repo.authorize_step(
+            _binding(input_hash=canonical_payload_hash(inputs)),
+            principal=principal,
+            reason="过期步骤快照不得授权",
+            issue_effect_approval=True,
+            expected_step_fingerprint=expected_step_fingerprint,
+        )
+
+    assert repo.list_decisions_by_step("plan-1", "step-adopt") == []
+    with connect(db_path) as conn:
+        confirmed = conn.execute(
+            "SELECT confirmed FROM plan_steps WHERE id = 'step-adopt'"
+        ).fetchone()["confirmed"]
+    assert confirmed == 0
+
+
+def test_authorize_step_rejects_other_step_change_via_full_plan_fingerprint(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = GovernanceRepository(db_path)
+    principal = repo.create_local_principal()
+    inputs = {"strategy_id": "strategy-7"}
+    _seed_plan_gate(db_path, inputs)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO plan_steps(
+                id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
+                inputs_json, depends_on_json, post_checks_json,
+                needs_confirmation, policy_json, status, confirmed
+            ) VALUES (
+                'step-other', 'plan-1', 1, 'other', 'strategy', 'noop', '1.0.0',
+                '{}', '[]', '[]', 0,
+                '{"schema_version":"tool-policy.v1","human_decision_gate":"none","effect_authorization":"none"}',
+                'pending', 0
+            )
+            """
+        )
+    plan = PlanRepository(db_path).load_plan("plan-1")
+    expected_plan_fingerprint = plan_fingerprint(plan)
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE plan_steps SET title = 'other changed' WHERE id = 'step-other'"
+        )
+
+    with pytest.raises(ApprovalBindingError, match="plan snapshot changed"):
+        repo.authorize_step(
+            _binding(input_hash=canonical_payload_hash(inputs)),
+            principal=principal,
+            reason="整份计划已变化不得授权",
+            issue_effect_approval=True,
+            expected_plan_fingerprint=expected_plan_fingerprint,
+        )
+
+    assert repo.list_decisions_by_step("plan-1", "step-adopt") == []
+    with connect(db_path) as conn:
+        confirmed = conn.execute(
+            "SELECT confirmed FROM plan_steps WHERE id = 'step-adopt'"
+        ).fetchone()["confirmed"]
+    assert confirmed == 0
 
 
 @pytest.mark.parametrize("with_input_updates", [False, True])

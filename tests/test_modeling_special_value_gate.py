@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from marvis.agent.gates.adapters import parse_special_value_instruction
 from marvis.agent.plan_driver import DriverError, PlanDriver
 from marvis.app import create_app
+from marvis.data.contracts import Dataset
 from marvis.db import PlanRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
@@ -16,6 +17,7 @@ from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.reviewer import Reviewer
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.runner import ToolResult
+from marvis.repositories.datasets import DatasetRepository
 
 
 class _ReviewerLLM:
@@ -114,9 +116,9 @@ def _screen_output(*, sentinel: bool) -> dict:
     }
 
 
-def _special_output() -> dict:
+def _special_output(*, result_dataset_id: str) -> dict:
     return {
-        "result_dataset_id": "ds-special",
+        "result_dataset_id": result_dataset_id,
         "selected": ["x1", "x2"],
         "governance": {},
         "policy_fingerprint": "",
@@ -124,6 +126,43 @@ def _special_output() -> dict:
         "retained": [],
         "dropped": [],
     }
+
+
+def _register_result_dataset(
+    db_path,
+    dataset_id: str,
+    *,
+    task_id: str = "task-special",
+) -> None:
+    DatasetRepository(db_path).create_dataset(
+        Dataset(
+            id=dataset_id,
+            task_id=task_id,
+            role="derived",
+            source_path=f"{dataset_id}.parquet",
+            format="parquet",
+            sheet=None,
+            row_count=1,
+            columns=(),
+            has_target=False,
+            target_col=None,
+            created_at="2026-08-03T00:00:00+00:00",
+            content_hash="a" * 64,
+        )
+    )
+
+
+def _has_relevant_sentinel(screen_output: dict) -> bool:
+    selected = {
+        str(item).strip()
+        for item in screen_output.get("selected", [])
+        if str(item).strip()
+    }
+    sentinel_columns = screen_output.get("sentinel_columns")
+    return isinstance(sentinel_columns, dict) and any(
+        str(column) in selected and bool(rows)
+        for column, rows in sentinel_columns.items()
+    )
 
 
 def _mixed_screen_output() -> dict:
@@ -153,13 +192,24 @@ def _driver(
 ):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
+    resolved_screen_output = (
+        screen_output
+        if screen_output is not None
+        else _screen_output(sentinel=sentinel)
+    )
+    result_dataset_id = (
+        "ds-special"
+        if _has_relevant_sentinel(resolved_screen_output)
+        else "ds-split"
+    )
+    _register_result_dataset(db_path, "ds-split")
+    if result_dataset_id != "ds-split":
+        _register_result_dataset(db_path, result_dataset_id)
     repo = PlanRepository(db_path)
     repo.create_plan(_special_plan(governed=governed))
     runner = _Runner([
-        screen_output
-        if screen_output is not None
-        else _screen_output(sentinel=sentinel),
-        _special_output(),
+        resolved_screen_output,
+        _special_output(result_dataset_id=result_dataset_id),
     ])
     executor = PlanExecutor(
         repo,
@@ -189,6 +239,10 @@ def test_empty_special_value_gate_executes_noop_without_human_pause_or_component
     assert plan.status == PlanStatus.DONE
     assert next(step for step in plan.steps if step.id == "special").status == StepStatus.DONE
     assert repo.is_step_confirmed("special") is False
+    assert repo.load_step_output("special")["result_dataset_id"] == "ds-split"
+    assert repo.load_step_evidence("special")["result_dataset_bindings"] == [
+        {"dataset_id": "ds-split", "content_hash": "a" * 64}
+    ]
 
 
 def test_detected_special_value_gate_exposes_only_selected_evidence_and_halts_auto(tmp_path):
@@ -551,16 +605,35 @@ def test_special_value_manual_http_submission_confirms_and_executes_atomically(
     )
     plan = _special_plan(governed=True)
     plan.task_id = task.id
-    plan.status = PlanStatus.AWAITING_CONFIRM
-    plan.steps[0].status = StepStatus.DONE
-    plan.steps[1].status = StepStatus.AWAITING_CONFIRM
     repo = app.state.plan_repo
     repo.create_plan(plan)
-    repo.store_step_output("screen", _screen_output(sentinel=True))
-    runner = _Runner([_special_output()])
+    _register_result_dataset(
+        app.state.settings.db_path,
+        "ds-split",
+        task_id=task.id,
+    )
+    _register_result_dataset(
+        app.state.settings.db_path,
+        "ds-special",
+        task_id=task.id,
+    )
+    runner = _Runner(
+        [
+            _screen_output(sentinel=True),
+            _special_output(result_dataset_id="ds-special"),
+        ]
+    )
     app.state.plan_executor._runner = runner
+    repo.confirm_plan(plan.id)
+    assert app.state.plan_executor.run(plan.id).status == PlanStatus.AWAITING_CONFIRM
 
     with TestClient(app) as client:
+        rendered_plan = client.get("/api/plans/plan-special").json()["plan"]
+        confirmation_snapshot = next(
+            step["confirmation_snapshot"]
+            for step in rendered_plan["steps"]
+            if step["id"] == "special"
+        )
         response = client.post(
             f"/api/tasks/{task.id}/agent/messages",
             json={
@@ -568,6 +641,7 @@ def test_special_value_manual_http_submission_confirms_and_executes_atomically(
                 "ui_action": "confirm_gate",
                 "expected_plan_id": "plan-special",
                 "expected_step_id": "special",
+                **confirmation_snapshot,
                 "adjust_params": {
                     "decisions": {"x1": {"action": "mask"}},
                 },

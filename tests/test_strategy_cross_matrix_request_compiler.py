@@ -9,6 +9,7 @@ from marvis.agent.strategy_request_compiler import (
     compile_strategy_request,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 class _FakeLLM:
@@ -155,7 +156,7 @@ def test_cross_matrix_compiles_exact_axes_and_methods() -> None:
     assert inputs["x_method"] == "equal_frequency"
     assert inputs["y_feature"] == "score"
     assert inputs["y_method"] == "equal_width"
-    assert llm.calls[0]["prompt_version"] == 52
+    assert llm.calls[0]["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "cross_matrix_analysis" in llm.calls[0]["system_prompt"]
 
 

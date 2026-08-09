@@ -342,6 +342,42 @@ def test_static_asset_version_changes_when_any_v2_module_changes(tmp_path):
     assert before != after
 
 
+def test_static_asset_version_changes_when_semantic_css_module_changes(tmp_path):
+    static_dir = tmp_path / "static"
+    css_dir = static_dir / "css"
+    css_dir.mkdir(parents=True)
+    stylesheet = css_dir / "task-shell.css"
+    stylesheet.write_text(".task-shell { color: black; }", encoding="utf-8")
+
+    before = _static_asset_version(static_dir)
+
+    stylesheet.write_text(".task-shell { color: blue; }", encoding="utf-8")
+    os.utime(
+        stylesheet,
+        (stylesheet.stat().st_atime, stylesheet.stat().st_mtime + 5),
+    )
+
+    assert _static_asset_version(static_dir) != before
+
+
+def test_static_asset_version_changes_when_content_changes_but_mtime_does_not(tmp_path):
+    static_dir = tmp_path / "static"
+    js_dir = static_dir / "js"
+    js_dir.mkdir(parents=True)
+    edited = js_dir / "controller.js"
+    newest = static_dir / "app.js"
+    edited.write_text("export const state = 'before';", encoding="utf-8")
+    newest.write_text("// stable newest asset", encoding="utf-8")
+    os.utime(edited, (1_000_000_000, 1_000_000_000))
+    os.utime(newest, (2_000_000_000, 2_000_000_000))
+
+    before = _static_asset_version(static_dir)
+    edited.write_text("export const state = 'after';", encoding="utf-8")
+    os.utime(edited, (1_000_000_000, 1_000_000_000))
+
+    assert _static_asset_version(static_dir) != before
+
+
 def test_static_import_map_covers_every_js_module_and_is_valid_json(tmp_path):
     app = create_app(tmp_path)
     client = TestClient(app)

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+from typing import Callable
 
 from marvis.data.workspace import (
     DATA_WORKSPACE_SCHEMA_VERSION,
@@ -84,8 +85,17 @@ class DataWorkspaceRepository:
         draft: DataWorkspaceDraft,
         expected_revision: int,
         audit: dict | None = None,
+        dataset_authenticator: Callable[[], object] | None = None,
+        on_connection: Callable[[sqlite3.Connection], None] | None = None,
     ) -> DataWorkspaceSnapshot:
-        """Atomically select and map the first dataset in a pristine workspace."""
+        """Atomically authenticate, select, and map the first dataset.
+
+        The optional authenticator runs twice while the SQLite write
+        transaction is open: immediately before the dataset row is trusted and
+        again after the workspace/audit rows are written.  Any byte drift
+        raises and rolls the whole transaction back.  This closes the gap where
+        a caller verified a path and the file changed before the binding write.
+        """
 
         return self._save(
             task_id,
@@ -93,6 +103,8 @@ class DataWorkspaceRepository:
             expected_revision,
             audit=audit,
             allow_initial_semantic_binding=True,
+            dataset_authenticator=dataset_authenticator,
+            on_connection=on_connection,
         )
 
     def _save(
@@ -103,6 +115,8 @@ class DataWorkspaceRepository:
         *,
         audit: dict | None,
         allow_initial_semantic_binding: bool,
+        dataset_authenticator: Callable[[], object] | None = None,
+        on_connection: Callable[[sqlite3.Connection], None] | None = None,
     ) -> DataWorkspaceSnapshot:
         normalized_task_id = _canonical_text(task_id, field_name="task_id")
         expected = _non_negative_int(
@@ -113,6 +127,10 @@ class DataWorkspaceRepository:
             raise DataWorkspaceDataError("draft must be a DataWorkspaceDraft")
         if audit is not None and not isinstance(audit, dict):
             raise DataWorkspaceDataError("audit must be an object")
+        if dataset_authenticator is not None and not callable(dataset_authenticator):
+            raise DataWorkspaceDataError("dataset_authenticator must be callable")
+        if on_connection is not None and not callable(on_connection):
+            raise DataWorkspaceDataError("on_connection must be callable")
 
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -143,6 +161,9 @@ class DataWorkspaceRepository:
                 raise DataWorkspaceRevisionConflict(
                     "initial semantic binding requires a pristine data workspace"
                 )
+
+            if dataset_authenticator is not None:
+                dataset_authenticator()
 
             dataset_columns = _dataset_columns_for_draft(
                 conn,
@@ -244,6 +265,10 @@ class DataWorkspaceRepository:
                 draft=draft,
                 audit=audit,
             )
+            if on_connection is not None:
+                on_connection(conn)
+            if dataset_authenticator is not None:
+                dataset_authenticator()
             return snapshot
 
     def activate_derived(

@@ -220,7 +220,7 @@ def test_rule_strategy_runs_reversible_steps_to_only_adoption_gate(
     # prefilled task/template value.
     turn = driver.resume(
         plan_id=plan_id,
-        user_text="确认采纳",
+        user_text="确认",
         run_seq=2,
         adjust_params={"adoption_reason": "committee approved"},
         expected_step_id=adopt_step.id,

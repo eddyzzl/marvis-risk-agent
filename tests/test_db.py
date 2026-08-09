@@ -32,6 +32,9 @@ from marvis.packs.modeling import Experiment, ModelArtifact, ModelMetrics, Train
 from marvis.packs.strategy import build_strategy
 from marvis.plugins.manifest import ToolRef
 from marvis.state_machine import ConflictError, IllegalTransition
+from tests.schema_fixture_support import (
+    install_v1_plan_step_runs_predecessor as _install_v1_plan_step_runs_predecessor,
+)
 
 
 def _task_create(model_name: str = "模型", **overrides) -> TaskCreate:
@@ -1043,6 +1046,7 @@ def test_init_db_migration_002_adds_strategy_versioning_to_version1_database(tmp
     db_path = tmp_path / "legacy_v1.sqlite"
 
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             """
             CREATE TABLE strategies (
@@ -1097,6 +1101,7 @@ def test_init_db_migration_004_adds_strategy_input_to_version3_database(tmp_path
     db_path = tmp_path / "legacy_v3.sqlite"
 
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             """
             CREATE TABLE tasks (
@@ -1129,6 +1134,7 @@ def test_init_db_migration_006_adds_canonical_strategy_dsl_to_version5_database(
 
     db_path = tmp_path / "legacy_v5.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             """
             CREATE TABLE strategies (
@@ -1182,6 +1188,7 @@ def test_init_db_migration_006_adds_canonical_strategy_dsl_to_version5_database(
 def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_path):
     db_path = tmp_path / "legacy_v8.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             """
             CREATE TABLE strategies (
@@ -1221,6 +1228,7 @@ def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_pat
 def test_init_db_migration_009_preserves_validated_partial_canonical_row(tmp_path):
     db_path = tmp_path / "partial_v8.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             """
             CREATE TABLE strategies (
@@ -1254,6 +1262,7 @@ def test_init_db_migration_009_preserves_validated_partial_canonical_row(tmp_pat
 def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_path):
     db_path = tmp_path / "legacy_v9.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
         conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
         conn.execute("PRAGMA user_version = 9")
@@ -1289,6 +1298,7 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
 def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
     db_path = tmp_path / "legacy_v11.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
         # A database stamped at migration 11 necessarily already owns the
@@ -1331,6 +1341,7 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
 def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path):
     db_path = tmp_path / "legacy_v12.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY)")
@@ -1401,6 +1412,7 @@ def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
 ):
     db_path = tmp_path / "legacy_v13.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE task_artifacts (id TEXT PRIMARY KEY)")
@@ -1488,6 +1500,7 @@ def test_init_db_migration_016_upgrades_candidate_pool_ledger_from_v14_database(
 ):
     db_path = tmp_path / "legacy_v14.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
         conn.execute(
             """
@@ -1626,6 +1639,7 @@ def test_init_db_migration_and_version_stamp_share_one_atomic_transaction(
 def test_init_db_migration_009_rejects_unknown_legacy_status_without_stamping(tmp_path):
     db_path = tmp_path / "unknown_status_v8.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             "CREATE TABLE strategies (id TEXT PRIMARY KEY, status TEXT NOT NULL)"
         )
@@ -1651,6 +1665,7 @@ def test_init_db_migration_009_rejects_unknown_legacy_status_without_stamping(tm
 def test_init_db_migration_009_rejects_canonical_drift_without_stamping(tmp_path):
     db_path = tmp_path / "drifting_status_v8.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             """
             CREATE TABLE strategies (
@@ -1683,6 +1698,7 @@ def test_init_db_migration_009_rejects_canonical_drift_without_stamping(tmp_path
 def test_init_db_migration_024_adds_metrics_configured_to_version23_database(tmp_path):
     db_path = tmp_path / "legacy_v23.sqlite"
     with connect(db_path) as conn:
+        _install_v1_plan_step_runs_predecessor(conn)
         conn.execute(
             """
             CREATE TABLE tasks (

@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from marvis.db import DraftRepository, PluginRepository
+from marvis.repositories.drafts import DraftRepository
+from marvis.repositories.plugins import PluginRepository
 from marvis.drafts.authoring import draft_script
 from marvis.drafts.errors import DraftNotFound, OfflineError
 from marvis.drafts.learning import distill_learning

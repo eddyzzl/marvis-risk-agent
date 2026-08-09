@@ -24,7 +24,7 @@ from marvis.data.workspace import (
     data_semantic_mapping_from_dict,
     data_semantic_mapping_hash,
 )
-from marvis.db import StrategyRepository
+from marvis.repositories.strategy import StrategyRepository
 from marvis.db_schema import connect
 from marvis.feature.univariate import (
     MANUAL_SCHEMA_VERSION as UNIVARIATE_MANUAL_ANALYSIS_SCHEMA_VERSION,
@@ -146,6 +146,9 @@ from marvis.packs.strategy.report_bundle_tools import (
 )
 from marvis.packs.strategy.model_evidence_tools import (
     run_materialize_model_evidence_v2,
+)
+from marvis.packs.strategy.model_score_comparison_tools import (
+    run_materialize_model_score_comparison_v2,
 )
 from marvis.packs.strategy.sample_design_execution import (
     StrategyRiskDevelopmentRef,
@@ -1158,6 +1161,20 @@ def tool_materialize_model_evidence_v2(inputs: dict, ctx) -> dict:
     """Materialize governed V2 analysis evidence from authenticated sources."""
 
     return run_materialize_model_evidence_v2(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_model_score_comparison_v2(inputs: dict, ctx) -> dict:
+    """Publish a governed comparison without authorizing model selection."""
+
+    # The strict upstream score-evidence loader requires modeling repositories;
+    # the comparison writer itself remains registered as a Strategy Tool.
+    from marvis.packs.modeling._runtime import _runtime as modeling_runtime
+
+    return run_materialize_model_score_comparison_v2(
+        inputs,
+        ctx,
+        modeling_runtime(ctx),
+    )
 
 
 def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:

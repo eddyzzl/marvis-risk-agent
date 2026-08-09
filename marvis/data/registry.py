@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
 import hmac
 import re
 import shutil
@@ -15,6 +16,12 @@ import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
+from marvis.data.authenticated_snapshot import (
+    AuthenticatedSnapshotError,
+    materialize_authenticated_file_snapshot,
+    read_authenticated_parquet_snapshot,
+    verify_content_addressed_file_snapshot,
+)
 from marvis.data.contracts import Dataset
 from marvis.data.csv_ingest import CsvIngestReport, read_csv_with_fallback_encoding
 from marvis.data.errors import DataBackendError, DatasetContentDriftError
@@ -27,6 +34,7 @@ from marvis.data.excel_ingest import (
 from marvis.data.profiler import profile_dataset
 from marvis.data.schema_infer import detect_target_column
 from marvis.files import sha256_file, write_json_atomic
+from marvis.state_machine import ConflictError
 
 import logging
 
@@ -40,6 +48,24 @@ _VERIFIED_FILE_CACHE: OrderedDict[
 ] = OrderedDict()
 _VERIFIED_FILE_CACHE_LOCK = Lock()
 _INFER_TARGET = object()
+
+
+@dataclass(frozen=True)
+class AuthenticatedDatasetBinding:
+    """One registered dataset bound to verified content-addressed bytes.
+
+    ``relative_path`` is the exact persisted ``_cas/<sha>/<sha>.parquet``
+    identity.  The binding is intentionally small and immutable so setup code
+    can carry it across semantic review without falling back to an unresolved
+    mutable upload path.
+    """
+
+    dataset_id: str
+    task_id: str
+    content_hash: str
+    relative_path: str
+    path: Path
+    row_count: int
 
 
 class DatasetRegistry:
@@ -395,6 +421,7 @@ class DatasetRegistry:
         task_id: str,
         role: str,
         anchor_target: str | None = None,
+        target_col_override: str | None | object = _INFER_TARGET,
         seed: int = 0,
     ) -> Dataset:
         parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
@@ -403,6 +430,7 @@ class DatasetRegistry:
             task_id=task_id,
             role=role,
             anchor_target=anchor_target,
+            target_col_override=target_col_override,
             seed=seed,
         )
         audit = audit_factory(dataset)
@@ -427,6 +455,7 @@ class DatasetRegistry:
         task_id: str,
         role: str,
         anchor_target: str | None = None,
+        target_col_override: str | None | object = _INFER_TARGET,
         seed: int = 0,
     ) -> Dataset:
         parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
@@ -435,6 +464,7 @@ class DatasetRegistry:
             task_id=task_id,
             role=role,
             anchor_target=anchor_target,
+            target_col_override=target_col_override,
             seed=seed,
         )
         audit = audit_factory(dataset)
@@ -464,6 +494,356 @@ class DatasetRegistry:
 
     def list_for_task(self, task_id: str) -> list[Dataset]:
         return self._repo.list_datasets(task_id)
+
+    @property
+    def datasets_root(self) -> Path:
+        """Governed root used by retained-descriptor dataset snapshot reads."""
+
+        return self._root
+
+    def pin_authenticated_snapshot(
+        self,
+        dataset_id: str,
+        *,
+        expected_task_id: str | None = None,
+        expected_content_hash: str | None = None,
+    ) -> Dataset:
+        """Bind a dataset id to read-only bytes named by its registered hash.
+
+        This is the filesystem half of the DataWorkspace trust boundary.  It
+        first publishes one retained-descriptor copy under ``_cas/<sha>/`` and
+        only then compare-and-swaps the dataset row to that immutable path.
+        Workspace commits can authenticate the pinned object without racing the
+        mutable upload path that originally produced it.
+        """
+
+        for attempt in range(2):
+            dataset = self.get(dataset_id)
+            expected_hash = dataset.content_hash
+            if (
+                expected_task_id is not None
+                and dataset.task_id != str(expected_task_id)
+            ):
+                raise DatasetContentDriftError(
+                    dataset_id,
+                    reason="registered dataset no longer belongs to the expected task",
+                )
+            if (
+                expected_content_hash is not None
+                and (
+                    not isinstance(expected_hash, str)
+                    or not hmac.compare_digest(
+                        expected_hash,
+                        str(expected_content_hash),
+                    )
+                )
+            ):
+                raise DatasetContentDriftError(
+                    dataset_id,
+                    reason="registered content hash changed before authentication",
+                )
+            if (
+                not isinstance(expected_hash, str)
+                or _SHA256_RE.fullmatch(expected_hash) is None
+            ):
+                raise DatasetContentDriftError(
+                    dataset_id,
+                    reason="registered content hash is missing or invalid",
+                )
+            destination = (
+                self._root
+                / "_cas"
+                / expected_hash
+                / f"{expected_hash}.parquet"
+            )
+            source = self._root / dataset.source_path
+            try:
+                pinned_path = materialize_authenticated_file_snapshot(
+                    source,
+                    root=self._root,
+                    expected_sha256=expected_hash,
+                    destination=destination,
+                )
+                pinned_relative = self._relative_path(pinned_path)
+
+                def validate_pinned_path() -> None:
+                    verify_content_addressed_file_snapshot(
+                        pinned_path,
+                        root=self._root,
+                        expected_sha256=expected_hash,
+                    )
+
+                self._repo.pin_dataset_source_path(
+                    dataset.id,
+                    expected_source_path=dataset.source_path,
+                    expected_content_hash=expected_hash,
+                    content_addressed_source_path=pinned_relative,
+                    validate_content_addressed_source=validate_pinned_path,
+                )
+            except AuthenticatedSnapshotError as exc:
+                if attempt == 0:
+                    continue
+                raise DatasetContentDriftError(
+                    dataset_id,
+                    reason=f"content-addressed pin failed: {exc.reason.value}",
+                ) from exc
+            except (ConflictError, KeyError, OSError, ValueError) as exc:
+                raise DatasetContentDriftError(
+                    dataset_id,
+                    reason="dataset identity changed while pinning",
+                ) from exc
+            pinned = self.get(dataset.id)
+            if (
+                pinned.source_path != pinned_relative
+                or pinned.content_hash != expected_hash
+            ):
+                raise DatasetContentDriftError(
+                    dataset_id,
+                    reason="dataset row did not retain its content-addressed identity",
+                )
+            return pinned
+        raise AssertionError("content-addressed pin retry loop did not return")
+
+    def authenticate_dataset_binding(
+        self,
+        dataset_id: str,
+        *,
+        expected_task_id: str,
+        expected_content_hash: str,
+    ) -> AuthenticatedDatasetBinding:
+        """Authenticate and pin one exact registered dataset identity.
+
+        The expected task/hash come from the C1 snapshot shown to the user.
+        Authentication therefore fails when either the database identity or
+        normalized Parquet bytes changed while the semantic review was in
+        progress.  Returning a content-addressed binding prevents downstream
+        setup from reopening the original mutable normalized path.
+        """
+
+        expected_task = str(expected_task_id)
+        expected_hash = str(expected_content_hash)
+        if _SHA256_RE.fullmatch(expected_hash) is None:
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason="expected registered content hash is missing or invalid",
+            )
+        dataset = self.pin_authenticated_snapshot(
+            dataset_id,
+            expected_task_id=expected_task,
+            expected_content_hash=expected_hash,
+        )
+        expected_relative = f"_cas/{expected_hash}/{expected_hash}.parquet"
+        if (
+            dataset.task_id != expected_task
+            or not isinstance(dataset.content_hash, str)
+            or not hmac.compare_digest(dataset.content_hash, expected_hash)
+            or dataset.source_path != expected_relative
+        ):
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason="authenticated dataset binding changed while it was created",
+            )
+        try:
+            path = self.resolve_verified_path(dataset.id)
+        except (OSError, ValueError) as exc:
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason="authenticated dataset path changed before binding",
+            ) from exc
+        if self._relative_path(path) != expected_relative:
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason="authenticated dataset path does not match its content identity",
+            )
+        return AuthenticatedDatasetBinding(
+            dataset_id=dataset.id,
+            task_id=dataset.task_id,
+            content_hash=expected_hash,
+            relative_path=expected_relative,
+            path=path,
+            row_count=int(dataset.row_count),
+        )
+
+    def verify_dataset_binding(
+        self,
+        binding: AuthenticatedDatasetBinding,
+    ) -> AuthenticatedDatasetBinding:
+        """Re-authenticate a previously returned binding before setup reads."""
+
+        return self.authenticate_dataset_binding(
+            binding.dataset_id,
+            expected_task_id=binding.task_id,
+            expected_content_hash=binding.content_hash,
+        )
+
+    def verify_authenticated_binding_snapshot(
+        self,
+        binding: AuthenticatedDatasetBinding,
+    ) -> Path:
+        """Verify pinned bytes without opening another database transaction.
+
+        This is the filesystem-only half of ``verify_dataset_binding``.  It is
+        safe to call from a repository callback that already owns SQLite's
+        write lock; the surrounding transaction separately validates the
+        dataset row and content hash before committing its reference.
+        """
+
+        expected_relative = (
+            f"_cas/{binding.content_hash}/{binding.content_hash}.parquet"
+        )
+        if binding.relative_path != expected_relative:
+            raise DatasetContentDriftError(
+                binding.dataset_id,
+                reason="authenticated binding path no longer matches its content identity",
+            )
+        try:
+            verified = verify_content_addressed_file_snapshot(
+                binding.path,
+                root=self._root,
+                expected_sha256=binding.content_hash,
+            )
+        except (AuthenticatedSnapshotError, OSError, ValueError) as exc:
+            raise DatasetContentDriftError(
+                binding.dataset_id,
+                reason="authenticated content-addressed snapshot changed",
+            ) from exc
+        if self._relative_path(verified) != expected_relative:
+            raise DatasetContentDriftError(
+                binding.dataset_id,
+                reason="verified binding path no longer matches its content identity",
+            )
+        return verified
+
+    def authenticated_binding_column_names(
+        self,
+        binding: AuthenticatedDatasetBinding,
+    ) -> tuple[str, ...]:
+        """Read the schema from the exact CAS bytes represented by ``binding``."""
+
+        verified = self.verify_authenticated_binding_snapshot(binding)
+        return tuple(str(item) for item in self._backend.column_names(verified))
+
+    def persist_authenticated_target_on_connection(
+        self,
+        conn,
+        binding: AuthenticatedDatasetBinding,
+        target_col: str | None,
+    ) -> None:
+        """Persist explicit C1 target semantics under the authenticated CAS identity."""
+
+        normalized_target = str(target_col or "").strip() or None
+        columns = self.authenticated_binding_column_names(binding)
+        if normalized_target is not None and normalized_target not in columns:
+            raise DatasetContentDriftError(
+                binding.dataset_id,
+                reason="confirmed target is absent from authenticated anchor bytes",
+            )
+        persist = getattr(
+            self._repo,
+            "set_authenticated_target_on_connection",
+            None,
+        )
+        if not callable(persist):
+            raise DataBackendError(
+                "dataset repository does not support authenticated target persistence"
+            )
+        persist(
+            conn,
+            dataset_id=binding.dataset_id,
+            expected_task_id=binding.task_id,
+            expected_content_hash=binding.content_hash,
+            expected_source_path=binding.relative_path,
+            target_col=normalized_target,
+            validate_authenticated_source=lambda: (
+                self.verify_authenticated_binding_snapshot(binding)
+            ),
+        )
+
+    def read_authenticated_parquet_snapshot(
+        self,
+        dataset_id: str,
+        *,
+        columns: list[str] | tuple[str, ...] | None = None,
+    ) -> pd.DataFrame:
+        """Return bytes authenticated against the registered dataset identity.
+
+        ``resolve_verified_path`` alone cannot bind a later backend read to the
+        bytes it verified.  This boundary retains and hashes one descriptor,
+        parses a private snapshot, and rechecks the visible source before the
+        frame is returned.
+        """
+
+        dataset = self.get(dataset_id)
+        expected_hash = dataset.content_hash
+        if (
+            not isinstance(expected_hash, str)
+            or _SHA256_RE.fullmatch(expected_hash) is None
+        ):
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason="registered content hash is missing or invalid",
+            )
+        path = self.resolve_verified_path(dataset_id)
+        try:
+            frame = read_authenticated_parquet_snapshot(
+                path,
+                root=self._root,
+                expected_sha256=expected_hash,
+                columns=columns,
+            )
+        except AuthenticatedSnapshotError as exc:
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason=f"authenticated snapshot failed: {exc.reason.value}",
+            ) from exc
+        if len(frame) != int(dataset.row_count):
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason="authenticated snapshot row count differs from registration",
+            )
+        return frame
+
+    def read_authenticated_binding_snapshot(
+        self,
+        binding: AuthenticatedDatasetBinding,
+        *,
+        columns: list[str] | tuple[str, ...] | None = None,
+    ) -> pd.DataFrame:
+        """Read the exact task/hash binding without reopening its database row."""
+
+        expected_relative = (
+            f"_cas/{binding.content_hash}/{binding.content_hash}.parquet"
+        )
+        if binding.relative_path != expected_relative:
+            raise DatasetContentDriftError(
+                binding.dataset_id,
+                reason="authenticated binding path no longer matches its content identity",
+            )
+        try:
+            if self._relative_path(binding.path) != expected_relative:
+                raise ValueError("authenticated binding escaped its content path")
+            frame = read_authenticated_parquet_snapshot(
+                binding.path,
+                root=self._root,
+                expected_sha256=binding.content_hash,
+                columns=columns,
+            )
+        except (AuthenticatedSnapshotError, OSError, ValueError) as exc:
+            reason = (
+                exc.reason.value
+                if isinstance(exc, AuthenticatedSnapshotError)
+                else "binding_path_changed"
+            )
+            raise DatasetContentDriftError(
+                binding.dataset_id,
+                reason=f"authenticated binding snapshot failed: {reason}",
+            ) from exc
+        if len(frame) != int(binding.row_count):
+            raise DatasetContentDriftError(
+                binding.dataset_id,
+                reason="authenticated binding row count differs from registration",
+            )
+        return frame
 
     def resolve_path(self, dataset_id: str) -> Path:
         return self._root / self.get(dataset_id).source_path

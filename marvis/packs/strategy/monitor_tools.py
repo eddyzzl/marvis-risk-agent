@@ -44,7 +44,8 @@ import pandas as pd
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, StrategyRepository
+from marvis.repositories.datasets import DatasetRepository
+from marvis.repositories.strategy import StrategyRepository
 from marvis.db_schema import connect
 from marvis.feature.metrics import compute_psi
 from marvis.files import sha256_file

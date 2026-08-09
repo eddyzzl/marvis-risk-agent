@@ -116,6 +116,12 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
     adoption_gate = _latest_message(began.json(), kind="gate")
     assert adoption_gate["metadata"]["gate_source_tool"] == "adopt_strategy"
     adoption_step_id = adoption_gate["metadata"]["step_id"]
+    adoption_control = {
+        "ui_action": "confirm_adoption",
+        "expected_plan_id": adoption_gate["metadata"]["plan_id"],
+        "expected_step_id": adoption_step_id,
+        **adoption_gate["metadata"]["confirmation_snapshot"],
+    }
     editable_schema = adoption_gate["metadata"]["editable_input_schema"]
     assert editable_schema["required"] == ["adoption_reason"]
     assert editable_schema["additionalProperties"] is False
@@ -136,10 +142,10 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
         f"/api/tasks/{task_id}/agent/messages",
         json={
             "content": "确认采纳",
-            "expected_step_id": adoption_step_id,
+            **adoption_control,
         },
     )
-    assert rejected.status_code == 409, rejected.text
+    assert rejected.status_code == 422, rejected.text
     assert "采纳理由" in rejected.json()["detail"]
 
     rejected_plan = client.app.state.plan_repo.load_plan(plan_id)
@@ -161,7 +167,7 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
         f"/api/tasks/{task_id}/agent/messages",
         json={
             "content": "确认采纳",
-            "expected_step_id": adoption_step_id,
+            **adoption_control,
             "adjust_params": {"adoption_reason": reason},
         },
     )

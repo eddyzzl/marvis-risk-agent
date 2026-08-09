@@ -22,6 +22,10 @@ import unicodedata
 from urllib.parse import quote
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.governed_json import (
+    strict_json_object_from_bytes,
+    strict_json_object_from_text,
+)
 from marvis.packs.strategy.automatic_tree_asset import (
     AutomaticTreeAssetError,
     canonical_automatic_tree_asset_json,
@@ -1124,38 +1128,19 @@ def _strict_leaf_selection_from_bytes(value: bytes) -> dict[str, Any]:
 
 
 def _strict_json_object_from_bytes(value: bytes, name: str) -> dict[str, Any]:
-    try:
-        text = value.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise StrategyError(f"{name} must be strict UTF-8 JSON") from exc
-    return _strict_json_object_from_text(text, name)
+    return strict_json_object_from_bytes(
+        value,
+        name,
+        error_factory=StrategyError,
+    )
 
 
 def _strict_json_object_from_text(value: str, name: str) -> dict[str, Any]:
-    def reject_duplicates(pairs):
-        result: dict[str, Any] = {}
-        for key, child in pairs:
-            if key in result:
-                raise StrategyError(f"{name} contains a duplicate JSON key: {key}")
-            result[key] = child
-        return result
-
-    def reject_constant(constant: str):
-        raise StrategyError(f"{name} contains non-finite JSON: {constant}")
-
-    try:
-        parsed = json.loads(
-            value,
-            object_pairs_hook=reject_duplicates,
-            parse_constant=reject_constant,
-        )
-    except StrategyError:
-        raise
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise StrategyError(f"{name} is invalid JSON") from exc
-    if not isinstance(parsed, dict):
-        raise StrategyError(f"{name} must be a JSON object")
-    return parsed
+    return strict_json_object_from_text(
+        value,
+        name,
+        error_factory=StrategyError,
+    )
 
 
 def _validate_inputs(inputs: object) -> dict[str, Any]:

@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from marvis.packs.strategy import model_evidence
 from marvis.packs.modeling.score_evidence import (
     MAX_GOVERNED_SCORE_MONTHS,
     ModelScoreEvidenceError,
@@ -160,6 +161,29 @@ def test_score_evidence_uses_common_development_bins_and_conserves_zero_bins() -
 
     assert _observation(evidence, "auc", "risk", "development")["value"] == 1.0
     assert _observation(evidence, "score_psi", "risk", "development")["value"] == 0.0
+
+
+def test_score_evidence_validates_one_sample_design_once_per_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = model_evidence.validate_strategy_sample_design_v2_bundle
+    validations = 0
+
+    def counting_validate(value):
+        nonlocal validations
+        validations += 1
+        return original(value)
+
+    monkeypatch.setattr(
+        model_evidence,
+        "validate_strategy_sample_design_v2_bundle",
+        counting_validate,
+    )
+
+    evidence = _build()
+
+    assert evidence["observations"]
+    assert validations == 1
 
 
 def test_score_evidence_constant_score_is_one_unbounded_bin() -> None:

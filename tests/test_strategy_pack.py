@@ -562,6 +562,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "materialize_sample_design_v2",
         "materialize_sample_design_v2_native",
         "materialize_model_evidence_v2",
+        "materialize_model_score_comparison_v2",
         "analyze_univariate_candidates",
         "build_automatic_tree_candidate",
         "apply_automatic_tree",

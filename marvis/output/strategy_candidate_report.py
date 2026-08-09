@@ -14,7 +14,6 @@ from io import BytesIO
 import json
 import math
 import re
-import unicodedata
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -27,6 +26,7 @@ from marvis.feature.univariate import (
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.dsl import canonicalize_expression
 from marvis.packs.strategy.errors import StrategyError
+from marvis.spreadsheet_safety import looks_like_excel_formula
 
 
 REPORT_SCHEMA_VERSION = "strategy.candidate-report.v1"
@@ -129,7 +129,6 @@ _METHODS = frozenset(
 _BIN_KINDS = frozenset({"numeric_interval", "category", "sentinel", "missing"})
 _FIXED_WORKBOOK_DATETIME = datetime(2000, 1, 1)
 _FIXED_ZIP_DATETIME = (1980, 1, 1, 0, 0, 0)
-_FORMULA_PREFIXES = frozenset("=+-@")
 _ILLEGAL_XLSX_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _CORE_MODIFIED_TIMESTAMP = re.compile(
     rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)"
@@ -1346,7 +1345,7 @@ def _xlsx_cell(value: object) -> object:
             f"report cell contains unsupported {type(value).__name__}"
         )
     text = value
-    if _looks_like_formula(text):
+    if looks_like_excel_formula(text):
         text = "'" + text
     text = _ILLEGAL_XLSX_CONTROL.sub(
         lambda match: f"\\u{ord(match.group(0)):04x}", text
@@ -1356,14 +1355,6 @@ def _xlsx_cell(value: object) -> object:
             "report cell exceeds Excel's 32767 character limit"
         )
     return text
-
-
-def _looks_like_formula(value: str) -> bool:
-    for character in value:
-        if character.isspace() or unicodedata.category(character).startswith("C"):
-            continue
-        return character in _FORMULA_PREFIXES
-    return False
 
 
 def _canonicalize_xlsx_bytes(raw: bytes) -> bytes:

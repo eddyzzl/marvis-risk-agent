@@ -8,8 +8,12 @@
 - 当前范围决定：**V2.x 承担全部已确定产品能力**；不得用 V3/V4 作为延后 V2 功能的蓄水池。V2.x 可以通过多个 minor / prerelease 逐批交付，但必须在 V2 major 内收口。
 - 当前产品面：数据处理、特征分析、模型开发、模型验证、策略开发、Vintage/风险分析、监控、组合分析、额度/定价和即席问数等信贷风控 workflow。
 - 模型验证是稳定兼容工作流之一：继续保留 V1.1 手动模式和 Agent 辅助验证能力，Notebook 契约、PMML 对比、确定性验证指标和 Excel/Word 产出必须保持兼容。
+- 批量模型验证是独立首屏入口：一次创建 1–10 个相互隔离的模型验证子任务，按顺序执行，逐项保留 Excel/Word 报告，并额外生成批次汇总 Excel；单个模型失败不阻断其余模型，输入合同仍需逐模型显式确认，批次汇总不替代单模型证据。
 - V2 不是只有 Plugin/Tool runtime 外壳；欢迎页展示的入口必须对应真实可用的端到端 workflow：人在环确认、受控工具执行、结构化结果、下载/报告或可审计产物。
-- Portfolio / 组合分析能力已有后端工具、模板和测试覆盖；具体是否作为首屏入口或 Agent start allowlist 暴露，以当前代码和 UI 为准。
+- 当前验收层状态唯一来源是 [capability-status.md](capability-status.md)；路线图描述 V2.x 范围，不把实现、单测、API、Agent、浏览器、真实材料、签字和生产交付合并成一个“完成”状态。
+- Portfolio / 组合分析已进入正式 Agent allowlist 与首屏，HTTP Agent、pre-plan 手动确认、浏览器和报告下载的 no-trend 纵切已闭环；余额/EAD、业务分群、损失态、LGD 与期限均为显式业务合同，缺失时失败关闭。当前证据仍只覆盖合成 no-trend 旅程，不等于真实组合验收、周期 trend、生产调度或经营签字。
+- Labeling / 标签构造不另设顶层任务，作为数据处理内的高风险 workflow：活动数据集与内容 hash、workspace revision/generation、观察窗、表现窗、as-of、坏样本规则和成熟度决定均需结构化确认；结果作为非活动派生数据集与证据写出，不静默替换 active dataset。
+- 信用决策数字孪生已有本地内容寻址审计、认证 replay 入口、Champion/Challenger/有界反事实联合约束和 proposal-only 晋级桥的基础实现；它尚无正式 API/UI、外部签名、远端不可篡改存储或生产决策接入，因此不能作为当前可交付入口宣传。
 - 策略平台改造的 Phase 0A（真实完整开发入口与业务 contract）、Phase 0B（运行时门禁、人工决策证明和一次性副作用授权）和 Phase 1（五类统一 DSL、自然语言可逆执行、标准分析 Workflow、版本化监控/处置、新版本 handoff、生命周期与可下载 artifact）已完成。策略采纳和监控处置仍是人工责任门，本地采纳不等于生产部署。Phase 2 及全部后续范围继续在 V2.x 内交付，不得推到 V3/V4。
 - **V2 策略开发核心七步已于 2026-07-27 收口**：一个策略任务内已经能够完成项目现状与历史证据、原生 approval/risk 双人群样本设计、单变量/模型证据、Cross/自动树/交互树/评分卡/Voting 候选开发、五类 Strategy Pool、逐月/分群/跨分区影响与验证、Pool → canonical Strategy、Python/SQL/JSON 等价代码交付，以及参考评审模板的 JSON/Markdown/XLSX/DOCX 七步报告。自然语言 Agent 与 Manual Workbench 共用 compiler、PlanValidator、Workflow、Tool、DSL 和确定性指标内核；缺关键口径会澄清，用户明确“暂缺”的可选报告信息保持空白。Evidence Drawer、任务级视图恢复、人工采纳门和全链 provenance 已接通。此结论不把生产部署、跨设备协作、SQL 数据源扩展或组织治理混入“策略开发已完成”的口径；这些增强仍继续在 V2.x 内交付，不转移到 V3/V4。
 
@@ -140,6 +144,7 @@ V2 是当前主线。它把信贷风控任务纳入统一 Plugin / Tool / Hook /
 - **特征分析**：计算 IV/KS/AUC/PSI/coverage/lift/共线等指标，输出可下载特征分析报告；被建模或策略调用时可进入筛选确认门。
 - **模型开发**：读样本、确认目标和切分、做泄漏感知筛选、调参训练、比较实验并输出模型开发报告、打分产物和交接材料。
 - **模型验证**：保持 V1.1 既有手动/Agent 验证能力可用，并可通过 `v1_compat` 作为 Workflow 里的稳定工具包调用。
+- **批量模型验证**：创建 1–10 个独立验证子任务，先逐项扫描并停在输入合同确认门，确认后按固定顺序运行；保留每个模型的 Word/Excel 报告和人工复核入口，再生成只做汇总、不重算指标的批次 Excel。详见 [批量模型验证规格](plans/specs/v2-validation-batch-spec.md)。
 - **策略开发**：构造规则、回测策略，计算通过率、坏账率、swap、利润或收益权衡，关键上线类动作保留人工确认。
 - **Vintage / 风险分析**：计算 vintage、roll-rate、稳定性观察和相关分析，输出可复核图表、表格和报告材料。
 - **监控与组合分析**：围绕评分、策略、组合表现、迁移矩阵、Expected Loss、限额/定价和 ad-hoc slice analytics 提供工具、模板和报告能力；首屏暴露范围以当前代码和产品选择为准。

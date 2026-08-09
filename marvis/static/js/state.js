@@ -1,5 +1,10 @@
-export const defaultPetPreference = "auditbot";
-export const explicitPetNoneStorageKey = "marvis_pet_none_explicit";
+const petCatalog = globalThis.MarvisPetCatalog;
+if (!petCatalog) throw new Error("MARVIS pet catalog must load before state.js");
+
+export const defaultPetPreference = petCatalog.defaultId;
+export const petPreferenceStorageKey = petCatalog.storageKeys.preference;
+export const explicitPetNoneStorageKey = petCatalog.storageKeys.explicitNone;
+export const petPositionStorageKey = petCatalog.storageKeys.position;
 export const agentComposerPreferenceStorageKey = "marvis_agent_composer_preferences";
 export const selectedTaskStorageKey = "marvis_selected_task_id";
 export const resultScrollPositionsStorageKey = "marvis_result_scroll_positions";

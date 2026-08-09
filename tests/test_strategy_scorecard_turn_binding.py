@@ -9,9 +9,9 @@ import pytest
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent.strategy_setup import StrategySetupError
 from marvis.agent.turn_handlers import (
+    _bind_scorecard_band_evidence,
+    _bind_scorecard_cutoff_evidence,
     _candidate_selection_artifact_slots,
-    _scorecard_band_build_plan_slots,
-    _scorecard_cutoff_selection_plan_slots,
 )
 import marvis.agent.turn_handlers as turn_handlers
 from marvis.packs.modeling.errors import ModelingError
@@ -166,12 +166,7 @@ def test_scorecard_build_binds_only_latest_score_and_sample_refs(
         "build_training_evidence_ref",
         lambda _training: {"sample_design_ref": dict(SAMPLE_REF)},
     )
-    draft = StandardWorkflowRequestDraft(
-        workflow="scorecard_band_build",
-        workflow_inputs={"bin_count": 7},
-    )
-
-    slots = _scorecard_band_build_plan_slots(_runtime(), _task(), draft)
+    slots = _bind_scorecard_band_evidence(_runtime(), _task())
 
     assert load_calls == [
         {
@@ -202,7 +197,6 @@ def test_scorecard_build_binds_only_latest_score_and_sample_refs(
             ),
         },
         "sample_design_ref": SAMPLE_REF,
-        "banding": {"method": "equal_frequency", "bin_count": 7},
     }
     assert artifacts.list_calls == 2
 
@@ -259,13 +253,9 @@ def test_scorecard_build_skips_authenticated_newer_non_scorecard_evidence(
         lambda _training: {"sample_design_ref": dict(SAMPLE_REF)},
     )
 
-    slots = _scorecard_band_build_plan_slots(
+    slots = _bind_scorecard_band_evidence(
         _runtime(),
         _task(),
-        StandardWorkflowRequestDraft(
-            workflow="scorecard_band_build",
-            workflow_inputs={},
-        ),
     )
 
     assert load_calls == [newer_lgb["id"], scorecard["id"]]
@@ -319,13 +309,9 @@ def test_scorecard_build_does_not_fallback_when_newest_score_is_damaged(
         StrategySetupError,
         match="最新.*评分证据|最新.*分数证据",
     ):
-        _scorecard_band_build_plan_slots(
+        _bind_scorecard_band_evidence(
             _runtime(),
             _task(),
-            StandardWorkflowRequestDraft(
-                workflow="scorecard_band_build",
-                workflow_inputs={},
-            ),
         )
 
     assert load_calls == [newest["id"]]
@@ -381,10 +367,10 @@ def test_scorecard_cutoff_selection_binds_exact_full_band_source(
         },
     )
 
-    slots = _scorecard_cutoff_selection_plan_slots(
+    slots = _bind_scorecard_cutoff_evidence(
         _runtime(),
         task_id="task-scorecard",
-        draft=draft,
+        workflow_inputs=draft.workflow_inputs,
     )
 
     assert loader_calls == [
@@ -401,8 +387,6 @@ def test_scorecard_cutoff_selection_binds_exact_full_band_source(
         "expected_source_artifact_content_hash": record["content_hash"],
         "expected_asset_id": ASSET_ID,
         "expected_asset_hash": ASSET_HASH,
-        "cutoff_id": CUTOFF_ID,
-        "reason": "人工确认进入后续影响评审",
     }
     assert artifacts.list_calls == 2
 
@@ -525,10 +509,8 @@ def test_llm_free_scorecard_request_enters_the_same_slot_resolver(
         ),
     )
 
-    def resolve(_runtime, task, draft):
-        resolver_calls.append(
-            {"task_id": task.id, "draft": draft.to_dict()}
-        )
+    def resolve(_runtime, task):
+        resolver_calls.append({"task_id": task.id})
         return {
             "score_evidence_ref": {"server": "score"},
             "sample_design_ref": {"server": "sample"},
@@ -536,7 +518,7 @@ def test_llm_free_scorecard_request_enters_the_same_slot_resolver(
 
     monkeypatch.setattr(
         turn_handlers,
-        "_scorecard_band_build_plan_slots",
+        "_bind_scorecard_band_evidence",
         resolve,
     )
 
@@ -567,14 +549,7 @@ def test_llm_free_scorecard_request_enters_the_same_slot_resolver(
         "scorecard_cutoff_selection",
     }.issubset(turn_handlers._MANUAL_STRATEGY_WORKFLOWS)
     assert resolver_calls == [
-        {
-            "task_id": "task-scorecard",
-            "draft": {
-                "request_kind": "standard_workflow",
-                "workflow": "scorecard_band_build",
-                "workflow_inputs": {},
-            },
-        }
+        {"task_id": "task-scorecard"}
     ]
     assert plan_calls == [
         {

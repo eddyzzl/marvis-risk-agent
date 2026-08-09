@@ -136,13 +136,18 @@ def _confirm_gate_and_wait(client: httpx.Client, plan_id: str, step_id: str) -> 
     """
     current = client.get(f"/api/plans/{plan_id}")
     assert current.status_code == 200, current.text
-    revision = current.json()["plan"]["replan_count"]
+    plan = current.json()["plan"]
+    snapshot = next(
+        step["confirmation_snapshot"]
+        for step in plan["steps"]
+        if step["id"] == step_id
+    )
     resp = client.post(
         f"/api/plans/{plan_id}/steps/{step_id}/decisions",
         json={
             "decision": "approve",
             "reason": "E2E reviewer approved this modeling gate",
-            "expected_plan_revision": revision,
+            **snapshot,
         },
     )
     assert resp.status_code == 202, resp.text
@@ -311,7 +316,10 @@ def test_real_server_join_and_modeling_journey(server, tmp_path: Path):
         plan_id = plan["id"]
         assert plan["template_id"] == "standard_modeling"
 
-        resp = client.post(f"/api/plans/{plan_id}/confirm")
+        resp = client.post(
+            f"/api/plans/{plan_id}/confirm",
+            json=plan["confirmation_snapshot"],
+        )
         assert resp.status_code == 200, resp.text
 
         resp = client.post(f"/api/plans/{plan_id}/run")
@@ -342,6 +350,17 @@ def test_real_server_join_and_modeling_journey(server, tmp_path: Path):
 
         # Gate 3: 模型交付动作 -> export_pmml + handoff_to_validation run for real.
         plan = _confirm_gate_and_wait(client, plan_id, delivery_step["id"])
+        if plan["status"] == "review":
+            # REVIEW is a legitimate transient state while the background
+            # executor finishes final post-checks.  The generic gate helper
+            # returns it so intermediate gates remain observable; for the last
+            # gate, wait for the actual terminal outcome before asserting.
+            plan = _poll_plan_until(
+                client,
+                plan_id,
+                statuses={"done", "failed"},
+                timeout=STEP_POLL_TIMEOUT_S,
+            )
         assert plan["status"] == "done", plan
         delivery_step = _step_by_title(plan, "模型交付动作")
         assert delivery_step["status"] == "done", delivery_step

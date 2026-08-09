@@ -3,9 +3,16 @@ import time
 
 from marvis.db import TaskRepository, init_db
 from marvis.agent.orchestrator import is_metrics_failure
-from marvis.domain import TaskCreate, TaskStatus
+from marvis.domain import (
+    TASK_TYPE_VALIDATION,
+    TASK_TYPE_VALIDATION_BATCH,
+    TaskCreate,
+    TaskStatus,
+)
 from marvis.job_heartbeat import heartbeat_job
 from marvis.job_watchdog import sweep_heartbeat_lost_jobs
+from marvis.repositories.validation_batches import ValidationBatchRepository
+from marvis.validation_batch_runner import mark_validation_batch_parent_running
 
 
 def _task(repo: TaskRepository, tmp_path):
@@ -80,6 +87,63 @@ def test_watchdog_releases_stale_queued_job_that_never_started(tmp_path):
         ).fetchone()
     assert audit_row == ("job.start_lost",)
     assert repo.task_has_active_job(task.id) is False
+
+
+def test_watchdog_makes_lost_validation_batch_callback_retryable_without_restart(
+    tmp_path,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    batch_repo = ValidationBatchRepository(db_path)
+    batch = batch_repo.create_batch(
+        TaskCreate(
+            task_type=TASK_TYPE_VALIDATION_BATCH,
+            model_name="批次",
+            model_version="",
+            validator="qa",
+            source_dir=str(tmp_path),
+            run_mode="agent",
+        ),
+        [
+            TaskCreate(
+                task_type=TASK_TYPE_VALIDATION,
+                model_name="模型A",
+                model_version="v1",
+                validator="qa",
+                source_dir=str(tmp_path),
+                run_mode="agent",
+            )
+        ],
+    )
+    job_id = repo.start_job(batch.parent_task_id, "validation_batch")
+    batch_repo.claim_start(batch.parent_task_id)
+    mark_validation_batch_parent_running(repo, batch.parent_task_id)
+
+    released = sweep_heartbeat_lost_jobs(
+        repo,
+        older_than_seconds=0,
+        include_running=False,
+    )
+
+    assert [job["id"] for job in released] == [job_id]
+    assert repo.get_job(job_id)["error_name"] == "JobStartLost"
+    assert batch_repo.get_batch(batch.parent_task_id).status == "partial_failure"
+    assert repo.get_task(batch.parent_task_id).status is TaskStatus.FAILED
+    assert repo.get_active_job_kind(batch.parent_task_id) is None
+    [failure] = [
+        message
+        for message in repo.list_agent_messages(batch.parent_task_id)
+        if message["metadata"].get("batch_failed_to_start") is True
+    ]
+    assert failure["metadata"]["error_code"] == "JobStartLost"
+    assert failure["metadata"]["retryable"] is True
+
+    retry_job_id = repo.start_job(batch.parent_task_id, "validation_batch")
+    retried, previous_status = batch_repo.claim_start(batch.parent_task_id)
+    assert retry_job_id != job_id
+    assert previous_status == "partial_failure"
+    assert retried.status == "running"
 
 
 def test_stuck_job_health_count_includes_stale_queued_jobs(tmp_path):

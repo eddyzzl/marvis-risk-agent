@@ -1,0 +1,569 @@
+/* Task-scoped Data Workspace: compact, visible semantic state backed by the
+   revisioned /api/tasks/{task_id}/data-workspace contract. */
+.data-workspace-panel {
+  display: grid;
+  gap: 0;
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.data-workspace-panel[hidden] {
+  display: none;
+}
+
+.data-workspace-head,
+.data-workspace-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  background: var(--surface-soft);
+}
+
+.data-workspace-head {
+  border-bottom: 1px solid var(--border);
+}
+
+.data-workspace-footer {
+  border-top: 1px solid var(--border);
+}
+
+.data-workspace-identity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.data-workspace-identity > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.data-workspace-identity > strong {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-workspace-identity > small {
+  color: var(--text-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+.data-workspace-head-actions,
+.data-workspace-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 7px;
+  align-items: center;
+}
+
+.data-workspace-revision,
+.data-workspace-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.data-workspace-state-clean {
+  border-color: var(--success-border);
+  color: var(--success-strong);
+  background: var(--success-soft);
+}
+
+.data-workspace-state-dirty,
+.data-workspace-state-busy {
+  border-color: var(--warning-border);
+  color: var(--warning-strong);
+  background: var(--warning-soft);
+}
+
+.data-workspace-state-conflict,
+.data-workspace-state-error {
+  border-color: var(--danger-border);
+  color: var(--danger-strong);
+  background: var(--danger-soft);
+}
+
+.data-workspace-editor {
+  display: grid;
+  grid-template-columns: minmax(180px, .28fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 11px 12px;
+}
+
+.data-workspace-target {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.data-workspace-target select,
+.data-workspace-field-row select,
+.data-workspace-field-row input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+}
+
+.data-workspace-target select:focus-visible,
+.data-workspace-field-row select:focus-visible,
+.data-workspace-field-row input:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  outline-offset: 1px;
+}
+
+.data-workspace-target select:disabled,
+.data-workspace-field-row select:disabled,
+.data-workspace-field-row input:disabled {
+  color: var(--text-muted);
+  background: var(--surface-soft);
+  cursor: not-allowed;
+}
+
+.data-workspace-semantics {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.data-workspace-semantics > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-soft);
+}
+
+.data-workspace-semantics > header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.data-workspace-semantics > header strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.data-workspace-semantics > header small,
+.data-workspace-semantics > header > span {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.data-workspace-semantics > header > span {
+  flex: 0 0 auto;
+  padding-top: 1px;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-workspace-field-head,
+.data-workspace-field-row {
+  display: grid;
+  grid-template-columns: minmax(130px, .8fr) minmax(120px, .58fr) minmax(160px, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.data-workspace-field-head {
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--surface-soft) 72%, var(--surface) 28%);
+  font-size: 10px;
+}
+
+.data-workspace-fields {
+  max-height: 164px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.data-workspace-field-row {
+  padding: 5px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+}
+
+.data-workspace-field-row:last-child {
+  border-bottom: 0;
+}
+
+.data-workspace-field-row code {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-workspace-empty {
+  margin: 0;
+  padding: 14px 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.data-workspace-status {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-workspace-status.warning {
+  color: var(--warning-strong);
+}
+
+.data-workspace-status.error {
+  color: var(--danger-strong);
+}
+
+/* Label construction binds an explicit business rule to the authenticated
+   Data Workspace snapshot before any executable plan is created. */
+.labeling-setup-panel {
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--tone-data-join) 42%, var(--border));
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.labeling-setup-panel[hidden],
+.labeling-setup-form[hidden],
+.labeling-proposal-panel[hidden],
+.labeling-rule-fields[hidden] {
+  display: none;
+}
+
+.labeling-setup-head,
+.labeling-setup-footer,
+.labeling-proposal-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  background: color-mix(in srgb, var(--tone-data-join) 7%, var(--surface-soft));
+}
+
+.labeling-setup-head {
+  border-bottom: 1px solid var(--border);
+}
+
+.labeling-setup-head > div,
+.labeling-proposal-panel > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.labeling-setup-head span,
+.labeling-setup-form label > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.labeling-setup-head strong,
+.labeling-proposal-panel strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.labeling-setup-badge {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--tone-data-join) 48%, var(--border));
+  border-radius: 999px;
+  color: var(--tone-data-join) !important;
+  background: color-mix(in srgb, var(--tone-data-join) 9%, var(--surface));
+  font-size: 10px !important;
+}
+
+.labeling-setup-form {
+  display: grid;
+}
+
+.labeling-setup-guidance {
+  margin: 0;
+  padding: 9px 12px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.labeling-setup-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 9px;
+  padding: 10px 12px;
+}
+
+.labeling-setup-grid label,
+.labeling-rule-fields {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.labeling-rule-fields {
+  grid-column: span 2;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 9px;
+}
+
+#labelingStatusFields {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(120px, .7fr) minmax(140px, .8fr) minmax(240px, 1.5fr);
+}
+
+.labeling-setup-grid input,
+.labeling-setup-grid select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+}
+
+.labeling-setup-grid input:focus-visible,
+.labeling-setup-grid select:focus-visible {
+  border-color: var(--tone-data-join);
+  outline: 2px solid color-mix(in srgb, var(--tone-data-join) 25%, transparent);
+  outline-offset: 1px;
+}
+
+.labeling-setup-footer {
+  border-top: 1px solid var(--border);
+}
+
+.labeling-setup-status,
+.labeling-proposal-panel p {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.labeling-setup-status.busy,
+.labeling-setup-status.warning {
+  color: var(--warning-strong);
+}
+
+.labeling-setup-status.success {
+  color: var(--success-strong);
+}
+
+.labeling-setup-status.error {
+  color: var(--danger-strong);
+}
+
+.labeling-proposal-panel {
+  align-items: end;
+  border-top: 1px solid var(--border);
+}
+
+.labeling-proposal-panel p {
+  margin-top: 3px;
+  line-height: 1.45;
+}
+
+/* Portfolio setup is a typed human-owned contract. Keep it visible beside the
+   task evidence until the server has produced the bucket-order confirmation
+   gate; it is not a free-text Agent prompt. */
+.portfolio-setup-panel {
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--tone-portfolio) 42%, var(--border));
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.portfolio-setup-panel[hidden] {
+  display: none;
+}
+
+.portfolio-setup-head,
+.portfolio-setup-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  background: color-mix(in srgb, var(--tone-portfolio) 7%, var(--surface-soft));
+}
+
+.portfolio-setup-head {
+  border-bottom: 1px solid var(--border);
+}
+
+.portfolio-setup-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.portfolio-setup-head span,
+.portfolio-setup-form label > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.portfolio-setup-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.portfolio-setup-badge {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--tone-portfolio) 48%, var(--border));
+  border-radius: 999px;
+  color: var(--tone-portfolio) !important;
+  background: color-mix(in srgb, var(--tone-portfolio) 9%, var(--surface));
+  font-size: 10px !important;
+}
+
+.portfolio-setup-form {
+  display: grid;
+}
+
+.portfolio-setup-guidance {
+  margin: 0;
+  padding: 9px 12px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.portfolio-setup-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 9px;
+  padding: 10px 12px;
+}
+
+.portfolio-setup-grid label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.portfolio-setup-grid input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+}
+
+.portfolio-setup-grid input:focus-visible {
+  border-color: var(--tone-portfolio);
+  outline: 2px solid color-mix(in srgb, var(--tone-portfolio) 25%, transparent);
+  outline-offset: 1px;
+}
+
+.portfolio-trend-contract {
+  margin: 0 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.portfolio-trend-contract summary {
+  padding: 7px 9px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.portfolio-setup-grid-optional {
+  grid-template-columns: repeat(2, minmax(140px, 1fr));
+  padding-top: 2px;
+}
+
+.portfolio-trend-contract > small {
+  display: block;
+  padding: 0 12px 9px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.portfolio-setup-footer {
+  border-top: 1px solid var(--border);
+}
+
+.portfolio-setup-status {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.portfolio-setup-status.busy {
+  color: var(--warning-strong);
+}
+
+.portfolio-setup-status.success {
+  color: var(--success-strong);
+}
+
+.portfolio-setup-status.error {
+  color: var(--danger-strong);
+}
+
+@media (max-width: 980px) {
+  .portfolio-setup-grid {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+}

@@ -1,3 +1,9 @@
+import {
+  confirmationSnapshotAttributes,
+  confirmationSnapshotFromControl,
+  refreshAfterConfirmationConflict,
+} from "./driver_gate_confirm.js";
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -11,7 +17,11 @@ export function renderFeatureBinningGate(message, options = {}) {
   if (!payload || !Array.isArray(payload.features)) return "";
   const interactive = options.interactive !== false;
   const disabled = interactive ? "" : " disabled";
+  const planId = String(message?.metadata?.plan_id || "");
   const stepId = String(message?.metadata?.step_id || "");
+  const snapshotAttrs = confirmationSnapshotAttributes(
+    message?.metadata?.confirmation_snapshot || {},
+  );
   const minBins = Number(payload.min_bins || 3);
   const maxBins = Number(payload.max_bins || 20);
   const defaultBins = Number(payload.default_bins || 10);
@@ -33,7 +43,7 @@ export function renderFeatureBinningGate(message, options = {}) {
     ].join("");
   }).join("");
   return [
-    `<section class="feature-binning-gate" data-feature-binning-step-id="${escapeHtml(stepId)}">`,
+    `<section class="feature-binning-gate" data-feature-binning-plan-id="${escapeHtml(planId)}" data-feature-binning-step-id="${escapeHtml(stepId)}"${snapshotAttrs}>`,
     '<div class="feature-binning-heading"><div><h4>是否需要查看特征分箱？</h4><p>可多选；不选择也可以直接跳过并生成报告。</p></div>',
     `<label class="feature-binning-count"><span>分箱数</span><input type="number" data-feature-binning-count min="${minBins}" max="${maxBins}" value="${defaultBins}"${disabled}></label></div>`,
     `<div class="feature-binning-options">${optionsHtml}</div>`,
@@ -55,6 +65,7 @@ function contextValues(context = {}) {
     pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
     resetFetchThrottle: context.resetFetchThrottle || (() => {}),
     renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
+    refreshAgentMessages: context.refreshAgentMessages,
   };
 }
 
@@ -62,7 +73,16 @@ export async function submitFeatureBinning(button, context = {}) {
   const values = contextValues(context);
   const wrap = button?.closest?.("[data-feature-binning-step-id]");
   if (!wrap || !values.taskId || typeof values.api !== "function") return;
+  const expectedPlanId = wrap.dataset.featureBinningPlanId || "";
   const expectedStepId = wrap.dataset.featureBinningStepId || "";
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    wrap,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
+    values.setActionStatus("计划已变化，请刷新后重新确认。", "error");
+    return;
+  }
   const mode = button.dataset.featureBinningSubmit || "skip";
   const features = mode === "skip"
     ? []
@@ -84,7 +104,9 @@ export async function submitFeatureBinning(button, context = {}) {
       body: JSON.stringify({
         content: "确认",
         ui_action: "confirm_feature_binning",
+        expected_plan_id: expectedPlanId,
         expected_step_id: expectedStepId,
+        ...confirmationSnapshot,
         adjust_params: { features, bins },
       }),
     });
@@ -94,8 +116,15 @@ export async function submitFeatureBinning(button, context = {}) {
     values.setAgentMessages(result.messages);
     values.renderAgentConversation();
   } catch (error) {
-    wrap.querySelectorAll("button, input").forEach((node) => { node.disabled = false; });
-    values.setActionStatus(error?.message || "提交分箱设置失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId: values.taskId,
+      refreshAgentMessages: values.refreshAgentMessages,
+      setActionStatus: values.setActionStatus,
+    });
+    if (!conflictHandled) {
+      wrap.querySelectorAll("button, input").forEach((node) => { node.disabled = false; });
+      values.setActionStatus(error?.message || "提交分箱设置失败", "error");
+    }
   } finally {
     values.resetFetchThrottle(values.taskId);
     values.renderWorkflowStepper({ force: true });

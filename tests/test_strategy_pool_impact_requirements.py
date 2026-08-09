@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime
+import hashlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from marvis.agent.turn_handlers import (
+    _strategy_report_optional_training_evidence,
+    _strategy_report_read_runtime,
+    _strategy_report_training_ref,
+)
+from marvis.packs.modeling.evidence_tools import (
+    MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+)
 from marvis.data.workspace import (
     DataSemanticMapping,
     DataWorkspaceDraft,
@@ -23,6 +35,9 @@ from marvis.packs.strategy.pool_impact_tools import (
 from marvis.packs.strategy.pool_requirement_resolver import (
     project_pool_entry_requirements,
 )
+from marvis.packs.strategy.project_context_tools import (
+    run_materialize_project_context,
+)
 from marvis.packs.strategy.pool_tools import (
     bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
@@ -32,6 +47,7 @@ from marvis.packs.strategy.voting_candidate_tools import (
     run_build_voting_candidate,
 )
 from marvis.packs.strategy.strategy import build_strategy
+from marvis.db import TaskRepository
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from tests.test_strategy_model_evidence_tool import _native_fixture
@@ -295,6 +311,137 @@ def test_pool_impact_executes_real_scorecard_and_voting_requirements_in_memory(
             )
     finally:
         vector_path.write_bytes(original_vector)
+
+
+@pytest.mark.slow
+def test_project_context_materializes_requirements_backed_pool_impact_and_rejects_requirement_provenance_tamper(
+    tmp_path: Path,
+) -> None:
+    real = _two_scorecard_pool_entries(tmp_path)
+    impact = run_measure_pool_impact(
+        _impact_request(real, real["pool"]),
+        real["fx"]["ctx"],
+        real["runtime"],
+    )
+    descriptor = impact["artifacts"][0]
+    repository = TaskArtifactRepository(real["fx"]["settings"].db_path)
+    record = repository.get_for_task(
+        real["fx"]["task"].id,
+        descriptor["artifact_id"],
+    )
+    assert record is not None
+    assert "requirement_bindings" in record["provenance"]
+
+    message = TaskRepository(real["fx"]["settings"].db_path).add_agent_message(
+        real["fx"]["task"].id,
+        role="user",
+        stage="chat",
+        content="请基于评分卡策略池影响测算整理当前项目现状。",
+    )
+    request = {
+        "expected_revision": 0,
+        "expected_revision_id": None,
+        "expected_state_hash": None,
+        "user_message_ref": {
+            "message_id": message["id"],
+            "content_hash": hashlib.sha256(
+                message["content"].encode("utf-8")
+            ).hexdigest(),
+        },
+        "as_of": datetime.fromisoformat(
+            record["created_at"].replace("Z", "+00:00")
+        ).date().isoformat(),
+        "scope": "评分卡策略池影响测算",
+        "business_context": {},
+        "explicit_unavailable": ["historical_strategy_reviews"],
+        "external_report_filenames": [],
+    }
+
+    output = run_materialize_project_context(
+        request,
+        real["fx"]["ctx"],
+        real["runtime"],
+    )
+
+    approval = output["revision"]["state"]["current_project_snapshot"][
+        "status_fields"
+    ]["approval"]
+    assert approval["availability"] == "present"
+    assert approval["value"]["comparison_mode"] == "absolute"
+    assert approval["source_refs"] == [
+        {
+            "kind": "pool_impact",
+            "ref_id": impact["assessment_id"],
+            "content_hash": impact["content_hash"],
+        }
+    ]
+
+    report_runtime = _strategy_report_read_runtime(
+        SimpleNamespace(settings=real["fx"]["settings"])
+    )
+    training_records, _ = (
+        report_runtime.task_artifacts.list_recent_for_task_kind_with_count(
+            real["fx"]["task"].id,
+            MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+            limit=1,
+        )
+    )
+    assert len(training_records) == 1
+    expected_training_ref = _strategy_report_training_ref(
+        report_runtime,
+        task_id=real["fx"]["task"].id,
+        record=training_records[0],
+    )
+    training_binding, training_ref = (
+        _strategy_report_optional_training_evidence(
+            report_runtime,
+            task_id=real["fx"]["task"].id,
+            sample_ref=expected_training_ref["sample_design_ref"],
+        )
+    )
+    assert training_binding is not None
+    assert training_ref == expected_training_ref
+
+    original_provenance = record["provenance"]
+
+    def replace_provenance(value: dict) -> None:
+        provenance_json = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        with repository.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_task_artifacts_immutable_update"
+            )
+            conn.execute(
+                "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+                (provenance_json, record["id"]),
+            )
+            conn.commit()
+
+    malformed = json.loads(json.dumps(original_provenance))
+    malformed["requirement_bindings"]["unexpected"] = True
+    replace_provenance(malformed)
+    with pytest.raises(StrategyError, match="Pool impact artifact provenance changed"):
+        run_materialize_project_context(
+            request,
+            real["fx"]["ctx"],
+            real["runtime"],
+        )
+
+    tampered = json.loads(json.dumps(original_provenance))
+    tampered["requirement_bindings"]["requirements_hash"] = "0" * 64
+    replace_provenance(tampered)
+    with pytest.raises(StrategyError, match="Pool impact artifact provenance changed"):
+        run_materialize_project_context(
+            request,
+            real["fx"]["ctx"],
+            real["runtime"],
+        )
 
 
 def test_native_bad_zero_pool_impact_rejects_target_leaking_baseline(

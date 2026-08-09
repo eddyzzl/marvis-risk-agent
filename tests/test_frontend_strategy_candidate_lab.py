@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import textwrap
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -16,6 +18,87 @@ def run_node(script: str) -> None:
         capture_output=True,
         check=True,
     )
+
+
+def test_candidate_lab_legacy_facade_reexports_axis_module_interfaces():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import * as facade from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_presenters.js";
+        import {
+          STRATEGY_CANDIDATE_LAB_WORKFLOWS,
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_requests.js";
+        import {
+          syncSampleDesignV2StatusControls,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_projection.js";
+
+        assert.equal(
+          facade.strategyCandidateLabResultsHtml,
+          strategyCandidateLabResultsHtml,
+        );
+        assert.equal(
+          facade.STRATEGY_CANDIDATE_LAB_WORKFLOWS,
+          STRATEGY_CANDIDATE_LAB_WORKFLOWS,
+        );
+        assert.equal(
+          facade.collectStrategyCandidateLabRequest,
+          collectStrategyCandidateLabRequest,
+        );
+        assert.equal(
+          facade.syncSampleDesignV2StatusControls,
+          syncSampleDesignV2StatusControls,
+        );
+        assert.equal(typeof facade.createStrategyCandidateLabController, "function");
+        """
+    )
+
+
+def test_candidate_lab_axis_modules_keep_one_way_dependency_contract():
+    module_root = ROOT / "marvis" / "static" / "js" / "v2"
+    sources = {
+        name: (module_root / name).read_text(encoding="utf-8")
+        for name in (
+            "strategy_candidate_lab_contracts.js",
+            "strategy_candidate_lab_presenters.js",
+            "strategy_candidate_lab_requests.js",
+            "strategy_candidate_lab_projection.js",
+            "strategy_candidate_lab_controller.js",
+        )
+    }
+    controller = sources["strategy_candidate_lab_controller.js"]
+    for axis in ("presenters", "requests", "projection"):
+        assert f'from "./strategy_candidate_lab_{axis}.js"' in controller
+
+    contracts_name = "strategy_candidate_lab_contracts.js"
+    axis_names = {
+        "strategy_candidate_lab_presenters.js",
+        "strategy_candidate_lab_requests.js",
+        "strategy_candidate_lab_projection.js",
+    }
+    for name in axis_names:
+        source = sources[name]
+        assert f'from "./{contracts_name}"' in source
+        assert 'from "./strategy_candidate_lab_controller.js"' not in source
+        for peer in axis_names - {name}:
+            assert f'from "./{peer}"' not in source
+    assert "strategy_candidate_lab_" not in sources[contracts_name]
+
+
+def test_candidate_lab_field_labels_have_one_artifact_id_definition():
+    source = (
+        ROOT
+        / "marvis"
+        / "static"
+        / "js"
+        / "v2"
+        / "strategy_candidate_lab_contracts.js"
+    ).read_text(encoding="utf-8")
+
+    assert source.count("  artifact_id:") == 1
 
 
 def test_cross_rule_launchers_use_authenticated_fields_and_exact_rule_pointers():
@@ -2476,9 +2559,7 @@ def test_candidate_lab_refresh_is_single_flight_and_aborts_on_task_switch():
 def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
     app_js = (ROOT / "marvis/static/app.js").read_text(encoding="utf-8")
     index_html = (ROOT / "marvis/static/index.html").read_text(encoding="utf-8")
-    workbench_css = (
-        ROOT / "marvis/static/css/v2-workbench.css"
-    ).read_text(encoding="utf-8")
+    workbench_css = read_browser_stylesheets(ROOT / "marvis/static")
 
     assert (
         'from "./js/v2/strategy_candidate_lab_controller.js"' in app_js
@@ -3914,21 +3995,162 @@ def test_interactive_tree_feature_replacement_controls_are_projection_bound() ->
     html = (ROOT / "marvis" / "static" / "index.html").read_text(
         encoding="utf-8"
     )
-    source = (
-        ROOT
-        / "marvis"
-        / "static"
-        / "js"
-        / "v2"
-        / "strategy_candidate_lab_controller.js"
-    ).read_text(encoding="utf-8")
-
     assert '<option value="replace_split_feature">' in html
     assert 'data-candidate-lab-field="interactive_tree_feature"' in html
-    assert "eligible_feature_replacements" in source
-    assert "feature_universe" in source
-    assert 'operation === "replace_split_feature"' in source
-    assert "新分裂字段必须从当前来源树的认证字段全集中明确选择" in source
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+        import {
+          interactiveTreeRevisionRequestIsCurrent,
+          syncInteractiveTreeRevisionControls,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_projection.js";
+
+        class FakeSelect {
+          constructor(fieldName, value = "") {
+            this.dataset = { candidateLabField: fieldName };
+            this.options = [];
+            this._value = value;
+          }
+          set innerHTML(html) {
+            this.options = Array.from(
+              html.matchAll(/<option value="([^"]*)"([^>]*)>/g),
+            ).map((match) => {
+              const data = {};
+              for (const [attribute, key] of [
+                ["candidate-lab-projection", "candidateLabProjection"],
+                ["source-tree-id", "sourceTreeId"],
+                ["node-id", "nodeId"],
+                ["operation", "operation"],
+                ["feature", "feature"],
+                ["current-threshold", "currentThreshold"],
+              ]) {
+                const value = match[2].match(
+                  new RegExp(`data-${attribute}="([^"]*)"`),
+                );
+                if (value) data[key] = value[1];
+              }
+              return { value: match[1], selected: false, dataset: data };
+            });
+            this.value = "";
+          }
+          set value(value) {
+            this._value = String(value);
+            for (const option of this.options) {
+              option.selected = option.value === this._value;
+            }
+          }
+          get value() { return this._value; }
+          get selectedOptions() {
+            return this.options.filter((option) => option.selected);
+          }
+        }
+
+        const sourceTreeId =
+          "candidate-asset-0123456789abcdef0123456789abcdef";
+        const nodeId = "node-0123456789abcdef0123";
+        const operation = new FakeSelect(
+          "interactive_tree_operation",
+          "replace_split_feature",
+        );
+        const source = new FakeSelect("interactive_tree_source_id");
+        const node = new FakeSelect("interactive_tree_node_id");
+        const feature = new FakeSelect("interactive_tree_feature");
+        const threshold = { value: "575.5" };
+        const reason = { value: "人工选择 age 替换 score" };
+        const fields = new Map([
+          ["interactive_tree_operation", operation],
+          ["interactive_tree_source_id", source],
+          ["interactive_tree_node_id", node],
+          ["interactive_tree_feature", feature],
+          ["interactive_tree_threshold", threshold],
+          ["interactive_tree_reason", reason],
+        ]);
+        const form = {
+          dataset: { candidateLabWorkflow: "interactive_tree_revision" },
+          querySelector(selector) {
+            const match = selector.match(
+              /data-candidate-lab-field="([^"]+)"/,
+            );
+            return match ? fields.get(match[1]) || null : null;
+          },
+          querySelectorAll() { return []; },
+        };
+        const tree = {
+          kind: "automatic_tree",
+          detail: { source_tree_id: sourceTreeId },
+          pointers: {
+            feature_universe: ["score", "age"],
+            nodes: [{
+              node_id: nodeId,
+              kind: "split",
+              feature: "score",
+              threshold: 600,
+              is_visible: true,
+              is_frontier: false,
+              can_prune: true,
+            }],
+            eligible_feature_replacements: [{
+              source_tree_id: sourceTreeId,
+              node_id: nodeId,
+              operation: "replace_split_feature",
+              current_feature: "score",
+              current_threshold: 600,
+            }],
+          },
+        };
+        const payload = {
+          candidates: {
+            automatic_tree: { all: [tree] },
+          },
+        };
+
+        syncInteractiveTreeRevisionControls(form, payload);
+        assert.ok(source.options.some(
+          (option) => option.value === sourceTreeId,
+        ));
+        assert.equal(source.value, "");
+        source.value = sourceTreeId;
+        syncInteractiveTreeRevisionControls(form, payload, {
+          preserveNode: false,
+        });
+        node.value = nodeId;
+        syncInteractiveTreeRevisionControls(form, payload);
+        assert.deepEqual(
+          feature.options.map((option) => option.value),
+          ["", "age"],
+        );
+
+        feature.value = "age";
+        threshold.value = "575.5";
+        const request = collectStrategyCandidateLabRequest(form);
+        assert.deepEqual(request.workflow_inputs, {
+          source_tree_id: sourceTreeId,
+          node_id: nodeId,
+          operation: "replace_split_feature",
+          threshold: 575.5,
+          feature: "age",
+          reason: "人工选择 age 替换 score",
+        });
+        assert.equal(
+          interactiveTreeRevisionRequestIsCurrent(
+            payload,
+            request.workflow_inputs,
+          ),
+          true,
+        );
+        tree.pointers.feature_universe = ["score"];
+        assert.equal(
+          interactiveTreeRevisionRequestIsCurrent(
+            payload,
+            request.workflow_inputs,
+          ),
+          false,
+        );
+        """
+    )
 
 
 def test_interactive_tree_render_exposes_authenticated_threshold_adjustments():

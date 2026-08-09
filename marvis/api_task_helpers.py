@@ -7,7 +7,7 @@ import re
 
 from marvis.errors import conflict, not_found, unprocessable
 
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TaskRecord
 from marvis.safe_paths import assert_within
 
@@ -27,6 +27,22 @@ def get_task_or_404(repo: TaskRepository, task_id: str) -> TaskRecord:
 def reject_if_task_has_active_job(repo: TaskRepository, task_id: str) -> None:
     if repo.task_has_active_job(task_id):
         raise conflict(ACTIVE_JOB_DETAIL)
+
+
+def validation_batch_parent_id(
+    repo: TaskRepository,
+    child_task_id: str,
+) -> str | None:
+    """Return batch ownership for a child without mutating task or batch state."""
+    transaction = getattr(repo, "transaction", None)
+    if transaction is None:
+        return None
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT parent_task_id FROM validation_batch_items WHERE child_task_id = ?",
+            (child_task_id,),
+        ).fetchone()
+    return None if row is None else str(row["parent_task_id"])
 
 
 def dispatch_platform_hook(

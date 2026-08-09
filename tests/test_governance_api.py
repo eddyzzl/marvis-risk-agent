@@ -26,6 +26,12 @@ class _NoopExecutor:
         return type("Result", (), {"status": PlanStatus.AWAITING_CONFIRM})()
 
 
+def _decision_snapshot(client: TestClient, plan_id: str, step_id: str) -> dict:
+    plan = client.get(f"/api/plans/{plan_id}").json()["plan"]
+    step = next(item for item in plan["steps"] if item["id"] == step_id)
+    return dict(step["confirmation_snapshot"])
+
+
 def _seed_protected_plan(app) -> tuple[str, str]:
     task = TaskRepository(app.state.settings.db_path).create_task(
         TaskCreate(
@@ -173,13 +179,17 @@ def test_required_effect_step_uses_dedicated_human_decision_endpoint(tmp_path):
     client = TestClient(app)
     task_id, _strategy_id = _seed_protected_plan(app)
 
-    ordinary = client.post("/api/plans/plan-1/steps/step-adopt/confirm")
+    snapshot = _decision_snapshot(client, "plan-1", "step-adopt")
+    ordinary = client.post(
+        "/api/plans/plan-1/steps/step-adopt/confirm",
+        json=snapshot,
+    )
     authorized = client.post(
         "/api/plans/plan-1/steps/step-adopt/decisions",
         json={
             "decision": "approve",
             "reason": "I reviewed the backtest and authorize local adoption",
-            "expected_plan_revision": 0,
+            **snapshot,
         },
     )
 
@@ -234,7 +244,7 @@ def test_decision_binding_canonicalizes_nonfinite_resolved_band_evidence(tmp_pat
         json={
             "decision": "approve",
             "reason": "I reviewed the open-ended score bands",
-            "expected_plan_revision": 0,
+            **_decision_snapshot(client, "plan-1", "step-adopt"),
         },
     )
 
@@ -271,7 +281,7 @@ def test_human_only_decision_executes_through_live_binding_without_effect_approv
         json={
             "decision": "approve",
             "reason": "I reviewed and selected this candidate",
-            "expected_plan_revision": 0,
+            **_decision_snapshot(client, "plan-human", "step-human"),
         },
     )
 
@@ -307,7 +317,7 @@ def test_decision_endpoint_rejects_client_supplied_actor_and_stale_revision(tmp_
         json={
             "decision": "approve",
             "reason": "spoof",
-            "expected_plan_revision": 0,
+            **_decision_snapshot(client, "plan-1", "step-adopt"),
             "principal_id": "attacker-controlled",
         },
     )
@@ -316,6 +326,7 @@ def test_decision_endpoint_rejects_client_supplied_actor_and_stale_revision(tmp_
         json={
             "decision": "approve",
             "reason": "stale revision",
+            **_decision_snapshot(client, "plan-1", "step-adopt"),
             "expected_plan_revision": 99,
         },
     )
@@ -323,6 +334,114 @@ def test_decision_endpoint_rejects_client_supplied_actor_and_stale_revision(tmp_
     assert spoofed.status_code == 422
     assert stale.status_code == 409
     assert app.state.plan_repo.is_step_confirmed("step-adopt") is False
+
+
+def test_reject_decision_fails_closed_on_same_revision_plan_drift(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    _seed_protected_plan(app)
+    snapshot = _decision_snapshot(client, "plan-1", "step-adopt")
+    with connect(app.state.settings.db_path) as conn:
+        conn.execute(
+            "UPDATE plan_steps SET title = 'changed evidence title' "
+            "WHERE id = 'step-evidence'"
+        )
+
+    response = client.post(
+        "/api/plans/plan-1/steps/step-adopt/decisions",
+        json={
+            "decision": "reject",
+            "reason": "reject only the reviewed plan",
+            **snapshot,
+        },
+    )
+
+    assert response.status_code == 409
+    with connect(app.state.settings.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM decision_records"
+        ).fetchone()["count"]
+    assert count == 0
+
+
+def test_reject_decision_records_exact_rendered_snapshot(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    _seed_protected_plan(app)
+
+    response = client.post(
+        "/api/plans/plan-1/steps/step-adopt/decisions",
+        json={
+            "decision": "reject",
+            "reason": "evidence does not support adoption",
+            **_decision_snapshot(client, "plan-1", "step-adopt"),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["decision"] == "reject"
+    decisions = app.state.governance_repo.list_decisions_by_step(
+        "plan-1", "step-adopt"
+    )
+    assert [item.decision for item in decisions] == ["reject"]
+
+
+def test_reject_consumes_snapshot_and_cancels_gate_once(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    _seed_protected_plan(app)
+    snapshot = _decision_snapshot(client, "plan-1", "step-adopt")
+
+    rejected = client.post(
+        "/api/plans/plan-1/steps/step-adopt/decisions",
+        json={
+            "decision": "reject",
+            "reason": "evidence does not support adoption",
+            **snapshot,
+        },
+    )
+
+    assert rejected.status_code == 202, rejected.text
+    plan = app.state.plan_repo.load_plan("plan-1")
+    step = next(item for item in plan.steps if item.id == "step-adopt")
+    assert plan.status.value == "cancelled"
+    assert step.status.value == "skipped"
+    assert step.error.startswith("human_rejected:")
+
+    stale_approve = client.post(
+        "/api/plans/plan-1/steps/step-adopt/decisions",
+        json={"decision": "approve", "reason": "stale approve", **snapshot},
+    )
+    repeated_reject = client.post(
+        "/api/plans/plan-1/steps/step-adopt/decisions",
+        json={"decision": "reject", "reason": "repeat reject", **snapshot},
+    )
+    assert stale_approve.status_code == 409, stale_approve.text
+    assert repeated_reject.status_code == 409, repeated_reject.text
+    decisions = app.state.governance_repo.list_decisions_by_step(
+        "plan-1", "step-adopt"
+    )
+    assert [item.decision for item in decisions] == ["reject"]
+
+
+def test_decision_reason_rejects_whitespace_without_writing(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    _seed_protected_plan(app)
+
+    response = client.post(
+        "/api/plans/plan-1/steps/step-adopt/decisions",
+        json={
+            "decision": "reject",
+            "reason": "   ",
+            **_decision_snapshot(client, "plan-1", "step-adopt"),
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert app.state.governance_repo.list_decisions_by_step(
+        "plan-1", "step-adopt"
+    ) == []
 
 
 @pytest.mark.parametrize(
@@ -339,7 +458,7 @@ def test_issued_effect_approval_is_fenced_by_live_binding_drift(tmp_path, drift)
         json={
             "decision": "approve",
             "reason": "approve the frozen evidence and target snapshot",
-            "expected_plan_revision": 0,
+            **_decision_snapshot(client, "plan-1", "step-adopt"),
         },
     )
     assert approved.status_code == 202, approved.text

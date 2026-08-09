@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from marvis.modeling_policy_signals import has_monotonic_policy, monotonic_policy_profile
+from marvis.modeling_policy_signals import monotonic_policy_profile
 
 
 # UX-6: sample_keys/sample_conflicts are already capped (dedup._SAMPLE_CAP=50) by the
@@ -386,6 +386,7 @@ def build_model_delivery_payload(
     *,
     report_output: dict | None = None,
     report_step=None,
+    recommended_experiment_id: str = "",
 ) -> dict | None:
     """Structured modeling comparison/delivery payload for late-stage gates."""
     o = output if isinstance(output, dict) else {}
@@ -398,9 +399,24 @@ def build_model_delivery_payload(
     actions = _delivery_actions(o.get("actions"))
     candidates = _experiment_candidates(o.get("experiments"))
     selected_id = str(o.get("selected_experiment_id") or o.get("experiment_id") or "")
+    recommended_id = str(
+        recommended_experiment_id
+        or o.get("recommended_experiment_id")
+        or o.get("best_experiment_id")
+        or ""
+    ).strip()
+    # Recommendation is presentation evidence, not permission to select. Only
+    # expose it when it resolves to a candidate in this exact comparison output;
+    # this prevents a stale training id from being rendered as the current
+    # platform recommendation after candidates change.
+    candidate_ids = {str(item.get("id") or "") for item in candidates}
+    if recommended_id not in candidate_ids:
+        recommended_id = ""
     report = _report_summary(report_output, report_step)
     if selected_id:
         candidates = _mark_selected_candidate(candidates, selected_id)
+    if recommended_id:
+        candidates = _mark_recommended_candidate(candidates, recommended_id)
     selected_candidate = next((item for item in candidates if item.get("selected")), None)
     policy_signals = (
         dict(selected_candidate.get("policy_signals"))
@@ -413,6 +429,7 @@ def build_model_delivery_payload(
         "step_title": getattr(dep, "title", None),
         "source_tool": tool,
         "selected_experiment_id": selected_id,
+        "recommended_experiment_id": recommended_id,
         "artifact_id": str(o.get("artifact_id") or ""),
         "recipe": str(o.get("recipe") or ""),
         "target_type": str(o.get("target_type") or ""),
@@ -800,6 +817,7 @@ def _experiment_candidates(value) -> list[dict]:
             "business_signals": _business_signals(item),
             "policy_signals": _policy_signals(item),
             "selected": False,
+            "recommended": False,
         })
     return rows
 
@@ -967,10 +985,6 @@ def _policy_signals(row: dict | None) -> dict:
     }
 
 
-def _has_monotonic_policy(item: dict, scorecard_rows: list) -> bool:
-    return has_monotonic_policy(item, scorecard_rows)
-
-
 def _policy_decision(value) -> dict:
     decision = value if isinstance(value, dict) else {}
     if not decision:
@@ -1030,6 +1044,15 @@ def _mark_selected_candidate(candidates: list[dict], selected_id: str) -> list[d
     for item in candidates:
         row = dict(item)
         row["selected"] = row.get("id") == selected_id
+        marked.append(row)
+    return marked
+
+
+def _mark_recommended_candidate(candidates: list[dict], recommended_id: str) -> list[dict]:
+    marked = []
+    for item in candidates:
+        row = dict(item)
+        row["recommended"] = row.get("id") == recommended_id
         marked.append(row)
     return marked
 

@@ -9,6 +9,7 @@ from marvis.agent.strategy_request_compiler import (
     compile_strategy_request,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 ASSET_A = "candidate-asset-" + "a" * 32
@@ -135,7 +136,7 @@ def test_cross_cell_selection_compiles_exact_set_with_prompt_v20() -> None:
         CELL_A,
         CELL_B,
     }
-    assert llm.calls[0]["prompt_version"] == 52
+    assert llm.calls[0]["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "cross_matrix_cell_selection" in llm.calls[0]["system_prompt"]
 
 

@@ -19,6 +19,7 @@ from marvis.orchestrator.contracts import (
     SubAgent,
 )
 from marvis.orchestrator.executor import PlanExecutor
+from marvis.orchestrator.evidence import payload_hash
 from marvis.orchestrator.errors import OrchestratorError
 from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.reviewer import Reviewer
@@ -30,6 +31,7 @@ from marvis.plugins.manifest import (
     ToolSpec,
 )
 from marvis.plugins.runner import ToolResult
+from marvis.state_machine import ConflictError
 
 
 class FakeLLM:
@@ -167,6 +169,43 @@ def _fail(message="boom"):
         error_kind="execution",
         duration_ms=1,
     )
+
+
+def test_canonical_result_receipt_requires_exact_tool_manifest_identity():
+    step = _step(
+        "step-1",
+        plugin="modeling",
+        tool="train_model_with_evidence_v2",
+    )
+    output = {"experiment_id": "experiment-a"}
+    incomplete = ToolResult(
+        ok=True,
+        output=output,
+        error=None,
+        error_kind=None,
+        duration_ms=1,
+        invocation_id="run-1",
+        raw_output_hash=payload_hash(output),
+        canonical_binding_verified=True,
+    )
+
+    with pytest.raises(ValueError, match="exact invocation receipt"):
+        PlanExecutor._require_result_receipt(step, "run-1", output, incomplete)
+
+    complete = ToolResult(
+        ok=True,
+        output=output,
+        error=None,
+        error_kind=None,
+        duration_ms=1,
+        invocation_id="run-1",
+        raw_output_hash=payload_hash(output),
+        canonical_binding_verified=True,
+        tool_version="2.0.0",
+        manifest_hash=f"sha256:{'a' * 64}",
+    )
+
+    PlanExecutor._require_result_receipt(step, "run-1", output, complete)
 
 
 def _step(
@@ -365,6 +404,22 @@ def test_plan_executor_runs_linear_plan_resolves_refs_and_finalizes(tmp_path):
     assert evidence["input_hash"].startswith("sha256:")
     assert evidence["input_summary"] == {"message": "hi"}
     assert evidence["parent_output_refs"] == ["metrics:step-1:v1"]
+    assert evidence["parent_output_bindings"] == [
+        {
+            "step_id": "step-1",
+            "output_ref": "metrics:step-1:v1",
+            "output_hash": repo.list_step_runs("step-1")[0]["output_hash"],
+        }
+    ]
+    assert evidence["resolved_parent_refs"] == [
+        {
+            "input_path": "/message",
+            "step_id": "step-1",
+            "field": "echoed",
+            "output_ref": "metrics:step-1:v1",
+            "output_hash": repo.list_step_runs("step-1")[0]["output_hash"],
+        }
+    ]
 
 
 def test_plan_executor_persists_tuning_progress_without_changing_step_result(tmp_path):
@@ -827,6 +882,16 @@ def test_plan_executor_raises_typed_error_for_missing_ref_path(tmp_path):
         executor._resolve_refs(
             {"message": "$ref:step-1.output.items.0.message"}
         )
+    assert exc_info.type.__name__ == "RefResolutionError"
+
+
+def test_plan_executor_preserves_typed_error_for_malformed_ref(tmp_path):
+    repo = _repo(tmp_path, _plan(_step("step-1")))
+    executor = _executor(repo, FakeRunner([]))
+
+    with pytest.raises(OrchestratorError, match="invalid ref") as exc_info:
+        executor._resolve_refs({"message": "$ref:step-1.output."})
+
     assert exc_info.type.__name__ == "RefResolutionError"
 
 
@@ -1622,10 +1687,13 @@ def test_plan_executor_blocks_deterministic_postcheck_failure_without_llm_rescue
     assert llm.calls == []
 
 
-def test_plan_executor_recovers_checking_step_from_persisted_output_without_rerun(tmp_path):
+def test_plan_executor_rejects_unbound_checking_output_without_run_ledger(tmp_path):
     plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
     repo = _repo(tmp_path, plan)
-    output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
+    output_ref = repo.store_step_output(
+        "step-1",
+        {"echoed": "hi"},
+    )
     loaded = repo.load_plan("plan-1")
     loaded.steps[0].output_ref = output_ref
     repo.update_step(loaded.steps[0])
@@ -1635,15 +1703,12 @@ def test_plan_executor_recovers_checking_step_from_persisted_output_without_reru
     result = _executor(repo, runner, hooks=hooks).run("plan-1")
 
     loaded = repo.load_plan("plan-1")
-    assert result.status == PlanStatus.DONE
+    assert result.status == PlanStatus.FAILED
     assert runner.calls == []
-    assert loaded.steps[0].status == StepStatus.DONE
+    assert loaded.steps[0].status == StepStatus.FAILED
     assert loaded.steps[0].output_ref == output_ref
-    assert [verdict.reviewer for verdict in loaded.steps[0].review_verdicts] == [
-        "deterministic",
-        "llm_critic",
-    ]
-    assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
+    assert "before output was persisted" in loaded.steps[0].error
+    assert hooks.calls == []
 
 
 def test_plan_executor_recovers_checking_step_with_run_ledger_output_without_step_ref(tmp_path):
@@ -1674,7 +1739,11 @@ def test_plan_executor_recovers_checking_step_from_succeeded_run_without_step_re
     plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
     repo = _repo(tmp_path, plan)
     run_id = _seed_run_for_checking_step(repo, "step-1", inputs={"message": "hi"})
-    output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
+    output_ref = repo.store_step_output(
+        "step-1",
+        {"echoed": "hi"},
+        evidence={"step_run_id": run_id},
+    )
     repo.finish_step_run(run_id, status="succeeded", output_ref=output_ref, duration_ms=10)
     runner = FakeRunner([])
 
@@ -1722,8 +1791,8 @@ def test_plan_executor_recovers_running_step_with_persisted_output_without_rerun
     assert loaded.steps[0].output_ref == output_ref
     runs = repo.list_step_runs("step-1")
     assert [run["id"] for run in runs] == [first_run_id, second_run_id]
-    assert [run["status"] for run in runs] == ["succeeded", "succeeded"]
-    assert [run["output_ref"] for run in runs] == [output_ref, output_ref]
+    assert [run["status"] for run in runs] == ["interrupted", "succeeded"]
+    assert [run["output_ref"] for run in runs] == [None, output_ref]
 
 
 def test_plan_executor_does_not_recover_output_predating_running_attempt(tmp_path):
@@ -1759,11 +1828,12 @@ def test_plan_executor_does_not_recover_late_output_from_previous_attempt(tmp_pa
         tool_ref="_sample.echo",
         inputs={"message": "current retry"},
     )
-    repo.store_step_output(
-        "step-1",
-        {"echoed": "late previous attempt"},
-        evidence={"step_run_id": "previous-run"},
-    )
+    with pytest.raises(ConflictError):
+        repo.store_step_output(
+            "step-1",
+            {"echoed": "late previous attempt"},
+            evidence={"step_run_id": "previous-run"},
+        )
 
     result = _executor(repo, FakeRunner([])).run("plan-1")
 

@@ -28,7 +28,7 @@ from marvis.output.strategy_candidate_report import (
     canonical_strategy_candidate_report_json,
     strategy_candidate_report_from_json,
 )
-from marvis.packs.strategy import candidate_asset_tools
+import marvis.packs.strategy.candidate_asset_tools as candidate_asset_tools
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.candidate_fragment import (
     sample_context_hash_from_candidate_evidence,

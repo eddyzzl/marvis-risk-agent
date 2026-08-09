@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from marvis.agent.plan_driver import PlanDriver
 from marvis.data.backend import DataBackend
@@ -103,6 +104,24 @@ def _register_csv(registry, tmp_path, name, frame, *, role):
     path = tmp_path / f"{name}.csv"
     frame.to_csv(path, index=False)
     return registry.register_from_upload("task-1", path, role=role)
+
+
+def test_start_composer_failure_does_not_persist_plan(tmp_path, monkeypatch):
+    driver, _registry, plan_repo = _join_driver(tmp_path)
+
+    def fail_overview(_plan):
+        raise RuntimeError("overview rendering failed")
+
+    monkeypatch.setattr(driver._composer, "plan_overview_message", fail_overview)
+
+    with pytest.raises(RuntimeError, match="overview rendering failed"):
+        driver.start(
+            task_id="task-1",
+            template_id="data_join",
+            slots={"anchor_id": "anchor", "feature_ids": ["feature"]},
+        )
+
+    assert plan_repo.list_plans_for_task("task-1") == []
 
 
 def test_join_flow_pauses_at_forced_confirm_then_executes_1to1(tmp_path):

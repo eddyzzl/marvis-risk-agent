@@ -122,6 +122,111 @@ def _last_assistant(messages: list[dict]) -> dict:
     return [m for m in messages if m["role"] == "assistant"][-1]
 
 
+def test_modeling_setup_message_rolls_back_with_plan_creation(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    src = _sample_dir(tmp_path, n=80)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "建模开始消息原子提交",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "modeling",
+            "run_mode": "manual",
+            "recipes": ["lr"],
+        },
+    ).json()["id"]
+    original_create_plan = client.app.state.plan_repo.create_plan
+    fail_once = True
+
+    def create_plan_with_callback_failure(plan, *, on_connection=None):
+        nonlocal fail_once
+        if not fail_once:
+            return original_create_plan(plan, on_connection=on_connection)
+        fail_once = False
+
+        def callback_then_fail(conn):
+            assert on_connection is not None
+            on_connection(conn)
+            raise RuntimeError("injected failure after setup persistence")
+
+        return original_create_plan(plan, on_connection=callback_then_fail)
+
+    monkeypatch.setattr(
+        client.app.state.plan_repo,
+        "create_plan",
+        create_plan_with_callback_failure,
+    )
+
+    failed = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert failed.status_code == 202, failed.text
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    failed_messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert not any(
+        item["role"] == "assistant"
+        and item.get("content", "").startswith("开始建模:样本 `")
+        for item in failed_messages
+    )
+
+    retried = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert retried.status_code == 202, retried.text
+    assert len(client.app.state.plan_repo.list_plans_for_task(task_id)) == 1
+    retried_messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert sum(
+        item["role"] == "assistant"
+        and item.get("content", "").startswith("开始建模:样本 `")
+        for item in retried_messages
+    ) == 1
+
+
+_TYPED_GATE_SNAPSHOT_FIELDS = frozenset(
+    {
+        "expected_plan_status",
+        "expected_plan_revision",
+        "expected_plan_fingerprint",
+        "expected_step_fingerprint",
+    }
+)
+
+
+def _typed_gate_action_payload(
+    message: dict,
+    *,
+    action: str,
+    content: str = "确认",
+    selection: list[str] | None = None,
+    adjust_params: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a browser action from the exact gate snapshot returned by GET."""
+
+    metadata = message.get("metadata") or {}
+    snapshot = metadata.get("confirmation_snapshot") or {}
+    assert _TYPED_GATE_SNAPSHOT_FIELDS <= set(snapshot), metadata
+    assert metadata.get("plan_id") and metadata.get("step_id"), metadata
+    payload: dict[str, object] = {
+        "content": content,
+        "ui_action": action,
+        "expected_plan_id": metadata["plan_id"],
+        "expected_step_id": metadata["step_id"],
+        **snapshot,
+        "acceptance_mode": "manual",
+    }
+    if selection is not None:
+        payload["selection"] = selection
+    if adjust_params is not None:
+        payload["adjust_params"] = adjust_params
+    return payload
+
+
 def _modeling_setup_message(messages: list[dict]) -> dict:
     """The 建模 setup chat message (carries proposal.notes: split/OOT wording),
     which precedes the plan-overview gate."""
@@ -129,6 +234,46 @@ def _modeling_setup_message(messages: list[dict]) -> dict:
         m for m in messages
         if m["role"] == "assistant" and (m.get("metadata") or {}).get("intent") == "modeling"
     )
+
+
+def _gate_confirmation_payload(
+    message: dict,
+    *,
+    content: str = "确认",
+) -> dict:
+    """Mirror the visible gate action, including explicit champion choice.
+
+    The selection gate must never turn a generic confirmation into a hidden
+    platform decision. The UI defaults a traceable recommendation when present,
+    otherwise visibly falls back to the first candidate; this helper keeps the
+    HTTP E2E tests on that same contract.
+    """
+    metadata = message.get("metadata") or {}
+    if metadata.get("kind") != "gate" or metadata.get("gate_source_tool") != "select_experiment":
+        return {"content": content}
+    delivery = metadata.get("model_delivery") or {}
+    candidates = [
+        str(item.get("id") or "")
+        for item in (delivery.get("candidates") or [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    ]
+    assert candidates, metadata
+    recommended_id = str(delivery.get("recommended_experiment_id") or "")
+    if recommended_id:
+        assert recommended_id in candidates
+        selected_id = recommended_id
+    else:
+        # Explicit legacy/evidence-degraded fallback: the browser shows this
+        # first-row default and still requires the human to submit it.
+        selected_id = candidates[0]
+    return {
+        "content": "确认",
+        "ui_action": "confirm_gate",
+        "expected_plan_id": metadata.get("plan_id"),
+        "expected_step_id": metadata.get("step_id"),
+        **metadata["confirmation_snapshot"],
+        "adjust_params": {"selected_experiment_id": selected_id},
+    }
 
 
 @pytest.fixture
@@ -263,6 +408,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
     ).json()["messages"]
     overview = _last_assistant(messages)
     plan_id = overview["metadata"]["plan_id"]
+    overview_snapshot = overview["metadata"]["confirmation_snapshot"]
 
     missing_plan_token = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -284,6 +430,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
             "content": "先别执行",
             "ui_action": "start_plan",
             "expected_plan_id": plan_id,
+            **overview_snapshot,
         },
     )
     assert contradictory_start.status_code == 409, contradictory_start.text
@@ -293,6 +440,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
             "content": "停止",
             "ui_action": "start_plan",
             "expected_plan_id": plan_id,
+            **overview_snapshot,
         },
     )
     assert stop_start.status_code == 409, stop_start.text
@@ -306,6 +454,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
             "content": "确认",
             "ui_action": "start_plan",
             "expected_plan_id": plan_id,
+            **overview_snapshot,
         },
     )
     assert first_start.status_code == 202, first_start.text
@@ -314,6 +463,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
     ).json()["messages"]
     gate = _last_assistant(messages_at_gate)
     assert gate["metadata"]["kind"] == "gate"
+    gate_snapshot = gate["metadata"]["confirmation_snapshot"]
     current_plan = client.app.state.plan_repo.load_plan(plan_id)
     assert current_plan.status.value == "awaiting_confirm"
 
@@ -323,6 +473,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
             "content": "确认",
             "ui_action": "start_plan",
             "expected_plan_id": plan_id,
+            **overview_snapshot,
         },
     )
     assert stale_overview.status_code == 409, stale_overview.text
@@ -334,6 +485,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
             "ui_action": "confirm_gate",
             "expected_plan_id": plan_id,
             "expected_step_id": "stale-gate",
+            **gate_snapshot,
         },
     )
     assert stale_gate.status_code == 409, stale_gate.text
@@ -344,6 +496,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
             "ui_action": "confirm_gate",
             "expected_plan_id": plan_id,
             "expected_step_id": gate["metadata"]["step_id"],
+            **gate_snapshot,
         },
     )
     assert contradictory_gate.status_code == 409, contradictory_gate.text
@@ -354,6 +507,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
             "ui_action": "confirm_gate",
             "expected_plan_id": plan_id,
             "expected_step_id": gate["metadata"]["step_id"],
+            **gate_snapshot,
         },
     )
     assert stop_gate.status_code == 409, stop_gate.text
@@ -391,6 +545,7 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
             "ui_action": "confirm_gate",
             "expected_plan_id": plan_id,
             "expected_step_id": gate["metadata"]["step_id"],
+            **gate_snapshot,
         },
     )
     assert valid_gate.status_code == 202, valid_gate.text
@@ -407,6 +562,188 @@ def test_stale_start_plan_and_gate_actions_fail_without_success_audit(
         and (message.get("metadata") or {}).get("ui_action") == "confirm_gate"
         for message in messages_after_valid_gate
     ) == 1
+
+
+def test_modeling_typed_screen_actions_use_live_get_snapshot_and_fail_closed(
+    client: TestClient,
+    tmp_path: Path,
+):
+    """All modeling screen controls are typed, snapshot-bound HTTP commands."""
+
+    src = _sample_dir(tmp_path, n=120)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "建模 typed UI action",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "modeling",
+            "run_mode": "manual",
+            "recipes": ["lr"],
+        },
+    ).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "开始"},
+    ).status_code == 202
+
+    setup_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert setup_gate["metadata"]["modeling_setup"]["recipes"] == ["lr"]
+    before_invalid = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+
+    missing_adjust = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            setup_gate,
+            action="apply_modeling_setup",
+            content="调整建模规格",
+        ),
+    )
+    assert missing_adjust.status_code == 422, missing_adjust.text
+    unknown_field_payload = _typed_gate_action_payload(
+        setup_gate,
+        action="apply_modeling_setup",
+        content="调整建模规格",
+        adjust_params={"recipes": ["lr", "xgb"]},
+    )
+    unknown_field_payload["unknown_top_level"] = True
+    unknown_field = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=unknown_field_payload,
+    )
+    assert unknown_field.status_code == 422, unknown_field.text
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == before_invalid
+
+    apply_setup_payload = _typed_gate_action_payload(
+        setup_gate,
+        action="apply_modeling_setup",
+        content="调整建模规格",
+        adjust_params={"recipes": ["lr", "xgb"]},
+    )
+    applied_setup = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=apply_setup_payload,
+    )
+    assert applied_setup.status_code == 202, applied_setup.text
+    revised_setup_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert revised_setup_gate["metadata"]["modeling_setup"]["recipes"] == [
+        "lr",
+        "xgb",
+    ]
+
+    after_setup = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    stale_setup = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=apply_setup_payload,
+    )
+    assert stale_setup.status_code == 409, stale_setup.text
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == after_setup
+
+    confirmed_setup = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            revised_setup_gate,
+            action="confirm_gate",
+        ),
+    )
+    assert confirmed_setup.status_code == 202, confirmed_setup.text
+    screen_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert screen_gate["metadata"]["screen"]["selected"]
+
+    missing_thresholds = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            screen_gate,
+            action="adjust_screen_thresholds",
+            content="调整筛选阈值",
+        ),
+    )
+    assert missing_thresholds.status_code == 422, missing_thresholds.text
+    adjusted_thresholds = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            screen_gate,
+            action="adjust_screen_thresholds",
+            content="调整筛选阈值",
+            adjust_params={"leakage_ks": 0.5},
+        ),
+    )
+    assert adjusted_thresholds.status_code == 202, adjusted_thresholds.text
+
+    rerun_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert rerun_gate["metadata"]["step_id"] != screen_gate["metadata"]["step_id"]
+    rerun = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(rerun_gate, action="confirm_gate"),
+    )
+    assert rerun.status_code == 202, rerun.text
+    reviewed_features_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    screen = reviewed_features_gate["metadata"]["screen"]
+    assert screen["thresholds"]["leakage_ks"] == pytest.approx(0.5)
+    assert screen["selected"]
+
+    missing_selection = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            reviewed_features_gate,
+            action="confirm_features",
+            content="确认所选特征",
+        ),
+    )
+    assert missing_selection.status_code == 422, missing_selection.text
+
+    before_rejection = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    rejected = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            reviewed_features_gate,
+            action="confirm_features",
+            content="先别执行",
+            selection=screen["selected"],
+        ),
+    )
+    assert rejected.status_code == 409, rejected.text
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == before_rejection
+
+    confirmed_features = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            reviewed_features_gate,
+            action="confirm_features",
+            content="确认所选特征",
+            selection=screen["selected"],
+        ),
+    )
+    assert confirmed_features.status_code == 202, confirmed_features.text
+    next_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert next_gate["metadata"]["step_id"] != reviewed_features_gate["metadata"][
+        "step_id"
+    ]
 
 
 @pytest.mark.slow
@@ -457,16 +794,15 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     )
     assert stale.status_code == 409
 
-    # confirm features WITH an edited selection: override the screen's set,
-    # then pause at the FS-1 multivariate-refinement ("精选特征") gate.
+    # Confirm features WITH an edited selection. The screen Tool result remains
+    # immutable; the reviewed set is bound atomically to the confirmation gate,
+    # then drives the FS-1 multivariate-refinement ("精选特征") step.
     resp = client.post(
         f"/api/tasks/{task_id}/agent/messages",
         json={"content": "确认", "selection": chosen, "expected_step_id": gate1["metadata"]["step_id"]},
     )
     assert resp.status_code == 202, resp.text
-    # the screen step's stored output now reflects the user's edited selection
-    overridden = client.app.state.plan_repo.load_step_output(screen["step_id"])["selected"]
-    assert overridden == chosen
+    assert client.app.state.plan_repo.load_step_output(screen["step_id"])["selected"] == proposed
     refine_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert refine_gate["metadata"].get("kind") == "gate"
     assert "精选特征完成" in refine_gate["content"]
@@ -496,7 +832,18 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     assert any(t["title"].startswith("trials 排行") for t in gate2_tables)
 
     # confirm selected model, approve report generation, then approve final delivery actions.
-    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    delivery = gate2["metadata"]["model_delivery"]
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    train_step = next(step for step in plan.steps if step.title == "训练模型")
+    train_output = client.app.state.plan_repo.load_step_output(train_step.id)
+    assert delivery["recommended_experiment_id"] == train_output["best_experiment_id"]
+    assert [
+        item["id"] for item in delivery["candidates"] if item.get("recommended")
+    ] == [delivery["recommended_experiment_id"]]
+    resp = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_gate_confirmation_payload(gate2),
+    )
     assert resp.status_code == 202, resp.text
     report_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "已选择最终实验" in report_gate["content"]
@@ -604,7 +951,13 @@ def test_modeling_refinement_funnel_drops_noise_and_redundant_features(client: T
     # drive to completion: confirm 配置调参 -> tune/train/compare -> model-selection gate
     # -> report gate -> delivery gate -> done.
     for content in ["确认", "确认", "确认", "确认", "确认"]:
-        resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
+        latest = _last_assistant(
+            client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+        )
+        resp = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json=_gate_confirmation_payload(latest, content=content),
+        )
         assert resp.status_code == 202, resp.text
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "计划已全部完成" in done["content"]
@@ -722,7 +1075,13 @@ def test_modeling_business_materials_flow_into_report_and_delivery(client: TestC
     # tuning-config gate; 确认 -> model-selection gate; 确认 -> report gate; 确认 -> delivery
     # gate; 确认 -> done.
     for content in ["开始", "确认", "确认", "确认", "确认", "确认", "确认", "确认"]:
-        resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
+        latest = _last_assistant(
+            client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+        )
+        resp = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json=_gate_confirmation_payload(latest, content=content),
+        )
         assert resp.status_code == 202, resp.text
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "计划已全部完成" in done["content"]
@@ -831,7 +1190,13 @@ def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: 
 
     # 确认 selected experiment → report gate; 确认 report → delivery gate; 确认 delivery → done.
     for content in ["确认", "确认"]:
-        resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
+        latest = _last_assistant(
+            client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+        )
+        resp = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json=_gate_confirmation_payload(latest, content=content),
+        )
         assert resp.status_code == 202, resp.text
     delivery_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "报告已生成" in delivery_gate["content"]
@@ -1004,7 +1369,13 @@ def test_modeling_fails_final_review_when_oot_ks_min_unmet_in_manual_mode(client
         plans = client.app.state.plan_repo.list_plans_for_task(task_id)
         if plans[0].status.value in {"failed", "done", "review"}:
             break
-        resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+        latest = _last_assistant(
+            client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+        )
+        resp = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json=_gate_confirmation_payload(latest),
+        )
         assert resp.status_code == 202, resp.text
 
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
@@ -1064,6 +1435,214 @@ def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClien
     assert "extra_score" in split_output["feature_cols"]
 
 
+def test_modeling_c1_semantic_review_rejects_source_drift(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    src = _sample_dir(tmp_path, n=80)
+    feature_path = src / "feature_table.parquet"
+    pd.DataFrame(
+        {
+            "cust_id": np.arange(80),
+            "extra_score": np.linspace(0.0, 1.0, 80),
+        }
+    ).to_parquet(feature_path)
+
+    class _SemanticClient:
+        def __init__(self):
+            self.mutated = False
+
+        def complete(self, *_args, **kwargs):
+            if kwargs.get("prompt_name") == "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS":
+                if not self.mutated:
+                    self.mutated = True
+                    pd.DataFrame(
+                        {
+                            "cust_id": np.arange(80),
+                            "extra_score": np.linspace(0.0, 1.0, 80),
+                            "post_review_drift": np.arange(80) % 3,
+                        }
+                    ).to_parquet(feature_path)
+                instruction = json.loads(kwargs["user_prompt"])["instruction"]
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": instruction,
+                        "reason": "用户明确接受当前展示值。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "action": "confirm",
+                    "params": {},
+                    "constraint": "",
+                    "reason": "用户明确接受当前展示值。",
+                    "confidence": "high",
+                    "explicit_authorization": True,
+                },
+                ensure_ascii=False,
+            )
+
+    semantic_client = _SemanticClient()
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: semantic_client,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda _request, _task: semantic_client,
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "C1 漂移阻断",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "modeling",
+            "run_mode": "agent",
+            "recipes": ["lr"],
+        },
+    ).json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    before = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )["metadata"]["join_c1"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "我确认无误，请按推荐的样本主表和特征表继续。"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert semantic_client.mutated
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    assert not any(
+        item.get("metadata", {}).get("intent") == "c1_semantic_authorization"
+        for item in messages
+    )
+    refreshed = _last_assistant(messages)["metadata"]["join_c1"]
+    assert refreshed != before
+    assert any(
+        "post_review_drift" in item.get("columns", [])
+        for item in refreshed["files"]
+    )
+
+
+def test_modeling_c1_semantic_review_rejects_normalized_dataset_byte_swap(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """C1 authorization binds registered Parquet bytes, not source metadata."""
+
+    src = _sample_dir(tmp_path, n=80)
+    pd.DataFrame(
+        {
+            "cust_id": np.arange(80),
+            "extra_score": np.linspace(0.0, 1.0, 80),
+        }
+    ).to_parquet(src / "feature_table.parquet")
+
+    class _SemanticClient:
+        normalized_path: Path | None = None
+        mutated = False
+
+        def complete(self, *_args, **kwargs):
+            if kwargs.get("prompt_name") == "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS":
+                assert self.normalized_path is not None
+                if not self.mutated:
+                    self.mutated = True
+                    # Keep the registered schema/row count unchanged so only
+                    # byte authentication can detect this post-review swap.
+                    pd.DataFrame(
+                        {
+                            "cust_id": np.arange(80),
+                            "extra_score": np.linspace(1.0, 0.0, 80),
+                        }
+                    ).to_parquet(self.normalized_path)
+                instruction = json.loads(kwargs["user_prompt"])["instruction"]
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": instruction,
+                        "reason": "用户明确接受当前展示值。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "action": "confirm",
+                    "params": {},
+                    "constraint": "",
+                    "reason": "用户明确接受当前展示值。",
+                    "confidence": "high",
+                    "explicit_authorization": True,
+                },
+                ensure_ascii=False,
+            )
+
+    semantic_client = _SemanticClient()
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: semantic_client,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda _request, _task: semantic_client,
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "C1 归一化数据漂移阻断",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "modeling",
+            "run_mode": "agent",
+            "recipes": ["lr"],
+        },
+    ).json()["id"]
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    registered = DatasetRepository(
+        client.app.state.settings.db_path
+    ).list_datasets(task_id)
+    feature = next(
+        item for item in registered if "feature_table" in item.source_path
+    )
+    semantic_client.normalized_path = (
+        client.app.state.settings.datasets_dir / feature.source_path
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "我确认无误，请按推荐的样本主表和特征表继续。"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert semantic_client.mutated
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    assert not any(
+        item.get("metadata", {}).get("intent") == "c1_semantic_authorization"
+        for item in messages
+    )
+
+
 @pytest.mark.slow
 def test_modeling_agent_natural_language_completes_multi_file_delivery(
     client: TestClient,
@@ -1073,18 +1652,56 @@ def test_modeling_agent_natural_language_completes_multi_file_delivery(
     """Agent mode turns natural-language instructions into the full governed flow.
 
     The gate client is deliberately local and is not asked to auto-approve any
-    business gate. This verifies the product contract from natural-language
-    confirmation through JOIN, FEATURE, training, report, and delivery without
-    depending on an external model or network service.
+    business gate. This verifies natural-language confirmations through JOIN,
+    FEATURE, training, report, and delivery; the champion gate uses the same
+    explicit structured candidate choice as the visible UI, without depending
+    on an external model or network service.
     """
 
     class _NoNetworkGateClient:
         def complete(self, *_args, **_kwargs):
             raise AssertionError("NORMAL mode must not auto-approve governed gates")
 
+    class _SemanticTurnClient:
+        """Local two-pass semantic fixture; no external model or network call."""
+
+        def complete(self, *_args, **kwargs):
+            if kwargs.get("prompt_name") == "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS":
+                instruction = json.loads(kwargs["user_prompt"])["instruction"]
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": instruction,
+                        "reason": "用户明确、即时且无条件地授权当前动作。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "action": "confirm",
+                    "params": {},
+                    "constraint": "",
+                    "reason": "用户明确接受当前界面展示的方案并要求继续。",
+                    "confidence": "high",
+                    "explicit_authorization": True,
+                },
+                ensure_ascii=False,
+            )
+
+    semantic_client = _SemanticTurnClient()
+
     monkeypatch.setattr(
         "marvis.routers.validation_agent.resolve_driver_agent_client",
         lambda _request, _task, _payload: _NoNetworkGateClient(),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda _request, _task: semantic_client,
     )
 
     src = _business_material_dir(tmp_path, n=360)
@@ -1117,6 +1734,17 @@ def test_modeling_agent_natural_language_completes_multi_file_delivery(
         json={"content": "我确认无误，请按推荐的样本主表和特征表继续。"},
     )
     assert response.status_code == 202, response.text
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    semantic_receipts = [
+        item["metadata"]["semantic_authorization"]
+        for item in messages
+        if item.get("metadata", {}).get("intent") == "c1_semantic_authorization"
+    ]
+    assert len(semantic_receipts) == 1
+    assert semantic_receipts[0]["evidence_quote"] == (
+        "我确认无误，请按推荐的样本主表和特征表继续。"
+    )
+    assert len(semantic_receipts[0]["c1_snapshot_sha256"]) == 64
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     assert plans and plans[-1].template_id == "modeling_with_join"
     plan_id = plans[-1].id
@@ -1137,7 +1765,10 @@ def test_modeling_agent_natural_language_completes_multi_file_delivery(
         assert not latest["metadata"].get("error"), latest["content"]
         response = client.post(
             f"/api/tasks/{task_id}/agent/messages",
-            json={"content": "我确认当前结果，请继续下一步。"},
+            json=_gate_confirmation_payload(
+                latest,
+                content="我确认当前结果，请继续下一步。",
+            ),
         )
         assert response.status_code == 202, response.text
 
@@ -1200,6 +1831,77 @@ def test_modeling_c1_plain_named_excel_is_included_in_three_file_proposal(
         client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     )
     assert len(c1["metadata"]["join_c1"]["files"]) == 3
+
+
+@pytest.mark.parametrize("confirmation_mode", ["structured", "natural_language"])
+def test_modeling_c1_can_ignore_reviewed_file_without_losing_full_snapshot_guard(
+    client: TestClient,
+    tmp_path: Path,
+    confirmation_mode: str,
+):
+    src = _sample_dir(tmp_path, n=80)
+    pd.DataFrame(
+        {"cust_id": np.arange(80), "selected_signal": np.arange(80)}
+    ).to_parquet(src / "feature_table.parquet")
+    pd.DataFrame(
+        {"cust_id": np.arange(80), "ignored_signal": np.arange(80)}
+    ).to_parquet(src / "ignored_table.parquet")
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "三文件选择性建模",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "modeling",
+            "run_mode": "manual",
+            "recipes": ["lr"],
+        },
+    ).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    state = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )["metadata"]["join_c1"]
+    by_name = {item["name"]: item for item in state["files"]}
+    anchor_id = by_name["sample.parquet"]["dataset_id"]
+    selected_id = by_name["feature_table.parquet"]["dataset_id"]
+    ignored_id = by_name["ignored_table.parquet"]["dataset_id"]
+
+    if confirmation_mode == "structured":
+        content = "[C1]" + json.dumps(
+            {
+                "anchor_id": anchor_id,
+                "feature_ids": [selected_id],
+                "target_col": "long_y",
+            }
+        )
+        payload = {"content": content, "ui_action": "confirm_roles"}
+    else:
+        payload = {
+            "content": (
+                "sample.parquet 作为样本主表，feature_table.parquet 作为特征表，"
+                "其他文件全部忽略，目标列 long_y。"
+            )
+        }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=payload,
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans and plans[-1].template_id == "modeling_with_join"
+    join_step = next(
+        step
+        for step in plans[-1].steps
+        if step.tool_ref is not None and step.tool_ref.tool == "propose_join"
+    )
+    assert join_step.inputs["anchor_id"] == anchor_id
+    assert join_step.inputs["feature_ids"] == [selected_id]
+    assert ignored_id not in json.dumps(join_step.inputs)
+    assert TaskRepository(client.app.state.settings.db_path).get_task(
+        task_id
+    ).target_col == "long_y"
 
 
 def test_modeling_single_file_ambiguous_targets_accepts_agent_language_choice(
@@ -1319,10 +2021,10 @@ def test_modeling_agent_first_turn_binds_all_llm_decided_multiclass_controls(
                         "target_type": "multiclass",
                         "recipes": recipes,
                         "split_config": {"test_size": 0.25},
-                        "n_trials": 7,
+                        "n_trials": 1,
                     },
                     "constraint": "",
-                    "reason": "用户明确指定多分类、四种算法、无 OOT 与七轮调参",
+                    "reason": "用户明确指定多分类、四种算法、无 OOT 与单轮调参",
                     "confidence": "high",
                     "explicit_authorization": False,
                 },
@@ -1367,7 +2069,7 @@ def test_modeling_agent_first_turn_binds_all_llm_decided_multiclass_controls(
             "content": (
                 "请用当前单个 CSV 做三分类建模，risk_band_target 是 low/mid/high "
                 "三分类目标列；没有特征表，不需要 OOT；使用 lgb_multiclass、"
-                "xgb_multiclass、lr_multiclass、mlp_multiclass，每个调参 7 轮。"
+                "xgb_multiclass、lr_multiclass、mlp_multiclass，每个调参 1 轮。"
             ),
             "acceptance_mode": "normal",
         },
@@ -1383,7 +2085,7 @@ def test_modeling_agent_first_turn_binds_all_llm_decided_multiclass_controls(
     assert "random_oot" not in split_step.inputs["split_config"]
     assert spec_step.inputs["target_type"] == "multiclass"
     assert spec_step.inputs["recipes"] == recipes
-    assert spec_step.inputs["n_trials"] == 7
+    assert spec_step.inputs["n_trials"] == 1
 
 
 def test_modeling_proposal_infers_rare_class_beyond_fixed_sample(

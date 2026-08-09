@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import tempfile
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
@@ -19,7 +18,12 @@ from urllib.parse import quote
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.db import ModelingRepository
+from marvis.data.authenticated_snapshot import (
+    AuthenticatedSnapshotError,
+    SnapshotFailureReason,
+    read_authenticated_parquet_snapshot,
+)
+from marvis.repositories.modeling import ModelingRepository
 from marvis.domain import STRATEGY_TYPES
 from marvis.files import sha256_file
 from marvis.packs.modeling.experiment import ExperimentStore
@@ -74,6 +78,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
+    stable_task_artifact_id,
 )
 
 
@@ -1165,8 +1170,9 @@ def _load_artifact_record(
         raise StrategyError(
             "candidate stability artifact registry row is invalid"
         )
-    expected_id = _stable_task_artifact_id(
+    expected_id = stable_task_artifact_id(
         task_id=task_id,
+        kind=ARTIFACT_KIND,
         path=record["path"],
     )
     if not hmac.compare_digest(artifact_id, expected_id):
@@ -1432,7 +1438,11 @@ def _require_artifact_row_on_connection(
         or str(row["provenance_json"]) != provenance_json
         or not hmac.compare_digest(
             artifact_id,
-            _stable_task_artifact_id(task_id=task_id, path=str(path)),
+            stable_task_artifact_id(
+                task_id=task_id,
+                kind=ARTIFACT_KIND,
+                path=str(path),
+            ),
         )
     ):
         raise StrategyError(
@@ -1460,17 +1470,6 @@ def _require_binding_connection(conn, *, db_path: Path) -> None:
         raise StrategyError(
             "candidate stability binding database changed"
         )
-
-
-def _stable_task_artifact_id(*, task_id: str, path: str) -> str:
-    identity = json.dumps(
-        [task_id, ARTIFACT_KIND, path],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(
-        f"marvis.task_artifact.v1:{identity}".encode("utf-8")
-    ).hexdigest()
 
 
 def _tool_output(
@@ -1628,95 +1627,38 @@ def _read_authenticated_parquet_snapshot(
     expected_content_hash: str,
     columns: list[str],
 ) -> pd.DataFrame:
-    """Read only bytes copied from one authenticated, retained source fd."""
-
-    _require_dataset_path(path, root=root)
-    source_fd = -1
-    snapshot = None
     try:
-        before = os.lstat(path)
-        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
-            raise StrategyError(
-                "candidate stability dataset must be a regular file"
-            )
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+        return read_authenticated_parquet_snapshot(
+            path,
+            root=root,
+            expected_sha256=expected_content_hash,
+            columns=columns,
         )
-        source_fd = os.open(path, flags)
-        opened = os.fstat(source_fd)
-        after_open = os.lstat(path)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or stat.S_ISLNK(after_open.st_mode)
-            or _file_identity(before) != _file_identity(opened)
-            or _file_identity(opened) != _file_identity(after_open)
-            or _stable_file_stat(before) != _stable_file_stat(opened)
-            or _stable_file_stat(opened) != _stable_file_stat(after_open)
-        ):
-            raise StrategyError(
+    except AuthenticatedSnapshotError as exc:
+        messages = {
+            SnapshotFailureReason.PATH_OUTSIDE_ROOT: (
+                "candidate stability dataset escaped dataset storage"
+            ),
+            SnapshotFailureReason.SOURCE_NOT_REGULAR: (
+                "candidate stability dataset must be a regular file"
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_WHILE_OPENING: (
                 "candidate stability dataset changed while opening"
-            )
-
-        snapshot = tempfile.TemporaryFile(mode="w+b", dir=root)
-        digest = hashlib.sha256()
-        copied = 0
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            copied += len(chunk)
-            snapshot.write(chunk)
-        snapshot.flush()
-        source_after_copy = os.fstat(source_fd)
-        if (
-            _stable_file_stat(source_after_copy)
-            != _stable_file_stat(opened)
-            or copied != int(opened.st_size)
-            or not hmac.compare_digest(
-                digest.hexdigest(),
-                expected_content_hash,
-            )
-        ):
-            raise StrategyError(
+            ),
+            SnapshotFailureReason.SOURCE_BYTES_CHANGED: (
                 "candidate stability dataset bytes changed before replay"
-            )
-
-        snapshot_stat = os.fstat(snapshot.fileno())
-        if int(snapshot_stat.st_size) != copied:
-            raise StrategyError(
+            ),
+            SnapshotFailureReason.PRIVATE_SNAPSHOT_INCOMPLETE: (
                 "candidate stability private dataset snapshot is incomplete"
-            )
-        snapshot.seek(0)
-        frame = pd.read_parquet(snapshot, columns=columns)
-        snapshot_after_read = os.fstat(snapshot.fileno())
-        current = os.lstat(path)
-        if (
-            _stable_file_stat(snapshot_after_read)
-            != _stable_file_stat(snapshot_stat)
-            or _stable_file_stat(os.fstat(source_fd))
-            != _stable_file_stat(opened)
-            or stat.S_ISLNK(current.st_mode)
-            or _stable_file_stat(current) != _stable_file_stat(opened)
-        ):
-            raise StrategyError(
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_DURING_READ: (
                 "candidate stability dataset changed during replay"
-            )
-        return frame
-    except StrategyError:
-        raise
-    except (OSError, TypeError, ValueError) as exc:
-        raise StrategyError(
-            "candidate stability dataset could not be read"
-        ) from exc
-    finally:
-        if snapshot is not None:
-            snapshot.close()
-        if source_fd >= 0:
-            os.close(source_fd)
+            ),
+            SnapshotFailureReason.READ_FAILED: (
+                "candidate stability dataset could not be read"
+            ),
+        }
+        raise StrategyError(messages[exc.reason]) from exc
 
 
 def _file_identity(value: os.stat_result) -> tuple[int, int, int]:

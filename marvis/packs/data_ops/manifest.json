@@ -1309,6 +1309,10 @@
             "type": "string",
             "minLength": 1
           },
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
           "group_by": {
             "type": "array",
             "items": {

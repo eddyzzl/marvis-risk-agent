@@ -1,0 +1,1456 @@
+.v2-workspace-dialog {
+  width: min(1180px, calc(100vw - 32px));
+}
+
+.v2-workspace-panel {
+  max-height: min(860px, calc(100vh - 32px));
+}
+
+.v2-workspace-body {
+  gap: 12px;
+}
+
+.v2-workspace-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.v2-workspace-summary > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.v2-workspace-summary strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.v2-workspace-summary span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.v2-workspace-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.governance-extension-shell {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  min-height: 0;
+}
+
+.v2-panel {
+  min-width: 0;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 14px;
+}
+
+.v2-panel::before {
+  content: attr(data-panel-title) "\A" attr(data-panel-description);
+  display: block;
+  white-space: pre-line;
+  margin: -2px 0 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.v2-panel[data-panel-description=""]::before {
+  content: attr(data-panel-title);
+}
+
+.governance-settings-dialog .v2-workspace-summary,
+.governance-settings-dialog .v2-workspace-toolbar {
+  display: none;
+}
+
+.governance-settings-dialog .governance-extension-shell {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  min-height: 0;
+}
+
+.governance-settings-dialog .v2-panel {
+  display: none;
+  grid-area: auto;
+  max-height: none;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* The governance dialog already shows the per-view title + description in its own
+   header, so suppress the duplicate panel/page headings (cuts repeated content). */
+.governance-settings-dialog .v2-panel::before {
+  display: none;
+}
+
+/* The dialog header already shows the per-view title/description and now also
+   carries the single refresh icon, so the whole in-panel page-head is redundant. */
+.governance-settings-dialog .governance-page-head {
+  display: none;
+}
+
+.governance-settings-dialog[data-extension-view="plugins"] .v2-plugin-panel,
+.governance-settings-dialog[data-extension-view="workflows"] .v2-skill-panel,
+.governance-settings-dialog[data-extension-view="capabilities"] .v2-capability-panel {
+  display: grid;
+}
+
+/* The "待转正草稿" drill-in lives in the runtime panel but only belongs to the
+   plugins view (drafts get promoted into plugins). */
+.governance-settings-dialog #draftManageDetails {
+  display: none;
+}
+
+.governance-settings-dialog[data-extension-view="plugins"] #draftManageDetails {
+  display: block;
+}
+
+.v2-empty {
+  padding: 18px 12px;
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.plugin-list,
+.memory-distillation-list,
+.skill-list {
+  display: grid;
+  gap: 10px;
+}
+
+.plugin-row,
+.memory-distillation-row,
+.memory-distillation-detail-inner,
+.skill,
+.tier-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: var(--surface-soft);
+}
+
+.retry-schema-fields {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+.retry-schema-field {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.retry-schema-field span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.retry-schema-field em {
+  color: var(--text-subtle);
+  font-style: normal;
+}
+.retry-schema-field input,
+.retry-schema-field select {
+  width: 100%;
+  min-height: 32px;
+}
+
+/* Capability tiers: single-select list — the selected row shows a LEFT
+   checkmark, matching the 执行环境 (.exec-env-row) list so both "从列表选一项"
+   lists share one visual language. The radio input stays for form semantics and
+   the change handler but is visually replaced by the .tier-check glyph. */
+.tier-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  font-size: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.tier-row-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tier-check {
+  grid-row: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.tier-row:has(.tier-row-radio:checked) .tier-check {
+  opacity: 1;
+}
+
+.tier-check svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tier-row-body {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.tier-row-body h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.tier-row-body p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.tier-row:hover {
+  border-color: var(--option-hover);
+  background: var(--option-hover);
+}
+
+.tier-row:has(.tier-row-radio:checked) {
+  border-color: var(--option-selected);
+  background: var(--option-selected);
+  box-shadow: none;
+}
+
+.plugin-manager,
+.memory-manager,
+.skill-manager,
+.tier-settings {
+  display: grid;
+  gap: 8px;
+}
+
+.tier-settings-head {
+  padding: 0 2px 2px;
+}
+
+.tier-settings-list {
+  display: grid;
+  gap: 8px;
+}
+
+.memory-manager-toolbar,
+.skill-validator {
+  display: grid;
+  gap: 6px;
+}
+
+.tier-guardrail-note {
+  margin: 0 2px 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* The dialog header subtitle already says exactly this; don't repeat it as a
+   lone first line inside the panel. */
+.governance-settings-dialog .tier-guardrail-note {
+  display: none;
+}
+
+.skill-validator textarea {
+  max-width: 100%;
+}
+
+.plugin-row {
+  display: grid;
+  gap: 8px;
+}
+
+.memory-distillation-row,
+.memory-distillation-row button:first-child,
+.memory-manager-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.memory-distillation-row {
+  justify-content: space-between;
+}
+
+.memory-distillation-row button:first-child {
+  min-width: 0;
+  flex: 1 1 240px;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.memory-distillation-detail-inner {
+  display: grid;
+  gap: 10px;
+}
+
+.plugin-row input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  max-height: 16px;
+  margin: 0;
+  accent-color: var(--button-primary-bg);
+}
+
+.governance-settings-dialog .plugin-row input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 38px;
+  min-width: 38px;
+  max-width: none;
+  height: 22px;
+  min-height: 22px;
+  max-height: none;
+}
+
+.plugin-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plugin-row-id {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.plugin-row-id strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.plugin-row-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.plugin-row-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plugin-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plugin-version,
+.plugin-tool-count,
+.plugin-builtin-badge,
+.memory-distillation-row span,
+.skill-badge,
+.tier-limit {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.plugin-tools {
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-tools:not(:empty) {
+  margin-top: 2px;
+}
+
+.plugin-tool {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.plugin-tool-head {
+  display: grid;
+  gap: 2px;
+}
+
+.plugin-tool-head strong {
+  font-size: 13px;
+}
+
+.plugin-tool-head span {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* macOS grouped-row list: the enclosing .plugin-tool is already a card, so the
+   impl rows bleed to its edges and separate with hairlines (icon | label |
+   value) rather than nesting a second boxed grid of chips. */
+.plugin-tool-impl {
+  display: flex;
+  flex-direction: column;
+  margin: 2px -12px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 66%, transparent);
+}
+
+.plugin-tool-impl div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.plugin-tool-impl div + div {
+  border-top: 1px solid color-mix(in srgb, var(--border) 66%, transparent);
+}
+
+.plugin-tool-impl dt {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plugin-tool-impl dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: right;
+  justify-self: end;
+  overflow-wrap: anywhere;
+}
+
+.plugin-tool-schema {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.plugin-schema-table-wrap {
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.plugin-schema-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.plugin-schema-table caption {
+  padding: 8px 9px;
+  color: var(--text);
+  font-weight: 700;
+  text-align: left;
+}
+
+.plugin-schema-table th,
+.plugin-schema-table td {
+  padding: 7px 9px;
+  border-top: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.plugin-schema-table th {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--surface) 84%, var(--text) 4%);
+}
+
+.plugin-schema-table code {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.plugin-required {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.plugin-schema-empty {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+
+.skill-manager textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+}
+
+.governance-settings-dialog .tier-settings,
+.governance-settings-dialog .plugin-manager,
+.governance-settings-dialog .skill-manager,
+.governance-settings-dialog .memory-manager {
+  gap: 10px;
+}
+
+.governance-settings-dialog .tier-row,
+.governance-settings-dialog .plugin-row,
+.governance-settings-dialog .skill,
+.governance-settings-dialog .memory-distillation-row,
+.governance-settings-dialog .memory-distillation-detail-inner {
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+}
+
+.governance-settings-dialog .tier-settings {
+  gap: 8px;
+}
+
+.governance-settings-dialog .tier-row {
+  padding: 9px 12px;
+}
+
+.governance-settings-dialog .plugin-row,
+.governance-settings-dialog .skill,
+.governance-settings-dialog .memory-distillation-row {
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.governance-settings-dialog .plugin-row:hover,
+.governance-settings-dialog .skill:hover,
+.governance-settings-dialog .memory-distillation-row:hover {
+  border-color: var(--option-hover);
+  background: var(--option-hover);
+}
+
+.governance-settings-dialog .memory-manager-toolbar {
+  align-items: end;
+  padding: 0 2px 2px;
+}
+
+.governance-settings-dialog .memory-manager-toolbar label {
+  display: grid;
+  gap: 5px;
+  min-width: 180px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.governance-settings-dialog .memory-manager-toolbar select {
+  min-height: 34px;
+  padding: 5px 34px 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background-color: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.governance-settings-dialog .memory-manager-toolbar button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--button-primary-border);
+  border-radius: var(--radius-control);
+  color: var(--button-primary-text);
+  background: var(--button-primary-bg);
+  box-shadow: var(--button-solid-shadow);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.governance-settings-dialog .memory-manager-toolbar button:hover,
+.governance-settings-dialog .memory-manager-toolbar button:focus-visible {
+  border-color: var(--button-primary-border-hover);
+  color: var(--button-primary-text-hover);
+  background: var(--button-primary-bg-hover);
+  box-shadow: var(--button-solid-shadow-hover);
+}
+
+.governance-settings-dialog .memory-distillation-list {
+  display: grid;
+  gap: 8px;
+}
+
+.governance-settings-dialog .memory-distillation-row button:first-child {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.governance-settings-dialog .memory-distillation-row button:first-child strong {
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.governance-settings-dialog .memory-distillation-row button:first-child span {
+  display: block;
+  margin-top: 2px;
+  line-height: 1.45;
+}
+
+.governance-settings-dialog .memory-distillation-row button[data-rollback-memory-distillation] {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--danger);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.governance-settings-dialog .memory-distillation-row button[data-rollback-memory-distillation]:hover {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: var(--danger-soft);
+}
+
+.governance-settings-dialog :is(
+  .plugin-row-actions .button,
+  .plugin-upload-button,
+  .skill-toolbar .button,
+  .memory-manager-toolbar button,
+  .memory-distillation-row button[data-rollback-memory-distillation]
+) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 84px;
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* Upload row: a labelled prompt on the left and a real shared-.button file
+   picker on the right (was a bespoke dashed ::after pseudo-button before —
+   unified so 选择文件 matches every other button in the dialog). */
+.governance-settings-dialog .plugin-upload {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 0 2px 2px;
+  color: var(--text);
+}
+
+.plugin-upload-text {
+  display: block;
+  min-width: 0;
+}
+
+.plugin-upload-text strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.plugin-upload-text > span {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* The .button styling comes from the shared class; here we only need to flag it
+   as a file-picker trigger and hide the native <input type=file>. */
+.plugin-upload-button {
+  flex: none;
+  cursor: pointer;
+}
+
+.plugin-upload-button input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.extension-format-guide {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.extension-format-guide > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.extension-format-guide > summary::-webkit-details-marker {
+  display: none;
+}
+
+.extension-format-guide > summary:hover {
+  background: var(--option-hover);
+}
+
+.extension-format-guide > summary strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.extension-format-guide > summary span span {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.extension-format-guide > summary svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform 0.18s ease;
+}
+
+.extension-format-guide[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.extension-format-guide-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
+.extension-format-guide-body > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.extension-format-guide-body strong {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.extension-format-guide-body pre {
+  max-height: 260px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.governance-settings-dialog .skill-manager {
+  gap: 24px;
+}
+
+.skill-section {
+  display: grid;
+  gap: 10px;
+}
+
+.skill-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.skill-toolbar-text {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.skill-section-label {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.skill-section-hint {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.skill-builtin-list {
+  display: grid;
+  gap: 8px;
+}
+
+.skill-builtin-workflow {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  overflow: hidden;
+}
+
+.skill-builtin-workflow > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.skill-builtin-workflow > summary::-webkit-details-marker {
+  display: none;
+}
+
+.skill-builtin-workflow > summary:hover {
+  background: var(--option-hover);
+}
+
+.skill-builtin-workflow-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.skill-builtin-workflow-title strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.skill-builtin-workflow-title span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.skill-builtin-workflow > summary svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform 0.18s ease;
+}
+
+.skill-builtin-workflow[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.skill-builtin-workflow-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+
+.skill-builtin-workflow-body section {
+  display: grid;
+  gap: 7px;
+}
+
+.skill-builtin-workflow-body h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.skill-workflow-goals {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.skill-workflow-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+
+.skill-workflow-slots div {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.skill-workflow-slots dt {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.skill-workflow-slots dd {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.skill-required {
+  margin-left: 2px;
+  color: var(--danger);
+}
+
+.skill-workflow-empty {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.skill-workflow-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skill-workflow-steps > li {
+  display: grid;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.skill-workflow-step-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.skill-workflow-step-head strong {
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.skill-workflow-step-head code {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.skill-workflow-step-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.skill-workflow-step-inputs,
+.skill-workflow-checks {
+  display: grid;
+  gap: 5px;
+}
+
+.skill-workflow-step-inputs > strong,
+.skill-workflow-checks > strong {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.skill-workflow-step-inputs pre,
+.skill-builtin-workflow-body > section > pre {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px 9px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.skill-workflow-checks ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.skill-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.skill-row-head strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.skill-id {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.governance-settings-dialog .skill {
+  display: grid;
+  gap: 4px;
+}
+
+.governance-settings-dialog .skill-validator-details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.governance-settings-dialog .skill-validator-details > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.governance-settings-dialog .skill-validator-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.governance-settings-dialog .skill-validator-details > summary:hover {
+  background: var(--option-hover);
+}
+
+.skill-validator-summary-text strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.skill-validator-summary-text span {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.skill-validator-chevron {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform 0.18s ease;
+}
+
+.governance-settings-dialog .skill-validator-details[open] > summary .skill-validator-chevron {
+  transform: rotate(90deg);
+}
+
+.governance-settings-dialog .skill-validator-body {
+  display: grid;
+  gap: 10px;
+  padding: 4px 16px 16px;
+}
+
+.governance-settings-dialog .skill-validator {
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.governance-settings-dialog .skill-validator textarea {
+  min-height: 104px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.governance-settings-dialog .skill-list {
+  gap: 8px;
+}
+
+.governance-settings-dialog .skill-badge {
+  justify-self: start;
+  width: max-content;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-weight: 650;
+}
+
+.governance-settings-dialog .skill-problems {
+  margin: 2px 0 0;
+  padding-left: 1.2em;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.governance-settings-dialog .skill-validation {
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.governance-settings-dialog .skill-validation.valid {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+}
+
+.governance-settings-dialog .skill-validation.problems,
+.governance-settings-dialog .skill-validation.invalid {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.tier-limits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  line-height: 1.35;
+}
+
+/* Governance settings typography scale: execution, memory, plugin and workflow
+   panels should read as one settings surface, even though their components live
+   in different modules. */
+.governance-settings-dialog {
+  --settings-dialog-title-size: 19px;
+  --settings-page-title-size: 18px;
+  --settings-row-title-size: 14px;
+  --settings-row-title-weight: 650;
+  --settings-row-line-height: 1.35;
+  --settings-body-size: 12.5px;
+  --settings-body-weight: 400;
+  --settings-body-line-height: 1.45;
+  --settings-label-size: 12px;
+  --settings-label-weight: 650;
+  --settings-meta-size: 12px;
+  --settings-meta-weight: 500;
+  --settings-meta-line-height: 1.4;
+  --settings-control-size: 13px;
+  --settings-control-weight: 600;
+}
+
+.governance-settings-dialog .governance-settings-head h2 {
+  font-size: var(--settings-dialog-title-size);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.governance-settings-dialog :is(
+  .governance-page-lead h3,
+  .governance-page-head h3
+) {
+  font-size: var(--settings-page-title-size);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.governance-settings-dialog :is(
+  .governance-settings-head p,
+  .governance-page-lead p,
+  .governance-page-head p
+) {
+  font-size: var(--settings-body-size);
+  font-weight: var(--settings-body-weight);
+  line-height: var(--settings-body-line-height);
+}
+
+.governance-settings-dialog .governance-nav-item strong {
+  font-size: var(--settings-control-size);
+  font-weight: var(--settings-control-weight);
+  line-height: var(--settings-row-line-height);
+}
+
+.governance-settings-dialog :is(
+  .governance-panel .settings-row-text strong,
+  .governance-setting-row strong,
+  .exec-env-row-title,
+  .llm-engine-item-name,
+  .memory-manage-head strong,
+  .draft-manage-summary-text strong,
+  .agent-memory-pane-head strong,
+  .agent-memory-item-main strong,
+  .plugin-upload-text strong,
+  .plugin-row-id strong,
+  .plugin-tool-head strong,
+  .tier-row-body h4,
+  .skill-section-label,
+  .skill-row-head strong,
+  .skill-validator-summary-text strong,
+  .memory-distillation-row button:first-child strong,
+  .extension-format-guide > summary strong,
+  .skill-builtin-workflow-title strong,
+  .draft-tool-head h3,
+  .draft-tool-section h4
+) {
+  font-size: var(--settings-row-title-size);
+  font-weight: var(--settings-row-title-weight);
+  line-height: var(--settings-row-line-height);
+  letter-spacing: 0;
+}
+
+.governance-settings-dialog :is(
+  .governance-panel .settings-row-text span,
+  .governance-setting-row span,
+  .exec-env-row-sub,
+  .exec-env-hint,
+  .exec-env-empty,
+  .llm-engine-empty,
+  .llm-engine-item-url,
+  .memory-manage-head span,
+  .draft-manage-summary-text span,
+  .agent-memory-view-hint,
+  .agent-memory-pane-head span,
+  .agent-memory-item-main span,
+  .agent-memory-item-main p,
+  .agent-memory-detail-meta,
+  .agent-memory-empty,
+  .plugin-upload-text > span,
+  .plugin-row-desc,
+  .plugin-tool-head span,
+  .plugin-tool-impl dd,
+  .plugin-schema-empty,
+  .tier-row-body p,
+  .tier-guardrail-note,
+  .skill-section-hint,
+  .skill-builtin-workflow-title span,
+  .skill-workflow-goals,
+  .skill-validator-summary-text span,
+  .skill-problems,
+  .skill-validation,
+  .draft-tools-hint,
+  .draft-tool-meta,
+  .draft-learning-note,
+  .draft-run-history,
+  .extension-format-guide > summary span span
+) {
+  font-size: var(--settings-body-size);
+  font-weight: var(--settings-body-weight);
+  line-height: var(--settings-body-line-height);
+}
+
+.governance-settings-dialog :is(
+  .exec-env-section-label,
+  .agent-memory-filter-grid label > span,
+  .memory-manager-toolbar label,
+  .plugin-tool-impl dt,
+  .plugin-schema-table caption,
+  .plugin-schema-table th,
+  .extension-format-guide-body strong,
+  .skill-builtin-workflow-body h4,
+  .skill-workflow-slots dt,
+  .skill-workflow-step-inputs > strong,
+  .skill-workflow-checks > strong,
+  .agent-memory-detail-eyebrow,
+  .agent-memory-summary-card strong,
+  .agent-memory-evidence-card h4,
+  .agent-memory-audit-panel h4,
+  .agent-memory-source-list strong,
+  .draft-status-filter span,
+  .draft-schema-grid strong
+) {
+  font-size: var(--settings-label-size);
+  font-weight: var(--settings-label-weight);
+  line-height: var(--settings-row-line-height);
+  letter-spacing: 0;
+}
+
+.governance-settings-dialog :is(
+  .governance-panel .settings-row-control .governance-status-badge,
+  .governance-setting-row .governance-status-badge,
+  .plugin-version,
+  .plugin-tool-count,
+  .plugin-builtin-badge,
+  .memory-distillation-row span,
+  .skill-badge,
+  .skill-id,
+  .tier-limit,
+  .plugin-schema-table,
+  .plugin-schema-table code,
+  .skill-workflow-slots dd,
+  .skill-workflow-empty,
+  .skill-workflow-step-head strong,
+  .skill-workflow-step-head code,
+  .skill-workflow-step-meta,
+  .skill-workflow-checks ul,
+  .agent-memory-badges span,
+  .agent-memory-evidence-row span,
+  .agent-memory-audit-event span,
+  .agent-memory-audit-event time,
+  .agent-memory-evidence-row strong,
+  .agent-memory-source-list li span,
+  .agent-memory-audit-event strong
+) {
+  font-size: var(--settings-meta-size);
+  font-weight: var(--settings-meta-weight);
+  line-height: var(--settings-meta-line-height);
+}
+
+.governance-settings-dialog :is(input, select, textarea) {
+  font-size: var(--settings-control-size);
+  line-height: var(--settings-row-line-height);
+}
+
+.governance-settings-dialog :is(
+  .settings-row-control > .button,
+  .agent-memory-toolbar > .button,
+  .agent-memory-load-more .button,
+  .agent-memory-actions .button,
+  .agent-memory-view-tab,
+  .draft-tool-run-section > .button,
+  .draft-governance-actions .button,
+  .plugin-row-actions .button,
+  .plugin-upload-button,
+  .skill-toolbar .button,
+  .memory-manager-toolbar button,
+  .memory-distillation-row button[data-rollback-memory-distillation]
+) {
+  font-size: var(--settings-control-size);
+  font-weight: var(--settings-control-weight);
+  line-height: 1.2;
+}
+
+@media (max-width: 860px) {
+  .v2-workspace-summary,
+  .governance-extension-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-panel {
+    grid-area: auto;
+  }
+
+  .plugin-tool-schema {
+    grid-template-columns: 1fr;
+  }
+}

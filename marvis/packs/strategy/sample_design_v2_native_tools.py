@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import marvis.packs.strategy.sample_design_v2_tools as common
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.errors import DatasetContentDriftError
 from marvis.data.workspace import (
@@ -39,7 +40,6 @@ from marvis.packs.strategy.sample_membership import (
     encode_sample_membership,
     validate_sample_membership_header,
 )
-from marvis.packs.strategy import sample_design_v2_tools as common
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 
 
@@ -1401,42 +1401,6 @@ def _native_source_binding_output(
             "drop_missing": binding.drop_nan_labels,
         },
         "membership_registry_identity_hash": registry_identity_hash,
-        "development_partition": "risk/development",
-    }
-
-
-def _native_source_binding_from_provenance(
-    provenance: Mapping[str, Any],
-) -> dict[str, Any]:
-    return {
-        "source_mode": provenance["source_mode"],
-        "dataset_ref": {
-            "dataset_id": provenance["dataset_id"],
-            "content_hash": provenance["dataset_content_hash"],
-        },
-        "dataset_registry_ref": {
-            "source_path_hash": hashlib.sha256(
-                str(provenance["dataset_source_path"]).encode("utf-8")
-            ).hexdigest(),
-            "metadata_hash": provenance[
-                "dataset_registry_metadata_hash"
-            ],
-        },
-        "workspace_ref": {
-            "revision": provenance["workspace_revision"],
-            "generation": provenance["workspace_generation"],
-            "semantic_mapping_hash": provenance["semantic_mapping_hash"],
-        },
-        "target_selector": {
-            "column": provenance["target_col"],
-            "bad_value": provenance["target_bad_value"],
-            "drop_missing": provenance["drop_nan_labels"],
-        },
-        "membership_registry_identity_hash": (
-            native_sample_design_v2_membership_registry_identity_hash(
-                provenance
-            )
-        ),
         "development_partition": "risk/development",
     }
 

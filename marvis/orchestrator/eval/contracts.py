@@ -30,6 +30,8 @@ class EvalResult:
     passed: bool
     metrics: dict[str, float]
     transcript_ref: str
+    final_status: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,8 @@ class PlanRunTrace:
     replan_count: int = 0
     segments: int = 0
     guardrail_hits: tuple[str, ...] = ()
+    guardrail_outcome: str = ""
+    intervention_source: str = ""
     invented_numbers: bool = False
     transcript_ref: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)

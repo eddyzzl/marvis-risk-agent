@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent.strategy_setup import StrategySetupError
 from marvis.agent.turn_handlers import (
-    _candidate_monthly_stability_plan_slots,
+    _bind_candidate_monthly_stability_evidence,
     _strategy_request_preflight,
     _strategy_request_requires_dataset,
 )
@@ -139,7 +139,7 @@ def test_candidate_stability_template_omits_the_unused_oneof_branch(
         ),
     ],
 )
-def test_turn_preflight_injects_only_platform_resolved_tool_inputs(
+def test_turn_evidence_adapter_injects_only_platform_resolved_tool_inputs(
     monkeypatch: pytest.MonkeyPatch,
     draft: StandardWorkflowRequestDraft,
     expected_pointer: dict[str, object],
@@ -182,13 +182,17 @@ def test_turn_preflight_injects_only_platform_resolved_tool_inputs(
         resolve,
     )
 
-    slots = _candidate_monthly_stability_plan_slots(
+    evidence = _bind_candidate_monthly_stability_evidence(
         SimpleNamespace(),
         SimpleNamespace(id="task-1"),
-        draft,
+        draft.workflow_inputs,
     )
 
-    assert slots == resolved
+    assert evidence == {
+        key: value
+        for key, value in resolved.items()
+        if key not in expected_pointer
+    }
     assert captured == {
         "runtime": "read-runtime",
         "task_id": "task-1",
@@ -196,7 +200,7 @@ def test_turn_preflight_injects_only_platform_resolved_tool_inputs(
     }
 
 
-def test_turn_preflight_maps_missing_month_to_plan_free_clarification(
+def test_canonical_evidence_binding_owns_missing_month_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -217,14 +221,12 @@ def test_turn_preflight_maps_missing_month_to_plan_free_clarification(
     draft = _draft(asset_id=ASSET_ID)
 
     with pytest.raises(StrategySetupError, match="月份字段"):
-        _candidate_monthly_stability_plan_slots(runtime, task, draft)
-    assert _strategy_request_preflight(runtime, task, draft) == (
-        "candidate_monthly_stability_month_required",
-        (
-            "当前受治理 StrategySampleDesign 没有唯一且非空的月份字段；"
-            "请先补充并重新固化 month 口径，再测算候选逐月稳定性。"
-        ),
-    )
+        _bind_candidate_monthly_stability_evidence(
+            runtime,
+            task,
+            draft.workflow_inputs,
+        )
+    assert _strategy_request_preflight(runtime, task, draft) is None
 
 
 @pytest.mark.e2e

@@ -14,9 +14,13 @@ from marvis.api_stage_helpers import (
     run_stage_job,
     start_task_job,
 )
-from marvis.api_task_helpers import get_task_or_404
-from marvis.db import TaskRepository
-from marvis.domain import TASK_TYPE_VALIDATION, TaskStatus
+from marvis.api_task_helpers import get_task_or_404, validation_batch_parent_id
+from marvis.repositories.tasks import TaskRepository
+from marvis.domain import (
+    TASK_TYPE_VALIDATION,
+    TASK_TYPE_VALIDATION_BATCH,
+    TaskStatus,
+)
 from marvis.notebooks import close_live_notebook_session, get_live_notebook_session
 from marvis.pipeline import (
     LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE,
@@ -48,6 +52,16 @@ def _start_v2_guarded_job(
     kind: str,
 ):
     task = get_task_or_404(repo, task_id)
+    if task.task_type == TASK_TYPE_VALIDATION_BATCH:
+        raise unprocessable(
+            "validation_batch 父任务不能使用通用模型验证阶段接口；"
+            "请使用专用批次 API /api/validation-batches。"
+        )
+    if validation_batch_parent_id(repo, task.id) is not None:
+        raise conflict(
+            "批次内模型验证子任务不能通过通用验证阶段接口重跑；"
+            "请从专用批次流程继续。"
+        )
     if (
         task.task_type == TASK_TYPE_VALIDATION
         and task.validation_workflow_version == 2
@@ -284,6 +298,7 @@ def validate_task(
             ),
             "cancellation_job_id": job_id,
         },
+        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
     )
     return {
         "task_id": task_id,

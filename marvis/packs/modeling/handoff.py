@@ -14,7 +14,8 @@ from marvis.data.data_dictionary import first_data_dictionary_id, load_business_
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, TaskRepository
+from marvis.repositories.datasets import DatasetRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TASK_TYPE_VALIDATION, TaskCreate, TaskStatus
 from marvis.packs.modeling.artifact import export_pmml, persist_model_meta
 from marvis.packs.modeling.contracts import Experiment, ModelArtifact

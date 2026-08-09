@@ -114,7 +114,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     eval_llm_parser = subparsers.add_parser(
         "eval-llm",
-        help="Run the orchestrator LLM-touchpoint eval suite against a real configured model",
+        help="Run the orchestrator planning/guardrail eval suite against a real configured model",
     )
     eval_llm_parser.add_argument(
         "--model-id",
@@ -288,7 +288,7 @@ def _validate(args: argparse.Namespace) -> None:
 
 
 def _load_validation_runtime():
-    from marvis.db import init_db
+    from marvis.db_schema import init_db
     from marvis.execution_environment import load_execution_environment
     from marvis.pipeline import PipelineSettings, run_staged_pipeline
     from marvis.settings import build_settings

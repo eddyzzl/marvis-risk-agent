@@ -479,7 +479,10 @@ def test_model_validation_workflow_executes_v1_compat_until_report_confirmation(
     plan_id = plan["id"]
     report_step_id = plan["steps"][-1]["id"]
 
-    confirmed = client.post(f"/api/plans/{plan_id}/confirm")
+    confirmed = client.post(
+        f"/api/plans/{plan_id}/confirm",
+        json=plan["confirmation_snapshot"],
+    )
     first_run = client.post(f"/api/plans/{plan_id}/run")
     waiting = client.get(f"/api/plans/{plan_id}").json()["plan"]
 
@@ -494,7 +497,11 @@ def test_model_validation_workflow_executes_v1_compat_until_report_confirmation(
         json={
             "decision": "approve",
             "reason": "Reviewer approved rendering the validation reports",
-            "expected_plan_revision": waiting["replan_count"],
+            **next(
+                step["confirmation_snapshot"]
+                for step in waiting["steps"]
+                if step["id"] == report_step_id
+            ),
         },
     )
     completed = client.get(f"/api/plans/{plan_id}").json()["plan"]

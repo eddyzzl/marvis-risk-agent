@@ -20,7 +20,7 @@ from marvis.data.contracts import Dataset
 from marvis.data.errors import DatasetContentDriftError
 from marvis.data.labels import nan_label_mask
 from marvis.data.workspace import data_semantic_mapping_hash
-from marvis.db import StrategyRepository
+from marvis.repositories.strategy import StrategyRepository
 from marvis.domain import STRATEGY_OBJECTIVES, FileRole
 from marvis.files import scan_source_dir, sha256_file
 from marvis.repositories.data_workspace import (

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from marvis.modeling_policy_signals import has_monotonic_policy, monotonic_policy_profile
+from marvis.modeling_policy_signals import monotonic_policy_profile
 from marvis.packs.modeling.errors import ModelingError
 
 from marvis.packs.modeling._common import _cleanup_unattached_artifact, _finite_float_or_none, _format_number_token, _is_metric_key, _jsonable, _nonnegative_float_or_none, _positive_int_or_none, _score_first, _snapshot_latest_model_meta
@@ -851,7 +851,3 @@ def _row_policy_profile(row: dict) -> dict:
         profile["policy_psi_oot_vs_train"] = psi_oot
         profile["policy_psi_source"] = "psi_oot_vs_train"
     return profile
-
-
-def _row_has_monotonic_policy(item: dict, scorecard_rows: list) -> bool:
-    return has_monotonic_policy(item, scorecard_rows)

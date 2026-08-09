@@ -15,11 +15,9 @@ import hashlib
 import hmac
 import json
 import math
-import os
 from pathlib import Path
 import re
 import stat
-import tempfile
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
@@ -28,7 +26,12 @@ import numpy as np
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.db import ModelingRepository
+from marvis.data.authenticated_snapshot import (
+    AuthenticatedSnapshotError,
+    SnapshotFailureReason,
+    read_authenticated_parquet_snapshot,
+)
+from marvis.repositories.modeling import ModelingRepository
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.evidence import RAW_SCORE_PRODUCT
 from marvis.packs.modeling.score_evidence_tools import (
@@ -1132,144 +1135,38 @@ def _read_authenticated_dataset_snapshot(
     expected_content_hash: str,
     columns: list[str],
 ) -> pd.DataFrame:
-    """Read labels only from one retained, hash-authenticated private copy."""
-
-    _require_dataset_path(path, root=root)
-    source_fd = -1
-    snapshot = None
     try:
-        before = os.lstat(path)
-        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
-            raise StrategyError(
-                "scorecard governed dataset must be a regular file"
-            )
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+        return read_authenticated_parquet_snapshot(
+            path,
+            root=root,
+            expected_sha256=expected_content_hash,
+            columns=columns,
         )
-        source_fd = os.open(path, flags)
-        opened = os.fstat(source_fd)
-        after_open = os.lstat(path)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or stat.S_ISLNK(after_open.st_mode)
-            or _dataset_file_identity(before)
-            != _dataset_file_identity(opened)
-            or _dataset_file_identity(opened)
-            != _dataset_file_identity(after_open)
-            or _dataset_stable_file_stat(before)
-            != _dataset_stable_file_stat(opened)
-            or _dataset_stable_file_stat(opened)
-            != _dataset_stable_file_stat(after_open)
-        ):
-            raise StrategyError(
-                "scorecard governed dataset changed while opening"
-            )
-
-        snapshot = tempfile.TemporaryFile(mode="w+b", dir=root)
-        digest = hashlib.sha256()
-        copied = 0
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            copied += len(chunk)
-            snapshot.write(chunk)
-        snapshot.flush()
-        if (
-            _dataset_stable_file_stat(os.fstat(source_fd))
-            != _dataset_stable_file_stat(opened)
-            or copied != int(opened.st_size)
-            or not hmac.compare_digest(
-                digest.hexdigest(),
-                expected_content_hash,
-            )
-        ):
-            raise StrategyError(
-                "scorecard governed dataset bytes changed before replay"
-            )
-
-        snapshot_stat = os.fstat(snapshot.fileno())
-        if int(snapshot_stat.st_size) != copied:
-            raise StrategyError(
-                "scorecard governed dataset private snapshot is incomplete"
-            )
-        snapshot.seek(0)
-        frame = pd.read_parquet(snapshot, columns=columns)
-        current = os.lstat(path)
-        if (
-            _dataset_stable_file_stat(os.fstat(snapshot.fileno()))
-            != _dataset_stable_file_stat(snapshot_stat)
-            or _dataset_stable_file_stat(os.fstat(source_fd))
-            != _dataset_stable_file_stat(opened)
-            or stat.S_ISLNK(current.st_mode)
-            or _dataset_stable_file_stat(current)
-            != _dataset_stable_file_stat(opened)
-        ):
-            raise StrategyError(
-                "scorecard governed dataset changed during replay"
-            )
-        return frame
-    except StrategyError:
-        raise
-    except (OSError, TypeError, ValueError) as exc:
-        raise StrategyError(
-            "scorecard governed dataset could not be read"
-        ) from exc
-    finally:
-        if snapshot is not None:
-            snapshot.close()
-        if source_fd >= 0:
-            os.close(source_fd)
-
-
-def _require_dataset_path(path: Path, *, root: Path) -> None:
-    absolute = path.absolute()
-    declared_root = root.absolute()
-    try:
-        absolute.relative_to(declared_root)
-    except ValueError as exc:
-        raise StrategyError(
-            "scorecard governed dataset escaped dataset storage"
-        ) from exc
-    current = absolute
-    while True:
-        if current.is_symlink():
-            raise StrategyError(
-                "scorecard governed dataset must not use symlinks"
-            )
-        if current == declared_root:
-            break
-        if current == current.parent:
-            raise StrategyError(
+    except AuthenticatedSnapshotError as exc:
+        messages = {
+            SnapshotFailureReason.PATH_OUTSIDE_ROOT: (
                 "scorecard governed dataset escaped dataset storage"
-            )
-        current = current.parent
-
-
-def _dataset_file_identity(value: os.stat_result) -> tuple[int, int, int]:
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(stat.S_IFMT(value.st_mode)),
-    )
-
-
-def _dataset_stable_file_stat(
-    value: os.stat_result,
-) -> tuple[int, ...]:
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(stat.S_IFMT(value.st_mode)),
-        int(value.st_nlink),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-    )
+            ),
+            SnapshotFailureReason.SOURCE_NOT_REGULAR: (
+                "scorecard governed dataset must be a regular file"
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_WHILE_OPENING: (
+                "scorecard governed dataset changed while opening"
+            ),
+            SnapshotFailureReason.SOURCE_BYTES_CHANGED: (
+                "scorecard governed dataset bytes changed before replay"
+            ),
+            SnapshotFailureReason.PRIVATE_SNAPSHOT_INCOMPLETE: (
+                "scorecard governed dataset private snapshot is incomplete"
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_DURING_READ: (
+                "scorecard governed dataset changed during replay"
+            ),
+            SnapshotFailureReason.READ_FAILED: (
+                "scorecard governed dataset could not be read"
+            ),
+        }
+        raise StrategyError(messages[exc.reason]) from exc
 
 
 def _scorecard_identity(

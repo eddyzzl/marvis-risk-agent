@@ -86,6 +86,27 @@ class _FakeLLM:
 
     def complete(self, **kwargs) -> str:
         self.calls.append(kwargs)
+        if str(kwargs.get("caller") or "").startswith("semantic_intent_"):
+            request = json.loads(kwargs["user_prompt"])
+            instruction = str(request["instruction"])
+            intent = (
+                "risk_standard_vintage"
+                if instruction == "标准 Vintage"
+                else "current_workflow"
+            )
+            return json.dumps(
+                {
+                    "intent": intent,
+                    "evidence_quote": instruction,
+                    "reason": "用户明确选择当前风险分析流程并要求继续。",
+                    "confidence": "high",
+                    "is_question": False,
+                    "is_conditional": False,
+                    "requests_change": False,
+                    "withholds_action": False,
+                },
+                ensure_ascii=False,
+            )
         return self._payload
 
 
@@ -277,7 +298,12 @@ def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch)
     task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
     client = _SequencedLLM([json.dumps({"action": "replan", "reason": "继续", "replan_goal": "重规划当前步骤"})])
 
-    agent_autodrive_turn(SimpleNamespace(), repo, task, client=client)
+    agent_autodrive_turn(
+        SimpleNamespace(settings=object()),
+        repo,
+        task,
+        client=client,
+    )
 
     assert calls
     assert calls[0]["plan_id"] == "plan-9"
@@ -399,6 +425,67 @@ def test_agent_autodrive_sizes_budget_from_active_plan_gate_count(monkeypatch):
     assert len(calls) == 14
 
 
+def test_agent_autodrive_preplan_refresh_keeps_conservative_ceiling(monkeypatch):
+    calls = []
+    plans = []
+
+    steps = [
+        PlanStep(
+            id=f"step-{index}",
+            plan_id="plan-1",
+            index=index,
+            title=f"步骤{index}",
+            tool_ref=ToolRef("_sample", "echo"),
+            inputs={},
+            depends_on=[],
+            post_checks=[],
+            needs_confirmation=True,
+        )
+        for index in range(11)
+    ]
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=0,
+        steps=steps,
+        status=PlanStatus.AWAITING_CONFIRM,
+    )
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        plans[:] = [plan]
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content="请确认下一个 gate",
+            metadata={"kind": "gate", "step_id": f"gate-{len(calls) + 1}"},
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    repo = _TokenRepo()
+    task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
+    plan_repo = SimpleNamespace(list_plans_for_task=lambda task_id: list(plans))
+    runtime = SimpleNamespace(plan_repo=plan_repo, tier="conservative")
+
+    agent_autodrive_turn(
+        runtime,
+        repo,
+        task,
+        client=_FakeLLM(action="confirm", reason="继续"),
+    )
+
+    assert len(calls) == 6
+    assert repo.messages[-1]["metadata"] == {
+        "intent": "agent_budget_exhausted",
+        "max_gates": 6,
+    }
+
+
 def test_agent_mode_halt_decision_stops_at_gate(client: TestClient, tmp_path: Path, monkeypatch):
     fake = _FakeLLM(action="halt", reason="命中率过低,请人工核对")
     monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)
@@ -482,6 +569,10 @@ def test_agent_mode_vintage_halts_on_undeclared_label_semantics(client: TestClie
     # handing the user both concrete semantics to choose from before the curve is trusted.
     fake = _FakeLLM(action="confirm", reason="字段已识别,继续")
     monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: fake,
+    )
     src = _vintage_dir(tmp_path)
     task_id = client.post("/api/tasks", json={
         "model_name": "Vintage 自动",

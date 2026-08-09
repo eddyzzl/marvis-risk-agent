@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from marvis.api_task_helpers import get_task_or_404
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 
 
 router = APIRouter(prefix="/api", tags=["audit"])

@@ -85,8 +85,23 @@ def test_turn_routes_without_dataset_or_target_and_starts_two_step_template(
         "marvis.agent.turn_handlers._strategy_pool_stability_plan_slots",
         lambda runtime, task, candidate: {
             "strategy_type": "pricing",
-            "pool_ref": {"exact": "pool"},
-            "sample_design_ref": {"exact": "sample"},
+            "pool_ref": {
+                "artifact_id": "1" * 64,
+                "expected_artifact_content_hash": "2" * 64,
+                "expected_pool_id": "strategy-pool-1",
+                "expected_revision": 1,
+                "expected_revision_id": "strategy-pool-revision-1",
+                "expected_snapshot_hash": "3" * 64,
+            },
+            "sample_design_ref": {
+                "membership_artifact_id": "4" * 64,
+                "expected_membership_artifact_content_hash": "5" * 64,
+                "bundle_artifact_id": "6" * 64,
+                "expected_bundle_artifact_content_hash": "7" * 64,
+                "expected_bundle_id": "sample-bundle-1",
+                "expected_sample_design_id": "sample-design-1",
+                "expected_sample_design_content_hash": "8" * 64,
+            },
             "partitions": ["development", "oot"],
         },
     )

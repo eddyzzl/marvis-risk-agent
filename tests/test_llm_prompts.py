@@ -20,13 +20,17 @@ from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 # text changed without a version bump (fix: bump the version) or the version
 # was bumped without updating this lock (fix: update the hash below).
 _LOCKED_HASHES = {
-    "PLAN_SYS": (1, "b8f0c77f37f0eedd"),
-    "REPLAN_SYS": (1, "872ddb4c5fe37492"),
-    "EXPLORE_SYS": (1, "64a0439c1c1090a1"),
+    "PLAN_SYS": (3, "3c6cfb356d591761"),
+    "REPLAN_SYS": (3, "e4122cdc65809ab9"),
+    "EXPLORE_SYS": (3, "815e9fe5eac70dbb"),
     "CRITIC_SYS": (1, "b9aef8096c81cc56"),
     "CLASSIFY_SYS": (1, "b74f7d825f9b1b10"),
     "GATE_SYSTEM_TEMPLATE": (1, "7ae1a3768ff2aaa6"),
     "GATE_INSTRUCTION_ROUTER_SYS": (7, "a217f6f1aeaade6a"),
+    "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS": (2, "b5253c6e1930156c"),
+    "TOP_LEVEL_INTENT_ROUTER_SYS": (2, "c7a4a6d139cfbf95"),
+    "TOP_LEVEL_INTENT_REVIEW_SYS": (2, "ca7de98de8bc09de"),
+    "TOP_LEVEL_INTENT_REPAIR_SYS": (1, "2c74151f80278217"),
     "WORKFLOW_INSIGHT_SYS": (1, "7984417217ee72da"),
     "AGENT_SYSTEM_PROMPT": (2, "80ee6702aa4fc81e"),
     "WORD_CONCLUSION_SYSTEM_PROMPT": (2, "a3754910d82cf210"),
@@ -36,7 +40,7 @@ _LOCKED_HASHES = {
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
     "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
-    "STRATEGY_REQUEST_COMPILER_SYS": (52, "687a8ca54ffccf43"),
+    "STRATEGY_REQUEST_COMPILER_SYS": (54, "90e58403ecc3529c"),
     "SAMPLE_DESIGN_V2_CORRECTION_SYS": (1, "6ffd79f3c4790e46"),
 }
 
@@ -73,11 +77,11 @@ def test_version_tag_format():
 def test_prompt_version_snapshot_covers_all_prompts():
     snapshot = prompt_version_snapshot()
     assert snapshot == {spec.name: spec.version for spec in ALL_PROMPTS}
-    assert snapshot["PLAN_SYS"] == 1
+    assert snapshot["PLAN_SYS"] == 3
 
 
 def test_strategy_compiler_prompt_owns_pool_materialization_contract():
-    assert STRATEGY_REQUEST_COMPILER_SYS.version == 52
+    assert STRATEGY_REQUEST_COMPILER_SYS.version == 54
     assert "scorecard_model_score_evidence_build" in (
         STRATEGY_REQUEST_COMPILER_SYS.text
     )

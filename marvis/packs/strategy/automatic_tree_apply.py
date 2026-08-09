@@ -93,6 +93,31 @@ class AutomaticTreeApplyBudgetError(AutomaticTreeApplyError):
 
 
 @dataclass
+class _ExclusiveOutputOwnership:
+    """Track whether this invocation won exclusive creation of the output."""
+
+    path: Path
+    owned: bool = False
+
+    def open(self) -> BinaryIO:
+        stream = self.path.open("xb")
+        self.owned = True
+        return stream
+
+    def cleanup(self, *, primary_error: BaseException) -> None:
+        if not self.owned:
+            return
+        cleanup_error = _unlink_failed_output(self.path)
+        if cleanup_error is None:
+            self.owned = False
+            return
+        primary_error.add_note(
+            "automatic-tree output cleanup also failed: "
+            f"{type(cleanup_error).__name__}: {cleanup_error}"
+        )
+
+
+@dataclass
 class _SourceSnapshot:
     """Private immutable copy bound to one retained regular-file descriptor."""
 
@@ -337,7 +362,48 @@ def _apply_automatic_tree_snapshot_to_parquet(
         leaf_id_column=leaf_id_column,
         rule_id_column=rule_id_column,
     )
+    output_ownership = _ExclusiveOutputOwnership(output)
     parquet_file = _open_source_parquet(source_stream)
+    active_error: BaseException | None = None
+    try:
+        return _apply_open_parquet_to_output(
+            tree,
+            asset_id=asset_id,
+            asset_hash=asset_hash,
+            parquet_file=parquet_file,
+            output=output,
+            output_ownership=output_ownership,
+            source_content_hash=source_content_hash,
+            output_columns=output_columns,
+            leaf_id_column=leaf_id_column,
+            rule_id_column=rule_id_column,
+        )
+    except BaseException as exc:
+        active_error = exc
+        raise
+    finally:
+        _close_source_parquet(
+            parquet_file,
+            output_ownership=output_ownership,
+            active_error=active_error,
+        )
+
+
+def _apply_open_parquet_to_output(
+    tree: Mapping[str, Any],
+    *,
+    asset_id: str | None,
+    asset_hash: str | None,
+    parquet_file: pq.ParquetFile,
+    output: Path,
+    output_ownership: _ExclusiveOutputOwnership,
+    source_content_hash: str,
+    output_columns: dict[str, str],
+    leaf_id_column: str,
+    rule_id_column: str,
+) -> AutomaticTreeApplyResult:
+    """Write and verify one output while the caller owns the open reader."""
+
     source_schema = parquet_file.schema_arrow
     source_row_count = int(parquet_file.metadata.num_rows)
     features = tuple(tree["training"]["feature_order"])
@@ -353,7 +419,7 @@ def _apply_automatic_tree_snapshot_to_parquet(
         features=features,
         output_columns=output_columns,
     )
-    # Fail schema/type/casefold errors before the output file is opened.  Value
+    # Fail schema/type/casefold errors before the output file is opened. Value
     # validation is repeated on every decoded batch below, covering every cell.
     empty_feature_frame = _empty_feature_frame(
         source_schema,
@@ -374,7 +440,7 @@ def _apply_automatic_tree_snapshot_to_parquet(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        with output.open("xb") as output_stream:
+        with output_ownership.open() as output_stream:
             with pq.ParquetWriter(
                 output_stream,
                 result_schema,
@@ -426,11 +492,9 @@ def _apply_automatic_tree_snapshot_to_parquet(
                     rows_written += int(batch.num_rows)
     except FileExistsError as exc:
         raise AutomaticTreeApplyError("output_path must not already exist") from exc
-    except Exception:
-        output.unlink(missing_ok=True)
+    except BaseException as exc:
+        output_ownership.cleanup(primary_error=exc)
         raise
-    finally:
-        parquet_file.close()
 
     try:
         if rows_written != source_row_count:
@@ -499,9 +563,42 @@ def _apply_automatic_tree_snapshot_to_parquet(
             output_content_hash=output_content_hash,
             result_hash=result_hash,
         )
-    except Exception:
-        output.unlink(missing_ok=True)
+    except BaseException as exc:
+        output_ownership.cleanup(primary_error=exc)
         raise
+
+
+def _close_source_parquet(
+    parquet_file: pq.ParquetFile,
+    *,
+    output_ownership: _ExclusiveOutputOwnership,
+    active_error: BaseException | None,
+) -> None:
+    """Close exactly once without hiding an error already being propagated."""
+
+    try:
+        parquet_file.close()
+    except BaseException as close_error:
+        if active_error is not None:
+            active_error.add_note(
+                "source Parquet reader close also failed: "
+                f"{type(close_error).__name__}: {close_error}"
+            )
+            return
+
+        error = AutomaticTreeApplyError("source Parquet reader could not be closed")
+        output_ownership.cleanup(primary_error=error)
+        raise error from close_error
+
+
+def _unlink_failed_output(output: Path) -> BaseException | None:
+    """Best-effort cleanup that lets the primary failure retain ownership."""
+
+    try:
+        output.unlink(missing_ok=True)
+    except BaseException as exc:
+        return exc
+    return None
 
 
 def _validated_tree_and_asset_identity(

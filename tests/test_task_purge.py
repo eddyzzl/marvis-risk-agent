@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from marvis.app import create_app
 from marvis.data.backend import DataBackend
+from marvis.data.dataset_source_gc import DatasetSourceGarbageCollector
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, DraftRepository, TaskRepository, connect
 from marvis.drafts.contracts import DraftRun, DraftTool
@@ -229,6 +230,277 @@ def test_delete_task_keeps_dataset_file_still_referenced_by_another_task(tmp_pat
     assert second_response.status_code == 204
     # once the last referencing task is gone, the file is finally removed
     assert not dataset_path.exists()
+
+
+def test_delete_task_removes_last_content_addressed_snapshot_reference(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    dataset = _upload_dataset(
+        client,
+        task["id"],
+        pd.DataFrame({"acct_id": ["A1", "B2"]}),
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    pinned = registry.pin_authenticated_snapshot(dataset["id"])
+    pinned_path = settings.datasets_dir / pinned.source_path
+    pinned_dir = pinned_path.parent
+    assert pinned_path.exists()
+
+    response = client.delete(f"/api/tasks/{task['id']}")
+
+    assert response.status_code == 204
+    assert not pinned_path.exists()
+    assert not pinned_dir.exists()
+
+
+def test_delete_task_keeps_shared_content_addressed_snapshot_until_last_reference(
+    tmp_path,
+):
+    client, settings = _client(tmp_path)
+    frame = pd.DataFrame({"acct_id": ["A1", "B2"]})
+    first_task = _create_task(client)
+    first_dataset = _upload_dataset(client, first_task["id"], frame)
+    second_task = _create_task(client)
+    second_dataset = _upload_dataset(client, second_task["id"], frame)
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    first_pinned = registry.pin_authenticated_snapshot(first_dataset["id"])
+    second_pinned = registry.pin_authenticated_snapshot(second_dataset["id"])
+    assert second_pinned.source_path == first_pinned.source_path
+    pinned_path = settings.datasets_dir / first_pinned.source_path
+    pinned_dir = pinned_path.parent
+
+    first_response = client.delete(f"/api/tasks/{first_task['id']}")
+
+    assert first_response.status_code == 204
+    assert pinned_path.exists()
+
+    second_response = client.delete(f"/api/tasks/{second_task['id']}")
+
+    assert second_response.status_code == 204
+    assert not pinned_path.exists()
+    assert not pinned_dir.exists()
+
+
+def test_delete_task_rechecks_cas_references_after_purge_before_unlink(
+    tmp_path,
+):
+    client, settings = _client(tmp_path)
+    frame = pd.DataFrame({"acct_id": ["A1", "B2"]})
+    owner_task = _create_task(client)
+    owner_dataset = _upload_dataset(client, owner_task["id"], frame)
+    other_task = _create_task(client)
+    other_dataset = _upload_dataset(client, other_task["id"], frame)
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    owner_pinned = registry.pin_authenticated_snapshot(owner_dataset["id"])
+    pinned_path = settings.datasets_dir / owner_pinned.source_path
+    cleanup_entered = threading.Event()
+    resume_cleanup = threading.Event()
+    original_collector = client.app.state.dataset_source_gc
+
+    class PausingCollector:
+        def sweep(self, **kwargs):
+            cleanup_entered.set()
+            assert resume_cleanup.wait(timeout=5)
+            return original_collector.sweep(**kwargs)
+
+    client.app.state.dataset_source_gc = PausingCollector()
+    outcome: dict[str, object] = {}
+
+    def delete_owner():
+        outcome["response"] = client.delete(f"/api/tasks/{owner_task['id']}")
+
+    worker = threading.Thread(target=delete_owner)
+    worker.start()
+    assert cleanup_entered.wait(timeout=5)
+    try:
+        other_pinned = registry.pin_authenticated_snapshot(other_dataset["id"])
+        assert other_pinned.source_path == owner_pinned.source_path
+    finally:
+        resume_cleanup.set()
+        worker.join(timeout=10)
+
+    assert worker.is_alive() is False
+    assert outcome["response"].status_code == 204
+    assert pinned_path.exists()
+
+
+def test_pin_reauthenticates_cas_after_concurrent_last_reference_cleanup(
+    tmp_path,
+    monkeypatch,
+):
+    client, settings = _client(tmp_path)
+    frame = pd.DataFrame({"acct_id": ["A1", "B2"]})
+    owner_task = _create_task(client)
+    owner_dataset = _upload_dataset(client, owner_task["id"], frame)
+    other_task = _create_task(client)
+    other_dataset = _upload_dataset(client, other_task["id"], frame)
+    repo = DatasetRepository(settings.db_path)
+    registry = DatasetRegistry(
+        repo,
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    owner_pinned = registry.pin_authenticated_snapshot(owner_dataset["id"])
+    pinned_path = settings.datasets_dir / owner_pinned.source_path
+    pin_entered = threading.Event()
+    resume_pin = threading.Event()
+    original_pin = repo.pin_dataset_source_path
+
+    def pause_after_materialization(*args, **kwargs):
+        pin_entered.set()
+        assert resume_pin.wait(timeout=5)
+        return original_pin(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "pin_dataset_source_path", pause_after_materialization)
+    outcome: dict[str, object] = {}
+
+    def pin_other():
+        try:
+            outcome["dataset"] = registry.pin_authenticated_snapshot(
+                other_dataset["id"]
+            )
+        except Exception as exc:  # pragma: no cover - asserted below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=pin_other)
+    worker.start()
+    assert pin_entered.wait(timeout=5)
+    try:
+        deleted = client.delete(f"/api/tasks/{owner_task['id']}")
+        assert deleted.status_code == 204
+        assert not pinned_path.exists()
+    finally:
+        resume_pin.set()
+        worker.join(timeout=10)
+
+    assert worker.is_alive() is False
+    assert "error" not in outcome
+    repinned = outcome["dataset"]
+    assert repinned.source_path == owner_pinned.source_path
+    assert registry.get(other_dataset["id"]).source_path == repinned.source_path
+    assert pinned_path.exists()
+    authenticated = registry.read_authenticated_parquet_snapshot(other_dataset["id"])
+    assert authenticated["acct_id"].tolist() == ["A1", "B2"]
+
+
+def test_dataset_repository_requires_authentication_before_cas_binding(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    dataset = _upload_dataset(
+        client,
+        task["id"],
+        pd.DataFrame({"acct_id": ["A1", "B2"]}),
+    )
+    repo = DatasetRepository(settings.db_path)
+    digest = dataset["content_hash"]
+    content_addressed_path = f"_cas/{digest}/{digest}.parquet"
+
+    with pytest.raises(TypeError, match="validate_content_addressed_source"):
+        repo.pin_dataset_source_path(
+            dataset["id"],
+            expected_source_path=dataset["source_path"],
+            expected_content_hash=digest,
+            content_addressed_source_path=content_addressed_path,
+        )
+
+    assert repo.get_dataset(dataset["id"]).source_path == dataset["source_path"]
+
+
+def test_delete_task_retries_and_defers_post_commit_cleanup_lock_failure(
+    tmp_path,
+    caplog,
+):
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    dataset = _upload_dataset(
+        client,
+        task["id"],
+        pd.DataFrame({"acct_id": ["A1", "B2"]}),
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    pinned = registry.pin_authenticated_snapshot(dataset["id"])
+    pinned_path = settings.datasets_dir / pinned.source_path
+    calls = {"count": 0}
+
+    def locked_cleanup(_path):
+        calls["count"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    client.app.state.dataset_source_gc = DatasetSourceGarbageCollector(
+        settings.db_path,
+        settings.datasets_dir,
+        delete_source=locked_cleanup,
+    )
+
+    response = client.delete(f"/api/tasks/{task['id']}")
+
+    assert response.status_code == 204
+    assert calls["count"] == 1
+    with pytest.raises(KeyError):
+        TaskRepository(settings.db_path).get_task(task["id"])
+    assert pinned_path.exists()
+    status = client.app.state.dataset_source_gc.status()
+    assert status.pending_count == 1
+    assert status.entries[0].state == "retry_wait"
+    assert "dataset source GC deferred" in caplog.text
+
+
+def test_delete_task_retries_transient_post_commit_cleanup_lock(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    dataset = _upload_dataset(
+        client,
+        task["id"],
+        pd.DataFrame({"acct_id": ["A1", "B2"]}),
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    pinned = registry.pin_authenticated_snapshot(dataset["id"])
+    pinned_path = settings.datasets_dir / pinned.source_path
+    calls = {"count": 0}
+
+    def transient_lock(_path):
+        calls["count"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    client.app.state.dataset_source_gc = DatasetSourceGarbageCollector(
+        settings.db_path,
+        settings.datasets_dir,
+        delete_source=transient_lock,
+    )
+
+    response = client.delete(f"/api/tasks/{task['id']}")
+
+    assert response.status_code == 204
+    assert calls["count"] == 1
+    assert pinned_path.exists()
+
+    recovered = DatasetSourceGarbageCollector(
+        settings.db_path,
+        settings.datasets_dir,
+    ).sweep(force=True)
+
+    assert recovered.deleted == 1
+    assert not pinned_path.exists()
 
 
 def test_delete_task_unlinks_task_directory_symlink_without_deleting_target(tmp_path):

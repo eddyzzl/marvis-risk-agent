@@ -5,6 +5,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import nbformat
 import pandas as pd
@@ -95,6 +96,11 @@ def test_v2_pmml_scoring_and_metrics_never_execute_notebook(
     monkeypatch,
     v2_workflow,
 ):
+    template = Document(pipeline_settings.report_template_path)
+    template.add_paragraph("{{TEXT:pressure_impact_recommendation}}")
+    template.add_paragraph("{{TEXT:final_validation_conclusion}}")
+    template.save(pipeline_settings.report_template_path)
+
     monkeypatch.setattr(
         pipeline_module,
         "_notebook_step_v3",
@@ -166,6 +172,10 @@ def test_v2_pmml_scoring_and_metrics_never_execute_notebook(
     }
     assert (outputs / "validation_report.docx").is_file()
     assert (outputs / "validation.xlsx").is_file()
+    with ZipFile(outputs / "validation_report.docx") as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+    assert "{{TEXT:" not in document_xml
+    assert "确定性保守回退结论" in document_xml
 
 
 def _empty_stress_scores_payload() -> dict:

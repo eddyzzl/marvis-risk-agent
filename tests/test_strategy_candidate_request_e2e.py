@@ -154,7 +154,10 @@ def test_natural_language_candidate_auto_runs_to_only_adoption_gate_and_rerender
         f"/api/tasks/{task_id}/agent/messages",
         json={
             "content": "确认采纳",
+            "ui_action": "confirm_adoption",
+            "expected_plan_id": gate["metadata"]["plan_id"],
             "expected_step_id": gate["metadata"]["step_id"],
+            **gate["metadata"]["confirmation_snapshot"],
             "adjust_params": {"adoption_reason": reason},
         },
     )

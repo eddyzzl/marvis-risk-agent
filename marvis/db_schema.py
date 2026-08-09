@@ -8,6 +8,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
+from marvis.agent_memory_schema import ensure_agent_memory_schema
 from marvis.strategy_lifecycle import (
     ASSET_STATUS_ADOPTED_LOCAL,
     ASSET_STATUS_DRAFT,
@@ -37,6 +38,9 @@ _MIGRATION_TABLES = frozenset({
     "strategy_artifacts",
     "strategies",
     "validation_input_contracts",
+    "validation_batches",
+    "validation_batch_items",
+    "validation_batch_material_uploads",
     "data_analysis_runs",
     "data_transform_runs",
     "dataset_lineage_edges",
@@ -53,6 +57,12 @@ _MIGRATION_TABLES = frozenset({
     "strategy_report_heads",
     "strategy_report_revisions",
     "strategy_pool_materializations",
+    "production_principals",
+    "production_governance_events",
+    "production_environment_heads",
+    "production_promotion_requests",
+    "production_promotion_approvals",
+    "production_deployments",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -192,7 +202,30 @@ _MIGRATION_TABLES = frozenset({
 #
 # _migration_024_explicit_feature_metrics distinguishes omitted feature metrics
 # from an explicitly empty selection while preserving historical default behavior.
-SCHEMA_VERSION = 24
+#
+# _migration_026_production_governance adds server-owned production role bindings
+# and the append-only, hash-chained production-governance event ledger.
+#
+# _migration_027_verified_production_activation binds production activation to
+# server-created deployment manifests and allowlisted verifier evidence.
+#
+# _migration_028_dataset_source_gc persists dataset-file cleanup intent in the
+# same transaction that removes the last dataset row.  A process crash or
+# sharing violation can therefore delay cleanup but cannot forget it.
+#
+# _migration_029_dataset_source_lookup_index bounds reference rechecks while GC
+# holds the SQLite writer lock.
+# _migration_030_task_filesystem_gc persists typed task-directory cleanup intent.
+# _migration_031_step_output_binding binds every successful run to the canonical
+# hash of its exact persisted output version for fail-closed presentation.
+# _migration_032_step_result_receipt binds governed canonical outputs to the
+# trusted ToolRunner invocation while preserving repository-owned cascade purge.
+# _migration_033_tool_manifest_receipt extends that immutable receipt to the
+# resolved Tool version and manifest identity used by the producer invocation.
+# _migration_034_validation_batch_source_gc adds a narrowly typed cleanup target
+# for platform-owned validation-batch material trees.  The old migration remains
+# immutable; SQLite requires a table rebuild to extend its CHECK constraint.
+SCHEMA_VERSION = 35
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -862,8 +895,6 @@ def _migration_001_baseline(conn: sqlite3.Connection) -> None:
     # S1b: training-time baseline distribution snapshot (nullable JSON text --
     # old rows stay NULL, no backfill; monitor_run treats NULL as "no baseline").
     _ensure_column(conn, "model_artifacts", "baseline_distributions_json", "TEXT")
-    from marvis.agent_memory.store import ensure_agent_memory_schema
-
     ensure_agent_memory_schema(conn)
 
 
@@ -2665,11 +2696,10 @@ def _migration_018_strategy_dsl_content_hash(conn: sqlite3.Connection) -> None:
         # high schema stamp with only the lifecycle subset.  There is no
         # canonical Strategy DSL to backfill in that partial shape.
         return
-    from marvis.packs.strategy.dsl import canonical_strategy_json, parse_strategy_spec
-
     rows = conn.execute(
         "SELECT id, dsl_json, dsl_schema_version, dsl_content_hash FROM strategies"
     ).fetchall()
+    canonical_rows: list[sqlite3.Row] = []
     for row in rows:
         dsl_json = row["dsl_json"]
         schema_version = row["dsl_schema_version"]
@@ -2684,6 +2714,20 @@ def _migration_018_strategy_dsl_content_hash(conn: sqlite3.Connection) -> None:
             raise ValueError(
                 f"strategy {row['id']} has incomplete canonical DSL columns"
             )
+        canonical_rows.append(row)
+
+    # A fresh database has no Strategy rows. Keep schema initialization at the
+    # persistence seam instead of importing the Strategy execution graph merely
+    # to discover that there is nothing to backfill.
+    if not canonical_rows:
+        return
+
+    from marvis.packs.strategy.dsl import canonical_strategy_json, parse_strategy_spec
+
+    for row in canonical_rows:
+        dsl_json = row["dsl_json"]
+        schema_version = row["dsl_schema_version"]
+        stored_hash = row["dsl_content_hash"]
         spec = parse_strategy_spec(json.loads(str(dsl_json)))
         if str(schema_version) != spec.schema_version:
             raise ValueError(
@@ -3589,6 +3633,792 @@ def _migration_024_explicit_feature_metrics(conn: sqlite3.Connection) -> None:
         definition="INTEGER NOT NULL DEFAULT 0",
     )
 
+
+def _migration_025_validation_batches(conn: sqlite3.Connection) -> None:
+    """Add parent-batch orchestration without changing single-model tasks."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS validation_batches (
+            parent_task_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL
+                CHECK(status IN (
+                    'created', 'running', 'awaiting_confirmation',
+                    'completed', 'partial_failure', 'failed', 'cancelled'
+                )),
+            item_count INTEGER NOT NULL CHECK(item_count BETWEEN 1 AND 10),
+            summary_path TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(parent_task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS validation_batch_items (
+            id TEXT PRIMARY KEY,
+            parent_task_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 10),
+            child_task_id TEXT NOT NULL UNIQUE,
+            model_name TEXT NOT NULL,
+            model_version TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL
+                CHECK(status IN (
+                    'queued', 'running', 'awaiting_confirmation',
+                    'succeeded', 'review_required', 'failed', 'cancelled'
+                )),
+            stage TEXT NOT NULL DEFAULT 'queued',
+            oot_ks REAL,
+            oot_psi REAL,
+            pmml_status TEXT NOT NULL DEFAULT '',
+            stress_risk TEXT NOT NULL DEFAULT '',
+            report_complete INTEGER NOT NULL DEFAULT 0 CHECK(report_complete IN (0, 1)),
+            outcome TEXT NOT NULL DEFAULT '',
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(parent_task_id, ordinal),
+            FOREIGN KEY(parent_task_id) REFERENCES validation_batches(parent_task_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(child_task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_validation_batch_items_parent_status
+            ON validation_batch_items(parent_task_id, status, ordinal)
+        """
+    )
+
+
+def _migration_026_production_governance(conn: sqlite3.Connection) -> None:
+    """Add local role bindings and a verifiable append-only audit chain."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_principals (
+            local_principal_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('maker', 'checker', 'admin')),
+            status TEXT NOT NULL CHECK(status IN ('active', 'revoked')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(local_principal_id) REFERENCES local_principals(id)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_deployments (
+            id TEXT PRIMARY KEY,
+            environment TEXT NOT NULL,
+            deployment_slot TEXT NOT NULL
+                CHECK(deployment_slot IN ('shadow', 'production')),
+            strategy_id TEXT NOT NULL,
+            strategy_version INTEGER NOT NULL CHECK(strategy_version >= 1),
+            strategy_content_hash TEXT NOT NULL
+                CHECK(length(strategy_content_hash) = 64),
+            asset_status_snapshot TEXT NOT NULL
+                CHECK(asset_status_snapshot IN ('validated', 'adopted_local')),
+            manifest_hash TEXT NOT NULL CHECK(length(manifest_hash) = 64),
+            external_deployment_ref TEXT NOT NULL,
+            health_evidence_ref TEXT NOT NULL,
+            health_status TEXT NOT NULL
+                CHECK(health_status IN ('healthy', 'degraded', 'unhealthy')),
+            status TEXT NOT NULL CHECK(status IN (
+                'shadow', 'active', 'superseded', 'failed', 'rolled_back'
+            )),
+            predecessor_deployment_id TEXT,
+            promotion_request_id TEXT NOT NULL UNIQUE,
+            activated_by TEXT NOT NULL,
+            activation_reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(environment, external_deployment_ref),
+            FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE RESTRICT,
+            FOREIGN KEY(predecessor_deployment_id)
+                REFERENCES production_deployments(id) ON DELETE RESTRICT,
+            FOREIGN KEY(promotion_request_id)
+                REFERENCES production_promotion_requests(id) ON DELETE RESTRICT,
+            FOREIGN KEY(activated_by)
+                REFERENCES production_principals(local_principal_id)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_environment_heads (
+            environment TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+            active_deployment_id TEXT,
+            shadow_deployment_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_promotion_requests (
+            id TEXT PRIMARY KEY,
+            environment TEXT NOT NULL,
+            deployment_slot TEXT NOT NULL
+                CHECK(deployment_slot IN ('shadow', 'production')),
+            strategy_id TEXT NOT NULL,
+            strategy_version INTEGER NOT NULL CHECK(strategy_version >= 1),
+            strategy_content_hash TEXT NOT NULL
+                CHECK(length(strategy_content_hash) = 64),
+            asset_status_snapshot TEXT NOT NULL
+                CHECK(asset_status_snapshot IN ('validated', 'adopted_local')),
+            manifest_hash TEXT NOT NULL CHECK(length(manifest_hash) = 64),
+            expected_current_deployment_id TEXT,
+            maker_principal_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN (
+                'pending_checker', 'awaiting_admin', 'approved',
+                'promoted', 'expired', 'rejected'
+            )),
+            expires_at TEXT NOT NULL,
+            promoted_deployment_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE RESTRICT,
+            FOREIGN KEY(maker_principal_id)
+                REFERENCES production_principals(local_principal_id)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_promotion_approvals (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            stage TEXT NOT NULL CHECK(stage IN ('checker', 'admin')),
+            principal_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('checker', 'admin')),
+            reason TEXT NOT NULL,
+            approved_at TEXT NOT NULL,
+            UNIQUE(request_id, stage),
+            FOREIGN KEY(request_id) REFERENCES production_promotion_requests(id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY(principal_id)
+                REFERENCES production_principals(local_principal_id)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_production_promotion_requests_environment
+            ON production_promotion_requests(environment, status, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_production_deployments_environment
+            ON production_deployments(environment, deployment_slot, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_production_deployments_no_delete
+        BEFORE DELETE ON production_deployments
+        BEGIN
+            SELECT RAISE(ABORT, 'production deployments cannot be deleted');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_production_promotion_approvals_no_update
+        BEFORE UPDATE ON production_promotion_approvals
+        BEGIN
+            SELECT RAISE(ABORT, 'production promotion approvals are append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_production_promotion_approvals_no_delete
+        BEFORE DELETE ON production_promotion_approvals
+        BEGIN
+            SELECT RAISE(ABORT, 'production promotion approvals are append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_governance_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL,
+            actor_principal_id TEXT NOT NULL,
+            actor_role TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            environment TEXT,
+            payload_json TEXT NOT NULL,
+            previous_event_hash TEXT NOT NULL
+                CHECK(length(previous_event_hash) = 64),
+            event_hash TEXT NOT NULL UNIQUE CHECK(length(event_hash) = 64),
+            at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_production_governance_events_target
+            ON production_governance_events(target_type, target_id, sequence)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_production_governance_events_no_update
+        BEFORE UPDATE ON production_governance_events
+        BEGIN
+            SELECT RAISE(ABORT, 'production governance events are append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_production_governance_events_no_delete
+        BEFORE DELETE ON production_governance_events
+        BEGIN
+            SELECT RAISE(ABORT, 'production governance events are append-only');
+        END
+        """
+    )
+
+
+def _migration_027_verified_production_activation(conn: sqlite3.Connection) -> None:
+    """Content-address deployment manifests and verifier-issued health evidence."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_deployment_manifests (
+            id TEXT PRIMARY KEY CHECK(length(id) = 64),
+            strategy_id TEXT NOT NULL,
+            strategy_version INTEGER NOT NULL CHECK(strategy_version >= 1),
+            strategy_content_hash TEXT NOT NULL
+                CHECK(length(strategy_content_hash) = 64),
+            environment TEXT NOT NULL,
+            deployment_slot TEXT NOT NULL
+                CHECK(deployment_slot IN ('shadow', 'production')),
+            canonical_json TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_activation_evidence (
+            id TEXT PRIMARY KEY CHECK(length(id) = 64),
+            verifier_id TEXT NOT NULL,
+            receipt_id TEXT NOT NULL,
+            promotion_request_id TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL CHECK(length(manifest_hash) = 64),
+            external_deployment_ref TEXT NOT NULL,
+            health_evidence_ref TEXT NOT NULL,
+            health_status TEXT NOT NULL CHECK(health_status = 'healthy'),
+            canonical_json TEXT NOT NULL UNIQUE,
+            verified_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(verifier_id, receipt_id),
+            FOREIGN KEY(promotion_request_id)
+                REFERENCES production_promotion_requests(id) ON DELETE RESTRICT,
+            FOREIGN KEY(manifest_hash)
+                REFERENCES production_deployment_manifests(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    _ensure_column(
+        conn,
+        "production_deployments",
+        "activation_evidence_id",
+        "TEXT REFERENCES production_activation_evidence(id)",
+    )
+    for table in (
+        "production_deployment_manifests",
+        "production_activation_evidence",
+    ):
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_{table}_no_update
+            BEFORE UPDATE ON {table}
+            BEGIN
+                SELECT RAISE(ABORT, '{table} is append-only');
+            END
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_{table}_no_delete
+            BEFORE DELETE ON {table}
+            BEGIN
+                SELECT RAISE(ABORT, '{table} is append-only');
+            END
+            """
+        )
+
+
+def _migration_028_dataset_source_gc(conn: sqlite3.Connection) -> None:
+    """Durable, retryable cleanup ledger for unreferenced dataset sources."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dataset_source_gc_queue (
+            source_path TEXT PRIMARY KEY,
+            state TEXT NOT NULL
+                CHECK(state IN ('pending', 'retry_wait', 'quarantined')),
+            attempt_count INTEGER NOT NULL DEFAULT 0
+                CHECK(attempt_count >= 0),
+            next_attempt_at TEXT NOT NULL,
+            last_error_code TEXT,
+            last_error_message TEXT,
+            origin_task_id TEXT NOT NULL,
+            enqueued_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dataset_source_gc_due
+            ON dataset_source_gc_queue(state, next_attempt_at, source_path)
+        """
+    )
+
+
+def _migration_029_dataset_source_lookup_index(conn: sqlite3.Connection) -> None:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'datasets'"
+    ).fetchone()
+    if exists is None:
+        return
+    table_sql = _migration_table_identifier("datasets")
+    columns = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
+    }
+    if not {"source_path", "task_id"} <= columns:
+        return
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_datasets_source_path_task
+            ON datasets(source_path, task_id)
+        """
+    )
+
+
+def _migration_030_task_filesystem_gc(conn: sqlite3.Connection) -> None:
+    """Durable, typed cleanup ledger for task-owned directory trees."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_fs_gc_queue (
+            target_type TEXT NOT NULL
+                CHECK(target_type IN (
+                    'task_dir', 'dataset_identity_dir',
+                    'dataset_task_dir', 'risk_intake_dir'
+                )),
+            relative_path TEXT NOT NULL,
+            state TEXT NOT NULL
+                CHECK(state IN ('pending', 'retry_wait', 'quarantined')),
+            attempt_count INTEGER NOT NULL DEFAULT 0
+                CHECK(attempt_count >= 0),
+            next_attempt_at TEXT NOT NULL,
+            last_error_code TEXT,
+            last_error_message TEXT,
+            origin_task_id TEXT NOT NULL,
+            origin_task_created_at TEXT NOT NULL,
+            enqueued_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(target_type, relative_path)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_fs_gc_due
+            ON task_fs_gc_queue(state, next_attempt_at, target_type, relative_path)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_fs_gc_origin
+            ON task_fs_gc_queue(origin_task_id, target_type)
+        """
+    )
+
+
+def _migration_031_step_output_binding(conn: sqlite3.Connection) -> None:
+    """Bind future successful step runs to their exact persisted output bytes."""
+
+    _ensure_column(
+        conn,
+        table="plan_step_runs",
+        column="output_hash",
+        definition="TEXT",
+    )
+    output_versions_exists = conn.execute(
+        """
+        SELECT 1
+          FROM sqlite_master
+         WHERE type = 'table' AND name = 'plan_step_output_versions'
+        """
+    ).fetchone()
+    if output_versions_exists is not None:
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_plan_step_output_versions_immutable_update
+            BEFORE UPDATE ON plan_step_output_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'plan step output versions are immutable');
+            END
+            """
+        )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_plan_step_runs_identity_immutable
+        BEFORE UPDATE ON plan_step_runs
+        WHEN NEW.plan_id IS NOT OLD.plan_id
+          OR NEW.step_id IS NOT OLD.step_id
+          OR NEW.attempt IS NOT OLD.attempt
+          OR NEW.tool_ref IS NOT OLD.tool_ref
+          OR NEW.input_json IS NOT OLD.input_json
+          OR NEW.started_at IS NOT OLD.started_at
+        BEGIN
+            SELECT RAISE(ABORT, 'plan step run identity is immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_plan_step_runs_output_binding_immutable
+        BEFORE UPDATE ON plan_step_runs
+        WHEN OLD.output_ref IS NOT NULL
+         AND (
+            NEW.output_ref IS NOT OLD.output_ref
+            OR NEW.output_hash IS NOT OLD.output_hash
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'plan step run output binding is immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_plan_step_runs_succeeded_immutable
+        BEFORE UPDATE ON plan_step_runs
+        WHEN OLD.status = 'succeeded'
+        BEGIN
+            SELECT RAISE(ABORT, 'succeeded plan step runs are immutable');
+        END
+        """
+    )
+
+
+def _migration_032_step_result_receipt(conn: sqlite3.Connection) -> None:
+    """Persist the producer receipt and make its bound fields immutable."""
+
+    _ensure_column(
+        conn,
+        table="plan_step_runs",
+        column="invocation_id",
+        definition="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table="plan_step_runs",
+        column="raw_output_hash",
+        definition="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table="plan_step_runs",
+        column="canonical_binding_verified",
+        definition="INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_plan_step_runs_receipt_immutable
+        BEFORE UPDATE ON plan_step_runs
+        WHEN OLD.output_ref IS NOT NULL
+         AND (
+            NEW.invocation_id IS NOT OLD.invocation_id
+            OR NEW.raw_output_hash IS NOT OLD.raw_output_hash
+            OR NEW.canonical_binding_verified IS NOT OLD.canonical_binding_verified
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'plan step run result receipt is immutable');
+        END
+        """
+    )
+
+
+def _migration_033_tool_manifest_receipt(conn: sqlite3.Connection) -> None:
+    """Bind a completed run to the Tool version and manifest it executed."""
+
+    _ensure_column(
+        conn,
+        table="plan_step_runs",
+        column="tool_version",
+        definition="TEXT",
+    )
+    _ensure_column(
+        conn,
+        table="plan_step_runs",
+        column="manifest_hash",
+        definition="TEXT",
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_plan_step_runs_tool_receipt_immutable
+        BEFORE UPDATE ON plan_step_runs
+        WHEN OLD.output_ref IS NOT NULL
+         AND (
+            NEW.tool_version IS NOT OLD.tool_version
+            OR NEW.manifest_hash IS NOT OLD.manifest_hash
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'plan step run tool receipt is immutable');
+        END
+        """
+    )
+
+
+def _migration_034_validation_batch_source_gc(conn: sqlite3.Connection) -> None:
+    """Allow durable cleanup of proven validation-batch material directories."""
+
+    existing = conn.execute(
+        """
+        SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'task_fs_gc_queue'
+        """
+    ).fetchone()
+    required_columns = {
+        "target_type",
+        "relative_path",
+        "state",
+        "attempt_count",
+        "next_attempt_at",
+        "last_error_code",
+        "last_error_message",
+        "origin_task_id",
+        "origin_task_created_at",
+        "enqueued_at",
+        "updated_at",
+    }
+    existing_columns = (
+        {
+            str(row[1])
+            for row in conn.execute(
+                "PRAGMA table_info(task_fs_gc_queue)"
+            ).fetchall()
+        }
+        if existing is not None
+        else set()
+    )
+    preserve_existing_rows = required_columns <= existing_columns
+
+    conn.execute("DROP TABLE IF EXISTS task_fs_gc_queue_v34_backup")
+    if preserve_existing_rows:
+        # Keep the rows in a simple backup table, then recreate the final table
+        # under its real name.  SQLite's ALTER TABLE RENAME reparses every
+        # historical trigger in the database; partially provisioned legacy
+        # schemas can legitimately contain forward-created triggers whose
+        # referenced tables/columns are not present yet, making an unrelated
+        # rename fail.  Direct recreation avoids that global reparse while the
+        # surrounding migration transaction still makes the swap atomic.
+        conn.execute(
+            """
+            CREATE TABLE task_fs_gc_queue_v34_backup AS
+            SELECT target_type, relative_path, state, attempt_count,
+                   next_attempt_at, last_error_code, last_error_message,
+                   origin_task_id, origin_task_created_at, enqueued_at, updated_at
+                  FROM task_fs_gc_queue
+            """
+        )
+    if existing is not None:
+        conn.execute("DROP TABLE task_fs_gc_queue")
+    conn.execute(
+        """
+        CREATE TABLE task_fs_gc_queue (
+            target_type TEXT NOT NULL
+                CHECK(target_type IN (
+                    'task_dir', 'dataset_identity_dir',
+                    'dataset_task_dir', 'risk_intake_dir',
+                    'validation_batch_source_dir'
+                )),
+            relative_path TEXT NOT NULL,
+            state TEXT NOT NULL
+                CHECK(state IN ('pending', 'retry_wait', 'quarantined')),
+            attempt_count INTEGER NOT NULL DEFAULT 0
+                CHECK(attempt_count >= 0),
+            next_attempt_at TEXT NOT NULL,
+            last_error_code TEXT,
+            last_error_message TEXT,
+            origin_task_id TEXT NOT NULL,
+            origin_task_created_at TEXT NOT NULL,
+            enqueued_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(target_type, relative_path)
+        )
+        """
+    )
+    if preserve_existing_rows:
+        conn.execute(
+            """
+            INSERT INTO task_fs_gc_queue (
+                target_type, relative_path, state, attempt_count,
+                next_attempt_at, last_error_code, last_error_message,
+                origin_task_id, origin_task_created_at, enqueued_at, updated_at
+            )
+            SELECT target_type, relative_path, state, attempt_count,
+                       next_attempt_at, last_error_code, last_error_message,
+                       origin_task_id, origin_task_created_at, enqueued_at, updated_at
+              FROM task_fs_gc_queue_v34_backup
+             WHERE target_type IN (
+                       'task_dir', 'dataset_identity_dir',
+                       'dataset_task_dir', 'risk_intake_dir',
+                       'validation_batch_source_dir'
+                   )
+               AND state IN ('pending', 'retry_wait', 'quarantined')
+               AND attempt_count >= 0
+               AND relative_path IS NOT NULL
+               AND next_attempt_at IS NOT NULL
+               AND origin_task_id IS NOT NULL
+               AND origin_task_created_at IS NOT NULL
+               AND enqueued_at IS NOT NULL
+               AND updated_at IS NOT NULL
+            """
+        )
+        conn.execute("DROP TABLE task_fs_gc_queue_v34_backup")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_fs_gc_due
+            ON task_fs_gc_queue(state, next_attempt_at, target_type, relative_path)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_fs_gc_origin
+            ON task_fs_gc_queue(origin_task_id, target_type)
+        """
+    )
+
+
+def _migration_035_validation_batch_material_uploads(
+    conn: sqlite3.Connection,
+) -> None:
+    """Persist browser-staged validation material ownership and expiry."""
+
+    existing = conn.execute(
+        """
+        SELECT sql FROM sqlite_master
+         WHERE type = 'table'
+           AND name = 'validation_batch_material_uploads'
+        """
+    ).fetchone()
+    required_columns = {
+        "upload_token",
+        "relative_path",
+        "expires_at",
+        "created_at",
+        "updated_at",
+    }
+    existing_columns = (
+        {
+            str(row[1])
+            for row in conn.execute(
+                "PRAGMA table_info(validation_batch_material_uploads)"
+            ).fetchall()
+        }
+        if existing is not None
+        else set()
+    )
+    preserve_existing_rows = required_columns <= existing_columns
+    conn.execute(
+        "DROP TABLE IF EXISTS validation_batch_material_uploads_v35_backup"
+    )
+    if preserve_existing_rows:
+        conn.execute(
+            """
+            CREATE TABLE validation_batch_material_uploads_v35_backup AS
+            SELECT upload_token, relative_path, expires_at, created_at, updated_at
+              FROM validation_batch_material_uploads
+            """
+        )
+    if existing is not None:
+        conn.execute("DROP TABLE validation_batch_material_uploads")
+    conn.execute(
+        """
+        CREATE TABLE validation_batch_material_uploads (
+            upload_token TEXT PRIMARY KEY
+                CHECK(length(upload_token) = 32)
+                CHECK(upload_token = lower(upload_token))
+                CHECK(upload_token NOT GLOB '*[^0-9a-f]*'),
+            relative_path TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            claim_state TEXT NOT NULL DEFAULT 'staged'
+                CHECK(claim_state IN ('staged', 'reserved')),
+            claim_owner TEXT NOT NULL DEFAULT '',
+            CHECK(
+                (claim_state = 'staged' AND claim_owner = '')
+                OR (
+                    claim_state = 'reserved'
+                    AND length(claim_owner) = 32
+                    AND claim_owner = lower(claim_owner)
+                    AND claim_owner NOT GLOB '*[^0-9a-f]*'
+                )
+            )
+        )
+        """
+    )
+    if preserve_existing_rows:
+        conn.execute(
+            """
+            INSERT INTO validation_batch_material_uploads(
+                upload_token, relative_path, expires_at, created_at, updated_at
+            )
+            SELECT upload_token, relative_path, expires_at, created_at, updated_at
+              FROM validation_batch_material_uploads_v35_backup
+             WHERE length(upload_token) = 32
+               AND upload_token = lower(upload_token)
+               AND upload_token NOT GLOB '*[^0-9a-f]*'
+               AND relative_path = 'staging/' || upload_token
+               AND expires_at IS NOT NULL
+               AND created_at IS NOT NULL
+               AND updated_at IS NOT NULL
+            """
+        )
+        conn.execute(
+            "DROP TABLE validation_batch_material_uploads_v35_backup"
+        )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_validation_batch_material_uploads_expiry
+            ON validation_batch_material_uploads(
+                claim_state, expires_at, upload_token
+            )
+        """
+    )
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -3621,6 +4451,17 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (22, _migration_022_strategy_pool_materializations),
     (23, _migration_023_step_run_progress),
     (24, _migration_024_explicit_feature_metrics),
+    (25, _migration_025_validation_batches),
+    (26, _migration_026_production_governance),
+    (27, _migration_027_verified_production_activation),
+    (28, _migration_028_dataset_source_gc),
+    (29, _migration_029_dataset_source_lookup_index),
+    (30, _migration_030_task_filesystem_gc),
+    (31, _migration_031_step_output_binding),
+    (32, _migration_032_step_result_receipt),
+    (33, _migration_033_tool_manifest_receipt),
+    (34, _migration_034_validation_batch_source_gc),
+    (35, _migration_035_validation_batch_material_uploads),
 ]
 
 

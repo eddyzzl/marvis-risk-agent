@@ -166,11 +166,24 @@ def test_capture_dispatches_memory_after_save_when_hook_dispatcher_present(tmp_p
         {"content": "请记住：优先用KS指标对比。", "id": "msg-1"},
     )
 
-    assert len(dispatched) == 1
-    event, payload, task_id = dispatched[0]
+    assert [item[0] for item in dispatched] == [
+        "memory.before_save",
+        "memory.after_save",
+    ]
+    before_event, before_payload, before_task_id = dispatched[0]
+    assert before_event == "memory.before_save"
+    assert before_payload == {
+        "task_id": "task-1",
+        "memory_type": "user_preference",
+        "confidence": "high",
+    }
+    assert before_task_id == "task-1"
+    event, payload, task_id = dispatched[1]
     assert event == "memory.after_save"
     assert payload["task_id"] == "task-1"
     assert payload["memory_type"] == "user_preference"
+    assert payload["status"] == "active"
+    assert payload["memory_id"]
     assert task_id == "task-1"
 
 

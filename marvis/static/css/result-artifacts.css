@@ -1,0 +1,820 @@
+/* ====== Metric overview redesign ====== */
+
+/* Container so inner content can shrink under narrow viewports */
+#metricPreview { min-width: 0; }
+
+/* Section themes — drive --accent / --accent-soft via the section's data-theme.
+   The accent surfaces only as a hairline left rule and the marginalia numeral;
+   the panel reads as an editorial ledger, not a stack of colored cards. */
+.metric-table-section {
+  --accent: var(--report-tone-cool-blue);
+  --accent-soft: var(--report-tone-cool-blue-soft);
+}
+.metric-table-section[data-theme="cool-blue"] {
+  --accent: var(--report-tone-cool-blue);
+  --accent-soft: var(--report-tone-cool-blue-soft);
+}
+.metric-table-section[data-theme="warm-orange"] {
+  --accent: var(--report-tone-warm-orange);
+  --accent-soft: var(--report-tone-warm-orange-soft);
+}
+.metric-table-section[data-theme="deep-purple"] {
+  --accent: var(--report-tone-deep-purple);
+  --accent-soft: var(--report-tone-deep-purple-soft);
+}
+.metric-table-section[data-theme="warning-red"] {
+  --accent: var(--report-tone-warning-red);
+  --accent-soft: var(--report-tone-warning-red-soft);
+}
+.metric-table-section[data-theme="heatmap"] {
+  --accent: var(--report-tone-heatmap);
+  --accent-soft: var(--report-tone-heatmap-soft);
+}
+
+body[data-theme="dark"] .metric-table-section {
+  --accent: var(--report-tone-cool-blue);
+  --accent-soft: var(--report-tone-cool-blue-soft);
+}
+body[data-theme="dark"] .metric-table-section[data-theme="cool-blue"] {
+  --accent: var(--report-tone-cool-blue);
+  --accent-soft: var(--report-tone-cool-blue-soft);
+}
+body[data-theme="dark"] .metric-table-section[data-theme="warm-orange"] {
+  --accent: var(--report-tone-warm-orange);
+  --accent-soft: var(--report-tone-warm-orange-soft);
+}
+body[data-theme="dark"] .metric-table-section[data-theme="deep-purple"] {
+  --accent: var(--report-tone-deep-purple);
+  --accent-soft: var(--report-tone-deep-purple-soft);
+}
+body[data-theme="dark"] .metric-table-section[data-theme="warning-red"] {
+  --accent: var(--report-tone-warning-red);
+  --accent-soft: var(--report-tone-warning-red-soft);
+}
+body[data-theme="dark"] .metric-table-section[data-theme="heatmap"] {
+  --accent: var(--report-tone-heatmap);
+  --accent-soft: var(--report-tone-heatmap-soft);
+}
+
+.metric-table-section {
+  position: relative;
+  min-width: 0;
+  margin: 22px 0 18px;
+  padding: 14px 0 6px 30px;
+  border-top: 1px solid var(--metric-border);
+}
+body[data-theme="dark"] .metric-table-section {
+  border-top-color: var(--border);
+}
+.metric-table-section:first-of-type { margin-top: 6px; }
+/* Hairline accent ribbon on the top edge — short, set in from the numeral */
+.metric-table-section::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 30px;
+  width: 56px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+/* Marginalia: the section index as a numeric folio, in the accent color.
+   It replaces the redundant Chinese heading text. */
+.metric-table-section::after {
+  content: attr(data-section-index);
+  position: absolute;
+  top: 10px;
+  left: 0;
+  width: 22px;
+  font: 600 11px/1 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  text-align: right;
+  opacity: 0.85;
+}
+/* Section title — sits right under the accent ribbon, aligned with the
+   content stack (not the marginalia folio). Quiet weight; the folio + ribbon
+   carry the visual identity, the title just names the row. */
+.metric-section-title {
+  margin: 6px 0 12px;
+  padding: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--metric-text-strong);
+  letter-spacing: 0.01em;
+}
+/* Light themed surface ONLY behind the section content — no card, no chip.
+   We use a flat 1px left rule the full height for the theme cue. */
+.metric-table-section > .metric-table-stack {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.metric-table-section > .metric-table-stack::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -14px;
+  width: 1px;
+  background: var(--accent);
+  opacity: 0.35;
+}
+
+.metric-table-wrap { min-width: 0; }
+.metric-table-scroll { min-width: 0; overflow-x: auto; }
+
+/* Tooltip */
+.metric-tooltip {
+  position: fixed;
+  pointer-events: none;
+  background: var(--metric-tooltip-bg);
+  color: var(--metric-tooltip-text);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  z-index: 9999;
+  max-width: 320px;
+  white-space: pre-line;
+}
+
+/* Data bar primitive */
+.databar {
+  position: relative;
+  display: block;
+  height: 22px;
+  background: var(--metric-control-surface);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.databar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--fraction, 0) * 100%);
+  background: var(--bar-color, var(--accent));
+  opacity: 0.85;
+  transition: width .35s ease-out;
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+/* VD-9: skip the entry animation on rebuilds where the wrapping metric
+   table isn't rendering for the first time (polling redraws with the same
+   or newer data must not keep replaying the grow-in). */
+.metric-table-wrap[data-animation="none"] .databar-fill {
+  animation: none;
+}
+@keyframes bar-grow-x {
+  from { transform: scaleX(0); opacity: 0; }
+  to { transform: scaleX(1); opacity: 0.85; }
+}
+.databar-label {
+  position: relative;
+  display: inline-block;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--metric-text-strong);
+  line-height: 22px;
+}
+.databar[data-emphasize="primary"] { height: 26px; }
+.databar[data-emphasize="primary"] .databar-label { font-size: 13px; line-height: 26px; }
+.databar[data-color="neutral"] .databar-fill { background: var(--metric-databar-neutral); }
+.databar[data-color="primary"] .databar-fill { background: var(--accent); }
+.databar[data-color="accent"] .databar-fill { background: var(--metric-databar-accent); }
+
+/* Heat chip (percent-heat) */
+.heat-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--heat, var(--metric-heat-default));
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--metric-text-strong);
+}
+
+/* Split badge */
+.split-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--metric-inverse-text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Period text */
+.period-text {
+  color: var(--metric-text-muted);
+  font-size: 12px;
+}
+
+/* PSI cell */
+.psi-cell { display: inline-flex; flex-direction: column; gap: 2px; }
+.psi-value { font-size: 12px; font-weight: 700; }
+.psi-value[data-tier="stable"]   { color: var(--metric-psi-stable); }
+.psi-value[data-tier="warn"]     { color: var(--metric-psi-warn); }
+.psi-value[data-tier="critical"] { color: var(--metric-psi-critical); }
+.psi-value[data-tier="base"]     { color: var(--metric-psi-base); }
+.psi-strip {
+  position: relative;
+  width: 64px;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 1fr 2fr 5fr;
+}
+.psi-strip > span:nth-child(1) { background: var(--metric-psi-stable-soft); }
+.psi-strip > span:nth-child(2) { background: var(--metric-psi-warn-soft); }
+.psi-strip > span:nth-child(3) { background: var(--metric-psi-critical-soft); }
+.psi-marker {
+  position: absolute;
+  top: -2px;
+  width: 3px;
+  height: 10px;
+  background: var(--metric-text-strong);
+  border-radius: 1px;
+  transform: translateX(-50%);
+}
+
+/* Enhanced table cells — table-layout `table` gets a full hairline grid.
+   Borders pick up the section accent via --accent-soft so each themed
+   block keeps a coherent look without colored headings. */
+.metric-table-section .metric-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.metric-table-section .metric-table th,
+.metric-table-section .metric-table td {
+  border-right: 1px solid var(--accent-soft);
+  border-bottom: 1px solid var(--accent-soft);
+  padding: 6px 10px;
+  text-align: center;
+  vertical-align: middle;
+}
+.metric-table-section .metric-table th:last-child,
+.metric-table-section .metric-table td:last-child { border-right: 0; }
+.metric-table-section .metric-table tbody tr:last-child td { border-bottom: 0; }
+.metric-table-section .metric-table thead th {
+  background: color-mix(in srgb, var(--accent-soft) 60%, var(--metric-surface));
+  color: var(--metric-text);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+/* Per-column left-align override (e.g. 特征 column in 特征重要性) */
+.metric-table-section .metric-table th[data-align="left"],
+.metric-table-section .metric-table td[data-align="left"] {
+  text-align: left;
+}
+.metric-table-section .metric-table td.cell-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Centered numeric primitives sit horizontally within their cell */
+.metric-table-section .metric-table td.cell-databar > .databar,
+.metric-table-section .metric-table td.cell-heat > .heat-chip,
+.metric-table-section .metric-table td.cell-psi > .psi-cell {
+  margin: 0 auto;
+}
+.metric-table-section .metric-table td.cell-psi .psi-cell {
+  align-items: center;
+}
+
+.metric-table td.cell-databar,
+.metric-table td.cell-heat,
+.metric-table td.cell-psi { min-width: 96px; }
+.metric-table tbody tr { transition: opacity .15s ease, background .15s ease; }
+.metric-table.metric-table-hoverable tbody:has(tr:hover) tr {
+  opacity: 0.55;
+}
+.metric-table.metric-table-hoverable tbody:has(tr:hover) tr:hover {
+  opacity: 1;
+  background: var(--accent-soft);
+}
+body[data-theme="dark"] .metric-table-section .metric-table {
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+body[data-theme="dark"] .metric-table-section .metric-table thead th {
+  background: color-mix(in srgb, var(--accent-soft) 62%, var(--surface));
+  color: var(--text);
+}
+body[data-theme="dark"] .metric-table.metric-table-hoverable tbody:has(tr:hover) tr {
+  opacity: 0.62;
+}
+body[data-theme="dark"] .metric-table.metric-table-hoverable tbody:has(tr:hover) tr:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent-soft) 76%, var(--surface));
+  color: var(--text);
+}
+body[data-theme="dark"] .metric-table.metric-table-hoverable tbody:has(tr:hover) tr:hover :is(.databar-label, .period-text, .psi-value) {
+  color: var(--text);
+}
+body[data-theme="dark"] .databar,
+body[data-theme="dark"] .kpi-card-primary-bar,
+body[data-theme="dark"] .kpi-card-row-bar {
+  background: var(--metric-control-surface);
+}
+body[data-theme="dark"] .databar-fill {
+  opacity: 0.68;
+}
+body[data-theme="dark"] .databar-label {
+  color: var(--text);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.36);
+}
+body[data-theme="dark"] .period-text {
+  color: var(--text-muted);
+}
+
+.kpi-cards {
+  display: grid;
+  grid-template-columns: repeat(var(--kpi-count, 3), minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 8px;
+}
+/* Wraps KPI card + ROC card so both align as one vertical column */
+.kpi-card-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.kpi-card {
+  background: var(--metric-surface);
+  border: 1px solid var(--metric-border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  min-width: 0;
+  transition: transform .15s, box-shadow .15s;
+}
+.kpi-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+}
+/* Editorial header treatment: SPLIT name as small caps in the accent
+   color, no colored chip background; period in a muted tone, separated
+   from the body by a hairline rule. */
+.kpi-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0 0 8px;
+  margin-bottom: 12px;
+  background: transparent;
+  border-bottom: 1px solid var(--accent-soft);
+  border-radius: 0;
+}
+.kpi-card-split {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.kpi-card-period { font-size: 11px; color: var(--metric-text-muted); font-variant-numeric: tabular-nums; }
+.kpi-card-primary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.kpi-card-primary-label { font-size: 11px; color: var(--metric-text-muted); }
+.kpi-card-primary-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--metric-text-strong);
+  animation: kpi-value-reveal 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: 80ms;
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-primary-value {
+  animation: none;
+}
+@keyframes kpi-value-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.kpi-card-primary-bar {
+  flex: 1;
+  position: relative;
+  height: 8px;
+  background: var(--metric-control-surface);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.kpi-card-primary-bar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  width: calc(var(--fraction, 0) * 100%);
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-primary-bar > i {
+  animation: none;
+}
+.kpi-card-rule { height: 1px; background: var(--metric-border); margin: 6px 0 8px; }
+.kpi-card-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 50px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 0;
+}
+.kpi-card-row-label { color: var(--metric-text-muted); }
+.kpi-card-row-bar {
+  position: relative;
+  height: 8px;
+  background: var(--metric-control-surface);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.kpi-card-row-bar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--bar-color, var(--accent));
+  width: calc(var(--fraction, 0) * 100%);
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-row-bar > i {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .databar-fill,
+  .kpi-card-primary-bar > i,
+  .kpi-card-row-bar > i,
+  .kpi-card-primary-value {
+    animation: none;
+  }
+}
+.kpi-card-row-value { text-align: right; font-weight: 700; color: var(--metric-text-strong); }
+.kpi-card-footer {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--metric-border);
+  font-size: 11px;
+}
+.kpi-card-footer-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  text-align: center;
+}
+.kpi-card-footer-label { color: var(--metric-text-muted); }
+.kpi-card-footer-value { font-weight: 700; color: var(--metric-text-strong); }
+.metric-sparkline {
+  width: 120px;
+  height: 24px;
+  display: block;
+}
+.metric-sparkline-line { fill: none; stroke: var(--accent); stroke-width: 1.4; opacity: 0.8; }
+.metric-sparkline-point { fill: var(--accent); opacity: 0.45; }
+.metric-sparkline-point.current { opacity: 1; stroke: var(--metric-surface); stroke-width: 1.2; }
+.metric-sparkline-baseline { stroke: var(--metric-border); stroke-width: 1; }
+body[data-theme="dark"] .kpi-card {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+body[data-theme="dark"] .kpi-card:hover {
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+body[data-theme="dark"] .kpi-card-period,
+body[data-theme="dark"] .kpi-card-primary-label,
+body[data-theme="dark"] .kpi-card-row-label,
+body[data-theme="dark"] .kpi-card-footer-label {
+  color: var(--text-muted);
+}
+body[data-theme="dark"] .kpi-card-primary-value,
+body[data-theme="dark"] .kpi-card-row-value,
+body[data-theme="dark"] .kpi-card-footer-value {
+  color: var(--text);
+}
+body[data-theme="dark"] .kpi-card-rule {
+  background: var(--border);
+}
+body[data-theme="dark"] .kpi-card-footer {
+  border-top-color: var(--border);
+}
+body[data-theme="dark"] .metric-sparkline-baseline {
+  stroke: var(--border-strong);
+}
+.roc-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--roc-count, 3), minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 8px;
+  min-width: 0;
+}
+/* Default standalone ROC card (kept for potential reuse) */
+.roc-card {
+  background: var(--metric-surface);
+  border: 1px solid var(--metric-border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  min-width: 0;
+}
+/* When nested under a KPI card inside a kpi-card-column, drop the heavy
+   border so the pair reads as one unit and let the section accent carry
+   the visual grouping. */
+.kpi-card-column > .roc-card {
+  border: 0;
+  border-top: 1px solid var(--accent-soft);
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--metric-surface-soft);
+  padding: 10px 14px 12px;
+}
+.roc-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.roc-card-split { font-weight: 700; font-size: 13px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
+.roc-card-ks { font-size: 12px; color: var(--metric-text-strong); font-weight: 600; }
+.roc-svg { display: block; width: 100%; height: auto; cursor: crosshair; user-select: none; }
+.roc-axis { stroke: var(--chart-axis); stroke-width: 0.6; }
+.roc-axis-label { fill: var(--chart-muted); }
+.roc-grid-line { stroke: var(--chart-grid); stroke-width: 0.5; stroke-dasharray: 2 3; }
+.roc-curve { fill: none; stroke-width: 1.4; }
+.roc-curve-tpr { stroke: var(--chart-roc-tpr); }
+.roc-curve-baseline { stroke: var(--chart-roc-baseline); }
+.roc-curve-ks { stroke: var(--chart-roc-ks); }
+.roc-ks-marker { stroke: var(--chart-roc-ks); stroke-dasharray: 3 3; stroke-width: 0.8; }
+.roc-crosshair { stroke: var(--chart-muted); stroke-width: 0.5; pointer-events: none; }
+.roc-legend {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.roc-legend button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--metric-border);
+  border-radius: var(--radius-pill);
+  background: var(--metric-surface);
+  padding: 2px 8px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--metric-text-strong);
+}
+.roc-legend button[aria-pressed="false"] { opacity: 0.4; }
+.roc-legend button > i { width: 10px; height: 2px; border-radius: 1px; display: inline-block; }
+.roc-legend-tpr      > i { background: var(--chart-roc-tpr); }
+.roc-legend-baseline > i { background: var(--chart-roc-baseline); }
+.roc-legend-ks       > i { background: var(--chart-roc-ks); }
+.roc-readout {
+  margin-top: 4px;
+  font-size: 11px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color: var(--chart-readout);
+  min-height: 1.2em;
+}
+body[data-theme="dark"] .roc-card {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+body[data-theme="dark"] .kpi-card-column > .roc-card {
+  background: var(--surface-soft);
+  border-top-color: var(--border);
+}
+body[data-theme="dark"] .roc-card-ks,
+body[data-theme="dark"] .roc-readout,
+body[data-theme="dark"] .roc-legend button {
+  color: var(--text);
+}
+body[data-theme="dark"] .roc-axis {
+  stroke: var(--text-secondary);
+}
+body[data-theme="dark"] .roc-axis-label {
+  fill: var(--text-muted);
+}
+body[data-theme="dark"] .roc-grid-line {
+  stroke: var(--border-strong);
+}
+body[data-theme="dark"] .roc-crosshair {
+  stroke: var(--text);
+}
+body[data-theme="dark"] .roc-legend button {
+  background: var(--surface-soft);
+  border-color: var(--border-strong);
+}
+
+/* VD-4: calibration reliability curve + score-band bar/line chart, mounted
+   above their driver tables (agent-inline-table) in the plan-driver timeline.
+   Reuses the roc-* axis/grid/readout primitives above so the visual language
+   matches the existing ROC&KS card exactly. */
+.agent-inline-table-chart {
+  margin: 8px 0 10px;
+}
+.calibration-card,
+.score-band-card {
+  background: var(--metric-surface);
+  border: 1px solid var(--metric-border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  min-width: 0;
+  max-width: 360px;
+}
+.calibration-curve-line { stroke: var(--metric-databar-accent); stroke-width: 1.4; }
+.calibration-point {
+  fill: var(--metric-psi-stable);
+  stroke: var(--metric-surface);
+  stroke-width: 1;
+}
+.calibration-point[data-tier="warn"] { fill: var(--metric-psi-warn); }
+.calibration-point[data-tier="critical"] { fill: var(--metric-psi-critical); }
+.calibration-readout {
+  margin-top: 4px;
+  font-size: 11px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color: var(--chart-readout);
+  min-height: 1.2em;
+}
+.score-band-legend {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--metric-text-muted);
+}
+.score-band-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.score-band-legend-bar { width: 8px; height: 8px; border-radius: 2px; display: inline-block; background: var(--metric-databar-accent); }
+.score-band-legend-line { width: 10px; height: 2px; display: inline-block; background: var(--chart-roc-tpr); }
+.score-band-bar { fill: var(--metric-databar-accent); opacity: 0.85; }
+.score-band-bar:hover { opacity: 1; }
+.score-band-rate-line { fill: none; stroke: var(--chart-roc-tpr); stroke-width: 1.4; }
+.score-band-rate-point { fill: var(--chart-roc-tpr); stroke: var(--metric-surface); stroke-width: 1; }
+body[data-theme="dark"] .calibration-card,
+body[data-theme="dark"] .score-band-card {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+body[data-theme="dark"] .calibration-readout {
+  color: var(--text);
+}
+body[data-theme="dark"] .score-band-legend {
+  color: var(--text-muted);
+}
+
+/* Responsive: when the metric panel shrinks, KPI+ROC columns reflow.
+   The grid switches from 3-up to 1-up so neither cards nor curves
+   compress past readability, and wide tables get a scoped horizontal
+   scroll inside their wrap. */
+@media (max-width: 1100px) {
+  .kpi-cards { grid-template-columns: 1fr; }
+  .roc-grid  { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 920px) {
+  .governance-settings-shell {
+    grid-template-columns: 1fr;
+    height: min(840px, calc(100dvh - 32px));
+  }
+
+  .governance-settings-nav {
+    grid-template-rows: auto auto;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .governance-nav-list {
+    display: flex;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .governance-nav-group {
+    flex: 0 0 180px;
+    min-width: 0;
+  }
+
+  .governance-page-head,
+  .governance-setting-row,
+  .governance-settings-dialog .draft-tools-layout,
+  .governance-settings-dialog .agent-memory-workspace {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .metric-table-section {
+    padding-left: 22px;
+  }
+  .metric-table-section::before { left: 22px; }
+  .metric-table-section > .metric-table-stack::before { left: -10px; }
+}
+
+[data-v2-artifact-view="true"] :is(.metrics-preview, .dataset-preview table) {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+[data-v2-artifact-view="true"] .metrics-preview th {
+  text-align: left;
+}
+
+[data-v2-artifact-view="true"] .metrics-preview td {
+  text-align: right;
+}
+
+[data-v2-artifact-view="true"] .dataset-column-null {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+.dataset-preview th {
+  position: relative;
+}
+
+.dataset-column-name {
+  font-weight: 700;
+}
+
+.dataset-column-info {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  margin-left: 6px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 55%, transparent);
+  border-radius: 50%;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+}
+
+.dataset-column-info:hover,
+.dataset-column-info:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.dataset-column-tooltip {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 10px;
+  z-index: 8;
+  width: max-content;
+  max-width: 280px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 18%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.dataset-column-info:hover + .dataset-column-tooltip,
+.dataset-column-info:focus-visible + .dataset-column-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}

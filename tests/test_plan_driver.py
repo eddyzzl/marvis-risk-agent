@@ -7,6 +7,7 @@ exercised deterministically without running real modeling tools.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace as _dataclass_replace
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from marvis.agent.plan_driver import (
     DriverError,
     PlanDriver,
     _parse_dedup_instruction,
+    confirmation_is_explicitly_withheld,
     is_confirm,
     render_tool_output,
 )
@@ -23,10 +25,18 @@ from marvis.agent.gate_adapters import render_gate_dependencies
 from marvis.agent.gate_param_schema import gate_param_schema
 from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.agent.renderers import _join_trust_rows
+from marvis.data.contracts import Dataset
 from marvis.db import PlanRepository, connect, init_db
 from marvis.governance.contracts import AuthorizationBinding
 from marvis.governance.repository import GovernanceRepository, canonical_payload_hash
-from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
+from marvis.orchestrator.contracts import (
+    Plan,
+    PlanStatus,
+    PlanStep,
+    StepStatus,
+    plan_fingerprint,
+    plan_step_confirmation_fingerprint,
+)
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.reviewer import Reviewer
@@ -37,11 +47,214 @@ from marvis.plugins.manifest import (
     governance_policy_hash,
 )
 from marvis.plugins.runner import ToolResult
+from marvis.repositories.datasets import DatasetRepository
 
 
 class FakeLLM:
     def complete(self, **kwargs):
         return '{"summary": "done", "open_items": [], "goal_doubt": false, "goal_met": true}'
+
+
+def _register_result_dataset(db_path, dataset_id: str) -> None:
+    DatasetRepository(db_path).create_dataset(
+        Dataset(
+            id=dataset_id,
+            task_id="task-1",
+            role="derived",
+            source_path=f"{dataset_id}.parquet",
+            format="parquet",
+            sheet=None,
+            row_count=1,
+            columns=(),
+            has_target=False,
+            target_col=None,
+            created_at="2026-08-01T00:00:00+00:00",
+            content_hash="a" * 64,
+        )
+    )
+
+
+_SEMANTIC_REVIEW_PROMPT_NAME = "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS"
+
+_COMPOUND_CONFIRMATION_CASES = (
+    "确认，Hang on.",
+    "确认，审完就继续。",
+    "确认，threshold = 0.3 and proceed.",
+    "确认，跑 xgb 并继续。",
+    "确认，是否继续",
+    "确认，审核通过后继续。",
+    "确认，等审核通过再继续。",
+    "确认，只有审批通过才继续。",
+    "我确认，if approved then proceed.",
+    "确认，upon approval proceed.",
+)
+
+_STANDARDS_UNSAFE_SEMANTIC_AUTHORIZATION_CASES = (
+    "先缓缓",
+    "回头再说",
+    "让我想想",
+    "我再考虑考虑",
+    "Decision pending",
+    "Defer this",
+    "Ask me again later",
+    "Consent withheld",
+    "Please hold",
+    "Hang on",
+    "Let's pause",
+    "Give me a moment",
+    "I withdraw approval",
+    "I revoke consent",
+    "Okay to proceed",
+    "Thoughts on proceeding",
+    "Any objections to proceeding",
+    "Proceed, yes or no",
+    "Continue or wait",
+    "继续行不",
+    "继续妥不妥",
+    "确认没问题就继续",
+    "没问题的话继续",
+    "条件允许就继续",
+    "审核通过方可继续",
+    "Only upon approval, proceed",
+    "Assuming approval, proceed",
+    "Without my approval, proceed",
+    "Upon approval, proceed",
+    "With approval, proceed",
+    "Following approval, proceed",
+    "Approval first, then proceed",
+    "模型换 XGBoost 继续",
+    "算法选 XGBoost 并继续",
+    "算法选成 XGBoost 并继续",
+    "建一个 XGBoost 模型并继续",
+    "配置 n_trials 1 并继续",
+    "把参数改一下再继续",
+    "把阈值调一下再继续",
+    "阈值下调一点再继续",
+    "n_trials 配成 1 并继续",
+    "Execute XGBoost and proceed",
+    "Fit XGBoost and proceed",
+    "Try XGBoost and proceed",
+    "Go with XGBoost and proceed",
+    "Prefer XGBoost and proceed",
+    "Put threshold at 0.3 and proceed",
+    "Turn threshold down and proceed",
+    "Reduce threshold and proceed",
+)
+
+_STANDARDS_POSITIVE_SEMANTIC_AUTHORIZATION_CASES = (
+    "Keep moving",
+    "Keep this going",
+    "Keep proceeding",
+    "Keep the plan moving",
+    "Keep the same settings and proceed",
+    "Use the same plan and proceed",
+    "Run through the remaining steps",
+    "运行模型验证剩余步骤",
+    "模型运行结果符合预期，继续",
+    "模型训练完成，继续",
+    "当前设置为 0.3，符合预期，继续",
+    "当前配置为原方案，继续",
+    "当前阈值设置为 0.3，结果没问题，继续",
+    "Don't modify the current plan, proceed",
+    "No model change is needed; proceed",
+)
+
+_SPEC_UNSAFE_SEMANTIC_AUTHORIZATION_CASES = (
+    "先停一下，稍后再继续。",
+    "先别急，等会儿再继续。",
+    "我想再考虑考虑，之后继续。",
+    "容我考虑一下再继续。",
+    "稍后处理。",
+    "过两天再继续。",
+    "先搁一搁。",
+    "Hang on.",
+    "Give me a moment.",
+    "Let us pause here.",
+    "I need to think before proceeding.",
+    "Defer this for now.",
+    "Stop for now.",
+    "Come back later and proceed.",
+    "Continue later.",
+    "Keep going later.",
+    "Let me think first.",
+    "Pause here and resume later.",
+    "审完就继续。",
+    "审批好了就继续。",
+    "等风控同意就继续。",
+    "达标便继续。",
+    "经批准后继续。",
+    "If approved, go ahead.",
+    "Proceed once the review passes.",
+    "Go ahead only when approval arrives.",
+    "Continue upon approval.",
+    "Continue contingent on approval.",
+    "Only proceed after approval.",
+    "Proceed if the review passes.",
+    "Review it first, then continue.",
+    "参数配成 0.3 后继续。",
+    "把 n_trials 调至 1 后继续。",
+    "阈值定为 0.3 后继续。",
+    "threshold = 0.3 and proceed.",
+    "Make it 0.3 and proceed.",
+    "Move it to 0.3 and proceed.",
+    "Assign threshold 0.3 and proceed.",
+    "Put the threshold at 0.3 and proceed.",
+    "跑 xgb 并继续。",
+    "训练 xgb 后继续。",
+    "跑 lgb 并继续。",
+    "训练 lr 后继续。",
+    "跑个随机森林然后继续。",
+    "运行一个 boosting 模型然后继续。",
+    "Run a random forest and proceed.",
+    "Fit XGBoost and proceed.",
+    "Execute the LR model and proceed.",
+    "Build a scorecard and continue.",
+)
+
+_SPEC_POSITIVE_SEMANTIC_AUTHORIZATION_CASES = (
+    "模型训练已经完成，继续。",
+    "模型已经训练完成，继续。",
+    "XGBoost has finished training; proceed.",
+    "Training is complete; proceed.",
+    "数据划分已经完成，继续。",
+    "配置已经完成，继续。",
+    "模型已经跑完，继续。",
+    "The model run is complete; proceed.",
+    "Run the remaining steps.",
+    "Keep going.",
+    "Keep working through the remaining steps.",
+    "运行后续流程。",
+    "跑完剩余流程。",
+    "把剩余流程跑完。",
+    "继续把后续步骤跑完。",
+)
+
+
+def _valid_semantic_review_payload(
+    instruction: str,
+    *,
+    evidence_quote: str | None = None,
+) -> str:
+    """Return an independently valid second-pass authorization review.
+
+    The quote is deliberately checked here as well as by production code so a
+    positive E2E fixture can never authorize with a paraphrase.
+    """
+    quote = evidence_quote if evidence_quote is not None else instruction
+    assert quote and quote in instruction
+    return json.dumps(
+        {
+            "verdict": "authorize",
+            "evidence_quote": quote,
+            "reason": "用户原话明确、当前且无条件地授权当前动作。",
+            "confidence": "high",
+            "is_question": False,
+            "is_conditional": False,
+            "requests_change": False,
+            "withholds_authorization": False,
+        },
+        ensure_ascii=False,
+    )
 
 
 def test_join_reconciliation_row_counts_render_as_integers():
@@ -390,6 +603,61 @@ def test_driver_resume_confirm_runs_to_done(tmp_path):
     assert all(s.status == StepStatus.DONE for s in loaded.steps)
 
 
+def test_agent_typed_exact_confirmation_requires_two_pass_semantic_review(tmp_path):
+    driver, repo = _driver(tmp_path)
+    text = "确认"
+    driver._require_semantic_text_authorization = True
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"用户明确授权当前节点","confidence":"high",'
+        '"explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(text),
+    )
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text=text,
+        run_seq=1,
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.DONE.value
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
+
+
+def test_agent_validated_ui_confirmation_remains_deterministic(tmp_path):
+    driver, repo = _driver(tmp_path)
+    driver._require_semantic_text_authorization = True
+    driver._llm = FakeRouterLLM("must not be called")
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    rendered = repo.load_plan("plan-1")
+    gate = next(step for step in rendered.steps if step.id == "tune")
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="确认",
+        run_seq=1,
+        expected_step_id="tune",
+        expected_plan_status=rendered.status.value,
+        expected_plan_revision=rendered.replan_count,
+        expected_plan_fingerprint=plan_fingerprint(rendered),
+        expected_step_fingerprint=plan_step_confirmation_fingerprint(
+            gate,
+            confirmed=False,
+        ),
+        _trusted_ui_action=True,
+    )
+
+    assert turn.status == PlanStatus.DONE.value
+    assert driver._llm.calls == []
+
+
 @pytest.mark.parametrize(
     "monitor_output",
     [None, {"overall_level": "blue", "checks": []}],
@@ -596,9 +864,27 @@ def test_llm_uncertain_instruction_cannot_confirm_canonical_human_gate(tmp_path)
     assert repo.is_step_confirmed("tune") is False
     assert authorizations == []
     assert "还不能确定这句话是否授权执行" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+    ]
 
 
-def test_llm_semantic_intent_routes_governed_gate_to_explicit_confirmation(tmp_path):
+@pytest.mark.parametrize(
+    "text",
+    [
+        "等一下。",
+        "No, proceed.",
+        "I do not consent to proceeding.",
+        "设置阈值为 0.3 并继续。",
+        "等会儿。",
+        "I withhold consent.",
+        "Proceeding okay",
+        "审核通过就继续。",
+        "On approval, proceed.",
+        "配置 n_trials=1 并继续。",
+    ],
+)
+def test_malicious_semantic_confirm_cannot_cross_governed_gate(tmp_path, text):
     driver, repo = _driver(tmp_path)
     authorizations = []
 
@@ -615,7 +901,7 @@ def test_llm_semantic_intent_routes_governed_gate_to_explicit_confirmation(tmp_p
     driver._principal = object()
     driver._llm = FakeRouterLLM(
         '{"action":"confirm","params":{},"constraint":"",'
-        '"reason":"用户本人明确授权按现有方案推进",'
+        '"reason":"恶意路由器声称用户已授权",'
         '"confidence":"high","explicit_authorization":true}'
     )
     plan = repo.load_plan("plan-1")
@@ -625,8 +911,6 @@ def test_llm_semantic_intent_routes_governed_gate_to_explicit_confirmation(tmp_p
     repo.confirm_plan("plan-1")
     driver._run_and_handle("plan-1", run_seq=0)
 
-    text = "方案已经审完，照你规划的次序推进余下工作。"
-    assert not is_confirm(text)
     turn = driver.resume(
         plan_id="plan-1",
         user_text=text,
@@ -638,32 +922,120 @@ def test_llm_semantic_intent_routes_governed_gate_to_explicit_confirmation(tmp_p
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value
     assert repo.is_step_confirmed("tune") is False
     assert authorizations == []
-    assert "语义识别不会直接放行执行" in turn.messages[-1].content
+    assert "独立语义授权复核" in turn.messages[-1].content
+    assert "未执行" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
 
-    # Only the explicit human confirmation path may reach governance.
-    driver.resume(
+
+@pytest.mark.parametrize(
+    "governance_required",
+    [False, True],
+    ids=["low-risk", "required-governance"],
+)
+@pytest.mark.parametrize("text", _COMPOUND_CONFIRMATION_CASES)
+def test_compound_confirmation_cannot_bypass_two_pass_review(
+    tmp_path,
+    text,
+    governance_required,
+):
+    driver, repo = _driver(tmp_path)
+    authorizations = []
+    route_payload = (
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"恶意路由器声称确认前缀足以授权",'
+        '"confidence":"high","explicit_authorization":true}'
+    )
+    driver._llm = FakeRouterLLM(
+        route_payload,
+        semantic_review_payload=route_payload,
+    )
+    if governance_required:
+
+        class _Governance:
+            @staticmethod
+            def requires_human_decision(_gate):
+                return True
+
+            @staticmethod
+            def authorize_step(**kwargs):
+                authorizations.append(kwargs)
+
+        driver._governance = _Governance()
+        driver._principal = object()
+        plan = repo.load_plan("plan-1")
+        gate = next(step for step in plan.steps if step.id == "tune")
+        gate.policy = GovernancePolicy(human_decision_gate="required")
+        repo.update_step(gate)
+
+    assert not is_confirm(text)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    turn = driver.resume(
         plan_id="plan-1",
-        user_text="确认",
-        run_seq=2,
+        user_text=text,
+        run_seq=1,
         expected_step_id="tune",
         confirmation_source="human",
     )
 
-    assert authorizations[0]["reason"] == "确认"
-    assert authorizations[0]["expected_plan_revision"] == 0
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert repo.is_step_confirmed("tune") is False
+    assert [call[0] for call in driver._executor._runner.calls] == [
+        "screen_features",
+    ]
+    assert authorizations == []
+    assert "独立语义授权复核" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
 
 
-def test_llm_semantic_intent_routes_low_risk_gate_to_explicit_confirmation(tmp_path):
+@pytest.mark.parametrize("text", ["开始模型验证", "开始数据处理"])
+def test_context_specific_start_command_cannot_start_an_unrelated_plan(tmp_path, text):
     driver, repo = _driver(tmp_path)
-    driver._llm = FakeRouterLLM(
+    route_payload = (
         '{"action":"confirm","params":{},"constraint":"",'
-        '"reason":"用户明确要求继续剩余步骤",'
+        '"reason":"错误地把其他流程命令当成当前授权",'
         '"confidence":"high","explicit_authorization":true}'
+    )
+    driver._llm = FakeRouterLLM(
+        route_payload,
+        semantic_review_payload=route_payload,
+    )
+
+    assert not is_confirm(text)
+    turn = driver.resume(plan_id="plan-1", user_text=text, confirmation_source="human")
+
+    assert turn.status == PlanStatus.VALIDATED.value
+    assert repo.load_plan("plan-1").status is PlanStatus.VALIDATED
+    assert driver._executor._runner.calls == []
+    assert "独立语义授权复核" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
+
+
+@pytest.mark.parametrize("text", ["确认导出", "确认采纳", "导出矩阵"])
+def test_context_specific_action_cannot_confirm_an_unrelated_gate(tmp_path, text):
+    driver, repo = _driver(tmp_path)
+    route_payload = (
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"错误地把其他节点命令当成当前授权",'
+        '"confidence":"high","explicit_authorization":true}'
+    )
+    driver._llm = FakeRouterLLM(
+        route_payload,
+        semantic_review_payload=route_payload,
     )
     repo.confirm_plan("plan-1")
     driver._run_and_handle("plan-1", run_seq=0)
 
-    text = "这版筛选结果符合预期，接着完成余下步骤。"
     assert not is_confirm(text)
     turn = driver.resume(
         plan_id="plan-1",
@@ -675,23 +1047,426 @@ def test_llm_semantic_intent_routes_low_risk_gate_to_explicit_confirmation(tmp_p
 
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value
     assert repo.is_step_confirmed("tune") is False
-    assert "语义识别不会直接放行执行" in turn.messages[-1].content
+    assert [call[0] for call in driver._executor._runner.calls] == ["screen_features"]
+    assert "独立语义授权复核" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
 
-    confirmed_turn = driver.resume(
+
+def test_later_modeling_gate_does_not_reopen_selected_experiment_control(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "later-gate.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    select = _dataclass_replace(
+        _step("select", index=0, tool="select_experiment", phase="建模"),
+        plan_id="plan-later-gate",
+        status=StepStatus.DONE,
+        inputs={"selected_experiment_id": "exp-lr"},
+    )
+    report = _dataclass_replace(
+        _step(
+            "report",
+            index=1,
+            tool="generate_model_reports",
+            depends_on=["select"],
+            needs_confirmation=True,
+            phase="报告",
+        ),
+        plan_id="plan-later-gate",
+        status=StepStatus.AWAITING_CONFIRM,
+    )
+    repo.create_plan(
+        Plan(
+            id="plan-later-gate",
+            task_id="task-1",
+            goal="modeling",
+            source="template",
+            template_id="modeling",
+            autonomy_level=1,
+            status=PlanStatus.AWAITING_CONFIRM,
+            steps=[select, report],
+        )
+    )
+    executor = PlanExecutor(
+        repo,
+        FakeRunner([]),
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+    captured = {}
+
+    def capture_route(_client, **kwargs):
+        captured.update(kwargs)
+        return {
+            "action": "clarify",
+            "params": {},
+            "constraint": "",
+            "reason": "test",
+            "confidence": "low",
+            "explicit_authorization": False,
+        }
+
+    monkeypatch.setattr("marvis.agent.plan_driver.route_instruction", capture_route)
+    driver = PlanDriver(repo, executor, llm_client=object())
+
+    turn = driver.resume(
+        plan_id="plan-later-gate",
+        user_text="我确认当前报告范围，请继续。",
+        expected_step_id="report",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert "selected_experiment_id" not in {
+        item["name"] for item in captured["param_schema"]
+    }
+
+
+@pytest.mark.parametrize(
+    "governance_required",
+    [False, True],
+    ids=["low-risk", "required-governance"],
+)
+def test_contextual_monitoring_choice_cannot_bypass_two_pass_review(
+    tmp_path,
+    governance_required,
+):
+    driver, repo, runner = _monitoring_driver(
+        tmp_path,
+        {"overall_level": "red", "checks": []},
+    )
+    authorizations = []
+    route_payload = (
+        '{"action":"confirm","params":{"disposition":"observe"},'
+        '"constraint":"","reason":"错误地忽略了审批条件",'
+        '"confidence":"high","explicit_authorization":true}'
+    )
+    driver._llm = FakeRouterLLM(
+        route_payload,
+        semantic_review_payload=route_payload,
+    )
+    if governance_required:
+
+        class _Governance:
+            @staticmethod
+            def requires_human_decision(_gate):
+                return True
+
+            @staticmethod
+            def authorize_step(**kwargs):
+                authorizations.append(kwargs)
+
+        driver._governance = _Governance()
+        driver._principal = object()
+        plan = repo.load_plan("plan-monitor")
+        gate = next(step for step in plan.steps if step.id == "disposition")
+        gate.policy = GovernancePolicy(human_decision_gate="required")
+        repo.update_step(gate)
+
+    repo.confirm_plan("plan-monitor")
+    driver._run_and_handle("plan-monitor", run_seq=0)
+    text = "确认，只有审批通过才观察。"
+
+    turn = driver.resume(
+        plan_id="plan-monitor",
+        user_text=text,
+        run_seq=1,
+        expected_step_id="disposition",
+        confirmation_source="human",
+    )
+
+    current = repo.load_plan("plan-monitor")
+    gate = next(step for step in current.steps if step.id == "disposition")
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert gate.inputs["disposition"] is None
+    assert repo.is_step_confirmed("disposition") is False
+    assert [call[0] for call in runner.calls] == ["run_strategy_monitoring"]
+    assert authorizations == []
+    assert "独立语义授权复核" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
+
+
+def test_agent_mode_without_router_never_uses_manual_monitoring_adapter(tmp_path):
+    driver, repo, runner = _monitoring_driver(
+        tmp_path,
+        {"overall_level": "red", "checks": []},
+    )
+    driver._allow_manual_gate_adapters = False
+    repo.confirm_plan("plan-monitor")
+    driver._run_and_handle("plan-monitor", run_seq=0)
+
+    turn = driver.resume(
+        plan_id="plan-monitor",
+        user_text="如果审批通过就观察",
+        run_seq=1,
+        expected_step_id="disposition",
+    )
+
+    plan = repo.load_plan("plan-monitor")
+    gate = next(step for step in plan.steps if step.id == "disposition")
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert gate.inputs["disposition"] is None
+    assert repo.is_step_confirmed("disposition") is False
+    assert [call[0] for call in runner.calls] == ["run_strategy_monitoring"]
+    assert "确认当前结果" in turn.messages[-1].content
+
+
+def test_semantic_confirm_with_first_pass_constraint_fails_before_review(tmp_path):
+    driver, repo = _driver(tmp_path)
+    text = "如果审批通过就继续。"
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},'
+        '"constraint":"审批通过后继续","reason":"带条件的继续",'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(text),
+    )
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    turn = driver.resume(
         plan_id="plan-1",
-        user_text="确认",
-        run_seq=2,
+        user_text=text,
+        run_seq=1,
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert repo.is_step_confirmed("tune") is False
+    assert "即时无条件授权" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+    ]
+
+
+def test_llm_semantic_review_reaches_required_governance_human_path(tmp_path):
+    driver, repo = _driver(tmp_path)
+    authorizations = []
+
+    class _Governance:
+        @staticmethod
+        def requires_human_decision(_gate):
+            return True
+
+        @staticmethod
+        def authorize_step(**kwargs):
+            authorizations.append(kwargs)
+
+    driver._governance = _Governance()
+    driver._principal = object()
+    text = "方案已经审完，照你规划的次序推进余下工作。"
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"用户本人明确授权按现有方案推进",'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(text),
+    )
+    plan = repo.load_plan("plan-1")
+    gate = next(step for step in plan.steps if step.id == "tune")
+    gate.policy = GovernancePolicy(human_decision_gate="required")
+    repo.update_step(gate)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    assert not is_confirm(text)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text=text,
+        run_seq=1,
         expected_step_id="tune",
         confirmation_source="human",
     )
 
-    assert confirmed_turn.status == PlanStatus.DONE.value
+    # The fake governance recorder does not persist a runnable decision, so the
+    # executor re-pauses and clears the transient confirmed bit; the semantic
+    # turn must nevertheless reach the same human authorization boundary.
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert repo.is_step_confirmed("tune") is False
+    assert len(authorizations) == 1
+    assert text in authorizations[0]["reason"]
+    assert authorizations[0]["expected_plan_revision"] == 0
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
+
+
+def test_llm_semantic_intent_confirms_low_risk_gate(tmp_path):
+    driver, repo = _driver(tmp_path)
+    text = "这版筛选结果符合预期，接着完成余下步骤。"
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"用户明确要求继续剩余步骤",'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(text),
+    )
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    assert not is_confirm(text)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text=text,
+        run_seq=1,
+        expected_step_id="tune",
+        confirmation_source="human",
+    )
+
+    assert turn.status == PlanStatus.DONE.value
     assert repo.is_step_confirmed("tune") is True
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
 
 
-def test_llm_semantic_candidate_selection_waits_for_explicit_control_submission(tmp_path):
-    """The LLM may interpret a candidate choice, but only an explicit human
-    control submission can bind that choice and release the gate."""
+@pytest.mark.parametrize(
+    "text",
+    [
+        *_STANDARDS_POSITIVE_SEMANTIC_AUTHORIZATION_CASES,
+        *_SPEC_POSITIVE_SEMANTIC_AUTHORIZATION_CASES,
+        "No problem, proceed with the plan.",
+        "No issues, continue with the remaining steps.",
+        "No need to wait, go ahead.",
+        "No adjustments are needed; continue.",
+        "No need to change anything, proceed.",
+        "No need to adjust the parameters; continue.",
+        "We do not need to change anything; proceed.",
+        "Nothing needs to change; proceed.",
+        "We do not change anything; proceed.",
+        "No parameter changes are needed; continue.",
+        "Use the current plan and proceed.",
+        "不用调整，继续。",
+        "不用再调整参数，继续。",
+        "不需要修改，按当前方案继续。",
+        "不需要修改当前方案，继续。",
+        "不需要修改任何参数，按当前方案继续。",
+        "无需对参数做任何修改，继续。",
+        "无需作任何改动，继续。",
+        "无需任何参数调整，继续。",
+        "参数无需调整，继续。",
+        "当前方案不需要修改，继续。",
+        "不用等了，继续吧。",
+        "无需等待，继续。",
+        "不要停止，继续。",
+        "采用当前方案继续执行。",
+        "沿用现有设置，继续。",
+        "我不反对，继续。",
+        "我不反对当前方案，继续。",
+        "当前设置没问题，继续。",
+        "参数调整已经完成，继续后续步骤。",
+        "变量选择结果符合预期，继续。",
+        "模型选择已经完成，继续。",
+        "选择结果符合预期，继续。",
+        "我已经调整好参数，继续。",
+        "参数已调整好，继续。",
+        "已经完成参数调整，继续。",
+        "调整结果没问题，继续。",
+        "修改后的方案没问题，继续。",
+        "Model selection is complete; proceed.",
+        "The parameter adjustment is complete; proceed.",
+        "The updated plan looks good; proceed.",
+        "Keep going.",
+        "Keep working through the remaining steps.",
+        "Keep going with the plan.",
+        "Run the remaining steps.",
+        "Please run the remaining steps.",
+        "Run this plan and proceed.",
+        "运行当前方案，继续。",
+        "继续运行剩余步骤。",
+        "运行剩余步骤并完成报告。",
+        "运行后续流程。",
+        "跑完剩余流程。",
+        "跑完剩下的步骤。",
+        "Run the current plan and proceed.",
+        "变量选择的结果符合预期，继续。",
+        "我把参数调整好了，继续。",
+        "Don't change anything, proceed.",
+    ],
+)
+def test_llm_semantic_intent_accepts_no_problem_affirmation(tmp_path, text):
+    driver, repo = _driver(tmp_path)
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"用户明确表示没有异议并要求继续",'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(text),
+    )
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    assert not is_confirm(text)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text=text,
+        run_seq=1,
+        expected_step_id="tune",
+        confirmation_source="human",
+    )
+
+    assert turn.status == PlanStatus.DONE.value
+    assert repo.is_step_confirmed("tune") is True
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "我拒绝继续，也不认可这个方案。",
+        "我不同意按当前方案继续。",
+        "我不认可这个方案。",
+        "这一步未授权。",
+        "方案尚未审核。",
+        "我不接受这个方案。",
+        "这个方案不通过。",
+        "不行。",
+        "No.",
+    ],
+)
+def test_llm_semantic_intent_cannot_override_explicit_human_rejection(
+    tmp_path,
+    text,
+):
+    """A mistaken high-confidence route must not override the human's words."""
+    driver, repo = _driver(tmp_path)
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"用户明确授权继续",'
+        '"confidence":"high","explicit_authorization":true}'
+    )
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text=text,
+        run_seq=1,
+        expected_step_id="tune",
+        confirmation_source="human",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert repo.is_step_confirmed("tune") is False
+    assert "独立语义授权复核" in turn.messages[-1].content
+    assert "未执行" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
+
+
+def _selection_gate_driver(tmp_path):
     selected_id = "experiment_f1eb251544394fefb8092301676b5a20"
     other_id = "experiment_143ac251b8934810a437c47a0adae87a"
     db_path = tmp_path / "app.sqlite"
@@ -760,17 +1535,76 @@ def test_llm_semantic_candidate_selection_waits_for_explicit_control_submission(
         FakeHooks(),
         HarnessState(repo),
     )
-    llm = FakeRouterLLM(
+    driver = PlanDriver(repo, executor)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    return driver, repo, runner, selected_id, other_id
+
+
+def test_llm_semantic_candidate_selection_binds_authenticated_candidate(tmp_path):
+    """A high-confidence human instruction may bind only a live candidate id."""
+    driver, repo, runner, selected_id, other_id = _selection_gate_driver(tmp_path)
+    empty_route_text = "采用平台推荐的模型作为最终模型。"
+    mismatched_text = "采用 XGBoost 作为最终模型。"
+    text = "采用平台推荐的逻辑回归作为最终模型。"
+    selected_route_payload = (
         '{"action":"confirm","params":{"selected_experiment_id":"'
         + selected_id
         + '"},"constraint":"","reason":"用户明确选择 LR 并授权进入报告",'
         '"confidence":"high","explicit_authorization":true}'
     )
-    driver = PlanDriver(repo, executor, llm_client=llm)
-    repo.confirm_plan("plan-1")
-    driver._run_and_handle("plan-1", run_seq=0)
+    llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"用户要求采用推荐模型",'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(empty_route_text),
+    )
+    driver._llm = llm
 
-    text = "采用平台推荐的逻辑回归作为最终模型。"
+    direct_confirmation = driver.resume(
+        plan_id="plan-1",
+        user_text="确认",
+        run_seq=1,
+        expected_step_id="select",
+        confirmation_source="human",
+    )
+    assert direct_confirmation.status == PlanStatus.AWAITING_CONFIRM.value
+    assert "明确选择" in direct_confirmation.messages[-1].content
+    assert [call[0] for call in runner.calls] == ["train_models", "compare_experiments"]
+    assert llm.calls == []
+
+    missing_binding = driver.resume(
+        plan_id="plan-1",
+        user_text=empty_route_text,
+        run_seq=1,
+        expected_step_id="select",
+        confirmation_source="human",
+    )
+    assert missing_binding.status == PlanStatus.AWAITING_CONFIRM.value
+    assert "明确选择" in missing_binding.messages[-1].content
+    assert [call[0] for call in runner.calls] == ["train_models", "compare_experiments"]
+    assert [call.get("prompt_name") for call in llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+    ]
+
+    llm.route_payload = selected_route_payload
+    llm.semantic_review_payload = _valid_semantic_review_payload(mismatched_text)
+    mismatched = driver.resume(
+        plan_id="plan-1",
+        user_text=mismatched_text,
+        run_seq=1,
+        expected_step_id="select",
+        confirmation_source="human",
+    )
+    assert mismatched.status == PlanStatus.AWAITING_CONFIRM.value
+    assert "无法唯一绑定" in mismatched.messages[-1].content
+    assert [call[0] for call in runner.calls] == ["train_models", "compare_experiments"]
+    assert [call.get("prompt_name") for call in llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        "GATE_INSTRUCTION_ROUTER_SYS",
+    ]
+
+    llm.semantic_review_payload = _valid_semantic_review_payload(text)
     turn = driver.resume(
         plan_id="plan-1",
         user_text=text,
@@ -779,12 +1613,12 @@ def test_llm_semantic_candidate_selection_waits_for_explicit_control_submission(
         confirmation_source="human",
     )
 
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert turn.status == PlanStatus.DONE.value
     assert [call[0] for call in runner.calls] == [
         "train_models",
         "compare_experiments",
+        "select_experiment",
     ]
-    assert "语义识别不会直接放行执行" in turn.messages[-1].content
     prompt = llm.calls[0]["user_prompt"]
     assert "selected_experiment_id" in prompt
     assert selected_id in prompt
@@ -792,30 +1626,48 @@ def test_llm_semantic_candidate_selection_waits_for_explicit_control_submission(
     assert '"recipe":"lr"' in prompt
     assert '"display_name":"逻辑回归"' in prompt
     assert '"recommended":true' in prompt
+    assert [call.get("prompt_name") for call in llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
 
-    confirmed_turn = driver.resume(
+    assert runner.calls[-1][0] == "select_experiment"
+    assert runner.calls[-1][1]["selected_experiment_id"] == selected_id
+
+
+def test_typed_candidate_selection_requires_and_uses_explicit_experiment_id(tmp_path):
+    driver, repo, runner, selected_id, _ = _selection_gate_driver(tmp_path)
+
+    turn = driver.resume(
         plan_id="plan-1",
         user_text="确认",
-        run_seq=2,
+        run_seq=1,
         adjust_params={"selected_experiment_id": selected_id},
         expected_step_id="select",
         confirmation_source="human",
     )
 
-    assert confirmed_turn.status == PlanStatus.DONE.value
-    assert runner.calls[-1][0] == "select_experiment"
+    assert turn.status == PlanStatus.DONE.value
+    assert [call[0] for call in runner.calls] == [
+        "train_models",
+        "compare_experiments",
+        "select_experiment",
+    ]
     assert runner.calls[-1][1]["selected_experiment_id"] == selected_id
 
 
-def test_llm_semantic_intent_routes_plan_overview_to_explicit_confirmation(tmp_path):
+def test_llm_semantic_intent_starts_plan_overview(tmp_path):
     driver, repo = _driver(tmp_path)
+    text = "方案已经看完了，就照你规划的次序推进。"
     driver._llm = FakeRouterLLM(
         '{"action":"confirm","params":{},"constraint":"",'
         '"reason":"用户明确要求启动计划",'
-        '"confidence":"high","explicit_authorization":true}'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(text),
     )
 
-    text = "方案已经看完了，就照你规划的次序推进。"
     assert not is_confirm(text)
     turn = driver.resume(
         plan_id="plan-1",
@@ -824,19 +1676,208 @@ def test_llm_semantic_intent_routes_plan_overview_to_explicit_confirmation(tmp_p
         confirmation_source="human",
     )
 
-    assert turn.status == PlanStatus.VALIDATED.value
-    assert repo.load_plan("plan-1").status is PlanStatus.VALIDATED
-    assert "语义识别不会直接放行执行" in turn.messages[-1].content
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert repo.load_plan("plan-1").status is PlanStatus.AWAITING_CONFIRM
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
 
-    confirmed_turn = driver.resume(
+
+@pytest.mark.parametrize("mutation", ["status", "replan_count"])
+def test_semantic_review_fails_closed_when_plan_changes_mid_review(
+    tmp_path,
+    mutation,
+):
+    driver, repo = _driver(tmp_path)
+    text = "方案已经看完了，就照你规划的次序推进。"
+    assert not is_confirm(text)
+
+    def mutate_plan_during_review():
+        if mutation == "status":
+            repo.confirm_plan("plan-1")
+            return
+        current = repo.load_plan("plan-1")
+        repo.replace_remaining_steps("plan-1", current)
+
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"用户明确授权当前计划",'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(text),
+        on_semantic_review=mutate_plan_during_review,
+    )
+
+    turn = driver.resume(
         plan_id="plan-1",
-        user_text="确认",
-        run_seq=1,
+        user_text=text,
+        run_seq=0,
         confirmation_source="human",
     )
 
-    assert confirmed_turn.status == PlanStatus.AWAITING_CONFIRM.value
-    assert repo.load_plan("plan-1").status is PlanStatus.AWAITING_CONFIRM
+    changed = repo.load_plan("plan-1")
+    assert turn.status == changed.status.value
+    assert "语义授权复核期间计划" in turn.messages[-1].content
+    assert "已变化" in turn.messages[-1].content
+    assert all(step.status is StepStatus.PENDING for step in changed.steps)
+    assert driver._executor._runner.calls == []
+    assert changed.replan_count == (1 if mutation == "replan_count" else 0)
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
+
+
+@pytest.mark.parametrize("location", ["gate", "overview"])
+def test_semantic_review_fails_closed_when_inputs_change_without_revision(
+    tmp_path,
+    location,
+):
+    driver, repo = _driver(tmp_path)
+    if location == "gate":
+        repo.confirm_plan("plan-1")
+        driver._run_and_handle("plan-1", run_seq=0)
+        target_step_id = "tune"
+        text = "这版筛选结果符合预期，接着完成余下步骤。"
+        expected_step_id = "tune"
+        expected_runner_calls = ["screen_features"]
+    else:
+        target_step_id = "screen"
+        text = "方案已经看完了，就照你规划的次序推进。"
+        expected_step_id = None
+        expected_runner_calls = []
+    assert not is_confirm(text)
+    before = repo.load_plan("plan-1")
+
+    def mutate_inputs_during_review():
+        current = repo.load_plan("plan-1")
+        step = next(item for item in current.steps if item.id == target_step_id)
+        repo.update_step(
+            _dataclass_replace(
+                step,
+                inputs={**(step.inputs or {}), "review_race_marker": location},
+            )
+        )
+
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"用户明确授权当前动作",'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload=_valid_semantic_review_payload(text),
+        on_semantic_review=mutate_inputs_during_review,
+    )
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text=text,
+        run_seq=1,
+        expected_step_id=expected_step_id,
+        confirmation_source="human",
+    )
+
+    changed = repo.load_plan("plan-1")
+    changed_step = next(item for item in changed.steps if item.id == target_step_id)
+    assert changed.status is before.status
+    assert changed.replan_count == before.replan_count
+    assert [step.id for step in changed.steps] == [step.id for step in before.steps]
+    assert changed_step.inputs["review_race_marker"] == location
+    assert turn.status == changed.status.value
+    assert "语义授权复核期间计划快照已变化" in turn.messages[-1].content
+    assert [call[0] for call in driver._executor._runner.calls] == expected_runner_calls
+    if location == "gate":
+        assert repo.is_step_confirmed("tune") is False
+    else:
+        assert all(step.status is StepStatus.PENDING for step in changed.steps)
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
+
+
+def test_step_confirmation_is_atomic_after_driver_snapshot_check(tmp_path, monkeypatch):
+    driver, repo = _driver(tmp_path)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    original_confirm_step = repo.confirm_step
+
+    def mutate_then_confirm(step_id, **kwargs):
+        current = repo.load_plan("plan-1")
+        gate = next(step for step in current.steps if step.id == step_id)
+        repo.update_step(
+            _dataclass_replace(
+                gate,
+                inputs={**(gate.inputs or {}), "n_trials": 777},
+            )
+        )
+        return original_confirm_step(step_id, **kwargs)
+
+    monkeypatch.setattr(repo, "confirm_step", mutate_then_confirm)
+
+    with pytest.raises(DriverError, match="确认节点.*已变化"):
+        driver.resume(
+            plan_id="plan-1",
+            user_text="确认",
+            run_seq=1,
+            expected_step_id="tune",
+        )
+
+    changed = repo.load_plan("plan-1")
+    gate = next(step for step in changed.steps if step.id == "tune")
+    assert changed.status is PlanStatus.AWAITING_CONFIRM
+    assert gate.status is StepStatus.AWAITING_CONFIRM
+    assert gate.inputs["n_trials"] == 777
+    assert repo.is_step_confirmed("tune") is False
+    assert [call[0] for call in driver._executor._runner.calls] == ["screen_features"]
+
+
+def test_plan_confirmation_is_atomic_after_driver_snapshot_check(tmp_path, monkeypatch):
+    driver, repo = _driver(tmp_path)
+    original_confirm_plan = repo.confirm_plan
+
+    def mutate_then_confirm(plan_id, **kwargs):
+        current = repo.load_plan(plan_id)
+        step = next(item for item in current.steps if item.id == "screen")
+        repo.update_step(
+            _dataclass_replace(
+                step,
+                inputs={**(step.inputs or {}), "race_marker": "changed"},
+            )
+        )
+        return original_confirm_plan(plan_id, **kwargs)
+
+    monkeypatch.setattr(repo, "confirm_plan", mutate_then_confirm)
+
+    with pytest.raises(DriverError, match="计划总览.*已变化"):
+        driver.resume(plan_id="plan-1", user_text="开始", run_seq=0)
+
+    changed = repo.load_plan("plan-1")
+    screen = next(step for step in changed.steps if step.id == "screen")
+    assert changed.status is PlanStatus.VALIDATED
+    assert screen.inputs["race_marker"] == "changed"
+    assert driver._executor._runner.calls == []
+
+
+def test_llm_semantic_intent_cannot_relabel_auto_source_as_human(tmp_path):
+    driver, repo = _driver(tmp_path)
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"",'
+        '"reason":"模型声称可以继续",'
+        '"confidence":"high","explicit_authorization":true}'
+    )
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="按这个计划继续。",
+        run_seq=0,
+        confirmation_source="auto",
+    )
+
+    assert turn.status == PlanStatus.VALIDATED.value
+    assert repo.load_plan("plan-1").status is PlanStatus.VALIDATED
+    assert "只有当前人工输入" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+    ]
 
 
 def test_llm_low_confidence_confirm_does_not_release_gate(tmp_path):
@@ -859,9 +1900,130 @@ def test_llm_low_confidence_confirm_does_not_release_gate(tmp_path):
 
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value
     assert repo.is_step_confirmed("tune") is False
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+    ]
 
 
-@pytest.mark.parametrize("text", ["不要执行", "这样可以吗？"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        *_STANDARDS_UNSAFE_SEMANTIC_AUTHORIZATION_CASES,
+        *_SPEC_UNSAFE_SEMANTIC_AUTHORIZATION_CASES,
+        "不要执行",
+        "不继续。",
+        "不执行。",
+        "不开始。",
+        "不确认。",
+        "暂时不继续。",
+        "I won't proceed.",
+        "I refuse to proceed.",
+        "Never proceed.",
+        "我不想继续。",
+        "我不打算继续。",
+        "我还没同意。",
+        "我还没确认。",
+        "我没有授权。",
+        "我没同意。",
+        "我还没有批准。",
+        "我还没决定。",
+        "先别往下做。",
+        "暂时不要往下走。",
+        "I have not consented.",
+        "I cannot authorize this.",
+        "I haven't decided.",
+        "I need more time.",
+        "等会儿。",
+        "且慢。",
+        "暂不作决定。",
+        "我需要考虑一下。",
+        "Not yet.",
+        "Hold off.",
+        "I withhold consent.",
+        "Approval has not been granted.",
+        "I do not consent to proceeding.",
+        "I am not authorizing this; proceed.",
+        "等一下。",
+        "先等等。",
+        "稍等。",
+        "先放一放。",
+        "晚点再继续。",
+        "Not now.",
+        "Maybe later.",
+        "Let's wait.",
+        "Pause.",
+        "No, proceed.",
+        "不，继续。",
+        "这样可以吗？",
+        "是否继续",
+        "可否继续",
+        "能否继续",
+        "可否执行",
+        "这样可以么",
+        "Should we proceed",
+        "Can we continue",
+        "Is proceeding okay",
+        "Would proceeding now be okay",
+        "Proceed or not",
+        "Proceeding okay",
+        "继续可好",
+        "该不该继续",
+        "继续合适不",
+        "把阈值改到 0.3 再继续。",
+        "把阈值调到 0.3 再继续。",
+        "将 n_trials 设为 1 并继续。",
+        "设置 n_trials 为 1 并继续。",
+        "设置阈值为 0.3 并继续。",
+        "把当前设置为 0.3 并继续。",
+        "age 删掉后继续。",
+        "降低阈值并执行。",
+        "阈值设成 0.3 再继续。",
+        "不要删除 age，继续。",
+        "不用增加变量，继续。",
+        "无需新增特征，继续。",
+        "不要去掉 sig1，继续。",
+        "不需要切换算法，继续。",
+        "Set n_trials to 1 and proceed.",
+        "Remove age and continue.",
+        "Use XGBoost and proceed.",
+        "跑 XGBoost 并继续。",
+        "Run XGBoost and proceed.",
+        "模型用 XGBoost，继续。",
+        "Train XGBoost and proceed.",
+        "选择逻辑回归并继续。",
+        "选逻辑回归继续。",
+        "用逻辑回归继续。",
+        "Choose XGBoost and proceed.",
+        "Pick XGBoost and continue.",
+        "把阈值变成 0.3 再继续。",
+        "Update threshold to 0.3 and proceed.",
+        "Keep age and proceed.",
+        "配置 n_trials=1 并继续。",
+        "Configure threshold to 0.3 and proceed.",
+        "把阈值弄成 0.3 再继续。",
+        "将阈值降到 0.3 再继续。",
+        "阈值往下调一点再继续。",
+        "Make the threshold 0.3 and proceed.",
+        "Move the threshold to 0.3 and proceed.",
+        "如果效果好就继续。",
+        "KS 达到 0.3 后再继续。",
+        "审核通过后继续执行。",
+        "审核通过再继续。",
+        "等审核通过继续。",
+        "完成复核之后再继续。",
+        "只有审核通过才继续。",
+        "审批通过才能继续。",
+        "Proceed after the review completes.",
+        "Once approved, proceed.",
+        "Provided approval, proceed.",
+        "一旦审核通过就继续。",
+        "Subject to approval, proceed.",
+        "审核通过就继续。",
+        "On approval, proceed.",
+        "Pending approval, proceed.",
+        "When KS exceeds 0.3, continue.",
+    ],
+)
 def test_malicious_llm_confirm_cannot_start_plan_overview(tmp_path, text):
     driver, repo = _driver(tmp_path)
     driver._llm = FakeRouterLLM(
@@ -881,7 +2043,12 @@ def test_malicious_llm_confirm_cannot_start_plan_overview(tmp_path, text):
     assert turn.status == PlanStatus.VALIDATED.value
     assert plan.status is PlanStatus.VALIDATED
     assert all(step.status is StepStatus.PENDING for step in plan.steps)
-    assert "语义识别不会直接放行执行" in turn.messages[-1].content
+    assert "独立语义授权复核" in turn.messages[-1].content
+    assert "未执行" in turn.messages[-1].content
+    assert [call.get("prompt_name") for call in driver._llm.calls] == [
+        "GATE_INSTRUCTION_ROUTER_SYS",
+        _SEMANTIC_REVIEW_PROMPT_NAME,
+    ]
 
 
 def test_driver_failed_message_carries_retry_contract(tmp_path):
@@ -1047,12 +2214,32 @@ def test_driver_retry_failed_step_keeps_template_recipe_reference(tmp_path):
         steps=[configure, select, step],
     )
     repo.create_plan(plan)
-    configure.output_ref = repo.store_step_output(
-        "configure", {"recipes": ["lgb", "xgb"]}
-    )
-    select.output_ref = repo.store_step_output("select", {"selected": ["x1", "x2"]})
-    repo.update_step(configure)
-    repo.update_step(select)
+    for completed, output in (
+        (configure, {"recipes": ["lgb", "xgb"]}),
+        (select, {"selected": ["x1", "x2"]}),
+    ):
+        completed.status = StepStatus.RUNNING
+        repo.update_step(completed)
+        run_id = repo.start_step_run(
+            plan_id=plan.id,
+            step_id=completed.id,
+            tool_ref=completed.tool_ref.label(),
+            inputs=completed.inputs,
+        )
+        completed.status = StepStatus.CHECKING
+        repo.update_step(completed)
+        completed.output_ref = repo.store_step_output(
+            completed.id,
+            output,
+            evidence={"step_run_id": run_id},
+        )
+        repo.finish_step_run(
+            run_id,
+            status="succeeded",
+            output_ref=completed.output_ref,
+        )
+        completed.status = StepStatus.DONE
+        repo.update_step(completed)
     runner = FakeRunner([{"best_params": {"num_leaves": 31}}])
     executor = PlanExecutor(
         repo,
@@ -1589,6 +2776,7 @@ def test_modeling_screen_gate_warns_when_selected_sample_weight_has_high_leakage
 def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
+    _register_result_dataset(db_path, "ds-split")
     repo = PlanRepository(db_path)
     plan = Plan(
         id="plan-1",
@@ -2259,6 +3447,110 @@ def test_done_message_carries_plural_report_download_and_delivery_summary():
     )
 
 
+def test_done_message_labels_portfolio_report_download():
+    report = _dataclass_replace(
+        _step("portfolio-report", index=0, tool="portfolio_report", phase="报告"),
+        status=StepStatus.DONE,
+        output_ref="out-portfolio-report",
+    )
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="portfolio",
+        source="template",
+        template_id="portfolio_analysis_no_trend",
+        autonomy_level=1,
+        status=PlanStatus.DONE,
+        steps=[report],
+    )
+    outputs = {
+        "portfolio-report": {
+            "report_path": "/tmp/portfolio_report.xlsx",
+            "artifact_id": "portfolio-artifact",
+            "artifact_content_hash": "a" * 64,
+        }
+    }
+
+    message = PlanMessageComposer(
+        load_output=outputs.__getitem__,
+    ).done_message(plan, run_seq=1)
+
+    assert message.metadata["report_download"] == {
+        "label": "下载组合分析报告",
+        "download_url": "/api/tasks/task-1/driver-report/download",
+    }
+
+
+def test_done_message_labels_labeling_result_dataset():
+    label = _dataclass_replace(
+        _step("label", index=0, tool="define_label", phase="标签"),
+        status=StepStatus.DONE,
+        output_ref="metrics:label:v1",
+    )
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="labeling",
+        source="template",
+        template_id="label_construction",
+        autonomy_level=1,
+        status=PlanStatus.DONE,
+        steps=[label],
+    )
+    outputs = {
+        "label": {
+            "schema_version": "labeling-tool-result.v1",
+            "result_dataset_id": "ds-labeled",
+            "target_col": "bad_m3",
+        }
+    }
+    evidence = {
+        "output_ref": "metrics:label:v1",
+        "step_run_id": "run-label",
+        "renderer_hint": "define_label",
+        "input_hash": "sha256:" + "a" * 64,
+        "result_dataset_bindings": [
+            {"dataset_id": "ds-labeled", "content_hash": "b" * 64}
+        ],
+    }
+    dataset = SimpleNamespace(
+        id="ds-labeled",
+        task_id="task-1",
+        content_hash="b" * 64,
+    )
+
+    message = PlanMessageComposer(
+        load_output=outputs.__getitem__,
+        load_step_presentation_binding=lambda _step_id, _output_ref: {
+            "plan_id": "plan-1",
+            "task_id": "task-1",
+            "step_id": "label",
+            "output_ref": "metrics:label:v1",
+            "output": outputs["label"],
+            "evidence": evidence,
+            "inputs": {"source_dataset_id": "ds-source"},
+        },
+        load_dataset=lambda _dataset_id: dataset,
+        resolve_verified_dataset_path=lambda _dataset_id: "/tmp/ds-labeled.parquet",
+    ).done_message(plan, run_seq=1)
+
+    assert message.metadata["result_dataset"] == {
+        "dataset_id": "ds-labeled",
+        "download_url": (
+            "/api/tasks/task-1/datasets/ds-labeled/download"
+            "?plan_id=plan-1&step_id=label"
+            "&output_ref=metrics%3Alabel%3Av1"
+            f"&expected_content_hash={'b' * 64}"
+        ),
+        "plan_id": "plan-1",
+        "step_id": "label",
+        "output_ref": "metrics:label:v1",
+        "content_hash": "b" * 64,
+        "title": "标签数据集已生成",
+        "download_label": "下载标签结果",
+    }
+
+
 def test_done_message_carries_post_training_delivery_payload(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -2665,6 +3957,8 @@ def test_driver_split_config_adjust_reruns_make_split(tmp_path):
     boundary, without needing free-text LLM routing to guess the nested schema."""
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
+    _register_result_dataset(db_path, "ds-split-1")
+    _register_result_dataset(db_path, "ds-split-2")
     repo = PlanRepository(db_path)
     plan = _gated_modeling_split_plan()
     plan.steps[0].inputs = {
@@ -2977,10 +4271,8 @@ def test_render_screen_shows_metric_columns_and_buckets():
     assert "疑似泄漏" in titles and "疑似模型输出" in titles and "不可用" in titles
 
 
-def test_resume_with_selection_overrides_screen_output(tmp_path):
-    """Confirming the screening gate with an edited selection overrides the screen
-    step's proposed ``selected`` so downstream ``$ref:...output.selected`` trains on
-    exactly the user's chosen features."""
+def test_resume_with_selection_preserves_screen_receipt_and_binds_gate_input(tmp_path):
+    """A human selection is a gate decision, not a replacement Tool result."""
     driver, repo = _driver(tmp_path)
     tune = next(
         step
@@ -2991,8 +4283,11 @@ def test_resume_with_selection_overrides_screen_output(tmp_path):
     repo.update_step(tune)
     repo.confirm_plan("plan-1")
     driver._run_and_handle("plan-1", run_seq=0)  # pause at tune gate; screen DONE with [sig1, sig2]
+    original_screen = next(
+        step for step in repo.load_plan("plan-1").steps if step.id == "screen"
+    )
 
-    driver.resume(
+    turn = driver.resume(
         plan_id="plan-1",
         user_text="确认",
         run_seq=1,
@@ -3000,9 +4295,11 @@ def test_resume_with_selection_overrides_screen_output(tmp_path):
         expected_step_id="tune",
     )
 
-    assert repo.load_step_output("screen")["selected"] == ["sig1"]
+    assert turn.status == PlanStatus.DONE.value
+    assert repo.load_step_output("screen")["selected"] == ["sig1", "sig2"]
     screen_step = next(step for step in repo.load_plan("plan-1").steps if step.id == "screen")
-    assert screen_step.output_ref == "metrics:screen:v2"
+    assert screen_step.output_ref == original_screen.output_ref == "metrics:screen:v1"
+    assert repo.latest_succeeded_step_run_output_ref("screen") == original_screen.output_ref
     tune_step = next(step for step in repo.load_plan("plan-1").steps if step.id == "tune")
     assert tune_step.inputs["features"] == ["sig1"]
 
@@ -3011,6 +4308,9 @@ def test_resume_selection_constrained_to_known_and_allows_force_select(tmp_path)
     """An edited selection may re-pick among screened features — including force-selecting
     a flagged (leakage) column — but cannot inject a column the screen never saw."""
     driver, repo = _driver(tmp_path)
+    tune = next(step for step in repo.load_plan("plan-1").steps if step.id == "tune")
+    tune.inputs = {"features": "$ref:screen.output.selected"}
+    repo.update_step(tune)
     repo.confirm_plan("plan-1")
     driver._run_and_handle("plan-1", run_seq=0)
 
@@ -3020,7 +4320,9 @@ def test_resume_selection_constrained_to_known_and_allows_force_select(tmp_path)
         expected_step_id="tune",
     )
 
-    assert repo.load_step_output("screen")["selected"] == ["sig1", "leak_col"]
+    assert repo.load_step_output("screen")["selected"] == ["sig1", "sig2"]
+    tune_step = next(step for step in repo.load_plan("plan-1").steps if step.id == "tune")
+    assert tune_step.inputs["features"] == ["sig1", "leak_col"]
 
 
 def test_resume_empty_or_unknown_selection_keeps_proposed(tmp_path):
@@ -3162,7 +4464,7 @@ def test_adoption_reason_control_atomically_updates_confirms_and_runs(tmp_path):
 
     turn = driver.resume(
         plan_id="plan-adopt",
-        user_text="确认采纳",
+        user_text="确认",
         run_seq=1,
         adjust_params={"adoption_reason": "  委员会批准 Q3 上线  "},
         expected_step_id="adopt",
@@ -3249,6 +4551,117 @@ def test_resume_dedup_control_rejects_stale_or_missing_gate_token(tmp_path):
     assert runner.calls[-1][1]["dedup_strategies"] == {"feat-1": "first"}
 
 
+def test_join_exclude_feature_control_atomically_revises_proposal_and_reruns(
+    tmp_path,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_join_dedup_plan()
+    plan.steps[0].inputs = {
+        "anchor_id": "anchor",
+        "feature_ids": ["feat-1", "feat-2"],
+        "key_overrides": {},
+    }
+    repo.create_plan(plan)
+    runner = FakeRunner(
+        [
+            {"joins": [{"feature_id": "feat-1"}, {"feature_id": "feat-2"}]},
+            {"needs_dedup": ["feat-1"]},
+            {"joins": [{"feature_id": "feat-2"}]},
+            {"needs_dedup": []},
+        ]
+    )
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+    driver = PlanDriver(repo, executor)
+    repo.confirm_plan(plan.id)
+    driver._run_and_handle(plan.id, run_seq=0)
+    reviewed = repo.load_plan(plan.id)
+    gate = next(step for step in reviewed.steps if step.status is StepStatus.AWAITING_CONFIRM)
+
+    turn = driver._gate_execution.exclude_join_feature(
+        reviewed,
+        gate,
+        "feat-1",
+        run_seq=1,
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert [call[0] for call in runner.calls] == [
+        "propose_join",
+        "confirm_join",
+        "propose_join",
+        "confirm_join",
+    ]
+    assert runner.calls[2][1]["feature_ids"] == ["feat-2"]
+    loaded = repo.load_plan(plan.id)
+    assert loaded.steps[0].inputs["feature_ids"] == ["feat-2"]
+    assert loaded.steps[2].status is StepStatus.AWAITING_CONFIRM
+    assert any("已排除特征表" in message.content for message in turn.messages)
+
+
+@pytest.mark.parametrize(
+    ("feature_ids", "excluded_feature_id", "message"),
+    [
+        (["feat-1"], "feat-1", "至少保留一张特征表"),
+        (["feat-1", "feat-2"], "feat-missing", "已不在当前拼接方案"),
+    ],
+)
+def test_join_exclude_feature_control_rejects_invalid_selection_without_reset(
+    tmp_path,
+    feature_ids,
+    excluded_feature_id,
+    message,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_join_dedup_plan()
+    plan.steps[0].inputs = {
+        "anchor_id": "anchor",
+        "feature_ids": feature_ids,
+        "key_overrides": {},
+    }
+    repo.create_plan(plan)
+    runner = FakeRunner(
+        [
+            {"joins": [{"feature_id": feature_id} for feature_id in feature_ids]},
+            {"needs_dedup": [feature_ids[0]]},
+        ]
+    )
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+    driver = PlanDriver(repo, executor)
+    repo.confirm_plan(plan.id)
+    driver._run_and_handle(plan.id, run_seq=0)
+    reviewed = repo.load_plan(plan.id)
+    gate = next(step for step in reviewed.steps if step.status is StepStatus.AWAITING_CONFIRM)
+
+    turn = driver._gate_execution.exclude_join_feature(
+        reviewed,
+        gate,
+        excluded_feature_id,
+        run_seq=1,
+    )
+
+    assert [call[0] for call in runner.calls] == ["propose_join", "confirm_join"]
+    assert repo.load_plan(plan.id).steps[0].inputs["feature_ids"] == feature_ids
+    assert message in turn.messages[-1].content
+
+
 def test_join_dedup_gate_message_carries_editable_input_schema(tmp_path):
     """LT-3 (A.3): an execute_join gate whose confirm_join dependency still needs a
     dedup strategy carries the adapter-declared editable_input_schema on the gate
@@ -3278,15 +4691,27 @@ def test_join_dedup_gate_message_carries_editable_input_schema(tmp_path):
 
 
 class FakeRouterLLM:
-    """Returns a fixed instruction-route JSON (agent-mode gate instruction)."""
+    """Dispatches route and independent authorization-review replies by prompt."""
 
-    def __init__(self, payload):
-        self.payload = payload
+    def __init__(
+        self,
+        route_payload,
+        *,
+        semantic_review_payload='{"verdict":"ambiguous"}',
+        on_semantic_review=None,
+    ):
+        self.route_payload = route_payload
+        self.semantic_review_payload = semantic_review_payload
+        self.on_semantic_review = on_semantic_review
         self.calls = []
 
     def complete(self, **kwargs):
         self.calls.append(kwargs)
-        return self.payload
+        if kwargs.get("prompt_name") == _SEMANTIC_REVIEW_PROMPT_NAME:
+            if self.on_semantic_review is not None:
+                self.on_semantic_review()
+            return self.semantic_review_payload
+        return self.route_payload
 
 
 def test_driver_recipe_route_exposes_enum_and_normalizes_cat_alias(tmp_path):
@@ -3344,7 +4769,8 @@ def test_driver_recipe_route_exposes_enum_and_normalizes_cat_alias(tmp_path):
     executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
     llm = FakeRouterLLM(
         '{"action":"adjust","params":{"recipes":["lgb","xgb","cat"],"n_trials":40},'
-        '"constraint":"","reason":"使用三种树模型"}'
+        '"constraint":"","reason":"使用三种树模型","confidence":"high",'
+        '"explicit_authorization":false}'
     )
     driver = PlanDriver(repo, executor, llm_client=llm)
 
@@ -3382,7 +4808,11 @@ def test_driver_adjust_reruns_analysis_step_with_new_params(tmp_path):
         {"selected": ["sig1", "sig2", "sig3"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
     ])
     executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
-    llm = FakeRouterLLM('{"action":"adjust","params":{"leakage_ks":0.3},"constraint":"","reason":"放宽阈值重算"}')
+    llm = FakeRouterLLM(
+        '{"action":"adjust","params":{"leakage_ks":0.3},"constraint":"",'
+        '"reason":"放宽阈值重算","confidence":"high",'
+        '"explicit_authorization":false}'
+    )
     driver = PlanDriver(repo, executor, llm_client=llm)
 
     repo.confirm_plan("plan-1")
@@ -3397,6 +4827,80 @@ def test_driver_adjust_reruns_analysis_step_with_new_params(tmp_path):
     assert runner.calls[1][1].get("leakage_ks") == 0.3  # the declared override reached the tool
     assert "保留 **3** 个" in turn.messages[-1].content  # the recomputed screen output is shown
     assert any("调整参数" in m.content for m in turn.messages)
+
+
+def test_invalid_adjust_clarifies_text_but_rejects_trusted_ui_without_reset(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_plan()
+    plan.steps[0].inputs = {"leakage_ks": 0.4}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "selected": ["sig1"],
+            "leakage": [],
+            "suspected": [],
+            "n_screened": 1,
+            "ranked": [],
+            "unusable": [],
+            "scores": {},
+        },
+    ])
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+    driver = PlanDriver(
+        repo,
+        executor,
+        llm_client=FakeRouterLLM(
+            '{"action":"adjust","params":{"leakage_ks":2.0},'
+            '"constraint":"","reason":"无效阈值",'
+            '"confidence":"high","explicit_authorization":false}'
+        ),
+    )
+    repo.confirm_plan(plan.id)
+    driver._run_and_handle(plan.id, run_seq=0)
+    before = repo.load_plan(plan.id)
+    gate = next(
+        step for step in before.steps if step.status is StepStatus.AWAITING_CONFIRM
+    )
+    before_fingerprint = plan_fingerprint(before)
+
+    text_turn = driver.resume(
+        plan_id=plan.id,
+        user_text="把泄漏阈值改成 2",
+        run_seq=1,
+    )
+
+    assert "0 到 1" in text_turn.messages[-1].content
+    assert plan_fingerprint(repo.load_plan(plan.id)) == before_fingerprint
+    assert len(runner.calls) == 1
+
+    with pytest.raises(DriverError, match="0 到 1"):
+        driver.resume(
+            plan_id=plan.id,
+            user_text="确认",
+            run_seq=2,
+            adjust_params={"leakage_ks": 2.0},
+            expected_step_id=gate.id,
+            expected_plan_status=before.status.value,
+            expected_plan_revision=before.replan_count,
+            expected_plan_fingerprint=before_fingerprint,
+            expected_step_fingerprint=plan_step_confirmation_fingerprint(
+                gate,
+                confirmed=False,
+            ),
+            _trusted_ui_action=True,
+        )
+
+    assert plan_fingerprint(repo.load_plan(plan.id)) == before_fingerprint
+    assert len(runner.calls) == 1
 
 
 def test_malicious_semantic_noop_adjust_mismatch_cannot_release_gate(tmp_path):
@@ -3500,7 +5004,11 @@ def test_driver_handle_instruction_passes_gate_param_schema_to_router(tmp_path):
         {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
     ])
     executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
-    llm = FakeRouterLLM('{"action":"clarify","params":{},"constraint":"","reason":"请说明具体参数"}')
+    llm = FakeRouterLLM(
+        '{"action":"clarify","params":{},"constraint":"",'
+        '"reason":"请说明具体参数","confidence":"low",'
+        '"explicit_authorization":false}'
+    )
     driver = PlanDriver(repo, executor, llm_client=llm)
 
     repo.confirm_plan("plan-1")
@@ -3776,7 +5284,11 @@ def test_driver_adjust_with_unmatched_params_does_not_rerun_or_claim_success(tmp
         {"selected": ["sig1", "sig2"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
     ])
     executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
-    llm = FakeRouterLLM('{"action":"adjust","params":{"unknown_param":123},"constraint":"","reason":"调参数"}')
+    llm = FakeRouterLLM(
+        '{"action":"adjust","params":{"unknown_param":123},"constraint":"",'
+        '"reason":"调参数","confidence":"high",'
+        '"explicit_authorization":false}'
+    )
     driver = PlanDriver(repo, executor, llm_client=llm)
 
     repo.confirm_plan("plan-1")
@@ -3801,7 +5313,11 @@ def test_driver_replan_instruction_routes_to_structural_replan(tmp_path):
         {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
     ])
     executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))  # planner=None
-    llm = FakeRouterLLM('{"action":"replan","params":{},"constraint":"去掉调参步骤","reason":"改流程"}')
+    llm = FakeRouterLLM(
+        '{"action":"replan","params":{},"constraint":"去掉调参步骤",'
+        '"reason":"改流程","confidence":"high",'
+        '"explicit_authorization":false}'
+    )
     driver = PlanDriver(repo, executor, llm_client=llm)
 
     repo.confirm_plan("plan-1")
@@ -3841,7 +5357,11 @@ def test_driver_replan_success_at_overview_shows_new_plan_and_stays_validated(tm
     executor = PlanExecutor(
         repo, FakeRunner([]), Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo), planner=planner
     )
-    llm = FakeRouterLLM('{"action":"replan","params":{},"constraint":"只跑一步A","reason":"改流程"}')
+    llm = FakeRouterLLM(
+        '{"action":"replan","params":{},"constraint":"只跑一步A",'
+        '"reason":"改流程","confidence":"high",'
+        '"explicit_authorization":false}'
+    )
     driver = PlanDriver(repo, executor, llm_client=llm)
 
     turn = driver.resume(plan_id="plan-1", user_text="把流程改成只跑一步", run_seq=0)
@@ -3918,9 +5438,9 @@ def test_is_confirm_matches_common_phrasings():
     assert not is_confirm("把 age 去掉")
 
 
-def test_is_confirm_accepts_explicit_confirmation_with_non_adjusting_context():
-    assert is_confirm("确认，采用上述切分与建模规格，继续执行特征筛选。")
-    assert is_confirm("我确认当前方案，继续执行。")
+def test_is_confirm_routes_explicit_confirmation_with_context_to_llm():
+    assert not is_confirm("确认，采用上述切分与建模规格，继续执行特征筛选。")
+    assert not is_confirm("我确认当前方案，继续执行。")
 
 
 def test_is_confirm_rejects_explicit_confirmation_that_also_requests_adjustment():
@@ -3929,17 +5449,22 @@ def test_is_confirm_rejects_explicit_confirmation_that_also_requests_adjustment(
     assert not is_confirm("确认，如果效果好就继续。")
 
 
-def test_is_confirm_accepts_task_start_shortcuts():
-    assert is_confirm("开始数据处理")
-    assert is_confirm("请开始特征分析吧")
-    assert is_confirm("开始风险分析")
-    assert is_confirm("开始建模")
-    assert is_confirm("开始模型开发")
-    assert is_confirm("开始策略开发")
-    assert is_confirm("确认采纳")
-    assert is_confirm("确认导出")
-    assert is_confirm("接受并导出")
-    assert is_confirm("导出矩阵")
+@pytest.mark.parametrize("text", _COMPOUND_CONFIRMATION_CASES)
+def test_is_confirm_routes_compound_confirmation_to_llm(text):
+    assert not is_confirm(text)
+
+
+def test_is_confirm_routes_context_specific_task_commands_to_llm():
+    assert not is_confirm("开始数据处理")
+    assert not is_confirm("请开始特征分析吧")
+    assert not is_confirm("开始风险分析")
+    assert not is_confirm("开始建模")
+    assert not is_confirm("开始模型开发")
+    assert not is_confirm("开始策略开发")
+    assert not is_confirm("确认采纳")
+    assert not is_confirm("确认导出")
+    assert not is_confirm("接受并导出")
+    assert not is_confirm("导出矩阵")
     assert not is_confirm("不要开始建模")
     assert not is_confirm("开始建模吗？")
 
@@ -3951,6 +5476,34 @@ def test_is_confirm_rejects_negated_or_contrasting_confirm_phrases():
     assert not is_confirm("不开始")
     assert not is_confirm("do not proceed")
     assert is_confirm("没问题，继续")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "我拒绝执行",
+        "我不同意继续",
+        "稍后再说",
+        "先等等",
+        "Not now",
+        "I refuse to proceed",
+    ],
+)
+def test_typed_confirmation_detects_explicit_refusal(text):
+    assert confirmation_is_explicitly_withheld(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "不需要 XGBoost，保留 LightGBM",
+        "不要 age，保留 income",
+        "取消 XGBoost，改用逻辑回归",
+        "stop using XGBoost and keep LightGBM",
+    ],
+)
+def test_typed_adjustment_reason_is_not_mistaken_for_action_refusal(text):
+    assert not confirmation_is_explicitly_withheld(text)
 
 
 def test_is_confirm_rejects_questions_and_embedded_affirmatives():
@@ -3986,8 +5539,8 @@ def test_is_confirm_accepts_short_full_string_affirmatives():
         "照当前方案执行",
     ],
 )
-def test_is_confirm_accepts_clear_natural_language_continue_intent(text):
-    assert is_confirm(text)
+def test_is_confirm_routes_clear_natural_language_continue_intent_to_llm(text):
+    assert not is_confirm(text)
 
 
 @pytest.mark.parametrize(

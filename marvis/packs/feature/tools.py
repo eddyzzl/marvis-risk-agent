@@ -608,7 +608,7 @@ def _attach_meaning_consistency(
 
 def _task_run_mode(runtime: "_Runtime", ctx) -> str:
     try:
-        from marvis.db import TaskRepository
+        from marvis.repositories.tasks import TaskRepository
 
         return str(TaskRepository(runtime.settings.db_path).get_task(ctx.task_id).run_mode or "")
     except (KeyError, AttributeError):

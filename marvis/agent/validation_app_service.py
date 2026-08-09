@@ -28,8 +28,10 @@ from marvis.agent.orchestrator import (
 from marvis.agent.service import (
     agent_conclusions_confirmed,
     compose_agent_start_message,
+    fallback_word_conclusions,
     failure_summary,
     generate_word_conclusions,
+    review_validation_instruction_authorization,
     summarize_stage,
     REQUIRED_AGENT_REPORT_KEYS,
 )
@@ -75,6 +77,7 @@ from marvis.agent.validation_service import (
     raise_if_agent_cancelled,
 )
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN, DriverError
+from marvis.agent.join_setup import C1TargetValidationError
 from marvis.job_cancellation import (
     register_job_cancellation,
     unregister_job_cancellation,
@@ -96,11 +99,12 @@ from marvis.api_stage_helpers import (
     start_task_job,
 )
 from marvis.api_task_helpers import get_task_or_404
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_FEATURE_ANALYSIS,
     TASK_TYPE_MODELING,
+    TASK_TYPE_PORTFOLIO,
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
     TASK_TYPE_VINTAGE,
@@ -180,6 +184,7 @@ WIRED_AGENT_TASK_TYPES = frozenset(
         TASK_TYPE_FEATURE_ANALYSIS,
         TASK_TYPE_STRATEGY,
         TASK_TYPE_VINTAGE,
+        TASK_TYPE_PORTFOLIO,
     }
 )
 
@@ -190,7 +195,8 @@ def require_wired_agent_task_type(
     if task.task_type not in wired_agent_task_types:
         raise not_implemented(
             f"任务类型 '{task.task_type}' 的 Agent 流程尚未接入"
-            "（当前仅支持 模型验证 / 模型开发 / 数据拼接 / 特征分析 / 策略分析 / Vintage风险分析）"
+            "（当前仅支持 模型验证 / 模型开发 / 数据拼接 / 特征分析 / 策略分析 / "
+            "Vintage风险分析 / 组合分析）"
         )
 
 
@@ -253,12 +259,77 @@ def driver_llm_client(request: Request, task: TaskRecord) -> OpenAICompatibleLLM
     if task.run_mode != "agent":
         return None
     try:
-        # LLM-4: route_instruction (caller="router") drives this client exclusively.
+        # LLM-4: free-text routing and its independent semantic-authorization
+        # review share the router-role profile but use distinct caller/prompt ids.
         return OpenAICompatibleLLMClient(
             resolve_llm_model(request.app.state.settings.workspace, None, role="router")
         )
     except LLMSettingsError:
         return None
+
+
+_VALIDATION_AUTHORIZATION_STAGE_LABELS = {
+    "scan": "材料扫描",
+    "reproducibility": "模型可复现性验证",
+    "metrics": "模型效果与稳定性验证",
+    "word_conclusion_draft": "报告结论草稿生成",
+    "report_confirmation": "将当前三段结论写入报告并生成 Word",
+}
+
+
+def review_validation_semantic_authorization(
+    request: Request,
+    repo_: TaskRepository,
+    task: TaskRecord,
+    *,
+    instruction: str,
+    model_id: str | None,
+    effort: str | None,
+    target_stage: str | None = None,
+) -> dict | None:
+    """Review one legacy-validation free-text authorization at its live stage."""
+
+    if task.run_mode != "agent":
+        return None
+    stage = target_stage or agent_next_stage(
+        repo_,
+        task,
+        scan_failure_prefix=SCAN_FAILURE_PREFIX,
+    )
+    if stage is None:
+        return None
+    label = _VALIDATION_AUTHORIZATION_STAGE_LABELS.get(stage)
+    if label is None:
+        return None
+    profile = resolve_agent_model(
+        request,
+        model_id,
+        effort,
+        role="router",
+    )
+    evidence = review_validation_instruction_authorization(
+        profile,
+        gate_context=(
+            f"模型验证当前状态为 {task.status.value}。"
+            f"当前唯一待授权动作：立即执行【{label}】。"
+        ),
+        instruction=instruction,
+    )
+    if evidence is None:
+        return None
+    latest_task = repo_.get_task(task.id)
+    if stage == "report_confirmation":
+        if latest_task.status != task.status:
+            return None
+    else:
+        latest_stage = agent_next_stage(
+            repo_,
+            latest_task,
+            scan_failure_prefix=SCAN_FAILURE_PREFIX,
+        )
+        if latest_stage != stage:
+            return None
+    return {**evidence, "target_stage": stage}
 
 
 def dispatch_driver_turn(
@@ -274,9 +345,15 @@ def dispatch_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
     expected_plan_id: str | None = None,
+    expected_plan_status: str | None = None,
+    expected_plan_revision: int | None = None,
+    expected_plan_fingerprint: str | None = None,
+    expected_step_fingerprint: str | None = None,
     ui_action: str | None = None,
     strategy_input: StrategyTaskInput | None = None,
     strategy_request: Mapping[str, object] | None = None,
+    portfolio_request: Mapping[str, object] | None = None,
+    labeling_request: Mapping[str, object] | None = None,
     recovery_model_id: str | None = None,
     recovery_effort: str | None = None,
 ) -> dict:
@@ -305,7 +382,24 @@ def dispatch_driver_turn(
     except ConflictError as exc:
         raise conflict(_DRIVER_JOB_BUSY_DETAIL) from exc
     if repo_.mark_job_running(job_id) is False:
-        raise conflict(_DRIVER_JOB_BUSY_DETAIL)
+        job = repo_.get_job(job_id)
+        observed_status = str((job or {}).get("status") or "missing")
+        if observed_status in {"queued", "running"}:
+            repo_.finish_job(
+                job_id,
+                status="failed",
+                error_name="JobStartRejected",
+                error_value=(
+                    "driver execution did not claim its queued job; "
+                    f"observed_status={observed_status}"
+                ),
+            )
+            observed_status = str(
+                (repo_.get_job(job_id) or {}).get("status") or "missing"
+            )
+        raise conflict(
+            f"{_DRIVER_JOB_BUSY_DETAIL}（driver job status: {observed_status}）"
+        )
     cancel_token = register_job_cancellation(job_id)
     try:
         if strategy_input is not None:
@@ -331,6 +425,9 @@ def dispatch_driver_turn(
                 else driver_llm_client(request, task)
             ),
             tier=task_tier(request, task),
+            allow_manual_gate_adapters=task.run_mode != "agent",
+            require_semantic_text_authorization=task.run_mode == "agent",
+            ui_action=ui_action,
             governance_service=getattr(request.app.state, "governance_service", None),
             local_principal=getattr(request.state, "local_principal", None),
             recovery_responder=_driver_recovery_responder(
@@ -348,13 +445,30 @@ def dispatch_driver_turn(
             dedup_strategies=dedup_strategies, adjust_params=adjust_params,
             expected_step_id=expected_step_id,
             expected_plan_id=expected_plan_id,
+            expected_plan_status=expected_plan_status,
+            expected_plan_revision=expected_plan_revision,
+            expected_plan_fingerprint=expected_plan_fingerprint,
+            expected_step_fingerprint=expected_step_fingerprint,
             strategy_request=strategy_request,
+            portfolio_request=portfolio_request,
+            labeling_request=labeling_request,
             ui_action=ui_action,
             confirmation_source=CONFIRMATION_SOURCE_HUMAN,
             recovery_bypass=(
-                strategy_input is not None or strategy_request is not None
+                strategy_input is not None
+                or strategy_request is not None
+                or portfolio_request is not None
+                or labeling_request is not None
             ),
         )
+    except C1TargetValidationError as exc:
+        repo_.finish_job(
+            job_id,
+            status="failed",
+            error_name="C1TargetValidationError",
+            error_value=str(exc),
+        )
+        raise unprocessable(str(exc)) from exc
     except DriverError as exc:
         repo_.finish_job(job_id, status="failed", error_name="DriverError", error_value=str(exc))
         raise conflict(str(exc)) from exc
@@ -837,6 +951,7 @@ def validation_stage_dependencies() -> ValidationStageDependencies:
         compose_agent_start_message=compose_agent_start_message,
         summarize_stage=summarize_stage,
         generate_word_conclusions=generate_word_conclusions,
+        fallback_word_conclusions=fallback_word_conclusions,
         failure_summary=failure_summary,
     )
 

@@ -487,12 +487,6 @@ def _round_log_sample(
     return float(round(value, 8))
 
 
-def _sample_params(rng: np.random.RandomState, pos_weight_hint: float) -> dict:
-    """Back-compat single-stage sampler (used by callers that want one draw from
-    the full coarse space, e.g. non-lgb fallbacks or tests)."""
-    return _sample_coarse_params(rng, pos_weight_hint)
-
-
 def _boost_round_ceiling(learning_rate: float, max_boost_round: int) -> int:
     """Scale the per-trial round ceiling inversely with the sampled learning rate
     so low-lr trials get enough rounds to converge; early stopping still bounds

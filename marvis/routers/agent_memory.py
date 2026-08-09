@@ -13,7 +13,7 @@ from marvis.agent_memory.consolidation import ConsolidationScheduler
 from marvis.agent_memory.distillation import DistillationEngine
 from marvis.agent_memory.evolution import EvolutionManager
 from marvis.agent_memory.store import AgentMemoryStore
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import resolve_llm_model
 

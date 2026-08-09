@@ -20,6 +20,15 @@ def _requirement_names(requirements: list[str]) -> set[str]:
     return names
 
 
+def _read_current_tracked_text(path: Path) -> str | None:
+    """Read the worktree version of a tracked path, skipping deletes/binaries."""
+
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, UnicodeDecodeError):
+        return None
+
+
 def test_project_identity_uses_marvis_package_and_scripts():
     pyproject = _pyproject()
 
@@ -86,9 +95,8 @@ def test_tracked_files_do_not_reference_legacy_identity():
 
     for relative_path in tracked:
         path = Path(relative_path)
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        text = _read_current_tracked_text(path)
+        if text is None:
             continue
         if any(token in text for token in banned) or any(
             token in relative_path for token in banned
@@ -96,3 +104,9 @@ def test_tracked_files_do_not_reference_legacy_identity():
             offenders.append(relative_path)
 
     assert offenders == []
+
+
+def test_project_identity_scan_skips_a_tracked_path_deleted_from_worktree(
+    tmp_path,
+):
+    assert _read_current_tracked_text(tmp_path / "deleted.py") is None

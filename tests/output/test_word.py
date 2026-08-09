@@ -3,6 +3,7 @@ from pathlib import Path
 from docx import Document
 
 from marvis.output.word import write_validation_word
+from marvis.report_fields import default_report_values
 from tests.output.test_excel import _make_pmml_results, _make_results
 
 
@@ -112,3 +113,54 @@ def test_word_report_renders_v2_pmml_scoring_summary_for_old_and_new_templates(
     assert text.count("全量 3 行") == 2
     assert "三方分数对比" not in text
     assert len(document.inline_shapes) >= 1
+
+
+def test_packaged_default_template_renders_complete_neutral_report(tmp_path: Path):
+    results = _make_pmml_results()
+    template = Path("marvis/report_templates/default.docx")
+    output = tmp_path / "default-report.docx"
+    validator = "MARVIS QA"
+    report_values = default_report_values(
+        results.model_name,
+        results.model_version,
+        validator,
+        results.algorithm,
+    )
+
+    result = write_validation_word(
+        results,
+        template_path=template,
+        output_path=output,
+        image_output_dir=tmp_path / "default-images",
+        report_values=report_values,
+    )
+
+    assert result.unresolved_placeholders == []
+    document = Document(output)
+    text = "\n".join(
+        [*(paragraph.text for paragraph in document.paragraphs)]
+        + [
+            paragraph.text
+            for table in document.tables
+            for row in table.rows
+            for cell in row.cells
+            for paragraph in cell.paragraphs
+        ]
+    )
+    expected_headings = [
+        paragraph.text
+        for paragraph in Document(template).paragraphs
+        if paragraph.style.name.startswith("Heading")
+    ]
+    rendered_headings = [
+        paragraph.text
+        for paragraph in document.paragraphs
+        if paragraph.style.name.startswith("Heading")
+    ]
+
+    assert report_values["TEXT:report_title"] in text
+    assert report_values["TEXT:drafter"] in text
+    assert report_values["TEXT:model_training_description"] in text
+    assert "{{" not in text
+    assert rendered_headings == expected_headings
+    assert len(document.inline_shapes) >= 10

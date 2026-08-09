@@ -52,8 +52,8 @@ from marvis.packs.strategy.pool_impact import (
 )
 from marvis.packs.strategy.pool_impact_tools import (
     POOL_IMPACT_ARTIFACT_KIND,
-    POOL_IMPACT_ARTIFACT_SCHEMA_VERSION,
     POOL_IMPACT_ORIGIN_TOOL,
+    validate_strategy_pool_impact_artifact_provenance,
 )
 from marvis.packs.strategy.project_context import (
     MAX_PROJECT_CONTEXT_JSON_BYTES,
@@ -78,18 +78,28 @@ from marvis.packs.strategy.sample_design import (
     strategy_sample_design_bundle_from_json,
 )
 from marvis.packs.strategy.sample_design_v2 import (
+    STRATEGY_SAMPLE_DESIGN_V2_PRODUCER_VERSION,
     canonical_strategy_sample_design_v2_bundle_json,
     strategy_sample_design_v2_bundle_from_json,
 )
 from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ARTIFACT_SCHEMA_VERSION,
     SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
     load_historical_native_strategy_sample_design_v2_artifacts,
+    native_sample_design_v2_membership_registry_identity_hash,
     require_historical_native_strategy_sample_design_v2_artifact_binding_on_connection,
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
     SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.sample_membership import (
+    MAX_MEMBERSHIP_HEADER_BYTES,
+    MAX_MEMBERSHIP_PAYLOAD_BYTES,
+    decode_sample_membership,
+    encode_sample_membership,
 )
 from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
@@ -110,7 +120,10 @@ from marvis.repositories.strategy_project_context import (
     StrategyProjectContextConflictError,
     StrategyProjectContextRepository,
 )
-from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.repositories.task_artifacts import (
+    TaskArtifactRepository,
+    stable_task_artifact_id,
+)
 
 
 PROJECT_CONTEXT_TOOL_SCHEMA_VERSION = "strategy.materialize-project-context-tool.v1"
@@ -188,37 +201,93 @@ _SAMPLE_PROVENANCE_FIELDS = frozenset(
         "request_hash",
     }
 )
-_POOL_PROVENANCE_FIELDS = frozenset(
+_NATIVE_SAMPLE_SOURCE_PROVENANCE_FIELDS = frozenset(
     {
         "schema_version",
         "producer_version",
+        "source_mode",
         "task_id",
-        "assessment_id",
-        "assessment_content_hash",
-        "pool_id",
-        "pool_revision",
-        "pool_revision_id",
-        "pool_snapshot_hash",
-        "design_hash",
-        "strategy_spec_hash",
         "dataset_id",
         "dataset_content_hash",
-        "registry_metadata_hash",
+        "dataset_source_path",
+        "dataset_registry_metadata_hash",
         "workspace_revision",
         "workspace_generation",
         "semantic_mapping_hash",
         "target_col",
-        "sample_design_ref",
-        "month_col",
-        "loan_amount_col",
-        "overdue_amount_col",
-        "source_target_bad_value",
-        "normalized_target_bad_value",
-        "sample_partition",
-        "comparison_mode",
-        "baseline_strategy_id",
-        "baseline_spec_hash",
+        "target_bad_value",
+        "drop_nan_labels",
     }
+)
+_NATIVE_SAMPLE_MEMBERSHIP_PROVENANCE_FIELDS = (
+    _NATIVE_SAMPLE_SOURCE_PROVENANCE_FIELDS
+    | {
+        "format",
+        "artifact_role",
+        "membership_id",
+        "membership_content_hash",
+        "membership_artifact_content_hash",
+    }
+)
+_NATIVE_SAMPLE_BUNDLE_PROVENANCE_FIELDS = (
+    _NATIVE_SAMPLE_SOURCE_PROVENANCE_FIELDS
+    | {
+        "format",
+        "artifact_role",
+        "membership_id",
+        "membership_content_hash",
+        "membership_artifact_id",
+        "membership_artifact_content_hash",
+        "bundle_id",
+        "bundle_content_hash",
+        "bundle_artifact_content_hash",
+        "sample_design_id",
+        "sample_design_content_hash",
+        "request",
+        "request_hash",
+    }
+)
+_COMPAT_SAMPLE_V2_BUNDLE_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "format",
+        "artifact_role",
+        "task_id",
+        "membership_id",
+        "membership_content_hash",
+        "membership_artifact_id",
+        "membership_artifact_content_hash",
+        "bundle_id",
+        "bundle_content_hash",
+        "bundle_artifact_content_hash",
+        "sample_design_id",
+        "sample_design_content_hash",
+        "dataset_id",
+        "dataset_content_hash",
+        "dataset_source_path",
+        "dataset_registry_metadata_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "legacy_sample_design_ref",
+        "request",
+        "request_hash",
+    }
+)
+_ARTIFACT_DERIVED_SOURCE_KINDS = frozenset(
+    {
+        "task_artifact",
+        "external_report",
+        "sample_design",
+        "pool_impact",
+        "impact_cube",
+        "metric_definition",
+        "metric_observation",
+    }
+)
+_MAX_NATIVE_MEMBERSHIP_FILE_BYTES = (
+    MAX_MEMBERSHIP_HEADER_BYTES + MAX_MEMBERSHIP_PAYLOAD_BYTES + 64
 )
 _KNOWN_MISSING = {
     "current.status_fields.volume": (
@@ -1308,16 +1377,23 @@ def _discover_task_artifacts(
             if raw != canonical:
                 raise StrategyError("Pool impact artifact bytes are not canonical")
             provenance = record["provenance"]
+            try:
+                validated_provenance = (
+                    validate_strategy_pool_impact_artifact_provenance(provenance)
+                )
+            except StrategyError as exc:
+                raise StrategyError(
+                    "Pool impact artifact provenance changed"
+                ) from exc
+            if provenance != validated_provenance:
+                raise StrategyError("Pool impact artifact provenance changed")
             identity = assessment["identity"]
             if (
-                set(provenance) != _POOL_PROVENANCE_FIELDS
-                or Path(record["path"])
+                Path(record["path"])
                 != Path(tasks_root).absolute()
                 / task_id
                 / "strategy_pool_impacts"
                 / f"{assessment['assessment_id']}.json"
-                or provenance.get("schema_version")
-                != POOL_IMPACT_ARTIFACT_SCHEMA_VERSION
                 or provenance.get("producer_version")
                 != STRATEGY_POOL_IMPACT_PRODUCER_VERSION
                 or provenance.get("task_id") != task_id
@@ -2303,7 +2379,7 @@ def _build_state(
         extra_sources.append(
             build_source_ref(
                 kind="task_artifact",
-                ref_id=_stable_task_artifact_id(
+                ref_id=stable_task_artifact_id(
                     task_id=task_id,
                     kind=PROJECT_CONTEXT_EXTERNAL_ARTIFACT_KIND,
                     path=str(external_path),
@@ -3093,7 +3169,7 @@ def _artifact_row(row, *, task_id: str, tasks_root: Path) -> dict[str, Any]:
     path = Path(_text(row["path"], "task_artifact.path"))
     _require_no_symlink_path(path, root=Path(tasks_root).absolute())
     content_hash = _hash(row["content_hash"], "task_artifact.content_hash")
-    expected_artifact_id = _stable_task_artifact_id(
+    expected_artifact_id = stable_task_artifact_id(
         task_id=task_id,
         kind=str(row["kind"]),
         path=str(path),
@@ -3276,6 +3352,15 @@ def _verify_live_refs(
     task_id: str,
     source_refs: Sequence[Mapping[str, Any]],
 ) -> None:
+    artifact_ref_index = (
+        _build_artifact_derived_ref_index(
+            conn,
+            tasks_root=tasks_root,
+            task_id=task_id,
+        )
+        if any(ref["kind"] in _ARTIFACT_DERIVED_SOURCE_KINDS for ref in source_refs)
+        else {}
+    )
     for ref in source_refs:
         kind, ref_id, expected = ref["kind"], ref["ref_id"], ref["content_hash"]
         actual = None
@@ -3345,23 +3430,8 @@ def _verify_live_refs(
                 (ref_id,),
             ).fetchone()
             actual = None if row is None else _run_record_from_row(row).result_hash
-        elif kind in {
-            "task_artifact",
-            "external_report",
-            "sample_design",
-            "pool_impact",
-            "impact_cube",
-            "metric_definition",
-            "metric_observation",
-        }:
-            actual = _resolve_artifact_derived_ref(
-                conn,
-                tasks_root=tasks_root,
-                task_id=task_id,
-                kind=kind,
-                ref_id=ref_id,
-                expected=expected,
-            )
+        elif kind in _ARTIFACT_DERIVED_SOURCE_KINDS:
+            actual = artifact_ref_index.get((kind, ref_id))
         else:
             raise StrategyError(f"unsupported live project-context source kind: {kind}")
         if actual is None or not hmac.compare_digest(actual, expected):
@@ -3370,9 +3440,14 @@ def _verify_live_refs(
             )
 
 
-def _resolve_artifact_derived_ref(
-    conn, *, tasks_root: Path, task_id: str, kind: str, ref_id: str, expected: str
-) -> str | None:
+def _build_artifact_derived_ref_index(
+    conn,
+    *,
+    tasks_root: Path,
+    task_id: str,
+) -> dict[tuple[str, str], str]:
+    """Authenticate task-scoped artifacts once and index their source refs."""
+
     artifact_kinds = (
         SAMPLE_DESIGN_ARTIFACT_KIND,
         SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
@@ -3384,101 +3459,609 @@ def _resolve_artifact_derived_ref(
     placeholders = ",".join("?" for _ in artifact_kinds)
     rows = conn.execute(
         "SELECT * FROM task_artifacts "
-        f"WHERE task_id = ? AND kind IN ({placeholders})",
+        f"WHERE task_id = ? AND kind IN ({placeholders}) ORDER BY created_at, id",
         (task_id, *artifact_kinds),
     ).fetchall()
+    index: dict[tuple[str, str], str] = {}
+    native_memberships: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    native_bundles: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    external_total_size = 0
     for row in rows:
         record = _artifact_row(row, task_id=task_id, tasks_root=tasks_root)
         raw: bytes | None = None
+        external_size: int | None = None
         if record["kind"] == PROJECT_CONTEXT_EXTERNAL_ARTIFACT_KIND:
-            _verify_regular_file(
-                Path(record["path"]),
-                root=tasks_root,
-                expected_hash=record["content_hash"],
-                max_bytes=MAX_EXTERNAL_REPORT_BYTES,
+            external_size, external_hash = _stream_regular_nofollow(
+                Path(record["path"]), max_bytes=MAX_EXTERNAL_REPORT_BYTES
             )
+            if not hmac.compare_digest(external_hash, record["content_hash"]):
+                raise StrategyError(
+                    "task artifact bytes do not match its registry hash"
+                )
+            external_total_size += external_size
+            if external_total_size > MAX_EXTERNAL_REPORT_TOTAL_BYTES:
+                raise StrategyError(
+                    "registered external reports exceed total byte limit"
+                )
         else:
+            if record["kind"] == IMPACT_CUBE_ARTIFACT_KIND:
+                max_bytes = MAX_IMPACT_CUBE_JSON_BYTES
+            elif record["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND:
+                max_bytes = _MAX_NATIVE_MEMBERSHIP_FILE_BYTES
+            else:
+                max_bytes = MAX_PROJECT_CONTEXT_JSON_BYTES
             raw = _read_verified_registered_artifact(
                 record,
                 tasks_root=tasks_root,
-                max_bytes=(
-                    MAX_IMPACT_CUBE_JSON_BYTES
-                    if record["kind"] == IMPACT_CUBE_ARTIFACT_KIND
-                    else MAX_PROJECT_CONTEXT_JSON_BYTES
-                ),
+                max_bytes=max_bytes,
             )
-        if kind == "task_artifact" and record["id"] == ref_id:
-            return record["content_hash"]
+        _add_artifact_derived_ref(
+            index,
+            kind="task_artifact",
+            ref_id=record["id"],
+            content_hash=record["content_hash"],
+        )
         if (
             record["kind"] == PROJECT_CONTEXT_EXTERNAL_ARTIFACT_KIND
-            and kind == "external_report"
-            and record["content_hash"] == ref_id
         ):
-            return record["content_hash"]
+            assert external_size is not None
+            _validate_indexed_external_artifact(
+                record,
+                tasks_root=tasks_root,
+                task_id=task_id,
+                content_size=external_size,
+            )
+            _add_artifact_derived_ref(
+                index,
+                kind="external_report",
+                ref_id=record["content_hash"],
+                content_hash=record["content_hash"],
+            )
         if record["kind"] == SAMPLE_DESIGN_ARTIFACT_KIND:
             assert raw is not None
-            bundle = strategy_sample_design_bundle_from_json(raw)
+            bundle = _validate_indexed_sample_design_artifact(
+                record,
+                raw=raw,
+                tasks_root=tasks_root,
+                task_id=task_id,
+            )
             design = bundle["sample_design"]
-            if kind == "sample_design" and design["sample_design_id"] == ref_id:
-                return design["content_hash"]
+            _add_artifact_derived_ref(
+                index,
+                kind="sample_design",
+                ref_id=design["sample_design_id"],
+                content_hash=design["content_hash"],
+            )
             for item in bundle["metric_definitions"]:
-                if (
-                    kind == "metric_definition"
-                    and item["metric_definition_id"] == ref_id
-                ):
-                    return item["content_hash"]
-            for item in bundle["metric_observations"]:
-                if kind == "metric_observation" and item["observation_id"] == ref_id:
-                    return item["content_hash"]
-        if (
-            record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
-            and record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
-        ):
-            assert raw is not None
-            bundle_v2 = strategy_sample_design_v2_bundle_from_json(raw)
-            if (
-                canonical_strategy_sample_design_v2_bundle_json(
-                    bundle_v2
-                ).encode("utf-8")
-                != raw
-            ):
-                raise StrategyError(
-                    "native sample-design V2 artifact bytes are not canonical"
+                _add_artifact_derived_ref(
+                    index,
+                    kind="metric_definition",
+                    ref_id=item["metric_definition_id"],
+                    content_hash=item["content_hash"],
                 )
+            for item in bundle["metric_observations"]:
+                _add_artifact_derived_ref(
+                    index,
+                    kind="metric_observation",
+                    ref_id=item["observation_id"],
+                    content_hash=item["content_hash"],
+                )
+        if record["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND:
+            assert raw is not None
+            membership = _validate_indexed_native_membership_artifact(
+                record,
+                raw=raw,
+                tasks_root=tasks_root,
+                task_id=task_id,
+            )
+            native_memberships[record["id"]] = (record, membership)
+        if record["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND:
+            assert raw is not None
+            bundle_v2 = _validate_indexed_sample_design_v2_bundle_artifact(
+                record,
+                raw=raw,
+                tasks_root=tasks_root,
+                task_id=task_id,
+            )
+            if record["origin_tool"] != SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL:
+                continue
+            native_bundles.append((record, bundle_v2))
             design_v2 = bundle_v2["sample_design"]
-            if (
-                kind == "sample_design"
-                and design_v2["sample_design_id"] == ref_id
-            ):
-                return design_v2["content_hash"]
+            _add_artifact_derived_ref(
+                index,
+                kind="sample_design",
+                ref_id=design_v2["sample_design_id"],
+                content_hash=design_v2["content_hash"],
+            )
             for item in bundle_v2["metric_definitions"]:
-                if (
-                    kind == "metric_definition"
-                    and item["metric_definition_id"] == ref_id
-                ):
-                    return item["content_hash"]
+                _add_artifact_derived_ref(
+                    index,
+                    kind="metric_definition",
+                    ref_id=item["metric_definition_id"],
+                    content_hash=item["content_hash"],
+                )
             for item in bundle_v2["metric_observations"]:
-                if (
-                    kind == "metric_observation"
-                    and item["observation_id"] == ref_id
-                ):
-                    return item["content_hash"]
+                _add_artifact_derived_ref(
+                    index,
+                    kind="metric_observation",
+                    ref_id=item["observation_id"],
+                    content_hash=item["content_hash"],
+                )
         if record["kind"] == POOL_IMPACT_ARTIFACT_KIND:
             assert raw is not None
-            assessment = validate_strategy_pool_impact_assessment(json.loads(raw))
-            if kind == "pool_impact" and assessment["assessment_id"] == ref_id:
-                return assessment["content_hash"]
+            assessment = _validate_indexed_pool_impact_artifact(
+                record,
+                raw=raw,
+                tasks_root=tasks_root,
+                task_id=task_id,
+            )
+            _add_artifact_derived_ref(
+                index,
+                kind="pool_impact",
+                ref_id=assessment["assessment_id"],
+                content_hash=assessment["content_hash"],
+            )
         if record["kind"] == IMPACT_CUBE_ARTIFACT_KIND:
             assert raw is not None
-            cube = validate_strategy_impact_cube(json.loads(raw))
-            if (
-                canonical_strategy_impact_cube_json(cube).encode("utf-8")
-                != raw
-            ):
-                raise StrategyError("ImpactCube artifact bytes are not canonical")
-            if kind == "impact_cube" and cube["cube_id"] == ref_id:
-                return cube["content_hash"]
-    return None
+            cube = _validate_indexed_impact_cube_artifact(
+                conn,
+                record,
+                raw=raw,
+                tasks_root=tasks_root,
+                task_id=task_id,
+            )
+            _add_artifact_derived_ref(
+                index,
+                kind="impact_cube",
+                ref_id=cube["cube_id"],
+                content_hash=cube["content_hash"],
+            )
+    for bundle_record, bundle in native_bundles:
+        membership_entry = native_memberships.get(
+            bundle_record["provenance"]["membership_artifact_id"]
+        )
+        if membership_entry is None:
+            raise StrategyError(
+                "native sample-design V2 membership artifact is not registered"
+            )
+        _require_indexed_native_artifact_pair(
+            bundle_record=bundle_record,
+            bundle=bundle,
+            membership_record=membership_entry[0],
+            membership=membership_entry[1],
+        )
+    return index
+
+
+def _add_artifact_derived_ref(
+    index: dict[tuple[str, str], str],
+    *,
+    kind: str,
+    ref_id: str,
+    content_hash: str,
+) -> None:
+    key = (kind, ref_id)
+    normalized = _hash(content_hash, f"{kind}.content_hash")
+    prior = index.get(key)
+    if prior is not None and not hmac.compare_digest(prior, normalized):
+        raise StrategyError(
+            f"ambiguous artifact-derived source identity: {kind}:{ref_id}"
+        )
+    index[key] = normalized
+
+
+def _validate_indexed_external_artifact(
+    record: Mapping[str, Any],
+    *,
+    tasks_root: Path,
+    task_id: str,
+    content_size: int,
+) -> None:
+    provenance = record["provenance"]
+    if set(provenance) != {
+        "schema_version",
+        "task_id",
+        "content_hash",
+        "content_size",
+        "suffix",
+    }:
+        raise StrategyError("external strategy report provenance is invalid")
+    expected_path = (
+        Path(tasks_root).absolute()
+        / task_id
+        / "strategy_project_context_sources"
+        / f"{record['content_hash']}{provenance['suffix']}"
+    )
+    if (
+        record["origin_tool"] != PROJECT_CONTEXT_ORIGIN_TOOL
+        or provenance["schema_version"] != PROJECT_CONTEXT_EXTERNAL_SCHEMA_VERSION
+        or provenance["task_id"] != task_id
+        or provenance["content_hash"] != record["content_hash"]
+        or provenance["content_size"] != content_size
+        or provenance["suffix"] != Path(record["path"]).suffix.lower()
+        or Path(record["path"]) != expected_path
+    ):
+        raise StrategyError("external strategy report provenance changed")
+
+
+def _validate_indexed_sample_design_artifact(
+    record: Mapping[str, Any],
+    *,
+    raw: bytes,
+    tasks_root: Path,
+    task_id: str,
+) -> dict[str, Any]:
+    if record["origin_tool"] != SAMPLE_DESIGN_ORIGIN_TOOL:
+        raise StrategyError("strategy sample-design artifact origin changed")
+    bundle = strategy_sample_design_bundle_from_json(raw)
+    canonical = canonical_strategy_sample_design_bundle_json(bundle).encode("utf-8")
+    if raw != canonical:
+        raise StrategyError("strategy sample-design artifact bytes are not canonical")
+    provenance = record["provenance"]
+    design = bundle["sample_design"]
+    dataset_ref = design["identity"]["dataset_ref"]
+    expected_path = (
+        Path(tasks_root).absolute()
+        / task_id
+        / "strategy_sample_designs"
+        / f"{design['sample_design_id']}.json"
+    )
+    if (
+        set(provenance) != _SAMPLE_PROVENANCE_FIELDS
+        or Path(record["path"]) != expected_path
+        or provenance.get("schema_version") != SAMPLE_DESIGN_ARTIFACT_SCHEMA_VERSION
+        or provenance.get("producer_version")
+        != STRATEGY_SAMPLE_DESIGN_PRODUCER_VERSION
+        or provenance.get("format") != "json"
+        or provenance.get("task_id") != task_id
+        or provenance.get("sample_design_id") != design["sample_design_id"]
+        or provenance.get("sample_design_content_hash") != design["content_hash"]
+        or provenance.get("bundle_id") != bundle["bundle_id"]
+        or provenance.get("bundle_content_hash") != bundle["content_hash"]
+        or provenance.get("dataset_id") != dataset_ref["dataset_id"]
+        or provenance.get("dataset_content_hash") != dataset_ref["content_hash"]
+        or provenance.get("request_hash") != _sha256_json(provenance.get("request"))
+    ):
+        raise StrategyError("strategy sample-design artifact provenance changed")
+    return bundle
+
+
+def _validate_indexed_native_membership_artifact(
+    record: Mapping[str, Any],
+    *,
+    raw: bytes,
+    tasks_root: Path,
+    task_id: str,
+) -> dict[str, Any]:
+    if record["origin_tool"] != SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL:
+        raise StrategyError("native sample-design V2 artifact origin changed")
+    try:
+        membership = decode_sample_membership(raw)
+    except StrategyError as exc:
+        raise StrategyError(
+            "native sample-design V2 membership artifact is invalid"
+        ) from exc
+    header = membership["header"]
+    canonical = encode_sample_membership(
+        task_id=header["task_id"],
+        dataset_id=header["dataset_ref"]["dataset_id"],
+        dataset_content_hash=header["dataset_ref"]["content_hash"],
+        masks=membership["masks"],
+    )
+    if raw != canonical:
+        raise StrategyError(
+            "native sample-design V2 membership bytes are not canonical"
+        )
+    provenance = record["provenance"]
+    if set(provenance) != _NATIVE_SAMPLE_MEMBERSHIP_PROVENANCE_FIELDS:
+        raise StrategyError(
+            "native sample-design V2 membership provenance changed"
+        )
+    _validate_indexed_native_source_provenance(provenance, task_id=task_id)
+    for field in (
+        "membership_content_hash",
+        "membership_artifact_content_hash",
+    ):
+        _hash(provenance[field], f"native membership provenance.{field}")
+    registry_hash = native_sample_design_v2_membership_registry_identity_hash(
+        provenance
+    )
+    expected_path = (
+        Path(tasks_root).absolute()
+        / task_id
+        / "strategy_sample_designs_v2"
+        / f"{header['membership_id']}-{registry_hash[:24]}.bin"
+    )
+    expected = {
+        "format": "binary",
+        "artifact_role": "membership",
+        "task_id": task_id,
+        "membership_id": header["membership_id"],
+        "membership_content_hash": header["content_hash"],
+        "membership_artifact_content_hash": record["content_hash"],
+        "dataset_id": header["dataset_ref"]["dataset_id"],
+        "dataset_content_hash": header["dataset_ref"]["content_hash"],
+    }
+    if Path(record["path"]) != expected_path or any(
+        provenance[field] != value for field, value in expected.items()
+    ):
+        raise StrategyError(
+            "native sample-design V2 membership provenance changed"
+        )
+    return membership
+
+
+def _validate_indexed_sample_design_v2_bundle_artifact(
+    record: Mapping[str, Any],
+    *,
+    raw: bytes,
+    tasks_root: Path,
+    task_id: str,
+) -> dict[str, Any]:
+    try:
+        bundle = strategy_sample_design_v2_bundle_from_json(raw)
+    except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise StrategyError("sample-design V2 bundle artifact is invalid") from exc
+    if canonical_strategy_sample_design_v2_bundle_json(bundle).encode("utf-8") != raw:
+        raise StrategyError("sample-design V2 artifact bytes are not canonical")
+    provenance = record["provenance"]
+    native = record["origin_tool"] == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+    if native:
+        if set(provenance) != _NATIVE_SAMPLE_BUNDLE_PROVENANCE_FIELDS:
+            raise StrategyError("native sample-design V2 provenance changed")
+        _validate_indexed_native_source_provenance(provenance, task_id=task_id)
+    elif record["origin_tool"] == SAMPLE_DESIGN_V2_ORIGIN_TOOL:
+        if set(provenance) != _COMPAT_SAMPLE_V2_BUNDLE_PROVENANCE_FIELDS:
+            raise StrategyError("sample-design V2 provenance changed")
+        _validate_indexed_compat_sample_v2_source_provenance(
+            provenance,
+            task_id=task_id,
+        )
+    else:
+        raise StrategyError("strategy sample-design V2 artifact origin changed")
+    if not isinstance(provenance["request"], Mapping):
+        raise StrategyError("sample-design V2 provenance request changed")
+    for field in (
+        "membership_content_hash",
+        "membership_artifact_id",
+        "membership_artifact_content_hash",
+        "bundle_content_hash",
+        "bundle_artifact_content_hash",
+        "sample_design_content_hash",
+        "request_hash",
+    ):
+        _hash(provenance[field], f"sample-design V2 provenance.{field}")
+    design = bundle["sample_design"]
+    identity = design["identity"]
+    expected_path = (
+        Path(tasks_root).absolute()
+        / task_id
+        / "strategy_sample_designs_v2"
+        / f"{bundle['bundle_id']}.json"
+    )
+    expected = {
+        "format": "json",
+        "artifact_role": "bundle",
+        "task_id": task_id,
+        "membership_id": bundle["membership"]["membership_id"],
+        "membership_content_hash": bundle["membership"]["content_hash"],
+        "bundle_id": bundle["bundle_id"],
+        "bundle_content_hash": bundle["content_hash"],
+        "bundle_artifact_content_hash": record["content_hash"],
+        "sample_design_id": design["sample_design_id"],
+        "sample_design_content_hash": design["content_hash"],
+        "dataset_id": identity["dataset_ref"]["dataset_id"],
+        "dataset_content_hash": identity["dataset_ref"]["content_hash"],
+        "workspace_revision": identity["workspace_ref"]["revision"],
+        "workspace_generation": identity["workspace_ref"]["generation"],
+        "semantic_mapping_hash": identity["workspace_ref"][
+            "semantic_mapping_hash"
+        ],
+    }
+    if native:
+        expected.update(
+            {
+                "target_col": design["target_selector"]["column"],
+                "target_bad_value": design["target_selector"]["bad_value"],
+                "drop_nan_labels": design["target_selector"]["drop_missing"],
+            }
+        )
+    else:
+        expected["legacy_sample_design_ref"] = design["compatibility"][
+            "legacy_development_ref"
+        ]
+    if (
+        Path(record["path"]) != expected_path
+        or provenance["request_hash"] != _sha256_json(provenance["request"])
+        or any(provenance[field] != value for field, value in expected.items())
+    ):
+        raise StrategyError("sample-design V2 artifact provenance changed")
+    return bundle
+
+
+def _validate_indexed_native_source_provenance(
+    provenance: Mapping[str, Any],
+    *,
+    task_id: str,
+) -> None:
+    if (
+        provenance["schema_version"]
+        != SAMPLE_DESIGN_V2_NATIVE_ARTIFACT_SCHEMA_VERSION
+        or provenance["producer_version"]
+        != STRATEGY_SAMPLE_DESIGN_V2_PRODUCER_VERSION
+        or provenance["source_mode"] != "native_active_dataset"
+        or provenance["task_id"] != task_id
+    ):
+        raise StrategyError("native sample-design V2 provenance version changed")
+    _validate_indexed_sample_v2_source_scalars(provenance)
+    bad_value = provenance["target_bad_value"]
+    if (
+        isinstance(bad_value, bool)
+        or bad_value not in {0, 1}
+        or not isinstance(provenance["drop_nan_labels"], bool)
+    ):
+        raise StrategyError("native sample-design V2 target provenance changed")
+    _text(provenance["target_col"], "native provenance.target_col")
+
+
+def _validate_indexed_compat_sample_v2_source_provenance(
+    provenance: Mapping[str, Any],
+    *,
+    task_id: str,
+) -> None:
+    if (
+        provenance["schema_version"] != SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION
+        or provenance["producer_version"]
+        != STRATEGY_SAMPLE_DESIGN_V2_PRODUCER_VERSION
+        or provenance["task_id"] != task_id
+        or not isinstance(provenance["legacy_sample_design_ref"], Mapping)
+    ):
+        raise StrategyError("sample-design V2 provenance version changed")
+    _validate_indexed_sample_v2_source_scalars(provenance)
+
+
+def _validate_indexed_sample_v2_source_scalars(
+    provenance: Mapping[str, Any],
+) -> None:
+    for field in (
+        "dataset_content_hash",
+        "dataset_registry_metadata_hash",
+        "semantic_mapping_hash",
+    ):
+        _hash(provenance[field], f"sample-design V2 provenance.{field}")
+    for field in ("task_id", "dataset_id", "dataset_source_path"):
+        _text(provenance[field], f"sample-design V2 provenance.{field}")
+    for field in ("workspace_revision", "workspace_generation"):
+        _non_negative_int(
+            provenance[field],
+            f"sample-design V2 provenance.{field}",
+        )
+
+
+def _require_indexed_native_artifact_pair(
+    *,
+    bundle_record: Mapping[str, Any],
+    bundle: Mapping[str, Any],
+    membership_record: Mapping[str, Any],
+    membership: Mapping[str, Any],
+) -> None:
+    bundle_provenance = bundle_record["provenance"]
+    membership_provenance = membership_record["provenance"]
+    header = membership["header"]
+    source_fields = _NATIVE_SAMPLE_SOURCE_PROVENANCE_FIELDS
+    if (
+        bundle["membership"] != header
+        or bundle_provenance["membership_artifact_id"] != membership_record["id"]
+        or bundle_provenance["membership_artifact_content_hash"]
+        != membership_record["content_hash"]
+        or any(
+            bundle_provenance[field] != membership_provenance[field]
+            for field in source_fields
+        )
+    ):
+        raise StrategyError("native sample-design V2 artifact pair changed")
+
+
+def _validate_indexed_pool_impact_artifact(
+    record: Mapping[str, Any],
+    *,
+    raw: bytes,
+    tasks_root: Path,
+    task_id: str,
+) -> dict[str, Any]:
+    if record["origin_tool"] != POOL_IMPACT_ORIGIN_TOOL:
+        raise StrategyError("Pool impact artifact origin changed")
+    try:
+        assessment = validate_strategy_pool_impact_assessment(json.loads(raw))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StrategyError("Pool impact artifact JSON is invalid") from exc
+    if canonical_strategy_pool_impact_json(assessment).encode("utf-8") != raw:
+        raise StrategyError("Pool impact artifact bytes are not canonical")
+    provenance = record["provenance"]
+    try:
+        normalized_provenance = validate_strategy_pool_impact_artifact_provenance(
+            provenance
+        )
+    except StrategyError as exc:
+        raise StrategyError("Pool impact artifact provenance changed") from exc
+    identity = assessment["identity"]
+    expected_path = (
+        Path(tasks_root).absolute()
+        / task_id
+        / "strategy_pool_impacts"
+        / f"{assessment['assessment_id']}.json"
+    )
+    if (
+        provenance != normalized_provenance
+        or Path(record["path"]) != expected_path
+        or provenance.get("producer_version")
+        != STRATEGY_POOL_IMPACT_PRODUCER_VERSION
+        or provenance.get("task_id") != task_id
+        or provenance.get("assessment_id") != assessment["assessment_id"]
+        or provenance.get("assessment_content_hash") != assessment["content_hash"]
+        or provenance.get("pool_id") != identity["pool_id"]
+        or provenance.get("pool_revision") != identity["revision"]
+        or provenance.get("pool_snapshot_hash") != identity["snapshot_hash"]
+        or provenance.get("design_hash") != identity["design_hash"]
+        or provenance.get("strategy_spec_hash") != identity["strategy_spec_hash"]
+        or provenance.get("dataset_id")
+        != assessment["bindings"]["sample"]["dataset_id"]
+        or provenance.get("dataset_content_hash")
+        != assessment["bindings"]["sample"]["dataset_content_hash"]
+        or provenance.get("comparison_mode")
+        != assessment["bindings"]["comparison_mode"]
+    ):
+        raise StrategyError("Pool impact artifact provenance changed")
+    return assessment
+
+
+def _validate_indexed_impact_cube_artifact(
+    conn,
+    record: Mapping[str, Any],
+    *,
+    raw: bytes,
+    tasks_root: Path,
+    task_id: str,
+) -> dict[str, Any]:
+    if record["origin_tool"] != IMPACT_CUBE_ORIGIN_TOOL:
+        raise StrategyError("ImpactCube artifact origin changed")
+    try:
+        cube = validate_strategy_impact_cube(json.loads(raw))
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ) as exc:
+        raise StrategyError("ImpactCube artifact JSON is invalid") from exc
+    if canonical_strategy_impact_cube_json(cube).encode("utf-8") != raw:
+        raise StrategyError("ImpactCube artifact bytes are not canonical")
+    expected_path = (
+        Path(tasks_root).absolute()
+        / task_id
+        / "strategy_impact_cubes"
+        / f"{cube['cube_id']}.json"
+    )
+    if Path(record["path"]) != expected_path:
+        raise StrategyError("ImpactCube artifact path changed")
+    database = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()
+    if database is None or not str(database["file"]):
+        raise StrategyError("ImpactCube binding database changed")
+    binding = StrategyImpactCubeArtifactBinding(
+        task_id=task_id,
+        artifact_id=record["id"],
+        artifact_path=Path(record["path"]),
+        artifact_content_hash=record["content_hash"],
+        artifact_provenance=record["provenance"],
+        artifact_provenance_json=_canonical_json(record["provenance"]),
+        cube=cube,
+        tasks_root=Path(tasks_root).absolute(),
+        db_path=Path(str(database["file"])).absolute(),
+    )
+    return validate_strategy_impact_cube_artifact_binding(binding)
 
 
 def _artifact_output(
@@ -3564,17 +4147,6 @@ def _evidence_fingerprint_without_external_hashes(
 
 def _request_hash(request: Mapping[str, Any]) -> str:
     return _sha256_json(request)
-
-
-def _stable_task_artifact_id(*, task_id: str, kind: str, path: str) -> str:
-    identity = json.dumps(
-        [task_id, kind, path],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(
-        f"marvis.task_artifact.v1:{identity}".encode("utf-8")
-    ).hexdigest()
 
 
 def _dedupe_refs(refs: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:

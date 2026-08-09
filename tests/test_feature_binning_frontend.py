@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 
 STATIC = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
@@ -45,7 +47,7 @@ def test_feature_binning_gate_is_wired_to_shared_manual_and_agent_surfaces():
 
 
 def test_feature_binning_gate_resets_global_form_styles_and_keeps_copy_readable():
-    styles = (STATIC / "css" / "v2-workbench.css").read_text(encoding="utf-8")
+    styles = read_browser_stylesheets(STATIC)
 
     assert '.feature-binning-option > input[type="checkbox"]' in styles
     assert "inline-size: 18px" in styles
@@ -64,3 +66,69 @@ def test_feature_binning_gate_resets_global_form_styles_and_keeps_copy_readable(
     assert "white-space: normal" in copy_rule
     assert "overflow-wrap: anywhere" in copy_rule
     assert "text-overflow: ellipsis" not in copy_rule
+
+
+def test_feature_binning_gate_uses_the_shared_light_and_dark_theme_tokens():
+    styles = read_browser_stylesheets(STATIC)
+    gate_start = styles.index(".feature-binning-gate {")
+    gate_end = styles.index("/* Special-value HITL", gate_start)
+    gate_styles = styles[gate_start:gate_end]
+
+    # These aliases are not defined by either theme. Their literal light-mode
+    # fallbacks turned the gate white-on-near-white under the dark theme.
+    assert "var(--panel" not in gate_styles
+    assert "var(--line" not in gate_styles
+    assert "var(--muted" not in gate_styles
+
+    # The component must inherit the same semantic surface, border and text
+    # palette that :root and body[data-theme=dark] both provide.
+    assert "var(--surface)" in gate_styles
+    assert "var(--border" in gate_styles
+    assert "var(--text-secondary)" in gate_styles
+
+
+def test_feature_binning_conflict_refreshes_latest_gate_and_keeps_stale_form_disabled():
+    module_url = (STATIC / "js" / "v2" / "feature_binning_gate.js").as_uri()
+    script = "\n".join([
+        "import assert from 'node:assert/strict';",
+        f"import {{ submitFeatureBinning }} from {json.dumps(module_url)};",
+        "const submitButton = { disabled: false, dataset: { featureBinningSubmit: 'skip' } };",
+        "const countInput = { disabled: false, value: '10' };",
+        "const controls = [submitButton, countInput];",
+        "const wrap = {",
+        "  dataset: {",
+        "    featureBinningPlanId: 'plan-1',",
+        "    featureBinningStepId: 'gate-1',",
+        "    expectedPlanStatus: 'awaiting_confirm',",
+        "    expectedPlanRevision: '2',",
+        "    expectedPlanFingerprint: 'a'.repeat(64),",
+        "    expectedStepFingerprint: 'b'.repeat(64),",
+        "  },",
+        "  querySelector: () => countInput,",
+        "  querySelectorAll: (selector) => selector === 'button, input' ? controls : [],",
+        "};",
+        "submitButton.closest = () => wrap;",
+        "const statuses = [];",
+        "const refreshed = [];",
+        "const conflict = Object.assign(new Error('确认快照已变化'), { status: 409 });",
+        "await submitFeatureBinning(submitButton, {",
+        "  selectedTaskId: 'task-1',",
+        "  api: async () => { throw conflict; },",
+        "  pollAgentMessagesUntilSettled: async () => {},",
+        "  refreshAgentMessages: async (taskId) => { refreshed.push(taskId); },",
+        "  setActionStatus: (message, kind) => statuses.push([message, kind]),",
+        "});",
+        "assert.deepEqual(refreshed, ['task-1']);",
+        "assert.equal(controls.every((control) => control.disabled), true);",
+        "assert.deepEqual(statuses.at(-1), [",
+        "  '计划已更新，已加载最新待确认步骤，请重新检查后操作。', 'info',",
+        "]);",
+        "process.stdout.write('ok');",
+    ])
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout == "ok"

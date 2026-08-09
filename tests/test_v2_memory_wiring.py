@@ -622,14 +622,12 @@ def test_append_driver_done_shows_agent_analysis_memory_reference_and_capture_re
         messages=[DriverMessage("done", "✅ 计划已全部完成。", {"tables": tables})],
     )
 
-    append_driver_messages(
-        repo,
-        task.id,
-        turn,
+    runtime = SimpleNamespace(
         settings=settings,
-        task=task,
+        llm_client=None,
         hook_dispatcher=hooks,
     )
+    append_driver_messages(repo, task, turn, runtime=runtime)
 
     stored = repo.items[-1]
     assert "本次参考的历史记忆" in stored["content"]
@@ -637,7 +635,10 @@ def test_append_driver_done_shows_agent_analysis_memory_reference_and_capture_re
     assert "本次记忆沉淀" in stored["content"]
     assert stored["metadata"]["agent_insight"]["avoid_features"] == ["x2"]
     assert stored["metadata"]["memory_capture"]["saved"][0]["memory_type"] == "feature_experience"
-    assert hooks.events[0][0] == "memory.after_save"
+    assert [event[0] for event in hooks.events] == [
+        "memory.before_save",
+        "memory.after_save",
+    ]
 
 
 def test_feature_experience_can_be_consolidated_into_visible_distillation(tmp_path: Path):

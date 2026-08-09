@@ -19,7 +19,7 @@ from marvis.agent_memory.api_support import (
     audit_agent_memory_use_from_store,
 )
 from marvis.agent_memory.store import AgentMemoryStore
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TASK_TYPE_VALIDATION, TaskRecord, TaskStatus
 from marvis.repositories.validation_contracts import (
     ValidationContractRepository,
@@ -60,6 +60,7 @@ class ValidationStageDependencies:
     compose_agent_start_message: Callable
     summarize_stage: Callable
     generate_word_conclusions: Callable
+    fallback_word_conclusions: Callable
     failure_summary: Callable
 
 
@@ -586,9 +587,20 @@ def run_agent_word_conclusion_stage(
             model_profile=model_profile,
             user_instruction=rewrite_instruction,
         )
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        narrative_source = "agent_generated"
+        if not isinstance(values, dict) or not agent_conclusions_confirmed(values):
+            values = deps.fallback_word_conclusions(task=task, evidence=evidence)
+            narrative_source = "deterministic_fallback"
+            metadata.update({
+                "fallback": True,
+                "deterministic_fallback": True,
+                "confirmable": False,
+            })
         draft_result["values"] = values
         draft_result["metadata"] = metadata
         draft_result["report_revision"] = report_revision
+        draft_result["narrative_source"] = narrative_source
         return (
             format_conclusion_values(values),
             {**metadata, "draft_values": values, "report_revision": report_revision},
@@ -622,22 +634,30 @@ def run_agent_word_conclusion_stage(
             metadata=draft_result.get("metadata"),
         )
         return False
+    narrative_source = str(draft_result.get("narrative_source") or "agent_generated")
     if auto_accept:
-        return auto_confirm_agent_report_conclusions(
+        return generate_agent_report_from_conclusions(
             repo=repo,
             settings=settings,
             task_id=task_id,
             model_profile=model_profile,
             values=draft_result.get("values"),
             expected_revision=draft_result.get("report_revision"),
+            narrative_source=narrative_source,
             deps=deps,
         )
     repo.add_agent_message(
         task_id,
         role="assistant",
         stage="chat",
-        content="三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。",
-        metadata={**model_metadata(model_profile), "awaiting_confirmation": True},
+        content=(
+            "三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。"
+        ),
+        metadata={
+            **model_metadata(model_profile),
+            "awaiting_confirmation": True,
+            "narrative_source": narrative_source,
+        },
     )
     return True
 
@@ -661,6 +681,7 @@ def _visible_stage_summaries_for_word_conclusion(messages: list[dict]) -> list[d
     excluded_stages = {
         "chat",
         "word_conclusion_draft",
+        "word_conclusion_generated",
         "word_conclusion_confirmed",
         "word_report_ready",
     }
@@ -702,7 +723,7 @@ def add_agent_word_draft_failure_message(
     )
 
 
-def auto_confirm_agent_report_conclusions(
+def generate_agent_report_from_conclusions(
     *,
     repo: TaskRepository,
     settings,
@@ -710,6 +731,7 @@ def auto_confirm_agent_report_conclusions(
     model_profile: dict,
     values: object,
     expected_revision: object,
+    narrative_source: str = "agent_generated",
     deps: ValidationStageDependencies,
 ) -> bool:
     if (
@@ -718,7 +740,7 @@ def auto_confirm_agent_report_conclusions(
         or not isinstance(expected_revision, int)
         or isinstance(expected_revision, bool)
     ):
-        raise RuntimeError("agent report draft is incomplete; cannot auto-confirm report")
+        raise RuntimeError("agent report narratives are incomplete; cannot generate report")
     conclusion_values = {
         key: str(values.get(key) or "").strip()
         for key in REQUIRED_AGENT_REPORT_KEYS
@@ -728,26 +750,31 @@ def auto_confirm_agent_report_conclusions(
         conclusion_values,
         expected_revision=expected_revision,
         audit={
-            "kind": "report.agent_conclusions.confirm",
+            "kind": "report.agent_conclusions.generated",
             "target_ref": task_id,
             "outcome": "succeeded",
             "detail": {
                 "keys": sorted(conclusion_values),
                 "expected_revision": expected_revision,
-                "auto_accept": True,
+                "source": narrative_source,
             },
         },
     )
     repo.add_agent_message(
         task_id,
         role="assistant",
-        stage="word_conclusion_confirmed",
-        content="三段报告结论已自动确认，正在生成最终 Word 报告。",
+        stage="word_conclusion_generated",
+        content=(
+            "大模型报告结论生成失败，平台已使用确定性指标生成保守回退文本，"
+            "正在直接生成最终 Word 报告；完成后请人工复核。"
+            if narrative_source == "deterministic_fallback"
+            else "报告结论已生成，正在直接生成最终 Word 报告。"
+        ),
         metadata={
             **model_metadata(model_profile),
             "revision": revision,
-            "confirmed_keys": sorted(REQUIRED_AGENT_REPORT_KEYS),
-            "auto_accept": True,
+            "generated_keys": sorted(REQUIRED_AGENT_REPORT_KEYS),
+            "narrative_source": narrative_source,
         },
     )
     raise_if_agent_cancelled(task_id)
@@ -770,6 +797,30 @@ def auto_confirm_agent_report_conclusions(
         return False
     deps.add_agent_report_ready_message(repo, task_id)
     return True
+
+
+def auto_confirm_agent_report_conclusions(
+    *,
+    repo: TaskRepository,
+    settings,
+    task_id: str,
+    model_profile: dict,
+    values: object,
+    expected_revision: object,
+    narrative_source: str = "agent_generated",
+    deps: ValidationStageDependencies,
+) -> bool:
+    """Compatibility alias for callers predating direct report generation."""
+    return generate_agent_report_from_conclusions(
+        repo=repo,
+        settings=settings,
+        task_id=task_id,
+        model_profile=model_profile,
+        values=values,
+        expected_revision=expected_revision,
+        narrative_source=narrative_source,
+        deps=deps,
+    )
 
 
 def add_agent_failure_summary(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import traceback
 
@@ -12,7 +13,7 @@ from marvis.api_task_helpers import (
     dispatch_platform_hook,
 )
 from marvis.api_task_payloads import normalized_status_reason
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TASK_STATUS_REASON_USER_CANCELLED, TaskRecord
 from marvis.execution_environment import load_execution_environment
 from marvis.job_heartbeat import heartbeat_job
@@ -51,7 +52,17 @@ def run_stage_job(
     repo = TaskRepository(db_path)
     if repo.mark_job_running(job_id) is False:
         return
-    task_id = kwargs.get("task_id")
+    stage_kwargs = dict(kwargs)
+    pipeline_settings = stage_kwargs.get("settings")
+    if hook_dispatcher is not None and isinstance(
+        pipeline_settings,
+        PipelineSettings,
+    ):
+        stage_kwargs["settings"] = replace(
+            pipeline_settings,
+            hook_dispatcher=hook_dispatcher,
+        )
+    task_id = stage_kwargs.get("task_id")
     task_id_text = str(task_id) if task_id else None
     dispatch_platform_hook(
         hook_dispatcher,
@@ -61,7 +72,7 @@ def run_stage_job(
     )
     try:
         with heartbeat_job(repo, job_id):
-            stage_func(**kwargs)
+            stage_func(**stage_kwargs)
     except Exception as exc:
         repo.finish_job(
             job_id,
@@ -110,19 +121,20 @@ def add_agent_report_ready_message(repo: TaskRepository, task_id: str | None) ->
     if task.run_mode != "agent":
         return
     messages = repo.list_agent_messages(task_id)
-    latest_confirmed_index = max(
+    latest_narrative_index = max(
         (
             index
             for index, message in enumerate(messages)
-            if message.get("stage") == "word_conclusion_confirmed"
+            if message.get("stage")
+            in {"word_conclusion_generated", "word_conclusion_confirmed"}
         ),
         default=-1,
     )
-    if latest_confirmed_index < 0:
+    if latest_narrative_index < 0:
         return
     if any(
         message.get("stage") == "word_report_ready"
-        for message in messages[latest_confirmed_index + 1 :]
+        for message in messages[latest_narrative_index + 1 :]
     ):
         return
     repo.add_agent_message(

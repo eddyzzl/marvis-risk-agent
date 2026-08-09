@@ -46,9 +46,10 @@ from marvis.agent_memory.extractors import (
     extract_task_experience,
     extract_validation_pitfall,
 )
+from marvis.agent_memory.capture import save_memory_candidate
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     FileArtifact,
@@ -180,6 +181,11 @@ class PipelineSettings:
     data_dict_feature_col: str = "特征名"
     data_dict_category_col: str = "类别"
     pmml_scoring_chunk_size: int = 10_000
+    hook_dispatcher: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 REPRODUCIBILITY_RESULT_JSON = "reproducibility_result.json"
@@ -442,6 +448,7 @@ def run_notebook_stage(
                 default="notebook" if failure_prefix == NOTEBOOK_STAGE_FAILURE_PREFIX else "execution",
             ),
             message=message,
+            hook_dispatcher=settings.hook_dispatcher,
         )
         raise
     except Exception as exc:
@@ -463,6 +470,7 @@ def run_notebook_stage(
                 default="notebook" if failure_prefix == NOTEBOOK_STAGE_FAILURE_PREFIX else "execution",
             ),
             message=message,
+            hook_dispatcher=settings.hook_dispatcher,
         )
         raise
 
@@ -1199,6 +1207,7 @@ def _run_legacy_metrics_stage(
             repo=repo,
             task_id=task_id,
             outputs_dir=outputs_dir,
+            hook_dispatcher=settings.hook_dispatcher,
         )
     except PipelineCancelled as exc:
         logger.info("metrics stage cancelled task_id=%s", task_id)
@@ -1215,6 +1224,7 @@ def _run_legacy_metrics_stage(
             task_id=task_id,
             failure_kind=_memory_failure_kind(str(exc), default="execution"),
             message=message,
+            hook_dispatcher=settings.hook_dispatcher,
         )
         raise
     except Exception as exc:
@@ -1233,6 +1243,7 @@ def _run_legacy_metrics_stage(
             task_id=task_id,
             failure_kind=_memory_failure_kind(str(exc), default="execution"),
             message=message,
+            hook_dispatcher=settings.hook_dispatcher,
         )
         raise
     finally:
@@ -1273,6 +1284,11 @@ def run_report_stage(
         staged_images = report_uow.stage_directory(task_dir, images_dir.name)
         results = _load_validation_results(outputs_dir)
         report_values, _ = repo.get_report_values(task_id)
+        report_values = _report_values_with_manual_fallback(
+            task=task,
+            results=results,
+            report_values=report_values,
+        )
         word_result = write_validation_word(
             results,
             template_path=settings.report_template_path,
@@ -1347,6 +1363,7 @@ def run_report_stage(
             task_id=task_id,
             failure_kind="report",
             message=message,
+            hook_dispatcher=settings.hook_dispatcher,
         )
         raise
     except Exception as exc:
@@ -1366,6 +1383,7 @@ def run_report_stage(
             task_id=task_id,
             failure_kind="report",
             message=message,
+            hook_dispatcher=settings.hook_dispatcher,
         )
         raise
     finally:
@@ -1384,6 +1402,34 @@ def _terminal_validation_status(task: TaskRecord, results) -> TaskStatus:
         if results.reproducibility.summary.status is ConsistencyStatus.FAIL
         else TaskStatus.SUCCEEDED
     )
+
+
+def _report_values_with_manual_fallback(
+    *,
+    task: TaskRecord,
+    results,
+    report_values: dict[str, str],
+) -> dict[str, str]:
+    if task.run_mode == "agent":
+        return report_values
+
+    # Manual validation has no UI fields for the three report conclusions.
+    # Reuse the same structured-evidence fallback as the Agent LLM-failure path
+    # so Word output never exposes template tokens or invents metric values.
+    from marvis.agent.service import fallback_word_conclusions
+
+    try:
+        validation_payload = validation_results_to_dict(results)
+    except ValueError:
+        # Preserve the report writer's existing validation/error behavior for
+        # malformed or test-double results; canonical pipeline results always
+        # serialize through this strict boundary.
+        return report_values
+    fallback = fallback_word_conclusions(
+        task=task,
+        evidence={"validation_results": validation_payload},
+    )
+    return {**fallback, **report_values}
 
 
 def _rollback_artifact_uow(uow: ArtifactUnitOfWork | None) -> None:
@@ -1902,6 +1948,11 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
         failure_prefix = REPORT_STAGE_FAILURE_PREFIX
         results = _load_validation_results(outputs_dir)
         report_values, _ = repo.get_report_values(task_id)
+        report_values = _report_values_with_manual_fallback(
+            task=task,
+            results=results,
+            report_values=report_values,
+        )
         word_result = write_validation_word(
             results,
             template_path=settings.report_template_path,
@@ -1986,6 +2037,7 @@ def _capture_agent_memory_for_metrics_success(
     repo: TaskRepository,
     task_id: str,
     outputs_dir: Path,
+    hook_dispatcher=None,
 ) -> None:
     # Gate on the user-facing "自动沉淀任务经验" (auto_distill) memory policy:
     # when off, no automatic capture happens on this pipeline surface either.
@@ -2004,7 +2056,12 @@ def _capture_agent_memory_for_metrics_success(
             extract_field_convention(_memory_field_convention_payload(task)),
         ):
             if candidate is not None:
-                store.create(candidate, task_id=task_id)
+                save_memory_candidate(
+                    store,
+                    candidate,
+                    task_id=task_id,
+                    hook_dispatcher=hook_dispatcher,
+                )
                 created += 1
         logger.info(
             "agent memory captured on metrics success task_id=%s entries=%d",
@@ -2023,6 +2080,7 @@ def _capture_agent_memory_for_failure(
     task_id: str,
     failure_kind: str,
     message: str,
+    hook_dispatcher=None,
 ) -> None:
     # Gate on auto_distill (see _capture_agent_memory_for_metrics_success).
     if not load_memory_policy(repo.db_path.parent).auto_distill:
@@ -2043,7 +2101,12 @@ def _capture_agent_memory_for_failure(
             extract_task_experience(payload),
         ]:
             if candidate is not None:
-                store.create(candidate, task_id=task_id)
+                save_memory_candidate(
+                    store,
+                    candidate,
+                    task_id=task_id,
+                    hook_dispatcher=hook_dispatcher,
+                )
                 created += 1
         logger.info(
             "agent memory captured on failure task_id=%s failure_kind=%s entries=%d",

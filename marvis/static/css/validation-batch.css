@@ -1,0 +1,367 @@
+.task-kind-icon[data-kind="validation_batch"] {
+  color: var(--tone-validation);
+}
+
+.validation-batch-panel {
+  width: 100%;
+}
+
+.validation-batch-overview,
+.validation-batch-loading,
+.validation-batch-load-error {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.validation-batch-overview {
+  padding: 18px;
+}
+
+.validation-batch-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.validation-batch-eyebrow {
+  margin: 0 0 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+}
+
+.validation-batch-title-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.validation-batch-title-line h3 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.validation-batch-head > div > p:last-child {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.validation-batch-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.validation-batch-download.button {
+  border-color: var(--download-excel-border);
+  background: var(--download-excel-bg);
+  color: #fff;
+  text-decoration: none;
+}
+
+.validation-batch-download.button:hover {
+  border-color: var(--download-excel-border-hover);
+  background: var(--download-excel-bg-hover);
+  color: #fff;
+}
+
+.validation-batch-summary-pending {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.validation-batch-status {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.validation-batch-status.running,
+.validation-batch-status.created,
+.validation-batch-status.queued {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.validation-batch-status.success,
+.validation-batch-status.completed,
+.validation-batch-status.succeeded {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+  color: var(--success-strong);
+}
+
+.validation-batch-status.warning,
+.validation-batch-status.awaiting_confirmation,
+.validation-batch-status.review_required,
+.validation-batch-status.partial_failure {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-strong);
+}
+
+.validation-batch-status.danger,
+.validation-batch-status.failed,
+.validation-batch-status.cancelled {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+}
+
+.validation-batch-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(92px, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.validation-batch-stats > div {
+  display: flex;
+  min-height: 62px;
+  flex-direction: column;
+  justify-content: center;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.validation-batch-stats strong {
+  color: var(--text-primary);
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.validation-batch-stats span {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.validation-batch-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.validation-batch-table {
+  width: 100%;
+  min-width: 880px;
+  border-spacing: 0;
+  border-collapse: separate;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.validation-batch-table th,
+.validation-batch-table td {
+  padding: 10px 11px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.validation-batch-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.validation-batch-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.validation-batch-table tbody tr {
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.validation-batch-table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent-soft) 42%, transparent);
+}
+
+.validation-batch-table tbody tr.is-deep-linked {
+  background: var(--warning-soft);
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+
+.validation-batch-table td:first-child {
+  min-width: 195px;
+}
+
+.validation-batch-table td:first-child strong {
+  display: block;
+  line-height: 1.45;
+}
+
+.validation-batch-table td.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.validation-batch-table td > small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.validation-batch-error {
+  margin-top: 5px;
+  color: var(--danger-strong);
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 1.45;
+}
+
+.validation-batch-links {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  white-space: nowrap;
+}
+
+.validation-batch-link {
+  color: var(--accent);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.validation-batch-link:hover {
+  text-decoration: underline;
+}
+
+button.validation-batch-link {
+  padding: 0;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.validation-batch-contract-confirmed {
+  color: var(--success-strong);
+  font-weight: 700;
+}
+
+.validation-batch-contract-panel {
+  margin: 14px 0 0;
+  border-color: color-mix(in srgb, var(--tone-validation) 30%, var(--border));
+  box-shadow: var(--shadow);
+}
+
+.validation-batch-contract-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.validation-batch-contract-head h4 {
+  margin: 0;
+}
+
+.validation-batch-contract-eyebrow {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--tone-validation);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+}
+
+.validation-batch-muted,
+.validation-batch-empty {
+  color: var(--text-muted);
+}
+
+.validation-batch-empty {
+  padding: 24px !important;
+  text-align: center !important;
+}
+
+.validation-batch-banner-error {
+  margin: 14px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+  font-size: 12px;
+}
+
+.validation-batch-contract-guidance {
+  margin: 14px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  background: var(--warning-soft);
+  color: var(--warning-strong);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.validation-batch-loading,
+.validation-batch-load-error {
+  min-height: 132px;
+  padding: 22px;
+}
+
+.validation-batch-loading {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.validation-batch-load-error {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 7px;
+  color: var(--danger-strong);
+}
+
+.validation-batch-load-error span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .validation-batch-table tbody tr {
+    transition: none;
+  }
+}

@@ -4,7 +4,8 @@ from fastapi import APIRouter, Request, Response
 from marvis.errors import not_found
 
 from marvis.api_task_helpers import get_task_or_404
-from marvis.db import ModelingRepository, TaskRepository
+from marvis.repositories.modeling import ModelingRepository
+from marvis.repositories.tasks import TaskRepository
 
 
 router = APIRouter(prefix="/api", tags=["modeling"])

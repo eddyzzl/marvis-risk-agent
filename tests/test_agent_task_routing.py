@@ -37,6 +37,53 @@ def _strategy_source(tmp_path: Path) -> Path:
     return src
 
 
+def test_typed_ui_action_does_not_require_llm_configuration(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "typed ui action",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "agent",
+            "target_col": "bad",
+            "score_col": "score",
+        },
+    )
+    assert created.status_code == 200, created.text
+    observed = {}
+
+    def fake_dispatch(*args, **kwargs):
+        observed.update(kwargs)
+        return {"status": "ok", "messages": []}
+
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.dispatch_driver_turn",
+        fake_dispatch,
+    )
+
+    response = client.post(
+        f"/api/tasks/{created.json()['id']}/agent/messages",
+        json={
+            "content": "执行界面上展示的计划",
+            "ui_action": "start_plan",
+            "expected_plan_id": "plan-1",
+            "expected_plan_status": "validated",
+            "expected_plan_revision": 0,
+            "expected_plan_fingerprint": "0" * 64,
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert observed["agent_client"] is None
+    assert observed["ui_action"] == "start_plan"
+
+
 @pytest.mark.parametrize(
     ("goal", "expected"),
     [
@@ -283,7 +330,10 @@ def test_standard_analysis_without_compiler_never_falls_into_approval_plan(
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
 
 
-def test_strategy_portfolio_intent_redirects_to_portfolio_task_without_plan(client, tmp_path):
+def test_strategy_portfolio_intent_redirects_to_supported_portfolio_entry(
+    client,
+    tmp_path,
+):
     src = _strategy_source(tmp_path)
     created = client.post(
         "/api/tasks",
@@ -309,16 +359,21 @@ def test_strategy_portfolio_intent_redirects_to_portfolio_task_without_plan(clie
     payload = response.json()
     assert payload["status"] == "clarification_required"
     assert payload["intent"] == "portfolio_analysis"
-    assert payload["code"] == "strategy_portfolio_task_redirect"
+    assert payload["code"] == "strategy_portfolio_entry_required"
+    assert payload["capability_status"] == "available"
     assert payload["suggested_task_type"] == "portfolio"
     clarification = payload["clarification"]
     assert clarification["intent"] == "portfolio_analysis"
+    assert clarification["capability_status"] == "available"
     assert clarification["suggested_task_type"] == "portfolio"
     metadata = payload["messages"][-1]["metadata"]
     assert metadata["intent"] == "portfolio_analysis"
-    assert metadata["code"] == "strategy_portfolio_task_redirect"
+    assert metadata["code"] == "strategy_portfolio_entry_required"
+    assert metadata["capability_status"] == "available"
     assert metadata["suggested_task_type"] == "portfolio"
-    assert "V2" in payload["messages"][-1]["content"]
+    assert "组合分析" in payload["messages"][-1]["content"]
+    assert "正式入口" in payload["messages"][-1]["content"]
+    assert "internal" not in payload["messages"][-1]["content"]
     assert "V3" not in payload["messages"][-1]["content"]
     assert "V4" not in payload["messages"][-1]["content"]
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []

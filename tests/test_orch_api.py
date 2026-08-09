@@ -30,6 +30,14 @@ _STRATEGY_SAMPLE_DESIGN_REF = {
 }
 
 
+def _confirmation_snapshot(client: TestClient, plan_id: str, step_id: str | None = None) -> dict:
+    plan = client.get(f"/api/plans/{plan_id}").json()["plan"]
+    if step_id is None:
+        return dict(plan["confirmation_snapshot"])
+    step = next(item for item in plan["steps"] if item["id"] == step_id)
+    return dict(step["confirmation_snapshot"])
+
+
 class FakeIntentRouter:
     def __init__(self, kind="template"):
         self.kind = kind
@@ -385,17 +393,43 @@ def test_step_output_endpoint_returns_stored_structured_output(tmp_path):
     client = _client(tmp_path)
     repo = client.app.state.plan_repo
     repo.create_plan(_plan(status=PlanStatus.VALIDATED))
-    repo.store_step_output("step-1", {"auc": 0.74, "notes": ["ok"]})
+    plan = repo.load_plan("plan-1")
+    step = plan.steps[0]
+    step.status = StepStatus.RUNNING
+    repo.update_step(step)
+    run_id = repo.start_step_run(
+        plan_id=plan.id,
+        step_id=step.id,
+        tool_ref=step.tool_ref.label(),
+        inputs=step.inputs,
+    )
+    step.status = StepStatus.CHECKING
+    repo.update_step(step)
+    step.output_ref = repo.store_step_output(
+        step.id,
+        {"auc": 0.74, "notes": ["ok"]},
+        evidence={"step_run_id": run_id},
+    )
+    repo.finish_step_run(
+        run_id,
+        status="succeeded",
+        output_ref=step.output_ref,
+    )
+    step.status = StepStatus.DONE
+    repo.update_step(step)
+    # An unbound later cache row must not become a user-visible result.
     repo.store_step_output("step-1", {"auc": 0.81, "notes": ["new"]})
 
     response = client.get("/api/step-outputs/step-1")
     versioned = client.get("/api/step-outputs/step-1:v1")
+    unbound = client.get("/api/step-outputs/step-1:v2")
     missing = client.get("/api/step-outputs/missing-step")
 
     assert response.status_code == 200
-    assert response.json() == {"auc": 0.81, "notes": ["new"]}
+    assert response.json() == {"auc": 0.74, "notes": ["ok"]}
     assert versioned.status_code == 200
     assert versioned.json() == {"auc": 0.74, "notes": ["ok"]}
+    assert unbound.status_code == 404
     assert missing.status_code == 404
 
 
@@ -439,7 +473,10 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     task_id = _create_task(repo.db_path)
     repo.create_plan(_plan(status=PlanStatus.VALIDATED, task_id=task_id))
 
-    confirmed = client.post("/api/plans/plan-1/confirm")
+    confirmed = client.post(
+        "/api/plans/plan-1/confirm",
+        json=_confirmation_snapshot(client, "plan-1"),
+    )
     assert confirmed.status_code == 200
     assert confirmed.json()["plan"]["status"] == "confirmed"
 
@@ -452,7 +489,10 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     step = repo.load_plan("plan-1").steps[0]
     step.status = StepStatus.AWAITING_CONFIRM
     repo.update_step(step)
-    step_confirm = client.post("/api/plans/plan-1/steps/step-1/confirm")
+    step_confirm = client.post(
+        "/api/plans/plan-1/steps/step-1/confirm",
+        json=_confirmation_snapshot(client, "plan-1", "step-1"),
+    )
     assert step_confirm.status_code == 202
     assert step_confirm.json()["job_id"]
     assert client.app.state.plan_executor.calls == ["plan-1", "plan-1"]
@@ -466,6 +506,41 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     cancelled = cancel_client.post("/api/plans/plan-1/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["plan"]["status"] == "cancelled"
+
+
+def test_public_plan_confirm_requires_exact_same_revision_snapshot(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.VALIDATED, task_id=task_id))
+    snapshot = _confirmation_snapshot(client, "plan-1")
+    with connect(repo.db_path) as conn:
+        conn.execute(
+            "UPDATE plan_steps SET title = 'changed in another tab' WHERE id = 'step-1'"
+        )
+
+    missing = client.post("/api/plans/plan-1/confirm")
+    stale = client.post("/api/plans/plan-1/confirm", json=snapshot)
+
+    assert missing.status_code == 422
+    assert stale.status_code == 409
+    assert repo.load_plan("plan-1").status == PlanStatus.VALIDATED
+
+
+def test_generic_confirm_cannot_bypass_agent_semantic_route(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.VALIDATED, task_id=task_id))
+    snapshot = _confirmation_snapshot(client, "plan-1")
+    with connect(repo.db_path) as conn:
+        conn.execute("UPDATE tasks SET run_mode = 'agent' WHERE id = ?", (task_id,))
+
+    response = client.post("/api/plans/plan-1/confirm", json=snapshot)
+
+    assert response.status_code == 409
+    assert "agent message endpoint" in response.json()["detail"]
+    assert repo.load_plan("plan-1").status == PlanStatus.VALIDATED
 
 
 def test_plan_cancel_keeps_active_job_leased_until_callback_exits(tmp_path):
@@ -621,7 +696,10 @@ def test_plan_step_confirm_endpoint_rejects_non_awaiting_step(tmp_path):
     task_id = _create_task(repo.db_path)
     repo.create_plan(_plan(status=PlanStatus.CONFIRMED, task_id=task_id))
 
-    response = client.post("/api/plans/plan-1/steps/step-1/confirm")
+    response = client.post(
+        "/api/plans/plan-1/steps/step-1/confirm",
+        json=_confirmation_snapshot(client, "plan-1", "step-1"),
+    )
 
     assert response.status_code == 409
     assert "not awaiting confirmation" in response.json()["detail"]
@@ -640,7 +718,10 @@ def test_plan_step_confirm_without_service_fails_closed_for_governed_policy(tmp_
     plan.steps[0].policy = GovernancePolicy(human_decision_gate="required")
     repo.create_plan(plan)
 
-    response = client.post("/api/plans/plan-1/steps/step-1/confirm")
+    response = client.post(
+        "/api/plans/plan-1/steps/step-1/confirm",
+        json=_confirmation_snapshot(client, "plan-1", "step-1"),
+    )
 
     assert response.status_code == 409
     assert "governed human-decision" in response.json()["detail"]
@@ -747,7 +828,10 @@ def test_plan_confirm_dispatches_plan_confirmed_hook(tmp_path):
     task_id = _create_task(repo.db_path)
     repo.create_plan(_plan(status=PlanStatus.VALIDATED, task_id=task_id))
 
-    response = client.post("/api/plans/plan-1/confirm")
+    response = client.post(
+        "/api/plans/plan-1/confirm",
+        json=_confirmation_snapshot(client, "plan-1"),
+    )
 
     assert response.status_code == 200
     assert dispatcher.calls == [
@@ -814,6 +898,12 @@ def test_create_app_can_create_standard_modeling_template_plan_from_goal(tmp_pat
     assert "generate_model_report" in tools
     assert plan["steps"][-1]["tool_ref"] == {"plugin": "modeling", "tool": "post_training_action", "version": ""}
     assert plan["steps"][-1]["needs_confirmation"] is True
+
+    confirmed = client.post(
+        f"/api/plans/{plan['id']}/confirm",
+        json=plan["confirmation_snapshot"],
+    )
+    assert confirmed.status_code == 200, confirmed.text
 
 
 def test_create_app_can_create_model_validation_plan_from_task_goal(tmp_path):

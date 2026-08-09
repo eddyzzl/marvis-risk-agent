@@ -28,6 +28,7 @@ from marvis.packs.strategy.typed_backtest import (
     STRATEGY_BACKTEST_SCHEMA_VERSION,
     StrategyBacktestResult,
 )
+from marvis.repositories.audit import _write_audit_row
 from marvis.state_machine import ConflictError
 from marvis.strategy_adoption import normalize_adoption_reason
 from marvis.strategy_lifecycle import (
@@ -1939,37 +1940,6 @@ def _pool_materialization_canonical_json(value: object) -> str:
         raise StrategyPoolMaterializationError(
             "Pool materialization must be finite canonical JSON"
         ) from exc
-
-
-def _write_audit_row(
-    conn: sqlite3.Connection,
-    *,
-    kind: str,
-    target_ref: str,
-    actor: str = "system",
-    inputs_hash: str | None = None,
-    outcome: str | None = None,
-    detail: dict | None = None,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO audit(
-            id, kind, actor, target_ref, inputs_hash, outcome,
-            detail_json, at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            uuid.uuid4().hex,
-            kind,
-            actor,
-            target_ref,
-            inputs_hash,
-            outcome,
-            json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
-            _now(),
-        ),
-    )
 
 
 def _insert_strategy_artifact_row(

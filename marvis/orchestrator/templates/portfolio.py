@@ -26,12 +26,21 @@ _GOAL_PATTERNS = ("组合分析", "组合报告", "资产质量", "portfolio ana
 def _base_slots() -> tuple[SlotSpec, ...]:
     return (
         SlotSpec("performance_dataset_id", True, "task_context", "Registered performance snapshot dataset id"),
+        SlotSpec(
+            "performance_dataset_content_hash",
+            True,
+            "task_context",
+            "SHA-256 of the human-confirmed performance dataset bytes",
+        ),
         SlotSpec("id_col", True, "task_context", "Loan id column"),
         SlotSpec("snapshot_col", True, "task_context", "Snapshot month column"),
         SlotSpec("bucket_col", True, "task_context", "Delinquency bucket column"),
         SlotSpec("states", True, "task_context", "Ordered bucket states (worst last), human-confirmed"),
-        SlotSpec("balance_col", False, "task_context", "Balance column (count basis when absent)"),
-        SlotSpec("segment_col", False, "user", "Segment column for the profile step"),
+        SlotSpec("balance_col", True, "task_context", "Monetary balance/EAD column"),
+        SlotSpec("segment_col", True, "user", "Business segment column for the profile step"),
+        SlotSpec("loss_state", True, "user", "Human-selected absorbing loss state"),
+        SlotSpec("lgd", True, "user", "Explicit loss-given-default assumption in [0, 1]"),
+        SlotSpec("horizon_months", True, "user", "Explicit positive expected-loss horizon in months"),
         SlotSpec("score_col", False, "user", "Score column for the trend step"),
         SlotSpec("experiment_id", False, "user", "Experiment id for the stability-trend step"),
     )
@@ -43,6 +52,7 @@ def _flow_step() -> StepTemplate:
         tool_ref=ToolRef("analysis", "flow_rate"),
         inputs_template={
             "dataset_id": "{slot:performance_dataset_id}",
+            "expected_content_hash": "{slot:performance_dataset_content_hash}",
             "id_col": "{slot:id_col}",
             "snapshot_col": "{slot:snapshot_col}",
             "bucket_col": "{slot:bucket_col}",
@@ -60,6 +70,7 @@ def _migration_step() -> StepTemplate:
         tool_ref=ToolRef("analysis", "bucket_migration"),
         inputs_template={
             "dataset_id": "{slot:performance_dataset_id}",
+            "expected_content_hash": "{slot:performance_dataset_content_hash}",
             "id_col": "{slot:id_col}",
             "snapshot_col": "{slot:snapshot_col}",
             "bucket_col": "{slot:bucket_col}",
@@ -77,7 +88,9 @@ def _segment_step() -> StepTemplate:
         tool_ref=ToolRef("analysis", "segment_profile"),
         inputs_template={
             "dataset_id": "{slot:performance_dataset_id}",
+            "expected_content_hash": "{slot:performance_dataset_content_hash}",
             "segment_col": "{slot:segment_col}",
+            "ead_col": "{slot:balance_col}",
         },
         depends_on_titles=(),
         post_checks=(PostCheck("nonempty", {"field": "segments"}),),
@@ -91,6 +104,7 @@ def _trend_step() -> StepTemplate:
         inputs_template={
             "experiment_id": "{slot:experiment_id}",
             "dataset_id": "{slot:performance_dataset_id}",
+            "expected_content_hash": "{slot:performance_dataset_content_hash}",
             "month_col": "{slot:snapshot_col}",
             "score_col": "{slot:score_col}",
         },
@@ -105,11 +119,15 @@ def _el_step() -> StepTemplate:
         tool_ref=ToolRef("analysis", "expected_loss_estimate"),
         inputs_template={
             "dataset_id": "{slot:performance_dataset_id}",
+            "expected_content_hash": "{slot:performance_dataset_content_hash}",
             "id_col": "{slot:id_col}",
             "snapshot_col": "{slot:snapshot_col}",
             "bucket_col": "{slot:bucket_col}",
             "states": "{slot:states}",
             "balance_col": "{slot:balance_col}",
+            "loss_state": "{slot:loss_state}",
+            "lgd": "{slot:lgd}",
+            "horizon_months": "{slot:horizon_months}",
         },
         depends_on_titles=("迁徙热力",),
         post_checks=(PostCheck("nonempty", {"field": "chain"}),),

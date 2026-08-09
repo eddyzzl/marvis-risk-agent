@@ -21,7 +21,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.errors import (
+    StrategyError,
+    StrategySampleDesignScopeIneligibleError,
+)
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     bind_strategy_development_frame,
@@ -583,8 +586,8 @@ def _native_execution_binding(
             "native sample-design drop_nan_labels does not match execution binding"
         )
     if semantics["scope"] != "strategy_development":
-        raise StrategyError(
-            "native sample-design scope must be strategy_development"
+        raise StrategySampleDesignScopeIneligibleError(
+            scope=semantics["scope"],
         )
     optional_mapping = {
         "month_col": "month_field",

@@ -3,6 +3,10 @@
 > V2 完善总计划第 5 份 spec（见 [v2-completion-plan.md](v2-completion-plan.md)）。
 > 决策 #7:顶栏只状态/报错;中间对话流放所有富表(append);右栏只看流程 + 下载预览。
 > **三区骨架已存在**——本 spec 是把新 3 类任务接进去 + 验证共存,不是重搭。
+>
+> 2026-07-29 后续决策覆盖本文早期“taskSnapshot 暂保留原样”的描述：
+> 顶部任务状态栏默认收起，只保留标题和状态 pill；用户点击卡片或展开按钮后才显示
+> 报错、说明和 taskSnapshot，且任何交互控件点击或文本选择都不得误触收起。
 
 ---
 
@@ -19,7 +23,7 @@
 ## 1. 三区映射（按 task_type 切换内容,容器复用）
 | 区 | 容器 | 新 3 类任务(拼接/特征/建模) | 验证(不改) |
 |---|---|---|---|
-| **顶** | `#taskHero` | `#actionStatus`(整体状态)+`#actionErrorDetail`(报错);**`#taskSnapshot` 暂保留**(用户之后再定怎么改) | 原样 |
+| **顶** | `#taskHero` | 默认收起，只显示标题与 `#actionStatus`；展开后显示 `#actionErrorDetail` 与 `#taskSnapshot` | 同一折叠行为 |
 | **中** | `#resultScrollContent` | **只用 `#agentConversationPanel`**:append-only 对话 + 内联富表(`renderMetricTableSection`);**隐藏 4 个验证 stage 区** | 原样(stage 区) |
 | **右** | `#progressRail` | 挂 **`plan_view`**(V2 计划步骤/进度/确认按钮 + loop 事件)+ **下载/预览区** | `#workflowStepper` 原样 |
 
@@ -38,7 +42,8 @@
 
 ## 4. 顶栏(taskHero)
 - 标题、`#actionStatus`(running/awaiting/done/failed 整体状态)、`#actionErrorDetail`(报错)。
-- `#taskSnapshot` **暂保留原样**(用户之后再定怎么精简,不在本轮动)。
+- `#taskSnapshot` 保留完整内容，但位于可折叠详情区；首屏默认收起。
+- 整个 task hero 可点击切换，按钮同步 `aria-expanded`/标签；链接、表单控件、复制按钮和文本选择不得触发折叠。
 
 ## 5. composer / 模式
 - `#agentAcceptanceModeSelect` **复用**,按 task_type **改名**:自动审查→`自动拼接/自动分析/自动建模`;默认权限不变(仅 agent 模式)。
@@ -66,6 +71,6 @@
 - **新建**:`#progressRail` 按 task_type 渲 plan_view(替换/并存 workflowStepper)、右栏下载区、中间区 append 富表 + 隐藏验证 stage、顶栏精简、acceptance 改名、手动模式门控件组件、渲染分发开关。
 
 ## 9. 已锁小项
-1. **顶栏 taskSnapshot**(已定):**暂保留原样**,用户之后再思考怎么改,本轮不动。
+1. **顶栏 taskSnapshot**(后续决策已覆盖):内容保留在详情区，状态栏默认收起，只常显标题与状态。
 2. **手动模式 composer**(已定):**完全隐藏自由文本输入**,纯控件 +「继续/暂停」,**照模型验证手动模式**(右栏 `step-action-button` + 步骤推进)。
 3. **下载位置**(已定):**挂在右栏对应大步骤的合适位置**(步骤行内动作按钮),**不**放侧栏底部。

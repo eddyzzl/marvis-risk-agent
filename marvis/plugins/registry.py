@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from marvis.db import PluginRepository
+from marvis.repositories.plugins import PluginRepository
 from marvis.plugins.errors import (
     DuplicatePluginError,
     PluginNotFoundError,

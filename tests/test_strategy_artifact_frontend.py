@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import textwrap
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "marvis" / "static"
@@ -278,7 +280,7 @@ def test_strategy_artifact_card_styles_live_in_driver_actions_family():
     source = (STATIC / "js" / "v2" / "plan_rail_controller.js").read_text(
         encoding="utf-8"
     )
-    css = (STATIC / "css" / "v2-workbench.css").read_text(encoding="utf-8")
+    css = read_browser_stylesheets(STATIC)
 
     assert "生产已部署" not in source
     assert "已在生产环境上线" not in source

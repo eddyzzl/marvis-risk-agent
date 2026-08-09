@@ -18,13 +18,17 @@ import os
 from pathlib import Path
 import re
 import stat
-import tempfile
 from typing import Any
 from urllib.parse import quote
 import uuid
 
 import pandas as pd
 
+from marvis.data.authenticated_snapshot import (
+    AuthenticatedSnapshotError,
+    SnapshotFailureReason,
+    read_authenticated_parquet_snapshot,
+)
 from marvis.data.errors import DatasetContentDriftError
 from marvis.data.workspace import (
     DataSemanticMapping,
@@ -58,6 +62,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
+    stable_task_artifact_id,
 )
 
 
@@ -1361,7 +1366,7 @@ def validate_strategy_delivery_artifact_records(
             raise StrategyDeliveryToolError(
                 f"strategy delivery artifact record {name} identity drifted"
             )
-        expected_artifact_id = _stable_task_artifact_id(
+        expected_artifact_id = stable_task_artifact_id(
             task_id=task_id,
             kind=contract["kind"],
             path=str(canonical_path),
@@ -1651,98 +1656,37 @@ def _read_authenticated_parquet_snapshot(
     root: Path,
     expected_content_hash: str,
 ) -> pd.DataFrame:
-    """Read delivery rows only from one hash-authenticated private snapshot."""
-
-    source_fd = -1
-    snapshot = None
     try:
-        resolved_root = root.resolve(strict=True)
-        if (
-            not path.is_absolute()
-            or path.is_symlink()
-            or not path.is_file()
-            or not path.resolve(strict=True).is_relative_to(resolved_root)
-        ):
-            raise StrategyDeliveryToolError(
-                "dataset path escaped governed dataset storage"
-            )
-        before = os.lstat(path)
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+        return read_authenticated_parquet_snapshot(
+            path,
+            root=root,
+            expected_sha256=expected_content_hash,
         )
-        source_fd = os.open(path, flags)
-        opened = os.fstat(source_fd)
-        after_open = os.lstat(path)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or stat.S_ISLNK(after_open.st_mode)
-            or _file_identity(before) != _file_identity(opened)
-            or _file_identity(opened) != _file_identity(after_open)
-            or _stable_file_stat(before) != _stable_file_stat(opened)
-            or _stable_file_stat(opened) != _stable_file_stat(after_open)
-        ):
-            raise StrategyDeliveryToolError(
+    except AuthenticatedSnapshotError as exc:
+        messages = {
+            SnapshotFailureReason.PATH_OUTSIDE_ROOT: (
+                "dataset path escaped governed dataset storage"
+            ),
+            SnapshotFailureReason.SOURCE_NOT_REGULAR: (
+                "dataset path escaped governed dataset storage"
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_WHILE_OPENING: (
                 "dataset changed while opening the delivery snapshot"
-            )
-
-        snapshot = tempfile.TemporaryFile(mode="w+b", dir=resolved_root)
-        digest = hashlib.sha256()
-        copied = 0
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            copied += len(chunk)
-            snapshot.write(chunk)
-        snapshot.flush()
-        if (
-            _stable_file_stat(os.fstat(source_fd))
-            != _stable_file_stat(opened)
-            or copied != int(opened.st_size)
-            or not hmac.compare_digest(
-                digest.hexdigest(),
-                expected_content_hash,
-            )
-        ):
-            raise StrategyDeliveryToolError(
+            ),
+            SnapshotFailureReason.SOURCE_BYTES_CHANGED: (
                 "dataset bytes changed before delivery reconciliation"
-            )
-
-        snapshot_stat = os.fstat(snapshot.fileno())
-        if int(snapshot_stat.st_size) != copied:
-            raise StrategyDeliveryToolError(
+            ),
+            SnapshotFailureReason.PRIVATE_SNAPSHOT_INCOMPLETE: (
                 "private delivery dataset snapshot is incomplete"
-            )
-        snapshot.seek(0)
-        frame = pd.read_parquet(snapshot)
-        current = os.lstat(path)
-        if (
-            _stable_file_stat(os.fstat(snapshot.fileno()))
-            != _stable_file_stat(snapshot_stat)
-            or _stable_file_stat(os.fstat(source_fd))
-            != _stable_file_stat(opened)
-            or stat.S_ISLNK(current.st_mode)
-            or _stable_file_stat(current) != _stable_file_stat(opened)
-        ):
-            raise StrategyDeliveryToolError(
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_DURING_READ: (
                 "dataset changed during delivery reconciliation"
-            )
-        return frame
-    except StrategyDeliveryToolError:
-        raise
-    except (OSError, TypeError, ValueError) as exc:
-        raise StrategyDeliveryToolError(
-            "dataset could not be read for delivery reconciliation"
-        ) from exc
-    finally:
-        if snapshot is not None:
-            snapshot.close()
-        if source_fd >= 0:
-            os.close(source_fd)
+            ),
+            SnapshotFailureReason.READ_FAILED: (
+                "dataset could not be read for delivery reconciliation"
+            ),
+        }
+        raise StrategyDeliveryToolError(messages[exc.reason]) from exc
 
 
 def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
@@ -2161,7 +2105,7 @@ def _require_existing_delivery_row(
     content_hash: str,
     provenance: Mapping[str, Any],
 ) -> None:
-    expected_id = _stable_task_artifact_id(
+    expected_id = stable_task_artifact_id(
         task_id=task_id,
         kind=kind,
         path=str(path),
@@ -2179,22 +2123,6 @@ def _require_existing_delivery_row(
         raise StrategyDeliveryToolError(
             "existing strategy delivery registry row changed"
         )
-
-
-def _stable_task_artifact_id(
-    *,
-    task_id: str,
-    kind: str,
-    path: str,
-) -> str:
-    identity = json.dumps(
-        [task_id, kind, path],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(
-        f"marvis.task_artifact.v1:{identity}".encode("utf-8")
-    ).hexdigest()
 
 
 def _directory_entry_identity(

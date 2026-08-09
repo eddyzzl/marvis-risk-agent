@@ -1,6 +1,6 @@
-# V2 Master Backlog（唯一主待办清单）
+# V2 Master Backlog（历史实施追踪）
 
-> **权威声明**：本文档是 V2 全部待办的**唯一权威来源**（single source of truth）。审查报告、策略计划、旧追踪器等文档保留为背景与证据，**不再各自维护待办状态**；进度只在本文档更新。
+> **2026-08-01 定位更新**：本文档保留原子实施项和历史验收记录，不再把里程碑勾选当作产品完成证明。V2.x 产品范围与术语唯一来源是 [roadmap.md](../roadmap.md)，implementation / unit / API / Agent / browser / real data / sign-off / production 的当前分层状态唯一来源是 [capability-status.md](../capability-status.md)。本表的 ✅ / 🔄 只表示该实施里程碑的代码推进状态。
 > **生成**：2026-07-02。合并来源：① 2026-07-02 全方位审查（115 条，[报告](../reviews/2026-07-02-v2-comprehensive-improvement-review.md)）；② 建模方法学极致专项审计（37 条，四镜头：预处理/筛选/调参/选择评估，本文 §3）；③ [策略与风险分析计划](v2-strategy-risk-analysis-plan.md)（S1a–S6，6 项已拍板）；④ 旧执行追踪器 [v2-comprehensive-improvement-plan.md](v2-comprehensive-improvement-plan.md) 提取的 24 条余项；⑤ modeling-agent-roadmap / 6-28 报告残留（经代码核实）；⑥ PR 前流程清单。
 > **图例**：状态 ⬜ 待做 · 🔄 进行中 · ✅ 完成 · ⏸️ 显式搁置（记录为产品选择）。验证列：✅ 对抗验证确认 · ⚠️ 部分确认（细节见源报告） · — 未独立验证。
 > **范围变更（2026-07-17）**：用户决定全部已列能力归入 V2.x，撤销用 V3/V4 延后的旧裁决。新增范围按下方 FSP-0A～FSP-8 十个里程碑在本文跟踪；详细 contract、提交拆分和验收见 [策略平台对标计划](../superpowers/plans/2026-07-17-strategy-platform-gap-analysis-and-roadmap.md)。
@@ -12,18 +12,18 @@
 
 | 状态 | ID | 里程碑 | 初始估算 |
 |---|---|---|---|
-| ⬜ | FSP-0A | 真实策略入口、业务 contract 和产品路由 | 3-5 人日 |
-| ⬜ | FSP-0B | 决策门、执行授权和批准状态机运行时不变量 | 7-12 人日，spike 后重估 |
-| ⬜ | FSP-1 | 现有策略 Tool 产品闭环和统一 Strategy DSL | 9-14 人日 |
-| ⬜ | FSP-2 | Data & Semantics Workbench | 10-16 人日 |
-| ⬜ | FSP-3 | 完整 Candidate Lab | 18-28 人日 |
-| ⬜ | FSP-4 | Strategy Pool、回测与交付 | 12-18 人日 |
-| ⬜ | FSP-5 | 独立策略验证集 | 10-16 人日 |
-| ⬜ | FSP-6 | 统一 Strategy Workbench 与 Manual/Agent parity | 8-14 人日 |
-| ⬜ | FSP-7 | 持续监控、策略资产生命周期和经营复盘 | 10-17 人日 |
-| ⬜ | FSP-8 | 组织治理、逐环境部署、实时/批量评分、决策引擎和执行隔离 | 28-52 人日 |
+| ✅ | FSP-0A | 真实策略入口、业务 contract 和产品路由 | 3-5 人日 |
+| ✅ | FSP-0B | 决策门、执行授权和批准状态机运行时不变量 | 7-12 人日，spike 后重估 |
+| ✅ | FSP-1 | 现有策略 Tool 产品闭环和统一 Strategy DSL | 9-14 人日 |
+| 🔄 | FSP-2 | Data & Semantics Workbench | 10-16 人日 |
+| 🔄 | FSP-3 | 完整 Candidate Lab | 18-28 人日 |
+| 🔄 | FSP-4 | Strategy Pool、回测与交付 | 12-18 人日 |
+| 🔄 | FSP-5 | 独立策略验证集 | 10-16 人日 |
+| 🔄 | FSP-6 | 统一 Strategy Workbench 与 Manual/Agent parity | 8-14 人日 |
+| 🔄 | FSP-7 | 持续监控、策略资产生命周期和经营复盘 | 10-17 人日 |
+| 🔄 | FSP-8 | 组织治理、逐环境部署、实时/批量评分、决策引擎和执行隔离 | 28-52 人日 |
 
-所有 FSP 里程碑均属于 V2.x；V3/V4 当前不承载这些 backlog。状态只在本表更新，详细设计文档不得另建一套进度真相。
+所有 FSP 里程碑均属于 V2.x；V3/V4 当前不承载这些 backlog。`🔄` 只表示已有纵切但里程碑尚未整体闭环；分层验收不得从本表推断，必须查看能力状态矩阵。
 
 ---
 

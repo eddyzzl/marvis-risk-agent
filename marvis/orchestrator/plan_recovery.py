@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from marvis.orchestrator.contracts import Plan, PlanStep, StepStatus
 from marvis.plugins.runner import ToolResult
+from marvis.state_machine import ConflictError
 
 
 class PlanStepRecovery:
@@ -33,9 +34,9 @@ class PlanStepRecovery:
                 )
                 if latest_output_ref:
                     step.output_ref = latest_output_ref
-                    self._recover_step_runs(
+                    self._repo.update_step(step)
+                    self._recover_step_runs_for_output(
                         step_runs,
-                        status="succeeded",
                         output_ref=latest_output_ref,
                     )
                     self._recover_checking_step(plan, step)
@@ -62,9 +63,9 @@ class PlanStepRecovery:
                     )
                 if latest_output_ref:
                     step.output_ref = latest_output_ref
-                    self._recover_step_runs(
+                    self._repo.update_step(step)
+                    self._recover_step_runs_for_output(
                         step_runs,
-                        status="succeeded",
                         output_ref=latest_output_ref,
                     )
                 else:
@@ -91,6 +92,44 @@ class PlanStepRecovery:
                 except Exception:
                     continue
 
+    def _recover_step_runs_for_output(
+        self,
+        runs: list[dict],
+        *,
+        output_ref: str,
+    ) -> None:
+        """Close only the run durably bound to ``output_ref`` as successful.
+
+        Multiple attempts can be left RUNNING by a process crash.  An output is
+        immutable evidence for exactly one attempt; older/unbound attempts must
+        be interrupted instead of inheriting another attempt's result.
+        """
+
+        for run in runs:
+            run_id = str(run.get("id") or "")
+            if not run_id:
+                continue
+            bound_ref = str(run.get("output_ref") or "")
+            try:
+                if bound_ref == output_ref:
+                    self._repo.finish_step_run(
+                        run_id,
+                        status="succeeded",
+                        output_ref=output_ref,
+                    )
+                else:
+                    self._repo.finish_step_run(
+                        run_id,
+                        status="interrupted",
+                        error=(
+                            "superseded by the execution attempt bound to the "
+                            "persisted output"
+                        ),
+                        error_kind="ServerRestart",
+                    )
+            except Exception:
+                continue
+
     def _recover_checking_step(self, plan: Plan, step: PlanStep) -> None:
         version = _step_output_version(step)
         if version is None:
@@ -98,8 +137,24 @@ class PlanStepRecovery:
             self._set_step_status(step, StepStatus.FAILED)
             return
         try:
-            output = self._repo.load_step_output(step.id, version=version)
-        except KeyError:
+            load_recovery_binding = getattr(
+                self._repo,
+                "load_step_recovery_binding",
+                None,
+            )
+            if callable(load_recovery_binding):
+                binding = load_recovery_binding(step.id, str(step.output_ref))
+                output = binding["output"]
+            else:
+                output = self._repo.load_step_output(step.id, version=version)
+        except ConflictError as exc:
+            step.error = (
+                "persisted step output failed integrity checks during recovery: "
+                f"{exc}"
+            )
+            self._set_step_status(step, StepStatus.FAILED)
+            return
+        except (KeyError, TypeError, ValueError):
             step.error = "interrupted during checking before output was persisted"
             self._set_step_status(step, StepStatus.FAILED)
             return

@@ -2,7 +2,12 @@ import { api } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
 import { skeletonRowsHtml } from "../skeleton.js";
 import { listPluginTools, listStrategyArtifacts, listTaskArtifacts } from "./api_v2.js";
-import { gateConfirmLabel } from "./driver_gate_confirm.js";
+import {
+  confirmationSnapshotAttributes,
+  driverGateActionable,
+  driverGatePendingClaimSignature,
+  gateConfirmLabel,
+} from "./driver_gate_confirm.js";
 import {
   driverGateHasWidget,
   gateMessageForCurrentTool,
@@ -10,7 +15,7 @@ import {
 import { renderModelTuningProgress } from "./model_tuning_progress.js";
 
 // Wired driver task types drive the plan rail / analysis flow.
-export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);
+export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage", "portfolio"]);
 const PLAN_RETRY_REFRESH_MAX_ATTEMPTS = 300;
 const PLAN_RETRY_REFRESH_INTERVAL_MS = 1000;
 
@@ -1101,45 +1106,71 @@ export function createPlanRailController({
     const cards = [];
     const agentMode = Boolean(isAgentMode?.());
     const activeJobKind = String(selectedTask()?.active_job_kind || "").trim();
-    const authorizationBusy = Boolean(activeJobKind);
-    const authorizationBusyAttrs = authorizationBusy
-      ? ' disabled aria-disabled="true" title="上一步正在收尾，完成后可继续授权"'
-      : "";
+    const localBusyAction = String(getTaskBusyAction?.() || "");
+    const localDriverBusy = ["driver_execute", "agent"].includes(localBusyAction);
+    const serverDriverBusy = Boolean(activeJobKind);
     const agentGate = agentMode && Array.isArray(plan?.steps)
       ? plan.steps.find((step) => String(step?.status || "") === "awaiting_confirm")
       : null;
     const agentGateMessage = matchingAgentGateMessage(plan, agentGate);
-    // Agent-mode structured gates already explain the exact inputs required in
-    // the conversation (special-value decisions, adoption reason, screening,
-    // etc.). Their widgets are evidence-only in Agent mode and the composer is
-    // the single governed input channel. Never add a generic confirm button
-    // that cannot supply those required values. Also wait for the matching gate
-    // message before exposing a plain action, avoiding a transient unsafe
-    // button while plan polling is ahead of message polling.
+    // Agent-mode structured gates own their exact actionable widget
+    // (special-value decisions, adoption reason, screening, etc.). Never add a
+    // generic confirm button that cannot supply those required values. Also wait
+    // for the matching gate message before exposing a plain action, avoiding a
+    // transient unsafe button while plan polling is ahead of message polling.
     const agentGateHasStructuredInput = agentGateNeedsStructuredInput(agentGateMessage);
     if (agentGate && !agentGateHasStructuredInput) {
       const planId = String(plan?.id || "");
       const stepId = String(agentGate?.id || "");
       const toolName = String(agentGate?.tool_ref?.tool || "");
+      const snapshotAttrs = confirmationSnapshotAttributes(
+        agentGate?.confirmation_snapshot || {},
+      );
+      const gateActionable = driverGateActionable({
+        taskId: selectedTaskId(),
+        planId,
+        stepId,
+        stepStatus: agentGate?.status,
+        snapshot: agentGate?.confirmation_snapshot || {},
+        localBusy: localDriverBusy,
+        serverBusy: serverDriverBusy,
+      });
+      const gateBusyAttrs = gateActionable
+        ? ""
+        : ' disabled aria-disabled="true" title="上一步正在收尾，完成后可继续授权"';
       cards.push([
         '<section class="plan-driver-action-card" data-driver-action="agent-gate">',
         '<header class="plan-driver-action-head">',
-        `<span class="plan-driver-action-pill">${authorizationBusy ? "正在收尾" : "需要人工授权"}</span>`,
-        `<span class="plan-driver-action-title">${authorizationBusy ? "上一步仍在收尾，完成后即可授权" : "Agent 已理解你的意图；请复核并授权"}「${escapeHtml(agentGate?.title || "当前步骤")}」。</span>`,
+        `<span class="plan-driver-action-pill">${gateActionable ? "需要人工授权" : "正在收尾"}</span>`,
+        `<span class="plan-driver-action-title">${gateActionable ? "Agent 已理解你的意图；请复核并授权" : "上一步仍在收尾，完成后即可授权"}「${escapeHtml(agentGate?.title || "当前步骤")}」。</span>`,
         "</header>",
-        `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1" data-expected-plan-id="${escapeHtml(planId)}" data-expected-step-id="${escapeHtml(stepId)}"${authorizationBusyAttrs}>${escapeHtml(gateConfirmLabel(toolName))}</button>`,
+        `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1" data-expected-plan-id="${escapeHtml(planId)}" data-expected-step-id="${escapeHtml(stepId)}"${snapshotAttrs}${gateBusyAttrs}>${escapeHtml(gateConfirmLabel(toolName))}</button>`,
         "</section>",
       ].join(""));
     }
     const awaitingStart = plan?.status === "validated";
     if (awaitingStart) {
+      const snapshotAttrs = confirmationSnapshotAttributes(
+        plan?.confirmation_snapshot || {},
+      );
+      const startActionable = driverGateActionable({
+        taskId: selectedTaskId(),
+        planId: String(plan?.id || ""),
+        stepStatus: plan?.status,
+        snapshot: plan?.confirmation_snapshot || {},
+        localBusy: localDriverBusy,
+        serverBusy: serverDriverBusy,
+      });
+      const startBusyAttrs = startActionable
+        ? ""
+        : ' disabled aria-disabled="true" title="上一步正在收尾，完成后可继续授权"';
       cards.push([
         '<section class="plan-driver-action-card" data-driver-action="start">',
         '<header class="plan-driver-action-head">',
         `<span class="plan-driver-action-pill">${agentMode ? "需要人工授权" : "开始执行"}</span>`,
         `<span class="plan-driver-action-title">${agentMode ? "Agent 已生成执行计划；请复核后授权开始。" : "计划已生成，确认后开始逐步执行。"}</span>`,
         "</header>",
-        `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1" data-expected-plan-id="${escapeHtml(String(plan?.id || ""))}"${authorizationBusyAttrs}>开始执行</button>`,
+        `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1" data-expected-plan-id="${escapeHtml(String(plan?.id || ""))}"${snapshotAttrs}${startBusyAttrs}>开始执行</button>`,
         "</section>",
       ].join(""));
     }
@@ -1183,13 +1214,34 @@ export function createPlanRailController({
           : "pending-message"
       )
       : "";
+    const activeJobKind = String(selectedTask()?.active_job_kind || "");
+    const localBusyAction = String(getTaskBusyAction?.() || "");
+    const serverBusy = Boolean(activeJobKind);
     return JSON.stringify({
       plan_id: String(plan?.id || ""),
       start: plan?.status === "validated",
-      authorization_busy: String(selectedTask()?.active_job_kind || ""),
+      plan_confirmation_snapshot: plan?.confirmation_snapshot || null,
+      authorization_busy: activeJobKind,
+      local_busy_action: localBusyAction,
+      start_pending_claim: driverGatePendingClaimSignature({
+        taskId: selectedTaskId(),
+        planId: String(plan?.id || ""),
+        stepStatus: plan?.status,
+        snapshot: plan?.confirmation_snapshot || {},
+        serverBusy,
+      }),
       agent_gate: agentGate
         ? `${String(agentGate?.id || "")}:${String(agentGate?.tool_ref?.tool || "")}:${String(agentGateMessage?.id || "")}:${agentGateControl}`
         : "",
+      agent_gate_confirmation_snapshot: agentGate?.confirmation_snapshot || null,
+      agent_gate_pending_claim: agentGate ? driverGatePendingClaimSignature({
+        taskId: selectedTaskId(),
+        planId: String(plan?.id || ""),
+        stepId: String(agentGate?.id || ""),
+        stepStatus: agentGate?.status,
+        snapshot: agentGate?.confirmation_snapshot || {},
+        serverBusy,
+      }) : "",
       report: report && !conversationReport ? String(report.id || report.output_ref || "1") : "",
       conversationReport,
       strategy_artifacts: strategyArtifactState,

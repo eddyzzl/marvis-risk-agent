@@ -16,11 +16,14 @@ before any join executes.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from marvis.agent.data_setup import reconcile_source_data_tables
 from marvis.data.data_dictionary import resolve_data_dictionary_id
+from marvis.data.errors import DatasetContentDriftError
+from marvis.data.registry import AuthenticatedDatasetBinding
 from marvis.domain import FileRole
 
 # Dataset roles that represent join-able data tables (not dictionaries/notebooks).
@@ -34,9 +37,14 @@ class JoinSetupError(ValueError):
     """Raised when the task does not have enough data files to join."""
 
 
+class C1TargetValidationError(JoinSetupError):
+    """Raised when a submitted C1 target is not on the authenticated anchor."""
+
+
 @dataclass
 class JoinFileInfo:
     dataset_id: str
+    content_hash: str | None
     name: str
     row_count: int
     n_cols: int
@@ -60,6 +68,80 @@ class JoinProposal:
     target_col: str | None
     skip: bool
     ingest_notices: list[dict] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AuthenticatedJoinSelection:
+    """Exact anchor/features pinned to their C1-registered Parquet bytes."""
+
+    task_id: str
+    anchor: AuthenticatedDatasetBinding
+    features: tuple[AuthenticatedDatasetBinding, ...]
+
+    @property
+    def dataset_ids(self) -> tuple[str, ...]:
+        return (self.anchor.dataset_id, *(item.dataset_id for item in self.features))
+
+
+def authenticate_join_selection(
+    registry,
+    task_id: str,
+    *,
+    anchor_id: str,
+    feature_ids: list[str] | tuple[str, ...],
+    expected_content_hashes: Mapping[str, str],
+) -> AuthenticatedJoinSelection:
+    """Authenticate a post-C1 selection and return stable CAS bindings.
+
+    ``expected_content_hashes`` must come from the C1 state that was reviewed,
+    not from a fresh database read after authorization.  Every selected
+    normalized Parquet is hashed, pinned, and then re-authenticated as a group;
+    any drift fails before callers create a plan or persist an authorization
+    receipt.
+    """
+
+    normalized_task_id = str(task_id)
+    normalized_anchor = str(anchor_id or "").strip()
+    normalized_features = tuple(
+        str(item).strip() for item in feature_ids if str(item).strip()
+    )
+    if not normalized_anchor:
+        raise JoinSetupError("请先指定样本锚表，再认证文件选择。")
+    if len(normalized_features) != len(set(normalized_features)):
+        raise JoinSetupError("特征表选择包含重复数据集，请刷新后重新确认。")
+    if normalized_anchor in normalized_features:
+        raise JoinSetupError("样本锚表不能同时作为特征表，请刷新后重新确认。")
+    selected_ids = (normalized_anchor, *normalized_features)
+    missing_hashes = [
+        dataset_id
+        for dataset_id in selected_ids
+        if not str(expected_content_hashes.get(dataset_id) or "").strip()
+    ]
+    if missing_hashes:
+        raise JoinSetupError("C1 文件快照缺少内容指纹，请刷新后重新确认。")
+
+    try:
+        bindings = [
+            registry.authenticate_dataset_binding(
+                dataset_id,
+                expected_task_id=normalized_task_id,
+                expected_content_hash=str(expected_content_hashes[dataset_id]),
+            )
+            for dataset_id in selected_ids
+        ]
+        # Recheck the whole selection after the final file is pinned.  This keeps
+        # the returned set coherent if cleanup or another local process touched an
+        # earlier content-addressed object while later files were being bound.
+        verified = [registry.verify_dataset_binding(item) for item in bindings]
+    except DatasetContentDriftError as exc:
+        raise JoinSetupError(
+            "文件角色确认期间数据或 DataWorkspace 已变化，请刷新后重新确认。"
+        ) from exc
+    return AuthenticatedJoinSelection(
+        task_id=normalized_task_id,
+        anchor=verified[0],
+        features=tuple(verified[1:]),
+    )
 
 
 def build_join_proposal(registry, task_id: str, source_dir) -> JoinProposal:
@@ -86,7 +168,8 @@ def build_join_proposal(registry, task_id: str, source_dir) -> JoinProposal:
         target_candidates = _strong_target_candidates(dataset)
         files.append(JoinFileInfo(
             dataset_id=dataset.id,
-            name=_dataset_name(dataset),
+            content_hash=str(getattr(dataset, "content_hash", "") or "") or None,
+            name=_dataset_name(registry, dataset),
             row_count=int(getattr(dataset, "row_count", 0) or 0),
             n_cols=len(_column_names(dataset)),
             has_target=bool(target_candidates) or bool(getattr(dataset, "has_target", False)),
@@ -116,7 +199,20 @@ def _consume_ingest_notices(registry, task_id: str) -> list[dict]:
     return list(consume(task_id)) if callable(consume) else []
 
 
-def _dataset_name(dataset) -> str:
+def _dataset_name(registry, dataset) -> str:
+    source_identity = getattr(registry, "source_identity", None)
+    if callable(source_identity):
+        try:
+            identity = source_identity(dataset.id)
+        except (KeyError, OSError, TypeError, ValueError):
+            identity = None
+        original_name = (
+            str(identity.get("original_name") or "").strip()
+            if isinstance(identity, dict)
+            else ""
+        )
+        if original_name:
+            return original_name
     source = getattr(dataset, "source_path", None)
     return Path(source).name if source else str(getattr(dataset, "id", ""))
 
@@ -224,11 +320,10 @@ def _proposal_columns(dataset, target_candidates: list[str]) -> list[str]:
     return targets + ordinary[: _MAX_PROPOSAL_COLUMNS - len(targets)]
 
 
-def _data_datasets(registry, task_id: str):
-    return [d for d in registry.list_for_task(task_id) if d.role in _DATA_ROLES]
-
-
 __all__ = [
+    "C1TargetValidationError",
+    "authenticate_join_selection",
+    "AuthenticatedJoinSelection",
     "discover_join_inputs",
     "propose_roles",
     "build_join_proposal",

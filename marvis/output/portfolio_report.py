@@ -77,8 +77,27 @@ def _write_overview(workbook: Workbook, payload: PortfolioReportPayload) -> None
     if payload.segment:
         conc = payload.segment.get("concentration") or {}
         rows.append(("细分集中度", ""))
+        rows.append(
+            (
+                "concentration_basis",
+                _cell(payload.segment.get("concentration_basis") or "unspecified"),
+            )
+        )
         for key, value in conc.items():
             rows.append((f"concentration.{key}", _cell(value)))
+        ead_conc = payload.segment.get("ead_concentration") or {}
+        if ead_conc:
+            rows.append(
+                (
+                    "ead_concentration_basis",
+                    _cell(
+                        payload.segment.get("ead_concentration_basis")
+                        or "unspecified"
+                    ),
+                )
+            )
+            for key, value in ead_conc.items():
+                rows.append((f"ead_concentration.{key}", _cell(value)))
     rows.append(("数据质量红旗数", _cell(len(payload.red_flags))))
     _write_rows(sheet, rows)
 

@@ -14,7 +14,9 @@ proves that an opaque reference exists or is task-owned.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -63,6 +65,19 @@ MAX_COMPARISON_EVIDENCE = 100
 MAX_BINS_PER_EVIDENCE = 1_000
 MAX_OBSERVATIONS_PER_EVIDENCE = 50_000
 MAX_FEATURES_PER_MODEL = 10_000
+
+
+@dataclass(frozen=True)
+class _ValidatedSampleDesignScope:
+    """Opaque validator-owned state for one synchronous evidence build."""
+
+    bundle: Mapping[str, Any]
+    context: dict[str, Any]
+
+
+_SAMPLE_DESIGN_CONTEXT_SCOPE: ContextVar[_ValidatedSampleDesignScope | None] = (
+    ContextVar("strategy_model_evidence_sample_design_context", default=None)
+)
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _MONTH_RE = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
@@ -903,6 +918,9 @@ def strategy_model_evidence_bundle_from_json(
 
 
 def _sample_design_context(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    scoped = _SAMPLE_DESIGN_CONTEXT_SCOPE.get()
+    if scoped is not None and scoped.bundle is bundle:
+        return scoped.context
     try:
         normalized = validate_strategy_sample_design_v2_bundle(bundle)
     except StrategyError as exc:
@@ -965,6 +983,23 @@ def _sample_design_context(bundle: Mapping[str, Any]) -> dict[str, Any]:
         "sample_refs": samples,
         "sample_statistics": _sample_statistics(normalized),
     }
+
+
+@contextmanager
+def _reuse_sample_design_context(
+    bundle: Mapping[str, Any],
+) -> Iterator[Mapping[str, Any]]:
+    """Validate once while one deterministic evidence build uses the bundle."""
+
+    context = _sample_design_context(bundle)
+    normalized = context["bundle"]
+    token = _SAMPLE_DESIGN_CONTEXT_SCOPE.set(
+        _ValidatedSampleDesignScope(bundle=normalized, context=context)
+    )
+    try:
+        yield normalized
+    finally:
+        _SAMPLE_DESIGN_CONTEXT_SCOPE.reset(token)
 
 
 def _sample_statistics(

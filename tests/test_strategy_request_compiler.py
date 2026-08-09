@@ -14,6 +14,7 @@ from marvis.agent.strategy_request_compiler import (
     compile_strategy_request,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 class _SequencedLLM:
@@ -178,7 +179,7 @@ def test_compile_uses_deterministic_json_schema_call_and_returns_confirmation() 
     assert call["max_tokens"] == 8192
     assert call["caller"] == "strategy_request_compiler"
     assert call["prompt_name"] == "STRATEGY_REQUEST_COMPILER_SYS"
-    assert call["prompt_version"] == 52
+    assert call["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert set(result.to_dict()) == {"draft", "clarification", "confirmation"}
 
 

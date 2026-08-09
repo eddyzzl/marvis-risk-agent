@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +10,7 @@ from marvis.db_schema import connect
 from marvis.domain import (
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
+    TASK_TYPE_VALIDATION_BATCH,
     VALID_TASK_TYPES,
     StrategyProfitInput,
     StrategyTaskInput,
@@ -33,6 +34,7 @@ AGENT_REPORT_CONCLUSION_KEYS = frozenset({
     "TEXT:pressure_impact_recommendation",
     "TEXT:final_validation_conclusion",
 })
+TASK_FILESYSTEM_PROVISION_AUDIT_KIND = "task.filesystem.provisioned"
 
 
 def _now() -> str:
@@ -51,6 +53,49 @@ class TaskRepository:
         with connect(self.db_path) as conn:
             _insert_task_record_row(conn, record, report_values=payload.report_values)
         return record
+
+    def create_task_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskCreate,
+    ) -> TaskRecord:
+        """Create a task inside a caller-owned transaction."""
+        record = _task_record_from_create(payload)
+        _insert_task_record_row(conn, record, report_values=payload.report_values)
+        return record
+
+    def record_task_filesystem_provision_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task: TaskRecord,
+        *,
+        target_type: str,
+        relative_path: str,
+    ) -> None:
+        """Persist proof that the platform, not the user, created a target."""
+
+        if target_type == "risk_intake_dir":
+            if (
+                not relative_path.startswith("risk-intake-")
+                or Path(relative_path).name != relative_path
+            ):
+                raise ValueError("invalid risk intake provenance path")
+        elif target_type == "validation_batch_source_dir":
+            if not _is_validation_batch_source_relative_path(relative_path):
+                raise ValueError("invalid validation batch provenance path")
+        else:
+            raise ValueError("unsupported task filesystem provisioning target")
+        _write_audit_row(
+            conn,
+            kind=TASK_FILESYSTEM_PROVISION_AUDIT_KIND,
+            target_ref=task.id,
+            outcome="succeeded",
+            detail={
+                "target_type": target_type,
+                "relative_path": relative_path,
+                "task_created_at": task.created_at,
+            },
+        )
 
     def create_task_with_audit(self, payload: TaskCreate, *, audit_factory) -> TaskRecord:
         with connect(self.db_path) as conn:
@@ -128,24 +173,36 @@ class TaskRepository:
                 raise KeyError(f"Task not found: {task_id}")
         return self.get_task(task_id)
 
-    def update_target_col(self, task_id: str, target_col: str) -> TaskRecord:
-        """Persist an explicit target selected during conversational setup."""
+    def update_target_col(
+        self,
+        task_id: str,
+        target_col: str | None,
+    ) -> TaskRecord:
+        """Persist an explicit target selection, including an explicit clear."""
+
+        with connect(self.db_path) as conn:
+            self.update_target_col_on_connection(conn, task_id, target_col)
+        return self.get_task(task_id)
+
+    def update_target_col_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        target_col: str | None,
+    ) -> None:
+        """Update or clear a target inside the caller's SQLite transaction."""
 
         value = str(target_col or "").strip()
-        if not value:
-            raise ValueError("target_col must be a non-empty string")
-        with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE tasks
-                   SET target_col = ?, updated_at = ?
-                 WHERE id = ?
-                """,
-                (value, _now(), task_id),
-            )
-            if cursor.rowcount == 0:
-                raise KeyError(f"Task not found: {task_id}")
-        return self.get_task(task_id)
+        cursor = conn.execute(
+            """
+            UPDATE tasks
+               SET target_col = ?, updated_at = ?
+             WHERE id = ?
+            """,
+            (value, _now(), task_id),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Task not found: {task_id}")
 
     def update_strategy_input(
         self,
@@ -240,10 +297,18 @@ class TaskRepository:
 
     def purge_preview(self, task_id: str) -> dict:
         with connect(self.db_path) as conn:
-            row = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if row is None:
-                raise KeyError(f"Task not found: {task_id}")
-            summary = _task_purge_summary(conn, task_id)
+            summary = self.purge_preview_on_connection(conn, task_id)
+        return summary
+
+    def purge_preview_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+    ) -> dict:
+        row = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Task not found: {task_id}")
+        summary = _task_purge_summary(conn, task_id)
         summary.pop("_dataset_source_paths", None)
         return summary
 
@@ -253,6 +318,7 @@ class TaskRepository:
         *,
         actor: str = "system",
         validate_dataset_source_path: Callable[[str], None] | None = None,
+        task_fs_targets: Sequence[object] = (),
     ) -> dict:
         with connect(self.db_path) as conn:
             return self.purge_task_on_connection(
@@ -260,6 +326,7 @@ class TaskRepository:
                 task_id,
                 actor=actor,
                 validate_dataset_source_path=validate_dataset_source_path,
+                task_fs_targets=task_fs_targets,
             )
 
     def purge_task_on_connection(
@@ -269,10 +336,14 @@ class TaskRepository:
         *,
         actor: str = "system",
         validate_dataset_source_path: Callable[[str], None] | None = None,
+        task_fs_targets: Sequence[object] = (),
     ) -> dict:
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = conn.execute(
+            "SELECT id, task_type, source_dir, created_at FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
         if row is None:
             raise KeyError(f"Task not found: {task_id}")
         active_job = conn.execute(
@@ -292,6 +363,23 @@ class TaskRepository:
         if validate_dataset_source_path is not None:
             for source_path in source_paths:
                 validate_dataset_source_path(source_path)
+        _enqueue_dataset_source_gc_candidates(
+            conn,
+            task_id=task_id,
+            source_paths=source_paths,
+            now=_now(),
+        )
+        summary["dataset_source_gc_candidates"] = len(set(source_paths))
+        task_fs_candidate_count = _enqueue_task_fs_gc_candidates(
+            conn,
+            task_id=task_id,
+            task_type=str(row["task_type"] or ""),
+            task_source_dir=str(row["source_dir"] or ""),
+            task_created_at=str(row["created_at"] or ""),
+            targets=task_fs_targets,
+            now=_now(),
+        )
+        summary["task_fs_gc_candidates"] = task_fs_candidate_count
         # datasets/joins/plans/experiments/strategies/sub_agents have no ON DELETE
         # CASCADE from tasks (see marvis/db_schema.py); their own children
         # (model_artifacts, backtests, plan_steps/outputs/runs) do cascade once the
@@ -314,33 +402,71 @@ class TaskRepository:
         conn.execute("DELETE FROM draft_runs WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM draft_tools WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        cleanup_pending = bool(
+            conn.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1 FROM dataset_source_gc_queue
+                     WHERE origin_task_id = ?
+                    UNION ALL
+                    SELECT 1 FROM task_fs_gc_queue
+                     WHERE origin_task_id = ?
+                )
+                """,
+                (task_id, task_id),
+            ).fetchone()[0]
+        )
         _write_audit_row(
             conn,
             kind="task.delete",
             target_ref=task_id,
             actor=actor,
-            outcome="succeeded",
-            detail={"purge_summary": summary},
+            outcome="cleanup_pending" if cleanup_pending else "db_purged",
+            detail={
+                "task_created_at": str(row["created_at"] or ""),
+                "purge_summary": summary,
+            },
         )
+        maybe_write_task_cleanup_succeeded(conn, task_id=task_id)
         summary["dataset_source_paths"] = source_paths
         return summary
 
-    def list_tasks(self, *, limit: int | None = None, offset: int = 0) -> list[TaskRecord]:
+    def list_tasks(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        include_batch_children: bool = True,
+    ) -> list[TaskRecord]:
         bounded_limit = None if limit is None else max(1, int(limit))
         bounded_offset = max(0, int(offset))
+        where_clause = (
+            ""
+            if include_batch_children
+            else (
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM validation_batch_items batch_item "
+                "WHERE batch_item.child_task_id = tasks.id)"
+            )
+        )
         with connect(self.db_path) as conn:
             if bounded_limit is not None:
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM tasks
+                     {where_clause}
                      ORDER BY created_at DESC, id DESC
                      LIMIT ? OFFSET ?
-                    """,
+                    """,  # noqa: S608 - clause is selected from fixed literals above.
                     (bounded_limit, bounded_offset),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM tasks ORDER BY created_at DESC, id DESC"
+                    f"""
+                    SELECT * FROM tasks
+                     {where_clause}
+                     ORDER BY created_at DESC, id DESC
+                    """  # noqa: S608 - clause is selected from fixed literals above.
                 ).fetchall()
         return [_row_to_task(row) for row in rows]
 
@@ -369,6 +495,10 @@ class TaskRepository:
             limit=limit,
             offset=offset,
         )
+
+    def write_audit(self, **kwargs) -> None:
+        with connect(self.db_path) as conn:
+            _write_audit_row(conn, **kwargs)
 
     def count_audit(
         self,
@@ -725,6 +855,7 @@ class TaskRepository:
                     }
                 )
                 task_state_closed = False
+                batch_state_closed = False
                 if previous_status == "queued":
                     task_failure = {
                         "notebook": (
@@ -757,6 +888,67 @@ class TaskRepository:
                             ),
                         )
                         task_state_closed = task_cursor.rowcount > 0
+                    if str(row["kind"]) == "validation_batch":
+                        batch_message = "批次后台任务排队超时，未开始执行；可修复后重试"
+                        batch_cursor = conn.execute(
+                            """
+                            UPDATE validation_batches
+                               SET status = 'partial_failure',
+                                   summary_path = '',
+                                   error_message = ?,
+                                   finished_at = ?,
+                                   updated_at = ?
+                             WHERE parent_task_id = ?
+                               AND status = 'running'
+                            """,
+                            (
+                                batch_message,
+                                now,
+                                now,
+                                str(row["task_id"]),
+                            ),
+                        )
+                        batch_state_closed = batch_cursor.rowcount > 0
+                        if batch_state_closed:
+                            task_cursor = conn.execute(
+                                """
+                                UPDATE tasks
+                                   SET status = ?,
+                                       status_message = ?,
+                                       status_reason_code = '',
+                                       updated_at = ?
+                                 WHERE id = ?
+                                """,
+                                (
+                                    TaskStatus.FAILED.value,
+                                    batch_message,
+                                    now,
+                                    str(row["task_id"]),
+                                ),
+                            )
+                            task_state_closed = task_cursor.rowcount > 0
+                            conn.execute(
+                                """
+                                INSERT INTO agent_messages
+                                (id, task_id, role, stage, content, created_at, metadata_json)
+                                VALUES (?, ?, 'assistant', 'failure', ?, ?, ?)
+                                """,
+                                (
+                                    uuid.uuid4().hex,
+                                    str(row["task_id"]),
+                                    batch_message,
+                                    now,
+                                    json.dumps(
+                                        {
+                                            "batch_failed_to_start": True,
+                                            "error_code": "JobStartLost",
+                                            "retryable": True,
+                                        },
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    ),
+                                ),
+                            )
                 _write_audit_row(
                     conn,
                     kind=(
@@ -772,6 +964,7 @@ class TaskRepository:
                         "previous_status": previous_status,
                         "stale_after_seconds": older_than_seconds,
                         "task_state_closed": task_state_closed,
+                        "batch_state_closed": batch_state_closed,
                     },
                 )
         return released
@@ -1051,6 +1244,28 @@ class TaskRepository:
         content: str,
         metadata: dict | None = None,
     ) -> dict:
+        with connect(self.db_path) as conn:
+            return self.add_agent_message_on_connection(
+                conn,
+                task_id,
+                role=role,
+                stage=stage,
+                content=content,
+                metadata=metadata,
+            )
+
+    def add_agent_message_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        *,
+        role: str,
+        stage: str,
+        content: str,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Insert a message inside the caller's existing SQLite transaction."""
+
         message_id = uuid.uuid4().hex
         now = _now()
         # TST-6: agent_messages is the densest PII surface (users routinely
@@ -1064,21 +1279,20 @@ class TaskRepository:
         # by key/shape, and redacting it could silently break gate detection.
         safe_content = redact_text(content)
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":"))
-        with connect(self.db_path) as conn:
-            task_row = conn.execute(
-                "SELECT 1 FROM tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-            if task_row is None:
-                raise KeyError(f"Task not found: {task_id}")
-            conn.execute(
-                """
-                INSERT INTO agent_messages
-                (id, task_id, role, stage, content, created_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (message_id, task_id, role, stage, safe_content, now, metadata_json),
-            )
+        task_row = conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            raise KeyError(f"Task not found: {task_id}")
+        conn.execute(
+            """
+            INSERT INTO agent_messages
+            (id, task_id, role, stage, content, created_at, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (message_id, task_id, role, stage, safe_content, now, metadata_json),
+        )
         return {
             "id": message_id,
             "task_id": task_id,
@@ -1544,6 +1758,272 @@ def _task_purge_summary(conn: sqlite3.Connection, task_id: str) -> dict:
         "data_workspaces": _count("data_workspaces"),
         "_dataset_source_paths": removable_paths,
     }
+
+
+def _enqueue_dataset_source_gc_candidates(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    source_paths: list[str],
+    now: str,
+) -> None:
+    """Record cleanup intent inside the caller's task-purge transaction."""
+
+    for source_path in sorted(set(source_paths)):
+        if not source_path:
+            raise ValueError("dataset source path must be non-empty")
+        conn.execute(
+            """
+            INSERT INTO dataset_source_gc_queue(
+                source_path, state, attempt_count, next_attempt_at,
+                last_error_code, last_error_message, origin_task_id,
+                enqueued_at, updated_at
+            ) VALUES (?, 'pending', 0, ?, NULL, NULL, ?, ?, ?)
+            ON CONFLICT(source_path) DO UPDATE SET
+                state = 'pending',
+                attempt_count = 0,
+                next_attempt_at = excluded.next_attempt_at,
+                last_error_code = NULL,
+                last_error_message = NULL,
+                origin_task_id = excluded.origin_task_id,
+                enqueued_at = excluded.enqueued_at,
+                updated_at = excluded.updated_at
+            """,
+            (source_path, now, task_id, now, now),
+        )
+
+
+def _enqueue_task_fs_gc_candidates(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    task_type: str,
+    task_source_dir: str,
+    task_created_at: str,
+    targets: Sequence[object],
+    now: str,
+) -> int:
+    """Record typed directory cleanup intent in the task-purge transaction."""
+
+    normalized: set[tuple[str, str]] = set()
+    for target in targets:
+        target_type = str(getattr(target, "target_type", ""))
+        relative_path = str(getattr(target, "relative_path", ""))
+        if target_type not in {
+            "task_dir",
+            "dataset_identity_dir",
+            "dataset_task_dir",
+            "risk_intake_dir",
+            "validation_batch_source_dir",
+        }:
+            raise ValueError(f"unsupported task filesystem target: {target_type}")
+        if not relative_path:
+            raise ValueError("task filesystem relative_path must be non-empty")
+        expected_path = {
+            "task_dir": task_id,
+            "dataset_identity_dir": f"{task_id}/.source-identities",
+            "dataset_task_dir": task_id,
+        }.get(target_type)
+        if expected_path is not None and relative_path != expected_path:
+            raise ValueError(
+                f"{target_type} cleanup target does not match task owner"
+            )
+        if target_type == "risk_intake_dir":
+            if (
+                task_type != "vintage"
+                or Path(task_source_dir).name != relative_path
+                or not relative_path.startswith("risk-intake-")
+            ):
+                raise ValueError("risk intake cleanup target does not match task source")
+            if not task_filesystem_provenance_exists(
+                conn,
+                task_id=task_id,
+                task_created_at=task_created_at,
+                target_type=target_type,
+                relative_path=relative_path,
+            ):
+                continue
+            reused = conn.execute(
+                """
+                SELECT 1 FROM tasks
+                 WHERE id != ? AND source_dir = ?
+                 LIMIT 1
+                """,
+                (task_id, task_source_dir),
+            ).fetchone()
+            if reused is not None:
+                continue
+        if target_type == "validation_batch_source_dir":
+            if (
+                task_type != TASK_TYPE_VALIDATION_BATCH
+                or not _is_validation_batch_source_relative_path(relative_path)
+                or tuple(Path(task_source_dir).parts[-2:])
+                != tuple(relative_path.split("/"))
+            ):
+                raise ValueError(
+                    "validation batch cleanup target does not match task source"
+                )
+            if not task_filesystem_provenance_exists(
+                conn,
+                task_id=task_id,
+                task_created_at=task_created_at,
+                target_type=target_type,
+                relative_path=relative_path,
+            ):
+                continue
+            source_root = Path(task_source_dir).absolute()
+            reused = False
+            for source_row in conn.execute(
+                "SELECT id, source_dir FROM tasks WHERE id != ?",
+                (task_id,),
+            ).fetchall():
+                candidate = Path(str(source_row["source_dir"] or "")).absolute()
+                if candidate == source_root or source_root in candidate.parents:
+                    reused = True
+                    break
+            if reused:
+                continue
+        normalized.add((target_type, relative_path))
+
+    for target_type, relative_path in sorted(normalized):
+        conn.execute(
+            """
+            INSERT INTO task_fs_gc_queue(
+                target_type, relative_path, state, attempt_count,
+                next_attempt_at, last_error_code, last_error_message,
+                origin_task_id, origin_task_created_at, enqueued_at, updated_at
+            ) VALUES (?, ?, 'pending', 0, ?, NULL, NULL, ?, ?, ?, ?)
+            ON CONFLICT(target_type, relative_path) DO UPDATE SET
+                state = 'pending',
+                attempt_count = 0,
+                next_attempt_at = excluded.next_attempt_at,
+                last_error_code = NULL,
+                last_error_message = NULL,
+                origin_task_id = excluded.origin_task_id,
+                origin_task_created_at = excluded.origin_task_created_at,
+                enqueued_at = excluded.enqueued_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                target_type,
+                relative_path,
+                now,
+                task_id,
+                task_created_at,
+                now,
+                now,
+            ),
+        )
+    return len(normalized)
+
+
+def task_filesystem_provenance_exists(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    task_created_at: str,
+    target_type: str,
+    relative_path: str,
+) -> bool:
+    """Verify exact platform-created target provenance from the audit ledger."""
+
+    rows = conn.execute(
+        """
+        SELECT detail_json
+          FROM audit
+         WHERE kind = ?
+           AND target_ref = ?
+           AND outcome = 'succeeded'
+        """,
+        (TASK_FILESYSTEM_PROVISION_AUDIT_KIND, task_id),
+    ).fetchall()
+    for row in rows:
+        try:
+            detail = json.loads(str(row["detail_json"]))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(detail, dict):
+            continue
+        if (
+            detail.get("target_type") == target_type
+            and detail.get("relative_path") == relative_path
+            and detail.get("task_created_at") == task_created_at
+        ):
+            return True
+    return False
+
+
+def _is_validation_batch_source_relative_path(relative_path: str) -> bool:
+    parts = str(relative_path or "").split("/")
+    token = parts[-1] if parts else ""
+    return (
+        len(parts) == 2
+        and parts[0] == "validation-batches"
+        and len(token) == 32
+        and token == token.lower()
+        and all(character in "0123456789abcdef" for character in token)
+    )
+
+
+def maybe_write_task_cleanup_succeeded(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+) -> bool:
+    """Append one final cleanup audit for the latest drained delete generation."""
+
+    delete_row = conn.execute(
+        """
+        SELECT rowid AS audit_rowid, id, actor
+          FROM audit
+         WHERE kind = 'task.delete'
+           AND target_ref = ?
+           AND outcome IN ('db_purged', 'cleanup_pending')
+         ORDER BY rowid DESC
+         LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if delete_row is None:
+        return False
+    pending = conn.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM dataset_source_gc_queue WHERE origin_task_id = ?
+            UNION ALL
+            SELECT 1 FROM task_fs_gc_queue WHERE origin_task_id = ?
+        )
+        """,
+        (task_id, task_id),
+    ).fetchone()[0]
+    if pending:
+        return False
+    exists = conn.execute(
+        """
+        SELECT 1 FROM audit
+         WHERE kind = 'task.cleanup'
+           AND target_ref = ?
+           AND outcome = 'succeeded'
+           AND rowid > ?
+         LIMIT 1
+        """,
+        (task_id, int(delete_row["audit_rowid"])),
+    ).fetchone()
+    if exists is not None:
+        return False
+    _write_audit_row(
+        conn,
+        kind="task.cleanup",
+        target_ref=task_id,
+        actor=str(delete_row["actor"] or "system"),
+        outcome="succeeded",
+        detail={
+            "delete_audit_id": str(delete_row["id"]),
+            "dataset_source_gc_pending": 0,
+            "task_fs_gc_pending": 0,
+        },
+    )
+    return True
 
 
 def _normalize_run_mode(value: str | None) -> str:

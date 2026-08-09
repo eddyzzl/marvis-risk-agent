@@ -16,8 +16,21 @@
     <link id="brandAppleTouchIconDark" rel="apple-touch-icon" media="(prefers-color-scheme: dark)" href="static/brand/marvis-apple-touch-icon-dark.png" />
     <link rel="manifest" href="static/manifest.webmanifest" />
     <link rel="stylesheet" href="static/styles.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/app-shell.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/dialogs-governance.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/task-shell.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/execution-workspace.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/agent-conversation.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/result-artifacts.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/welcome.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/v2-governance.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/v2-workbench.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/v2-strategy.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/v2-workflow-gates.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/v2-task-setup.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/validation-batch.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/validation-batch-create.css?v=__MARVIS_STATIC_VERSION__" />
+    <script src="static/js/pet_catalog.js?v=__MARVIS_STATIC_VERSION__"></script>
   </head>
   <body class="app-booting" data-theme="light" data-marvis-local-token="__MARVIS_LOCAL_TOKEN__" data-marvis-plugin-admin-token="__MARVIS_PLUGIN_ADMIN_TOKEN__">
     <script>
@@ -430,6 +443,43 @@
           </button>
           <div id="statusMessage" class="status" role="status" aria-live="polite"></div>
         </div>
+      </form>
+    </dialog>
+
+    <dialog id="validationBatchCreateDialog" class="validation-batch-create-dialog" aria-labelledby="validationBatchCreateTitle">
+      <form id="validationBatchCreateForm" class="validation-batch-create-panel" novalidate>
+        <header class="dialog-head">
+          <h2 id="validationBatchCreateTitle">创建批量模型验证</h2>
+          <p class="dialog-subtitle">每个模型独立上传四份材料；创建后先核对输入合同，再由你启动批次。</p>
+          <button id="closeValidationBatchCreateButton" class="button compact secondary dialog-close-button" type="button" aria-label="关闭" title="关闭">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </header>
+        <div class="validation-batch-create-body">
+          <section class="validation-batch-create-intro" aria-label="批次信息">
+            <label>
+              <span>批次名称<em>必填</em></span>
+              <input id="validationBatchName" type="text" autocomplete="off" required placeholder="例如：2026 Q3 贷前模型集中验证" />
+            </label>
+            <label>
+              <span>验证人员<em>必填</em></span>
+              <input id="validationBatchValidator" type="text" autocomplete="off" required placeholder="填写验证人员姓名" />
+            </label>
+          </section>
+          <div class="validation-batch-create-toolbar">
+            <div class="validation-batch-create-toolbar-copy">
+              <h3>模型与材料</h3>
+              <span id="validationBatchRowCount">1 / 10</span>
+            </div>
+            <button id="addValidationBatchRowButton" class="button compact secondary" type="button">添加模型</button>
+          </div>
+          <div id="validationBatchRows" class="validation-batch-create-rows"></div>
+        </div>
+        <footer class="validation-batch-create-actions">
+          <div id="validationBatchCreateStatus" class="status" role="status" aria-live="polite"></div>
+          <button id="cancelValidationBatchCreateButton" class="button secondary" type="button">取消</button>
+          <button id="createValidationBatchButton" class="button primary" type="submit">创建批次</button>
+        </footer>
       </form>
     </dialog>
 
@@ -1066,18 +1116,7 @@
                     </svg>
                     <span>宠物</span>
                   </label>
-                  <select id="settingsPetSelect" class="settings-select">
-                    <option value="none">不显示</option>
-                    <option value="naitang">蛋黄</option>
-                    <option value="xiaojiu">小九</option>
-                    <option value="auditbot">MARVIS</option>
-                    <option value="auditbot-pro">MARVIS Pro</option>
-                    <option value="auditbot-poly">MARVIS Poly</option>
-                    <option value="auditbot-ink">MARVIS Ink</option>
-                    <option value="auditbot-clay">MARVIS Clay</option>
-                    <option value="auditbot-comic">MARVIS Comic</option>
-                    <option value="auditbot-pixel">MARVIS Pixel</option>
-                  </select>
+                  <select id="settingsPetSelect" class="settings-select"></select>
                 </div>
               </section>
               <button id="openGovernanceSettingsButton" class="settings-system-row" type="button" data-settings-row="system">
@@ -1237,6 +1276,26 @@
                 <span>Vintage、VTG 年化不良与收益测算</span>
               </button>
               <button
+                id="welcomePortfolioAnalysisCard"
+                class="welcome-task-card available"
+                type="button"
+                data-task-kind="portfolio"
+              >
+                <span class="welcome-task-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <g id="welcomePortfolioIconGlyph">
+                      <circle class="back" cx="10" cy="12" r="7.2"></circle>
+                      <path class="mid" d="M10 4.8a7.2 7.2 0 0 1 6.24 10.8L10 12Z"></path>
+                      <path d="M11.5 3.5a8.7 8.7 0 0 1 7.53 13.05l-2.79-.95A7.2 7.2 0 0 0 10 4.8Z"></path>
+                      <circle class="cut" cx="10" cy="12" r="2.35"></circle>
+                    </g>
+                  </svg>
+                  <span class="welcome-task-sheen" aria-hidden="true"></span>
+                </span>
+                <strong>组合分析</strong>
+                <span>迁徙矩阵、余额与分群集中度、预期损失和组合报告</span>
+              </button>
+              <button
                 id="welcomeModelDevelopmentCard"
                 class="welcome-task-card available"
                 type="button"
@@ -1304,6 +1363,40 @@
                 <span>PMML打分、效果稳定性验证，模型压力测试</span>
               </button>
               <button
+                id="welcomeValidationBatchCard"
+                class="welcome-task-card available"
+                type="button"
+                data-task-kind="validation_batch"
+              >
+                <span class="welcome-task-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <g id="welcomeValidationBatchIconGlyph">
+                      <rect class="back" x="4" y="6" width="12" height="14" rx="2"></rect>
+                      <rect x="8" y="3" width="12" height="14" rx="2"></rect>
+                      <rect class="mid" x="10.5" y="5.7" width="7" height="1.7" rx="0.85"></rect>
+                      <rect class="cut" x="10.5" y="9" width="7" height="1.1" rx="0.55"></rect>
+                      <rect class="cut" x="10.5" y="11.8" width="4.7" height="1.1" rx="0.55"></rect>
+                      <circle class="cut" cx="17.4" cy="16.3" r="3.7"></circle>
+                      <circle cx="17.4" cy="16.3" r="2.9"></circle>
+                      <path class="cst" d="M16 16.4 17 17.4 18.9 15.4"></path>
+                    </g>
+                    <defs>
+                      <clipPath id="welcomeValidationBatchIconClip">
+                        <rect x="4" y="6" width="12" height="14" rx="2"></rect>
+                        <rect x="8" y="3" width="12" height="14" rx="2"></rect>
+                      </clipPath>
+                    </defs>
+                    <g class="icon-sheen" clip-path="url(#welcomeValidationBatchIconClip)">
+                      <rect x="-9" y="-4" width="8.5" height="32" rx="2.6" transform="skewX(-18)"></rect>
+                      <rect class="icon-sheen-soft" x="-0.5" y="-4" width="4" height="32" rx="1.8" transform="skewX(-18)"></rect>
+                    </g>
+                  </svg>
+                  <span class="welcome-task-sheen" aria-hidden="true"></span>
+                </span>
+                <strong>批量模型验证</strong>
+                <span>集中上传 1–10 个模型，隔离执行并汇总验证结果</span>
+              </button>
+              <button
                 id="welcomeStrategyDevelopmentCard"
                 class="welcome-task-card available"
                 type="button"
@@ -1361,7 +1454,7 @@
                     </button>
                   </div>
                 </div>
-                <div class="task-hero-details" id="taskHeroDetails">
+                <div class="task-hero-details" id="taskHeroDetails" aria-hidden="true" inert>
                   <div class="task-hero-details-inner">
                     <p
                       id="actionErrorDetail"
@@ -1378,6 +1471,177 @@
               </div>
             </header>
             <div id="resultScrollContent" class="result-scroll-content" aria-label="验证结果明细">
+              <section
+                id="batchOverviewPanel"
+                class="validation-batch-panel hidden"
+                aria-label="模型验证批次总览"
+                aria-hidden="true"
+              ></section>
+              <section
+                id="batchValidationContractPanel"
+                class="validation-contract-panel validation-batch-contract-panel hidden"
+                aria-label="批次模型验证字段合同"
+                aria-live="polite"
+              ></section>
+              <section
+                id="dataWorkspacePanel"
+                class="data-workspace-panel"
+                aria-label="数据工作区"
+                hidden
+              >
+                <header class="data-workspace-head">
+                  <div class="data-workspace-identity">
+                    <span>数据工作区</span>
+                    <strong id="dataWorkspaceDataset">尚未绑定数据集</strong>
+                    <small id="dataWorkspaceDatasetHash">无内容指纹</small>
+                  </div>
+                  <div class="data-workspace-head-actions">
+                    <span id="dataWorkspaceRevision" class="data-workspace-revision">R–</span>
+                    <span id="dataWorkspaceState" class="data-workspace-state data-workspace-state-clean">已同步</span>
+                    <button
+                      id="dataWorkspaceRefreshButton"
+                      class="button compact secondary data-workspace-refresh"
+                      type="button"
+                      aria-label="刷新数据工作区"
+                      title="刷新数据工作区"
+                    >刷新</button>
+                  </div>
+                </header>
+                <div class="data-workspace-editor">
+                  <label class="data-workspace-target">
+                    <span>目标字段</span>
+                    <select id="dataWorkspaceTarget" aria-label="目标字段">
+                      <option value="">未设置目标字段</option>
+                    </select>
+                  </label>
+                  <section class="data-workspace-semantics" aria-label="字段语义">
+                    <header>
+                      <div>
+                        <strong>字段角色与业务名称</strong>
+                        <small>角色和目标字段由平台按同一语义契约保存。</small>
+                      </div>
+                      <span id="dataWorkspaceFieldCount">0 个字段 · 0 个已标注</span>
+                    </header>
+                    <div class="data-workspace-field-head" aria-hidden="true">
+                      <span>字段</span><span>角色</span><span>业务名称</span>
+                    </div>
+                    <div id="dataWorkspaceFields" class="data-workspace-fields">
+                      <p class="data-workspace-empty">绑定数据集后显示字段语义。</p>
+                    </div>
+                  </section>
+                </div>
+                <footer class="data-workspace-footer">
+                  <p id="dataWorkspaceStatus" class="data-workspace-status" role="status" aria-live="polite">
+                    上传或由 Agent 绑定数据集后，可在这里维护字段语义。
+                  </p>
+                  <div class="data-workspace-actions">
+                    <button id="dataWorkspaceDiscardButton" class="button compact secondary" type="button" disabled>丢弃</button>
+                    <button id="dataWorkspaceSaveButton" class="button compact primary" type="button" disabled>保存</button>
+                  </div>
+                </footer>
+              </section>
+              <section
+                id="labelingSetupPanel"
+                class="labeling-setup-panel"
+                aria-label="标签构造口径"
+                hidden
+              >
+                <header class="labeling-setup-head">
+                  <div>
+                    <span>标签构造口径</span>
+                    <strong>把数据切点、表现窗与坏样本定义固定为可审计合同</strong>
+                  </div>
+                  <span class="labeling-setup-badge">人工确认</span>
+                </header>
+                <form id="labelingSetupForm" class="labeling-setup-form" novalidate>
+                  <p class="labeling-setup-guidance">
+                    只使用已保存的数据工作区快照；平台不会根据列名猜测坏样本，也不会覆盖已有目标列。
+                  </p>
+                  <div class="labeling-setup-grid">
+                    <label><span>贷款 ID 列</span><input id="labelingIdCol" autocomplete="off" placeholder="loan_id" required /></label>
+                    <label><span>账龄 MOB 列</span><input id="labelingMobCol" autocomplete="off" placeholder="mob" required /></label>
+                    <label><span>Cohort 列</span><input id="labelingCohortCol" autocomplete="off" placeholder="cohort" required /></label>
+                    <label><span>快照日期列</span><input id="labelingDateCol" autocomplete="off" placeholder="snapshot_date" required /></label>
+                    <label><span>数据切点</span><input id="labelingAsOfDate" type="date" required /></label>
+                    <label><span>目标标签列</span><input id="labelingTargetCol" autocomplete="off" placeholder="bad_m3" required /></label>
+                    <label><span>观察窗（月）</span><input id="labelingObservationWindow" type="number" min="0" step="1" value="0" required /></label>
+                    <label><span>表现窗（月）</span><input id="labelingPerformanceWindow" type="number" min="1" step="1" value="6" required /></label>
+                    <label><span>标签判定 MOB</span><input id="labelingAtMob" type="number" min="1" step="1" value="3" required /></label>
+                    <label>
+                      <span>坏样本规则</span>
+                      <select id="labelingRuleKind">
+                        <option value="dpd">DPD 阈值</option>
+                        <option value="status">有序状态</option>
+                      </select>
+                    </label>
+                    <div id="labelingDpdFields" class="labeling-rule-fields">
+                      <label><span>DPD 列</span><input id="labelingDpdCol" autocomplete="off" placeholder="dpd" /></label>
+                      <label><span>DPD 阈值</span><input id="labelingThresholdDpd" type="number" min="0" step="1" value="30" /></label>
+                    </div>
+                    <div id="labelingStatusFields" class="labeling-rule-fields" hidden>
+                      <label><span>状态列</span><input id="labelingStatusCol" autocomplete="off" placeholder="status" /></label>
+                      <label><span>坏样本起始状态</span><input id="labelingThresholdStatus" autocomplete="off" placeholder="M2" /></label>
+                      <label class="labeling-states-field"><span>从好到坏的状态顺序</span><input id="labelingStates" autocomplete="off" placeholder="current, M1, M2, charged_off" /></label>
+                    </div>
+                  </div>
+                  <footer class="labeling-setup-footer">
+                    <p id="labelingSetupStatus" class="labeling-setup-status" role="status" aria-live="polite">
+                      先绑定并保存数据集，再提交经业务确认的标签口径。
+                    </p>
+                    <button id="labelingSetupSubmit" class="button compact primary" type="submit">核验并生成提案</button>
+                  </footer>
+                </form>
+                <section id="labelingProposalPanel" class="labeling-proposal-panel" aria-label="标签构造提案" hidden>
+                  <div>
+                    <strong>只读核验已完成</strong>
+                    <p id="labelingProposalSummary">等待标签构造提案。</p>
+                  </div>
+                  <button id="labelingProposalConfirm" class="button compact primary" type="button">确认并生成计划</button>
+                </section>
+              </section>
+              <section
+                id="portfolioSetupPanel"
+                class="portfolio-setup-panel"
+                aria-label="组合分析口径"
+                hidden
+              >
+                <header class="portfolio-setup-head">
+                  <div>
+                    <span>组合分析口径</span>
+                    <strong>先明确业务语义，再计算组合风险</strong>
+                  </div>
+                  <span class="portfolio-setup-badge">人工确认</span>
+                </header>
+                <form id="portfolioSetupForm" class="portfolio-setup-form" novalidate>
+                  <p class="portfolio-setup-guidance">
+                    平台会校验字段是否真实存在；不会用笔数代替余额，也不会猜测损失态、LGD 或预测期限。
+                  </p>
+                  <div class="portfolio-setup-grid">
+                    <label><span>贷款 ID 列</span><input id="portfolioIdCol" autocomplete="off" placeholder="loan_id" required /></label>
+                    <label><span>快照月列</span><input id="portfolioSnapshotCol" autocomplete="off" placeholder="snapshot_month" required /></label>
+                    <label><span>逾期桶列</span><input id="portfolioBucketCol" autocomplete="off" placeholder="bucket" required /></label>
+                    <label><span>余额 / EAD 列</span><input id="portfolioBalanceCol" autocomplete="off" placeholder="balance" required /></label>
+                    <label><span>业务分群列</span><input id="portfolioSegmentCol" autocomplete="off" placeholder="segment" required /></label>
+                    <label><span>损失态</span><input id="portfolioLossState" autocomplete="off" placeholder="charged_off" required /></label>
+                    <label><span>LGD</span><input id="portfolioLgd" type="number" min="0" max="1" step="0.01" value="0.45" required /></label>
+                    <label><span>预测期限（月）</span><input id="portfolioHorizonMonths" type="number" min="1" step="1" value="12" required /></label>
+                  </div>
+                  <details class="portfolio-trend-contract">
+                    <summary>可选：模型分趋势分析</summary>
+                    <div class="portfolio-setup-grid portfolio-setup-grid-optional">
+                      <label><span>分数列</span><input id="portfolioScoreCol" autocomplete="off" placeholder="score" /></label>
+                      <label><span>实验 ID</span><input id="portfolioExperimentId" autocomplete="off" placeholder="experiment_id" /></label>
+                    </div>
+                    <small>两项必须同时填写；留空则使用不含模型趋势的组合分析流程。</small>
+                  </details>
+                  <footer class="portfolio-setup-footer">
+                    <p id="portfolioSetupStatus" class="portfolio-setup-status" role="status" aria-live="polite">
+                      填写数据中的准确列名和经业务确认的损失口径。
+                    </p>
+                    <button id="portfolioSetupSubmit" class="button compact primary" type="submit">校验并提交口径</button>
+                  </footer>
+                </form>
+              </section>
               <section id="scanSection" class="progress-panel">
                 <div id="agentScanLeadMessages" class="agent-stage-messages agent-stage-lead-messages" aria-live="polite"></div>
                 <h3>材料识别</h3>
@@ -3361,20 +3625,14 @@
       <div
         id="petCompanion"
         class="pet-companion"
-        data-pet-id="auditbot"
+        data-pet-id=""
         data-pet-mood="idle"
         role="img"
         aria-live="polite"
-        aria-label="MARVIS，3D 玩具审计机器人，青色护目镜眼睛和铜色耳机，当前状态：idle"
+        aria-label="宠物载入中"
         tabindex="0"
       >
-        <div id="petSticker" class="pet-sticker" data-pet-id="auditbot" aria-hidden="true">
-          <div
-            class="pet-sprite"
-            style='background-image: url("static/pets/auditbot/spritesheet.webp")'
-            aria-hidden="true"
-          ></div>
-        </div>
+        <div id="petSticker" class="pet-sticker" aria-hidden="true"></div>
       </div>
       <script>
         (() => {
@@ -3383,71 +3641,19 @@
             const sticker = document.getElementById("petSticker");
             if (!pet || !sticker) return;
 
-            const pets = {
-              naitang: {
-                name: "蛋黄",
-                label: "奶油色长毛蓝眼猫，黑色领结",
-                asset: "static/pets/naitang/spritesheet.webp",
-              },
-              xiaojiu: {
-                name: "小九",
-                label: "贪吃、呆萌、胆小的小猫",
-                asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f",
-              },
-              auditbot: {
-                name: "MARVIS",
-                label: "3D 玩具审计机器人，青色护目镜眼睛和铜色耳机",
-                asset: "static/pets/auditbot/spritesheet.webp",
-              },
-              "auditbot-pro": {
-                name: "MARVIS Pro",
-                label: "专业风格 3D 审计机器人",
-                asset: "static/pets/auditbot-pro/spritesheet.webp",
-              },
-              "auditbot-poly": {
-                name: "MARVIS Poly",
-                label: "低多边形硬表面审计机器人",
-                asset: "static/pets/auditbot-poly/spritesheet.webp",
-              },
-              "auditbot-ink": {
-                name: "MARVIS Ink",
-                label: "技术线稿风格审计机器人",
-                asset: "static/pets/auditbot-ink/spritesheet.webp",
-              },
-              "auditbot-clay": {
-                name: "MARVIS Clay",
-                label: "黏土与乙烯基质感审计机器人",
-                asset: "static/pets/auditbot-clay/spritesheet.webp",
-              },
-              "auditbot-comic": {
-                name: "MARVIS Comic",
-                label: "漫画描边风格审计机器人",
-                asset: "static/pets/auditbot-comic/spritesheet.webp",
-              },
-              "auditbot-pixel": {
-                name: "MARVIS Pixel",
-                label: "像素风审计机器人",
-                asset: "static/pets/auditbot-pixel/spritesheet.webp",
-              },
-            };
-            const legacy = { danhuang: "naitang", buou: "xiaojiu", "ragdoll-cat": "xiaojiu" };
-            const stored = localStorage.getItem("marvis_pet");
-            const explicitNone = localStorage.getItem("marvis_pet_none_explicit") === "1";
-            const normalized =
-              stored === "none" && explicitNone
-                ? "none"
-                : pets[legacy[stored] || stored]
-                  ? legacy[stored] || stored
-                  : "auditbot";
+            const catalog = window.MarvisPetCatalog;
+            const stored = localStorage.getItem(catalog.storageKeys.preference);
+            const explicitNone = localStorage.getItem(catalog.storageKeys.explicitNone) === "1";
+            const normalized = catalog.resolveStoredPreference(stored, explicitNone);
 
-            if (normalized === "none") {
+            if (normalized === catalog.noneId) {
               pet.classList.add("hidden");
-              pet.dataset.petId = "none";
+              pet.dataset.petId = catalog.noneId;
               pet.setAttribute("aria-label", "宠物未显示");
               return;
             }
 
-            const definition = pets[normalized];
+            const definition = catalog.definitions[normalized];
             pet.classList.remove("hidden");
             pet.dataset.petId = normalized;
             sticker.dataset.petId = normalized;
@@ -3461,7 +3667,7 @@
             sprite.style.backgroundImage = `url("${definition.asset}")`;
             pet.setAttribute("aria-label", `${definition.name}，${definition.label}，当前状态：idle`);
 
-            const storedPosition = JSON.parse(localStorage.getItem("marvis_pet_position") || "{}");
+            const storedPosition = JSON.parse(localStorage.getItem(catalog.storageKeys.position) || "{}");
             if (Number.isFinite(storedPosition.left) && Number.isFinite(storedPosition.top)) {
               const workspace = document.getElementById("validationWorkspace")?.getBoundingClientRect();
               const padding = 14;

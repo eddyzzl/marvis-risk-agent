@@ -253,17 +253,24 @@ def test_llm_settings_api_masks_keys_and_lists_enabled_models(tmp_path):
     assert loaded.json() == payload
 
 
-def test_agent_message_without_llm_config_returns_guidance(tmp_path):
+@pytest.mark.parametrize(
+    "content",
+    ["开始验证", "材料和当前设置都没问题，按这个方案往下处理。"],
+)
+def test_agent_message_without_llm_config_returns_guidance(tmp_path, content):
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
 
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "开始验证"},
+        json={"content": content},
     )
 
     assert response.status_code == 409
     assert "请先在设置中配置至少一个启用的大模型" in response.json()["detail"]
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    assert repo.get_task(task_id).status == TaskStatus.CREATED
+    assert repo.list_agent_messages(task_id) == []
 
 
 def test_agent_messages_endpoint_supports_after_id_cursor(tmp_path):
@@ -1107,7 +1114,7 @@ def test_clear_agent_cancellation_is_scoped_to_one_task():
         clear_agent_cancellation("task-b")
 
 
-def test_agent_word_conclusions_auto_accept_confirms_and_generates_report(
+def test_agent_word_conclusions_auto_accept_generates_report_without_confirmation(
     tmp_path,
     monkeypatch,
 ):
@@ -1150,15 +1157,14 @@ def test_agent_word_conclusions_auto_accept_confirms_and_generates_report(
     assert repo.get_task(task_id).status == TaskStatus.SUCCEEDED
     assert repo.get_report_values(task_id)[0] == REQUIRED_AGENT_CONCLUSIONS
     audit = PluginRepository(tmp_path / "marvis.sqlite").list_audit(
-        kind="report.agent_conclusions.confirm",
+        kind="report.agent_conclusions.generated",
     )
     assert len(audit) == 1
     assert audit[0]["target_ref"] == task_id
-    assert audit[0]["detail"]["auto_accept"] is True
     assert audit[0]["detail"]["keys"] == sorted(REQUIRED_AGENT_CONCLUSIONS)
     assert [message["stage"] for message in messages] == [
         "word_conclusion_draft",
-        "word_conclusion_confirmed",
+        "word_conclusion_generated",
         "word_report_ready",
     ]
     assert not any(message.get("metadata", {}).get("awaiting_confirmation") for message in messages)
@@ -1175,12 +1181,25 @@ def test_agent_word_conclusion_stage_passes_rewrite_instruction_to_llm(
     repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     seen_instructions: list[str | None] = []
+    report_calls: list[str] = []
 
     def fake_generate_word_conclusions(**kwargs):
         seen_instructions.append(kwargs.get("user_instruction"))
         return REQUIRED_AGENT_CONCLUSIONS, {"source": "test"}
 
+    def fake_run_report_stage(*, task_id, settings):
+        report_calls.append(task_id)
+        local_repo = TaskRepository(tmp_path / "marvis.sqlite")
+        local_repo.update_status(
+            task_id,
+            TaskStatus.SUCCEEDED,
+            "word generated",
+            expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+        )
+
     monkeypatch.setattr("marvis.agent.validation_app_service.generate_word_conclusions", fake_generate_word_conclusions)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_report_stage", fake_run_report_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_pipeline_settings", lambda _settings, _task: object())
     monkeypatch.setattr("marvis.agent.validation_app_service.agent_evidence_from_settings_impl", lambda _settings, _task_id: {})
 
     assert _run_agent_word_conclusion_stage(
@@ -1188,13 +1207,71 @@ def test_agent_word_conclusion_stage_passes_rewrite_instruction_to_llm(
         SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
         task_id,
         {"model_id": "m1", "effort": "high"},
+        auto_accept=True,
         rewrite_instruction="重新写草稿，强化压力测试高风险数据源说明",
     )
 
     assert seen_instructions == ["重新写草稿，强化压力测试高风险数据源说明"]
+    assert report_calls == [task_id]
     messages = repo.list_agent_messages(task_id)
-    assert messages[-2]["stage"] == "word_conclusion_draft"
-    assert messages[-1]["metadata"]["awaiting_confirmation"] is True
+    assert [message["stage"] for message in messages[-3:]] == [
+        "word_conclusion_draft",
+        "word_conclusion_generated",
+        "word_report_ready",
+    ]
+    assert not any(message.get("metadata", {}).get("awaiting_confirmation") for message in messages)
+
+
+def test_agent_word_conclusion_llm_failure_uses_fallback_and_generates_report(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.api import _run_agent_word_conclusion_stage
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    _advance_to_writing_artifacts(repo, task_id)
+    report_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.generate_word_conclusions",
+        lambda **_kwargs: ({}, {"llm_error": "timeout", "fallback": True}),
+    )
+
+    def fake_run_report_stage(*, task_id, settings):
+        report_calls.append(task_id)
+        local_repo = TaskRepository(tmp_path / "marvis.sqlite")
+        local_repo.update_status(
+            task_id,
+            TaskStatus.REVIEW_REQUIRED,
+            "word generated with deterministic fallback",
+            expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+        )
+
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_report_stage", fake_run_report_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_pipeline_settings", lambda _settings, _task: object())
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_evidence_from_settings_impl", lambda _settings, _task_id: {})
+
+    assert _run_agent_word_conclusion_stage(
+        repo,
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        task_id,
+        {"model_id": "m1", "effort": "high"},
+        auto_accept=True,
+    )
+
+    assert report_calls == [task_id]
+    values, _revision = repo.get_report_values(task_id)
+    assert REQUIRED_AGENT_CONCLUSIONS.keys() <= values.keys()
+    messages = repo.list_agent_messages(task_id)
+    assert messages[0]["metadata"]["deterministic_fallback"] is True
+    assert messages[1]["stage"] == "word_conclusion_generated"
+    assert messages[1]["metadata"]["narrative_source"] == "deterministic_fallback"
+    audit = PluginRepository(tmp_path / "marvis.sqlite").list_audit(
+        kind="report.agent_conclusions.generated",
+    )
+    assert audit[0]["detail"]["source"] == "deterministic_fallback"
 
 
 def test_agent_word_conclusion_stage_passes_prior_stage_summaries_to_llm(
@@ -1237,7 +1314,17 @@ def test_agent_word_conclusion_stage_passes_prior_stage_summaries_to_llm(
         seen_evidence.append(kwargs["evidence"])
         return REQUIRED_AGENT_CONCLUSIONS, {"source": "test"}
 
+    def fake_run_report_stage(*, task_id, settings):
+        TaskRepository(tmp_path / "marvis.sqlite").update_status(
+            task_id,
+            TaskStatus.SUCCEEDED,
+            "word generated",
+            expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+        )
+
     monkeypatch.setattr("marvis.agent.validation_app_service.generate_word_conclusions", fake_generate_word_conclusions)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_report_stage", fake_run_report_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_pipeline_settings", lambda _settings, _task: object())
     monkeypatch.setattr(
         "marvis.agent.validation_app_service.agent_evidence_from_settings_impl",
         lambda _settings, _task_id: {"validation_results": {"model_name": "A卡"}},
@@ -1248,6 +1335,7 @@ def test_agent_word_conclusion_stage_passes_prior_stage_summaries_to_llm(
         SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
         task_id,
         {"model_id": "m1", "effort": "high"},
+        auto_accept=True,
     )
 
     assert seen_evidence
@@ -2742,6 +2830,311 @@ def test_agent_continue_from_scanned_runs_only_notebook_stage(
     assert "模型效果&稳定性验证" in messages[-1]["content"]
 
 
+def test_agent_semantic_authorization_from_scanned_runs_notebook_stage(
+    tmp_path,
+    monkeypatch,
+):
+    llm_callers: list[str | None] = []
+
+    class FakeLLMClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def complete(self, **kwargs):
+            caller = kwargs.get("caller")
+            llm_callers.append(caller)
+            if caller == "router":
+                return json.dumps(
+                    {
+                        "action": "confirm",
+                        "params": {},
+                        "constraint": "",
+                        "reason": "用户明确要求按当前材料和设置立即向下执行。",
+                        "confidence": "high",
+                        "explicit_authorization": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if caller == "semantic_authorization_reviewer":
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": "请按这个方案往下处理",
+                        "reason": "该原话是对当前节点的即时无条件授权。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            prompt = json.loads(kwargs["user_prompt"])
+            if prompt.get("stage") == "reproducibility":
+                return "模型可复现性验证已完成，分数一致性通过。"
+            return "这是普通对话回复。"
+
+    def fake_notebook_stage(*, task_id, settings, stage_claimed):
+        assert stage_claimed is True
+        TaskRepository(settings.db_path).update_status(
+            task_id,
+            TaskStatus.EXECUTED,
+            "notebook executed",
+            expected=TaskStatus.RUNNING,
+        )
+
+    monkeypatch.setattr(
+        "marvis.agent.service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_notebook_stage",
+        fake_notebook_stage,
+    )
+    client = _client(tmp_path)
+    _configure_llm(client)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(
+        task_id,
+        TaskStatus.SCANNED,
+        "scan ok",
+        expected=TaskStatus.CREATED,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "这些材料和当前设置都没有问题，请按这个方案往下处理。",
+            "model_id": "m1",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "accepted"
+    assert repo.get_task(task_id).status == TaskStatus.EXECUTED
+    user_message = repo.list_agent_messages(task_id)[0]
+    assert user_message["metadata"]["intent"] == "advance"
+    assert user_message["metadata"]["semantic_authorization"]["evidence_quote"] == (
+        "请按这个方案往下处理"
+    )
+    assert llm_callers[:2] == ["router", "semantic_authorization_reviewer"]
+
+
+@pytest.mark.parametrize(
+    ("case", "content"),
+    [
+        ("question", "你是要按当前方案往下做吗？"),
+        ("conditional", "如果材料核对完成，就按当前方案往下做。"),
+        ("adjustment", "把容差改成 0.1 再往下做。"),
+        ("rejection", "这个方案我不接受。"),
+        ("reviewer_rejects", "这版看起来可以往下做。"),
+        ("router_error", "材料没问题，按当前方案处理。"),
+        ("reviewer_error", "材料没问题，现在按当前方案处理。"),
+    ],
+)
+def test_agent_semantic_non_authorization_never_advances_validation(
+    tmp_path,
+    monkeypatch,
+    case,
+    content,
+):
+    from marvis.llm_client import LLMClientError
+
+    confirm_route = {
+        "action": "confirm",
+        "params": {},
+        "constraint": "",
+        "reason": "用户似乎要求执行。",
+        "confidence": "high",
+        "explicit_authorization": True,
+    }
+    route_by_case = {
+        "question": {
+            **confirm_route,
+            "action": "clarify",
+            "confidence": "low",
+            "explicit_authorization": False,
+        },
+        "conditional": {**confirm_route, "constraint": "材料核对完成后"},
+        "adjustment": {
+            **confirm_route,
+            "action": "adjust",
+            "params": {"tolerance": 0.1},
+            "explicit_authorization": False,
+        },
+        "rejection": {
+            **confirm_route,
+            "action": "clarify",
+            "reason": "用户拒绝当前方案。",
+            "explicit_authorization": False,
+        },
+    }
+
+    class FakeLLMClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def complete(self, **kwargs):
+            caller = kwargs.get("caller")
+            if caller == "router":
+                if case == "router_error":
+                    raise LLMClientError("router unavailable")
+                return json.dumps(route_by_case.get(case, confirm_route), ensure_ascii=False)
+            if caller == "semantic_authorization_reviewer":
+                if case == "reviewer_error":
+                    raise LLMClientError("reviewer unavailable")
+                return json.dumps(
+                    {
+                        "verdict": "ambiguous" if case == "reviewer_rejects" else "authorize",
+                        "evidence_quote": "看起来可以往下做",
+                        "reason": "该话未构成即时无条件授权。",
+                        "confidence": "low" if case == "reviewer_rejects" else "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": case == "reviewer_rejects",
+                    },
+                    ensure_ascii=False,
+                )
+            return "已保留当前状态，没有执行下一阶段。"
+
+    monkeypatch.setattr(
+        "marvis.agent.service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_notebook_stage",
+        lambda **_kwargs: pytest.fail("non-authorization must not run validation"),
+    )
+    client = _client(tmp_path)
+    _configure_llm(client)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(
+        task_id,
+        TaskStatus.SCANNED,
+        "scan ok",
+        expected=TaskStatus.CREATED,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": content, "model_id": "m1"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "message_saved"
+    assert repo.get_task(task_id).status == TaskStatus.SCANNED
+    messages = repo.list_agent_messages(task_id)
+    assert messages[0]["role"] == "user"
+    assert messages[0]["metadata"].get("intent") != "advance"
+    assert "semantic_authorization" not in messages[0]["metadata"]
+
+
+def test_agent_semantic_authorization_is_discarded_when_stage_changes_during_review(
+    tmp_path,
+    monkeypatch,
+):
+    repo: TaskRepository | None = None
+
+    class FakeLLMClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def complete(self, **kwargs):
+            caller = kwargs.get("caller")
+            if caller == "router":
+                return json.dumps(
+                    {
+                        "action": "confirm",
+                        "params": {},
+                        "constraint": "",
+                        "reason": "用户明确要求立即执行当前阶段。",
+                        "confidence": "high",
+                        "explicit_authorization": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if caller == "semantic_authorization_reviewer":
+                assert repo is not None
+                task_id = repo.list_tasks()[0].id
+                repo.update_status(
+                    task_id,
+                    TaskStatus.RUNNING,
+                    "another worker started",
+                    expected=TaskStatus.SCANNED,
+                )
+                repo.update_status(
+                    task_id,
+                    TaskStatus.EXECUTED,
+                    "another worker finished",
+                    expected=TaskStatus.RUNNING,
+                )
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": "按这个方案往下处理",
+                        "reason": "用户原话在旧阶段上是即时无条件授权。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            return "任务状态已变化，未使用旧授权执行。"
+
+    monkeypatch.setattr(
+        "marvis.agent.service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_notebook_stage",
+        lambda **_kwargs: pytest.fail("stale authorization must not run notebook"),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_metrics_stage",
+        lambda **_kwargs: pytest.fail("stale authorization must not run metrics"),
+    )
+    client = _client(tmp_path)
+    _configure_llm(client)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(
+        task_id,
+        TaskStatus.SCANNED,
+        "scan ok",
+        expected=TaskStatus.CREATED,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "材料和设置都没问题，按这个方案往下处理。",
+            "model_id": "m1",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "message_saved"
+    assert repo.get_task(task_id).status == TaskStatus.EXECUTED
+    assert repo.get_active_job_kind(task_id) is None
+    assert not any(
+        message["metadata"].get("intent") == "advance"
+        for message in repo.list_agent_messages(task_id)
+    )
+
+
 def test_direct_agent_v2_reproducibility_stage_runs_pmml_scoring_not_notebook(
     tmp_path,
     monkeypatch,
@@ -3530,6 +3923,37 @@ def test_driver_turn_registers_cancellation_token_and_finishes_job_cancelled(
     assert repo.get_job(observed["job_id"])["status"] == "cancelled"
 
 
+def test_driver_turn_closes_job_when_running_claim_is_rejected(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent import validation_app_service as service
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    monkeypatch.setattr(repo, "mark_job_running", lambda _job_id: False)
+    request = SimpleNamespace(
+        app=client.app,
+        state=SimpleNamespace(local_principal=None),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        service.dispatch_driver_turn(
+            request,
+            repo,
+            repo.get_task(task_id),
+            user_text="确认",
+            agent_client=None,
+        )
+
+    assert raised.value.status_code == 409
+    job = repo.get_latest_job(task_id)
+    assert job["status"] == "failed"
+    assert job["error_name"] == "JobStartRejected"
+    assert repo.get_active_job_kind(task_id) is None
+
+
 def test_agent_stop_marks_scanned_task_stopped_without_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "marvis.agent.validation_app_service.request_notebook_cancellation",
@@ -3677,6 +4101,17 @@ def test_agent_word_conclusion_stage_shows_thinking_while_llm_generates_draft(
     repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
 
+    def fake_run_report_stage(*, task_id, settings):
+        TaskRepository(tmp_path / "marvis.sqlite").update_status(
+            task_id,
+            TaskStatus.SUCCEEDED,
+            "word generated",
+            expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+        )
+
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_report_stage", fake_run_report_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_pipeline_settings", lambda _settings, _task: object())
+
     finished = _run_agent_word_conclusion_stage(
         repo,
         client.app.state.settings,
@@ -3686,6 +4121,7 @@ def test_agent_word_conclusion_stage_shows_thinking_while_llm_generates_draft(
             "display_name": "主模型",
             "model_name": "credit-risk-gpt",
         },
+        auto_accept=True,
     )
 
     assert finished is True
@@ -3699,7 +4135,8 @@ def test_agent_word_conclusion_stage_shows_thinking_while_llm_generates_draft(
     messages = repo.list_agent_messages(task_id)
     assert [message["stage"] for message in messages] == [
         "word_conclusion_draft",
-        "chat",
+        "word_conclusion_generated",
+        "word_report_ready",
     ]
     draft = messages[0]
     assert draft["metadata"]["streaming"] is False
@@ -3707,10 +4144,11 @@ def test_agent_word_conclusion_stage_shows_thinking_while_llm_generates_draft(
     assert draft["metadata"]["report_revision"] == 0
     assert "压力测试总结" in draft["content"]
     assert "最终验证结论" in draft["content"]
-    assert messages[1]["metadata"]["awaiting_confirmation"] is True
+    assert messages[1]["metadata"]["narrative_source"] == "agent_generated"
+    assert not any(message.get("metadata", {}).get("awaiting_confirmation") for message in messages)
 
 
-def test_agent_word_conclusion_stage_rejects_empty_draft_without_confirmation(
+def test_agent_word_conclusion_stage_falls_back_when_llm_draft_is_empty(
     tmp_path,
     monkeypatch,
 ):
@@ -3734,6 +4172,17 @@ def test_agent_word_conclusion_stage_rejects_empty_draft_without_confirmation(
     )
     monkeypatch.setattr("marvis.agent.validation_app_service.agent_evidence_from_settings_impl", lambda _settings, _task_id: {})
 
+    def fake_run_report_stage(*, task_id, settings):
+        TaskRepository(tmp_path / "marvis.sqlite").update_status(
+            task_id,
+            TaskStatus.REVIEW_REQUIRED,
+            "word generated with deterministic fallback",
+            expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+        )
+
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_report_stage", fake_run_report_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_pipeline_settings", lambda _settings, _task: object())
+
     finished = _run_agent_word_conclusion_stage(
         repo,
         client.app.state.settings,
@@ -3743,20 +4192,21 @@ def test_agent_word_conclusion_stage_rejects_empty_draft_without_confirmation(
             "display_name": "主模型",
             "model_name": "credit-risk-gpt",
         },
+        auto_accept=True,
     )
 
-    assert finished is False
+    assert finished is True
     messages = repo.list_agent_messages(task_id)
     assert [message["stage"] for message in messages] == [
         "word_conclusion_draft",
-        "chat",
+        "word_conclusion_generated",
+        "word_report_ready",
     ]
-    assert messages[0]["content"] == ""
-    assert messages[0]["metadata"]["draft_values"] == {}
-    assert "三段 Word 结论草稿已生成" not in messages[1]["content"]
-    assert "草稿生成失败" in messages[1]["content"]
-    assert "上下文过长" in messages[1]["content"]
-    assert messages[1]["metadata"]["word_draft_failed"] is True
+    assert "压力测试总结" in messages[0]["content"]
+    assert REQUIRED_AGENT_CONCLUSIONS.keys() <= messages[0]["metadata"]["draft_values"].keys()
+    assert messages[0]["metadata"]["deterministic_fallback"] is True
+    assert "确定性指标生成保守回退文本" in messages[1]["content"]
+    assert messages[1]["metadata"]["narrative_source"] == "deterministic_fallback"
     assert "awaiting_confirmation" not in messages[1]["metadata"]
 
 
@@ -3956,6 +4406,106 @@ def test_agent_chat_confirm_report_draft_dispatches_report_without_llm_chat(
     assert messages[-3]["metadata"]["intent"] == "confirm_report"
     assert messages[-2]["stage"] == "word_conclusion_confirmed"
     assert messages[-1]["stage"] == "word_report_ready"
+
+
+def test_agent_semantic_authorization_confirms_current_report_draft(
+    tmp_path,
+    monkeypatch,
+):
+    llm_callers: list[str | None] = []
+    report_calls: list[str] = []
+
+    class FakeLLMClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def complete(self, **kwargs):
+            caller = kwargs.get("caller")
+            llm_callers.append(caller)
+            if caller == "router":
+                return json.dumps(
+                    {
+                        "action": "confirm",
+                        "params": {},
+                        "constraint": "",
+                        "reason": "用户明确授权将当前结论写入最终 Word。",
+                        "confidence": "high",
+                        "explicit_authorization": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if caller == "semantic_authorization_reviewer":
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": "可以按当前版本写入最终 Word",
+                        "reason": "用户对当前草稿给出了即时无条件授权。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            return "这是普通对话回复。"
+
+    def fake_report_stage(*, task_id, settings, cancellation_job_id=None):
+        assert cancellation_job_id
+        report_calls.append(task_id)
+        TaskRepository(settings.db_path).update_status(
+            task_id,
+            TaskStatus.SUCCEEDED,
+            "pipeline succeeded",
+            expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+        )
+
+    monkeypatch.setattr(
+        "marvis.agent.service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_report_stage",
+        fake_report_stage,
+    )
+    client = _client(tmp_path)
+    _configure_llm(client)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    _advance_to_writing_artifacts(repo, task_id)
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="word_conclusion_draft",
+        content="压力测试总结\n压力测试显示模型整体稳定。",
+        metadata={"draft_values": REQUIRED_AGENT_CONCLUSIONS, "report_revision": 0},
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "这版结论准确，可以按当前版本写入最终 Word。",
+            "model_id": "m1",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "accepted"
+    assert report_calls == [task_id]
+    assert repo.get_task(task_id).status == TaskStatus.SUCCEEDED
+    messages = repo.list_agent_messages(task_id)
+    user_message = next(
+        message for message in messages if message["role"] == "user"
+    )
+    assert user_message["metadata"]["intent"] == "confirm_report"
+    assert user_message["metadata"]["semantic_authorization"]["target_stage"] == (
+        "report_confirmation"
+    )
+    assert llm_callers == ["router", "semantic_authorization_reviewer"]
 
 
 def test_agent_chat_confirm_report_draft_does_not_need_enabled_llm(tmp_path, monkeypatch):
@@ -4912,7 +5462,20 @@ def test_agent_report_confirm_rejects_non_reportable_status_without_mutating_con
     assert repo.list_agent_messages(task_id) == []
 
 
-def test_agent_report_generation_requires_confirmed_conclusions(tmp_path):
+def test_agent_report_generation_requires_confirmed_conclusions(tmp_path, monkeypatch):
+    calls: list[str] = []
+
+    def fake_report_stage(*, task_id, settings, cancellation_job_id=None):
+        calls.append(task_id)
+        repo = TaskRepository(settings.db_path)
+        repo.update_status(
+            task_id,
+            TaskStatus.SUCCEEDED,
+            "report generated",
+            expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+        )
+
+    monkeypatch.setattr("marvis.routers.validation_stages.run_report_stage", fake_report_stage)
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
     repo = TaskRepository(tmp_path / "marvis.sqlite")
@@ -4920,11 +5483,13 @@ def test_agent_report_generation_requires_confirmed_conclusions(tmp_path):
 
     response = client.post(f"/api/tasks/{task_id}/report")
 
-    assert response.status_code == 409
-    assert "请先确认三段报告结论" in response.json()["detail"]
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "请先确认三段报告结论，确认后将生成 Word 报告"
+    assert calls == []
+    assert repo.get_active_job_kind(task_id) is None
 
 
-def test_agent_report_preview_requires_confirmed_agent_conclusions(tmp_path):
+def test_agent_report_preview_and_download_require_confirmed_conclusions(tmp_path):
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
     repo = TaskRepository(tmp_path / "marvis.sqlite")
@@ -4944,9 +5509,10 @@ def test_agent_report_preview_requires_confirmed_agent_conclusions(tmp_path):
     preview = client.get(f"/api/tasks/{task_id}/report/preview")
     download = client.get(f"/api/tasks/{task_id}/report/download")
 
-    assert preview.status_code == 409
-    assert download.status_code == 409
-    assert "请先确认三段报告结论" in preview.json()["detail"]
+    assert preview.status_code == 409, preview.text
+    assert download.status_code == 409, download.text
+    assert preview.json()["detail"] == "请先确认三段报告结论，确认后将生成 Word 报告"
+    assert download.json()["detail"] == "请先确认三段报告结论，确认后将生成 Word 报告"
 
 
 def test_stream_agent_message_throttles_db_writes():

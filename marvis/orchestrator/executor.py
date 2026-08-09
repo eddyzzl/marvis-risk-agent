@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import inspect
-import json
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from marvis.canonical_results import CANONICAL_RESULT_TOOLS
 from marvis.governance.errors import AuthorizationError
 from marvis.job_cancellation import JobCancelled
 from marvis.orchestrator.capability import CapabilityTier, resolve_tier
@@ -19,15 +18,24 @@ from marvis.orchestrator.contracts import (
     StepStatus,
 )
 from marvis.orchestrator.errors import RefResolutionError
+from marvis.orchestrator.evidence import (
+    artifact_bindings as _artifact_bindings,
+    artifact_refs as _artifact_refs,
+    dataset_refs as _dataset_refs,
+    payload_hash as _payload_hash,
+    result_dataset_ids,
+)
 from marvis.llm_client import LLMClientError
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.planner import PlanningError, ReplanError
 from marvis.orchestrator.plan_recovery import PlanStepRecovery
+from marvis.orchestrator.references import parse_step_output_ref
 from marvis.orchestrator.reviewer import FinalReview, ReviewVerdict
 from marvis.orchestrator.safety import is_safety_step
 from marvis.orchestrator.validator import METRIC_FIELDS
 from marvis.plugins.manifest import manifest_to_dict
 from marvis.plugins.runner import ToolResult
+from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.tasks import TaskRepository
 from marvis.state_machine import ConflictError
 
@@ -68,6 +76,19 @@ def _accepts_cancellation_check(invoke) -> bool:
     return any(
         parameter.name == "cancellation_check"
         or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _accepts_invocation_id(invoke) -> bool:
+    """Keep custom runners compatible while recognizing signed runners."""
+
+    try:
+        parameters = inspect.signature(invoke).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "invocation_id"
         for parameter in parameters
     )
 
@@ -400,6 +421,7 @@ class PlanExecutor:
                     plan,
                     step,
                     resolved_inputs,
+                    run_id=run_id,
                     progress_callback=(
                         progress_publisher.publish if progress_publisher else None
                     ),
@@ -439,15 +461,18 @@ class PlanExecutor:
                 return
 
             output = result.output or {}
+            self._require_result_receipt(step, run_id, output, result)
             self._set_step_status(step, StepStatus.CHECKING)
             step.output_ref = self._repo.store_step_output(
                 step.id,
                 output,
                 evidence=self._step_evidence(
+                    plan,
                     step,
                     resolved_inputs,
                     output,
                     run_id=run_id,
+                    result=result,
                 ),
             )
             self._finish_step_run(
@@ -522,16 +547,28 @@ class PlanExecutor:
 
     def _step_evidence(
         self,
+        plan: Plan,
         step: PlanStep,
         resolved_inputs: dict,
         output: dict,
         *,
         run_id: str,
+        result: ToolResult,
     ) -> dict:
         seed = resolved_inputs.get("seed")
-        tool_version, manifest_hash = _tool_manifest_details(getattr(self._runner, "_tools", None), step.tool_ref)
+        resolved_version, resolved_manifest_hash = _tool_manifest_details(
+            getattr(self._runner, "_tools", None),
+            step.tool_ref,
+        )
+        tool_version = result.tool_version or resolved_version
+        manifest_hash = result.manifest_hash or resolved_manifest_hash
         return {
             "step_run_id": run_id,
+            "producer_invocation_id": result.invocation_id,
+            "raw_output_hash": result.raw_output_hash,
+            "canonical_binding_verified": bool(
+                result.canonical_binding_verified
+            ),
             "tool_name": step.tool_ref.label(),
             "tool_version": tool_version,
             "manifest_hash": manifest_hash,
@@ -539,10 +576,42 @@ class PlanExecutor:
             "input_summary": _bounded_input_summary(resolved_inputs),
             "source_dataset_refs": _dataset_refs(resolved_inputs),
             "artifact_refs": _artifact_refs(output),
+            "artifact_bindings": _artifact_bindings(output),
+            "result_dataset_bindings": _result_dataset_bindings(
+                output,
+                task_id=plan.task_id,
+                db_path=self._repo.db_path,
+            ),
             "parent_output_refs": _parent_output_refs(self._repo, step),
             "random_seed": seed if isinstance(seed, int) else None,
             "renderer_hint": step.tool_ref.tool,
         }
+
+    @staticmethod
+    def _require_result_receipt(
+        step: PlanStep,
+        run_id: str,
+        output: dict,
+        result: ToolResult,
+    ) -> None:
+        """Reject unsigned or mismatched canonical Tool results before commit."""
+
+        if step.tool_ref.tool not in CANONICAL_RESULT_TOOLS:
+            return
+        if (
+            result.canonical_binding_verified is not True
+            or result.invocation_id != run_id
+            or result.raw_output_hash != _payload_hash(output)
+            or not str(result.tool_version or "").strip()
+            or not _is_sha256_ref(result.manifest_hash)
+            or (
+                bool(step.tool_ref.version)
+                and result.tool_version != step.tool_ref.version
+            )
+        ):
+            raise ValueError(
+                "canonical Tool result is missing its exact invocation receipt"
+            )
 
     def _invoke_step(
         self,
@@ -550,6 +619,7 @@ class PlanExecutor:
         step: PlanStep,
         resolved_inputs: dict,
         *,
+        run_id: str,
         progress_callback=None,
         cancellation_check=None,
     ) -> ToolResult:
@@ -614,6 +684,8 @@ class PlanExecutor:
                     self._runner.invoke
                 ):
                     invoke_kwargs["cancellation_check"] = cancellation_check
+                if _accepts_invocation_id(self._runner.invoke):
+                    invoke_kwargs["invocation_id"] = run_id
                 if protected_execution:
                     result = self._runner.invoke(
                         step.tool_ref,
@@ -750,12 +822,12 @@ class PlanExecutor:
     def _resolve_value(self, value):
         if isinstance(value, str) and value.startswith("$ref:"):
             try:
-                step_id, field = _parse_ref(value)
+                step_id, field = parse_step_output_ref(value)
             except ValueError as exc:
                 raise RefResolutionError(value, str(exc)) from exc
             try:
-                output = self._repo.load_step_output(step_id)
-            except KeyError as exc:
+                output = self._load_bound_step_output(step_id)
+            except (KeyError, TypeError, ValueError) as exc:
                 raise RefResolutionError(value, f"upstream output {step_id} is missing") from exc
             return _dig(output, field, ref=value) if field else output
         if isinstance(value, list):
@@ -763,6 +835,12 @@ class PlanExecutor:
         if isinstance(value, dict):
             return {key: self._resolve_value(item) for key, item in value.items()}
         return value
+
+    def _load_bound_step_output(self, step_id: str) -> dict:
+        loader = getattr(self._repo, "load_bound_step_output", None)
+        if callable(loader):
+            return loader(step_id)
+        return self._repo.load_step_output(step_id)
 
     def _finalize(self, plan: Plan, tier: CapabilityTier) -> ExecutionResult:
         incomplete = [
@@ -775,9 +853,9 @@ class PlanExecutor:
             return ExecutionResult(plan.id, PlanStatus.FAILED, None, None)
 
         outputs = {
-            step.id: self._repo.load_step_output(step.id)
+            step.id: self._load_bound_step_output(step.id)
             for step in plan.steps
-            if step.output_ref
+            if step.status == StepStatus.DONE and step.output_ref
         }
         review = self._reviewer.final_review(plan, outputs, plan.goal)
         summary_ref = self._repo.store_plan_summary(plan.id, review)
@@ -1054,8 +1132,8 @@ class PlanExecutor:
             if step.status not in {StepStatus.DONE, StepStatus.SKIPPED} or not step.output_ref:
                 continue
             try:
-                output = self._repo.load_step_output(step.id)
-            except KeyError:
+                output = self._load_bound_step_output(step.id)
+            except (KeyError, TypeError, ValueError):
                 continue
             summaries[step.id] = summarize_output(output, self._tool_spec(step))
         return summaries
@@ -1064,8 +1142,8 @@ class PlanExecutor:
         if reason == "failure":
             return summarize_failure(step.error or "", "execution")
         try:
-            return summarize_output(self._repo.load_step_output(step.id), self._tool_spec(step))
-        except KeyError:
+            return summarize_output(self._load_bound_step_output(step.id), self._tool_spec(step))
+        except (KeyError, TypeError, ValueError):
             return {}
 
     def _tool_spec(self, step: PlanStep):
@@ -1115,8 +1193,8 @@ class PlanExecutor:
             ):
                 continue
             try:
-                output = self._repo.load_step_output(dependency.id)
-            except KeyError:
+                output = self._load_bound_step_output(dependency.id)
+            except (KeyError, TypeError, ValueError):
                 return True
             if not isinstance(output, dict):
                 return True
@@ -1202,21 +1280,6 @@ class PlanExecutor:
             return
 
 
-def _parse_ref(value: str) -> tuple[str, str]:
-    raw = value[len("$ref:"):]
-    marker = ".output"
-    if marker not in raw:
-        raise ValueError(f"invalid ref {value}")
-    step_id, tail = raw.split(marker, 1)
-    if not step_id:
-        raise ValueError(f"invalid ref {value}")
-    if not tail:
-        return step_id, ""
-    if not tail.startswith(".") or tail == ".":
-        raise ValueError(f"invalid ref {value}")
-    return step_id, tail[1:]
-
-
 def _dig(value: Any, path: str, *, ref: str):
     current: Any = value
     for part in path.split("."):
@@ -1230,11 +1293,6 @@ def _dig(value: Any, path: str, *, ref: str):
                 continue
         raise RefResolutionError(ref, f"path segment {part!r} is missing")
     return current
-
-
-def _payload_hash(payload: dict) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _bounded_input_summary(payload: dict) -> dict:
@@ -1267,61 +1325,46 @@ def _tool_manifest_details(registry, ref) -> tuple[str | None, str | None]:
     return version, manifest_hash
 
 
-def _dataset_refs(payload: Any) -> list[str]:
-    refs: list[str] = []
-
-    def visit(value: Any, key: str = "") -> None:
-        normalized = key.lower()
-        if isinstance(value, dict):
-            for child_key, child_value in value.items():
-                visit(child_value, str(child_key))
-            return
-        if isinstance(value, list):
-            for item in value:
-                visit(item, key)
-            return
-        if not isinstance(value, str) or not value.strip():
-            return
-        text = value.strip()
-        if text.startswith("dataset:"):
-            _append_unique(refs, text)
-        elif normalized.endswith("dataset_id") or normalized.endswith("dataset_ids"):
-            _append_unique(refs, f"dataset:{text}")
-
-    visit(payload)
-    return refs
+def _is_sha256_ref(value: object) -> bool:
+    text = str(value or "")
+    digest = text.removeprefix("sha256:")
+    return (
+        text.startswith("sha256:")
+        and len(digest) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in digest)
+    )
 
 
-def _artifact_refs(payload: Any) -> list[str]:
-    refs: list[str] = []
+def _result_dataset_bindings(
+    output: dict,
+    *,
+    task_id: str,
+    db_path,
+) -> list[dict[str, str]]:
+    """Freeze task ownership and content identity for materialized results."""
 
-    def visit(value: Any, key: str = "") -> None:
-        normalized = key.lower()
-        if isinstance(value, dict):
-            for child_key, child_value in value.items():
-                visit(child_value, str(child_key))
-            return
-        if isinstance(value, list):
-            for item in value:
-                visit(item, key)
-            return
-        if not isinstance(value, str) or not value.strip():
-            return
-        text = value.strip()
-        if text.startswith("artifact:"):
-            _append_unique(refs, text)
-        elif normalized == "path" or normalized.endswith("_path"):
-            _append_unique(refs, f"artifact:{text}")
-        elif normalized.endswith("artifact_id") or normalized.endswith("artifact_ref"):
-            _append_unique(refs, f"artifact:{text}")
-
-    visit(payload)
-    return refs
-
-
-def _append_unique(values: list[str], item: str) -> None:
-    if item not in values:
-        values.append(item)
+    repository = DatasetRepository(db_path)
+    bindings: list[dict[str, str]] = []
+    for dataset_id in result_dataset_ids(output):
+        try:
+            dataset = repository.get_dataset(dataset_id)
+        except KeyError:
+            continue
+        content_hash = str(getattr(dataset, "content_hash", "") or "")
+        if (
+            dataset is None
+            or str(dataset.task_id) != str(task_id)
+            or len(content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_hash)
+        ):
+            continue
+        bindings.append(
+            {
+                "dataset_id": str(dataset.id),
+                "content_hash": content_hash,
+            }
+        )
+    return bindings
 
 
 def _parent_output_refs(repo, step: PlanStep) -> list[str]:

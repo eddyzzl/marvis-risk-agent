@@ -72,6 +72,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+from marvis.repositories.audit import _list_audit_rows
 
 
 MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_TOOL_SCHEMA_VERSION = (
@@ -249,6 +250,14 @@ class ModelScoreEvidenceArtifactBinding:
     evidence_path: Path
 
 
+@dataclass(frozen=True)
+class _RequestCachedModelScoreEvidenceBinding:
+    """One request's authenticated binding and its verification strength."""
+
+    require_current_training: bool
+    binding: ModelScoreEvidenceArtifactBinding
+
+
 def tool_materialize_model_score_evidence_v2(
     inputs: dict,
     ctx,
@@ -340,6 +349,7 @@ def validate_materialize_model_score_evidence_v2_tool_output(
     *,
     runtime,
     task_id: str,
+    trusted_inputs: object | None = None,
 ) -> dict[str, Any]:
     """Rebuild the Tool output from current authenticated artifact bytes."""
 
@@ -383,6 +393,35 @@ def validate_materialize_model_score_evidence_v2_tool_output(
     expected = _tool_output(binding)
     if training_ref != binding.envelope["training_evidence_ref"] or obj != expected:
         raise ModelingError("model-score-evidence output drifted from live artifacts")
+    if trusted_inputs is not None:
+        request = _validate_inputs(trusted_inputs)
+        if request["training_evidence_ref"] != binding.envelope["training_evidence_ref"]:
+            raise ModelingError(
+                "model-score-evidence output is not bound to this step's inputs"
+            )
+        rows = _list_audit_rows(
+            Path(runtime.settings.db_path),
+            kind=MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_AUDIT_KIND,
+            target_ref=str(obj["evidence_id"]),
+        )
+        expected_detail = {
+            "task_id": task_id,
+            "experiment_id": binding.training.experiment.id,
+            "model_artifact_id": binding.training.model_artifact.id,
+            "training_evidence_artifact_id": binding.training.evidence_record["id"],
+            "score_vector_artifact_id": binding.vector_record["id"],
+            "score_evidence_artifact_id": binding.evidence_record["id"],
+        }
+        if not any(
+            row.get("outcome") == "succeeded"
+            and row.get("inputs_hash") == _request_hash(request)
+            and isinstance(row.get("detail"), Mapping)
+            and all(row["detail"].get(key) == expected_value for key, expected_value in expected_detail.items())
+            for row in rows
+        ):
+            raise ModelingError(
+                "model-score-evidence producer audit is not bound to this step's inputs"
+            )
     return dict(obj)
 
 
@@ -507,20 +546,7 @@ def _load_model_score_evidence_artifacts(
         raise ModelingError(
             "score vector artifact id and expected hash must be supplied together"
         )
-    training_loader = (
-        load_modeling_training_evidence_artifacts
-        if require_current_training
-        else load_historical_modeling_training_evidence_artifacts
-    )
-    training = training_loader(
-        runtime,
-        task_id=normalized_task,
-        **training_ref,
-    )
-    canonical_ref = build_training_evidence_ref(training)
-    if canonical_ref != training_ref:
-        raise ModelingError("model score evidence training reference changed")
-    request = {"training_evidence_ref": canonical_ref}
+    request = {"training_evidence_ref": training_ref}
     paths = _publication_paths(
         runtime.settings.tasks_dir,
         task_id=normalized_task,
@@ -544,6 +570,57 @@ def _load_model_score_evidence_artifacts(
         paths["vector"],
         name="model score vector",
     )
+    request_cache = getattr(
+        runtime,
+        "_model_score_evidence_request_cache",
+        None,
+    )
+    if request_cache is not None and not isinstance(request_cache, dict):
+        raise ModelingError("model score evidence request cache is invalid")
+    cache_key = (
+        normalized_task,
+        str(evidence_record["id"]),
+        str(evidence_record["content_hash"]),
+        requested_vector_id,
+        requested_vector_hash,
+    )
+    if request_cache is not None:
+        cached_binding = request_cache.get(cache_key)
+        if cached_binding is not None:
+            if not isinstance(
+                cached_binding,
+                _RequestCachedModelScoreEvidenceBinding,
+            ):
+                raise ModelingError(
+                    "model score evidence request cache entry is invalid"
+                )
+            if (
+                cached_binding.require_current_training
+                or not require_current_training
+            ):
+                if (
+                    cached_binding.binding.evidence_record != evidence_record
+                    or cached_binding.binding.vector_record != vector_record
+                    or cached_binding.binding.evidence_path != paths["evidence"]
+                    or cached_binding.binding.vector_path != paths["vector"]
+                ):
+                    raise ModelingError(
+                        "model score evidence request cache binding changed"
+                    )
+                return cached_binding.binding
+    training_loader = (
+        load_modeling_training_evidence_artifacts
+        if require_current_training
+        else load_historical_modeling_training_evidence_artifacts
+    )
+    training = training_loader(
+        runtime,
+        task_id=normalized_task,
+        **training_ref,
+    )
+    canonical_ref = build_training_evidence_ref(training)
+    if canonical_ref != training_ref:
+        raise ModelingError("model score evidence training reference changed")
     vector = validate_model_score_vector(
         paths["vector"],
         expected_content_hash=str(vector_record["content_hash"]),
@@ -594,7 +671,7 @@ def _load_model_score_evidence_artifacts(
         fields=_EVIDENCE_PROVENANCE_FIELDS,
         name="model score evidence provenance",
     )
-    return ModelScoreEvidenceArtifactBinding(
+    binding = ModelScoreEvidenceArtifactBinding(
         task_id=normalized_task,
         training=training,
         vector_record=vector_record,
@@ -604,6 +681,12 @@ def _load_model_score_evidence_artifacts(
         vector_path=paths["vector"],
         evidence_path=paths["evidence"],
     )
+    if request_cache is not None:
+        request_cache[cache_key] = _RequestCachedModelScoreEvidenceBinding(
+            require_current_training=require_current_training,
+            binding=binding,
+        )
+    return binding
 
 
 def require_model_score_evidence_artifact_binding_on_connection(

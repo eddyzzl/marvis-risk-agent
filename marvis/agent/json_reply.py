@@ -9,6 +9,34 @@ from typing import Any
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _OPEN_THINK_RE = re.compile(r"<think>.*\Z", re.IGNORECASE | re.DOTALL)
+_POSITIVE_DECISION_REJECTION_PATTERNS = (
+    re.compile(
+        r"(?:拒绝|不同意|不认可|不接受|不通过|不行|否决|驳回|拒批|反对|"
+        r"(?:尚未|还未|未|未经)(?:授权|批准|同意|确认|审核|审查))",
+    ),
+    re.compile(
+        r"(?:不能|无法|不可|不应(?:该)?|不要|禁止|拒绝|不同意)"
+        r".{0,8}(?:确认|继续|执行|通过|采纳|批准)",
+    ),
+    re.compile(
+        r"(?:确认|继续|执行|通过|采纳|批准)"
+        r".{0,6}(?:不了|不行|不可|禁止|拒绝)",
+    ),
+    re.compile(
+        r"\b(?:cannot|can't|must\s+not|should\s+not|do\s+not|reject|disagree)"
+        r".{0,24}\b(?:confirm|continue|proceed|execute|pass|adopt|approve)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:no|nope|nah)\s*[.!?。！？]?\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:decline|reject(?:ed|ing)?|not\s+acceptable|"
+        r"unauthori[sz]ed|not\s+authori[sz]ed|not\s+approved|approval\s+pending)\b",
+        re.IGNORECASE,
+    ),
+)
 
 
 def strip_thinking(text: str) -> str:
@@ -51,6 +79,16 @@ def load_json_object(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
             return data, None
         last_error = "JSON value is not an object"
     return None, last_error
+
+
+def rejects_positive_decision(value: Any) -> bool:
+    """Whether explanatory text explicitly rejects a positive action."""
+
+    text = str(value or "").strip()
+    return bool(text) and any(
+        pattern.search(text)
+        for pattern in _POSITIVE_DECISION_REJECTION_PATTERNS
+    )
 
 
 def _extract_first_object(text: str) -> str | None:
@@ -117,4 +155,4 @@ def _extract_last_object(text: str) -> str | None:
     return last
 
 
-__all__ = ["load_json_object", "strip_thinking"]
+__all__ = ["load_json_object", "rejects_positive_decision", "strip_thinking"]

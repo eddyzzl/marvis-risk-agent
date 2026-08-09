@@ -28,7 +28,7 @@ import pandas as pd
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.errors import DataLayerError
 from marvis.data.labels import resolve_labeled_frame
-from marvis.db import ModelingRepository
+from marvis.repositories.modeling import ModelingRepository
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.strategy.candidate_evidence import MetricObservation
 from marvis.packs.strategy.candidate_fragment import (

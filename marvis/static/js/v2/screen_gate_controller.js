@@ -1,5 +1,10 @@
 import { escapeHtml } from "../ui-utils.js";
 import { columnFractions } from "../render-metrics.js";
+import {
+  confirmationSnapshotAttributes,
+  confirmationSnapshotFromControl,
+  refreshAfterConfirmationConflict,
+} from "./driver_gate_confirm.js";
 
 export function screenNum(value) {
   const n = Number(value);
@@ -56,6 +61,7 @@ const badges = {
 // tables. Pure UI state — never sent to the backend; confirm still POSTs the
 // checked feature set exactly as before.
 const tableState = new Map();
+const readOnlyTableState = new Map();
 
 function defaultState() {
   return {
@@ -82,6 +88,21 @@ function getState(messageId) {
     tableState.set(messageId, state);
   }
   return state;
+}
+
+function getReadOnlyState(messageId) {
+  let state = readOnlyTableState.get(messageId);
+  if (!state) {
+    state = defaultState();
+    readOnlyTableState.set(messageId, state);
+  }
+  return state;
+}
+
+function stateForWrap(wrap, messageId) {
+  return wrap?.dataset?.screenReadonly === "true"
+    ? getReadOnlyState(messageId)
+    : getState(messageId);
 }
 
 function buildRows(screen, interactive) {
@@ -240,7 +261,7 @@ function sortableHeader(label, key, state) {
   // right-align rule in v2-workbench.css still lines up even when the
   // optional "业务含义" column shifts every later <th> over by one.
   const headerClass = NUMERIC_SORT_KEYS.has(key) ? ' class="screen-num-header"' : "";
-  return `<th${headerClass}><button type="button" class="screen-sort-btn" data-screen-sort="${escapeHtml(key)}" aria-label="按${escapeHtml(label)}排序">${escapeHtml(label)}${sortIndicator(state, key)}</button></th>`;
+  return `<th${headerClass}><button type="button" class="screen-sort-btn" data-screen-sort="${escapeHtml(key)}" data-gate-passive-control aria-label="按${escapeHtml(label)}排序">${escapeHtml(label)}${sortIndicator(state, key)}</button></th>`;
 }
 
 function databarCell(value, fraction, tip) {
@@ -313,9 +334,9 @@ function metricRangeHtml(state, disabledAttr) {
 function paginationHtml(page, totalPages) {
   if (totalPages <= 1) return "";
   return `<div class="screen-pagination">
-    <button type="button" class="button compact secondary screen-page-prev" data-screen-page-prev="1"${page <= 1 ? " disabled" : ""}>上一页</button>
+    <button type="button" class="button compact secondary screen-page-prev" data-screen-page-prev="1" data-gate-passive-control${page <= 1 ? " disabled" : ""}>上一页</button>
     <span class="screen-page-status">第 ${page} / ${totalPages} 页</span>
-    <button type="button" class="button compact secondary screen-page-next" data-screen-page-next="1"${page >= totalPages ? " disabled" : ""}>下一页</button>
+    <button type="button" class="button compact secondary screen-page-next" data-screen-page-next="1" data-gate-passive-control${page >= totalPages ? " disabled" : ""}>下一页</button>
   </div>`;
 }
 
@@ -329,7 +350,7 @@ function chipsHtml(rows, state) {
     categorical: rows.filter((row) => row.isCategorical).length,
   };
   return CHIP_DEFS.map(({ key, label }) => (
-    `<button type="button" class="screen-chip${state.chip === key ? " active" : ""}" data-screen-chip="${escapeHtml(key)}" aria-pressed="${state.chip === key ? "true" : "false"}">${escapeHtml(label)} <b>${counts[key]}</b></button>`
+    `<button type="button" class="screen-chip${state.chip === key ? " active" : ""}" data-screen-chip="${escapeHtml(key)}" data-gate-passive-control aria-pressed="${state.chip === key ? "true" : "false"}">${escapeHtml(label)} <b>${counts[key]}</b></button>`
   )).join("");
 }
 
@@ -338,8 +359,13 @@ function tableBodyHtml(message, options = {}) {
   if (!screen || typeof screen !== "object") return null;
   const messageId = message?.id ? String(message.id) : "";
   const interactive = options.interactive !== false;
-  const state = getState(messageId);
-  const allRows = applyCheckedOverrides(buildRows(screen, interactive), state.checkedOverrides);
+  const state = interactive ? getState(messageId) : getReadOnlyState(messageId);
+  const baseRows = buildRows(screen, interactive);
+  // Historical evidence reflects the persisted server snapshot. Unsaved picks
+  // from the live gate must never leak into its read-only copy.
+  const allRows = interactive
+    ? applyCheckedOverrides(baseRows, state.checkedOverrides)
+    : baseRows;
   const totalCounts = categoryCounts(allRows);
   const filtered = sortRows(filterRows(allRows, state), state);
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -380,7 +406,11 @@ export function renderScreenGateTable(message, options = {}) {
   const built = tableBodyHtml(message, options);
   if (!built) return "";
   const { screen, messageId, interactive, state, totalCounts, totalPages, page, rowsHtml, selectedCount, checkedLeakage, disabledAttr, hasDictionary } = built;
+  const planId = message?.metadata?.plan_id ? String(message.metadata.plan_id) : "";
   const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  const snapshotAttrs = confirmationSnapshotAttributes(
+    message?.metadata?.confirmation_snapshot || {},
+  );
   const thresholds = screen.thresholds && typeof screen.thresholds === "object" ? screen.thresholds : {};
   const leakageKs = thresholds.leakage_ks ?? 0.4;
   const maxMissingRate = thresholds.max_missing_rate ?? 0.95;
@@ -417,7 +447,7 @@ export function renderScreenGateTable(message, options = {}) {
   const recommendationNotice = built.allRows.some((row) => row.recommended)
     ? '<div class="screen-recommendation-note">已按 Agent 推荐结果预勾选；你可以逐项增删，或用左侧指标范围缩小候选。</div>'
     : '<div class="screen-recommendation-note is-empty"><strong>Agent 未推荐任何特征。</strong> 当前候选均触发不可用或风险规则，请先检查拼接结果、数据缺失或调整计算阈值后重算。</div>';
-  return `<div class="screen-table-wrap" data-screen-form="${escapeHtml(messageId)}" data-screen-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-screen-readonly="true"'}>
+  return `<div class="screen-table-wrap" data-screen-form="${escapeHtml(messageId)}" data-screen-plan-id="${escapeHtml(planId)}" data-screen-step-id="${escapeHtml(gateStepId)}"${snapshotAttrs}${interactive ? "" : ' data-screen-readonly="true"'}>
     ${thresholdControls}
     ${recommendationNotice}
     <div class="screen-selection-layout">
@@ -497,7 +527,7 @@ export function handleScreenSearchInput(event, context = {}) {
   const messageId = wrap.dataset.screenForm || "";
   const message = findMessage(messageId, context);
   if (!message) return false;
-  const state = getState(messageId);
+  const state = stateForWrap(wrap, messageId);
   captureCheckedState(wrap, state);
   state.query = input.value || "";
   state.page = 1;
@@ -513,7 +543,7 @@ export function handleScreenMetricFilterInput(event, context = {}) {
   const messageId = wrap.dataset.screenForm || "";
   const message = findMessage(messageId, context);
   if (!message) return false;
-  const state = getState(messageId);
+  const state = stateForWrap(wrap, messageId);
   captureCheckedState(wrap, state);
   const key = input.getAttribute("data-screen-range");
   const value = Number(input.value);
@@ -533,7 +563,7 @@ export function handleScreenAgentRecommendClick(event, context = {}) {
   const messageId = wrap.dataset.screenForm || "";
   const message = findMessage(messageId, context);
   if (!message) return false;
-  const state = getState(messageId);
+  const state = stateForWrap(wrap, messageId);
   captureCheckedState(wrap, state);
   state.checkedOverrides.clear();
   for (const row of buildRows(message.metadata.screen, true)) {
@@ -554,7 +584,7 @@ export function handleScreenSortClick(event, context = {}) {
   const messageId = wrap.dataset.screenForm || "";
   const message = findMessage(messageId, context);
   if (!message) return false;
-  const state = getState(messageId);
+  const state = stateForWrap(wrap, messageId);
   captureCheckedState(wrap, state);
   const key = button.getAttribute("data-screen-sort");
   if (state.sortKey === key) {
@@ -576,7 +606,7 @@ export function handleScreenChipClick(event, context = {}) {
   const messageId = wrap.dataset.screenForm || "";
   const message = findMessage(messageId, context);
   if (!message) return false;
-  const state = getState(messageId);
+  const state = stateForWrap(wrap, messageId);
   captureCheckedState(wrap, state);
   state.chip = button.getAttribute("data-screen-chip") || "all";
   state.page = 1;
@@ -595,7 +625,7 @@ export function handleScreenPageClick(event, context = {}) {
   const messageId = wrap.dataset.screenForm || "";
   const message = findMessage(messageId, context);
   if (!message) return false;
-  const state = getState(messageId);
+  const state = stateForWrap(wrap, messageId);
   captureCheckedState(wrap, state);
   state.page += prevButton ? -1 : 1;
   rerenderWrap(wrap, message, { interactive: wrap.dataset.screenReadonly !== "true" }, context);
@@ -622,7 +652,7 @@ export function handleScreenBulkClick(event, context = {}) {
   const messageId = wrap.dataset.screenForm || "";
   const message = findMessage(messageId, context);
   if (!message) return false;
-  const state = getState(messageId);
+  const state = stateForWrap(wrap, messageId);
   captureCheckedState(wrap, state);
   for (const box of wrap.querySelectorAll(".screen-pick")) {
     if (box.disabled) continue;
@@ -644,7 +674,7 @@ export function handleScreenPickChange(event, context = {}) {
   const wrap = box.closest(".screen-table-wrap");
   if (!wrap) return false;
   const messageId = wrap.dataset.screenForm || "";
-  const state = getState(messageId);
+  const state = stateForWrap(wrap, messageId);
   state.checkedOverrides.set(box.value, box.checked);
   const total = wrap.querySelectorAll(".screen-pick").length;
   const checkedCount = wrap.querySelectorAll(".screen-pick:checked").length;
@@ -676,6 +706,7 @@ function screenGateContext(context = {}) {
     pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
     resetFetchThrottle: context.resetFetchThrottle || (() => {}),
     renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
+    refreshAgentMessages: context.refreshAgentMessages,
   };
 }
 
@@ -726,8 +757,13 @@ export async function submitScreenThresholdAdjust(button, rawContext = {}) {
     adjustParams[key] = value;
   }
   if (!Object.keys(adjustParams).length) return;
+  const expectedPlanId = wrap.dataset.screenPlanId || "";
   const expectedStepId = wrap.dataset.screenStepId || "";
-  if (!expectedStepId) {
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    wrap,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
     setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
@@ -739,8 +775,11 @@ export async function submitScreenThresholdAdjust(button, rawContext = {}) {
         method: "POST",
         body: JSON.stringify({
           content: "调整筛选阈值",
+          ui_action: "adjust_screen_thresholds",
           adjust_params: adjustParams,
+          expected_plan_id: expectedPlanId,
           expected_step_id: expectedStepId,
+          ...confirmationSnapshot,
           acceptance_mode: acceptanceMode,
         }),
       });
@@ -751,8 +790,15 @@ export async function submitScreenThresholdAdjust(button, rawContext = {}) {
       renderAgentConversation();
     });
   } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "重算特征筛选失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId,
+      refreshAgentMessages: context.refreshAgentMessages,
+      setActionStatus,
+    });
+    if (!conflictHandled) {
+      button.disabled = false;
+      setActionStatus(error?.message || "重算特征筛选失败", "error");
+    }
   }
 }
 
@@ -800,8 +846,13 @@ export async function submitScreenSelection(button, rawContext = {}) {
       return;
     }
   }
+  const expectedPlanId = wrap.dataset.screenPlanId || "";
   const expectedStepId = wrap.dataset.screenStepId || "";
-  if (!expectedStepId) {
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    wrap,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
     setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
@@ -816,7 +867,9 @@ export async function submitScreenSelection(button, rawContext = {}) {
           content,
           ui_action: "confirm_features",
           selection,
+          expected_plan_id: expectedPlanId,
           expected_step_id: expectedStepId,
+          ...confirmationSnapshot,
           acceptance_mode: acceptanceMode,
         }),
       });
@@ -827,8 +880,15 @@ export async function submitScreenSelection(button, rawContext = {}) {
       renderAgentConversation();
     });
   } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "确认所选特征失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId,
+      refreshAgentMessages: context.refreshAgentMessages,
+      setActionStatus,
+    });
+    if (!conflictHandled) {
+      button.disabled = false;
+      setActionStatus(error?.message || "确认所选特征失败", "error");
+    }
   }
 }
 

@@ -131,7 +131,12 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --extra dev
 
+      - name: Install Playwright Chromium
+        run: uv run playwright install --with-deps chromium
+
       - name: Run full release checks
+        env:
+          MARVIS_RUN_PLAYWRIGHT_SMOKE: "1"
         run: |
           base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
           if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then

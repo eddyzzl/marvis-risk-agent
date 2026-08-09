@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable
 import logging
 
-from marvis.db import PluginRepository
+from marvis.repositories.plugins import PluginRepository
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry
 from marvis.plugins.runner import ToolResult

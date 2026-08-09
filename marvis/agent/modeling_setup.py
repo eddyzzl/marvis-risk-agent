@@ -15,6 +15,7 @@ mislabelling a random holdout as out-of-time.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,8 +24,13 @@ import pandas as pd
 
 from marvis.agent.data_setup import reconcile_source_data_tables
 from marvis.data.data_dictionary import resolve_data_dictionary_id
-from marvis.agent.join_setup import propose_roles
+from marvis.agent.join_setup import (
+    AuthenticatedJoinSelection,
+    authenticate_join_selection,
+    propose_roles,
+)
 from marvis.agent.sample_setup import detect_setup
+from marvis.data.errors import DatasetContentDriftError
 from marvis.domain import FileRole
 from marvis.modeling_limits import normalize_n_trials
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
@@ -184,11 +190,55 @@ def build_modeling_proposal(
     join_feature_ids: list[str] | None = None,
     target_col: str | None = None,
     field_hints: dict | None = None,
+    authenticated_selection: AuthenticatedJoinSelection | None = None,
+    c1_expected_content_hashes: Mapping[str, str] | None = None,
 ) -> ModelingProposal:
     normalized_n_trials = _normalize_n_trials(n_trials)
     datasets = _resolve_datasets(registry, task_id, source_dir)
     by_id = {dataset.id: dataset for dataset in datasets}
     join_feature_ids = [str(item_id) for item_id in (join_feature_ids or []) if str(item_id)]
+    if authenticated_selection is not None:
+        authenticated_selection = _verify_authenticated_selection(
+            registry,
+            task_id,
+            authenticated_selection,
+            anchor_id=anchor_id,
+            feature_ids=join_feature_ids,
+        )
+        anchor_id = authenticated_selection.anchor.dataset_id
+        join_feature_ids = [
+            item.dataset_id for item in authenticated_selection.features
+        ]
+        if c1_expected_content_hashes is None and set(by_id) != set(
+            authenticated_selection.dataset_ids
+        ):
+            raise ModelingSetupError(
+                "建模文件集合在 C1 认证后发生变化，请刷新后重新确认。"
+            )
+        if c1_expected_content_hashes is not None:
+            reviewed_hashes = {
+                str(dataset_id): str(content_hash)
+                for dataset_id, content_hash in c1_expected_content_hashes.items()
+            }
+            if set(by_id) != set(reviewed_hashes):
+                raise ModelingSetupError(
+                    "建模文件集合在 C1 认证后发生变化，请刷新后重新确认。"
+                )
+            if not set(authenticated_selection.dataset_ids) <= set(reviewed_hashes):
+                raise ModelingSetupError(
+                    "认证的建模文件不属于完整 C1 文件集合，请刷新后重新确认。"
+                )
+            try:
+                for dataset_id, content_hash in reviewed_hashes.items():
+                    registry.authenticate_dataset_binding(
+                        dataset_id,
+                        expected_task_id=str(task_id),
+                        expected_content_hash=content_hash,
+                    )
+            except DatasetContentDriftError as exc:
+                raise ModelingSetupError(
+                    "建模文件内容在 C1 认证后发生变化，请刷新后重新确认。"
+                ) from exc
     if anchor_id:
         if anchor_id not in by_id:
             raise ModelingSetupError("选择的样本主表不存在；请重新确认文件角色。")
@@ -196,6 +246,18 @@ def build_modeling_proposal(
         join_feature_ids = [
             item_id for item_id in join_feature_ids if item_id in by_id and item_id != anchor_id
         ]
+        if authenticated_selection is None:
+            selected_ids = [anchor_id, *join_feature_ids]
+            authenticated_selection = authenticate_join_selection(
+                registry,
+                task_id,
+                anchor_id=anchor_id,
+                feature_ids=join_feature_ids,
+                expected_content_hashes={
+                    item_id: str(by_id[item_id].content_hash or "")
+                    for item_id in selected_ids
+                },
+            )
         joined = bool(join_feature_ids)
     elif len(datasets) > 1:
         ranked = propose_roles(datasets)
@@ -206,7 +268,11 @@ def build_modeling_proposal(
         dataset = datasets[0]
         join_feature_ids = []
         joined = False
-    path = registry.resolve_path(dataset.id)
+    path = (
+        authenticated_selection.anchor.path
+        if authenticated_selection is not None
+        else registry.resolve_verified_path(dataset.id)
+    )
     available_columns = backend.column_names(path)
     business_columns = _infer_business_columns(available_columns)
     requested_target_type = _normalize_target_type(target_type)
@@ -402,7 +468,7 @@ def build_modeling_proposal(
     oot = split_values.get("oot")
     return ModelingProposal(
         dataset_id=dataset_id,
-        dataset_name=_dataset_name(dataset),
+        dataset_name=_dataset_name(registry, dataset),
         target_col=setup.target_col,
         feature_cols=list(setup.candidates),
         split_col=split_col,
@@ -426,6 +492,45 @@ def build_modeling_proposal(
         feature_dictionary_id=feature_dictionary_id,
         split_config=auto_split_config,
         ingest_notices=_consume_ingest_notices(registry, task_id),
+    )
+
+
+def _verify_authenticated_selection(
+    registry,
+    task_id: str,
+    selection: AuthenticatedJoinSelection,
+    *,
+    anchor_id: str | None,
+    feature_ids: list[str],
+) -> AuthenticatedJoinSelection:
+    """Re-authenticate a C1 binding immediately before modeling setup reads."""
+
+    expected_task = str(task_id)
+    if selection.task_id != expected_task:
+        raise ModelingSetupError(
+            "认证的建模文件选择不属于当前任务，请刷新后重新确认。"
+        )
+    if anchor_id and str(anchor_id) != selection.anchor.dataset_id:
+        raise ModelingSetupError(
+            "认证的样本主表与当前 C1 选择不一致，请刷新后重新确认。"
+        )
+    selected_feature_ids = [item.dataset_id for item in selection.features]
+    if feature_ids and feature_ids != selected_feature_ids:
+        raise ModelingSetupError(
+            "认证的特征表与当前 C1 选择不一致，请刷新后重新确认。"
+        )
+    verified_anchor = registry.verify_dataset_binding(selection.anchor)
+    verified_features = tuple(
+        registry.verify_dataset_binding(item) for item in selection.features
+    )
+    if any(item.task_id != expected_task for item in (verified_anchor, *verified_features)):
+        raise ModelingSetupError(
+            "认证的数据文件归属已变化，请刷新后重新确认。"
+        )
+    return AuthenticatedJoinSelection(
+        task_id=expected_task,
+        anchor=verified_anchor,
+        features=verified_features,
     )
 
 
@@ -783,7 +888,10 @@ def _generate_split(
         raise ModelingSetupError(f"自动切分失败:{exc}") from exc
 
     read_cols = ["split", time_col] if time_col else ["split"]
-    frame = backend.read_frame(registry.resolve_path(derived.id), columns=read_cols)
+    frame = registry.read_authenticated_parquet_snapshot(
+        derived.id,
+        columns=read_cols,
+    )
     split_series = frame["split"]
     counts = {str(key): int(value) for key, value in split_series.value_counts().items()}
     split_values = {role: role for role in counts}
@@ -819,7 +927,20 @@ def _resolve_datasets(registry, task_id: str, source_dir):
     )
 
 
-def _dataset_name(dataset) -> str:
+def _dataset_name(registry, dataset) -> str:
+    source_identity = getattr(registry, "source_identity", None)
+    if callable(source_identity):
+        try:
+            identity = source_identity(dataset.id)
+        except (KeyError, OSError, TypeError, ValueError):
+            identity = None
+        original_name = (
+            str(identity.get("original_name") or "").strip()
+            if isinstance(identity, dict)
+            else ""
+        )
+        if original_name:
+            return original_name
     source = getattr(dataset, "source_path", None)
     return Path(source).name if source else str(getattr(dataset, "id", ""))
 

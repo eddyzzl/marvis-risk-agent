@@ -1,0 +1,241 @@
+.welcome-task-card[data-task-kind="validation_batch"] {
+  --tone: var(--tone-validation);
+}
+
+.welcome-task-card[data-task-kind="validation_batch"] .welcome-task-icon svg {
+  width: 40px;
+  height: 40px;
+}
+
+.welcome-task-card[data-task-kind="validation_batch"] .welcome-task-icon {
+  --welcome-icon-mask-size: 40px 40px;
+  --welcome-icon-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20x%3D%274%27%20y%3D%276%27%20width%3D%2712%27%20height%3D%2714%27%20rx%3D%272%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%278%27%20y%3D%273%27%20width%3D%2712%27%20height%3D%2714%27%20rx%3D%272%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+}
+
+.validation-batch-create-dialog {
+  width: min(1080px, calc(100vw - 64px));
+  max-width: 1080px;
+  max-height: calc(100vh - 56px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+}
+
+.validation-batch-create-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(3px);
+}
+
+.validation-batch-create-panel {
+  display: grid;
+  max-height: calc(100vh - 58px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  margin: 0;
+}
+
+.validation-batch-create-dialog .dialog-head {
+  padding: 22px 28px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.validation-batch-create-body {
+  overflow: auto;
+  padding: 22px 28px 28px;
+}
+
+.validation-batch-create-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.validation-batch-create-intro label,
+.validation-batch-model-fields label,
+.validation-batch-file-field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.validation-batch-create-intro label > span,
+.validation-batch-model-fields label > span,
+.validation-batch-file-field > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.validation-batch-create-dialog em {
+  color: var(--danger);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.validation-batch-create-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 12px;
+}
+
+.validation-batch-create-toolbar-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.validation-batch-create-toolbar-copy h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+#validationBatchRowCount {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.validation-batch-create-rows {
+  display: grid;
+  gap: 12px;
+}
+
+.validation-batch-create-row {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-soft) 72%, var(--surface));
+}
+
+.validation-batch-create-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.validation-batch-create-row-head > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.validation-batch-create-row-head strong {
+  font-size: 14px;
+}
+
+.validation-batch-create-row-index {
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  color: var(--tone-validation);
+  background: color-mix(in srgb, var(--tone-validation) 12%, transparent);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.validation-batch-model-fields {
+  display: grid;
+  grid-template-columns: 1.4fr 0.8fr;
+  gap: 12px;
+}
+
+.validation-batch-file-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+  margin: 15px 0 0;
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 12px;
+}
+
+.validation-batch-file-grid legend {
+  padding: 0 7px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.validation-batch-file-field {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.validation-batch-file-field input[type="file"] {
+  width: 100%;
+  min-width: 0;
+  padding: 6px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.validation-batch-file-field input[type="file"]::file-selector-button {
+  margin-right: 7px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+
+.validation-batch-file-field small {
+  min-height: 28px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.validation-batch-row-status {
+  min-height: 18px;
+  margin: 10px 2px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.validation-batch-row-status[data-state="uploading"] {
+  color: var(--accent);
+}
+
+.validation-batch-row-status[data-state="uploaded"] {
+  color: var(--success);
+  font-weight: 650;
+}
+
+.validation-batch-row-status[data-state="error"] {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.validation-batch-create-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 28px 20px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 94%, var(--surface-soft));
+}
+
+.validation-batch-create-actions .status {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.validation-batch-create-dialog :disabled {
+  cursor: not-allowed;
+}

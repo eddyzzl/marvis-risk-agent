@@ -1,6 +1,5 @@
 import json
 import sqlite3
-import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +11,7 @@ from marvis.packs.modeling.contracts import (
     ModelMetrics,
     TrainConfig,
 )
+from marvis.repositories.audit import _write_audit_row
 
 
 def _now() -> str:
@@ -571,37 +571,6 @@ def _model_metrics_from_dict(payload: dict) -> ModelMetrics:
         oot_lift_tail_5=_optional_float(payload.get("oot_lift_tail_5")),
         oot_lift_head_10=_optional_float(payload.get("oot_lift_head_10")),
         oot_lift_tail_10=_optional_float(payload.get("oot_lift_tail_10")),
-    )
-
-
-def _write_audit_row(
-    conn: sqlite3.Connection,
-    *,
-    kind: str,
-    target_ref: str,
-    actor: str = "system",
-    inputs_hash: str | None = None,
-    outcome: str | None = None,
-    detail: dict | None = None,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO audit(
-            id, kind, actor, target_ref, inputs_hash, outcome,
-            detail_json, at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            uuid.uuid4().hex,
-            kind,
-            actor,
-            target_ref,
-            inputs_hash,
-            outcome,
-            json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
-            _now(),
-        ),
     )
 
 

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 import pandas as pd
 
@@ -46,6 +47,9 @@ class SegmentProfileResult:
     segments: list[SegmentRow]
     concentration: Concentration
     red_flags: list[dict] = field(default_factory=list)
+    concentration_basis: str = "count"
+    ead_concentration: Concentration | None = None
+    ead_concentration_basis: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,25 @@ def segment_profile(
     # so 归并到「其他」不会掩盖真实集中度。
     raw_counts = df[segment_col].astype(str).value_counts()
     concentration = _concentration(raw_counts, total)
+    ead_concentration = None
+    ead_concentration_basis = None
+    if ead_col:
+        ead = pd.to_numeric(df[ead_col], errors="coerce")
+        if ead.isna().any() or any(not math.isfinite(float(value)) for value in ead):
+            raise AnalysisError(f"segment_profile: EAD 列 `{ead_col}` 含非有限或非数值。")
+        if (ead < 0).any():
+            raise AnalysisError(f"segment_profile: EAD 列 `{ead_col}` 不能为负数。")
+        total_ead = float(ead.sum())
+        if total_ead <= 0:
+            raise AnalysisError(f"segment_profile: EAD 列 `{ead_col}` 合计必须大于 0。")
+        ead_by_segment = (
+            pd.DataFrame({"segment": df[segment_col].astype(str), "ead": ead})
+            .groupby("segment", sort=False)["ead"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        ead_concentration = _concentration(ead_by_segment, total_ead)
+        ead_concentration_basis = "ead"
 
     ranked_segments = list(raw_counts.index)
     kept = ranked_segments[:top_k]
@@ -136,7 +159,14 @@ def segment_profile(
             }
         )
 
-    return SegmentProfileResult(segments=rows, concentration=concentration, red_flags=red_flags)
+    return SegmentProfileResult(
+        segments=rows,
+        concentration=concentration,
+        concentration_basis="count",
+        ead_concentration=ead_concentration,
+        ead_concentration_basis=ead_concentration_basis,
+        red_flags=red_flags,
+    )
 
 
 def _segment_row(
@@ -198,8 +228,8 @@ def _net_profit(group: pd.DataFrame, params: ProfitParams, *, ead_col: str, pd_c
     return revenue - expected_loss - funding_cost - operating_cost
 
 
-def _concentration(counts: pd.Series, total: int) -> Concentration:
-    shares = [int(value) / total for value in counts.tolist()] if total else []
+def _concentration(weights: pd.Series, total: float) -> Concentration:
+    shares = [float(value) / total for value in weights.tolist()] if total else []
     top1 = shares[0] if shares else 0.0
     top5 = float(sum(shares[:5]))
     hhi = float(sum(share * share for share in shares))

@@ -7,7 +7,7 @@ from marvis.api_stage_helpers import start_task_job
 from marvis.api_task_helpers import (
     get_task_or_404,
 )
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TASK_TYPE_VALIDATION
 from marvis.errors import conflict, not_found, unprocessable
 from marvis.job_heartbeat import heartbeat_job

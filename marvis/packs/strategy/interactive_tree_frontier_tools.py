@@ -13,7 +13,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.packs.strategy import interactive_tree_tools as revision_tools
+import marvis.packs.strategy.interactive_tree_tools as revision_tools
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.interactive_tree_frontier_selection import (
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,

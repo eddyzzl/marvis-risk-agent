@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import quote
 
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.packs.strategy import candidate_asset_tools
+import marvis.packs.strategy.candidate_asset_tools as candidate_asset_tools
 from marvis.packs.strategy.candidate_fragment import (
     sample_context_hash_from_candidate_evidence,
 )

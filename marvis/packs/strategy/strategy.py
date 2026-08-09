@@ -351,20 +351,12 @@ def evaluate_condition_mask(df: pd.DataFrame, condition: str) -> pd.Series:
     (via apply_strategy), rule mining (rules.mine_rules) and rule-set evaluation
     (rules.evaluate_rule_set) all resolve a condition's per-row hits through this
     one function, so a condition string produced by any of the three lands on the
-    exact same hit set -- there is never a second, drifting evaluator. It is the
-    same validated ``_safe_eval_condition`` apply_strategy already uses; exposed
-    publicly only so mine/evaluate reuse it by import instead of re-implementing.
+    exact same hit set -- there is never a second, drifting evaluator. The legacy
+    condition is converted to the typed expression contract and then evaluated by
+    the shared strategy evaluator.
     """
     expression = legacy_condition_to_expression(condition)
     return evaluate_expression_frame(df, expression)
-
-
-def _safe_eval_condition(df: pd.DataFrame, condition: str) -> pd.Series:
-    expression = _parse_condition(condition)
-    mask = _eval_node(expression.body, df)
-    if not isinstance(mask, pd.Series):
-        raise StrategyError("condition must evaluate to a boolean mask")
-    return mask.fillna(False).astype(bool)
 
 
 def _parse_condition(condition: str) -> ast.Expression:
@@ -409,84 +401,6 @@ def _validate_literal(node: ast.AST) -> None:
             _validate_literal(element)
         return
     raise StrategyError("unsupported condition literal")
-
-
-def _eval_node(node: ast.AST, df: pd.DataFrame) -> pd.Series:
-    if isinstance(node, ast.BoolOp):
-        masks = [_eval_node(value, df) for value in node.values]
-        result = masks[0]
-        for mask in masks[1:]:
-            if isinstance(node.op, ast.And):
-                result = result & mask
-            else:
-                result = result | mask
-        return result
-    if isinstance(node, ast.Compare):
-        field = node.left.id
-        if field not in df.columns:
-            raise StrategyError(f"unknown field: {field}")
-        return _eval_comparison(df[field], node.ops[0], _literal_value(node.comparators[0]))
-    raise StrategyError("unsupported condition expression")
-
-
-def _eval_comparison(series: pd.Series, op: ast.cmpop, value: Any) -> pd.Series:
-    try:
-        if _numeric_literal(value):
-            series = _coerce_numeric_series(series)
-        if isinstance(op, ast.Lt):
-            return series < value
-        if isinstance(op, ast.LtE):
-            return series <= value
-        if isinstance(op, ast.Gt):
-            return series > value
-        if isinstance(op, ast.GtE):
-            return series >= value
-        if isinstance(op, ast.Eq):
-            return series == value
-        if isinstance(op, ast.NotEq):
-            return series != value
-        if isinstance(op, ast.In):
-            values = _membership_values(value)
-            if values and all(_numeric_literal(item) for item in values):
-                series = _coerce_numeric_series(series)
-            return series.isin(values)
-        if isinstance(op, ast.NotIn):
-            values = _membership_values(value)
-            if values and all(_numeric_literal(item) for item in values):
-                series = _coerce_numeric_series(series)
-            return ~series.isin(values)
-    except TypeError as exc:
-        raise StrategyError("condition comparison failed") from exc
-    raise StrategyError("unsupported condition comparison")
-
-
-def _numeric_literal(value) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
-def _coerce_numeric_series(series: pd.Series) -> pd.Series:
-    numeric = pd.to_numeric(series, errors="coerce")
-    failed = series.notna() & numeric.isna()
-    if bool(failed.any()):
-        raise StrategyError("condition comparison failed: field contains non-numeric values")
-    return numeric
-
-
-def _literal_value(node: ast.AST):
-    if isinstance(node, ast.Constant):
-        return node.value
-    if isinstance(node, ast.UnaryOp):
-        value = _literal_value(node.operand)
-        return -value if isinstance(node.op, ast.USub) else value
-    if isinstance(node, ast.List | ast.Tuple | ast.Set):
-        return [_literal_value(element) for element in node.elts]
-    raise StrategyError("unsupported condition literal")
-
-
-def _membership_values(value) -> list:
-    if not isinstance(value, list | tuple | set):
-        raise StrategyError("in condition requires a list, tuple, or set")
-    return list(value)
 
 
 def _validate_decision(strategy_type: str, decision: str, value) -> None:

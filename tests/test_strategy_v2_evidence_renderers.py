@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-import marvis.agent.renderers as renderers
+import marvis.agent.presenters.strategy_evidence as strategy_evidence_presenters
 from marvis.agent.renderers import render_tool_output
 from marvis.packs.strategy.model_evidence_tools import (
     run_materialize_model_evidence_v2,
@@ -27,9 +27,7 @@ def strategy_v2_outputs(tmp_path_factory) -> dict:
     model_output = run_materialize_model_evidence_v2(
         fx["inputs"], fx["ctx"], fx["runtime"]
     )
-    native_fx = _setup_native(
-        tmp_path_factory.mktemp("strategy-v2-native-renderer")
-    )
+    native_fx = _setup_native(tmp_path_factory.mktemp("strategy-v2-native-renderer"))
     native_output = run_materialize_sample_design_v2_native(
         native_fx["request"],
         native_fx["ctx"],
@@ -133,7 +131,9 @@ def test_model_evidence_v2_renderer_is_univariate_only_and_never_builds_a_link(
     rows = {row[0]: row for row in evidence["rows"]}
     assert rows["channel"][1:3] == ["categorical", "2"]
     assert rows["legacy_score"][1:3] == ["equal_width", "3"]
-    assert all(int(row[3]) == sum(int(value) for value in row[4:]) for row in rows.values())
+    assert all(
+        int(row[3]) == sum(int(value) for value in row[4:]) for row in rows.values()
+    )
 
 
 @pytest.mark.parametrize(
@@ -220,7 +220,7 @@ def test_strategy_v2_renderer_internal_error_never_leaks_through_generic_fallbac
     def _unexpected(_value):
         raise RuntimeError("forged-id 999999")
 
-    monkeypatch.setattr(renderers, helper_name, _unexpected)
+    monkeypatch.setattr(strategy_evidence_presenters, helper_name, _unexpected)
 
     text, tables = render_tool_output(tool, strategy_v2_outputs[output_name])
 

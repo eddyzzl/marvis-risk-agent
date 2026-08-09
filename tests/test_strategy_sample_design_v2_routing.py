@@ -6,10 +6,10 @@ from copy import deepcopy
 
 import pytest
 
-from marvis.agent.turn_handlers import (
-    _native_sample_design_v2_context_relation,
-    _strategy_sample_design_v2_template_id,
+from marvis.agent.strategy_workflows._foundation_delivery import (
+    select_sample_design_v2_template,
 )
+from marvis.agent.turn_handlers import _native_sample_design_v2_context_relation
 
 
 def _eq(column: str, value: object) -> dict:
@@ -47,7 +47,7 @@ def _inputs() -> dict:
 
 def test_v2_selector_uses_legacy_only_for_exact_lossless_shape() -> None:
     assert (
-        _strategy_sample_design_v2_template_id(_inputs())
+        select_sample_design_v2_template(_inputs())
         == "strategy_sample_design_v2"
     )
 
@@ -111,7 +111,7 @@ def test_v2_selector_routes_every_nonlegacy_semantic_to_native(mutate) -> None:
     mutate(inputs)
 
     assert (
-        _strategy_sample_design_v2_template_id(inputs)
+        select_sample_design_v2_template(inputs)
         == "strategy_sample_design_v2_native"
     )
 

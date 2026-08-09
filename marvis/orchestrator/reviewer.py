@@ -7,7 +7,7 @@ import operator
 import re
 from typing import Any
 
-from marvis.agent.json_reply import load_json_object
+from marvis.agent.json_reply import load_json_object, rejects_positive_decision
 from marvis.llm_prompts import CRITIC_SYS as _CRITIC_SYS_SPEC
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.contracts import (
@@ -337,7 +337,10 @@ def _parse_soft_verdict(raw) -> tuple[bool, list[str], bool]:
         for item in data.get("reasons") or []
         if isinstance(item, str)
     ]
-    return bool(data.get("passed", True)), reasons, error is None
+    passed = data.get("passed") is True
+    if passed and any(rejects_positive_decision(reason) for reason in reasons):
+        passed = False
+    return passed, reasons, error is None
 
 
 # AGT-3: final_review/llm_critique previously saw only key names (dict -> {"type":

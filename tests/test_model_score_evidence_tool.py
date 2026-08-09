@@ -30,6 +30,7 @@ from marvis.packs.modeling.score_evidence_tools import (
     MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
     MODEL_SCORE_VECTOR_ARTIFACT_KIND,
     _model_score_task_lock_path,
+    load_historical_model_score_evidence_artifacts,
     load_model_score_evidence_artifacts,
     require_model_score_evidence_artifact_binding_on_connection,
     run_materialize_model_score_evidence_v2,
@@ -134,6 +135,98 @@ def test_lr_score_evidence_matches_direct_same_space_scorer(tmp_path: Path) -> N
         },
         "score_direction": "higher_is_riskier",
     }
+
+
+def test_request_cache_reuses_current_score_evidence_for_historical_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _fixture(tmp_path)
+    output = _run_score(fx, run_training(fx))
+    fx["runtime"]._model_score_evidence_request_cache = {}
+    original = score_evidence_tools._rebuild_envelope
+    rebuilds = 0
+
+    def counting_rebuild(**kwargs):
+        nonlocal rebuilds
+        rebuilds += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        score_evidence_tools,
+        "_rebuild_envelope",
+        counting_rebuild,
+    )
+    kwargs = {
+        "task_id": fx["task"].id,
+        "evidence_artifact_id": output["artifacts"]["score_evidence"][
+            "artifact_id"
+        ],
+        "expected_evidence_artifact_content_hash": output["artifacts"][
+            "score_evidence"
+        ]["content_hash"],
+        "score_vector_artifact_id": output["artifacts"]["score_vector"][
+            "artifact_id"
+        ],
+        "expected_score_vector_artifact_content_hash": output["artifacts"][
+            "score_vector"
+        ]["content_hash"],
+    }
+
+    current = load_model_score_evidence_artifacts(fx["runtime"], **kwargs)
+    historical = load_historical_model_score_evidence_artifacts(
+        fx["runtime"],
+        **kwargs,
+    )
+
+    assert historical is current
+    assert rebuilds == 1
+
+
+def test_request_cache_never_uses_historical_read_as_current_authentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _fixture(tmp_path)
+    output = _run_score(fx, run_training(fx))
+    fx["runtime"]._model_score_evidence_request_cache = {}
+    original = score_evidence_tools._rebuild_envelope
+    rebuilds = 0
+
+    def counting_rebuild(**kwargs):
+        nonlocal rebuilds
+        rebuilds += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        score_evidence_tools,
+        "_rebuild_envelope",
+        counting_rebuild,
+    )
+    kwargs = {
+        "task_id": fx["task"].id,
+        "evidence_artifact_id": output["artifacts"]["score_evidence"][
+            "artifact_id"
+        ],
+        "expected_evidence_artifact_content_hash": output["artifacts"][
+            "score_evidence"
+        ]["content_hash"],
+        "score_vector_artifact_id": output["artifacts"]["score_vector"][
+            "artifact_id"
+        ],
+        "expected_score_vector_artifact_content_hash": output["artifacts"][
+            "score_vector"
+        ]["content_hash"],
+    }
+
+    historical = load_historical_model_score_evidence_artifacts(
+        fx["runtime"],
+        **kwargs,
+    )
+    current = load_model_score_evidence_artifacts(fx["runtime"], **kwargs)
+
+    assert current is not historical
+    assert rebuilds == 2
 
 
 def test_score_evidence_maps_reversed_raw_target_to_bad_probability(

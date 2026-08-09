@@ -1,6 +1,6 @@
 """Regression gate for the TST-1 degraded-output eval corpus.
 
-Drives every marvis.orchestrator.eval.touchpoint_cases.TouchpointCase
+Drives every tests.eval.touchpoint_cases.TouchpointCase
 through the *real* production function it names (decide_gate,
 route_instruction, Planner.generate, Reviewer.llm_critique) -- never a
 reimplementation -- and asserts the documented outcome.
@@ -27,7 +27,7 @@ from marvis.agent.instruction_router import route_instruction
 from marvis.orchestrator.capability import resolve_tier
 from marvis.orchestrator.contracts import PlanStep
 from marvis.orchestrator.eval.runner import build_tool_registry
-from marvis.orchestrator.eval.touchpoint_cases import (
+from tests.eval.touchpoint_cases import (
     ALL_TOUCHPOINT_CASES,
     DECIDE_GATE_CASES,
     PLANNER_CASES,
@@ -136,6 +136,13 @@ def test_planner_generate_touchpoint_cases(case, _planner_deps):
         plan = planner.generate("goal", task_id="t", memory_context={}, task_context={}, tier=tier)
         assert plan is not None
         assert len(llm.calls) == case.expected["call_count"]
+        if "step_count" in case.expected:
+            assert len(plan.steps) == case.expected["step_count"]
+        if "tools" in case.expected:
+            assert [
+                step.tool_ref.label()
+                for step in plan.steps
+            ] == case.expected["tools"]
 
 
 # -- reviewer -------------------------------------------------------------
@@ -175,6 +182,4 @@ def test_expected_failure_count_matches_reported_unsafe_touchpoints():
     # Locks the count so silently adding/removing a documented gap is a
     # visible diff, not something that drifts unnoticed.
     unsafe = [case.id for case in ALL_TOUCHPOINT_CASES if case.expected_failure]
-    # 11 documented at authoring time; the three think-tag cases flipped to safe
-    # once LLM-6's client-side <think> stripping landed.
-    assert len(unsafe) == 8, unsafe
+    assert unsafe == []

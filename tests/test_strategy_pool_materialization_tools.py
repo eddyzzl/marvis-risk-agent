@@ -740,7 +740,7 @@ def test_migration_022_is_registered_and_recreates_the_guarded_ledger(
                 """
             ).fetchall()
         }
-    assert db_schema_module.SCHEMA_VERSION == 24
+    assert db_schema_module._MIGRATIONS[-1][0] == db_schema_module.SCHEMA_VERSION
     assert {
         "strategy_version",
         "requirements_json",

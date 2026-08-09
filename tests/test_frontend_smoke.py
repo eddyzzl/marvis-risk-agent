@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+from pathlib import Path
 import posixpath
 import re
 from urllib.parse import urljoin, urlparse
@@ -9,6 +10,10 @@ from fastapi.testclient import TestClient
 
 from marvis import __version__
 from marvis.app import create_app
+from tests.static_stylesheets import browser_stylesheet_hrefs
+
+
+STATIC_DIR = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
 
 _STATIC_IMPORT_RE = re.compile(
@@ -77,10 +82,18 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     assert '$("openGovernanceSettingsButton").onclick' in app_response.text
     assert '$("closeGovernanceSettingsButton").onclick = closeGovernanceSettingsDialog;' in app_response.text
     assert '$("governanceRefreshButton").onclick = refreshActiveGovernancePanel;' in app_response.text
-    assert len(parser.stylesheet_hrefs) == 3
-    assert parser.stylesheet_hrefs[0].startswith(f"static/styles.css?v={__version__}-")
-    assert parser.stylesheet_hrefs[1].startswith(f"static/css/welcome.css?v={__version__}-")
-    assert parser.stylesheet_hrefs[2].startswith(f"static/css/v2-workbench.css?v={__version__}-")
+    declared_hrefs = browser_stylesheet_hrefs(STATIC_DIR)
+    assert [urlparse(href).path for href in parser.stylesheet_hrefs] == [
+        urlparse(href).path for href in declared_hrefs
+    ]
+    assert all(
+        href.startswith(f"{urlparse(declared).path}?v={__version__}-")
+        for href, declared in zip(
+            parser.stylesheet_hrefs,
+            declared_hrefs,
+            strict=True,
+        )
+    )
     for href in parser.stylesheet_hrefs:
         response = client.get("/" + href)
         assert response.status_code == 200, href

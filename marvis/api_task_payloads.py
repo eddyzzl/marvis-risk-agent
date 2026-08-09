@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
     TASK_STATUS_REASON_USER_CANCELLED,

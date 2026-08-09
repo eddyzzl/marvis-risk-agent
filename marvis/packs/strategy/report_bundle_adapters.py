@@ -4274,18 +4274,25 @@ def _cross_rule_search_report_projection(
                         metrics["hit_share"],
                         source_ref,
                     ),
-                    "bad_rate": _present_field(
+                    "bad_rate": _optional_metric_field(
                         metrics["bad_rate"],
                         source_ref,
+                        note="cross_rule_bad_rate_undefined",
                     ),
-                    "lift": _present_field(metrics["lift"], source_ref),
-                    "bad_capture_rate": _present_field(
+                    "lift": _optional_metric_field(
+                        metrics["lift"],
+                        source_ref,
+                        note="cross_rule_lift_undefined",
+                    ),
+                    "bad_capture_rate": _optional_metric_field(
                         metrics["bad_capture_rate"],
                         source_ref,
+                        note="cross_rule_bad_capture_rate_undefined",
                     ),
-                    "amount_lift": _present_field(
+                    "amount_lift": _optional_metric_field(
                         metrics["amount_lift"],
                         source_ref,
+                        note="cross_rule_amount_lift_undefined",
                     ),
                 },
             }
@@ -8149,6 +8156,17 @@ def _present_field_many(
         origin="tool_output",
         source_refs=source_refs,
     )
+
+
+def _optional_metric_field(
+    value: Any,
+    source_ref: Mapping[str, str],
+    *,
+    note: str,
+) -> dict[str, Any]:
+    if value is None:
+        return _absent_field("not_applicable", note=note)
+    return _present_field(value, source_ref)
 
 
 def _absent_field(

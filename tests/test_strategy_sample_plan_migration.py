@@ -294,12 +294,11 @@ def test_non_strategy_turn_is_not_subject_to_strategy_plan_migration_guard(
         error_label="feature",
         run_setup=lambda *_args: pytest.fail("active plan should resume"),
         format_user_display=lambda value: value,
-        pass_memory_kwargs=False,
     )
 
     response = _run_driver_turn(
         feature_spec,
-        SimpleNamespace(plan_repo=plan_repo),
+        SimpleNamespace(plan_repo=plan_repo, settings=None),
         task_repo,
         task,
         user_text="继续",

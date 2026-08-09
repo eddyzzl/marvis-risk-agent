@@ -74,6 +74,10 @@ export const taskTypeDefinitions = {
     agentModeDescription: "Agent 辅助扫描材料、解释验证证据、推进确认步骤并起草验证报告",
     initialGoal: "开始模型验证",
   },
+  validation_batch: {
+    label: "模型验证批次",
+    available: true,
+  },
   strategy: {
     label: "策略开发",
     dialogTitle: "创建策略开发任务",
@@ -110,6 +114,23 @@ export const taskTypeDefinitions = {
     agentModeDescription: "Agent 先访谈分析目标，再校验材料字段，计算并生成可下载报表与重点结论",
     initialGoal: "",
   },
+  portfolio: {
+    label: "组合分析",
+    dialogTitle: "创建组合分析任务",
+    dialogSubtitle: "上传表现期快照，明确余额、分群、损失态与期限后，平台会计算迁徙、集中度和预期损失。",
+    nameLabel: "组合任务名称",
+    namePlaceholder: "例如：现金贷在贷组合 2026Q2",
+    validatorLabel: "组合负责人",
+    validatorPlaceholder: "填写负责人姓名",
+    sourceLabel: "表现期数据目录",
+    sourcePlaceholder: "/path/to/portfolio-performance-data",
+    reportFields: false,
+    defaultRunMode: "",
+    manualEnabled: true,
+    manualModeDescription: "用结构化口径确认快照、余额、分群、损失态和期限，再执行组合分析",
+    agentModeDescription: "Agent 校验材料、解释迁徙与集中度证据，但不会猜测损失定义或 LGD",
+    initialGoal: "",
+  },
 };
 
-export const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];
+export const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "portfolio", "modeling", "validation", "strategy"];

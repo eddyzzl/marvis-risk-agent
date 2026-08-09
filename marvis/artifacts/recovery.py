@@ -7,7 +7,8 @@ from pathlib import Path
 import re
 import shutil
 
-from marvis.db import PluginRepository, TaskRepository
+from marvis.repositories.plugins import PluginRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TASK_TYPE_VALIDATION
 from marvis.plugins.loader import compute_checksum
 

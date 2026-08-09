@@ -39,6 +39,7 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.model_evidence import (
     MAX_OBSERVATIONS_PER_EVIDENCE,
     StrategyModelEvidenceError,
+    _reuse_sample_design_context,
     build_artifact_ref,
     build_evidence_source_ref,
     build_model_observation,
@@ -388,10 +389,41 @@ def build_single_model_score_evidence(
     score_ref: Mapping[str, Any],
     features: Sequence[str],
 ) -> dict[str, Any]:
+    """Build evidence while reusing one strictly validated SampleDesign context."""
+
+    try:
+        with _reuse_sample_design_context(sample_design_bundle) as bundle:
+            return _build_single_model_score_evidence(
+                sample_design_bundle=bundle,
+                membership_masks=membership_masks,
+                frame=frame,
+                scores=scores,
+                training_evidence_ref=training_evidence_ref,
+                model_ref=model_ref,
+                score_ref=score_ref,
+                features=features,
+            )
+    except ModelScoreEvidenceError:
+        raise
+    except (StrategyError, StrategyModelEvidenceError, TypeError, ValueError) as exc:
+        raise ModelScoreEvidenceError(str(exc)) from exc
+
+
+def _build_single_model_score_evidence(
+    *,
+    sample_design_bundle: Mapping[str, Any],
+    membership_masks: Mapping[str, object],
+    frame: pd.DataFrame,
+    scores: Sequence[float] | np.ndarray,
+    training_evidence_ref: Mapping[str, Any],
+    model_ref: Mapping[str, Any],
+    score_ref: Mapping[str, Any],
+    features: Sequence[str],
+) -> dict[str, Any]:
     """Build a validated ``Strategy SingleModelEvidence`` from exact rows."""
 
     try:
-        bundle = validate_strategy_sample_design_v2_bundle(sample_design_bundle)
+        bundle = sample_design_bundle
         if not isinstance(frame, pd.DataFrame):
             raise ModelScoreEvidenceError(
                 "bound active training dataset must be a DataFrame"

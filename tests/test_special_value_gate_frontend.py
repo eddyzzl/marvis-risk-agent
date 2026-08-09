@@ -168,9 +168,13 @@ def test_special_value_submit_posts_atomic_decisions_without_evidence_values():
         const submitButton = {{ disabled: false }};
         const controls = [submitButton, ...rows.flatMap((row) => row.controls)];
         const wrap = {{
-          dataset: {{
-            specialValuePlanId: "plan-special-values",
-            specialValueStepId: "model-special-values",
+  dataset: {{
+    specialValuePlanId: "plan-special-values",
+    specialValueStepId: "model-special-values",
+    expectedPlanStatus: "awaiting_confirm",
+    expectedPlanRevision: "0",
+    expectedPlanFingerprint: "a".repeat(64),
+    expectedStepFingerprint: "b".repeat(64),
           }},
           querySelectorAll(selector) {{
             if (selector === "[data-special-value-row]") return rows;
@@ -201,8 +205,12 @@ def test_special_value_submit_posts_atomic_decisions_without_evidence_values():
         assert.deepEqual(body, {{
           content: "确认",
           ui_action: "confirm_gate",
-          expected_plan_id: "plan-special-values",
-          expected_step_id: "model-special-values",
+  expected_plan_id: "plan-special-values",
+  expected_step_id: "model-special-values",
+  expected_plan_status: "awaiting_confirm",
+  expected_plan_revision: 0,
+  expected_plan_fingerprint: "a".repeat(64),
+  expected_step_fingerprint: "b".repeat(64),
           adjust_params: {{
             decisions: {{
               balance: {{ action: "mask" }},
@@ -221,6 +229,63 @@ def test_special_value_submit_posts_atomic_decisions_without_evidence_values():
           [{{ role: "assistant", content: "已接收" }}],
         );
         assert.equal(controls.every((control) => control.disabled), true);
+        """
+    )
+
+
+def test_special_value_conflict_refreshes_latest_gate_without_reviving_stale_controls():
+    _run_node(
+        f"""
+        import assert from "node:assert/strict";
+        import {{ submitSpecialValueDecisions }} from {_module_url(SPECIAL_VALUE_MODULE)};
+
+        const actionControl = {{ value: "mask", disabled: false }};
+        const reasonControl = {{ value: "", disabled: false }};
+        const row = {{
+          dataset: {{ specialValueColumn: "balance" }},
+          querySelector(selector) {{
+            if (selector === "[data-special-value-action]") return actionControl;
+            if (selector === "[data-special-value-reason]") return reasonControl;
+            return null;
+          }},
+        }};
+        const submitButton = {{ disabled: false }};
+        const controls = [submitButton, actionControl, reasonControl];
+        const wrap = {{
+          dataset: {{
+            specialValuePlanId: "plan-special-values",
+            specialValueStepId: "model-special-values",
+            expectedPlanStatus: "awaiting_confirm",
+            expectedPlanRevision: "0",
+            expectedPlanFingerprint: "a".repeat(64),
+            expectedStepFingerprint: "b".repeat(64),
+          }},
+          querySelectorAll(selector) {{
+            if (selector === "[data-special-value-row]") return [row];
+            if (selector === "button, select, input") return controls;
+            return [];
+          }},
+        }};
+        submitButton.closest = () => wrap;
+        const refreshed = [];
+        const statuses = [];
+
+        await submitSpecialValueDecisions(submitButton, {{
+          selectedTaskId: "task-17",
+          api: async () => {{
+            throw Object.assign(new Error("stale gate"), {{ status: 409 }});
+          }},
+          pollAgentMessagesUntilSettled: async () => undefined,
+          refreshAgentMessages: async (taskId) => {{ refreshed.push(taskId); }},
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+        }});
+
+        assert.deepEqual(refreshed, ["task-17"]);
+        assert.equal(controls.every((control) => control.disabled), true);
+        assert.deepEqual(statuses.at(-1), [
+          "计划已更新，已加载最新待确认步骤，请重新检查后操作。",
+          "info",
+        ]);
         """
     )
 

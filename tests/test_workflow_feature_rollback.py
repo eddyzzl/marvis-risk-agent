@@ -12,9 +12,11 @@ from marvis.agent.workflow_recovery import (
     parse_tuning_budget_revision_intent,
     parse_workflow_rollback_intent,
 )
+from marvis.data.contracts import Dataset
 from marvis.db import connect, init_db
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.plugins.manifest import ToolRef
+from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.plans import PlanRepository
 from marvis.state_machine import ConflictError
 
@@ -249,6 +251,22 @@ def _persist_failed_plan(tmp_path) -> tuple[PlanRepository, Plan]:
     repo = PlanRepository(db_path)
     plan = _failed_modeling_plan()
     repo.create_plan(plan)
+    DatasetRepository(db_path).create_dataset(
+        Dataset(
+            id="ds-split",
+            task_id=plan.task_id,
+            role="derived",
+            source_path="ds-split.parquet",
+            format="parquet",
+            sheet=None,
+            row_count=1,
+            columns=(),
+            has_target=False,
+            target_col=None,
+            created_at="2026-08-01T00:00:00+00:00",
+            content_hash="a" * 64,
+        )
+    )
     outputs = {
         "split": {
             "result_dataset_id": "ds-split",
@@ -270,7 +288,27 @@ def _persist_failed_plan(tmp_path) -> tuple[PlanRepository, Plan]:
         output = outputs.get(step.id)
         if output is None:
             continue
-        step.output_ref = repo.store_step_output(step.id, output)
+        step.status = StepStatus.RUNNING
+        repo.update_step(step)
+        run_id = repo.start_step_run(
+            plan_id=plan.id,
+            step_id=step.id,
+            tool_ref=step.tool_ref.label(),
+            inputs=step.inputs,
+        )
+        step.status = StepStatus.CHECKING
+        repo.update_step(step)
+        step.output_ref = repo.store_step_output(
+            step.id,
+            output,
+            evidence={"step_run_id": run_id},
+        )
+        repo.finish_step_run(
+            run_id,
+            status="succeeded",
+            output_ref=step.output_ref,
+        )
+        step.status = StepStatus.DONE
         repo.update_step(step)
     with connect(db_path) as conn:
         conn.execute(

@@ -318,6 +318,12 @@ def test_plan_validator_checks_ref_compatibility(tmp_path):
         ToolRef("_sample", "echo"),
         {"message": "$ref:step-1.output.echoed"},
     )
+    malformed = _step(
+        "step-2",
+        ToolRef("_sample", "echo"),
+        {"message": "$ref:step-1.output."},
+        depends_on=["step-1"],
+    )
 
     assert _validator(tmp_path).validate(_plan(upstream, valid)) == []
     assert any(
@@ -327,6 +333,10 @@ def test_plan_validator_checks_ref_compatibility(tmp_path):
     assert any(
         "dependency" in problem
         for problem in _validator(tmp_path).validate(_plan(upstream, missing_edge))
+    )
+    assert any(
+        "invalid ref $ref:step-1.output." in problem
+        for problem in _validator(tmp_path).validate(_plan(upstream, malformed))
     )
 
 
@@ -444,6 +454,26 @@ def test_plan_validator_requires_range_checks_for_metric_fields(tmp_path):
     assert any("ks" in problem for problem in problems)
     assert any("auc" in problem for problem in problems)
     assert _validator(tmp_path).validate(_plan(checked)) == []
+
+
+def test_plan_validator_blocks_metric_results_without_tool_backing(tmp_path):
+    fabricated = _step(
+        "step-1",
+        ToolRef("_sample", "echo"),
+        {"message": "ks=0.42 auc=0.78"},
+        post_checks=[PostCheck("nonempty", {"field": "echoed"})],
+    )
+
+    problems = _validator(tmp_path).validate(_plan(fabricated))
+
+    assert any(
+        "metric auc literal lacks tool-backed output (INV-1)" in problem
+        for problem in problems
+    )
+    assert any(
+        "metric ks literal lacks tool-backed output (INV-1)" in problem
+        for problem in problems
+    )
 
 
 def test_plan_validator_requires_range_checks_for_nested_metric_fields(tmp_path):

@@ -15,14 +15,24 @@ from marvis.data.label_construction import (
     construct_label,
     suggest_bad_definition,
 )
+from marvis.packs.labeling.contracts import (
+    LabelingContractError,
+    LabelingProposal,
+    LabelingRequest,
+    build_labeling_proposal,
+)
 
 __all__ = [
     "BadDefinition",
     "BadDefinitionSuggestion",
     "CohortMaturity",
     "LabelConstruction",
+    "LabelingContractError",
+    "LabelingProposal",
+    "LabelingRequest",
     "MaturityReport",
     "check_cohort_maturity",
+    "build_labeling_proposal",
     "construct_label",
     "suggest_bad_definition",
 ]

@@ -1,11 +1,13 @@
 import json
 import sqlite3
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, is_dataclass, replace as dataclass_replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from marvis.agent.gates.contracts import EvidenceEnvelope
+from marvis.canonical_results import CANONICAL_RESULT_TOOLS
 from marvis.db_schema import connect
 from marvis.orchestrator.contracts import (
     AgentStatus,
@@ -14,14 +16,25 @@ from marvis.orchestrator.contracts import (
     StepStatus,
     SubAgent,
     plan_from_dict,
+    plan_payload_fingerprint,
+    plan_step_payload_confirmation_fingerprint,
     plan_to_dict,
 )
 from marvis.orchestrator.errors import PlanNotFoundError
+from marvis.orchestrator.evidence import (
+    artifact_bindings,
+    artifact_refs,
+    dataset_refs,
+    payload_hash,
+    result_dataset_ids,
+    step_output_references,
+)
 from marvis.orchestrator.harness_state import assert_plan_transition
 from marvis.plugins.errors import ManifestError
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.redaction import redact_value
 from marvis.repositories.audit import _list_audit_rows, _write_audit_row
+from marvis.repositories.datasets import DatasetRepository
 from marvis.state_machine import ConflictError
 
 
@@ -46,7 +59,12 @@ class PlanRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
 
-    def create_plan(self, plan: Plan) -> None:
+    def create_plan(
+        self,
+        plan: Plan,
+        *,
+        on_connection: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> None:
         payload = plan_to_dict(plan)
         now = _now()
         created_at = payload.get("created_at") or now
@@ -87,6 +105,8 @@ class PlanRepository:
                 outcome="succeeded",
                 detail={"task_id": plan.task_id, "step_count": len(plan.steps)},
             )
+            if on_connection is not None:
+                on_connection(conn)
 
     def load_plan(self, plan_id: str) -> Plan:
         with connect(self.db_path) as conn:
@@ -303,16 +323,96 @@ class PlanRepository:
                 detail={"from": current.value, "to": status.value},
             )
 
-    def confirm_plan(self, plan_id: str) -> None:
-        self.set_plan_status(plan_id, PlanStatus.CONFIRMED)
+    def confirm_plan(
+        self,
+        plan_id: str,
+        *,
+        expected_plan_fingerprint: str | None = None,
+        expected_plan_revision: int | None = None,
+        expected_plan_status: PlanStatus | str | None = None,
+    ) -> None:
+        """Confirm the exact reviewed plan snapshot in one write transaction.
 
-    def confirm_step(self, step_id: str) -> None:
+        The optional expectations are a compare-and-swap boundary for semantic
+        authorization.  Historical callers can omit them and retain the original
+        state-machine behavior.
+        """
+
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT status, confirmed, policy_json FROM plan_steps WHERE id = ?",
+            plan_row, step_rows = _load_plan_snapshot_rows(conn, plan_id)
+            _assert_expected_plan_snapshot(
+                plan_row,
+                step_rows,
+                plan_id=plan_id,
+                expected_fingerprint=expected_plan_fingerprint,
+                expected_revision=expected_plan_revision,
+                expected_status=expected_plan_status,
+            )
+            current = PlanStatus(str(plan_row["status"]))
+            assert_plan_transition(current, PlanStatus.CONFIRMED)
+            cursor = conn.execute(
+                """
+                UPDATE plans
+                   SET status = ?, updated_at = ?
+                 WHERE id = ? AND status = ? AND replan_count = ?
+                """,
+                (
+                    PlanStatus.CONFIRMED.value,
+                    _now(),
+                    plan_id,
+                    current.value,
+                    int(plan_row["replan_count"]),
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise ConflictError(f"plan {plan_id} changed while confirming")
+            _write_audit_row(
+                conn,
+                kind="plan.status",
+                target_ref=plan_id,
+                outcome="succeeded",
+                detail={"from": current.value, "to": PlanStatus.CONFIRMED.value},
+            )
+
+    def confirm_step(
+        self,
+        step_id: str,
+        *,
+        expected_step_fingerprint: str | None = None,
+        expected_plan_fingerprint: str | None = None,
+        expected_plan_revision: int | None = None,
+        expected_plan_status: PlanStatus | str | None = None,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            link = conn.execute(
+                "SELECT plan_id FROM plan_steps WHERE id = ?",
                 (step_id,),
             ).fetchone()
+            if link is None:
+                raise KeyError(step_id)
+            plan_id = str(link["plan_id"])
+            plan_row, step_rows = _load_plan_snapshot_rows(conn, plan_id)
+            row = next(
+                (candidate for candidate in step_rows if candidate["id"] == step_id),
+                None,
+            )
+            if row is None:
+                raise KeyError(step_id)
+            _assert_expected_plan_snapshot(
+                plan_row,
+                step_rows,
+                plan_id=plan_id,
+                expected_fingerprint=expected_plan_fingerprint,
+                expected_revision=expected_plan_revision,
+                expected_status=expected_plan_status,
+            )
+            _assert_expected_step_snapshot(
+                row,
+                step_id=step_id,
+                expected_fingerprint=expected_step_fingerprint,
+            )
             _assert_raw_confirmation_allowed(row, step_id=step_id)
             # Atomic one-shot transition: only an AWAITING_CONFIRM step that has
             # NOT already been confirmed flips confirmed 0 -> 1. confirm_step
@@ -355,6 +455,10 @@ class PlanRepository:
         step_id: str,
         *,
         input_updates: dict,
+        expected_step_fingerprint: str | None = None,
+        expected_plan_fingerprint: str | None = None,
+        expected_plan_revision: int | None = None,
+        expected_plan_status: PlanStatus | str | None = None,
     ) -> None:
         """Atomically merge reviewed gate inputs and confirm the current step.
 
@@ -368,14 +472,33 @@ class PlanRepository:
             raise ValueError("input_updates must be a non-empty object")
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """
-                SELECT status, confirmed, inputs_json, policy_json
-                  FROM plan_steps
-                 WHERE id = ?
-                """,
+            link = conn.execute(
+                "SELECT plan_id FROM plan_steps WHERE id = ?",
                 (step_id,),
             ).fetchone()
+            if link is None:
+                raise KeyError(step_id)
+            plan_id = str(link["plan_id"])
+            plan_row, step_rows = _load_plan_snapshot_rows(conn, plan_id)
+            row = next(
+                (candidate for candidate in step_rows if candidate["id"] == step_id),
+                None,
+            )
+            if row is None:
+                raise KeyError(step_id)
+            _assert_expected_plan_snapshot(
+                plan_row,
+                step_rows,
+                plan_id=plan_id,
+                expected_fingerprint=expected_plan_fingerprint,
+                expected_revision=expected_plan_revision,
+                expected_status=expected_plan_status,
+            )
+            _assert_expected_step_snapshot(
+                row,
+                step_id=step_id,
+                expected_fingerprint=expected_step_fingerprint,
+            )
             _assert_raw_confirmation_allowed(row, step_id=step_id)
             current_inputs = json.loads(str(row["inputs_json"] or "{}"))
             if not isinstance(current_inputs, dict):
@@ -439,6 +562,124 @@ class PlanRepository:
                 target_ref=step_id,
                 outcome="succeeded",
             )
+
+    def apply_gate_adjustment(
+        self,
+        plan_id: str,
+        *,
+        target_step_id: str,
+        reset_step_ids: list[str],
+        replacement_inputs_by_step: dict[str, dict] | None,
+        expected_plan_status: PlanStatus | str,
+        expected_plan_revision: int,
+        expected_plan_fingerprint: str,
+        expected_target_step_fingerprint: str,
+    ) -> None:
+        """Atomically revise gate inputs and invalidate every affected step.
+
+        A typed adjustment is authorized against one rendered plan/gate snapshot.
+        Acquiring the write lock before reloading that snapshot closes the gap
+        between a driver's initial read and the first reset.  Every input replacement,
+        output invalidation and audit row is committed together; a stale/cancelled
+        plan or any later write failure leaves the complete reviewed state intact.
+        """
+
+        normalized_reset_ids = list(
+            dict.fromkeys(
+                str(step_id).strip()
+                for step_id in reset_step_ids
+                if str(step_id).strip()
+            )
+        )
+        normalized_target_id = str(target_step_id).strip()
+        if not normalized_reset_ids:
+            raise ValueError("reset_step_ids must be non-empty")
+        if not normalized_target_id or normalized_target_id not in normalized_reset_ids:
+            raise ValueError("target_step_id must be included in reset_step_ids")
+
+        serialized_inputs: dict[str, str] = {}
+        for raw_step_id, inputs in (replacement_inputs_by_step or {}).items():
+            step_id = str(raw_step_id).strip()
+            if step_id not in normalized_reset_ids:
+                raise ValueError(
+                    "replacement input step must be included in reset_step_ids"
+                )
+            if not isinstance(inputs, dict):
+                raise ValueError("replacement step inputs must be objects")
+            serialized_inputs[step_id] = _dump_json_any(inputs)
+
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            plan_row, step_rows = _load_plan_snapshot_rows(conn, plan_id)
+            _assert_expected_plan_snapshot(
+                plan_row,
+                step_rows,
+                plan_id=plan_id,
+                expected_fingerprint=expected_plan_fingerprint,
+                expected_revision=expected_plan_revision,
+                expected_status=expected_plan_status,
+            )
+            rows_by_id = {str(row["id"]): row for row in step_rows}
+            target = rows_by_id.get(normalized_target_id)
+            if target is None:
+                raise KeyError(normalized_target_id)
+            _assert_expected_step_snapshot(
+                target,
+                step_id=normalized_target_id,
+                expected_fingerprint=expected_target_step_fingerprint,
+            )
+            missing = [
+                step_id
+                for step_id in normalized_reset_ids
+                if step_id not in rows_by_id
+            ]
+            if missing:
+                raise KeyError(missing[0])
+
+            for step_id in normalized_reset_ids:
+                replacement = serialized_inputs.get(step_id)
+                if replacement is None:
+                    cursor = conn.execute(
+                        """
+                        UPDATE plan_steps
+                           SET status = 'pending',
+                               confirmed = 0,
+                               output_ref = NULL,
+                               review_json = '[]',
+                               error = NULL
+                         WHERE id = ? AND plan_id = ?
+                        """,
+                        (step_id, plan_id),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        UPDATE plan_steps
+                           SET inputs_json = ?,
+                               status = 'pending',
+                               confirmed = 0,
+                               output_ref = NULL,
+                               review_json = '[]',
+                               error = NULL
+                         WHERE id = ? AND plan_id = ?
+                        """,
+                        (replacement, step_id, plan_id),
+                    )
+                if cursor.rowcount != 1:
+                    raise ConflictError(
+                        f"step {step_id} changed while applying gate adjustment"
+                    )
+                _write_audit_row(
+                    conn,
+                    kind="plan.step.reset",
+                    target_ref=step_id,
+                    outcome="succeeded",
+                    detail={
+                        "plan_id": plan_id,
+                        "inputs_replaced": replacement is not None,
+                        "adjustment_target_step_id": normalized_target_id,
+                    },
+                )
 
     def retry_failed_step(
         self,
@@ -824,7 +1065,11 @@ class PlanRepository:
             # and the INSERT are atomic against a concurrent status change.
             conn.execute("BEGIN IMMEDIATE")
             status_row = conn.execute(
-                "SELECT status FROM plan_steps WHERE id = ?",
+                """
+                SELECT status, plan_id, tool_plugin, tool_name
+                  FROM plan_steps
+                 WHERE id = ?
+                """,
                 (step_id,),
             ).fetchone()
             if status_row is None:
@@ -833,6 +1078,16 @@ class PlanRepository:
                 raise ConflictError(
                     f"cannot start run for step {step_id}: status is "
                     f"{status_row['status']}, expected running"
+                )
+            expected_tool_ref = (
+                f"{status_row['tool_plugin']}.{status_row['tool_name']}"
+            )
+            if (
+                str(status_row["plan_id"] or "") != str(plan_id)
+                or str(tool_ref) != expected_tool_ref
+            ):
+                raise ConflictError(
+                    f"cannot start run for step {step_id}: plan/tool binding changed"
                 )
             row = conn.execute(
                 "SELECT COALESCE(MAX(attempt), 0) + 1 AS next_attempt FROM plan_step_runs WHERE step_id = ?",
@@ -864,6 +1119,43 @@ class PlanRepository:
         if status not in {"succeeded", "failed", "interrupted"}:
             raise ValueError(f"unsupported step run status: {status}")
         with connect(self.db_path) as conn:
+            if status == "succeeded":
+                conn.execute("BEGIN IMMEDIATE")
+                binding = conn.execute(
+                    """
+                    SELECT tool_ref, output_ref, output_hash, invocation_id,
+                           raw_output_hash, canonical_binding_verified,
+                           tool_version, manifest_hash
+                      FROM plan_step_runs
+                     WHERE id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                canonical_tool = (
+                    binding is not None
+                    and str(binding["tool_ref"] or "").rsplit(".", 1)[-1]
+                    in CANONICAL_RESULT_TOOLS
+                )
+                if (
+                    binding is None
+                    or str(binding["output_ref"] or "") != str(output_ref or "")
+                    or not str(binding["output_hash"] or "").startswith("sha256:")
+                    or (
+                        canonical_tool
+                        and (
+                            str(binding["invocation_id"] or "") != run_id
+                            or not str(binding["raw_output_hash"] or "").startswith(
+                                "sha256:"
+                            )
+                            or int(binding["canonical_binding_verified"] or 0) != 1
+                            or not str(binding["tool_version"] or "").strip()
+                            or not _is_sha256_ref(binding["manifest_hash"])
+                        )
+                    )
+                ):
+                    raise ConflictError(
+                        "succeeded step run has no matching immutable output binding"
+                    )
             cursor = conn.execute(
                 """
                 UPDATE plan_step_runs
@@ -1002,10 +1294,117 @@ class PlanRepository:
             version = int(row["next_version"] if row is not None else 1)
             output_ref = f"metrics:{step_id}:v{version}"
             safe_output = redact_value(output)
+            output_hash = payload_hash(safe_output.value)
             evidence_payload = _step_evidence_payload(output_ref, evidence)
+            step_run_id = str(evidence_payload.get("step_run_id") or "")
+            producer_invocation_id = str(
+                evidence_payload.get("producer_invocation_id") or ""
+            )
+            raw_output_hash = str(evidence_payload.get("raw_output_hash") or "")
+            canonical_binding_verified = (
+                evidence_payload.get("canonical_binding_verified") is True
+            )
+            receipt_tool_version = str(
+                evidence_payload.get("tool_version") or ""
+            ).strip()
+            receipt_manifest_hash = str(
+                evidence_payload.get("manifest_hash") or ""
+            ).strip()
+            run_binding = None
+            if step_run_id:
+                run_binding = conn.execute(
+                    """
+                    SELECT r.plan_id, r.step_id, r.tool_ref, r.input_json,
+                           s.tool_name, s.tool_version AS planned_tool_version,
+                           p.task_id
+                      FROM plan_step_runs AS r
+                      JOIN plan_steps AS s ON s.id = r.step_id
+                      JOIN plans AS p ON p.id = r.plan_id
+                     WHERE r.id = ?
+                       AND r.step_id = ?
+                       AND s.plan_id = r.plan_id
+                       AND r.status = 'running'
+                       AND r.output_ref IS NULL
+                       AND r.output_hash IS NULL
+                    """,
+                    (step_run_id, step_id),
+                ).fetchone()
+                if run_binding is None:
+                    raise ConflictError(
+                        "step output could not bind to its active execution run"
+                    )
+                run_input = _load_json_object_unchecked(run_binding["input_json"])
+                canonical_tool = (
+                    str(run_binding["tool_ref"] or "").rsplit(".", 1)[-1]
+                    in CANONICAL_RESULT_TOOLS
+                )
+                receipt_supplied = bool(
+                    producer_invocation_id or raw_output_hash
+                )
+                if receipt_supplied and (
+                    producer_invocation_id != step_run_id
+                    or raw_output_hash != payload_hash(output)
+                ):
+                    raise ConflictError(
+                        "step output receipt does not match the active invocation"
+                    )
+                if canonical_tool and (
+                    producer_invocation_id != step_run_id
+                    or raw_output_hash != payload_hash(output)
+                    or canonical_binding_verified is not True
+                    or not receipt_tool_version
+                    or not _is_sha256_ref(receipt_manifest_hash)
+                    or (
+                        bool(str(run_binding["planned_tool_version"] or ""))
+                        and receipt_tool_version
+                        != str(run_binding["planned_tool_version"])
+                    )
+                ):
+                    raise ConflictError(
+                        "canonical step output has no verified producer receipt"
+                    )
+                parent_output_bindings, resolved_parent_refs = (
+                    _exact_parent_result_bindings(conn, step_id)
+                )
+                result_dataset_bindings = _registered_result_dataset_bindings(
+                    self.db_path,
+                    task_id=str(run_binding["task_id"]),
+                    output=output,
+                )
+                evidence_payload.update(
+                    {
+                        "plan_id": str(run_binding["plan_id"]),
+                        "task_id": str(run_binding["task_id"]),
+                        "step_id": step_id,
+                        "tool_name": str(run_binding["tool_ref"]),
+                        "renderer_hint": str(run_binding["tool_name"]),
+                        "input_hash": payload_hash(run_input),
+                        "source_dataset_refs": dataset_refs(run_input),
+                        "artifact_refs": artifact_refs(safe_output.value),
+                        "artifact_bindings": artifact_bindings(safe_output.value),
+                        "producer_invocation_id": (
+                            producer_invocation_id or None
+                        ),
+                        "raw_output_hash": raw_output_hash or None,
+                        "canonical_binding_verified": (
+                            canonical_binding_verified
+                        ),
+                        "tool_version": receipt_tool_version or None,
+                        "manifest_hash": receipt_manifest_hash or None,
+                        "parent_output_refs": [
+                            item["output_ref"]
+                            for item in parent_output_bindings
+                        ],
+                        "parent_output_bindings": parent_output_bindings,
+                        "resolved_parent_refs": resolved_parent_refs,
+                        "result_dataset_bindings": result_dataset_bindings,
+                    }
+                )
             safe_evidence = redact_value(evidence_payload)
             total_redacted = int(safe_output.redacted_count) + int(safe_evidence.redacted_count)
             evidence_value = safe_evidence.value
+            if isinstance(evidence_value, dict):
+                evidence_value["output_hash"] = output_hash
             if total_redacted and isinstance(evidence_value, dict):
                 evidence_value["persistence_redacted_count"] = int(
                     evidence_value.get("persistence_redacted_count") or 0
@@ -1030,6 +1429,36 @@ class PlanRepository:
                 """,
                 (step_id, output_json, evidence_json, now),
             )
+            if step_run_id:
+                cursor = conn.execute(
+                    """
+                    UPDATE plan_step_runs
+                       SET output_ref = ?, output_hash = ?,
+                           invocation_id = ?, raw_output_hash = ?,
+                           canonical_binding_verified = ?,
+                           tool_version = ?, manifest_hash = ?
+                     WHERE id = ?
+                       AND step_id = ?
+                       AND status = 'running'
+                       AND output_ref IS NULL
+                       AND output_hash IS NULL
+                    """,
+                    (
+                        output_ref,
+                        output_hash,
+                        producer_invocation_id or None,
+                        raw_output_hash or None,
+                        int(canonical_binding_verified),
+                        receipt_tool_version or None,
+                        receipt_manifest_hash or None,
+                        step_run_id,
+                        step_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ConflictError(
+                        "step output could not bind to its active execution run"
+                    )
         return output_ref
 
     def load_step_output(self, step_id: str, *, version: int | None = None) -> dict:
@@ -1072,6 +1501,201 @@ class PlanRepository:
                 output_ref = f"metrics:{step_id}:v{int(version)}"
             evidence = EvidenceEnvelope(output_ref=output_ref).to_dict()
         return evidence
+
+    def load_step_presentation_binding(
+        self,
+        step_id: str,
+        output_ref: str,
+    ) -> dict:
+        """Load one exact execution result and verify its durable run binding."""
+
+        return self._load_step_result_binding(
+            step_id,
+            output_ref,
+            allowed_step_statuses=frozenset({StepStatus.DONE.value}),
+        )
+
+    def load_step_recovery_binding(
+        self,
+        step_id: str,
+        output_ref: str,
+    ) -> dict:
+        """Authenticate a crash-persisted result before completing recovery."""
+
+        return self._load_step_result_binding(
+            step_id,
+            output_ref,
+            allowed_step_statuses=frozenset(
+                {StepStatus.RUNNING.value, StepStatus.CHECKING.value}
+            ),
+        )
+
+    def load_bound_step_output(self, step_id: str) -> dict:
+        """Load only the exact immutable output attached to a completed step."""
+
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT output_ref FROM plan_steps WHERE id = ?",
+                (step_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(step_id)
+        output_ref = str(row["output_ref"] or "")
+        if not output_ref:
+            raise ValueError("completed step has no immutable output reference")
+        return dict(
+            self.load_step_presentation_binding(step_id, output_ref)["output"]
+        )
+
+    def _load_step_result_binding(
+        self,
+        step_id: str,
+        output_ref: str,
+        *,
+        allowed_step_statuses: frozenset[str],
+    ) -> dict:
+
+        prefix = f"metrics:{step_id}:v"
+        if not isinstance(output_ref, str) or not output_ref.startswith(prefix):
+            raise ValueError("step output_ref is not versioned for this step")
+        raw_version = output_ref.removeprefix(prefix)
+        if not raw_version.isdigit() or int(raw_version) < 1:
+            raise ValueError("step output_ref version is invalid")
+        version = int(raw_version)
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT v.output_json, v.evidence_json,
+                       s.plan_id, s.tool_name, s.status AS step_status,
+                       s.output_ref AS current_output_ref,
+                       p.task_id
+                  FROM plan_step_output_versions AS v
+                  JOIN plan_steps AS s ON s.id = v.step_id
+                  JOIN plans AS p ON p.id = s.plan_id
+                 WHERE v.step_id = ? AND v.version = ?
+                """,
+                (step_id, version),
+            ).fetchone()
+            if row is None:
+                raise KeyError(step_id)
+            output = _load_json_object_unchecked(row["output_json"])
+            evidence = _load_json_object_unchecked(row["evidence_json"])
+            step_run_id = str(evidence.get("step_run_id") or "")
+            run = (
+                None
+                if not step_run_id
+                else conn.execute(
+                    """
+                    SELECT id, plan_id, step_id, tool_ref, status, input_json,
+                           output_ref, output_hash, invocation_id,
+                           raw_output_hash, canonical_binding_verified,
+                           tool_version, manifest_hash
+                      FROM plan_step_runs
+                     WHERE id = ?
+                    """,
+                    (step_run_id,),
+                ).fetchone()
+            )
+            parent_output_bindings, resolved_parent_refs = (
+                _exact_parent_result_bindings(conn, step_id)
+            )
+        computed_output_hash = payload_hash(output)
+        run_input = (
+            {}
+            if run is None
+            else _load_json_object_unchecked(run["input_json"])
+        )
+        canonical_tool = (
+            run is not None
+            and str(run["tool_ref"] or "").rsplit(".", 1)[-1]
+            in CANONICAL_RESULT_TOOLS
+        )
+        try:
+            result_dataset_bindings = _registered_result_dataset_bindings(
+                self.db_path,
+                task_id=str(row["task_id"] or ""),
+                output=output,
+            )
+        except ConflictError as exc:
+            raise ValueError("step result dataset binding is no longer valid") from exc
+        if (
+            str(row["step_status"] or "") not in allowed_step_statuses
+            or str(row["current_output_ref"] or "") != output_ref
+            or evidence.get("output_ref") != output_ref
+            or evidence.get("plan_id") != str(row["plan_id"] or "")
+            or evidence.get("task_id") != str(row["task_id"] or "")
+            or evidence.get("step_id") != step_id
+            or evidence.get("renderer_hint") != str(row["tool_name"] or "")
+            or run is None
+            or str(run["plan_id"] or "") != str(row["plan_id"] or "")
+            or str(run["step_id"] or "") != step_id
+            or str(run["tool_ref"] or "") != str(evidence.get("tool_name") or "")
+            or str(run["status"] or "") != "succeeded"
+            or str(run["output_ref"] or "") != output_ref
+            or str(run["output_hash"] or "") != computed_output_hash
+            or str(evidence.get("output_hash") or "") != computed_output_hash
+            or str(evidence.get("input_hash") or "") != payload_hash(run_input)
+            or list(evidence.get("source_dataset_refs") or [])
+            != dataset_refs(run_input)
+            or list(evidence.get("artifact_refs") or []) != artifact_refs(output)
+            or list(evidence.get("artifact_bindings") or [])
+            != artifact_bindings(output)
+            or list(evidence.get("parent_output_refs") or [])
+            != [item["output_ref"] for item in parent_output_bindings]
+            or list(evidence.get("parent_output_bindings") or [])
+            != parent_output_bindings
+            or list(evidence.get("resolved_parent_refs") or [])
+            != resolved_parent_refs
+            or list(evidence.get("result_dataset_bindings") or [])
+            != result_dataset_bindings
+            or (
+                run is not None
+                and str(run["invocation_id"] or "")
+                != str(evidence.get("producer_invocation_id") or "")
+            )
+            or (
+                run is not None
+                and str(run["raw_output_hash"] or "")
+                != str(evidence.get("raw_output_hash") or "")
+            )
+            or (
+                run is not None
+                and bool(run["canonical_binding_verified"])
+                != bool(evidence.get("canonical_binding_verified"))
+            )
+            or (
+                run is not None
+                and str(run["tool_version"] or "")
+                != str(evidence.get("tool_version") or "")
+            )
+            or (
+                run is not None
+                and str(run["manifest_hash"] or "")
+                != str(evidence.get("manifest_hash") or "")
+            )
+            or (
+                canonical_tool
+                and (
+                    str(run["invocation_id"] or "") != step_run_id
+                    or not str(run["raw_output_hash"] or "").startswith(
+                        "sha256:"
+                    )
+                    or bool(run["canonical_binding_verified"]) is not True
+                    or not str(run["tool_version"] or "").strip()
+                    or not _is_sha256_ref(run["manifest_hash"])
+                )
+            )
+        ):
+            raise ValueError("step presentation binding failed integrity checks")
+        return {
+            "plan_id": str(row["plan_id"]),
+            "task_id": str(row["task_id"]),
+            "step_id": step_id,
+            "output_ref": output_ref,
+            "output": output,
+            "evidence": evidence,
+            "inputs": run_input,
+        }
 
     def latest_step_output_ref(self, step_id: str) -> str | None:
         with connect(self.db_path) as conn:
@@ -1458,6 +2082,86 @@ def _set_sub_agent_status_row(
         raise KeyError(sub_id)
 
 
+def _load_plan_snapshot_rows(
+    conn: sqlite3.Connection,
+    plan_id: str,
+) -> tuple[sqlite3.Row, list[sqlite3.Row]]:
+    """Load one complete plan snapshot from the caller's transaction."""
+
+    plan_row = conn.execute(
+        """
+        SELECT id, task_id, goal, source, template_id, autonomy_level,
+               status, novel_mode, tier, replan_count, loop_events_json,
+               success_criteria_json, created_at, updated_at
+          FROM plans
+         WHERE id = ?
+        """,
+        (plan_id,),
+    ).fetchone()
+    if plan_row is None:
+        raise PlanNotFoundError(plan_id)
+    step_rows = conn.execute(
+        """
+        SELECT id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
+               inputs_json, depends_on_json, post_checks_json,
+               needs_confirmation, policy_json, decision_point, sub_agent_scope,
+               granted_tools_json, status, sub_agent_id, output_ref, review_json,
+               error, phase, confirmed
+          FROM plan_steps
+         WHERE plan_id = ?
+         ORDER BY idx, id
+        """,
+        (plan_id,),
+    ).fetchall()
+    return plan_row, list(step_rows)
+
+
+def _assert_expected_plan_snapshot(
+    plan_row: sqlite3.Row,
+    step_rows: list[sqlite3.Row],
+    *,
+    plan_id: str,
+    expected_fingerprint: str | None,
+    expected_revision: int | None,
+    expected_status: PlanStatus | str | None,
+) -> None:
+    if (
+        expected_revision is not None
+        and int(plan_row["replan_count"]) != int(expected_revision)
+    ):
+        raise ConflictError(f"plan {plan_id} revision changed while confirming")
+    if expected_status is not None:
+        expected_status_value = (
+            expected_status.value
+            if isinstance(expected_status, PlanStatus)
+            else str(expected_status)
+        )
+        if str(plan_row["status"]) != expected_status_value:
+            raise ConflictError(f"plan {plan_id} status changed while confirming")
+    if expected_fingerprint is not None:
+        actual_fingerprint = plan_payload_fingerprint(
+            _plan_payload_from_rows(plan_row, step_rows)
+        )
+        if actual_fingerprint != str(expected_fingerprint):
+            raise ConflictError(f"plan {plan_id} fingerprint changed while confirming")
+
+
+def _assert_expected_step_snapshot(
+    row: sqlite3.Row,
+    *,
+    step_id: str,
+    expected_fingerprint: str | None,
+) -> None:
+    if expected_fingerprint is None:
+        return
+    actual_fingerprint = plan_step_payload_confirmation_fingerprint(
+        _step_payload_from_row(row),
+        confirmed=bool(row["confirmed"]),
+    )
+    if actual_fingerprint != str(expected_fingerprint):
+        raise ConflictError(f"step {step_id} fingerprint changed while confirming")
+
+
 def _plan_payload_from_rows(plan_row: sqlite3.Row, step_rows: list[sqlite3.Row]) -> dict:
     return {
         "id": plan_row["id"],
@@ -1693,6 +2397,159 @@ def _optional_str(value) -> str | None:
 
 def _dump_json_any(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _exact_parent_result_bindings(
+    conn: sqlite3.Connection,
+    step_id: str,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Resolve dependency lineage from persisted plan state, never ``latest``."""
+
+    step = conn.execute(
+        "SELECT inputs_json, depends_on_json FROM plan_steps WHERE id = ?",
+        (step_id,),
+    ).fetchone()
+    if step is None:
+        raise KeyError(step_id)
+    dependency_ids = [str(value) for value in _load_json_array(step["depends_on_json"])]
+    bindings: list[dict[str, str]] = []
+    by_step_id: dict[str, dict[str, str]] = {}
+    for dependency_id in dependency_ids:
+        dependency = conn.execute(
+            "SELECT status, output_ref FROM plan_steps WHERE id = ?",
+            (dependency_id,),
+        ).fetchone()
+        if dependency is None:
+            raise ConflictError(
+                f"step {step_id} depends on missing step {dependency_id}"
+            )
+        output_ref = str(dependency["output_ref"] or "")
+        if not output_ref:
+            if str(dependency["status"] or "") == StepStatus.SKIPPED.value:
+                continue
+            raise ConflictError(
+                f"step {step_id} dependency {dependency_id} has no bound output"
+            )
+        prefix = f"metrics:{dependency_id}:v"
+        raw_version = output_ref.removeprefix(prefix)
+        if not output_ref.startswith(prefix) or not raw_version.isdigit():
+            raise ConflictError(
+                f"step {step_id} dependency {dependency_id} has an invalid output ref"
+            )
+        version = conn.execute(
+            """
+            SELECT output_json, evidence_json
+              FROM plan_step_output_versions
+             WHERE step_id = ? AND version = ?
+            """,
+            (dependency_id, int(raw_version)),
+        ).fetchone()
+        if version is None:
+            raise ConflictError(
+                f"step {step_id} dependency {dependency_id} output is missing"
+            )
+        output = _load_json_object_unchecked(version["output_json"])
+        evidence = _load_json_object_unchecked(version["evidence_json"])
+        output_hash = payload_hash(output)
+        run_id = str(evidence.get("step_run_id") or "")
+        run = conn.execute(
+            """
+            SELECT status, output_ref, output_hash
+              FROM plan_step_runs
+             WHERE id = ? AND step_id = ?
+            """,
+            (run_id, dependency_id),
+        ).fetchone()
+        if (
+            str(dependency["status"] or "") != StepStatus.DONE.value
+            or evidence.get("output_ref") != output_ref
+            or evidence.get("output_hash") != output_hash
+            or run is None
+            or str(run["status"] or "") != "succeeded"
+            or str(run["output_ref"] or "") != output_ref
+            or str(run["output_hash"] or "") != output_hash
+        ):
+            raise ConflictError(
+                f"step {step_id} dependency {dependency_id} result binding is invalid"
+            )
+        binding = {
+            "step_id": dependency_id,
+            "output_ref": output_ref,
+            "output_hash": output_hash,
+        }
+        bindings.append(binding)
+        by_step_id[dependency_id] = binding
+
+    original_inputs = _load_json_object_unchecked(step["inputs_json"])
+    resolved_refs: list[dict[str, str]] = []
+    try:
+        reference_specs = step_output_references(original_inputs)
+    except ValueError as exc:
+        raise ConflictError(f"step {step_id} contains an invalid output reference") from exc
+    for reference in reference_specs:
+        binding = by_step_id.get(reference["step_id"])
+        if binding is None:
+            raise ConflictError(
+                f"step {step_id} references an unbound non-dependency output"
+            )
+        resolved_refs.append(
+            {
+                **reference,
+                "output_ref": binding["output_ref"],
+                "output_hash": binding["output_hash"],
+            }
+        )
+    return bindings, resolved_refs
+
+
+def _registered_result_dataset_bindings(
+    db_path: Path,
+    *,
+    task_id: str,
+    output: dict,
+) -> list[dict[str, str]]:
+    """Bind declared result datasets to their live task/content identity."""
+
+    repository = DatasetRepository(db_path)
+    bindings: list[dict[str, str]] = []
+    for dataset_id in result_dataset_ids(output):
+        try:
+            dataset = repository.get_dataset(dataset_id)
+        except KeyError as exc:
+            raise ConflictError(
+                f"result dataset is not registered: {dataset_id}"
+            ) from exc
+        if dataset is None:
+            raise ConflictError(
+                f"result dataset is not registered: {dataset_id}"
+            )
+        content_hash = str(getattr(dataset, "content_hash", "") or "")
+        if (
+            str(getattr(dataset, "id", "") or "") != dataset_id
+            or str(getattr(dataset, "task_id", "") or "") != task_id
+            or len(content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_hash)
+        ):
+            raise ConflictError(
+                f"result dataset has no exact task/content binding: {dataset_id}"
+            )
+        bindings.append(
+            {
+                "dataset_id": dataset_id,
+                "content_hash": content_hash,
+            }
+        )
+    return bindings
+
+
+def _is_sha256_ref(value: object) -> bool:
+    text = str(value or "")
+    digest = text.removeprefix("sha256:")
+    return (
+        text.startswith("sha256:")
+        and len(digest) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in digest)
+    )
 
 
 def _step_evidence_payload(output_ref: str, evidence: dict | EvidenceEnvelope | None) -> dict:

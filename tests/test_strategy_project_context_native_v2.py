@@ -9,6 +9,7 @@ import pytest
 
 from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.db import TaskRepository
+from marvis.packs.strategy import project_context_tools
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.impact_cube_tools import (
@@ -34,6 +35,10 @@ from marvis.packs.strategy.sample_design_v2_native_tools import (
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.sample_membership import (
+    MAX_MEMBERSHIP_HEADER_BYTES,
+    MAX_MEMBERSHIP_PAYLOAD_BYTES,
 )
 from marvis.packs.strategy.pool_impact_tools import (
     POOL_IMPACT_ARTIFACT_KIND,
@@ -353,6 +358,56 @@ def test_project_context_discovers_native_v2_sample_and_full_impact_cube(
         )
         == output["revision"]
     )
+
+
+def test_current_context_uses_native_membership_binary_byte_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _materialize_native_v2_context_sources(tmp_path)
+    output = run_materialize_project_context(
+        fx["request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    expected_budget = (
+        MAX_MEMBERSHIP_HEADER_BYTES + MAX_MEMBERSHIP_PAYLOAD_BYTES + 64
+    )
+    observed_budgets: list[int] = []
+    original_read = project_context_tools._read_verified_registered_artifact
+
+    def enforce_contract_budget(
+        record,
+        *,
+        tasks_root,
+        max_bytes=project_context_tools.MAX_PROJECT_CONTEXT_JSON_BYTES,
+    ):
+        if record["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND:
+            observed_budgets.append(max_bytes)
+            if max_bytes < expected_budget:
+                raise StrategyError(
+                    "simulated legal native membership exceeds JSON byte budget"
+                )
+        return original_read(
+            record,
+            tasks_root=tasks_root,
+            max_bytes=max_bytes,
+        )
+
+    monkeypatch.setattr(
+        project_context_tools,
+        "_read_verified_registered_artifact",
+        enforce_contract_budget,
+    )
+
+    assert (
+        load_current_strategy_project_context(
+            fx["runtime"],
+            task_id=fx["task"].id,
+        )
+        == output["revision"]
+    )
+    assert observed_budgets == [expected_budget]
 
 
 @pytest.mark.parametrize(

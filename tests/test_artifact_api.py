@@ -773,6 +773,45 @@ def test_owned_and_generic_download_send_the_verified_snapshot_when_path_changes
         assert response.headers["content-length"] == str(len(verified_bytes))
 
 
+def test_verified_snapshot_downloads_preserve_single_range_semantics(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id, record, artifact = _seed_task_artifact(app)
+    expected = artifact.read_bytes()
+    relative_path = artifact.relative_to(app.state.settings.workspace).as_posix()
+    _, _, strategy_artifact_id, strategy_artifact = _seed_strategy_artifact(
+        app,
+        task_id=task_id,
+    )
+    strategy_expected = strategy_artifact.read_bytes()
+
+    routes = (
+        (
+            f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download",
+            expected,
+        ),
+        (f"/api/artifacts/{quote(relative_path, safe='')}", expected),
+        (
+            f"/api/tasks/{task_id}/strategy-artifacts/{strategy_artifact_id}/download",
+            strategy_expected,
+        ),
+    )
+    for url, content in routes:
+        response = client.get(url, headers={"Range": "bytes=1-4"})
+        assert response.status_code == 206
+        assert response.content == content[1:5]
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.headers["content-range"] == f"bytes 1-4/{len(content)}"
+        assert response.headers["content-length"] == "4"
+
+    unsatisfiable = client.get(
+        routes[0][0],
+        headers={"Range": f"bytes={len(expected) + 1}-"},
+    )
+    assert unsatisfiable.status_code == 416
+    assert unsatisfiable.headers["content-range"] == f"bytes */{len(expected)}"
+
+
 def test_legacy_owned_download_sends_one_frozen_snapshot_when_path_changes(
     tmp_path,
     monkeypatch,

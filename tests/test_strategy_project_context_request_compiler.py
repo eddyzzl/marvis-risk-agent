@@ -12,6 +12,7 @@ from marvis.agent.strategy_request_compiler import (
     utterance_targets_strategy_project_context,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 class _FakeLLM:
@@ -85,7 +86,7 @@ def test_project_context_compiler_grounding_accepts_exact_user_facts() -> None:
     assert result.draft is not None
     assert result.draft.workflow == "strategy_project_context"
     assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt_version"] == 52
+    assert llm.calls[0]["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "strategy_project_context" in llm.calls[0]["system_prompt"]
 
 

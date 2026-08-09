@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 import uuid
 
-from marvis.db import _now, connect
+from marvis.db_schema import connect
 from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
     TaskStatus,
@@ -13,6 +13,7 @@ from marvis.orchestrator.contracts import PlanStatus, StepStatus
 from marvis.orchestrator.errors import PlanNotFoundError
 from marvis.orchestrator.plan_recovery import PlanStepRecovery
 from marvis.pipeline import METRICS_STAGE_FAILURE_PREFIX
+from marvis.repositories.tasks import _now
 from marvis.state_machine import ConflictError
 
 
@@ -71,6 +72,7 @@ def reclaim_stale_running_tasks(
     ).isoformat()
     orphan_placeholders = ",".join(["?"] * len(ORPHAN_RECLAIM_STATUSES))
     with connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         reclaimed_task_ids = _stale_task_ids(conn, orphan_placeholders, cutoff)
         metrics_resumable_task_ids = _metrics_resumable_task_ids(
             conn, cutoff, tasks_dir=tasks_dir
@@ -78,7 +80,7 @@ def reclaim_stale_running_tasks(
         agent_task_ids = _interrupted_agent_task_ids(
             conn, orphan_placeholders, cutoff
         )
-        cursor = conn.execute(
+        conn.execute(
             f"""
             UPDATE tasks
                SET status = ?,
@@ -114,19 +116,200 @@ def reclaim_stale_running_tasks(
                     TaskStatus.FAILED.value,
                 ),
             )
+        (
+            reclaimed_batch_parent_task_ids,
+            reclaimed_batch_child_task_ids,
+        ) = _reconcile_reclaimed_validation_batches(
+            conn,
+            reclaimed_task_ids,
+            cutoff=cutoff,
+        )
         _finalize_interrupted_agent_messages(conn, agent_task_ids)
         _add_agent_restart_notices(conn, agent_task_ids)
         _fail_interrupted_jobs(
             conn,
-            task_ids=sorted(set(reclaimed_task_ids) | set(agent_task_ids)),
+            task_ids=sorted(
+                set(reclaimed_task_ids)
+                | set(agent_task_ids)
+                | set(reclaimed_batch_parent_task_ids)
+                | set(reclaimed_batch_child_task_ids)
+            ),
             cutoff=cutoff,
         )
-        if cursor.rowcount:
+        reclaimed_count = len(
+            set(reclaimed_task_ids) | set(reclaimed_batch_parent_task_ids)
+        )
+        if reclaimed_count:
             logger.info(
                 "startup recovery reclaimed %d stale running task(s) as failed",
-                cursor.rowcount,
+                reclaimed_count,
             )
-        return cursor.rowcount
+        return reclaimed_count
+
+
+def _reconcile_reclaimed_validation_batches(
+    conn,
+    reclaimed_task_ids: list[str],
+    *,
+    cutoff: str,
+) -> tuple[list[str], list[str]]:
+    rows = conn.execute(
+        """
+        SELECT parent_task_id
+          FROM validation_batches
+         WHERE status = 'running'
+        """,
+    ).fetchall()
+    reclaimed_set = set(reclaimed_task_ids)
+    parent_task_ids: list[str] = []
+    for row in rows:
+        parent_task_id = str(row[0])
+        if parent_task_id in reclaimed_set:
+            parent_task_ids.append(parent_task_id)
+            continue
+        active_job = conn.execute(
+            """
+            SELECT status, created_at,
+                   COALESCE(heartbeat_at, started_at, created_at) AS activity_at
+              FROM jobs
+             WHERE task_id = ?
+               AND kind = 'validation_batch'
+               AND status IN ('queued', 'running')
+             LIMIT 1
+            """,
+            (parent_task_id,),
+        ).fetchone()
+        if active_job is None or (
+            str(active_job["status"]) == "queued"
+            and str(active_job["created_at"]) <= cutoff
+        ) or (
+            str(active_job["status"]) == "running"
+            and str(active_job["activity_at"]) <= cutoff
+        ):
+            parent_task_ids.append(parent_task_id)
+    if not parent_task_ids:
+        return [], []
+
+    now = _now()
+    parent_placeholders = ",".join(["?"] * len(parent_task_ids))
+    child_rows = conn.execute(
+        f"""
+        SELECT id, parent_task_id, child_task_id, model_name, stage
+          FROM validation_batch_items
+         WHERE parent_task_id IN ({parent_placeholders})
+           AND status = 'running'
+        """,
+        parent_task_ids,
+    ).fetchall()
+    child_task_ids = [str(row["child_task_id"]) for row in child_rows]
+    running_item_parent_ids = {
+        str(row["parent_task_id"])
+        for row in child_rows
+    }
+    for row in child_rows:
+        conn.execute(
+            """
+            INSERT INTO agent_messages
+            (id, task_id, role, stage, content, created_at, metadata_json)
+            VALUES (?, ?, 'assistant', 'failure', ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                str(row["parent_task_id"]),
+                (
+                    f"模型 {row['model_name']} 在{row['stage']}阶段因服务器重启中断；"
+                    "该项已隔离并标记失败，可修复后重试。"
+                ),
+                now,
+                json.dumps(
+                    {
+                        "batch_item_failed": True,
+                        "item_id": str(row["id"]),
+                        "child_task_id": str(row["child_task_id"]),
+                        "model_name": str(row["model_name"]),
+                        "failed_stage": str(row["stage"]),
+                        "error_code": "ServerRestart",
+                        "retryable": True,
+                        "interrupted_by_restart": True,
+                        "streaming": False,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+    for parent_task_id in parent_task_ids:
+        if parent_task_id in running_item_parent_ids:
+            continue
+        conn.execute(
+            """
+            INSERT INTO agent_messages
+            (id, task_id, role, stage, content, created_at, metadata_json)
+            VALUES (?, ?, 'assistant', 'failure', ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                parent_task_id,
+                "批次因服务器重启在后台任务启动前中断；已恢复为可重试状态。",
+                now,
+                json.dumps(
+                    {
+                        "batch_failed_to_start": True,
+                        "error_code": "ServerRestart",
+                        "retryable": True,
+                        "interrupted_by_restart": True,
+                        "streaming": False,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+    conn.execute(
+        f"""
+        UPDATE validation_batch_items
+           SET status = 'failed',
+               outcome = 'failed',
+               error_code = 'ServerRestart',
+               error_message = ?,
+               finished_at = ?,
+               updated_at = ?
+         WHERE parent_task_id IN ({parent_placeholders})
+           AND status = 'running'
+        """,
+        (RECLAIM_SERVER_RESTART_MESSAGE, now, now, *parent_task_ids),
+    )
+    conn.execute(
+        f"""
+        UPDATE validation_batches
+           SET status = 'partial_failure',
+               summary_path = '',
+               error_message = ?,
+               finished_at = ?,
+               updated_at = ?
+         WHERE parent_task_id IN ({parent_placeholders})
+           AND status = 'running'
+        """,
+        (RECLAIM_SERVER_RESTART_MESSAGE, now, now, *parent_task_ids),
+    )
+    conn.execute(
+        f"""
+        UPDATE tasks
+           SET status = ?,
+               status_message = ?,
+               status_reason_code = ?,
+               updated_at = ?
+         WHERE id IN ({parent_placeholders})
+        """,
+        (
+            TaskStatus.FAILED.value,
+            RECLAIM_SERVER_RESTART_MESSAGE,
+            TASK_STATUS_REASON_SERVER_RESTART,
+            now,
+            *parent_task_ids,
+        ),
+    )
+    return parent_task_ids, child_task_ids
 
 
 def _stale_task_ids(conn, orphan_placeholders: str, cutoff: str) -> list[str]:

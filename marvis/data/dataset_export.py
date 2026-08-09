@@ -30,6 +30,7 @@ from openpyxl import Workbook
 
 from marvis.data.errors import DataLayerError
 from marvis.files import sha256_file
+from marvis.spreadsheet_safety import looks_like_excel_formula
 
 
 DATASET_EXPORT_RESULT_SCHEMA_VERSION = "dataset-export-result.v1"
@@ -39,7 +40,6 @@ _EXCEL_MAX_COLUMNS = 16_384
 _EXCEL_MAX_DATA_ROWS = _EXCEL_MAX_ROWS - 1  # one row is reserved for headers
 _FIXED_WORKBOOK_DATETIME = datetime(2000, 1, 1)
 _FIXED_ZIP_DATETIME = (1980, 1, 1, 0, 0, 0)
-_FORMULA_PREFIXES = frozenset("=+-@")
 _XLSX_ILLEGAL_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _EXCEL_NUMERIC_TEXT = re.compile(
     r"^[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)"
@@ -627,18 +627,10 @@ def _finite_float_text(value: float, *, safety: _SafetyCounts) -> str:
 
 
 def _safe_string(value: str, *, safety: _SafetyCounts) -> str:
-    if _looks_like_formula(value):
+    if looks_like_excel_formula(value):
         safety.formula_cells_escaped += 1
         return _prefix_text_marker(value)
     return value
-
-
-def _looks_like_formula(value: str) -> bool:
-    for character in value:
-        if character.isspace() or unicodedata.category(character).startswith("C"):
-            continue
-        return character in _FORMULA_PREFIXES
-    return False
 
 
 def _looks_like_excel_auto_coercion(value: str) -> bool:

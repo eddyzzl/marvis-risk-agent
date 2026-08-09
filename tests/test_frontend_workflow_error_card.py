@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import textwrap
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -344,7 +346,7 @@ def test_manual_driver_keeps_unrecovered_previous_plan_failure_as_read_only_hist
 
 
 def test_workflow_cards_use_border_first_responsive_theme_styles() -> None:
-    styles = (ROOT / "marvis/static/styles.css").read_text(encoding="utf-8")
+    styles = read_browser_stylesheets(ROOT / "marvis/static")
     start = styles.index(".workflow-error-card,")
     end = styles.index("/* Historical input-confirmation", start)
     card_styles = styles[start:end]

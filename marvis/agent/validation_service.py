@@ -7,7 +7,7 @@ from marvis.agent.orchestrator import (
     raise_if_agent_cancelled as _raise_if_agent_cancelled,
     request_agent_cancellation,
 )
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     TaskRecord,

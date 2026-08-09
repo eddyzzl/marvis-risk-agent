@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from marvis.api_task_helpers import get_task_or_404
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TASK_TYPE_STRATEGY
 from marvis.errors import conflict, unprocessable
 from marvis.packs.strategy.candidate_lab_projection import (

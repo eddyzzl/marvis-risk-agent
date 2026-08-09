@@ -199,7 +199,7 @@ def _adopt_strategy(driver, registry, plan_repo, settings, tmp_path, task, monke
     adopt_step = next(step for step in plan.steps if step.tool_ref.tool == "adopt_strategy")
     turn = driver.resume(
         plan_id=plan_id,
-        user_text="确认采纳",
+        user_text="确认",
         run_seq=3,
         adjust_params={"adoption_reason": "committee approved monitoring baseline"},
         expected_step_id=adopt_step.id,

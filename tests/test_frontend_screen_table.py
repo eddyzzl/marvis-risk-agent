@@ -14,11 +14,17 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 _STATIC = Path(__file__).resolve().parent.parent / "marvis" / "static"
 
 
 def _read(rel: str) -> str:
     return (_STATIC / rel).read_text(encoding="utf-8")
+
+
+def _read_css() -> str:
+    return read_browser_stylesheets(_STATIC)
 
 
 def _run_node(script: str) -> str:
@@ -108,11 +114,30 @@ def test_screen_threshold_adjust_posts_structured_params():
     assert "renderWorkflowStepper" in module_js
 
 
+def test_snapshot_bound_gate_contexts_can_reload_the_latest_agent_gate():
+    screen_context = _app_slice(
+        "function screenGateControllerContext()",
+        "\n}\nfunction handleScreenSearchInput",
+    )
+    driver_context = _app_slice(
+        "function driverConfirmControllerContext()",
+        "\n}\nif (typeof document",
+    )
+    acceptance_context = _app_slice(
+        "function agentAcceptanceControllerContext()",
+        "\n}\n\nfunction modelingSetupControllerContext",
+    )
+
+    assert "refreshAgentMessages: typeof refreshDriverGateState" in screen_context
+    assert "refreshAgentMessages: typeof refreshDriverGateState" in driver_context
+    assert "refreshAgentMessages: typeof refreshDriverGateState" in acceptance_context
+
+
 def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/modeling_setup_panel.js")
     manual_module_js = _read("js/v2/driver_manual_analysis.js")
-    css = _read("css/v2-workbench.css")
+    css = _read_css()
     assert "submitModelingWeightAdjustController" in app_js
     assert "handleModelingWeightAdjustClickController" in app_js
     assert "function agentMessageModelingSetupHtml(message, options = {})" in app_js
@@ -277,7 +302,7 @@ def test_modeling_setup_split_adjust_and_unchanged_confirm_are_actionable():
           api: async (_url, options) => {{ calls.push(JSON.parse(options.body)); return {{ messages: [] }}; }},
         }};
         const base = {{
-          dataset: {{ modelingPlanId: "plan-1", modelingGateStepId: "gate-1", modelingCurrentWeight: "", currentSplitConfig: JSON.stringify({{ test_size: 0.25, group_cols: ["phone"] }}) }},
+          dataset: {{ modelingPlanId: "plan-1", modelingGateStepId: "gate-1", modelingCurrentWeight: "", currentSplitConfig: JSON.stringify({{ test_size: 0.25, group_cols: ["phone"] }}), expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0", expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64) }},
           querySelector: (selector) => {{
             if (selector === ".modeling-target-select") return {{ value: "binary", getAttribute: () => "binary" }};
             if (selector === ".modeling-n-trials-input") return {{ value: "40", getAttribute: () => "40" }};
@@ -313,6 +338,60 @@ def test_modeling_setup_split_adjust_and_unchanged_confirm_are_actionable():
         await submitModelingWeightAdjust({{ disabled: false, closest: () => passthrough }}, context);
         assert.equal(calls[2].ui_action, "confirm_gate");
         assert.equal(calls[2].adjust_params, undefined);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_modeling_setup_conflict_refreshes_latest_gate_without_reviving_stale_button():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { submitModelingWeightAdjust } from "./marvis/static/js/v2/modeling_setup_panel.js";
+
+        const form = {
+          dataset: {
+            modelingPlanId: "plan-1",
+            modelingGateStepId: "gate-1",
+            modelingCurrentWeight: "",
+            currentSplitConfig: JSON.stringify({ test_size: 0.25, group_cols: ["phone"] }),
+            expectedPlanStatus: "awaiting_confirm",
+            expectedPlanRevision: "0",
+            expectedPlanFingerprint: "a".repeat(64),
+            expectedStepFingerprint: "b".repeat(64),
+          },
+          querySelector(selector) {
+            if (selector === ".modeling-target-select") return { value: "binary", getAttribute: () => "binary" };
+            if (selector === ".modeling-n-trials-input") return { value: "40", getAttribute: () => "40" };
+            if (selector === ".modeling-recipe-control") return { dataset: { currentRecipes: "lgb" }, querySelectorAll: () => [{ value: "lgb" }] };
+            if (selector === ".modeling-weight-pick:checked") return { value: "" };
+            if (selector === ".modeling-override-reason-input") return { value: "" };
+            if (selector === ".modeling-split-mode:checked") return { value: "none" };
+            if (selector === ".modeling-test-size-input") return { value: "25" };
+            if (selector === ".modeling-oot-size-input") return { value: "20" };
+            if (selector === ".modeling-time-column-select") return { value: "" };
+            return null;
+          },
+        };
+        const button = { disabled: false, closest: () => form };
+        const refreshed = [];
+        const statuses = [];
+        await submitModelingWeightAdjust(button, {
+          selectedTaskId: "task-1",
+          acceptanceMode: "manual",
+          api: async () => { throw Object.assign(new Error("stale gate"), { status: 409 }); },
+          pollAgentMessagesUntilSettled: async () => undefined,
+          refreshAgentMessages: async (taskId) => { refreshed.push(taskId); },
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+        });
+
+        assert.deepEqual(refreshed, ["task-1"]);
+        assert.equal(button.disabled, true);
+        assert.deepEqual(statuses.at(-1), [
+          "计划已更新，已加载最新待确认步骤，请重新检查后操作。",
+          "info",
+        ]);
         process.stdout.write("ok");
         """
     )
@@ -480,7 +559,7 @@ def test_model_delivery_panel_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/model_delivery_panel.js")
     manual_module_js = _read("js/v2/driver_manual_analysis.js")
-    css = _read("css/v2-workbench.css")
+    css = _read_css()
     assert 'import { renderModelDeliveryPanel } from "./js/v2/model_delivery_panel.js";' in app_js
     assert "function agentMessageModelDeliveryHtml(message, options = {})" in app_js
     assert "return renderModelDeliveryPanel(message, options);" in app_js
@@ -488,7 +567,7 @@ def test_model_delivery_panel_renderer_and_branch_are_wired():
     assert "renderModelDelivery(message)" in manual_module_js
     assert "export function renderModelDeliveryPanel(message, options = {})" in module_js
     assert "model-delivery-readiness-grid" in module_js
-    assert "candidateTable(delivery.candidates)" in module_js
+    assert "candidateTable(delivery.candidates, {" in module_js
     assert "actionTable(delivery.actions)" in module_js
     assert "reportSummary(delivery.report)" in module_js
     assert "businessSignalSummary(delivery.business_signals)" in module_js
@@ -508,8 +587,8 @@ def test_model_delivery_panel_renderer_and_branch_are_wired():
 
 
 def test_modeling_panels_use_semantic_model_visual_tokens():
-    styles_css = _read("styles.css")
-    v2_css = _read("css/v2-workbench.css")
+    styles_css = _read_css()
+    v2_css = styles_css
     start = v2_css.index("/* Modeling setup gate controls. */")
     end = v2_css.index("/* §4 interactive feature-screening selection table", start)
     modeling_panel_css = v2_css[start:end]
@@ -705,6 +784,70 @@ def test_model_delivery_panel_renders_selection_and_actions():
     assert output == "ok"
 
 
+def test_model_delivery_selection_gate_renders_bound_radio_candidates():
+    output = _run_node(
+        f"""
+        {""}
+        import assert from "node:assert/strict";
+        import {{ renderModelDeliveryPanel }} from "./marvis/static/js/v2/model_delivery_panel.js";
+
+        const baseMessage = {{
+          metadata: {{
+            kind: "gate",
+            gate_source_tool: "select_experiment",
+            plan_id: "plan-1",
+            step_id: "select-1",
+            model_delivery: {{
+              source_tool: "compare_experiments",
+              candidates: [
+                {{ id: "exp-lr", recipe: "lr", metrics: {{ oot_ks: 0.28 }} }},
+                {{ id: "exp-xgb", recipe: "xgb", metrics: {{ oot_ks: 0.31 }} }},
+              ],
+            }},
+          }},
+        }};
+        const recommendedHtml = renderModelDeliveryPanel({{
+          ...baseMessage,
+          metadata: {{
+            ...baseMessage.metadata,
+            model_delivery: {{
+              ...baseMessage.metadata.model_delivery,
+              recommended_experiment_id: "exp-xgb",
+            }},
+          }},
+        }});
+        assert.equal(recommendedHtml.includes('data-model-candidate-choice="1"'), true);
+        assert.equal(recommendedHtml.includes('data-expected-plan-id="plan-1"'), true);
+        assert.equal(recommendedHtml.includes('data-expected-step-id="select-1"'), true);
+        assert.equal(/value="exp-xgb"[^>]* checked/.test(recommendedHtml), true);
+        assert.equal(recommendedHtml.includes("平台推荐"), true);
+        assert.equal(recommendedHtml.includes("已默认勾选平台推荐候选"), true);
+
+        // No trusted recommendation is a supported legacy/evidence-degraded
+        // branch: choose the first real candidate visibly, never infer a winner
+        // from metrics in the browser.
+        const fallbackHtml = renderModelDeliveryPanel(baseMessage);
+        assert.equal(/value="exp-lr"[^>]* checked/.test(fallbackHtml), true);
+        assert.equal(fallbackHtml.includes("平台未提供可追溯的推荐候选"), true);
+
+        const deliveredHtml = renderModelDeliveryPanel({{
+          metadata: {{
+            kind: "gate",
+            gate_source_tool: "post_training_action",
+            model_delivery: {{
+              source_tool: "post_training_action",
+              selected_experiment_id: "exp-xgb",
+              candidates: [{{ id: "exp-xgb", recipe: "xgb", selected: true }}],
+            }},
+          }},
+        }});
+        assert.equal(deliveredHtml.includes('data-model-candidate-choice="1"'), false);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_modeling_panels_combined_dom_smoke_contract():
     output = _run_node(
         f"""
@@ -846,7 +989,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         }} = {{}}) {{
           const recipeInputs = selectedRecipes.map((value) => ({{ value }}));
           return {{
-            dataset: {{ modelingPlanId: "plan-modeling", modelingGateStepId: "gate-modeling", modelingCurrentWeight: currentWeight }},
+            dataset: {{ modelingPlanId: "plan-modeling", modelingGateStepId: "gate-modeling", modelingCurrentWeight: currentWeight, expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0", expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64) }},
             querySelector: (selector) => {{
               if (selector === ".modeling-target-select") {{
                 return {{ value: targetType, getAttribute: (name) => name === "data-current-target-type" ? currentTargetType : "" }};
@@ -966,7 +1109,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
           renderWorkflowStepper: () => {{ eventStepperCalls += 1; }},
         }};
         const eventForm = {{
-          dataset: {{ modelingPlanId: "plan-modeling", modelingGateStepId: "gate-modeling", modelingCurrentWeight: "" }},
+          dataset: {{ modelingPlanId: "plan-modeling", modelingGateStepId: "gate-modeling", modelingCurrentWeight: "", expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0", expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64) }},
           querySelector: (selector) => {{
             if (selector === ".modeling-target-select") return {{ value: "binary", getAttribute: () => "binary" }};
             if (selector === ".modeling-n-trials-input") return {{ value: "12", getAttribute: () => "12" }};
@@ -1007,7 +1150,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
 
 
 def test_screen_table_has_hardcut_coloring_styles():
-    css = _read("css/v2-workbench.css")
+    css = _read_css()
     assert ".screen-table" in css
     # hard-cut buckets are visually distinguished (leakage / suspected / unusable)
     assert ".screen-row.screen-leakage" in css
@@ -1352,7 +1495,7 @@ def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
         assert.deepEqual(statuses.at(-1), ["阈值不能为空。", "error"]);
 
         const validButton = {{ disabled: false, closest: () => ({{
-          dataset: {{ screenStepId: "gate-screen" }},
+          dataset: {{ screenPlanId: "plan-screen", screenStepId: "gate-screen", expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0", expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64) }},
           querySelectorAll: () => [
             {{ getAttribute: (name) => name === "data-screen-threshold" ? "leakage_ks" : null, value: "0.33" }},
             {{ getAttribute: (name) => name === "data-screen-threshold" ? "max_missing_rate" : null, value: "0.91" }},
@@ -1372,10 +1515,56 @@ def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
     assert output == "ok"
 
 
+def test_screen_threshold_conflict_refreshes_latest_gate_without_reenabling_stale_button():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { submitScreenThresholdAdjust } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const wrap = {
+          dataset: {
+            screenReadonly: "false",
+            screenPlanId: "plan-1",
+            screenStepId: "gate-1",
+            expectedPlanStatus: "awaiting_confirm",
+            expectedPlanRevision: "4",
+            expectedPlanFingerprint: "a".repeat(64),
+            expectedStepFingerprint: "b".repeat(64),
+          },
+          querySelectorAll: (selector) => selector === ".screen-threshold-input" ? [{
+            value: "0.42",
+            getAttribute: () => "leakage_ks",
+          }] : [],
+        };
+        const button = { disabled: false, closest: () => wrap };
+        const statuses = [];
+        const refreshed = [];
+        const conflict = Object.assign(new Error("确认快照已变化"), { status: 409 });
+
+        await submitScreenThresholdAdjust(button, {
+          selectedTaskId: "task-1",
+          api: async () => { throw conflict; },
+          pollAgentMessagesUntilSettled: async () => {},
+          refreshAgentMessages: async (taskId) => { refreshed.push(taskId); },
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+        });
+
+        assert.deepEqual(refreshed, ["task-1"]);
+        assert.equal(button.disabled, true);
+        assert.deepEqual(statuses.at(-1), [
+          "计划已更新，已加载最新待确认步骤，请重新检查后操作。",
+          "info",
+        ]);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_screen_table_gains_search_sort_chips_bulk_pagination_wiring():
     app_js = _read("app.js")
     module_js = _read("js/v2/screen_gate_controller.js")
-    css = _read("css/v2-workbench.css")
+    css = _read_css()
     # UX-4: search box, sortable headers, category chips, bulk ops, pagination.
     assert "screen-search-input" in module_js
     assert "data-screen-search" in module_js
@@ -1842,6 +2031,127 @@ def test_screen_table_paginates_at_fifty_rows_per_page():
     assert output == "ok"
 
 
+def test_historical_screen_uses_server_selection_not_unsaved_live_gate_state():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          handleScreenPickChange,
+          renderScreenGateTable,
+        } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const message = {
+          id: "same-gate-message",
+          metadata: {
+            step_id: "screen-gate",
+            screen: {
+              selected: ["x_server"],
+              ranked: [["x_server", 0.22], ["x_unsaved", 0.18]],
+              leakage: [],
+              suspected: [],
+              unusable: [],
+              scores: {
+                x_server: { ks: 0.22, iv: 0.12 },
+                x_unsaved: { ks: 0.18, iv: 0.08 },
+              },
+              thresholds: { leakage_ks: 0.4, max_missing_rate: 0.95 },
+            },
+          },
+        };
+        const wrap = {
+          dataset: { screenForm: message.id, screenReadonly: "false" },
+          querySelector: () => null,
+          querySelectorAll: (selector) => selector === ".screen-pick:checked" ? [box] : [box],
+        };
+        const row = { classList: { contains: () => false } };
+        const box = {
+          value: "x_unsaved",
+          checked: true,
+          closest: (selector) => selector === ".screen-pick" ? box
+            : selector === ".screen-table-wrap" ? wrap : row,
+        };
+        handleScreenPickChange({ target: box });
+
+        const historical = renderScreenGateTable(message, { interactive: false });
+        const serverRow = historical.slice(
+          historical.indexOf('data-screen-feature="x_server"'),
+          historical.indexOf("</tr>", historical.indexOf('data-screen-feature="x_server"')),
+        );
+        const unsavedRow = historical.slice(
+          historical.indexOf('data-screen-feature="x_unsaved"'),
+          historical.indexOf("</tr>", historical.indexOf('data-screen-feature="x_unsaved"')),
+        );
+        assert.match(serverRow, /value="x_server" checked disabled/);
+        assert.doesNotMatch(unsavedRow, /value="x_unsaved" checked/);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_historical_screen_keeps_passive_sort_filter_and_pagination_controls():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          handleScreenPageClick,
+          renderScreenGateTable,
+        } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const selected = [];
+        const scores = {};
+        for (let i = 0; i < 120; i++) {
+          const name = "history_" + String(i).padStart(3, "0");
+          selected.push(name);
+          scores[name] = { ks: i / 200, iv: i / 400 };
+        }
+        const message = {
+          id: "historical-page-message",
+          metadata: {
+            step_id: "historical-gate",
+            screen: {
+              selected,
+              scores,
+              leakage: [],
+              suspected: [],
+              unusable: [],
+              thresholds: { leakage_ks: 0.9, max_missing_rate: 0.95 },
+            },
+          },
+        };
+        const firstPage = renderScreenGateTable(message, { interactive: false });
+        const sortButton = firstPage.match(/<button[^>]+data-screen-sort="ks"[^>]*>/)?.[0] || "";
+        const chipButton = firstPage.match(/<button[^>]+data-screen-chip="all"[^>]*>/)?.[0] || "";
+        const nextButtonHtml = firstPage.match(/<button[^>]+data-screen-page-next="1"[^>]*>/)?.[0] || "";
+        const confirmButton = firstPage.match(/<button[^>]+screen-confirm[^>]*>/)?.[0] || "";
+        assert.match(sortButton, /data-gate-passive-control/);
+        assert.match(chipButton, /data-gate-passive-control/);
+        assert.match(nextButtonHtml, /data-gate-passive-control/);
+        assert.doesNotMatch(confirmButton, /data-gate-passive-control/);
+
+        let secondPage = "";
+        const wrap = {
+          dataset: { screenForm: message.id, screenReadonly: "true" },
+          querySelector: () => null,
+          querySelectorAll: () => [],
+        };
+        const nextButton = {
+          closest: (selector) => selector === "[data-screen-page-next]" ? nextButton
+            : selector === ".screen-table-wrap" ? wrap : null,
+        };
+        handleScreenPageClick({ target: nextButton, preventDefault: () => {} }, {
+          getAgentMessages: () => [message],
+          applyRerender: (_wrap, html) => { secondPage = html; },
+        });
+        assert.equal(secondPage.includes("第 2 / 3 页"), true);
+        assert.match(secondPage, /history_050/);
+        assert.doesNotMatch(secondPage, /history_000/);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_screen_confirm_submits_selection_across_all_pages():
     output = _run_node(
         """
@@ -1880,7 +2190,12 @@ def test_screen_confirm_submits_selection_across_all_pages():
           dataset: {
             screenForm: message.id,
             screenReadonly: "false",
+            screenPlanId: "plan-page-confirm",
             screenStepId: "gate-page-confirm",
+            expectedPlanStatus: "awaiting_confirm",
+            expectedPlanRevision: "0",
+            expectedPlanFingerprint: "a".repeat(64),
+            expectedStepFingerprint: "b".repeat(64),
           },
           querySelectorAll: (selector) => selector === ".screen-pick:checked" ? visibleBoxes : [],
           querySelector: () => null,
@@ -1907,6 +2222,62 @@ def test_screen_confirm_submits_selection_across_all_pages():
     assert output == "ok"
 
 
+def test_screen_selection_conflict_refreshes_latest_gate_without_reenabling_stale_button():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { submitScreenSelection } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const row = { classList: { contains: () => false } };
+        const pick = {
+          value: "x1",
+          checked: true,
+          disabled: false,
+          closest: () => row,
+        };
+        const wrap = {
+          dataset: {
+            screenReadonly: "false",
+            screenForm: "gate-message",
+            screenPlanId: "plan-1",
+            screenStepId: "gate-1",
+            expectedPlanStatus: "awaiting_confirm",
+            expectedPlanRevision: "4",
+            expectedPlanFingerprint: "a".repeat(64),
+            expectedStepFingerprint: "b".repeat(64),
+          },
+          querySelector: () => null,
+          querySelectorAll: (selector) => {
+            if (selector === ".screen-pick" || selector === ".screen-pick:checked") return [pick];
+            return [];
+          },
+        };
+        const button = { disabled: false, closest: () => wrap };
+        const statuses = [];
+        const refreshed = [];
+        const conflict = Object.assign(new Error("确认快照已变化"), { status: 409 });
+
+        await submitScreenSelection(button, {
+          selectedTaskId: "task-1",
+          agentMessages: [],
+          api: async () => { throw conflict; },
+          pollAgentMessagesUntilSettled: async () => {},
+          refreshAgentMessages: async (taskId) => { refreshed.push(taskId); },
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+        });
+
+        assert.deepEqual(refreshed, ["task-1"]);
+        assert.equal(button.disabled, true);
+        assert.deepEqual(statuses.at(-1), [
+          "计划已更新，已加载最新待确认步骤，请重新检查后操作。",
+          "info",
+        ]);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_screen_table_leakage_pick_requires_override_reason_before_confirm():
     output = _run_node(
         """
@@ -1922,7 +2293,7 @@ def test_screen_table_leakage_pick_requires_override_reason_before_confirm():
             closest: (sel) => (sel === ".screen-row" ? leakageRow : null),
           };
           return {
-            dataset: { screenForm: "leak-msg", screenReadonly: "false", screenStepId: "gate-leak" },
+            dataset: { screenForm: "leak-msg", screenReadonly: "false", screenPlanId: "plan-leak", screenStepId: "gate-leak", expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0", expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64) },
             querySelectorAll: (sel) => (sel === ".screen-pick:checked" ? [checkbox] : []),
             querySelector: (sel) => (sel === ".screen-leakage-reason-input" ? { value: reasonValue } : null),
           };
@@ -2023,7 +2394,7 @@ def test_screen_table_iv_tier_badges_and_visual_hierarchy_css():
 
 
 def test_screen_table_visual_hierarchy_css_tokens_only():
-    css = _read("css/v2-workbench.css")
+    css = _read_css()
     start = css.index("/* §4 interactive feature-screening selection table")
     end = css.index("/* §4 join dedup picker", start)
     screen_css = css[start:end]
@@ -2071,7 +2442,7 @@ def test_dedup_picker_posts_strategies():
     assert "data-dedup-gate-step-id" in module_js
     assert "expected_step_id: expectedStepId" in module_js
     assert "handleDedupConfirmClick" in app_js
-    css = _read("css/v2-workbench.css")
+    css = _read_css()
     assert ".dedup-picker" in css and ".dedup-feature-card" in css
     # UX-1/REL-1: dedup submission shares the same busy-feedback contract
     # (immediate busy pill + streamed poll + plan rail ticks) as the other
@@ -2109,6 +2480,8 @@ def test_join_c1_form_renderer_and_submit_are_wired():
     assert "feature_ids" in module_js
     assert "target_col" in module_js
     assert "handleC1ConfirmClick" in app_js
+    assert "handleC1RoleChange" in app_js
+    assert 'document.addEventListener("change", handleC1RoleChange)' in app_js
     # UX-1/REL-1: C1 submission shares the same busy-feedback contract
     # (immediate busy pill + streamed poll + plan rail ticks) as the other
     # v2 gate controllers, since it also reruns the driver turn (execute_join).
@@ -2129,6 +2502,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         import assert from "node:assert/strict";
         import {{
           closeC1DatasetPreview,
+          handleC1RoleChange,
           renderDedupPicker,
           renderJoinC1Form,
           showC1DatasetPreview,
@@ -2169,6 +2543,28 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(c1Html.includes('data-c1-dataset="main"'), true);
         assert.equal(c1Html.includes('data-c1-preview-dataset="main"'), true);
         assert.equal(c1Html.includes('value="bad" selected'), true);
+        assert.equal(c1Html.includes('value="score"'), false);
+
+        const targetSelect = {{ innerHTML: "", value: "bad" }};
+        const mainRole = {{
+          value: "feature",
+          getAttribute: (name) => name === "data-c1-target-options" ? JSON.stringify(["id", "bad"]) : null,
+        }};
+        const featureRole = {{
+          value: "anchor",
+          getAttribute: (name) => name === "data-c1-target-options" ? JSON.stringify(["id", "score"]) : null,
+        }};
+        const dynamicForm = {{
+          querySelectorAll: (selector) => selector === ".c1-role" ? [mainRole, featureRole] : [],
+          querySelector: (selector) => selector === ".c1-target" ? targetSelect : null,
+        }};
+        featureRole.closest = (selector) => selector === ".c1-form" ? dynamicForm : null;
+        handleC1RoleChange({{
+          target: {{ closest: (selector) => selector === ".c1-role" ? featureRole : null }},
+        }});
+        assert.equal(targetSelect.innerHTML.includes('value="score"'), true);
+        assert.equal(targetSelect.innerHTML.includes('value="bad"'), false);
+        assert.equal(targetSelect.value, "");
 
         const previewTitle = {{ textContent: "" }};
         const previewBody = {{ innerHTML: "" }};
@@ -2209,7 +2605,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(c1Button.disabled, true);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
         assert.equal(calls[0][1].acceptance_mode, "manual");
-        assert.equal(calls[0][1].expected_step_id, "gate-c1");
+        assert.equal(Object.hasOwn(calls[0][1], "expected_step_id"), false);
         assert.equal(calls[0][1].content.startsWith("[C1]"), true);
         assert.deepEqual(JSON.parse(calls[0][1].content.slice(4)), {{
           anchor_id: "main",
@@ -2220,13 +2616,13 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
 
         // C1 happens before a PlanDriver plan exists, so production C1
         // messages intentionally have no step_id.  The structured assignment
-        // must still be submitted; expected_step_id is only added when the
-        // backend actually supplied one.
+        // must still be submitted, and legacy metadata must not be forwarded
+        // as an unverifiable PlanDriver confirmation token.
         const prePlanC1Form = {{
           dataset: {{}},
           querySelectorAll: (selector) => selector === ".c1-role" ? [
-            {{ getAttribute: () => "main", value: "anchor" }},
-            {{ getAttribute: () => "feat", value: "feature" }},
+            {{ getAttribute: (name) => name === "data-c1-dataset" ? "main" : null, value: "anchor" }},
+            {{ getAttribute: (name) => name === "data-c1-dataset" ? "feat" : null, value: "feature" }},
           ] : [],
           querySelector: (selector) => selector === ".c1-target" ? {{ value: "bad" }} : null,
         }};
@@ -2258,6 +2654,24 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         }};
         await submitC1Assignment({{ disabled: false, closest: () => duplicateAnchorForm }}, context);
         assert.deepEqual(statuses.at(-1), ["只能有一张样本主表，请把其余表改为「特征表」或「忽略」。", "error"]);
+        assert.equal(calls.length, callsBeforeDuplicateAttempt);
+
+        const invalidTargetForm = {{
+          dataset: {{}},
+          querySelectorAll: (selector) => selector === ".c1-role" ? [
+            {{
+              getAttribute: (name) => ({{
+                "data-c1-dataset": "main",
+                "data-c1-target-options": JSON.stringify(["id", "bad"]),
+              }})[name] ?? null,
+              value: "anchor",
+            }},
+            {{ getAttribute: () => "feat", value: "feature" }},
+          ] : [],
+          querySelector: (selector) => selector === ".c1-target" ? {{ value: "score" }} : null,
+        }};
+        await submitC1Assignment({{ disabled: false, closest: () => invalidTargetForm }}, context);
+        assert.deepEqual(statuses.at(-1), ["目标列必须来自当前样本主表。", "error"]);
         assert.equal(calls.length, callsBeforeDuplicateAttempt);
 
         // UX-2: a read-only (stale) C1 form must refuse to submit, matching the
@@ -2309,7 +2723,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(readonlyDedupHtml.includes('data-dedup-readonly="true"'), true);
         assert.equal(readonlyDedupHtml.includes("历史结果"), true);
         const dedupForm = {{
-          dataset: {{ dedupGateStepId: "gate-dedup" }},
+          dataset: {{ dedupPlanId: "plan-dedup", dedupGateStepId: "gate-dedup", expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0", expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64) }},
           querySelectorAll: (selector) => selector === ".dedup-strategy" ? [
             {{ getAttribute: (name) => name === "data-dedup-feature" ? "feat" : null, value: "last" }},
           ] : [],
@@ -2333,7 +2747,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         // UX-6: "排除该特征表" posts the same free-text instruction channel a typed
         // composer message would use (no dedup_strategies field).
         const callsBeforeExclude = calls.length;
-        const excludeForm = {{ dataset: {{ dedupGateStepId: "gate-dedup" }} }};
+        const excludeForm = {{ dataset: {{ dedupPlanId: "plan-dedup", dedupGateStepId: "gate-dedup", expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0", expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64) }} }};
         const excludeButton = {{ disabled: false, closest: () => excludeForm, getAttribute: () => "feat" }};
         await submitDedupExclude(excludeButton, context);
         assert.equal(excludeButton.disabled, true);
@@ -2382,7 +2796,7 @@ def test_join_key_picker_keeps_two_tables_as_two_cards_and_posts_overrides():
           {{ getAttribute: () => "f2", querySelectorAll: () => [{{ value: "phone" }}] }},
         ];
         const form = {{
-          dataset: {{ joinKeyGateStepId: "gate-1" }},
+          dataset: {{ joinKeyPlanId: "plan-1", joinKeyGateStepId: "gate-1", expectedPlanStatus: "awaiting_confirm", expectedPlanRevision: "0", expectedPlanFingerprint: "a".repeat(64), expectedStepFingerprint: "b".repeat(64) }},
           querySelectorAll: (selector) => selector === "[data-join-key-card]" ? cards : [],
         }};
         let posted = null;
@@ -2405,6 +2819,85 @@ def test_join_key_picker_keeps_two_tables_as_two_cards_and_posts_overrides():
     assert output == "ok"
 
 
+def test_join_snapshot_conflicts_refresh_latest_gate_without_reviving_stale_controls():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          submitDedupExclude,
+          submitDedupStrategies,
+          submitJoinKeySelection,
+        } from "./marvis/static/js/v2/join_gate_controller.js";
+
+        const snapshot = {
+          expectedPlanStatus: "awaiting_confirm",
+          expectedPlanRevision: "0",
+          expectedPlanFingerprint: "a".repeat(64),
+          expectedStepFingerprint: "b".repeat(64),
+        };
+        const joinForm = {
+          dataset: {
+            joinKeyPlanId: "plan-join",
+            joinKeyGateStepId: "gate-join",
+            ...snapshot,
+          },
+          querySelectorAll(selector) {
+            if (selector !== "[data-join-key-card]") return [];
+            return [{
+              getAttribute: () => "feature-1",
+              querySelectorAll: () => [{ value: "applydt" }],
+            }];
+          },
+        };
+        const dedupForm = {
+          dataset: {
+            dedupPlanId: "plan-dedup",
+            dedupGateStepId: "gate-dedup",
+            ...snapshot,
+          },
+          querySelectorAll(selector) {
+            if (selector === ".dedup-strategy") {
+              return [{ getAttribute: () => "feature-1", value: "last" }];
+            }
+            return [];
+          },
+        };
+        const joinButton = { disabled: false, closest: () => joinForm };
+        const dedupButton = { disabled: false, closest: () => dedupForm };
+        const excludeButton = {
+          disabled: false,
+          closest: () => dedupForm,
+          getAttribute: () => "feature-1",
+        };
+        const refreshed = [];
+        const statuses = [];
+        const context = {
+          selectedTaskId: "task-1",
+          acceptanceMode: "manual",
+          api: async () => { throw Object.assign(new Error("stale gate"), { status: 409 }); },
+          pollAgentMessagesUntilSettled: async () => undefined,
+          refreshAgentMessages: async (taskId) => { refreshed.push(taskId); },
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+        };
+
+        await submitJoinKeySelection(joinButton, context);
+        await submitDedupStrategies(dedupButton, context);
+        await submitDedupExclude(excludeButton, context);
+
+        assert.deepEqual(refreshed, ["task-1", "task-1", "task-1"]);
+        assert.equal(joinButton.disabled, true);
+        assert.equal(dedupButton.disabled, true);
+        assert.equal(excludeButton.disabled, true);
+        assert.deepEqual(statuses.at(-1), [
+          "计划已更新，已加载最新待确认步骤，请重新检查后操作。",
+          "info",
+        ]);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_driver_gate_confirm_controller_renders_and_posts_confirm():
     output = _run_node(
         f"""
@@ -2415,7 +2908,13 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
           renderDriverGateButton,
           submitDriverConfirm,
         }} from "./marvis/static/js/v2/driver_gate_confirm.js";
-        const renderedButton = renderDriverGateButton({{ metadata: {{ kind: "gate", plan_id: "plan<1>", step_id: "gate<1>" }} }});
+        const confirmationSnapshot = {{
+          expected_plan_status: "awaiting_confirm",
+          expected_plan_revision: 0,
+          expected_plan_fingerprint: "a".repeat(64),
+          expected_step_fingerprint: "b".repeat(64),
+        }};
+        const renderedButton = renderDriverGateButton({{ metadata: {{ kind: "gate", plan_id: "plan<1>", step_id: "gate<1>", confirmation_snapshot: confirmationSnapshot }} }});
         assert.equal(renderedButton.includes("data-driver-confirm"), true);
         assert.equal(renderedButton.includes('data-expected-plan-id="plan&lt;1&gt;"'), true);
         assert.equal(renderedButton.includes('data-expected-step-id="gate&lt;1&gt;"'), true);
@@ -2458,9 +2957,14 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         }};
         const button = {{
           disabled: false,
-          getAttribute: (name) => name === "data-expected-plan-id"
-            ? "plan-1"
-            : (name === "data-expected-step-id" ? "gate-1" : null),
+          getAttribute: (name) => ({{
+            "data-expected-plan-id": "plan-1",
+            "data-expected-step-id": "gate-1",
+            "data-expected-plan-status": confirmationSnapshot.expected_plan_status,
+            "data-expected-plan-revision": String(confirmationSnapshot.expected_plan_revision),
+            "data-expected-plan-fingerprint": confirmationSnapshot.expected_plan_fingerprint,
+            "data-expected-step-fingerprint": confirmationSnapshot.expected_step_fingerprint,
+          }})[name] ?? null,
         }};
         await submitDriverConfirm(button, context);
         // busy state is pushed synchronously before the request settles
@@ -2473,6 +2977,7 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
           ui_action: "confirm_gate",
           expected_plan_id: "plan-1",
           expected_step_id: "gate-1",
+          ...confirmationSnapshot,
         }});
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
         assert.equal(rendered, 1);
@@ -2487,13 +2992,21 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         // a later gate reached in another tab.
         const startButton = {{
           disabled: false,
-          getAttribute: (name) => name === "data-expected-plan-id" ? "plan-1" : null,
+          getAttribute: (name) => ({{
+            "data-expected-plan-id": "plan-1",
+            "data-expected-plan-status": "validated",
+            "data-expected-plan-revision": "0",
+            "data-expected-plan-fingerprint": "c".repeat(64),
+          }})[name] ?? null,
         }};
         await submitDriverConfirm(startButton, context);
         assert.deepEqual(calls[1][1], {{
           content: "确认",
           ui_action: "start_plan",
           expected_plan_id: "plan-1",
+          expected_plan_status: "validated",
+          expected_plan_revision: 0,
+          expected_plan_fingerprint: "c".repeat(64),
         }});
 
         // failure path: api rejects, button is re-enabled, and an error status
@@ -2508,9 +3021,7 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         }};
         const failButton = {{
           disabled: false,
-          getAttribute: (name) => name === "data-expected-plan-id"
-            ? "plan-1"
-            : (name === "data-expected-step-id" ? "gate-1" : null),
+          getAttribute: button.getAttribute,
         }};
         await submitDriverConfirm(failButton, failContext);
         assert.equal(failButton.disabled, false);
@@ -2522,7 +3033,7 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
 
         const eventButton = {{
           disabled: false,
-          getAttribute: (name) => name === "data-expected-plan-id" ? "plan-1" : null,
+          getAttribute: startButton.getAttribute,
         }};
         const event = {{
           target: {{ closest: (selector) => selector === "[data-driver-confirm]" ? eventButton : null }},
@@ -2540,7 +3051,145 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
           content: "确认",
           ui_action: "start_plan",
           expected_plan_id: "plan-1",
+          expected_plan_status: "validated",
+          expected_plan_revision: 0,
+          expected_plan_fingerprint: "c".repeat(64),
         }});
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_driver_gate_conflict_refreshes_latest_gate_without_reenabling_stale_control():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { submitDriverConfirm } from "./marvis/static/js/v2/driver_gate_confirm.js";
+
+        const attrs = {
+          "data-expected-plan-id": "plan-1",
+          "data-expected-step-id": "gate-1",
+          "data-expected-plan-status": "awaiting_confirm",
+          "data-expected-plan-revision": "3",
+          "data-expected-plan-fingerprint": "a".repeat(64),
+          "data-expected-step-fingerprint": "b".repeat(64),
+        };
+        const button = {
+          disabled: false,
+          getAttribute: (name) => attrs[name] || "",
+        };
+        const statuses = [];
+        const refreshed = [];
+        const conflict = Object.assign(new Error("确认快照已变化"), { status: 409 });
+
+        await submitDriverConfirm(button, {
+          selectedTaskId: "task-1",
+          api: async () => { throw conflict; },
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+          pollAgentMessagesUntilSettled: async () => {},
+          refreshAgentMessages: async (taskId) => { refreshed.push(taskId); },
+        });
+
+        assert.deepEqual(refreshed, ["task-1"]);
+        assert.equal(button.disabled, true);
+        assert.deepEqual(statuses.at(-1), [
+          "计划已更新，已加载最新待确认步骤，请重新检查后操作。",
+          "info",
+        ]);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_driver_gate_confirm_posts_bound_model_candidate_selection():
+    output = _run_node(
+        f"""
+        {""}
+        import assert from "node:assert/strict";
+        import {{
+          renderDriverGateButton,
+          submitDriverConfirm,
+        }} from "./marvis/static/js/v2/driver_gate_confirm.js";
+
+        const confirmationSnapshot = {{
+          expected_plan_status: "awaiting_confirm",
+          expected_plan_revision: 0,
+          expected_plan_fingerprint: "a".repeat(64),
+          expected_step_fingerprint: "b".repeat(64),
+        }};
+        const rendered = renderDriverGateButton({{
+          metadata: {{
+            kind: "gate",
+            gate_source_tool: "select_experiment",
+            plan_id: "plan-1",
+            step_id: "select-1",
+            confirmation_snapshot: confirmationSnapshot,
+            model_delivery: {{ candidates: [{{ id: "exp-xgb" }}] }},
+          }},
+        }});
+        assert.equal(rendered.includes('data-model-candidate-required="1"'), true);
+        assert.equal(rendered.includes("确认所选实验"), true);
+
+        const selectedControl = {{
+          checked: true,
+          value: "exp-xgb",
+          getAttribute: (name) => name === "data-expected-plan-id"
+            ? "plan-1"
+            : (name === "data-expected-step-id" ? "select-1" : null),
+        }};
+        const selectionRoot = {{
+          querySelectorAll: (selector) => selector === "[data-model-candidate-choice]"
+            ? [selectedControl]
+            : [],
+        }};
+        const button = {{
+          disabled: false,
+          closest: () => selectionRoot,
+          getAttribute: (name) => ({{
+            "data-expected-plan-id": "plan-1",
+            "data-expected-step-id": "select-1",
+            "data-expected-plan-status": confirmationSnapshot.expected_plan_status,
+            "data-expected-plan-revision": String(confirmationSnapshot.expected_plan_revision),
+            "data-expected-plan-fingerprint": confirmationSnapshot.expected_plan_fingerprint,
+            "data-expected-step-fingerprint": confirmationSnapshot.expected_step_fingerprint,
+          }})[name] || null,
+        }};
+        const calls = [];
+        const statuses = [];
+        await submitDriverConfirm(button, {{
+          selectedTaskId: "task-1",
+          api: async (url, options) => {{
+            calls.push([url, JSON.parse(options.body)]);
+            return {{ messages: [] }};
+          }},
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+          setAgentMessages: () => {{}},
+          renderAgentConversation: () => {{}},
+          setDriverExecutionBusy: () => {{}},
+        }});
+        assert.deepEqual(calls[0], [
+          "/api/tasks/task-1/agent/messages",
+          {{
+            content: "确认",
+            ui_action: "confirm_gate",
+            expected_plan_id: "plan-1",
+            expected_step_id: "select-1",
+            ...confirmationSnapshot,
+            adjust_params: {{ selected_experiment_id: "exp-xgb" }},
+          }},
+        ]);
+
+        selectedControl.checked = false;
+        const missingButton = {{ ...button, disabled: false }};
+        await submitDriverConfirm(missingButton, {{
+          selectedTaskId: "task-1",
+          api: async () => {{ throw new Error("must not post"); }},
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+        }});
+        assert.equal(missingButton.disabled, false);
+        assert.deepEqual(statuses.at(-1), ["请先选择一个候选实验。", "error"]);
         process.stdout.write("ok");
         """
     )

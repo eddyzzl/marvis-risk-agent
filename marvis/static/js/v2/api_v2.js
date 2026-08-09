@@ -8,6 +8,21 @@ function queryPart(value) {
   return encodeURIComponent(String(value));
 }
 
+function confirmationBody(snapshot, { requireStep = false } = {}) {
+  const source = snapshot?.confirmation_snapshot || snapshot || {};
+  const body = {
+    expected_plan_status: source.expected_plan_status,
+    expected_plan_revision: source.expected_plan_revision,
+    expected_plan_fingerprint: source.expected_plan_fingerprint,
+  };
+  if (requireStep) body.expected_step_fingerprint = source.expected_step_fingerprint;
+  const missing = Object.entries(body).filter(([, value]) => value === undefined || value === null || value === "");
+  if (missing.length) {
+    throw new Error(`missing confirmation snapshot: ${missing.map(([key]) => key).join(", ")}`);
+  }
+  return body;
+}
+
 export const createPlan = (taskId, body) => apiPost(`/api/tasks/${pathPart(taskId)}/plans`, body);
 export const getTask = (taskId) => apiGet(`/api/tasks/${pathPart(taskId)}`);
 export const getLatestTaskJob = (taskId, kind = "") => {
@@ -15,10 +30,25 @@ export const getLatestTaskJob = (taskId, kind = "") => {
   return apiGet(`/api/tasks/${pathPart(taskId)}/jobs/latest${query}`);
 };
 export const getPlan = (planId) => apiGet(`/api/plans/${pathPart(planId)}`);
-export const confirmPlan = (planId) => apiPost(`/api/plans/${pathPart(planId)}/confirm`, {});
+export const confirmPlan = (planId, snapshot) => (
+  apiPost(`/api/plans/${pathPart(planId)}/confirm`, confirmationBody(snapshot))
+);
 export const runPlan = (planId) => apiPost(`/api/plans/${pathPart(planId)}/run`, {});
-export const confirmStep = (planId, stepId) => (
-  apiPost(`/api/plans/${pathPart(planId)}/steps/${pathPart(stepId)}/confirm`, {})
+export const confirmStep = (planId, stepId, snapshot) => (
+  apiPost(
+    `/api/plans/${pathPart(planId)}/steps/${pathPart(stepId)}/confirm`,
+    confirmationBody(snapshot, { requireStep: true }),
+  )
+);
+export const decideStep = (planId, stepId, decision, reason, snapshot) => (
+  apiPost(
+    `/api/plans/${pathPart(planId)}/steps/${pathPart(stepId)}/decisions`,
+    {
+      decision,
+      reason,
+      ...confirmationBody(snapshot, { requireStep: true }),
+    },
+  )
 );
 export const retryStep = (planId, stepId, inputs) => (
   apiPost(

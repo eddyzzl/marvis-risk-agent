@@ -8,7 +8,7 @@ import shutil
 import uuid
 
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import (
     TASK_TYPE_VALIDATION,
     FileArtifact,

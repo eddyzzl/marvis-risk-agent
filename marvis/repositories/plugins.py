@@ -1,12 +1,12 @@
 import json
 import sqlite3
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
 from marvis.db_schema import connect
 from marvis.plugins.errors import PluginNotFoundError
 from marvis.plugins.manifest import PluginManifest, manifest_to_dict
+from marvis.repositories.audit import _write_audit_row
 from marvis.repositories.drafts import _set_draft_status_row
 
 
@@ -273,37 +273,6 @@ def _delete_plugin_row(conn: sqlite3.Connection, name: str) -> None:
     cursor = conn.execute("DELETE FROM plugins WHERE name = ?", (name,))
     if cursor.rowcount == 0:
         raise PluginNotFoundError(name)
-
-
-def _write_audit_row(
-    conn: sqlite3.Connection,
-    *,
-    kind: str,
-    target_ref: str,
-    actor: str = "system",
-    inputs_hash: str | None = None,
-    outcome: str | None = None,
-    detail: dict | None = None,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO audit(
-            id, kind, actor, target_ref, inputs_hash, outcome,
-            detail_json, at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            uuid.uuid4().hex,
-            kind,
-            actor,
-            target_ref,
-            inputs_hash,
-            outcome,
-            json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
-            _now(),
-        ),
-    )
 
 
 def _list_audit_rows(

@@ -11,11 +11,15 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from marvis.data.backend import DataBackend
+from marvis.data.errors import DatasetContentDriftError
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, init_db
 from marvis.db_schema import connect
+from marvis.packs.data_ops.tools import tool_slice_aggregate
+from marvis.plugins.contracts import ToolContext
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -118,6 +122,57 @@ def test_slice_aggregate_hand_calculated_group_metrics(tmp_path):
     # spec_echo mirrors the口径 verbatim (all filters/months/ops echoed)
     assert result.output["spec_echo"]["months"] == ["2026-05"]
     assert result.output["columns"][0] == "channel"
+
+
+def test_slice_aggregate_rejects_dataset_owned_by_another_task(tmp_path):
+    runner, registry, _settings = _runtime(tmp_path)
+    ds = _register(registry, tmp_path, _frame())
+
+    result = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {"dataset_id": ds.id, "metrics": [{"op": "count"}]},
+        task_id="task-2",
+    )
+
+    assert result.ok is False
+    assert "task" in (result.error or "").lower()
+
+
+def test_slice_aggregate_rejects_bytes_replaced_after_binding_authentication(
+    tmp_path,
+    monkeypatch,
+):
+    _runner, registry, settings = _runtime(tmp_path)
+    ds = _register(registry, tmp_path, _frame())
+    real_authenticate = DatasetRegistry.authenticate_dataset_binding
+
+    def authenticate_then_replace(self, *args, **kwargs):
+        binding = real_authenticate(self, *args, **kwargs)
+        binding.path.chmod(0o600)
+        binding.path.write_bytes(b"post-authentication byte replacement")
+        return binding
+
+    monkeypatch.setattr(
+        DatasetRegistry,
+        "authenticate_dataset_binding",
+        authenticate_then_replace,
+    )
+    context = ToolContext(
+        task_id="task-1",
+        seed=None,
+        datasets_root=settings.datasets_dir,
+        workspace=settings.workspace,
+    )
+
+    with pytest.raises(DatasetContentDriftError):
+        tool_slice_aggregate(
+            {
+                "dataset_id": ds.id,
+                "expected_content_hash": ds.content_hash,
+                "metrics": [{"op": "count"}],
+            },
+            context,
+        )
 
 
 def test_slice_aggregate_rejects_injected_column_name(tmp_path):

@@ -1,3 +1,9 @@
+import {
+  confirmationSnapshotAttributes,
+  confirmationSnapshotFromControl,
+  refreshAfterConfirmationConflict,
+} from "./driver_gate_confirm.js";
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -45,6 +51,9 @@ export function renderSpecialValueGate(message, options = {}) {
   const disabled = interactive ? "" : " disabled";
   const planId = String(message?.metadata?.plan_id || "");
   const stepId = String(message?.metadata?.step_id || payload.step_id || "");
+  const snapshotAttrs = confirmationSnapshotAttributes(
+    message?.metadata?.confirmation_snapshot || {},
+  );
   const rows = payload.columns.map((item) => {
     const column = String(item?.column || "");
     if (!column) return "";
@@ -67,7 +76,7 @@ export function renderSpecialValueGate(message, options = {}) {
     ].join("");
   }).join("");
   return [
-    `<section class="special-value-gate" data-special-value-plan-id="${escapeHtml(planId)}" data-special-value-step-id="${escapeHtml(stepId)}">`,
+    `<section class="special-value-gate" data-special-value-plan-id="${escapeHtml(planId)}" data-special-value-step-id="${escapeHtml(stepId)}"${snapshotAttrs}>`,
     '<header class="special-value-gate-heading">',
     '<div><span class="special-value-kicker">Human in the loop</span><h4>确认特殊值治理策略</h4>',
     '<p>逐列选择处理方式。系统会使用检测结果中的完整值集合，界面不会回传或改写特殊值。</p></div>',
@@ -117,6 +126,7 @@ function contextValues(context = {}) {
     setAgentMessages: context.setAgentMessages || (() => {}),
     renderAgentConversation: context.renderAgentConversation || (() => {}),
     pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
+    refreshAgentMessages: context.refreshAgentMessages,
     resetFetchThrottle: context.resetFetchThrottle || (() => {}),
     renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
   };
@@ -144,6 +154,14 @@ export async function submitSpecialValueDecisions(button, context = {}) {
     values.setActionStatus("必须为每个特殊值特征选择治理方式。", "error");
     return;
   }
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    wrap,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
+    values.setActionStatus("计划已变化，请刷新后重新确认。", "error");
+    return;
+  }
   setControlsDisabled(wrap, true);
   values.setActionStatus("正在应用特殊值治理策略…", "busy");
   try {
@@ -154,6 +172,7 @@ export async function submitSpecialValueDecisions(button, context = {}) {
         ui_action: "confirm_gate",
         expected_plan_id: expectedPlanId,
         expected_step_id: expectedStepId,
+        ...confirmationSnapshot,
         adjust_params: { decisions },
       }),
     });
@@ -167,8 +186,15 @@ export async function submitSpecialValueDecisions(button, context = {}) {
     values.setAgentMessages(result.messages);
     values.renderAgentConversation();
   } catch (error) {
-    setControlsDisabled(wrap, false);
-    values.setActionStatus(error?.message || "提交特殊值治理策略失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId: values.taskId,
+      refreshAgentMessages: values.refreshAgentMessages,
+      setActionStatus: values.setActionStatus,
+    });
+    if (!conflictHandled) {
+      setControlsDisabled(wrap, false);
+      values.setActionStatus(error?.message || "提交特殊值治理策略失败", "error");
+    }
   } finally {
     values.resetFetchThrottle(values.taskId);
     values.renderWorkflowStepper({ force: true });

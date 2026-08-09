@@ -171,8 +171,16 @@ class FakeTaskRepository:
         except KeyError as exc:
             raise KeyError(f"Task not found: {task_id}") from exc
 
-    def list_tasks(self, *, limit: int | None = None, offset: int = 0):
+    def list_tasks(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        include_batch_children: bool = True,
+    ):
         tasks = list(self.tasks.values())
+        if not include_batch_children:
+            tasks = [task for task in tasks if not getattr(task, "parent_batch_id", None)]
         start = max(0, int(offset))
         if limit is None:
             return tasks[start:]
@@ -2501,6 +2509,43 @@ def test_stage_job_dispatches_before_and_after_hooks(tmp_path: Path, monkeypatch
     ]
 
 
+def test_stage_job_wires_hook_dispatcher_into_pipeline_memory_boundary(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from marvis.api import _run_stage_job
+    from marvis.pipeline import PipelineSettings
+
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    repo = FakeTaskRepository(tmp_path / "marvis.sqlite")
+    job_id = repo.start_job(task_id, "metrics")
+    dispatcher = FakeHookDispatcher()
+    original_settings = PipelineSettings(
+        workspace=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+        report_template_path=tmp_path / "template.docx",
+    )
+    observed = []
+
+    def stage(*, task_id: str, settings: PipelineSettings) -> None:
+        observed.append((task_id, settings.hook_dispatcher))
+
+    _run_stage_job(
+        job_id,
+        tmp_path / "marvis.sqlite",
+        stage,
+        {"task_id": task_id, "settings": original_settings},
+        hook_dispatcher=dispatcher,
+    )
+
+    assert observed == [(task_id, dispatcher)]
+    assert original_settings.hook_dispatcher is None
+
+
 def test_stage_job_does_not_execute_after_queued_job_is_cancelled(
     tmp_path: Path,
     monkeypatch,
@@ -3218,6 +3263,71 @@ def test_analysis_download_endpoint_returns_generated_excel(tmp_path: Path, monk
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert _decoded_download_filename(response) == "A卡_模型验证报告_20260521.xlsx"
+
+
+def test_validation_artifact_routes_reject_file_symlink_escape(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.SUCCEEDED}
+    )
+    output_dir = tmp_path / "tasks" / task_id / "outputs"
+    output_dir.mkdir(parents=True)
+    outside_docx = tmp_path / "outside-secret.docx"
+    outside_xlsx = tmp_path / "outside-secret.xlsx"
+    outside_docx.write_bytes(b"DOCX_SECRET")
+    outside_xlsx.write_bytes(b"XLSX_SECRET")
+    (output_dir / "validation_report.docx").symlink_to(outside_docx)
+    (output_dir / "validation.xlsx").symlink_to(outside_xlsx)
+
+    report = client.get(f"/api/tasks/{task_id}/report/download")
+    preview = client.get(f"/api/tasks/{task_id}/report/preview")
+    analysis = client.get(f"/api/tasks/{task_id}/analysis/download")
+
+    assert report.status_code == 404
+    assert preview.status_code == 404
+    assert analysis.status_code == 404
+    assert report.content != b"DOCX_SECRET"
+    assert analysis.content != b"XLSX_SECRET"
+
+
+def test_validation_artifact_routes_reject_outputs_directory_symlink(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.SUCCEEDED}
+    )
+    task_dir = tmp_path / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+    other_outputs = tmp_path / "tasks" / "other-task" / "outputs"
+    other_outputs.mkdir(parents=True)
+    (other_outputs / "validation_report.docx").write_bytes(b"OTHER_DOCX")
+    (other_outputs / "validation.xlsx").write_bytes(b"OTHER_XLSX")
+    (task_dir / "outputs").symlink_to(other_outputs, target_is_directory=True)
+
+    assert client.get(f"/api/tasks/{task_id}/report/download").status_code == 404
+    assert client.get(f"/api/tasks/{task_id}/report/preview").status_code == 404
+    assert client.get(f"/api/tasks/{task_id}/analysis/download").status_code == 404
 
 
 def test_analysis_download_allows_failed_report_stage_with_generated_excel(

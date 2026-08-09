@@ -18,16 +18,26 @@ from marvis.api_task_helpers import (
     validate_model_identifier,
 )
 from marvis.api_task_payloads import list_task_payloads, task_payload
-from marvis.db import TaskRepository
+from marvis.data.task_filesystem_gc import (
+    DATASET_IDENTITY_DIR,
+    DATASET_TASK_DIR,
+    RISK_INTAKE_DIR,
+    TASK_DIR,
+    TaskFilesystemGcTarget,
+)
 from marvis.domain import (
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VINTAGE,
+    TASK_TYPE_VALIDATION_BATCH,
     StrategyProfitInput,
     StrategyTaskInput,
     TaskCreate,
+    TaskRecord,
 )
 from marvis.model_algorithms import normalize_algorithm
 from marvis.notebooks import close_live_notebook_session
+from marvis.repositories.tasks import TaskRepository
+from marvis.safe_paths import lexical_child_path
 from marvis.state_machine import ConflictError
 
 
@@ -58,6 +68,30 @@ def _job_payload(job: dict | None) -> dict | None:
     return {key: job.get(key) for key in keys if key in job}
 
 
+def _reject_if_validation_batch_managed(
+    repo: TaskRepository,
+    task: TaskRecord,
+) -> None:
+    if task.task_type == TASK_TYPE_VALIDATION_BATCH:
+        raise conflict(
+            "批次父任务由批次生命周期统一管理，"
+            "不能通过通用任务清理接口预览或删除。"
+        )
+    transaction = getattr(repo, "transaction", None)
+    if transaction is None:
+        return
+    with transaction() as conn:
+        child = conn.execute(
+            "SELECT parent_task_id FROM validation_batch_items WHERE child_task_id = ?",
+            (task.id,),
+        ).fetchone()
+    if child is not None:
+        raise conflict(
+            "批次内模型验证子任务由批次生命周期统一管理，"
+            "不能单独预览清理或删除。"
+        )
+
+
 @router.get("/tasks")
 def list_tasks(
     request: Request,
@@ -69,7 +103,11 @@ def list_tasks(
     bounded_limit = None if limit is None else max(1, min(int(limit), 500))
     bounded_offset = max(0, int(offset))
     query_limit = bounded_limit + 1 if bounded_limit is not None else None
-    tasks = repo.list_tasks(limit=query_limit, offset=bounded_offset)
+    tasks = repo.list_tasks(
+        limit=query_limit,
+        offset=bounded_offset,
+        include_batch_children=False,
+    )
     has_more = False
     if bounded_limit is not None and len(tasks) > bounded_limit:
         has_more = True
@@ -83,6 +121,11 @@ def list_tasks(
 
 @router.post("/tasks")
 def create_task(payload: CreateTaskRequest, request: Request) -> dict:
+    if payload.task_type == TASK_TYPE_VALIDATION_BATCH:
+        raise unprocessable(
+            "validation_batch 父任务只能通过专用批次 API "
+            "POST /api/validation-batches 创建。"
+        )
     validate_model_identifier("model_name", payload.model_name)
     if payload.model_version:
         validate_model_identifier("model_version", payload.model_version)
@@ -94,46 +137,54 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         raise unprocessable("oot_ks_min 必须是 0 到 1 之间的数字。")
     if payload.strategy_input is not None and payload.task_type != TASK_TYPE_STRATEGY:
         raise unprocessable("strategy_input 只能用于 strategy 类型任务。")
-    # Risk-analysis intake is intentionally conversation-first: an Agent task
-    # may exist before the user has uploaded any data. Give that task a safe,
-    # empty workspace-owned material directory instead of letting Path("")
-    # resolve to the server cwd. Every other flow keeps the existing material
-    # requirement.
-    source_dir_path = _create_source_dir(payload, request.app.state.settings)
-    normalized_source_dir = str(source_dir_path)
-    created_intake_dir = not str(payload.source_dir or "").strip()
     repo = _repo(request)
+    source_dir_path: Path | None = None
+    created_intake_dir = not str(payload.source_dir or "").strip()
     try:
-        task = repo.create_task(
-            TaskCreate(
-                task_type=payload.task_type,
-                model_name=payload.model_name,
-                model_version=payload.model_version,
-                validator=payload.validator,
-                source_dir=normalized_source_dir,
-                algorithm=algorithm,
-                run_mode=payload.run_mode,
-                target_col=payload.target_col,
-                score_col=payload.score_col,
-                split_col=payload.split_col,
-                time_col=payload.time_col,
-                feature_columns=payload.feature_columns,
-                target_type=normalized_target_type(payload.target_type),
-                recipes=payload.recipes,
-                sample_weight_col=str(payload.sample_weight_col or "").strip(),
-                oot_ks_min=payload.oot_ks_min,
-                strategy_input=_strategy_task_input(payload),
-                metrics=payload.metrics,
-                capability_tier=normalized_capability_tier(payload.capability_tier),
-                notebook_path=payload.notebook_path,
-                sample_path=payload.sample_path,
-                pmml_path=payload.pmml_path,
-                dictionary_path=payload.dictionary_path,
-                report_values=payload.report_values,
+        transaction = getattr(repo, "transaction", None)
+        create_on_connection = getattr(repo, "create_task_on_connection", None)
+        if callable(transaction) and callable(create_on_connection):
+            with transaction() as conn:
+                # Directory creation/validation and the task insert share the
+                # same writer lock used by task filesystem GC.  The collector
+                # therefore cannot recheck, delete, and race a later insert.
+                conn.execute("BEGIN IMMEDIATE")
+                source_dir_path = _create_source_dir(
+                    payload,
+                    request.app.state.settings,
+                )
+                task = create_on_connection(
+                    conn,
+                    _task_create_contract(
+                        payload,
+                        algorithm=algorithm,
+                        source_dir=source_dir_path,
+                    ),
+                )
+                if created_intake_dir:
+                    repo.record_task_filesystem_provision_on_connection(
+                        conn,
+                        task,
+                        target_type=RISK_INTAKE_DIR,
+                        relative_path=source_dir_path.name,
+                    )
+        else:
+            # Lightweight repository doubles used by route unit tests do not
+            # own SQLite transactions. Production TaskRepository always takes
+            # the locked branch above.
+            source_dir_path = _create_source_dir(
+                payload,
+                request.app.state.settings,
             )
-        )
+            task = repo.create_task(
+                _task_create_contract(
+                    payload,
+                    algorithm=algorithm,
+                    source_dir=source_dir_path,
+                )
+            )
     except Exception:
-        if created_intake_dir:
+        if created_intake_dir and source_dir_path is not None:
             try:
                 source_dir_path.rmdir()
             except OSError as exc:
@@ -155,7 +206,10 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
 def _create_source_dir(payload: CreateTaskRequest, settings) -> Path:
     raw = str(payload.source_dir or "").strip()
     if raw:
-        return normalize_source_dir(raw, settings)
+        source_dir = normalize_source_dir(raw, settings)
+        if not source_dir.is_dir():
+            raise unprocessable("source_dir must be an existing directory")
+        return source_dir
     if payload.task_type != TASK_TYPE_VINTAGE or payload.run_mode != "agent":
         raise unprocessable("source_dir is required")
     intake_dir = (
@@ -165,6 +219,40 @@ def _create_source_dir(payload: CreateTaskRequest, settings) -> Path:
     )
     intake_dir.mkdir(parents=True, exist_ok=False)
     return normalize_source_dir(str(intake_dir), settings)
+
+
+def _task_create_contract(
+    payload: CreateTaskRequest,
+    *,
+    algorithm: str,
+    source_dir: Path,
+) -> TaskCreate:
+    return TaskCreate(
+        task_type=payload.task_type,
+        model_name=payload.model_name,
+        model_version=payload.model_version,
+        validator=payload.validator,
+        source_dir=str(source_dir),
+        algorithm=algorithm,
+        run_mode=payload.run_mode,
+        target_col=payload.target_col,
+        score_col=payload.score_col,
+        split_col=payload.split_col,
+        time_col=payload.time_col,
+        feature_columns=payload.feature_columns,
+        target_type=normalized_target_type(payload.target_type),
+        recipes=payload.recipes,
+        sample_weight_col=str(payload.sample_weight_col or "").strip(),
+        oot_ks_min=payload.oot_ks_min,
+        strategy_input=_strategy_task_input(payload),
+        metrics=payload.metrics,
+        capability_tier=normalized_capability_tier(payload.capability_tier),
+        notebook_path=payload.notebook_path,
+        sample_path=payload.sample_path,
+        pmml_path=payload.pmml_path,
+        dictionary_path=payload.dictionary_path,
+        report_values=payload.report_values,
+    )
 
 
 def _strategy_task_input(payload: CreateTaskRequest) -> StrategyTaskInput | None:
@@ -208,7 +296,8 @@ def get_latest_task_job(task_id: str, request: Request, kind: str | None = None)
 @router.get("/tasks/{task_id}/purge-preview")
 def purge_preview(task_id: str, request: Request) -> dict:
     repo = _repo(request)
-    get_task_or_404(repo, task_id)
+    task = get_task_or_404(repo, task_id)
+    _reject_if_validation_batch_managed(repo, task)
     try:
         summary = repo.purge_preview(task_id)
     except KeyError as exc:
@@ -220,26 +309,32 @@ def purge_preview(task_id: str, request: Request) -> dict:
 def delete_task(task_id: str, request: Request) -> None:
     repo = _repo(request)
     task = get_task_or_404(repo, task_id)
+    _reject_if_validation_batch_managed(repo, task)
     reject_if_task_has_active_job(repo, task_id)
 
     settings = request.app.state.settings
-    task_dir = _lexical_child_path(settings.tasks_dir, task_id)
+    task_dir = lexical_child_path(settings.tasks_dir, task_id)
     datasets_root = getattr(settings, "datasets_dir", None)
-    owned_intake_dir = _unshared_task_owned_risk_intake_dir(
-        repo,
-        task,
-        settings,
+    supports_durable_task_fs_gc = callable(
+        getattr(repo, "purge_task_on_connection", None)
+    )
+    task_fs_targets = (
+        _task_filesystem_gc_targets(task, settings)
+        if supports_durable_task_fs_gc
+        else ()
     )
 
     def validate_dataset_source_path(relative_path: str) -> None:
         if datasets_root is not None:
-            _lexical_child_path(datasets_root, relative_path)
+            lexical_child_path(datasets_root, relative_path)
 
     try:
-        summary = repo.purge_task(
-            task_id,
-            validate_dataset_source_path=validate_dataset_source_path,
-        )
+        purge_kwargs = {
+            "validate_dataset_source_path": validate_dataset_source_path,
+        }
+        if supports_durable_task_fs_gc:
+            purge_kwargs["task_fs_targets"] = task_fs_targets
+        summary = repo.purge_task(task_id, **purge_kwargs)
     except KeyError as exc:
         raise not_found(f"Task not found: {task_id}") from exc
     except PermissionError as exc:
@@ -247,69 +342,105 @@ def delete_task(task_id: str, request: Request) -> None:
     except ConflictError as exc:
         raise conflict(str(exc)) from exc
     close_live_notebook_session(task_id)
-    try:
-        if task_dir.is_symlink():
-            task_dir.unlink()
-        elif task_dir.exists():
-            shutil.rmtree(task_dir)
-    except OSError as exc:
-        logger.warning("task dir cleanup failed for %s: %s", task_id, exc)
+    if not supports_durable_task_fs_gc:
+        # Compatibility for lightweight route test doubles. Production
+        # TaskRepository always persists typed cleanup candidates above.
+        try:
+            if task_dir.is_symlink():
+                task_dir.unlink()
+            elif task_dir.exists():
+                shutil.rmtree(task_dir)
+        except OSError as exc:
+            logger.warning("task dir cleanup failed for %s: %s", task_id, exc)
     if datasets_root is not None:
-        # Only the dataset files this task exclusively owned are safe to remove --
-        # purge_task already excluded source_paths still referenced by another
-        # task's dataset row (GAP-7 content-fingerprint reuse shares parquet files
-        # across tasks). Remove files individually rather than rmtree'ing the whole
-        # datasets/<task_id>/ subtree, since a dataset row reused by this task may
-        # point at a file physically stored under a *different* task's directory.
-        for relative_path in summary.get("dataset_source_paths", []):
+        source_paths = tuple(summary.get("dataset_source_paths", ()))
+        collector = getattr(request.app.state, "dataset_source_gc", None)
+        if collector is None:
+            logger.warning(
+                "dataset source GC is unavailable after task purge for %s; "
+                "durable candidates remain queued",
+                task_id,
+            )
+        elif source_paths:
             try:
-                dataset_path = _lexical_child_path(datasets_root, relative_path)
-            except PermissionError:
-                continue
-            try:
-                if dataset_path.is_symlink() or dataset_path.is_file():
-                    dataset_path.unlink()
-            except OSError as exc:
+                gc_report = collector.sweep(
+                    source_paths=source_paths,
+                    limit=min(len(source_paths), 500),
+                    force=True,
+                )
+            except Exception as exc:
                 logger.warning(
-                    "dataset file cleanup failed for %s (%s): %s",
+                    "dataset source GC failed after task purge for %s; "
+                    "durable candidates remain queued: %s",
                     task_id,
-                    relative_path,
                     exc,
                 )
-        task_datasets_dir = datasets_root / task_id
-        # Original-upload identity sidecars are task-local metadata used to
-        # reconcile retries exactly. They are never shared through parquet
-        # content-hash deduplication, so removing only this controlled child is
-        # safe after the task's dataset rows have been purged.
-        try:
-            source_identity_dir = _lexical_child_path(
-                datasets_root,
-                f"{task_id}/.source-identities",
+            else:
+                if gc_report.deferred or gc_report.quarantined:
+                    logger.warning(
+                        "dataset source GC deferred after task purge for %s: "
+                        "deferred=%d quarantined=%d",
+                        task_id,
+                        gc_report.deferred,
+                        gc_report.quarantined,
+                    )
+    if supports_durable_task_fs_gc:
+        collector = getattr(request.app.state, "task_filesystem_gc", None)
+        candidate_count = int(summary.get("task_fs_gc_candidates", 0))
+        if collector is None:
+            logger.warning(
+                "task filesystem GC is unavailable after task purge for %s; "
+                "durable candidates remain queued",
+                task_id,
             )
-            if source_identity_dir.is_symlink():
-                source_identity_dir.unlink()
-            elif source_identity_dir.is_dir():
-                shutil.rmtree(source_identity_dir)
-        except (OSError, PermissionError) as exc:
-            logger.warning("source identity cleanup failed for %s: %s", task_id, exc)
-        try:
-            if task_datasets_dir.is_symlink():
-                task_datasets_dir.unlink()
-            elif task_datasets_dir.exists() and not any(task_datasets_dir.rglob("*")):
-                shutil.rmtree(task_datasets_dir)
-        except OSError as exc:
-            logger.warning("datasets dir cleanup failed for %s: %s", task_id, exc)
-    if owned_intake_dir is not None:
-        try:
-            if owned_intake_dir.is_symlink():
-                owned_intake_dir.unlink()
-            elif owned_intake_dir.exists():
-                shutil.rmtree(owned_intake_dir)
-        except OSError as exc:
-            logger.warning("risk intake dir cleanup failed for %s: %s", task_id, exc)
+        elif candidate_count:
+            try:
+                gc_report = collector.sweep(
+                    origin_task_id=task_id,
+                    limit=min(candidate_count, 500),
+                    force=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "task filesystem GC failed after task purge for %s; "
+                    "durable candidates remain queued: %s",
+                    task_id,
+                    exc,
+                )
+            else:
+                if gc_report.deferred or gc_report.quarantined:
+                    logger.warning(
+                        "task filesystem GC deferred after task purge for %s: "
+                        "deferred=%d quarantined=%d",
+                        task_id,
+                        gc_report.deferred,
+                        gc_report.quarantined,
+                    )
 
 
-def _unshared_task_owned_risk_intake_dir(repo, task, settings) -> Path | None:
+def _task_filesystem_gc_targets(task: TaskRecord, settings) -> tuple:
+    task_id = str(task.id)
+    lexical_child_path(settings.tasks_dir, task_id)
+    lexical_child_path(settings.datasets_dir, task_id)
+    lexical_child_path(settings.datasets_dir, f"{task_id}/.source-identities")
+    targets = [
+        TaskFilesystemGcTarget(TASK_DIR, task_id),
+        TaskFilesystemGcTarget(
+            DATASET_IDENTITY_DIR,
+            f"{task_id}/.source-identities",
+        ),
+        TaskFilesystemGcTarget(DATASET_TASK_DIR, task_id),
+    ]
+    risk_intake = _task_owned_risk_intake_relative_path(task, settings)
+    if risk_intake is not None:
+        targets.append(TaskFilesystemGcTarget(RISK_INTAKE_DIR, risk_intake))
+    return tuple(targets)
+
+
+def _task_owned_risk_intake_relative_path(
+    task: TaskRecord,
+    settings,
+) -> str | None:
     if task.task_type != TASK_TYPE_VINTAGE:
         return None
     uploads_root = (Path(settings.workspace).resolve() / "material_uploads").resolve()
@@ -318,44 +449,10 @@ def _unshared_task_owned_risk_intake_dir(repo, task, settings) -> Path | None:
         source_parent = source.parent.resolve()
     except OSError:
         return None
-    if (
-        source_parent != uploads_root
-        or not source.name.startswith("risk-intake-")
-    ):
+    if source_parent != uploads_root or not source.name.startswith("risk-intake-"):
         return None
-    resolved = None if source.is_symlink() else source.resolve()
-    if resolved is not None and resolved.parent != uploads_root:
+    try:
+        lexical_child_path(uploads_root, source.name)
+    except PermissionError:
         return None
-    for other in repo.list_tasks():
-        if other.id == task.id:
-            continue
-        other_source = Path(str(other.source_dir or "")).absolute()
-        if other_source == source:
-            return None
-        try:
-            if resolved is not None and other_source.resolve() == resolved:
-                return None
-        except OSError:
-            continue
-    return source
-
-
-def _lexical_child_path(root: Path, relative_path: str) -> Path:
-    """Return a child path without resolving its final symlink.
-
-    Resolving the final component before deletion turns a symlink into its
-    target and can delete another task's data. Intermediate symlinks are
-    rejected because unlinking a descendant would still follow them.
-    """
-    root_path = Path(root).resolve()
-    relative = Path(relative_path)
-    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-        raise PermissionError(f"path escapes root: {relative_path}")
-    current = root_path
-    for part in relative.parts[:-1]:
-        if part in {"", "."}:
-            continue
-        current = current / part
-        if current.is_symlink():
-            raise PermissionError(f"path traverses symlink: {relative_path}")
-    return root_path.joinpath(*relative.parts)
+    return source.name

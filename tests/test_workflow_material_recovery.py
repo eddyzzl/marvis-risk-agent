@@ -337,6 +337,27 @@ class _GateLLM:
 
     def complete(self, **kwargs) -> str:
         self.calls.append(kwargs)
+        if str(kwargs.get("caller") or "").startswith("semantic_intent_"):
+            request = json.loads(kwargs["user_prompt"])
+            instruction = str(request["instruction"])
+            intent = (
+                "risk_standard_vintage"
+                if instruction == "标准 Vintage"
+                else "current_workflow"
+            )
+            return json.dumps(
+                {
+                    "intent": intent,
+                    "evidence_quote": instruction,
+                    "reason": "用户明确选择当前工作流并要求继续。",
+                    "confidence": "high",
+                    "is_question": False,
+                    "is_conditional": False,
+                    "requests_change": False,
+                    "withholds_action": False,
+                },
+                ensure_ascii=False,
+            )
         return json.dumps({"action": "confirm", "reason": "继续"})
 
 
@@ -432,11 +453,10 @@ def test_agent_can_chat_after_material_failure_and_only_explicit_retry_reruns(
         "marvis.routers.validation_agent.resolve_driver_agent_client",
         lambda request, task, payload: gate_llm,
     )
-    if task_type == "strategy":
-        monkeypatch.setattr(
-            "marvis.agent.validation_app_service.driver_llm_client",
-            lambda request, task: router_llm,
-        )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: router_llm,
+    )
     created = client.post(
         "/api/tasks",
         json=_task_payload(source=source, task_type=task_type, run_mode="agent"),

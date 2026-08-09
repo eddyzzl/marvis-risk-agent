@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
@@ -127,7 +129,8 @@ def test_unselected_workspace_shows_centered_welcome_only():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     workspace_view_js = _read_static("js/task-workspace-view.js")
-    styles_css = _read_static("styles.css")
+    styles_css = read_browser_stylesheets(STATIC_DIR)
+    core_css = _read_static("styles.css")
     welcome_css = _read_static("css/welcome.css")
 
     assert 'id="workspaceWelcome"' in index_html
@@ -155,6 +158,7 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert 'id="welcomeVintageAnalysisCard"' in welcome_markup
     assert 'id="welcomeModelDevelopmentCard"' in welcome_markup
     assert 'id="welcomeModelValidationCard"' in welcome_markup
+    assert 'id="welcomeValidationBatchCard"' in welcome_markup
     assert 'id="welcomeStrategyDevelopmentCard"' in welcome_markup
     assert "自动识别主键，关联各种XY数据，诊断数据情况" in welcome_markup
     assert "上传多表、识别主键、诊断膨胀和确认 join" not in welcome_markup
@@ -200,7 +204,7 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "Vintage、FPD、营利性测算" not in welcome_markup
     assert "Vintage分析" not in welcome_markup
     assert "Vintage 分析" not in welcome_markup
-    expected_card_titles = ["数据处理", "特征分析", "风险分析", "模型开发", "模型验证", "策略开发"]
+    expected_card_titles = ["数据处理", "特征分析", "风险分析", "模型开发", "模型验证", "批量模型验证", "策略开发"]
     title_offsets = [welcome_markup.index(f"<strong>{title}</strong>") for title in expected_card_titles]
     assert title_offsets == sorted(title_offsets)
     assert 'data-task-kind="validation"' in welcome_markup
@@ -231,14 +235,14 @@ def test_unselected_workspace_shows_centered_welcome_only():
 
     assert 'href="static/styles.css?v=__MARVIS_STATIC_VERSION__"' in index_html
     assert 'href="static/css/welcome.css?v=__MARVIS_STATIC_VERSION__"' in index_html
-    assert ".workspace-welcome" not in styles_css
+    assert ".workspace-welcome" not in core_css
     assert ".workspace-welcome" in welcome_css
     assert ".workspace-brand-logo" in welcome_css
     assert ".welcome-task-cards" in welcome_css
     assert ".welcome-task-card" in welcome_css
     assert ".workspace-greeting-nowrap" in welcome_css
     assert "white-space: nowrap" in welcome_css
-    assert ".workspace-greeting-cursor" not in styles_css
+    assert ".workspace-greeting-cursor" not in core_css
     assert "workspace-greeting-cursor-blink" not in welcome_css
     title_start = welcome_css.index(".workspace-welcome h2 {")
     title_end = welcome_css.index("}", title_start)

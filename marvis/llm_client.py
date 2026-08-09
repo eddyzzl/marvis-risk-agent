@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from http.client import HTTPException
 import json
 import logging
@@ -14,8 +15,67 @@ from marvis.agent.json_reply import strip_thinking
 logger = logging.getLogger(__name__)
 
 
+class LLMClientErrorKind(StrEnum):
+    INCOMPLETE_PROFILE = "incomplete_profile"
+    INVALID_URL = "invalid_url"
+    CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
+    HTTP_4XX = "http_4xx"
+    HTTP_5XX = "http_5xx"
+    HTTP_ERROR = "http_error"
+    CONNECTION = "connection"
+    TIMEOUT = "timeout"
+    STREAM_INTERRUPTED = "stream_interrupted"
+    INVALID_RESPONSE = "invalid_response"
+    EMPTY_RESPONSE = "empty_response"
+    REASONING_BUDGET_EXHAUSTED = "reasoning_budget_exhausted"
+
+
+_SAFE_FINISH_REASONS = frozenset(
+    {
+        "stop",
+        "length",
+        "content_filter",
+        "tool_calls",
+        "function_call",
+        "insufficient_system_resource",
+    }
+)
+
+
+def _safe_nonnegative_int(value, *, default: int | None) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _safe_finish_reason(value) -> str | None:
+    if value is None:
+        return None
+    token = str(value).strip().lower()
+    if not token:
+        return None
+    return token if token in _SAFE_FINISH_REASONS else "other"
+
+
 class LLMClientError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_kind: LLMClientErrorKind | None = None,
+        retry_count: int = 0,
+        finish_reason: str | None = None,
+        reasoning_tokens: int | None = None,
+    ) -> None:
+        if error_kind is not None and not isinstance(error_kind, LLMClientErrorKind):
+            raise TypeError("error_kind must be an LLMClientErrorKind or None")
+        super().__init__(message)
+        self.error_kind = error_kind
+        self.retry_count = _safe_nonnegative_int(retry_count, default=0)
+        self.finish_reason = _safe_finish_reason(finish_reason)
+        self.reasoning_tokens = _safe_nonnegative_int(reasoning_tokens, default=None)
 
 
 @dataclass(frozen=True)
@@ -171,9 +231,15 @@ class OpenAICompatibleLLMClient:
         model_name = str(self.profile.get("model_name") or "")
         api_key = str(self.profile.get("api_key") or "")
         if not api_base_url or not model_name or not api_key:
-            raise LLMClientError("LLM profile is incomplete")
+            raise LLMClientError(
+                "LLM profile is incomplete",
+                error_kind=LLMClientErrorKind.INCOMPLETE_PROFILE,
+            )
         if not api_base_url.startswith(("http://", "https://")):
-            raise LLMClientError("api_base_url must start with http:// or https://")
+            raise LLMClientError(
+                "api_base_url must start with http:// or https://",
+                error_kind=LLMClientErrorKind.INVALID_URL,
+            )
         # LLM-5: client-side context-window budget check before any request is sent.
         # A weak local model's window (default 32768) is easy to punch through as
         # planner catalogs/gate metadata grow; the previous failure mode was an
@@ -190,7 +256,8 @@ class OpenAICompatibleLLMClient:
             raise LLMClientError(
                 "上下文过长：prompt 约 "
                 f"{estimated_prompt_tokens} tokens + max_tokens {effective_max_tokens} "
-                f"超过模型窗口 {context_window} tokens，请缩短输入或换用更大窗口的模型。"
+                f"超过模型窗口 {context_window} tokens，请缩短输入或换用更大窗口的模型。",
+                error_kind=LLMClientErrorKind.CONTEXT_LENGTH_EXCEEDED,
             )
         payload = {
             "model": model_name,
@@ -253,78 +320,13 @@ class OpenAICompatibleLLMClient:
                     content = _read_completion_content(
                         response, on_delta=wrapped_on_delta, usage_out=usage
                     )
-            except HTTPError as exc:
-                # Drain the body to extract a whitelisted error.code/error.type enum
-                # only (never the message — a rejected-prompt body must never be
-                # persisted into agent_messages.metadata), then discard the rest.
-                body_error_kind = None
-                try:
-                    body_error_kind = _classify_http_error_body(exc.read())
-                except Exception:
-                    pass
-                error_kind = body_error_kind or _http_error_kind(exc.code)
-                if error_kind == "http_5xx" and retry_count < max_retries:
-                    retry_count += 1
-                    time.sleep(_RETRY_BACKOFF_SECONDS)
-                    continue
-                self._record_call(
-                    recorder, caller=caller, model_name=model_name,
-                    prompt_chars=prompt_chars, usage={}, started=started,
-                    streamed=bool(stream), ok=False, error_kind=error_kind,
-                    retry_count=retry_count, prompt_name=prompt_name,
-                    prompt_version=prompt_version, truncated=truncated,
-                )
-                if error_kind == "context_length_exceeded":
-                    raise LLMClientError(
-                        "上下文过长：模型拒绝了该请求(context_length_exceeded)，"
-                        "请缩短输入或换用更大窗口的模型。"
-                    ) from exc
-                raise LLMClientError(f"LLM HTTP {exc.code} {exc.reason}") from exc
-            except URLError as exc:
-                if retry_count < max_retries:
-                    retry_count += 1
-                    time.sleep(_RETRY_BACKOFF_SECONDS)
-                    continue
-                self._record_call(
-                    recorder, caller=caller, model_name=model_name,
-                    prompt_chars=prompt_chars, usage={}, started=started,
-                    streamed=bool(stream), ok=False, error_kind="connection",
-                    retry_count=retry_count, prompt_name=prompt_name,
-                    prompt_version=prompt_version, truncated=truncated,
-                )
-                raise LLMClientError(f"LLM request failed: {exc.reason}") from exc
-            except TimeoutError as exc:
-                if retry_count < max_retries:
-                    retry_count += 1
-                    time.sleep(_RETRY_BACKOFF_SECONDS)
-                    continue
-                self._record_call(
-                    recorder, caller=caller, model_name=model_name,
-                    prompt_chars=prompt_chars, usage={}, started=started,
-                    streamed=bool(stream), ok=False, error_kind="timeout",
-                    retry_count=retry_count, prompt_name=prompt_name,
-                    prompt_version=prompt_version, truncated=truncated,
-                )
-                raise LLMClientError("LLM request timed out") from exc
-            except (OSError, HTTPException) as exc:
-                # A mid-stream interruption is only retryable if nothing has been
-                # forwarded to the caller yet; retrying after on_delta emitted
-                # content would make the UI roll back partial output.
-                if not delta_fired["value"] and retry_count < max_retries:
-                    retry_count += 1
-                    time.sleep(_RETRY_BACKOFF_SECONDS)
-                    continue
-                self._record_call(
-                    recorder, caller=caller, model_name=model_name,
-                    prompt_chars=prompt_chars, usage={}, started=started,
-                    streamed=bool(stream), ok=False,
-                    error_kind="stream_interrupted", retry_count=retry_count,
-                    prompt_name=prompt_name, prompt_version=prompt_version,
-                    truncated=truncated,
-                )
-                raise LLMClientError(f"LLM stream interrupted: {exc}") from exc
-            content = strip_thinking(content).strip()
-            if not content:
+            except LLMClientError as exc:
+                if exc.error_kind is not LLMClientErrorKind.INVALID_RESPONSE:
+                    raise
+                # A malformed/non-conforming provider envelope is transiently
+                # retryable while no streamed content has escaped to the caller.
+                # Once a delta has been emitted, retrying would duplicate visible
+                # output and must remain fail-closed.
                 if not delta_fired["value"] and retry_count < max_retries:
                     retry_count += 1
                     time.sleep(_RETRY_BACKOFF_SECONDS)
@@ -338,13 +340,145 @@ class OpenAICompatibleLLMClient:
                     started=started,
                     streamed=bool(stream),
                     ok=False,
-                    error_kind="empty_response",
+                    error_kind=LLMClientErrorKind.INVALID_RESPONSE,
                     retry_count=retry_count,
                     prompt_name=prompt_name,
                     prompt_version=prompt_version,
                     truncated=truncated,
                 )
-                raise LLMClientError("LLM returned an empty response")
+                raise LLMClientError(
+                    str(exc),
+                    error_kind=LLMClientErrorKind.INVALID_RESPONSE,
+                    retry_count=retry_count,
+                    finish_reason=usage.get("finish_reason"),
+                    reasoning_tokens=_usage_int(usage, "reasoning_tokens"),
+                ) from None
+            except HTTPError as exc:
+                # Drain the body to extract a whitelisted error.code/error.type enum
+                # only (never the message — a rejected-prompt body must never be
+                # persisted into agent_messages.metadata), then discard the rest.
+                body_error_kind = None
+                try:
+                    body_error_kind = _classify_http_error_body(exc.read())
+                except Exception:
+                    pass
+                error_kind = body_error_kind or _http_error_kind(exc.code)
+                if (
+                    error_kind is LLMClientErrorKind.HTTP_5XX
+                    and retry_count < max_retries
+                ):
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder, caller=caller, model_name=model_name,
+                    prompt_chars=prompt_chars, usage={}, started=started,
+                    streamed=bool(stream), ok=False, error_kind=error_kind,
+                    retry_count=retry_count, prompt_name=prompt_name,
+                    prompt_version=prompt_version, truncated=truncated,
+                )
+                if error_kind is LLMClientErrorKind.CONTEXT_LENGTH_EXCEEDED:
+                    raise LLMClientError(
+                        "上下文过长：模型拒绝了该请求(context_length_exceeded)，"
+                        "请缩短输入或换用更大窗口的模型。",
+                        error_kind=error_kind,
+                        retry_count=retry_count,
+                    ) from None
+                raise LLMClientError(
+                    f"LLM HTTP {exc.code}",
+                    error_kind=error_kind,
+                    retry_count=retry_count,
+                ) from None
+            except URLError:
+                if retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder, caller=caller, model_name=model_name,
+                    prompt_chars=prompt_chars, usage={}, started=started,
+                    streamed=bool(stream), ok=False,
+                    error_kind=LLMClientErrorKind.CONNECTION,
+                    retry_count=retry_count, prompt_name=prompt_name,
+                    prompt_version=prompt_version, truncated=truncated,
+                )
+                raise LLMClientError(
+                    "LLM request failed",
+                    error_kind=LLMClientErrorKind.CONNECTION,
+                    retry_count=retry_count,
+                ) from None
+            except TimeoutError:
+                if retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder, caller=caller, model_name=model_name,
+                    prompt_chars=prompt_chars, usage={}, started=started,
+                    streamed=bool(stream), ok=False,
+                    error_kind=LLMClientErrorKind.TIMEOUT,
+                    retry_count=retry_count, prompt_name=prompt_name,
+                    prompt_version=prompt_version, truncated=truncated,
+                )
+                raise LLMClientError(
+                    "LLM request timed out",
+                    error_kind=LLMClientErrorKind.TIMEOUT,
+                    retry_count=retry_count,
+                ) from None
+            except (OSError, HTTPException):
+                # A mid-stream interruption is only retryable if nothing has been
+                # forwarded to the caller yet; retrying after on_delta emitted
+                # content would make the UI roll back partial output.
+                if not delta_fired["value"] and retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder, caller=caller, model_name=model_name,
+                    prompt_chars=prompt_chars, usage={}, started=started,
+                    streamed=bool(stream), ok=False,
+                    error_kind=LLMClientErrorKind.STREAM_INTERRUPTED,
+                    retry_count=retry_count,
+                    prompt_name=prompt_name, prompt_version=prompt_version,
+                    truncated=truncated,
+                )
+                raise LLMClientError(
+                    "LLM stream interrupted",
+                    error_kind=LLMClientErrorKind.STREAM_INTERRUPTED,
+                    retry_count=retry_count,
+                ) from None
+            content = strip_thinking(content).strip()
+            if not content:
+                if not delta_fired["value"] and retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                error_kind = _empty_response_error_kind(
+                    usage,
+                    effective_max_tokens=effective_max_tokens,
+                )
+                self._record_call(
+                    recorder,
+                    caller=caller,
+                    model_name=model_name,
+                    prompt_chars=prompt_chars,
+                    usage=usage,
+                    started=started,
+                    streamed=bool(stream),
+                    ok=False,
+                    error_kind=error_kind,
+                    retry_count=retry_count,
+                    prompt_name=prompt_name,
+                    prompt_version=prompt_version,
+                    truncated=truncated,
+                )
+                raise LLMClientError(
+                    "LLM returned an empty response",
+                    error_kind=error_kind,
+                    retry_count=retry_count,
+                    finish_reason=usage.get("finish_reason"),
+                    reasoning_tokens=_usage_int(usage, "reasoning_tokens"),
+                )
             self._record_call(
                 recorder, caller=caller, model_name=model_name,
                 prompt_chars=prompt_chars, usage=usage, started=started,
@@ -365,13 +499,18 @@ class OpenAICompatibleLLMClient:
         started: float,
         streamed: bool,
         ok: bool,
-        error_kind: str | None,
+        error_kind: LLMClientErrorKind | str | None,
         retry_count: int = 0,
         prompt_name: str | None = None,
         prompt_version: int | None = None,
         truncated: bool = False,
     ) -> None:
         latency_ms = int((time.monotonic() - started) * 1000)
+        error_kind_value = (
+            error_kind.value
+            if isinstance(error_kind, LLMClientErrorKind)
+            else error_kind
+        )
         # Single choke point every call path (success, retry-exhausted, and
         # every typed failure kind) funnels through -- independent of whether
         # an on_call_recorded callback happens to be wired for this caller.
@@ -393,7 +532,7 @@ class OpenAICompatibleLLMClient:
                 "finish_reason=%s reasoning_tokens=%s reasoning_chars=%s",
                 caller,
                 model_name,
-                error_kind,
+                error_kind_value,
                 retry_count,
                 usage.get("finish_reason"),
                 _usage_int(usage, "reasoning_tokens"),
@@ -413,7 +552,7 @@ class OpenAICompatibleLLMClient:
             "reasoning_chars": _usage_int(usage, "reasoning_chars"),
             "latency_ms": latency_ms,
             "ok": ok,
-            "error_kind": error_kind,
+            "error_kind": error_kind_value,
             "streamed": streamed,
             "retry_count": retry_count,
             "prompt_name": prompt_name,
@@ -491,7 +630,7 @@ _CONTEXT_LENGTH_ERROR_TOKENS = frozenset({
 })
 
 
-def _classify_http_error_body(raw: bytes | None) -> str | None:
+def _classify_http_error_body(raw: bytes | None) -> LLMClientErrorKind | None:
     """Best-effort whitelist parse of an OpenAI-compatible error body.
 
     Only returns a fixed, non-message enum (`"context_length_exceeded"`) or
@@ -511,7 +650,7 @@ def _classify_http_error_body(raw: bytes | None) -> str | None:
     for key in ("code", "type"):
         token = str(error.get(key) or "").strip().lower()
         if token in _CONTEXT_LENGTH_ERROR_TOKENS:
-            return "context_length_exceeded"
+            return LLMClientErrorKind.CONTEXT_LENGTH_EXCEEDED
     return None
 
 
@@ -525,16 +664,16 @@ def _transport_max_retries(profile: dict) -> int:
         return 1
 
 
-def _http_error_kind(code) -> str:
+def _http_error_kind(code) -> LLMClientErrorKind:
     try:
         status = int(code)
     except (TypeError, ValueError):
-        return "http_error"
+        return LLMClientErrorKind.HTTP_ERROR
     if 400 <= status < 500:
-        return "http_4xx"
+        return LLMClientErrorKind.HTTP_4XX
     if 500 <= status < 600:
-        return "http_5xx"
-    return "http_error"
+        return LLMClientErrorKind.HTTP_5XX
+    return LLMClientErrorKind.HTTP_ERROR
 
 
 def _usage_int(usage: dict, key: str) -> int | None:
@@ -543,6 +682,23 @@ def _usage_int(usage: dict, key: str) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _empty_response_error_kind(
+    usage: dict,
+    *,
+    effective_max_tokens: int,
+) -> LLMClientErrorKind:
+    finish_reason = usage.get("finish_reason") if isinstance(usage, dict) else None
+    reasoning_tokens = _usage_int(usage, "reasoning_tokens")
+    reasoning_near_budget = (
+        reasoning_tokens is not None
+        and effective_max_tokens > 0
+        and reasoning_tokens * 10 >= effective_max_tokens * 9
+    )
+    if finish_reason == "length" and reasoning_near_budget:
+        return LLMClientErrorKind.REASONING_BUDGET_EXHAUSTED
+    return LLMClientErrorKind.EMPTY_RESPONSE
 
 
 def _read_completion_content(
@@ -599,8 +755,11 @@ def _content_from_stream_event(event_data: str, *, usage_out: dict | None = None
         message_content = message.get("content")
         if message_content is not None:
             return str(message_content)
-    except (AttributeError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise LLMClientError("LLM stream event did not contain valid JSON") from exc
+    except (AttributeError, IndexError, TypeError, json.JSONDecodeError):
+        raise LLMClientError(
+            "LLM stream event did not contain valid JSON",
+            error_kind=LLMClientErrorKind.INVALID_RESPONSE,
+        ) from None
     return ""
 
 
@@ -608,8 +767,11 @@ def _content_from_json_response(raw: str, *, usage_out: dict | None = None) -> s
     try:
         data = json.loads(raw)
         content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise LLMClientError("LLM response did not contain message content") from exc
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        raise LLMClientError(
+            "LLM response did not contain message content",
+            error_kind=LLMClientErrorKind.INVALID_RESPONSE,
+        ) from None
     if usage_out is not None:
         _merge_response_telemetry(usage_out, data)
     return str(content or "")
@@ -625,18 +787,6 @@ def _merge_usage(usage_out: dict, usage) -> None:
             reasoning_tokens = completion_details.get("reasoning_tokens")
             if reasoning_tokens is not None:
                 usage_out["reasoning_tokens"] = reasoning_tokens
-
-
-_SAFE_FINISH_REASONS = frozenset(
-    {
-        "stop",
-        "length",
-        "content_filter",
-        "tool_calls",
-        "function_call",
-        "insufficient_system_resource",
-    }
-)
 
 
 def _merge_response_telemetry(usage_out: dict, data) -> None:

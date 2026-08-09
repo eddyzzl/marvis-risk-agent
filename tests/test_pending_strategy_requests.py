@@ -14,6 +14,7 @@ from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestNotFoundError,
     PendingStrategyRequestRepository,
 )
+from tests.schema_fixture_support import install_v1_plan_step_runs_predecessor
 
 
 def _task(db_path, tmp_path, name: str):
@@ -61,6 +62,7 @@ def _identity() -> dict:
 def test_migration_007_adds_task_scoped_pending_strategy_requests(tmp_path):
     db_path = tmp_path / "schema-v6.sqlite"
     with sqlite3.connect(db_path) as conn:
+        install_v1_plan_step_runs_predecessor(conn)
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
         conn.execute("PRAGMA user_version = 6")
 

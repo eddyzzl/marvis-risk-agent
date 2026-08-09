@@ -34,7 +34,7 @@ from marvis.agent_memory.extractors import (
     extract_strategy_experience,
 )
 from marvis.agent_memory.distillation import render_structured_distillation_summary
-from marvis.agent_memory.api_support import dispatch_memory_after_save
+from marvis.agent_memory.capture import save_memory_candidate
 from marvis.agent_memory.retrieval import MemoryQuery, compare_model_experience, retrieve_with_distillations
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.domain import (
@@ -101,41 +101,52 @@ def capture_agent_memory_for_driver_done(
     """
     if not load_memory_policy(settings.workspace).auto_distill:
         return []
-    entries = []
+    candidate = None
     try:
         if task.task_type == TASK_TYPE_MODELING:
-            entries.append(_capture_model_experience(settings, task, done_message_metadata))
+            candidate = _model_experience_candidate(task, done_message_metadata)
         elif task.task_type == TASK_TYPE_DATA_JOIN:
-            entries.append(_capture_join_experience(settings, task, done_message_content, done_message_metadata))
+            candidate = _join_experience_candidate(
+                task,
+                done_message_content,
+                done_message_metadata,
+            )
         elif task.task_type == TASK_TYPE_FEATURE_ANALYSIS:
-            entries.append(_capture_feature_experience(settings, task, done_message_metadata))
+            candidate = _feature_experience_candidate(task, done_message_metadata)
         elif task.task_type == TASK_TYPE_STRATEGY:
-            entries.append(_capture_strategy_experience(settings, task))
+            candidate = _strategy_experience_candidate(settings, task)
         elif task.task_type == TASK_TYPE_VINTAGE:
-            entries.append(_capture_risk_analysis_experience(settings, task, done_message_metadata))
+            candidate = _risk_analysis_experience_candidate(
+                task,
+                done_message_metadata,
+            )
     except Exception:
         # Memory capture is best-effort; never fail the user-facing turn over it.
         return []
-    receipts = []
-    for entry in entries:
-        if entry is None or entry.status != "active":
-            continue
-        dispatch_memory_after_save(
-            hook_dispatcher,
+    if candidate is None:
+        return []
+    try:
+        entry = save_memory_candidate(
+            AgentMemoryStore(settings.db_path),
+            candidate,
             task_id=task.id,
-            memory_type=entry.memory_type,
+            hook_dispatcher=hook_dispatcher,
         )
-        receipts.append({
-            "id": entry.id,
-            "memory_type": entry.memory_type,
-            "summary": entry.summary,
-            "status": entry.status,
-        })
-    return receipts
+    except Exception:
+        return []
+    if entry.status != "active":
+        return []
+    return [{
+        "id": entry.id,
+        "memory_type": entry.memory_type,
+        "summary": entry.summary,
+        "status": entry.status,
+    }]
 
 
-def _capture_model_experience(
-    settings, task: TaskRecord, metadata: dict[str, Any] | None
+def _model_experience_candidate(
+    task: TaskRecord,
+    metadata: dict[str, Any] | None,
 ) -> Any | None:
     delivery = (metadata or {}).get("model_delivery")
     if not isinstance(delivery, dict) or not delivery:
@@ -163,12 +174,13 @@ def _capture_model_experience(
     candidate = extract_model_experience(result)
     if candidate is None:
         return None
-    store = AgentMemoryStore(settings.db_path)
-    return store.create(candidate, task_id=task.id)
+    return candidate
 
 
-def _capture_join_experience(
-    settings, task: TaskRecord, content: str, metadata: dict[str, Any] | None
+def _join_experience_candidate(
+    task: TaskRecord,
+    content: str,
+    metadata: dict[str, Any] | None,
 ) -> Any | None:
     per_table = _join_per_table_from_tables(metadata)
     if not per_table:
@@ -195,12 +207,12 @@ def _capture_join_experience(
     candidate = extract_join_experience(result)
     if candidate is None:
         return None
-    store = AgentMemoryStore(settings.db_path)
-    return store.create(candidate, task_id=task.id)
+    return candidate
 
 
-def _capture_feature_experience(
-    settings, task: TaskRecord, metadata: dict[str, Any] | None
+def _feature_experience_candidate(
+    task: TaskRecord,
+    metadata: dict[str, Any] | None,
 ) -> Any | None:
     tables = (metadata or {}).get("tables") if isinstance(metadata, dict) else []
     advice = next(
@@ -301,10 +313,10 @@ def _capture_feature_experience(
     candidate = extract_feature_experience(result)
     if candidate is None:
         return None
-    return AgentMemoryStore(settings.db_path).create(candidate, task_id=task.id)
+    return candidate
 
 
-def _capture_strategy_experience(settings, task: TaskRecord) -> Any | None:
+def _strategy_experience_candidate(settings, task: TaskRecord) -> Any | None:
     """S2: strategy_experience capture, sourced straight from persisted results
     (INV-1: no recompute) rather than parsed from the terminal message -- the
     STRATEGY_DEVELOPMENT template's terminal step is render_strategy_doc, not
@@ -349,12 +361,10 @@ def _capture_strategy_experience(settings, task: TaskRecord) -> Any | None:
     candidate = extract_strategy_experience(result)
     if candidate is None:
         return None
-    store = AgentMemoryStore(settings.db_path)
-    return store.create(candidate, task_id=task.id)
+    return candidate
 
 
-def _capture_risk_analysis_experience(
-    settings,
+def _risk_analysis_experience_candidate(
     task: TaskRecord,
     metadata: dict[str, Any] | None,
 ) -> Any:
@@ -369,8 +379,7 @@ def _capture_risk_analysis_experience(
     candidate = extract_risk_analysis_experience(result)
     if candidate is None:
         return
-    store = AgentMemoryStore(settings.db_path)
-    return store.create(candidate, task_id=task.id)
+    return candidate
 
 
 def _approval_backtest_memory_metrics(

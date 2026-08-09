@@ -26,7 +26,7 @@ from pathlib import Path
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository
+from marvis.repositories.datasets import DatasetRepository
 from marvis.settings import Settings, build_settings
 
 

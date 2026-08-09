@@ -439,6 +439,7 @@ class JoinEngine:
             raise JoinNotConfirmedError("all joins must be confirmed before execute")
 
         anchor = self._registry.get(plan.anchor_dataset_id)
+        target_col = anchor.target_col if anchor.has_target else None
         anchor_rows = anchor.row_count
         current_path = self._registry.resolve_path(plan.anchor_dataset_id)
         artifact_store = TransactionalArtifactStore(Path(out_dir))
@@ -529,6 +530,7 @@ class JoinEngine:
                 task_id=plan.task_id,
                 role="derived",
                 anchor_target=plan.anchor_dataset_id,
+                target_col_override=target_col,
             )
 
         result = self._connection_scoped_join_result(
@@ -537,6 +539,7 @@ class JoinEngine:
             join_plan_id=join_plan_id,
             audit_for=audit_for,
             plan=plan,
+            target_col=target_col,
         )
         if result is None:
             result = uow.finalize(register_result)
@@ -552,6 +555,7 @@ class JoinEngine:
         join_plan_id: str,
         audit_for,
         plan: JoinPlan,
+        target_col: str | None,
     ) -> Dataset | None:
         transaction = getattr(self._repo, "transaction", None)
         register_on_connection = getattr(
@@ -581,6 +585,7 @@ class JoinEngine:
                 task_id=plan.task_id,
                 role="derived",
                 anchor_target=plan.anchor_dataset_id,
+                target_col_override=target_col,
             ),
         )
 

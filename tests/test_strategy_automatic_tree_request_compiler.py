@@ -10,6 +10,7 @@ from marvis.agent.strategy_request_compiler import (
     compile_strategy_request,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 class _FakeLLM:
@@ -259,7 +260,7 @@ def test_automatic_tree_build_compilation_requires_all_explicit_controls_in_sour
     assert result.draft.to_dict() == reply
     assert len(llm.calls) == 1
     call = llm.calls[0]
-    assert call["prompt_version"] == 52
+    assert call["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "automatic_tree_candidate_build" in call["system_prompt"]
     assert "不能串联" in call["system_prompt"]
     assert "最好叶子" in call["system_prompt"]

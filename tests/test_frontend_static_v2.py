@@ -10,6 +10,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
@@ -18,10 +20,25 @@ def _read_static(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 
+def _read_browser_css() -> str:
+    return read_browser_stylesheets(STATIC_DIR)
+
+
 def _css_rule(css: str, selector: str) -> str:
-    start = css.index(f"{selector} {{")
-    end = css.index("}", start)
-    return css[start:end]
+    marker = f"{selector} {{"
+    cursor = 0
+    rules: list[str] = []
+    while (start := css.find(marker, cursor)) >= 0:
+        line_start = css.rfind("\n", 0, start) + 1
+        if css[line_start:start].strip():
+            cursor = start + len(marker)
+            continue
+        end = css.index("}", start)
+        rules.append(css[start:end])
+        cursor = end + 1
+    if not rules:
+        raise ValueError(f"CSS selector not found: {selector}")
+    return "\n".join(rules)
 
 
 def _css_vars(rule: str) -> dict[str, str]:
@@ -79,7 +96,7 @@ def test_artifact_metrics_object_values_render_as_readable_key_values():
 
 
 def test_v2_artifact_preview_uses_tabular_numeric_metrics():
-    css = _read_static("styles.css")
+    css = _read_browser_css()
 
     assert '[data-v2-artifact-view="true"] :is(.metrics-preview, .dataset-preview table)' in css
     assert 'font-feature-settings: "tnum"' in css
@@ -363,7 +380,7 @@ def _task_display_status_for(
         [
             f"const statusLabels = {json.dumps({'scanned': '已扫描', 'failed': '失败'}, ensure_ascii=False)};",
             f"const task = {json.dumps(task, ensure_ascii=False)};",
-            "function taskUsesPlanRail() { return false; }",
+            "function taskUsesPlanRail(task) { return ['data_join', 'feature_analysis', 'modeling', 'strategy', 'vintage', 'portfolio'].includes(task?.task_type); }",
             "const planRailController = { statusSnapshot() { return null; } };",
             "function workflowStatusSnapshot() { return null; }",
             app_js[stopped_start:stopped_end],
@@ -373,7 +390,7 @@ def _task_display_status_for(
             "process.stdout.write(JSON.stringify({",
             "  rowLabel: taskStatusLabel(task),",
             "  rowTone: taskStatusTone(task),",
-            f"  heroPill: actionStatusPill({json.dumps(action_message, ensure_ascii=False)}, {json.dumps(action_kind)}),",
+            f"  heroPill: actionStatusPill({json.dumps(action_message, ensure_ascii=False)}, {json.dumps(action_kind)}, task),",
             "}));",
         ]
     )
@@ -411,7 +428,7 @@ def test_frontend_uses_v2_task_actions_only():
 
 def test_word_report_preview_dialog_uses_task_dialog_backdrop():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'id="wordPreviewDialog"' in index_html
     assert 'class="task-dialog word-preview-dialog"' in index_html
@@ -422,7 +439,7 @@ def test_word_report_preview_dialog_uses_task_dialog_backdrop():
 
 
 def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actions():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
     layout_resize_js = _read_static("js/layout-resize.js")
 
@@ -459,7 +476,7 @@ def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actio
 
 def test_plan_rail_preserves_parent_steps_with_pure_status_subtasks():
     plan_js = _read_static("js/v2/plan_rail_controller.js")
-    v2_css = _read_static("css/v2-workbench.css")
+    v2_css = _read_browser_css()
 
     assert "export function planRailPhaseRows" in plan_js
     assert "Number(left?.index)" in plan_js
@@ -633,7 +650,7 @@ process.stdout.write("ok");
 
 def test_plan_rail_retry_step_posts_edited_inputs():
     plan_js = _read_static("js/v2/plan_rail_controller.js")
-    v2_css = _read_static("css/v2-workbench.css")
+    v2_css = _read_browser_css()
 
     retry_text_body = _slice_function(plan_js, "function planRetryInputsText")
     retry_fields_body = _slice_function(plan_js, "function planRetrySchemaFieldsHtml")
@@ -907,7 +924,7 @@ def test_plan_retry_replace_semantics_warning_is_always_present():
     unconditionally, and that the JSON editor keeps pre-filling current values
     (the mitigation for a user who edits only part of the object)."""
     plan_js = _read_static("js/v2/plan_rail_controller.js")
-    v2_css = _read_static("css/v2-workbench.css")
+    v2_css = _read_browser_css()
 
     warning_body = _slice_function(plan_js, "function planRetryReplaceWarningHtml")
     # The form (with the warning + JSON editor) now renders in the middle
@@ -1046,7 +1063,7 @@ def test_plan_retry_schema_form_marks_required_fields_and_falls_back_to_inferred
 
 
 def test_completed_report_actions_render_below_step_copy_with_office_colors():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
 
     assert "function completedReportReadyForDownloads" in app_js
@@ -1154,7 +1171,7 @@ def test_report_download_readiness_requires_generated_report_flag():
 
 
 def test_generic_actions_and_composer_use_semantic_visual_tokens():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
@@ -1269,7 +1286,7 @@ def test_create_dialog_enter_does_not_submit_textareas():
 
 def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
     focus_ring_js = _read_static("js/focus-ring.js")
 
@@ -1566,7 +1583,7 @@ def test_create_dialog_auto_fills_removed_report_values():
 
 def test_create_dialog_uses_visual_run_mode_cards():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     run_mode_start = index_html.index('class="run-mode-cards"')
     run_mode_end = index_html.index("</section>", run_mode_start)
     run_mode_markup = index_html[run_mode_start:run_mode_end]
@@ -1692,7 +1709,7 @@ def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
     definitions = task_types_js[definitions_start:definitions_end]
     assert 'defaultRunMode: "manual"' not in definitions
     assert 'defaultRunMode: "agent"' not in definitions
-    assert definitions.count('defaultRunMode: ""') == 6
+    assert definitions.count('defaultRunMode: ""') == 7
 
     dialog_start = create_dialog_js.index("function openTaskDialog")
     dialog_end = create_dialog_js.index("function openTaskDialogFromCard", dialog_start)
@@ -1784,7 +1801,7 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     app_js = _read_static("app.js")
     create_dialog_js = _read_static("js/create-task-dialog.js")
     dialogs_js = _read_static("js/dialogs.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert "报告初始内容" not in index_html
     task_info_start = index_html.index('<h3>任务信息</h3>')
@@ -1908,7 +1925,7 @@ process.stdout.write("ok");
 
 
 def test_material_upload_long_filename_cannot_expand_task_dialog():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     containment_rule = _css_rule(
         styles_css,
         ".material-source-section,\n.material-source-panel",
@@ -1938,7 +1955,7 @@ def test_validation_material_binding_dialog_is_wired_before_scan():
     assert 'createMaterialBindingDialogController' in app_js
     assert 'materialBindingDialog.ensureMaterialSelection(task)' in app_js
     assert 'ensureMaterialSelection(task, { force = false } = {})' in binding_js
-    assert 'if (!force && completeSelection(payload.selection)) return task;' in binding_js
+    assert 'if (!force && completeSelection(payload.selection) && !selectionIssue) return task;' in binding_js
     assert 'materialBindingDialog.bind();' in app_js
     assert 'label: "Notebook"' in binding_js
     assert 'label: "Sample"' in binding_js
@@ -1956,7 +1973,7 @@ def test_validation_material_binding_dialog_is_wired_before_scan():
 
 def test_validation_input_candidates_use_native_tables_with_legacy_row_styling():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     message_body = _slice_function(app_js, "function agentMessageHtml")
     assert 'data-agent-stage="${escapeHtml(String(message.stage))}"' in message_body
@@ -1971,7 +1988,7 @@ def test_validation_input_candidates_use_native_tables_with_legacy_row_styling()
 
 
 def test_validation_material_binding_dialog_keeps_content_inside_viewport():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     dialog_rule = _css_rule(styles_css, ".material-binding-dialog")
     assert "width: min(760px, calc(100vw - 32px))" in dialog_rule
@@ -2071,7 +2088,7 @@ def test_risk_analysis_can_defer_materials_and_upload_from_composer():
 
 def test_manual_risk_analysis_intake_exposes_deterministic_composer_without_llm():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     helper_start = app_js.index("function latestRiskAnalysisIntakePhase")
     helper_end = app_js.index("function syncRiskMaterialUploadControl", helper_start)
@@ -2112,7 +2129,8 @@ def test_manual_risk_analysis_intake_exposes_deterministic_composer_without_llm(
     send_end = app_js.index("async function dispatchAgentValidation", send_start)
     send_body = app_js[send_start:send_end]
     assert "const deterministicRiskIntake = selectedTaskNeedsManualRiskIntake();" in send_body
-    assert "if (!deterministicRiskIntake)" in send_body
+    assert "const deterministicTurn = deterministicRiskIntake || deterministicPortfolioTurn;" in send_body
+    assert "if (!deterministicTurn)" in send_body
     assert "const requestBody = { content };" in send_body
     assert "requestBody.model_id = modelId || null;" in send_body
 
@@ -2204,6 +2222,7 @@ def test_manual_vintage_material_upload_control_runs_deterministic_intake():
             "function taskBusyAction() { return null; }",
             "function requireTaskId(value) { return value; }",
             "async function uploadDataset(taskId, file, options) { uploads.push({ taskId, name: file.name, role: options.role }); }",
+            "async function reloadDataWorkspace() {}",
             "function setAgentComposerNotice() {}",
             "function autoGrowComposerInput() {}",
             "function updateAgentSendDisabled() {}",
@@ -2274,7 +2293,7 @@ def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
 
 
 def test_create_dialog_sections_are_unframed():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     dialog_start = styles_css.index(".task-dialog {")
     dialog_end = styles_css.index("}", dialog_start)
@@ -2296,7 +2315,7 @@ def test_create_dialog_sections_are_unframed():
 
 
 def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     create_dialog_start = styles_css.index(".task-dialog:not(.environment-dialog) {")
     create_dialog_end = styles_css.index("}", create_dialog_start)
@@ -2341,7 +2360,7 @@ def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
 
 def test_workbench_uses_middle_output_and_right_step_rail_layout():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
     plan_js = _read_static("js/v2/plan_rail_controller.js")
 
@@ -2457,7 +2476,7 @@ def test_waiting_confirmation_uses_matching_task_header_pill():
 def test_report_editor_form_and_summary_are_removed_from_frontend():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     removed_fragments = [
         'id="reportSummary"',
@@ -2483,7 +2502,7 @@ def test_report_editor_form_and_summary_are_removed_from_frontend():
 def test_sidebar_empty_state_is_compact():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     empty_start = styles_css.index(".empty-state {\n  padding")
     empty_end = styles_css.index("}", empty_start)
@@ -2504,7 +2523,7 @@ def test_sidebar_empty_state_is_compact():
 def test_shell_has_collapsible_compact_sidebar():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     assert root_vars["--collapsed-entry-size"] == "44px"
@@ -2642,7 +2661,7 @@ def test_shell_has_collapsible_compact_sidebar():
 
 def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert "static/styles.css?v=__MARVIS_STATIC_VERSION__" in index_html
     assert "static/css/welcome.css?v=__MARVIS_STATIC_VERSION__" in index_html
@@ -2770,7 +2789,7 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
 
 
 def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_search_button():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     assert root_vars["--collapsed-search-top"] == "79px"
@@ -2821,7 +2840,7 @@ def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_searc
 
 
 def test_sidebar_brand_title_stays_on_one_line():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
 
     sidebar_head_start = styles_css.index(".sidebar-head {")
@@ -2863,7 +2882,7 @@ def test_sidebar_brand_title_stays_on_one_line():
 
 def test_sidebar_footer_and_create_action_match_brand_treatment():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert "<span>新建任务</span>" in index_html
     assert "<span>创建任务</span>" not in index_html
@@ -2937,7 +2956,7 @@ def test_empty_workspace_copy_is_shorter_and_direct():
 def test_selected_task_header_omits_local_validation_subtitle():
     app_js = _read_static("app.js")
     workspace_view_js = _read_static("js/task-workspace-view.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     current_start = app_js.index("function renderCurrentTask")
     current_end = app_js.index("function workflowStepStatus", current_start)
@@ -2998,7 +3017,7 @@ def test_refresh_restores_selected_task_before_async_detail_loads():
     app_js = _read_static("app.js")
     index_html = _read_static("index.html")
     state_js = _read_static("js/state.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'export const resultScrollPositionsStorageKey = "marvis_result_scroll_positions";' in state_js
     assert "function loadResultScrollPositions" in app_js
@@ -3067,7 +3086,7 @@ def test_boot_initializes_restored_strategy_candidate_lab_once_outside_polling()
 
 
 def test_workspace_cards_float_on_one_background_with_top_step_rail():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert ".validation-workspace {" in styles_css
     assert "--workspace-main-gutter: 106px" in styles_css
@@ -3110,7 +3129,7 @@ def test_workspace_cards_float_on_one_background_with_top_step_rail():
 
 def test_right_resize_handle_sits_on_step_rail_left_edge():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'id="rightResizeHandle"' in index_html
     assert 'class="resize-handle resize-handle-right"' in index_html
@@ -3137,7 +3156,7 @@ def test_right_resize_handle_sits_on_step_rail_left_edge():
 
 
 def test_middle_result_sections_are_unframed():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     start = styles_css.index(".result-scroll-content > .progress-panel {")
     end = styles_css.index("}", start)
@@ -3160,7 +3179,7 @@ def test_middle_result_sections_are_unframed():
 
 
 def test_right_step_rail_uses_subtle_shadow():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
@@ -3174,7 +3193,7 @@ def test_right_step_rail_uses_subtle_shadow():
 
 
 def test_dark_theme_tokens_keep_panels_and_muted_text_readable():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
     assert dark_vars["--bg"] == "#181818"
@@ -3192,7 +3211,7 @@ def test_dark_theme_tokens_keep_panels_and_muted_text_readable():
 
 
 def test_dark_theme_visible_scrollbars_match_dark_surfaces():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
@@ -3240,7 +3259,7 @@ def test_dark_theme_visible_scrollbars_match_dark_surfaces():
 
 def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
@@ -3345,7 +3364,7 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
 
 
 def test_dark_theme_shell_columns_follow_reference_tones():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     workspace_rule = _css_rule(styles_css, 'body[data-theme="dark"] .validation-workspace')
     assert "background: var(--bg)" in workspace_rule
@@ -3356,7 +3375,7 @@ def test_dark_theme_shell_columns_follow_reference_tones():
 
 
 def test_dark_workspace_masks_match_center_background():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     base_workspace_rule = _css_rule(styles_css, ".validation-workspace")
     assert "--workspace-mask-bg: var(--surface)" in base_workspace_rule
@@ -3398,7 +3417,7 @@ def test_dark_workspace_masks_match_center_background():
 
 
 def test_primary_step_action_hover_keeps_button_text_readable():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     root_rule = _css_rule(styles_css, ":root")
 
     assert "--button-solid-shadow:" in root_rule
@@ -3464,7 +3483,7 @@ def test_primary_step_action_hover_keeps_button_text_readable():
 
 def test_theme_button_tokens_drive_create_environment_and_model_buttons():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     # The execution-environment panel auto-saves on row click (radiogroup), so
     # the #saveExecutionEnvironmentButton was retired and no longer carries the
@@ -3542,7 +3561,7 @@ def test_theme_button_tokens_drive_create_environment_and_model_buttons():
 
 def test_sidebar_task_card_is_two_line_compact_without_icon():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     append_start = app_js.index("function taskRowContentSignature")
     append_end = app_js.index("function renderTaskSnapshot", append_start)
@@ -3687,7 +3706,7 @@ def test_task_list_signature_tracks_plan_derived_status():
 
 
 def test_task_list_selected_card_has_no_visible_border_or_outline():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     task_list_start = styles_css.index("\n.task-list {\n  display: grid")
     task_list_end = styles_css.index("}", task_list_start)
@@ -3706,7 +3725,7 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     workspace_view_js = _read_static("js/task-workspace-view.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     head_start = index_html.index('<header class="workspace-head"')
     head_end = index_html.index("</header>", head_start)
@@ -3757,7 +3776,7 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
 
 
 def test_header_task_meta_values_stay_on_one_line():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     head_start = styles_css.index(".workspace-head {")
     head_end = styles_css.index("}", head_start)
@@ -3983,7 +4002,7 @@ def test_metrics_action_primes_metric_system_steps_immediately():
 
 
 def test_notebook_step_progress_items_are_single_line_and_compact():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     step_start = styles_css.index(".notebook-step {")
     step_end = styles_css.index("}", step_start)
@@ -4042,7 +4061,7 @@ def test_running_step_buttons_turn_into_cancel_buttons():
 
 
 def test_running_visual_tone_uses_header_status_blue():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     header_run_start = styles_css.index(".task-pill.run")
     header_run_end = styles_css.index("}", header_run_start)
@@ -4310,14 +4329,18 @@ assert.equal(modelTargetTypeForRecipes(["xgb_regressor", "xgb_multiclass"]), nul
     )
 
 
-def test_strategy_and_vintage_welcome_cards_are_enabled():
-    """风险分析(vintage) + 策略开发(strategy) are wired PlanDriver entries."""
+def test_strategy_vintage_and_portfolio_welcome_cards_are_enabled():
+    """风险分析、策略开发和组合分析都是已接通的 PlanDriver 入口。"""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
     toast_js = _read_static("js/toast.js")
-    for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
+    for card_id in (
+        "welcomeVintageAnalysisCard",
+        "welcomeStrategyDevelopmentCard",
+        "welcomePortfolioAnalysisCard",
+    ):
         start = index_html.index(f'id="{card_id}"')
         tag_end = index_html.index(">", start)
         tag = index_html[start:tag_end]
@@ -4328,10 +4351,14 @@ def test_strategy_and_vintage_welcome_cards_are_enabled():
         task_types_js.index("export const taskTypeDefinitions = {"):
         task_types_js.index("export const taskTypeDisplayOrder")
     ]
-    assert 'available: false' not in definitions
-    assert 'manualEnabled: false' not in definitions
+    for task_type in ("strategy", "vintage", "portfolio"):
+        task_start = definitions.index(f"  {task_type}: {{")
+        task_end = definitions.index("\n  },", task_start)
+        task_definition = definitions[task_start:task_end]
+        assert 'available: false' not in task_definition
+        assert 'manualEnabled: false' not in task_definition
     plan_js = _read_static("js/v2/plan_rail_controller.js")
-    assert 'export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);' in plan_js
+    assert 'export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage", "portfolio"]);' in plan_js
     # The toast path remains available for future explicitly unavailable task definitions.
     assert "card.dataset.comingSoon" not in app_js
     assert "definition.available === false" in create_dialog_js
@@ -4580,7 +4607,7 @@ def test_workflow_stepper_preserves_scroll_position_during_poll_rerender():
 
 def test_result_workspace_preserves_scroll_position_per_task_switch():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert "const resultScrollPositionsByTask = new Map();" in app_js
     assert "let resultScrollPersistFrame = null;" in app_js
@@ -4785,7 +4812,7 @@ process.stdout.write("ok");
 def test_dialog_close_buttons_render_as_x_controls():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     for button_id in [
         "closeTaskDialogButton",
@@ -4992,7 +5019,7 @@ def test_task_group_setting_supports_created_month_and_task_type():
     assert '<option value="created_month">按创建月份</option>' in settings_markup
     assert 'taskGroupMode === "task_type"' in app_js
     assert 'taskGroupMode === "created_month"' in app_js
-    assert 'export const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];' in task_types_js
+    assert 'export const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "portfolio", "modeling", "validation", "strategy"];' in task_types_js
     assert "sortTaskTypeGroups" in app_js
     assert "name: taskTypeLabel(taskType)," in app_js
     assert "function taskCreatedMonth" in app_js
@@ -5003,7 +5030,7 @@ def test_task_group_setting_supports_created_month_and_task_type():
 
 def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
 
     assert 'class="settings-tabs"' not in index_html
@@ -5176,7 +5203,7 @@ def test_appearance_setting_supports_light_dark_and_system_modes():
 
 def test_sidebar_settings_closes_on_outside_click_only():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert "function closeSidebarSettingsOnOutsideClick" in app_js
     assert "function openGovernanceSettingsFromSidebar" in app_js
@@ -5205,7 +5232,7 @@ def test_sidebar_settings_closes_on_outside_click_only():
 
 def test_system_settings_exposes_execution_environment_panel():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
@@ -5273,8 +5300,8 @@ def test_system_settings_exposes_execution_environment_panel():
 
 
 def test_capability_tier_rows_match_execution_environment_density():
-    styles_css = _read_static("styles.css")
-    v2_css = _read_static("css/v2-workbench.css")
+    styles_css = _read_browser_css()
+    v2_css = _read_browser_css()
 
     env_list_rule = _css_rule(styles_css, ".exec-env-list")
     tier_settings_rule = _css_rule(v2_css, ".tier-settings")
@@ -5309,8 +5336,8 @@ def test_capability_tier_rows_match_execution_environment_density():
 
 
 def test_governance_settings_text_buttons_match_scan_environment_size():
-    styles_css = _read_static("styles.css")
-    v2_css = _read_static("css/v2-workbench.css")
+    styles_css = _read_browser_css()
+    v2_css = _read_browser_css()
 
     scan_rule = _css_rule(
         styles_css,
@@ -5375,7 +5402,7 @@ def test_governance_settings_text_buttons_match_scan_environment_size():
 
 
 def test_governance_settings_uses_shared_typography_scale():
-    v2_css = _read_static("css/v2-workbench.css")
+    v2_css = _read_browser_css()
 
     token_vars = _css_vars(_css_rule(v2_css, ".governance-settings-dialog"))
     assert token_vars["--settings-row-title-size"] == "14px"
@@ -5504,36 +5531,132 @@ def test_governance_settings_uses_shared_typography_scale():
     assert "font-weight: var(--settings-control-weight)" in control_rule
 
 
-def test_pet_setting_includes_naitang_xiaojiu_auditbots_and_none():
+def test_pet_catalog_runtime_contract_drives_aliases_defaults_explicit_none_and_options():
+    catalog_path = STATIC_DIR / "js" / "pet_catalog.js"
+    script = f"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+
+const context = {{}};
+context.globalThis = context;
+context.window = context;
+vm.createContext(context);
+vm.runInContext(fs.readFileSync({json.dumps(str(catalog_path))}, "utf8"), context);
+
+const catalog = context.MarvisPetCatalog;
+assert.equal(catalog.schemaVersion, 1);
+assert.equal(catalog.defaultId, "auditbot");
+assert.equal(catalog.noneId, "none");
+assert.deepEqual(
+  JSON.parse(JSON.stringify(catalog.storageKeys)),
+  {{ preference: "marvis_pet", explicitNone: "marvis_pet_none_explicit", position: "marvis_pet_position" }},
+);
+assert.deepEqual(
+  ["danhuang", "buou", "ragdoll-cat", "unknown", "none"].map(catalog.normalizePreference),
+  ["naitang", "xiaojiu", "xiaojiu", "auditbot", "none"],
+);
+assert.deepEqual(
+  [
+    catalog.resolveStoredPreference(null, false),
+    catalog.resolveStoredPreference("none", false),
+    catalog.resolveStoredPreference("none", true),
+    catalog.resolveStoredPreference("danhuang", false),
+  ],
+  ["auditbot", "auditbot", "none", "naitang"],
+);
+
+const options = [];
+const select = {{ replaceChildren: (...children) => options.push(...children) }};
+const documentRef = {{ createElement: () => ({{ value: "", textContent: "" }}) }};
+catalog.populateSelect(select, documentRef);
+assert.deepEqual(
+  options.map((option) => [option.value, option.textContent]),
+  JSON.parse(JSON.stringify(catalog.order.map((petId) => [petId, catalog.definitions[petId].name]))),
+);
+assert.deepEqual(
+  options.map((option) => option.value),
+  ["none", "naitang", "xiaojiu", "auditbot", "auditbot-pro", "auditbot-poly", "auditbot-ink", "auditbot-clay", "auditbot-comic", "auditbot-pixel"],
+);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_pet_catalog_assets_bootstrap_and_package_data_stay_in_sync():
+    catalog_path = STATIC_DIR / "js" / "pet_catalog.js"
+    script = f"""
+const fs = require("node:fs");
+const vm = require("node:vm");
+const context = {{}};
+context.globalThis = context;
+context.window = context;
+vm.createContext(context);
+vm.runInContext(fs.readFileSync({json.dumps(str(catalog_path))}, "utf8"), context);
+process.stdout.write(JSON.stringify(context.MarvisPetCatalog));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    catalog = json.loads(result.stdout)
+
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
-    styles_css = _read_static("styles.css")
+    pyproject = (STATIC_DIR.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    pets_dir = STATIC_DIR / "pets"
+
+    catalog_script = '<script src="static/js/pet_catalog.js?v=__MARVIS_STATIC_VERSION__"></script>'
+    assert index_html.count(catalog_script) == 1
+    assert index_html.index(catalog_script) < index_html.index('id="petCompanion"')
+    assert index_html.index(catalog_script) < index_html.index('type="module" src="static/app.js')
+    settings_start = index_html.index('id="settingsPetSelect"')
+    settings_end = index_html.index("</select>", settings_start)
+    assert "<option" not in index_html[settings_start:settings_end]
+    pet_start = index_html.index('id="petCompanion"')
+    pet_end = index_html.index("</div>", index_html.index('id="petSticker"', pet_start)) + len("</div>")
+    initial_pet_markup = index_html[pet_start:pet_end]
+    assert 'data-pet-id=""' in initial_pet_markup
+    assert "static/pets/" not in initial_pet_markup
+    assert catalog["defaultId"] not in initial_pet_markup
+    assert "window.MarvisPetCatalog" in index_html
+    assert "globalThis.MarvisPetCatalog" in app_js
+    assert "globalThis.MarvisPetCatalog" in state_js
+    assert "catalog.resolveStoredPreference(stored, explicitNone)" in index_html
+    assert "petCatalog.resolveStoredPreference(stored, explicitNone)" in app_js
+    assert 'petCatalog.populateSelect($("settingsPetSelect"), document)' in app_js
+    assert "petCatalog.storageKeys.explicitNone" in state_js
+    assert 'import "./pet_catalog.js"' not in state_js
+    assert "static/pets/" not in app_js
+    assert '"auditbot"' not in state_js
+    assert '"marvis_pet_none_explicit"' not in state_js
+
+    asset_definitions = {
+        pet_id: definition
+        for pet_id, definition in catalog["definitions"].items()
+        if definition["asset"] is not None
+    }
+    assert list(asset_definitions) == catalog["order"][1:]
+    for pet_id, definition in asset_definitions.items():
+        asset_path = definition["asset"].split("?", 1)[0]
+        assert asset_path == f"static/pets/{pet_id}/spritesheet.webp"
+        assert (STATIC_DIR / asset_path.removeprefix("static/")).is_file()
+        assert not (pets_dir / pet_id / "pet.json").exists()
+    assert sorted(path.relative_to(pets_dir).as_posix() for path in pets_dir.rglob("*") if path.is_file()) == sorted(
+        f"{pet_id}/spritesheet.webp" for pet_id in asset_definitions
+    )
+
+    assert '"static/pets/*/*"' in pyproject
+    for pet_id in asset_definitions:
+        assert f'"static/pets/{pet_id}/*"' not in pyproject
+
+
+def test_pet_companion_visual_contract_stays_intact():
+    index_html = _read_static("index.html")
+    styles_css = _read_browser_css()
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
     assert 'data-settings-row="pet"' in settings_markup
     assert 'id="settingsPetSelect"' in settings_markup
-    assert '<option value="none">不显示</option>' in settings_markup
-    assert '<option value="naitang">蛋黄</option>' in settings_markup
-    assert '<option value="xiaojiu">小九</option>' in settings_markup
-    expected_auditbot_pets = {
-        "auditbot": ("MARVIS", "3D 玩具审计机器人，青色护目镜眼睛和铜色耳机"),
-        "auditbot-pro": ("MARVIS Pro", "专业风格 3D 审计机器人"),
-        "auditbot-poly": ("MARVIS Poly", "低多边形硬表面审计机器人"),
-        "auditbot-ink": ("MARVIS Ink", "技术线稿风格审计机器人"),
-        "auditbot-clay": ("MARVIS Clay", "黏土与乙烯基质感审计机器人"),
-        "auditbot-comic": ("MARVIS Comic", "漫画描边风格审计机器人"),
-        "auditbot-pixel": ("MARVIS Pixel", "像素风审计机器人"),
-    }
-    for pet_id, (display_name, pet_label) in expected_auditbot_pets.items():
-        assert f'<option value="{pet_id}">{display_name}</option>' in settings_markup
-        key = f'"{pet_id}": {{' if "-" in pet_id else f"{pet_id}: {{"
-        assert key in index_html
-        assert f'name: "{display_name}"' in index_html
-        assert f'label: "{pet_label}"' in index_html
-        assert f'asset: "static/pets/{pet_id}/spritesheet.webp"' in index_html
     pet_row_start = settings_markup.index('data-settings-row="pet"')
     pet_row_start = settings_markup.rfind('<div class="settings-row"', 0, pet_row_start)
     pet_row_end = settings_markup.index("</div>", settings_markup.index("</select>", pet_row_start))
@@ -5545,13 +5668,8 @@ def test_pet_setting_includes_naitang_xiaojiu_auditbots_and_none():
     assert '<circle cx="7.2" cy="9.2" r="1.65"></circle>' not in pet_row_markup
     assert 'id="petCompanion"' in index_html
     assert 'class="pet-companion"' in index_html
-    assert 'data-pet-id="auditbot"' in index_html
+    assert 'data-pet-id=""' in index_html
     assert 'id="petSticker"' in index_html
-    assert 'class="pet-sprite"' in index_html
-    assert 'background-image: url("static/pets/auditbot/spritesheet.webp")' in index_html
-    assert 'localStorage.getItem("marvis_pet")' in index_html
-    assert 'localStorage.getItem("marvis_pet_none_explicit") === "1"' in index_html
-    assert 'localStorage.getItem("marvis_pet_position")' in index_html
     assert 'pet.classList.add("hidden");' in index_html
     assert 'Number.isFinite(storedPosition.workspaceOffsetLeft)' in index_html
     assert 'const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", padding);' in index_html
@@ -5560,68 +5678,6 @@ def test_pet_setting_includes_naitang_xiaojiu_auditbots_and_none():
     assert 'id="petCompanionLabel"' not in index_html
     assert 'class="pet-companion-label"' not in index_html
     assert 'aria-live="polite"' in index_html
-
-    for removed_pet in [
-        "buou",
-        "danhuang",
-        "pixel-talisman-cat",
-        "ragdoll-cat",
-        "viola",
-        "布偶猫",
-        "Pixel Talisman Cat",
-        "Viola",
-        "Naitang",
-        "/static/pets/buou.svg",
-        "/static/pets/danhuang.svg",
-        "/static/pets/pixel-talisman-cat/spritesheet.webp",
-        "/static/pets/ragdoll-cat/spritesheet.webp",
-        "/static/pets/viola/spritesheet.webp",
-    ]:
-        assert removed_pet not in settings_markup
-
-    for removed_asset in [
-        "/static/pets/buou.svg",
-        "/static/pets/danhuang.svg",
-        "/static/pets/pixel-talisman-cat/spritesheet.webp",
-        "/static/pets/ragdoll-cat/spritesheet.webp",
-        "/static/pets/viola/spritesheet.webp",
-        "布偶猫",
-        "Pixel Talisman Cat",
-        "Viola",
-        "Naitang",
-    ]:
-        assert removed_asset not in app_js
-
-    assert 'export const defaultPetPreference = "auditbot";' in state_js
-    assert "let petPreference = defaultPetPreference" in app_js
-    assert 'naitang: {' in app_js
-    assert 'name: "蛋黄"' in app_js
-    assert 'kind: "spritesheet"' in app_js
-    assert 'asset: "static/pets/naitang/spritesheet.webp"' in app_js
-    assert 'xiaojiu: {' in app_js
-    assert 'name: "小九"' in app_js
-    assert 'asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f"' in app_js
-    for pet_id, (display_name, pet_label) in expected_auditbot_pets.items():
-        key = f'"{pet_id}": {{' if "-" in pet_id else f"{pet_id}: {{"
-        assert key in app_js
-        assert f'name: "{display_name}"' in app_js
-        assert f'label: "{pet_label}"' in app_js
-        assert f'asset: "static/pets/{pet_id}/spritesheet.webp"' in app_js
-    assert 'pet-sprite' in app_js
-    assert "sprite.style.backgroundImage" in app_js
-    assert "petCompanionLabel" not in app_js
-    assert "label.textContent" not in app_js
-    pet_definitions = app_js[app_js.index("const petDefinitions") : app_js.index("const legacyPetPreferences")]
-    assert "svg:" not in pet_definitions
-    assert "ragdoll-cat" not in pet_definitions
-    assert "sticker.innerHTML = definition.svg" not in app_js
-    assert "document.createElement(\"img\")" in app_js
-    assert "image.className = \"pet-image\"" in app_js
-    assert "function restorePetPreference" in app_js
-    assert "function applyPetPreference" in app_js
-    assert "function renderPetState" in app_js
-    assert "marvis_pet" in app_js
-    assert '$("settingsPetSelect").value = petPreference' in app_js
 
     assert ".pet-companion {" in styles_css
     pet_rule = _css_rule(styles_css, ".pet-companion")
@@ -5656,75 +5712,6 @@ def test_pet_setting_includes_naitang_xiaojiu_auditbots_and_none():
     assert '[data-pet-mood="running"]' in styles_css
     assert '[data-pet-mood="complete"]' in styles_css
     assert "@media (prefers-reduced-motion: reduce)" in styles_css
-
-
-def test_pet_preference_restores_legacy_local_storage_ids():
-    app_js = _read_static("app.js")
-
-    assert "const legacyPetPreferences" in app_js
-    assert 'danhuang: "naitang"' in app_js
-    assert '"ragdoll-cat": "xiaojiu"' in app_js
-    assert 'buou: "xiaojiu"' in app_js
-    assert 'buou: "ragdoll-cat"' not in app_js
-    assert "function normalizePetPreference" in app_js
-    assert "const normalized = normalizePetPreference(value);" in app_js
-    assert 'petPreference = normalized;' in app_js
-
-    preference_start = app_js.index("const petDefinitions")
-    preference_end = app_js.index("executionEnvironmentSettings =", preference_start)
-    normalize_start = app_js.index("function normalizePetPreference")
-    normalize_end = app_js.index("function persistPetPreference", normalize_start)
-    script = "\n".join(
-        [
-            'const defaultPetPreference = "auditbot";',
-            app_js[preference_start:preference_end],
-            app_js[normalize_start:normalize_end],
-            "const values = ['danhuang', 'buou', 'ragdoll-cat', 'unknown', 'none'].map(normalizePetPreference);",
-            "process.stdout.write(JSON.stringify(values));",
-        ]
-    )
-    result = subprocess.run(
-        ["node", "-e", script],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert json.loads(result.stdout) == ["naitang", "xiaojiu", "xiaojiu", "auditbot", "none"]
-
-    restore_start = app_js.index("function restorePetPreference")
-    restore_end = app_js.index("function applyPetPosition", restore_start)
-    restore_renderer = app_js[restore_start:restore_end]
-    assert "const stored = localStorage.getItem(\"marvis_pet\");" in restore_renderer
-    assert "const normalized = normalizePetPreference(stored);" in restore_renderer
-    assert "applyPetPreference(normalized, { persist: normalized !== stored });" in restore_renderer
-
-
-def test_pet_preference_defaults_visible_and_preserves_explicit_hide():
-    app_js = _read_static("app.js")
-    state_js = _read_static("js/state.js")
-
-    assert 'export const defaultPetPreference = "auditbot";' in state_js
-    assert 'export const explicitPetNoneStorageKey = "marvis_pet_none_explicit";' in state_js
-    assert "function persistPetPreference" in app_js
-    assert 'if (value === "none" && explicitNone) {' in app_js
-    assert "localStorage.setItem(explicitPetNoneStorageKey, \"1\");" in app_js
-    assert "localStorage.removeItem(explicitPetNoneStorageKey);" in app_js
-
-    restore_start = app_js.index("function restorePetPreference")
-    restore_end = app_js.index("function applyPetPosition", restore_start)
-    restore_renderer = app_js[restore_start:restore_end]
-    assert 'const explicitNone = localStorage.getItem(explicitPetNoneStorageKey) === "1";' in restore_renderer
-    assert 'if (!stored || (stored === "none" && !explicitNone)) {' in restore_renderer
-    assert 'applyPetPreference(defaultPetPreference, { persist: stored === "none" });' in restore_renderer
-    assert 'if (stored === "none") {' in restore_renderer
-    assert 'applyPetPreference("none", { persist: false });' in restore_renderer
-
-    settings_start = app_js.index("function handleSettingsMenuChange")
-    settings_end = app_js.index("async function loadExecutionEnvironmentSettings", settings_start)
-    settings_renderer = app_js[settings_start:settings_end]
-    assert 'applyPetPreference(target.value, { explicit: true });' in settings_renderer
-
-
 def test_task_search_controller_toggles_search_state_and_resets_query():
     module_url = (STATIC_DIR / "js" / "task-search.js").as_uri()
     script = f"""
@@ -5857,49 +5844,9 @@ def test_pet_position_restore_clamps_stale_coordinates_to_viewport():
     assert "applyPetPosition(next.left, next.top);" in drag_renderer
 
 
-def test_only_selected_pet_assets_are_bundled():
-    pets_dir = STATIC_DIR / "pets"
-    expected_pets = {
-        "naitang": "蛋黄",
-        "xiaojiu": "小九",
-        "auditbot": "MARVIS",
-        "auditbot-pro": "MARVIS Pro",
-        "auditbot-poly": "MARVIS Poly",
-        "auditbot-ink": "MARVIS Ink",
-        "auditbot-clay": "MARVIS Clay",
-        "auditbot-comic": "MARVIS Comic",
-        "auditbot-pixel": "MARVIS Pixel",
-    }
-    for pet_id, display_name in expected_pets.items():
-        assert (pets_dir / pet_id / "pet.json").exists()
-        assert (pets_dir / pet_id / "spritesheet.webp").exists()
-        assert f'"displayName": "{display_name}"' in (pets_dir / pet_id / "pet.json").read_text(encoding="utf-8")
-    assert not (pets_dir / "ragdoll-cat").exists()
-    bundled_files = sorted(path.relative_to(pets_dir).as_posix() for path in pets_dir.rglob("*") if path.is_file())
-    assert bundled_files == sorted(
-        [f"{pet_id}/pet.json" for pet_id in expected_pets]
-        + [f"{pet_id}/spritesheet.webp" for pet_id in expected_pets]
-    )
-
-
 def test_naitang_uses_pet_atlas_rows_and_drag_directions():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
-    pyproject = (STATIC_DIR.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-
-    assert 'static/pets/naitang/*' in pyproject
-    assert 'static/pets/xiaojiu/*' in pyproject
-    for pet_id in [
-        "auditbot",
-        "auditbot-pro",
-        "auditbot-poly",
-        "auditbot-ink",
-        "auditbot-clay",
-        "auditbot-comic",
-        "auditbot-pixel",
-    ]:
-        assert f"static/pets/{pet_id}/*" in pyproject
-    assert 'static/pets/ragdoll-cat/*' not in pyproject
+    styles_css = _read_browser_css()
 
     assert 'return "success";' in app_js
     assert 'return "failed";' in app_js
@@ -5934,7 +5881,7 @@ def test_naitang_uses_pet_atlas_rows_and_drag_directions():
 
 
 def test_naitang_sprite_animation_uses_slower_frame_timing():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     def css_rule(selector: str) -> str:
         start = styles_css.index(selector)
@@ -5960,7 +5907,7 @@ def test_naitang_sprite_animation_uses_slower_frame_timing():
 
 
 def test_pet_companion_does_not_auto_float_vertically():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     sticker_start = styles_css.index(".pet-sticker {")
     sticker_end = styles_css.index("}", sticker_start)
@@ -6008,7 +5955,6 @@ def test_pet_companion_is_draggable_and_reacts_to_task_status():
     assert "function startPetDrag" in app_js
     assert "function restorePetPosition" in app_js
     assert "function savePetPosition" in app_js
-    assert "marvis_pet_position" in app_js
     assert 'selectedTask?.status || ""' in app_js
     assert 'if (selectedTaskIsBusy()) return "running";' in app_js
     assert 'if (status === "succeeded") return "success";' in app_js
@@ -6036,7 +5982,7 @@ def test_pet_companion_is_draggable_and_reacts_to_task_status():
 
 def test_execution_environment_panel_is_in_system_settings():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     index_html = _read_static("index.html")
 
     assert "executionEnvironmentSettingsLabel" in app_js
@@ -6095,7 +6041,7 @@ def test_realtime_panel_keeps_only_reproducibility_evidence_in_center():
 
 def test_reproducibility_panel_renders_score_rows_and_diff_visuals():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     renderer_start = app_js.index("function renderReproducibilityEvidence")
     renderer_end = app_js.index("function renderEvidence", renderer_start)
@@ -6121,7 +6067,7 @@ def test_reproducibility_panel_renders_score_rows_and_diff_visuals():
 
 def test_reproducibility_summary_omits_six_decimal_match_count_and_keeps_status_tone():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     renderer_start = app_js.index("function renderReproducibilityEvidence")
     renderer_end = app_js.index("function renderEvidence", renderer_start)
@@ -6147,7 +6093,7 @@ def test_reproducibility_summary_omits_six_decimal_match_count_and_keeps_status_
 
 def test_reproducibility_panel_renders_precision_consistency_chart():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     precision_js = _read_static("js/precision-consistency.js")
 
@@ -6199,7 +6145,7 @@ def test_reproducibility_card_is_hidden_until_notebook_success():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'id="notebookSection" class="progress-panel hidden"' in index_html
     assert ".progress-panel.hidden" in styles_css
@@ -6215,7 +6161,7 @@ def test_metric_card_is_hidden_until_metric_validation_success():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'id="metricSection" class="progress-panel hidden"' in index_html
     assert ".progress-panel.hidden" in styles_css
@@ -6257,7 +6203,7 @@ def test_metric_tooltip_uses_document_delegation_for_rebuilt_preview():
 
 
 def test_metric_kpi_footer_values_are_centered_in_each_column():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     cell_start = styles_css.index(".kpi-card-footer-cell {")
     cell_end = styles_css.index("}", cell_start)
@@ -6268,7 +6214,7 @@ def test_metric_kpi_footer_values_are_centered_in_each_column():
 
 
 def test_metric_tables_use_tabular_right_aligned_numeric_cells():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
 
     table_start = styles_css.index(".metric-table-section .metric-table {")
@@ -6285,7 +6231,7 @@ def test_metric_tables_use_tabular_right_aligned_numeric_cells():
 
 
 def test_metric_overview_uses_semantic_visual_tokens():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
@@ -6351,7 +6297,7 @@ def test_metric_overview_uses_semantic_visual_tokens():
 
 
 def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
@@ -6433,7 +6379,7 @@ def test_evidence_restore_renders_persisted_scan_result():
 
 def test_scan_result_renders_structured_preflight_checks():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     renderer_start = app_js.index("function renderScanResult")
     renderer_end = app_js.index("function renderValidationResult", renderer_start)
     renderer = app_js[renderer_start:renderer_end]
@@ -6624,6 +6570,36 @@ def test_review_required_status_bar_uses_completed_green_copy_not_failure_detail
     }
 
 
+def test_intermediate_stage_success_never_claims_the_whole_task_is_complete():
+    scanned = _task_display_status_for(
+        {
+            "id": "validation-scanned",
+            "task_type": "validation",
+            "status": "scanned",
+            "active_job_kind": None,
+        },
+        action_message="材料扫描完成。",
+        action_kind="success",
+    )
+    portfolio_setup = _task_display_status_for(
+        {
+            "id": "portfolio-setup",
+            "task_type": "portfolio",
+            # A shared task record may be terminal-looking while the governed
+            # portfolio workflow is still waiting for its first typed gate.
+            "status": "succeeded",
+            "active_job_kind": None,
+        },
+        action_message="组合口径已校验，请确认逾期桶由好到坏的顺序。",
+        action_kind="success",
+    )
+
+    assert scanned["heroPill"] == {"label": "待继续", "tone": "review"}
+    assert portfolio_setup["heroPill"] == {"label": "待确认", "tone": "review"}
+    assert portfolio_setup["rowLabel"] == "待确认"
+    assert portfolio_setup["rowTone"] == ""
+
+
 def test_stopped_agent_task_status_copy_is_not_failure_or_busy():
     display = _task_display_status_for(
         {
@@ -6744,7 +6720,7 @@ def test_stopped_step_checker_has_no_stop_square_mark():
 
 def test_skipped_step_uses_dash_and_only_skipped_titles_are_struck_out():
     step_checker_js = _read_static("js/step-checker.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert '<span class="check-icon skipped" aria-hidden="true">' in step_checker_js
     assert 'd="M3 8h10"' in step_checker_js
@@ -6755,7 +6731,7 @@ def test_skipped_step_uses_dash_and_only_skipped_titles_are_struck_out():
 def test_current_status_error_detail_is_compact_accessible_and_collapsible():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'id="actionErrorDetail"' in index_html
     assert 'class="action-error-detail"' in index_html
@@ -6823,7 +6799,7 @@ def test_current_status_error_detail_is_compact_accessible_and_collapsible():
 
 
 def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     index_html = _read_static("index.html")
 
     workspace_start = styles_css.index(".result-workspace {")
@@ -7082,6 +7058,7 @@ def test_welcome_task_cards_share_the_same_visual_treatment():
         "vintage",
         "modeling",
         "validation",
+        "validation_batch",
         "strategy",
     ]:
         task_index = cards_markup.index(f'data-task-kind="{task_kind}"')
@@ -7315,6 +7292,7 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
             "function renderStoredStateSummaries() {}",
             "async function refreshTasks() {}",
             "async function loadReportFields() {}",
+            "async function reloadDataWorkspace() {}",
             "function closeTaskDialog() {}",
             "function setActionStatus() {}",
             "function setBusy() {}",
@@ -7380,7 +7358,7 @@ def test_delete_task_blocks_active_jobs_instead_of_stale_running_status():
 
 def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
     platform_confirm_js = _read_static("js/platform-confirm.js")
 
@@ -7464,7 +7442,7 @@ def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     assert 'cancelText: "取消"' in delete_body
     assert 'tone: "danger"' in delete_body
     # Purge counts now flow through as structured chip items, not appended text.
-    assert "loadTaskPurgeSummary(targetTask.id)" in delete_body
+    assert "loadTaskPurgeSummary(targetTask)" in delete_body
     assert "purgeItems," in delete_body
     assert "messageParts:" in delete_body
     assert "strong: true" in delete_body
@@ -7601,14 +7579,16 @@ def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
             "function renderWorkflowStepper() {}",
             "function renderPetState() {}",
             "function updateAgentSendDisabled() {}",
-            "function taskDisplayName(task) { return task.model_name; }",
-            "const window = { confirm() { return true; } };",
+                "function taskDisplayName(task) { return task.model_name; }",
+                "function isValidationBatchTask() { return false; }",
+                "const window = { confirm() { return true; } };",
             "function rememberSelectedTaskId() {}",
             "const resultScrollPositionsByTask = new Map();",
             "function renderStoredStateSummaries() {}",
             "async function loadReportFields() {}",
             "function renderAll() {}",
             "async function loadTaskPurgeSummary() { return []; }",
+            "function taskPurgeApiBase(task) { return `api/tasks/${task.id}`; }",
             "function showPlatformConfirm() { return true; }",
             "function persistResultScrollPositions() {}",
             "async function api(endpoint, options = {}) {",
@@ -7777,7 +7757,7 @@ def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
 def test_llm_settings_panel_and_agent_model_selector_exist():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert "模型引擎" in index_html
     assert 'id="llmSettingsDialog"' not in index_html
@@ -7877,8 +7857,8 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     draft_tools_panel_js = _read_static("js/draft-tools-panel.js")
-    styles_css = _read_static("styles.css")
-    v2_css = _read_static("css/v2-workbench.css")
+    styles_css = _read_browser_css()
+    v2_css = _read_browser_css()
 
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
@@ -8182,8 +8162,8 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     draft_open_rule = _css_rule(styles_css, ".draft-manage[open] .draft-manage-chevron")
     assert "transform: rotate(90deg)" in draft_open_rule
 
-    assert ".v2-workspace-summary" in v2_css
-    assert "grid-template-areas:" not in v2_css
+    workspace_summary_rule = _css_rule(v2_css, ".v2-workspace-summary")
+    assert "grid-template-areas:" not in workspace_summary_rule
     for selector in [
         ".v2-plugin-panel",
         ".v2-skill-panel",
@@ -8302,7 +8282,7 @@ def test_execution_environment_exposes_notebook_memory_limit_field():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'id="notebookMemoryLimitInput"' in index_html
     assert 'placeholder="不限制"' in index_html
@@ -8325,7 +8305,7 @@ def test_execution_environment_exposes_notebook_memory_limit_field():
 
 def test_agent_conversation_panel_layout_and_message_shapes():
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
     conversation_js = _read_static("js/agent-conversation-view.js")
     mount_js = _read_static("js/agent-conversation-mount.js")
@@ -8608,7 +8588,7 @@ def test_agent_memory_has_no_permanent_task_top_block():
     """
     app_js = _read_static("app.js")
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     result_area = index_html[index_html.index('id="resultWorkspace"') : index_html.index('id="agentComposer"')]
 
     forbidden_names = [
@@ -8704,7 +8684,7 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     app_js = _read_static("app.js")
     memory_panel_js = _read_static("js/agent-memory-panel.js")
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'id="openGovernanceSettingsButton"' in index_html
     assert 'id="governanceSettingsDialog"' in index_html
@@ -8771,7 +8751,7 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
 
 
 def test_agent_memory_item_actions_do_not_overlap_long_text():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     workspace_rule = _css_rule(styles_css, ".agent-memory-workspace")
     assert "height: clamp(420px, 58dvh, 620px);" in workspace_rule
@@ -8803,7 +8783,7 @@ def test_agent_memory_item_actions_do_not_overlap_long_text():
 
 def test_agent_memory_detail_view_uses_structured_cards():
     memory_panel_js = _read_static("js/agent-memory-panel.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     for fragment in [
         "agent-memory-detail-header",
@@ -9346,6 +9326,7 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
             "let selectedTask = { task_type: 'validation' };",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "function selectedTaskNeedsManualRiskIntake() { return false; }",
+            "function selectedTaskNeedsDeterministicPortfolioTurn() { return false; }",
             "let llmSettings = { enabled_models: [] };",
             "let apiCalls = 0;",
             "let focusedModel = false;",
@@ -9425,7 +9406,7 @@ def test_agent_material_selection_response_forces_dialog_then_requires_rescan():
 def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'data-agent-send-state="send"' in index_html
     assert 'class="agent-send-icon agent-send-icon-send"' in index_html
@@ -9521,6 +9502,7 @@ def test_agent_send_shows_thinking_message_before_network_wait():
             "let selectedTask = { task_type: 'validation' };",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "function selectedTaskNeedsManualRiskIntake() { return false; }",
+            "function selectedTaskNeedsDeterministicPortfolioTurn() { return false; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
             "const agentRequestAbortControllers = new Map();",
@@ -9590,6 +9572,7 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
             "let selectedTask = { task_type: 'validation' };",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "function selectedTaskNeedsManualRiskIntake() { return false; }",
+            "function selectedTaskNeedsDeterministicPortfolioTurn() { return false; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
             "const agentRequestAbortControllers = new Map();",
@@ -9610,6 +9593,7 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
             "function agentAcceptanceModeValue() { return 'normal'; }",
             "function sleep() { return new Promise((resolve) => setTimeout(resolve, 0)); }",
             "async function loadAgentMessages(_taskId, options = {}) { pollCount += 1; firstPollOptions ||= options; }",
+            "async function reloadDataWorkspace() {}",
             "let resolveApi;",
             "async function api() { return await new Promise((resolve) => { resolveApi = resolve; }); }",
             app_js[message_helpers_start:message_helpers_end],
@@ -9654,6 +9638,7 @@ def test_agent_stop_aborts_in_flight_message_request_and_clears_optimistic_state
             "let messageSignal = null;",
             "let stopCalled = false;",
             "function selectedTaskNeedsManualRiskIntake() { return false; }",
+            "function selectedTaskNeedsDeterministicPortfolioTurn() { return false; }",
             "const input = { value: '开始', style: {}, classList: { toggle() {} } };",
             "const modelSelect = { value: 'model-1' };",
             "function $(id) { return id === 'agentComposerInput' ? input : modelSelect; }",
@@ -9804,7 +9789,7 @@ def test_agent_composer_preferences_are_kept_per_task_in_local_storage():
 def test_agent_composer_acceptance_mode_selector_controls_auto_accept_payload():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'id="agentAcceptanceModeSelect"' in index_html
     assert 'class="agent-composer-chip-icon agent-acceptance-icon-default"' in index_html
@@ -9840,7 +9825,7 @@ def test_agent_composer_acceptance_mode_selector_controls_auto_accept_payload():
 
 
 def test_agent_composer_select_accent_does_not_stick_after_native_dropdown_closes():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     accent_start = styles_css.index("/* Agent execution mode chip.")
     accent_end = styles_css.index("\n.agent-composer-chip-caret {", accent_start)
@@ -9924,7 +9909,7 @@ def test_agent_model_preference_ignores_disabled_saved_model():
 def test_agent_assistant_messages_render_markdown_safely():
     app_js = _read_static("app.js")
     render_agent_js = _read_static("js/render-agent.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     assert 'import { renderAgentMarkdown } from "./js/render-agent.js";' in app_js
     assert "export function renderAgentMarkdown" in render_agent_js
@@ -9955,7 +9940,7 @@ def test_agent_assistant_messages_render_markdown_safely():
 
 
 def test_agent_markdown_renders_highlighted_code_blocks():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     html = _render_agent_markdown(
         "\n".join(
             [
@@ -10015,7 +10000,7 @@ def test_agent_markdown_preserves_ordered_section_numbers_after_blank_lines():
 
 
 def test_agent_markdown_renders_pipe_tables():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     html = _render_agent_markdown(
         "\n".join(
             [
@@ -10061,8 +10046,12 @@ def test_agent_markdown_rejects_unsafe_links_and_escapes_html():
 def test_branding_normalizer_rejects_unsafe_asset_urls():
     script = "\n".join(
         [
-            "import { isSafeAssetUrl, normalizeBranding, normalizeValidatorAliases } from "
-            "'./marvis/static/js/branding.js';",
+            # Browser startup installs the catalog through index.html's blocking
+            # classic script before app.js imports branding/state. Reproduce that
+            # public entrypoint contract explicitly for this standalone Node probe.
+            "await import('./marvis/static/js/pet_catalog.js');",
+            "const { isSafeAssetUrl, normalizeBranding, normalizeValidatorAliases } = "
+            "await import('./marvis/static/js/branding.js');",
             "const probes = {",
             "  absolute: isSafeAssetUrl('/branding/assets/logo.png'),",
             "  relative: isSafeAssetUrl('static/brand/logo.png'),",
@@ -10118,7 +10107,7 @@ def test_frozen_snapshot_sanitizer_strips_scripts_and_event_handlers():
 
 
 def test_step_rail_bottom_padding_is_visually_balanced():
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     rail_start = styles_css.index(".progress-rail {")
     rail_end = styles_css.index("}", rail_start)
@@ -10142,6 +10131,22 @@ def _slice_function(app_js: str, signature: str) -> str:
     needle = "\n}"
     end = app_js.index(needle, start)
     return app_js[start : end + len(needle)]
+
+
+def _gate_controller_context_region(app_js: str) -> str:
+    """Return the executable controller-context declarations as one seam.
+
+    The modeling and JOIN factories may share an implementation; callers only
+    depend on the contexts those named factories return.  Keeping the whole
+    declaration region makes the behavioral tests insensitive to that internal
+    factoring choice.
+    """
+
+    shared_start = app_js.find("function agentAcceptanceControllerContext")
+    modeling_start = app_js.index("function modelingSetupControllerContext")
+    start = modeling_start if shared_start < 0 else min(shared_start, modeling_start)
+    end = app_js.index("function handleDriverReportDownloadClick", start)
+    return app_js[start:end]
 
 
 def test_poll_validation_progress_does_not_call_render_all_in_loop():
@@ -10259,6 +10264,13 @@ def _run_node_capture_json(script: str) -> dict:
         ["node", "--input-type=module"], input=script, check=True, capture_output=True, text=True
     )
     return json.loads(result.stdout)
+
+
+def _prepare_app_module_for_node(app_js: str) -> str:
+    """Mirror the browser's classic-catalog-before-module startup contract."""
+
+    rewritten = app_js.replace('from "./js/', 'from "./marvis/static/js/')
+    return 'import "./marvis/static/js/pet_catalog.js";\n' + rewritten
 
 
 def test_validation_evidence_sections_reveal_only_after_their_stage_completes():
@@ -10429,7 +10441,7 @@ def test_reproducibility_pass_status_hides_score_compare_rows():
     app_js = _read_static("app.js")
     boot_marker = 'document.addEventListener(\n  "mousedown"'
     boot_idx = app_js.index(boot_marker)
-    app_js = app_js[:boot_idx].replace('from "./js/', 'from "./marvis/static/js/')
+    app_js = _prepare_app_module_for_node(app_js[:boot_idx])
 
     rows = [
         {
@@ -10496,7 +10508,7 @@ def test_reproducibility_render_skips_replay_and_disables_animation_on_rebuild()
     # bound to the agent-composer-chip blur logic.
     boot_marker = 'document.addEventListener(\n  "mousedown"'
     boot_idx = app_js.index(boot_marker)
-    app_js = app_js[:boot_idx].replace('from "./js/', 'from "./marvis/static/js/')
+    app_js = _prepare_app_module_for_node(app_js[:boot_idx])
 
     populated_a = {
         "summary": {"status": "ok", "mismatch_count": 0, "max_abs_diff": 0.00001},
@@ -10573,9 +10585,7 @@ def test_reproducibility_render_handles_task_switch_animation_policy():
     """
     app_js = _read_static("app.js")
     boot_marker = 'document.addEventListener(\n  "mousedown"'
-    app_js = app_js[: app_js.index(boot_marker)].replace(
-        'from "./js/', 'from "./marvis/static/js/'
-    )
+    app_js = _prepare_app_module_for_node(app_js[: app_js.index(boot_marker)])
 
     populated = {
         "summary": {"status": "ok", "mismatch_count": 0, "max_abs_diff": 0.00001},
@@ -10996,48 +11006,54 @@ def test_scroll_to_manual_workflow_section_captures_task_id():
     assert "if (selectedTaskId !== targetTaskId) return;" in body
 
 
-def test_gate_controller_context_factories_capture_task_id_before_write_back():
-    """UX-3: a driver turn is a synchronous long request; the user can switch
-    to a different task while task A's confirmation POST is still pending. If
-    A's response resolves after the switch, its setAgentMessages callback
-    must not overwrite the globals now backing task B's panel. Each of the
-    four *ControllerContext() factories must capture selectedTaskId at
-    creation time and compare against the live value before writing back.
+def test_modeling_and_join_controller_contexts_expose_the_same_behavior():
+    """The two named controller seams expose the same accepted dependencies.
+
+    This characterizes the caller-visible contract while allowing their shared
+    implementation to move behind either factory.
     """
     app_js = _read_static("app.js")
-    for factory in (
-        "function modelingSetupControllerContext",
-        "function joinGateControllerContext",
-        "function screenGateControllerContext",
-        "function driverConfirmControllerContext",
-    ):
-        body = _slice_function(app_js, factory)
-        assert "const capturedTaskId = selectedTaskId;" in body, (
-            f"{factory} must capture selectedTaskId at creation time so a "
-            "later write-back can detect a task switch."
-        )
-        assert "if (selectedTaskId !== capturedTaskId) return;" in body, (
-            f"{factory}'s setAgentMessages must guard against writing a "
-            "finished task's messages into a different task's panel."
-        )
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task-A';",
+            "let agentMessages = [];",
+            "function api() {}",
+            "function agentAcceptanceModeValue() { return 'manual'; }",
+            "function setActionStatus() {}",
+            "function renderAgentConversation() {}",
+            "function pollAgentMessagesUntilSettled() { return Promise.resolve(); }",
+            "function renderWorkflowStepper() {}",
+            "function setBusy() {}",
+            "const planRailController = { resetFetchThrottle() {} };",
+            _gate_controller_context_region(app_js),
+            "const modeling = modelingSetupControllerContext();",
+            "const join = joinGateControllerContext();",
+            "process.stdout.write(JSON.stringify({",
+            "  modelingKeys: Object.keys(modeling).sort(),",
+            "  joinKeys: Object.keys(join).sort(),",
+            "  modelingTaskId: modeling.getSelectedTaskId(),",
+            "  joinTaskId: join.getSelectedTaskId(),",
+            "  modelingAcceptance: modeling.agentAcceptanceModeValue(),",
+            "  joinAcceptance: join.agentAcceptanceModeValue(),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["modelingKeys"] == payload["joinKeys"]
+    assert payload["modelingTaskId"] == payload["joinTaskId"] == "task-A"
+    assert payload["modelingAcceptance"] == payload["joinAcceptance"] == "manual"
 
 
 def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally():
-    """Behavioral counterpart to the static guard check above: simulate
-    creating a controller context while task A is selected, switching to
-    task B, then having task A's pending request resolve. The resulting
-    setAgentMessages(...) call must be a no-op against the live globals.
-    """
+    """Late task-A responses must not overwrite task B's live conversation."""
     app_js = _read_static("app.js")
-    context_bodies = "\n".join(
-        _slice_function(app_js, factory)
-        for factory in (
-            "function modelingSetupControllerContext",
-            "function joinGateControllerContext",
-            "function screenGateControllerContext",
-            "function driverConfirmControllerContext",
-        )
-    )
     script = "\n".join(
         [
             "let selectedTaskId = 'task-A';",
@@ -11052,7 +11068,7 @@ def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally()
             "function pollAgentMessagesUntilSettled() { return Promise.resolve(); }",
             "function renderWorkflowStepper() {}",
             "const planRailController = { resetFetchThrottle() {} };",
-            context_bodies,
+            _gate_controller_context_region(app_js),
             "const results = {};",
             "for (const [name, factory] of Object.entries({"
             " modelingSetupControllerContext,"
@@ -11110,7 +11126,15 @@ def test_submit_driver_confirm_shows_busy_state_and_polls_before_response_resolv
             "let agentMessages = ['seed'];",
             "let resolveApi;",
             "function api() { return new Promise((resolve) => { resolveApi = resolve; }); }",
-            "const button = { disabled: false, getAttribute: () => '' };",
+            "const attrs = {",
+            "  'data-expected-plan-id': 'plan-A',",
+            "  'data-expected-step-id': 'gate-A',",
+            "  'data-expected-plan-status': 'awaiting_confirm',",
+            "  'data-expected-plan-revision': '0',",
+            "  'data-expected-plan-fingerprint': 'a'.repeat(64),",
+            "  'data-expected-step-fingerprint': 'b'.repeat(64),",
+            "};",
+            "const button = { disabled: false, getAttribute: (name) => attrs[name] || '' };",
             "const context = {",
             "  getSelectedTaskId: () => selectedTaskId,",
             "  api,",
@@ -11495,7 +11519,7 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
 def test_agent_gate_reply_is_not_wrapped_in_a_large_coloured_card():
     """Agent prose stays conversational; only nested functional widgets own cards."""
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     start = app_js.index("function agentMessageHtml(")
     end = app_js.index("\n}\n\nfunction agentThinkingHtml", start)
     message_renderer = app_js[start:end]
@@ -11518,7 +11542,7 @@ def test_retry_controls_follow_the_conversation_in_chronological_order():
     assert body.index('"agentConversationPanel"') < body.index('"planRetryPanel"')
 
 
-def test_agent_mode_gate_mounts_readonly_evidence_without_action_buttons():
+def test_agent_mode_latest_gate_keeps_typed_controls_interactive_with_chat():
     """UX-2: the agent-mode chat timeline must mount the SAME structured gate
     widgets manual mode uses (screening table / dedup picker / modeling setup
     panel / C1 role form) instead of a bare text bubble + confirm button.
@@ -11526,8 +11550,8 @@ def test_agent_mode_gate_mounts_readonly_evidence_without_action_buttons():
     This drives the real agentMessageHtml() (via the full app.js module, same
     harness as the reproducibility tests) so the assertions exercise actual
     production wiring, not a hand-rolled stand-in. Three things are pinned:
-    1. The latest gate reuses the same evidence widget but renders it read-only,
-       because Agent mode continues exclusively through natural language.
+    1. The latest gate reuses the same evidence widget as an interactive typed
+       control while keeping the natural-language reply visible.
     2. An OLDER (non-latest) gate message's widget renders read-only
        (disabled inputs, data-screen-readonly="true") — the stale-gate guard.
     3. The free-text composer contract is untouched: agentMessageHtml keeps
@@ -11536,7 +11560,7 @@ def test_agent_mode_gate_mounts_readonly_evidence_without_action_buttons():
     """
     app_js = _read_static("app.js")
     boot_marker = 'document.addEventListener(\n  "mousedown"'
-    app_js = app_js[: app_js.index(boot_marker)].replace('from "./js/', 'from "./marvis/static/js/')
+    app_js = _prepare_app_module_for_node(app_js[: app_js.index(boot_marker)])
 
     messages = [
         {
@@ -11557,7 +11581,14 @@ def test_agent_mode_gate_mounts_readonly_evidence_without_action_buttons():
                 "content": "阈值调整后重新筛选完成。确认请回复「确认」继续；可直接操作下方控件，或用文字说明要调整的参数。",
             "metadata": {
                 "kind": "gate",
+                "plan_id": "plan-new",
                 "step_id": "gate-new",
+                "confirmation_snapshot": {
+                    "expected_plan_status": "awaiting_confirm",
+                    "expected_plan_revision": 2,
+                    "expected_plan_fingerprint": "a" * 64,
+                    "expected_step_fingerprint": "b" * 64,
+                },
                 "screen": {"selected": ["x2"], "thresholds": {"leakage_ks": 0.35, "max_missing_rate": 0.9}},
             },
         },
@@ -11566,6 +11597,17 @@ def test_agent_mode_gate_mounts_readonly_evidence_without_action_buttons():
     test_driver = "\n".join(
         [
             f"const messages = {json.dumps(messages)};",
+            "selectedTaskId = 'task-gate';",
+            "selectedTask = { id: 'task-gate', task_type: 'modeling', run_mode: 'agent', active_job_kind: null };",
+            "taskCache = [selectedTask];",
+            "globalThis.fetch = async (url) => ({ ok: true, json: async () => ({ plans: [{",
+            "  id: 'plan-new', status: 'awaiting_confirm', steps: [{",
+            "    id: 'gate-new', status: 'awaiting_confirm',",
+            "    confirmation_snapshot: messages[1].metadata.confirmation_snapshot,",
+            "  }],",
+            "}] }) });",
+            "planRailController.resetFetchThrottle('task-gate');",
+            "await planRailController.maybeFetchPlan('task-gate');",
             "const oldHtml = agentMessageHtml(messages[0], 'chat', { isLatestGate: false, conversationOnly: true });",
             "const latestHtml = agentMessageHtml(messages[1], 'chat', { isLatestGate: true, conversationOnly: true });",
             "process.stdout.write(JSON.stringify({ oldHtml, latestHtml }));",
@@ -11591,17 +11633,20 @@ def test_agent_mode_gate_mounts_readonly_evidence_without_action_buttons():
     assert "agent-message-content" in latest_html
     assert "第一次筛选完成" in old_html
     assert "阈值调整后重新筛选完成" in latest_html
-    assert "可直接操作下方控件" not in latest_html
-    assert "Agent 模式请回复" in latest_html
+    assert "可直接操作下方控件" in latest_html
+    assert "自然语言表达同意并继续" in latest_html
+    assert "回复「确认」" not in latest_html
 
-    # Both historical and latest Agent-mode gates are evidence-only. The latest
-    # one advances through the composer, never through a second UI action path.
+    # Only historical Agent-mode gates are evidence-only. The latest gate keeps
+    # its typed action path, alongside the unchanged natural-language channel.
     assert 'data-screen-readonly="true"' in old_html
-    assert 'data-screen-readonly="true"' in latest_html
+    assert 'data-screen-readonly="true"' not in latest_html
     assert old_html.count(" disabled") > 0
     assert 'data-screen-step-id="gate-new"' in latest_html
-    assert "screen-confirm" not in latest_html
-    assert "<button" not in latest_html
+    assert 'data-screen-plan-id="plan-new"' in latest_html
+    assert 'data-screen-confirm="latest-screen"' in latest_html
+    assert 'data-expected-plan-revision="2"' in latest_html
+    assert 'data-expected-step-fingerprint="' + ("b" * 64) + '"' in latest_html
     assert "历史筛选结果" in old_html
 
     # Gates with a structured widget do NOT also render the plain
@@ -11617,7 +11662,7 @@ def test_agent_mode_plain_gate_uses_natural_language_without_confirm_button():
     """
     app_js = _read_static("app.js")
     boot_marker = 'document.addEventListener(\n  "mousedown"'
-    app_js = app_js[: app_js.index(boot_marker)].replace('from "./js/', 'from "./marvis/static/js/')
+    app_js = _prepare_app_module_for_node(app_js[: app_js.index(boot_marker)])
 
     message = {
         "id": "plain-gate",
@@ -11638,8 +11683,35 @@ def test_agent_mode_plain_gate_uses_natural_language_without_confirm_button():
 
     assert "driver-gate-actions" not in html
     assert 'data-driver-confirm="1"' not in html
-    assert "回复" in html
-    assert "继续" in html
+    assert "自然语言表达同意并继续" in html
+    assert "请回复" not in html
+
+
+def test_agent_mode_plan_overview_explains_semantic_authorization_without_keywords():
+    app_js = _read_static("app.js")
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    app_js = _prepare_app_module_for_node(app_js[: app_js.index(boot_marker)])
+
+    message = {
+        "id": "plan-overview",
+        "role": "assistant",
+        "stage": "plan",
+        "content": "计划已生成。手动模式请点击「开始执行」；Agent 模式请回复「开始」或「继续」。",
+        "metadata": {"kind": "plan_overview"},
+    }
+    test_driver = "\n".join(
+        [
+            f"const message = {json.dumps(message)};",
+            "const html = agentMessageHtml(message, 'plan', { conversationOnly: true });",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    script = _BROWSER_STUBS + "\n" + app_js + "\n" + test_driver
+    html = _run_node_capture_json(script)["html"]
+
+    assert "手动模式可点击「开始执行」" in html
+    assert "Agent 模式可直接用自然语言表达同意并开始执行" in html
+    assert "请回复「开始」" not in html
 
 
 def test_manual_mode_gate_strips_chat_instruction_and_keeps_button():
@@ -11660,6 +11732,34 @@ def test_manual_mode_gate_strips_chat_instruction_and_keeps_button():
     )
     assert "Agent 模式请回复" not in result.stdout
     assert "确认并继续" in result.stdout
+
+
+def test_manual_gate_interactivity_requires_awaiting_step_and_no_driver_busy():
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_manual_analysis.js").as_uri()
+    script = "\n".join(
+        [
+            f'import {{ driverManualAnalysisHtml }} from {json.dumps(module_url)};',
+            "const message = { id: 'm1', role: 'assistant', content: '确认筛选。', metadata: { kind: 'gate', plan_id: 'p1', step_id: 's1', screen: { selected: ['x1'] } } };",
+            "const render = (status, busy) => driverManualAnalysisHtml([message], {",
+            "  renderAgentMarkdown: (x) => x,",
+            "  stepStatus: () => status,",
+            "  isGateActionable: () => !busy,",
+            "  renderScreenTable: (_message, options) => `<div data-screen-interactive=\"${options.interactive}\"></div>`,",
+            "});",
+            "process.stdout.write(JSON.stringify({",
+            "  done: render('done', false),",
+            "  busy: render('awaiting_confirm', true),",
+            "  ready: render('awaiting_confirm', false),",
+            "}));",
+        ]
+    )
+    payload = _run_node_capture_json(script)
+    assert 'data-screen-interactive="false"' in payload["done"]
+    assert 'is-gate-pending' not in payload["done"]
+    assert 'data-screen-interactive="false"' in payload["busy"]
+    assert 'is-gate-pending' not in payload["busy"]
+    assert 'data-screen-interactive="true"' in payload["ready"]
+    assert 'is-gate-pending' in payload["ready"]
 
 
 def test_agent_mode_widget_submit_payload_matches_manual_mode_controller():
@@ -11688,7 +11788,15 @@ def test_agent_mode_widget_submit_payload_matches_manual_mode_controller():
             "const html = renderScreenGateTable(message, { interactive: true });",
             "const calls = [];",
             "const wrap = {",
-            "  dataset: { screenReadonly: 'false', screenStepId: 'gate-agent' },",
+            "  dataset: {",
+            "    screenReadonly: 'false',",
+            "    screenPlanId: 'plan-agent',",
+            "    screenStepId: 'gate-agent',",
+            "    expectedPlanStatus: 'awaiting_confirm',",
+            "    expectedPlanRevision: '0',",
+            "    expectedPlanFingerprint: 'a'.repeat(64),",
+            "    expectedStepFingerprint: 'b'.repeat(64),",
+            "  },",
             "  querySelectorAll: (selector) => selector === '.screen-pick:checked' ? [",
             "    { value: 'x1', disabled: false, closest: () => ({ classList: { contains: () => false } }) },",
             "  ] : [],",
@@ -11722,7 +11830,12 @@ def test_agent_mode_widget_submit_payload_matches_manual_mode_controller():
     # expected_step_id (the mode-independent contract validation_agent.py and
     # gate_response_adapter.py already accept).
     assert body["selection"] == ["x1"]
+    assert body["expected_plan_id"] == "plan-agent"
     assert body["expected_step_id"] == "gate-agent"
+    assert body["expected_plan_status"] == "awaiting_confirm"
+    assert body["expected_plan_revision"] == 0
+    assert body["expected_plan_fingerprint"] == "a" * 64
+    assert body["expected_step_fingerprint"] == "b" * 64
     assert "content" in body
 
 
@@ -12026,7 +12139,7 @@ def test_structured_confirmation_buttons_submit_ui_action_and_share_action_bar()
     screen_gate_js = _read_static("js/v2/screen_gate_controller.js")
     modeling_setup_js = _read_static("js/v2/modeling_setup_panel.js")
     adoption_gate_js = _read_static("js/v2/adoption_gate_controller.js")
-    workbench_css = _read_static("css/v2-workbench.css")
+    workbench_css = _read_browser_css()
 
     for source in (driver_gate_js, join_gate_js, screen_gate_js, modeling_setup_js, adoption_gate_js):
         assert "ui_action" in source
@@ -12040,7 +12153,10 @@ def test_completed_dataset_download_is_rendered_in_center_message_stream():
 
     assert "function agentMessageResultDatasetHtml" in app_js
     assert "data-result-dataset-download" in app_js
-    assert "下载拼接结果" in app_js
+    assert 'result?.title || "结果数据集已生成"' in app_js
+    assert 'result?.download_label || "下载结果数据集"' in app_js
+    assert "const scopedHref" not in app_js
+    assert 'persistedHref.includes("expected_content_hash=")' in app_js
 
 
 def test_strategy_create_dialog_captures_governed_business_input():
@@ -12107,13 +12223,14 @@ def test_adoption_gate_requires_reason_and_submits_gate_bound_payload():
         [
             f"import {{ renderAdoptionGate, submitAdoption }} from {json.dumps(module_url)};",
             "const message = { metadata: {",
-            "  kind: 'gate', step_id: 'adopt-step',",
+            "  kind: 'gate', plan_id: 'plan-1', step_id: 'adopt-step',",
+            "  confirmation_snapshot: { expected_plan_status: 'awaiting_confirm', expected_plan_revision: 0, expected_plan_fingerprint: 'a'.repeat(64), expected_step_fingerprint: 'b'.repeat(64) },",
             "  editable_input_schema: { type: 'object', properties: { adoption_reason: { type: 'string', minLength: 2 } }, required: ['adoption_reason'] },",
             "} };",
             "const html = renderAdoptionGate(message, { interactive: true });",
             "const calls = [];",
             "const wrap = {",
-            "  dataset: { adoptionStepId: 'adopt-step' },",
+            "  dataset: { adoptionPlanId: 'plan-1', adoptionStepId: 'adopt-step', expectedPlanStatus: 'awaiting_confirm', expectedPlanRevision: '0', expectedPlanFingerprint: 'a'.repeat(64), expectedStepFingerprint: 'b'.repeat(64) },",
             "  querySelector: (selector) => selector === '[data-adoption-reason]' ? { value: '委员会批准 Q3 本地采纳' } : null,",
             "};",
             "const button = { disabled: false, closest: () => wrap };",
@@ -12142,11 +12259,73 @@ def test_adoption_gate_requires_reason_and_submits_gate_bound_payload():
         "/api/tasks/task-1/agent/messages",
             {
                 "content": "确认采纳",
-                "ui_action": "confirm_adoption",
-                "adjust_params": {"adoption_reason": "委员会批准 Q3 本地采纳"},
-            "expected_step_id": "adopt-step",
+                    "ui_action": "confirm_adoption",
+                    "adjust_params": {"adoption_reason": "委员会批准 Q3 本地采纳"},
+                "expected_plan_id": "plan-1",
+                "expected_step_id": "adopt-step",
+                "expected_plan_status": "awaiting_confirm",
+                "expected_plan_revision": 0,
+                "expected_plan_fingerprint": "a" * 64,
+                "expected_step_fingerprint": "b" * 64,
         },
     ]]
+
+
+def test_adoption_conflict_refreshes_latest_gate_without_reviving_stale_button():
+    module_url = (STATIC_DIR / "js" / "v2" / "adoption_gate_controller.js").as_uri()
+    script = "\n".join(
+        [
+            "import assert from 'node:assert/strict';",
+            f"import {{ submitAdoption }} from {json.dumps(module_url)};",
+            "const wrap = {",
+            "  dataset: { adoptionPlanId: 'plan-1', adoptionStepId: 'adopt-step', expectedPlanStatus: 'awaiting_confirm', expectedPlanRevision: '0', expectedPlanFingerprint: 'a'.repeat(64), expectedStepFingerprint: 'b'.repeat(64) },",
+            "  querySelector: (selector) => selector === '[data-adoption-reason]' ? { value: '委员会批准 Q3 本地采纳' } : null,",
+            "};",
+            "const button = { disabled: false, closest: () => wrap };",
+            "const refreshed = []; const statuses = [];",
+            "await submitAdoption(button, {",
+            "  selectedTaskId: 'task-1',",
+            "  api: async () => { throw Object.assign(new Error('该操作对应的计划已变化，请刷新页面后重试。'), { status: 409 }); },",
+            "  pollAgentMessagesUntilSettled: async () => undefined,",
+            "  refreshAgentMessages: async (taskId) => { refreshed.push(taskId); },",
+            "  setActionStatus: (message, kind) => statuses.push([message, kind]),",
+            "});",
+            "assert.deepEqual(refreshed, ['task-1']);",
+            "assert.equal(button.disabled, true);",
+            "assert.deepEqual(statuses.at(-1), ['计划已更新，已加载最新待确认步骤，请重新检查后操作。', 'info']);",
+        ]
+    )
+    subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_active_driver_conflict_is_busy_duplicate_not_snapshot_or_validation_failure():
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = "\n".join(
+        [
+            "import assert from 'node:assert/strict';",
+            f"import {{ refreshAfterConfirmationConflict }} from {json.dumps(module_url)};",
+            "const refreshed = []; const statuses = [];",
+            "const handled = await refreshAfterConfirmationConflict(",
+            "  Object.assign(new Error('该任务正在执行上一步，请等待完成'), { status: 409, detail: '该任务正在执行上一步，请等待完成' }),",
+            "  { taskId: 'task-1', refreshAgentMessages: async (taskId) => refreshed.push(taskId), setActionStatus: (message, kind) => statuses.push([message, kind]) },",
+            ");",
+            "assert.equal(handled, true);",
+            "assert.deepEqual(refreshed, ['task-1']);",
+            "assert.deepEqual(statuses, [['上一步仍在执行，本次重复操作未提交。', 'busy']]);",
+            "assert.ok(!statuses[0][0].includes('验证失败'));",
+        ]
+    )
+    subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_strategy_clarification_controller_renders_exact_contract_and_readonly_history():
@@ -12400,7 +12579,7 @@ def test_strategy_clarification_uses_one_renderer_in_agent_and_manual_modes():
     assert "return renderStrategyClarification(message, options);" in app_js
     assert "handleStrategyClarificationSubmit" in app_js
     clarification_css = _css_rule(
-        _read_static("css/v2-workbench.css"), ".strategy-clarification-card"
+        _read_browser_css(), ".strategy-clarification-card"
     )
     assert "position: relative" in clarification_css
     assert "z-index: 25" in clarification_css
@@ -12420,7 +12599,7 @@ def test_all_rail_interactions_move_to_middle_workspace():
     plan_js = _read_static("js/v2/plan_rail_controller.js")
     driver_analysis_js = _read_static("js/v2/driver_manual_analysis.js")
     app_js = _read_static("app.js")
-    v2_css = _read_static("css/v2-workbench.css")
+    v2_css = _read_browser_css()
 
     # These plan-rail helpers are nested inside createPlanRailController, so their
     # closing brace is indented — _slice_function (which stops at a column-0 `}`)
@@ -12529,7 +12708,7 @@ def test_all_rail_interactions_move_to_middle_workspace():
             "selectedTask = { task_type: 'modeling', active_job_kind: 'driver' };",
             "messages = [];",
             "plan = { id: 'plan-agent', status: 'running', steps: [",
-            "  { id: 'report-gate', index: 0, phase: '报告', title: '生成模型开发报告', status: 'awaiting_confirm', needs_confirmation: true, tool_ref: { plugin: 'modeling', tool: 'generate_model_reports' }, depends_on: [] },",
+                "  { id: 'report-gate', index: 0, phase: '报告', title: '生成模型开发报告', status: 'awaiting_confirm', needs_confirmation: true, tool_ref: { plugin: 'modeling', tool: 'generate_model_reports' }, depends_on: [], confirmation_snapshot: { expected_plan_status: 'awaiting_confirm', expected_plan_revision: 1, expected_plan_fingerprint: 'a'.repeat(64), expected_step_fingerprint: 'b'.repeat(64) } },",
             "  { id: 'delivery', index: 1, phase: '交付', title: '模型交付动作', status: 'pending', tool_ref: { plugin: 'modeling', tool: 'post_training_action' }, depends_on: ['report-gate'] },",
             "] };",
             "controller.resetFetchThrottle('task-A');",
@@ -12650,6 +12829,147 @@ def test_all_rail_interactions_move_to_middle_workspace():
     assert data["redMonitoringHasConfirm"] is False, data
     assert data["unknownMonitoringHasConfirm"] is False, data
     assert data["conflictingMonitoringHasConfirm"] is False, data
+
+
+def test_plan_start_action_refreshes_when_confirmation_snapshot_changes():
+    """Polling a newer CAS snapshot must replace the actionable start button."""
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = _MINI_DOM_JS + "\n" + "\n".join(
+        [
+            f"const {{ createPlanRailController }} = await import({json.dumps(module_url)});",
+            "const __doc = makeDocument();",
+            "const workflowStepper = __doc.createElement('div');",
+            "const planDriverActions = __doc.createElement('section');",
+            "const elements = { progressRail: { setAttribute() {} }, workflowStepper, planDriverActions };",
+            "function $(id) { return elements[id] || null; }",
+            "let plan = { id: 'plan-refresh', status: 'validated', confirmation_snapshot: {",
+            "  expected_plan_status: 'validated', expected_plan_revision: 1,",
+            "  expected_plan_fingerprint: 'a'.repeat(64),",
+            "}, steps: [] };",
+            "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({ $, getSelectedTask: () => ({ task_type: 'modeling', active_job_kind: null }), getSelectedTaskId: () => 'task-A', getAgentMessages: () => [], isAgentMode: () => false, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "const rs = {};",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const first = planDriverActions.querySelector('.driver-confirm');",
+            "plan = { ...plan, confirmation_snapshot: {",
+            "  expected_plan_status: 'validated', expected_plan_revision: 2,",
+            "  expected_plan_fingerprint: 'c'.repeat(64),",
+            "} };",
+            "controller.resetFetchThrottle('task-A');",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const refreshed = planDriverActions.querySelector('.driver-confirm');",
+            "process.stdout.write(JSON.stringify({",
+            "  firstRevision: first?.dataset.expectedPlanRevision || '',",
+            "  firstFingerprint: first?.dataset.expectedPlanFingerprint || '',",
+            "  refreshedRevision: refreshed?.dataset.expectedPlanRevision || '',",
+            "  refreshedFingerprint: refreshed?.dataset.expectedPlanFingerprint || '',",
+            "}));",
+        ]
+    )
+    data = _run_node_capture_json(script)
+
+    assert data["firstRevision"] == "1", data
+    assert data["firstFingerprint"] == "a" * 64, data
+    assert data["refreshedRevision"] == "2", data
+    assert data["refreshedFingerprint"] == "c" * 64, data
+
+
+def test_agent_gate_action_refreshes_when_step_confirmation_snapshot_changes():
+    """A same-plan step CAS change must replace the actionable gate button."""
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = _MINI_DOM_JS + "\n" + "\n".join(
+        [
+            f"const {{ createPlanRailController }} = await import({json.dumps(module_url)});",
+            "const __doc = makeDocument();",
+            "const workflowStepper = __doc.createElement('div');",
+            "const planDriverActions = __doc.createElement('section');",
+            "const elements = { progressRail: { setAttribute() {} }, workflowStepper, planDriverActions };",
+            "function $(id) { return elements[id] || null; }",
+            "const baseSnapshot = { expected_plan_status: 'awaiting_confirm', expected_plan_revision: 1, expected_plan_fingerprint: 'a'.repeat(64) };",
+            "let plan = { id: 'plan-gate-refresh', status: 'awaiting_confirm', confirmation_snapshot: baseSnapshot, steps: [{",
+            "  id: 'report-gate', index: 0, phase: '报告', title: '生成报告', status: 'awaiting_confirm',",
+            "  tool_ref: { plugin: 'modeling', tool: 'generate_model_reports' }, depends_on: [],",
+            "  confirmation_snapshot: { ...baseSnapshot, expected_step_fingerprint: 'b'.repeat(64) },",
+            "}] };",
+            "const messages = [{ id: 'gate-message', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-gate-refresh', step_id: 'report-gate', gate_source_tool: 'generate_model_reports' } }];",
+            "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({ $, getSelectedTask: () => ({ task_type: 'modeling', active_job_kind: null }), getSelectedTaskId: () => 'task-A', getAgentMessages: () => messages, isAgentMode: () => true, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "const rs = {};",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const first = planDriverActions.querySelector('.driver-confirm');",
+            "plan = { ...plan, steps: [{ ...plan.steps[0], confirmation_snapshot: { ...baseSnapshot, expected_step_fingerprint: 'd'.repeat(64) } }] };",
+            "controller.resetFetchThrottle('task-A');",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const refreshed = planDriverActions.querySelector('.driver-confirm');",
+            "process.stdout.write(JSON.stringify({",
+            "  firstStepFingerprint: first?.dataset.expectedStepFingerprint || '',",
+            "  refreshedStepFingerprint: refreshed?.dataset.expectedStepFingerprint || '',",
+            "}));",
+        ]
+    )
+    data = _run_node_capture_json(script)
+
+    assert data["firstStepFingerprint"] == "b" * 64, data
+    assert data["refreshedStepFingerprint"] == "d" * 64, data
+
+
+def test_plan_gate_stays_disabled_across_rerender_for_local_busy_and_pending_claim():
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    gate_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = _MINI_DOM_JS + "\n" + "\n".join(
+        [
+            f"const {{ createPlanRailController }} = await import({json.dumps(module_url)});",
+            f"const {{ claimDriverGateSubmission, releaseDriverGateSubmission }} = await import({json.dumps(gate_url)});",
+            "const __doc = makeDocument();",
+            "const workflowStepper = __doc.createElement('div');",
+            "const planDriverActions = __doc.createElement('section');",
+            "const elements = { progressRail: { setAttribute() {} }, workflowStepper, planDriverActions };",
+            "function $(id) { return elements[id] || null; }",
+            "const snapshot = { expected_plan_status: 'awaiting_confirm', expected_plan_revision: 1, expected_plan_fingerprint: 'a'.repeat(64), expected_step_fingerprint: 'b'.repeat(64) };",
+            "const plan = { id: 'plan-1', status: 'awaiting_confirm', steps: [{",
+            "  id: 'step-1', index: 0, phase: '报告', title: '生成报告', status: 'awaiting_confirm',",
+            "  tool_ref: { plugin: 'modeling', tool: 'generate_model_reports' }, depends_on: [], confirmation_snapshot: snapshot,",
+            "}] };",
+            "const messages = [{ id: 'gate-1', role: 'assistant', metadata: { kind: 'gate', plan_id: 'plan-1', step_id: 'step-1', gate_source_tool: 'generate_model_reports' } }];",
+            "let localBusy = null;",
+            "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({ $, getSelectedTask: () => ({ task_type: 'modeling', active_job_kind: null }), getTaskBusyAction: () => localBusy, getSelectedTaskId: () => 'task-1', getAgentMessages: () => messages, isAgentMode: () => true, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "const rs = {};",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const ready = planDriverActions.querySelector('.driver-confirm');",
+            "claimDriverGateSubmission({ taskId: 'task-1', planId: 'plan-1', stepId: 'step-1', snapshot });",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const claimed = planDriverActions.querySelector('.driver-confirm');",
+            "releaseDriverGateSubmission({ taskId: 'task-1', planId: 'plan-1', stepId: 'step-1' });",
+            "localBusy = 'driver_execute';",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const busy = planDriverActions.querySelector('.driver-confirm');",
+            "localBusy = null;",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const idleAgain = planDriverActions.querySelector('.driver-confirm');",
+            "process.stdout.write(JSON.stringify({",
+            "  ready: ready?.getAttribute('disabled') == null,",
+            "  claimed: claimed?.getAttribute('disabled') != null,",
+            "  busy: busy?.getAttribute('disabled') != null,",
+            "  idleAgain: idleAgain?.getAttribute('disabled') == null,",
+            "}));",
+        ]
+    )
+    data = _run_node_capture_json(script)
+    assert data == {"ready": True, "claimed": True, "busy": True, "idleAgain": True}
 
 
 def test_acceptance_mode_chip_explains_auto_mode_scope():
@@ -12844,8 +13164,8 @@ def test_driver_wide_tables_keep_a_local_horizontal_scroll_viewport():
     """A wide driver table must shrink with the middle timeline and scroll
     inside its own wrapper instead of expanding the message and being clipped
     by result-scroll-content's intentional x-axis boundary."""
-    styles_css = _read_static("styles.css")
-    v2_css = _read_static("css/v2-workbench.css")
+    styles_css = _read_browser_css()
+    v2_css = _read_browser_css()
 
     assistant_rule = _css_rule(styles_css, ".agent-message.assistant")
     content_rule = _css_rule(styles_css, ".agent-message.assistant .agent-message-content")
@@ -13109,9 +13429,7 @@ def test_task_list_reconciliation_preserves_hovered_row_node_across_poll_ticks()
     the cursor never drops), not wipe the list via innerHTML="" and rebuild."""
     app_js = _read_static("app.js")
     boot_marker = 'document.addEventListener(\n  "mousedown"'
-    app_js = app_js[: app_js.index(boot_marker)].replace(
-        'from "./js/', 'from "./marvis/static/js/'
-    )
+    app_js = _prepare_app_module_for_node(app_js[: app_js.index(boot_marker)])
 
     stubs = _MINI_DOM_JS + r"""
 const __doc = makeDocument();
@@ -13312,7 +13630,7 @@ def test_explicit_driver_execute_promotes_only_the_current_plan_step():
 def test_task_hero_click_collapses_to_title_and_status_only():
     """The top card starts folded and remains manually expandable/collapsible."""
     index_html = _read_static("index.html")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
     app_js = _read_static("app.js")
 
     # DOM: every detail below the title/status row is inside the collapsible
@@ -13329,6 +13647,12 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     assert 'aria-label="展开任务详情"' in hero_markup
     assert 'class="task-hero-details"' in hero_markup
     assert 'id="taskHeroDetails"' in hero_markup
+    details_tag = hero_markup[
+        hero_markup.index('id="taskHeroDetails"'):
+        hero_markup.index(">", hero_markup.index('id="taskHeroDetails"'))
+    ]
+    assert 'aria-hidden="true"' in details_tag
+    assert "inert" in details_tag
     assert 'class="task-hero-details-inner"' in hero_markup
     # The always-visible title row precedes the collapsible details.
     assert hero_markup.index('class="task-hero-top"') < hero_markup.index('id="taskHeroDetails"')
@@ -13366,12 +13690,14 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     assert "[data-copy]" in app_js
     assert '$("taskHero")?.addEventListener("click", handleTaskHeroToggle)' in app_js
     assert 'toggle.setAttribute("aria-expanded"' in app_js
+    assert 'details.setAttribute("aria-hidden", collapsed ? "true" : "false")' in app_js
+    assert 'details.toggleAttribute("inert", collapsed)' in app_js
 
 
 def test_plan_failure_status_keeps_raw_trace_in_timeline_not_task_hero():
     controller = _read_static("js/v2/plan_rail_controller.js")
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     failed_status = controller[
         controller.index('if (status === "failed" || failedStep)'):
@@ -13388,7 +13714,7 @@ def test_plan_failure_status_keeps_raw_trace_in_timeline_not_task_hero():
 def test_agent_composer_bar_is_translucent_glass_like_the_task_hero():
     """The bottom input bar uses the same frosted-glass material as the top status
     card: a translucent surface gradient plus a backdrop blur, not an opaque fill."""
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     bar_rule = _css_rule(styles_css, ".agent-composer-bar")
     assert "backdrop-filter: blur(18px) saturate(1.55)" in bar_rule
@@ -13408,7 +13734,7 @@ def test_settings_panels_use_macos_grouped_cards_with_monochrome_icons():
     """All row-based settings panels share ONE rounded card per group, with
     hairline dividers between rows and a faint monochrome leading icon —
     the macOS System Settings pattern, replacing the old loose flat rows."""
-    styles_css = _read_static("styles.css")
+    styles_css = _read_browser_css()
 
     # Unified card (no per-panel card-stripping overrides survive).
     group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
@@ -13442,7 +13768,7 @@ def test_tool_detail_rows_render_as_grouped_list_with_right_aligned_values():
     """The plugin tool detail is a divided row-list (icon | label | value) inside
     the tool card, not a loose grid of boxed chips."""
     plugin_js = _read_static("js/v2/plugin_manager.js")
-    v2_css = _read_static("css/v2-workbench.css")
+    v2_css = _read_browser_css()
 
     # JS renders a leading monochrome icon per implementation field.
     assert "const TOOL_IMPL_ICONS" in plugin_js
@@ -13486,3 +13812,7 @@ def test_v2_pending_input_contract_has_an_interactive_confirmation_panel():
     assert "function submitValidationInputContract" in app_js
     assert "/validation-input-contract`" in app_js
     assert 'data-validation-contract-submit' in app_js
+    assert 'const taskId = form.dataset.validationContractTaskId || selectedTaskId;' in app_js
+    assert 'await loadValidationInputContract(taskId);' in app_js
+    assert 'if (selectedTaskIsAgentMode()) {' in app_js
+    assert 'await startAgentValidation();' in app_js

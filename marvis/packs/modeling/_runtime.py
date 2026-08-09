@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from marvis.db import ModelingRepository
+from marvis.repositories.modeling import ModelingRepository
 from marvis.feature.candidates import candidate_numeric_features
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError

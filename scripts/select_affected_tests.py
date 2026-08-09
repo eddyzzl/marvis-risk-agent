@@ -41,6 +41,7 @@ STRATEGY_PACK_SHARED_TEST_NAMES = frozenset(
         "test_agent_autodrive.py",
         "test_agent_gate_contracts.py",
         "test_agent_task_routing.py",
+        "test_db_import_boundaries.py",
         "test_governance_api.py",
         "test_governance_policy.py",
         "test_orch_templates.py",

@@ -95,17 +95,26 @@ schemas, and deterministic calculation kernels.
 | **Data processing** | Register CSV/Excel files, infer schemas, profile data, align columns, propose and confirm joins, diagnose match rate, fan-out and row inflation, deduplicate explicitly, run governed transformations, and export safely. | Derived datasets, join evidence, profiling summaries, CSV/XLSX exports |
 | **Labels, samples, and features** | Define bad labels from DPD plus observation and performance windows, check cohort maturity, design development/validation/OOT samples, calculate IV/KS/AUC/PSI/Lift/Coverage, bin numeric and categorical features, analyze correlation and collinearity, encode, impute, cap, and derive features. | Feature evidence, governed sample definitions, selected feature sets, Excel reports |
 | **Model development** | Build binary, regression, and multiclass recipes; check modeling readiness; run governed reject inference with explicit assumptions and sample weights; prepare leakage-aware splits; resolve special values; select features; tune and train multiple recipes; compare experiments; select and calibrate a model; assess segment value; score datasets; and create monitoring handoffs. | Experiments, score evidence, model reports, scored data, PMML for supported recipes, model cards and handoff packages |
-| **Model validation** | Scan Notebook, sample, PMML, and dictionary materials; execute the Notebook; compare in-memory model scores with submitted PMML scores; calculate performance, stability, score consistency, binning, and stress evidence; keep both manual and Agent-assisted paths available. | Structured validation evidence, Excel and Word reports |
+| **Model validation** | Scan Notebook, sample, PMML, and dictionary materials; execute the Notebook; compare in-memory model scores with submitted PMML scores; calculate performance, stability, score consistency, binning, and stress evidence; keep both manual and Agent-assisted paths available. A separate batch entry runs 1–10 isolated validation tasks sequentially, preserves every individual report, and adds a batch summary workbook. | Structured validation evidence, individual Excel and Word reports, batch summary Excel |
 | **Strategy development** | Design approval and risk populations; analyze variables and models; build and refine approval, reject, limit, pricing, and segmentation rules; use automatic and interactive trees, 2D Cross Matrix, 2D/3D cross-threshold search, scorecard cutoffs, and Voting/n-of-k combinations; compile Strategy Pools; measure impact and stability; validate on independent partitions; and adopt local versions through human gates. | Canonical strategies, backtests, ImpactCube evidence, Python/DuckDB SQL/JSON code, JSON/Markdown/XLSX/DOCX reports |
 | **Vintage and risk analysis** | After confirming fields, units, cut-off dates, scenarios, and assumptions, run the selected VTG-terminal/annualized-bad-rate or profitability calculation. Run Standard Vintage and roll-rate as separate governed analyses with bounded cohort/segment evidence. | Audited risk-analysis Excel reports; structured Vintage and roll-rate evidence, charts, assumptions, conclusions, and red flags |
 | **Monitoring and portfolio analytics** | Monitor score and feature stability, strategy thresholds and disposition, turn red monitoring evidence into a governed new-version task, and use implemented portfolio tools for flow rate, bucket migration, segments, concentration, Expected Loss, stability trends, and limit/pricing trade-offs. | Monitoring evidence, portfolio reports, migration tables, pricing matrices |
 | **Agent, governance, and memory** | Clarify intent, instantiate validated workflows, enforce task ownership and confirmation gates, preserve hashes and provenance, and reuse bounded memories about preferences, field definitions, prior performance, and known pitfalls—with source and audit metadata. | Reviewable plans, evidence envelopes, audit history, traceable memory references |
 
-The six primary desktop entries are Data Processing, Feature Analysis, Risk
-Analysis, Model Development, Model Validation, and Strategy Development.
-Monitoring is integrated into model and strategy workflows. Portfolio tools,
-templates, and report rendering are implemented and tested, but portfolio is
-not currently exposed as a first-screen or supported conversational Agent task.
+The eight primary desktop entries are Data Processing, Feature Analysis, Risk
+Analysis, Portfolio Analysis, Model Development, Model Validation, Batch Model
+Validation, and Strategy Development. Monitoring is integrated into model and
+strategy workflows. Batch Model Validation is an isolated 1–10-model flow: it
+does not replace the individual validation task or silently confirm any model's
+input contract.
+Portfolio now has a governed first-screen and conversational Agent journey with
+typed field, balance/EAD, segment, loss-state, LGD, horizon, and report gates;
+its verified public slice is currently the no-trend workflow, not a production
+portfolio-monitoring service. Label construction is exposed inside Data
+Processing rather than as a separate top-level task.
+See [docs/capability-status.md](docs/capability-status.md) for the canonical,
+layer-by-layer acceptance status; implementation is not treated as browser,
+real-data, sign-off, or production proof.
 
 ## Strategy development, end to end
 

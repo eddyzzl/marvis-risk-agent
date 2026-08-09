@@ -20,7 +20,10 @@ from marvis.agent.gate_payloads import (
     build_screen_payload,
     build_special_value_payload,
 )
-from marvis.agent.modeling_red_flags import select_experiment_red_flags, tuning_setup_red_flags
+from marvis.agent.modeling_red_flags import (
+    select_experiment_red_flags,
+    tuning_setup_red_flags,
+)
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStep
 
@@ -50,6 +53,12 @@ def render_gate_dependencies(
     plan: Plan,
     gate: PlanStep | None,
     load_output: Callable[[str], Any],
+    *,
+    render_output: Callable[
+        [PlanStep, Any, str | None],
+        tuple[str, list[dict]],
+    ]
+    | None = None,
 ) -> GateRenderResult:
     result = GateRenderResult()
     confirm_join_o: dict | None = None
@@ -75,17 +84,27 @@ def render_gate_dependencies(
         if output is None:
             continue
         try:
-            text, dep_tables = render_tool_output(
-                dep.tool_ref.tool,
-                output,
-                presentation_state=_dependency_presentation_state(gate, dep),
-            )
+            presentation_state = _dependency_presentation_state(gate, dep)
+            if render_output is None:
+                text, dep_tables = render_tool_output(
+                    dep.tool_ref.tool,
+                    output,
+                    presentation_state=presentation_state,
+                )
+            else:
+                text, dep_tables = render_output(
+                    dep,
+                    output,
+                    presentation_state,
+                )
         except Exception as exc:  # presentation must never rewrite execution truth
-            result.presentation_warnings.append({
-                "step_id": dep.id,
-                "step_title": dep.title,
-                "error": f"{exc.__class__.__name__}: {exc}",
-            })
+            result.presentation_warnings.append(
+                {
+                    "step_id": dep.id,
+                    "step_title": dep.title,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
             result.parts.append(
                 f"「{dep.title}」结果已经生成，但结构化展示暂时失败；"
                 "执行结果和后续进度已保留，可继续处理或稍后重新打开。"
@@ -115,7 +134,11 @@ def render_gate_dependencies(
             modeling_spec_step = dep
         elif dep.tool_ref.tool == "select_features" and isinstance(output, dict):
             select_features_o = output
-        elif dep.tool_ref.tool in {"compare_experiments", "select_experiment", "post_training_action"}:
+        elif dep.tool_ref.tool in {
+            "compare_experiments",
+            "select_experiment",
+            "post_training_action",
+        }:
             model_delivery_o = output if isinstance(output, dict) else None
             model_delivery_step = dep
         elif dep.tool_ref.tool in {"generate_model_report", "generate_model_reports"}:
@@ -168,11 +191,19 @@ def render_gate_dependencies(
             completed=tune_o is not None,
         )
     if model_delivery_o is not None and model_delivery_step is not None:
+        recommended_experiment_id = ""
+        if isinstance(train_models_o, dict):
+            recommended_experiment_id = str(
+                train_models_o.get("best_experiment_id")
+                or train_models_o.get("recommended_experiment_id")
+                or ""
+            ).strip()
         result.model_delivery = build_model_delivery_payload(
             model_delivery_o,
             model_delivery_step,
             report_output=report_o,
             report_step=report_step,
+            recommended_experiment_id=recommended_experiment_id,
         )
     result.dedup = build_dedup_payload(confirm_join_o, propose_join_o)
     result.join_keys = build_join_keys_payload(propose_join_o)
@@ -184,7 +215,9 @@ def render_gate_dependencies(
                 select_features_o,
             ),
         ),
-        *select_experiment_red_flags(tune_output=tune_o, train_models_output=train_models_o),
+        *select_experiment_red_flags(
+            tune_output=tune_o, train_models_output=train_models_o
+        ),
     ]
     return result
 
@@ -248,7 +281,9 @@ def _with_pending_tuning_budget(output: dict, gate: PlanStep | None) -> dict:
         recipes = list(budgets)
     primary = str(output.get("recipe") or recipes[0])
     scalar_budget = budgets.get(primary, next(iter(budgets.values())))
-    budget_note = "、".join(f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets)
+    budget_note = "、".join(
+        f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets
+    )
     total = sum(budgets.get(recipe, 0) for recipe in recipes)
     return {
         **output,
@@ -319,7 +354,9 @@ def _rewrite_pending_tuning_budget(
     if not completed and (gate is None or gate.tool_ref.tool != "configure_tuning"):
         return
     budgets = displayed_output.get("n_trials_by_recipe")
-    recipes = [str(item) for item in (displayed_output.get("recipes") or []) if str(item)]
+    recipes = [
+        str(item) for item in (displayed_output.get("recipes") or []) if str(item)
+    ]
     if not isinstance(budgets, dict) or not budgets:
         return
     ordered = [(recipe, budgets[recipe]) for recipe in recipes if recipe in budgets]
@@ -343,7 +380,9 @@ def _find_step(plan: Plan, step_id: str) -> PlanStep | None:
     return None
 
 
-def _dependency_presentation_state(gate: PlanStep | None, dependency: PlanStep) -> str | None:
+def _dependency_presentation_state(
+    gate: PlanStep | None, dependency: PlanStep
+) -> str | None:
     """Tell stateful renderers whether a completed output is preview or history.
 
     ``make_split`` is a proposal only at the feature-screen gate.  Once that gate

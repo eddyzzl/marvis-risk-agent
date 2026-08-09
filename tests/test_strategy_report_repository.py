@@ -268,15 +268,16 @@ def test_migration_021_remains_registered_in_current_schema_and_builds_guarded_r
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 24
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert db_schema_module._MIGRATIONS[-1][0] == db_schema_module.SCHEMA_VERSION
     assert (
         21,
         db_schema_module._migration_021_strategy_report_docx,
     ) in db_schema_module._MIGRATIONS
-    assert db_schema_module._MIGRATIONS[-3] == (
+    assert (
         22,
         db_schema_module._migration_022_strategy_pool_materializations,
-    )
+    ) in db_schema_module._MIGRATIONS
     assert {"strategy_report_heads", "strategy_report_revisions"} <= tables
     assert {
         "trg_strategy_report_revisions_parent",

@@ -9,6 +9,7 @@ from marvis.agent.strategy_request_compiler import (
     compile_strategy_request,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 RULE_A = "candidate-rule-" + "a" * 32
@@ -135,7 +136,7 @@ def test_voting_candidate_compiles_exact_rule_set_and_n() -> None:
         RULE_C,
     }
     assert result.draft.to_dict()["workflow_inputs"]["n"] == 2
-    assert llm.calls[0]["prompt_version"] == 52
+    assert llm.calls[0]["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "voting_candidate_build" in llm.calls[0]["system_prompt"]
 
 

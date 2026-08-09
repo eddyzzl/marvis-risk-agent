@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
+import json
 from typing import Any
 
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
@@ -172,6 +174,50 @@ def plan_to_dict(plan: Plan) -> dict[str, Any]:
         "loop_events": [_loop_event_to_dict(event) for event in plan.loop_events],
         "success_criteria": [dict(item) for item in plan.success_criteria],
     }
+
+
+def plan_fingerprint(plan: Plan) -> str:
+    """Canonical hash used to compare-and-swap a reviewed plan snapshot."""
+
+    return plan_payload_fingerprint(plan_to_dict(plan))
+
+
+def plan_payload_fingerprint(payload: dict[str, Any]) -> str:
+    return _canonical_payload_fingerprint(payload)
+
+
+def plan_step_confirmation_fingerprint(
+    step: PlanStep,
+    *,
+    confirmed: bool = False,
+) -> str:
+    """Hash every persisted step field plus its one-shot confirmed flag."""
+
+    return plan_step_payload_confirmation_fingerprint(
+        _step_to_dict(step),
+        confirmed=confirmed,
+    )
+
+
+def plan_step_payload_confirmation_fingerprint(
+    payload: dict[str, Any],
+    *,
+    confirmed: bool,
+) -> str:
+    return _canonical_payload_fingerprint(
+        {**payload, "confirmed": bool(confirmed)}
+    )
+
+
+def _canonical_payload_fingerprint(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def plan_from_dict(payload: dict[str, Any]) -> Plan:

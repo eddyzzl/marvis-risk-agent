@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request
 from marvis.errors import conflict
 
 from marvis.api_task_helpers import get_task_or_404
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TaskStatus
 from marvis.files import write_text_atomic
 from marvis.job_cancellation import request_job_cancellation

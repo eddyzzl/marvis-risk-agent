@@ -73,7 +73,17 @@ export function renderModelDeliveryPanel(message, options = {}) {
   const policyHtml = policySignalSummary(delivery.policy_signals);
   const policyDecisionHtml = policyDecisionSummary(delivery.policy_decision);
   const metricsHtml = metricsGrid(delivery.metrics);
-  const candidatesHtml = candidateTable(delivery.candidates);
+  const expectedPlanId = String(message?.metadata?.plan_id || "");
+  const expectedStepId = String(message?.metadata?.step_id || "");
+  const candidateSelectionGate = message?.metadata?.kind === "gate"
+    && String(message?.metadata?.gate_source_tool || "") === "select_experiment"
+    && sourceTool === "compare_experiments";
+  const candidatesHtml = candidateTable(delivery.candidates, {
+    interactive: candidateSelectionGate,
+    expectedPlanId,
+    expectedStepId,
+    recommendedExperimentId: trustedRecommendedExperimentId(delivery),
+  });
   const actionsHtml = actionTable(delivery.actions);
   const reportHtml = reportSummary(delivery.report);
   const artifactsHtml = artifactList(delivery, { taskId });
@@ -125,15 +135,50 @@ function metricsGrid(metrics) {
   </div>`;
 }
 
-function candidateTable(candidates) {
+function trustedRecommendedExperimentId(delivery) {
+  const candidates = Array.isArray(delivery?.candidates)
+    ? delivery.candidates.filter((item) => item && typeof item === "object")
+    : [];
+  const ids = new Set(candidates.map((item) => String(item.id || "")).filter(Boolean));
+  const declared = String(
+    delivery?.recommended_experiment_id
+    || delivery?.best_experiment_id
+    || ""
+  ).trim();
+  if (declared && ids.has(declared)) return declared;
+  const marked = candidates.find((item) => item.recommended === true);
+  const markedId = String(marked?.id || "").trim();
+  return ids.has(markedId) ? markedId : "";
+}
+
+function candidateTable(candidates, options = {}) {
   const rows = Array.isArray(candidates) ? candidates.filter((item) => item && typeof item === "object") : [];
   if (!rows.length) return "";
+  const interactive = options.interactive === true;
+  const expectedPlanId = String(options.expectedPlanId || "");
+  const expectedStepId = String(options.expectedStepId || "");
+  const recommendedExperimentId = String(options.recommendedExperimentId || "");
+  const selectedRow = rows.find((row) => row.selected === true && String(row.id || ""));
+  const firstCandidateId = String(rows.find((row) => String(row.id || ""))?.id || "");
+  const defaultExperimentId = recommendedExperimentId
+    || String(selectedRow?.id || "")
+    || firstCandidateId;
+  const radioName = `model-candidate-${expectedPlanId || "plan"}-${expectedStepId || "step"}`;
   const metricKeys = sortedMetricKeys([
     ...new Set(rows.flatMap((row) => Object.keys(row.metrics && typeof row.metrics === "object" ? row.metrics : {}))),
   ]).slice(0, 6);
-  const headers = ["算法", "实验", ...metricKeys, "稳定性", "特征数", "校准", "交付", "单调性", "审批"];
+  const headers = [
+    ...(interactive ? ["选择"] : []),
+    "算法", "实验", ...metricKeys, "稳定性", "特征数", "校准", "交付", "单调性", "审批",
+  ];
+  const selectionNote = interactive
+    ? `<div class="model-delivery-selection-note">${recommendedExperimentId
+      ? "已默认勾选平台推荐候选；请复核后确认。"
+      : "平台未提供可追溯的推荐候选，已默认勾选首项；请复核后确认。"}</div>`
+    : "";
   return `<div class="model-delivery-table-wrap">
     <div class="modeling-section-label">候选实验</div>
+    ${selectionNote}
     <table class="model-delivery-table">
       <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
       <tbody>${rows.map((row) => {
@@ -141,9 +186,20 @@ function candidateTable(candidates) {
         const metrics = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
         const signals = row.business_signals && typeof row.business_signals === "object" ? row.business_signals : {};
         const policy = row.policy_signals && typeof row.policy_signals === "object" ? row.policy_signals : {};
+        const candidateId = String(row.id || "");
         const selected = row.selected === true;
+        const recommended = candidateId && candidateId === recommendedExperimentId;
+        const checked = interactive && candidateId === defaultExperimentId;
+        const choiceCell = interactive
+          ? `<td><input type="radio" data-model-candidate-choice="1" data-expected-plan-id="${escapeHtml(expectedPlanId)}" data-expected-step-id="${escapeHtml(expectedStepId)}" name="${escapeHtml(radioName)}" value="${escapeHtml(candidateId)}" aria-label="选择候选实验 ${escapeHtml(candidateId || "未知")}"${checked ? " checked" : ""}${candidateId ? "" : " disabled"}></td>`
+          : "";
+        const badges = [
+          selected ? '<span class="model-delivery-selected">已选</span>' : "",
+          recommended ? '<span class="model-delivery-selected">平台推荐</span>' : "",
+        ].filter(Boolean).join(" ");
         return `<tr${selected ? ' class="is-selected"' : ""}>
-          <td>${escapeHtml(String(row.recipe || "-"))}${selected ? ' <span class="model-delivery-selected">已选</span>' : ""}</td>
+          ${choiceCell}
+          <td>${escapeHtml(String(row.recipe || "-"))}${badges ? ` ${badges}` : ""}</td>
           <td><code>${escapeHtml(String(row.id || "-"))}</code></td>
           ${metricKeys.map((key) => `<td class="model-delivery-num">${escapeHtml(formatMetric(metrics[key]))}</td>`).join("")}
           <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(signals.stability))}">${signalGlyph(signalKind(signals.stability))}${escapeHtml(String(signals.stability || "-"))}</span></td>

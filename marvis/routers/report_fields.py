@@ -6,7 +6,7 @@ from marvis.errors import bad_request, conflict, precondition_required, unproces
 from marvis.api_report_field_helpers import build_report_field_payload
 from marvis.api_schemas import ReportFieldsUpdateRequest
 from marvis.api_task_helpers import get_task_or_404
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.state_machine import ConflictError
 
 

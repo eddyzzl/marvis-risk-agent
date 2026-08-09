@@ -6,7 +6,7 @@ import traceback
 from typing import Any
 
 from marvis.agent.orchestrator import AgentValidationCancelled
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 
 
 @dataclass(frozen=True)

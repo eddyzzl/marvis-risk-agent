@@ -57,6 +57,24 @@ class _DeliveryLLM:
         self.strategy_id = strategy_id
 
     def complete(self, **kwargs) -> str:
+        if kwargs.get("caller") in {
+            "semantic_intent_router",
+            "semantic_intent_reviewer",
+        }:
+            instruction = json.loads(kwargs["user_prompt"])["instruction"]
+            return json.dumps(
+                {
+                    "intent": "strategy_workflow",
+                    "evidence_quote": instruction,
+                    "reason": "用户明确要求进入策略交付工作流。",
+                    "confidence": "high",
+                    "is_question": False,
+                    "is_conditional": False,
+                    "requests_change": False,
+                    "withholds_action": False,
+                },
+                ensure_ascii=False,
+            )
         return json.dumps(
             {
                 "request_kind": "standard_workflow",

@@ -24,6 +24,7 @@ from marvis.data.backend import (
 from marvis.data.contracts import SMALL_SAMPLE_N
 from marvis.data.dedup import two_level_dedup
 from marvis.data.errors import (
+    DatasetContentDriftError,
     DatasetTooLargeError,
     DedupRequiredError,
     KeyDtypeMismatchError,
@@ -1967,11 +1968,25 @@ def tool_slice_aggregate(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset_id = str(inputs["dataset_id"])
     dataset = runtime.registry.get(dataset_id)
-    path = runtime.registry.resolve_path(dataset.id)
+    task_id = str(ctx.task_id)
+    if dataset.task_id != task_id:
+        raise DatasetContentDriftError(
+            dataset_id,
+            reason="dataset belongs to a different task",
+        )
+    expected_content_hash = str(
+        inputs.get("expected_content_hash") or dataset.content_hash or ""
+    )
+    binding = runtime.registry.authenticate_dataset_binding(
+        dataset.id,
+        expected_task_id=task_id,
+        expected_content_hash=expected_content_hash,
+    )
+    snapshot = runtime.registry.read_authenticated_binding_snapshot(binding)
     # The column whitelist IS the dataset profile: only names the backend can see in
     # the physical file are legal anywhere in the spec (group_by/metrics/filters/
     # month_col/sort_by). Anything else -> DataSecurityError from sql_identifier.
-    allowed_columns = set(runtime.backend.column_names(path))
+    allowed_columns = {str(column) for column in snapshot.columns}
 
     group_by = [str(col) for col in (inputs.get("group_by") or [])]
     if len(group_by) > _MAX_GROUP_BY:
@@ -2000,7 +2015,7 @@ def tool_slice_aggregate(inputs: dict, ctx) -> dict:
     order_sql = _order_clause(
         _optional_str(inputs.get("sort_by")), group_by, metric_labels, allowed_columns
     )
-    rel = runtime.backend._duckdb_rel(path)  # parquet_rel/csv_rel -- read-only scan
+    rel = '"_slice_snapshot"'
     select_parts = [*group_sql, *metric_selects]
     query = (
         f"SELECT {', '.join(select_parts)} FROM {rel}{where_clause}"
@@ -2010,6 +2025,7 @@ def tool_slice_aggregate(inputs: dict, ctx) -> dict:
     )
     params = [*where_params, *month_params]
     with connect_duckdb(runtime.backend._temp_directory) as conn:
+        conn.register("_slice_snapshot", snapshot)
         scanned_row = conn.execute(f"SELECT count(*) FROM {rel}{where_clause}", params).fetchone()
         frame = conn.execute(query, params).df()
 
@@ -2057,6 +2073,7 @@ def tool_slice_aggregate(inputs: dict, ctx) -> dict:
 
     spec_echo = {
         "dataset_id": dataset_id,
+        "expected_content_hash": binding.content_hash,
         "group_by": group_by,
         "metrics": [{"op": str(m.get("op")), "col": _optional_str(m.get("col"))} for m in metrics],
         "filters": [
@@ -2077,6 +2094,7 @@ def tool_slice_aggregate(inputs: dict, ctx) -> dict:
             outcome="succeeded",
             detail={
                 "task_id": str(ctx.task_id),
+                "expected_content_hash": binding.content_hash,
                 "group_by": group_by,
                 "metrics": spec_echo["metrics"],
                 "n_rows_scanned": n_rows_scanned,

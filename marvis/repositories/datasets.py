@@ -1,6 +1,6 @@
 import json
 import sqlite3
-import uuid
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +16,8 @@ from marvis.data.contracts import (
     KeyPair,
 )
 from marvis.db_schema import connect
+from marvis.repositories.audit import _write_audit_row
+from marvis.safe_paths import canonical_relative_posix_path
 from marvis.state_machine import ConflictError
 
 
@@ -104,6 +106,91 @@ class DatasetRepository:
         ).fetchone()
         return None if row is None else _dataset_from_row(row)
 
+    def pin_dataset_source_path(
+        self,
+        dataset_id: str,
+        *,
+        expected_source_path: str,
+        expected_content_hash: str,
+        content_addressed_source_path: str,
+        validate_content_addressed_source: Callable[[], None],
+    ) -> None:
+        """CAS-update one dataset row to its immutable content-addressed object."""
+
+        destination = Path(content_addressed_source_path)
+        if (
+            destination.is_absolute()
+            or not destination.parts
+            or ".." in destination.parts
+            or len(destination.parts) != 3
+            or destination.parts[0] != "_cas"
+            or destination.parts[1] != expected_content_hash
+            or destination.name != f"{expected_content_hash}.parquet"
+        ):
+            raise ValueError(
+                "content-addressed dataset source_path must encode its registered hash"
+            )
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT task_id, source_path, content_hash
+                  FROM datasets
+                 WHERE id = ?
+                """,
+                (dataset_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(dataset_id)
+            current_source = str(row["source_path"])
+            current_hash = str(row["content_hash"] or "")
+            validate_content_addressed_source()
+            if (
+                current_source == content_addressed_source_path
+                and current_hash == expected_content_hash
+            ):
+                return
+            if (
+                current_source != expected_source_path
+                or current_hash != expected_content_hash
+            ):
+                raise ConflictError(
+                    f"dataset {dataset_id} changed while pinning its source"
+                )
+            cursor = conn.execute(
+                """
+                UPDATE datasets
+                   SET source_path = ?
+                 WHERE id = ?
+                   AND source_path = ?
+                   AND content_hash = ?
+                """,
+                (
+                    content_addressed_source_path,
+                    dataset_id,
+                    expected_source_path,
+                    expected_content_hash,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ConflictError(
+                    f"dataset {dataset_id} changed while pinning its source"
+                )
+            _write_audit_row(
+                conn,
+                kind="dataset.source.pinned",
+                target_ref=dataset_id,
+                actor="system:data-workspace",
+                outcome="succeeded",
+                detail={
+                    "task_id": str(row["task_id"]),
+                    "dataset_id": dataset_id,
+                    "content_hash": expected_content_hash,
+                    "previous_source_path": expected_source_path,
+                    "content_addressed_source_path": content_addressed_source_path,
+                },
+            )
+
     def set_dataset_role(self, dataset_id: str, role: str) -> None:
         with connect(self.db_path) as conn:
             cursor = conn.execute(
@@ -112,6 +199,80 @@ class DatasetRepository:
             )
             if cursor.rowcount == 0:
                 raise KeyError(dataset_id)
+
+    def set_authenticated_target_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        dataset_id: str,
+        expected_task_id: str,
+        expected_content_hash: str,
+        expected_source_path: str,
+        target_col: str | None,
+        validate_authenticated_source: Callable[[], None],
+    ) -> None:
+        """CAS-persist one C1 target choice inside the plan-start transaction."""
+
+        if target_col is not None and (not isinstance(target_col, str) or not target_col):
+            raise ValueError("authenticated target_col must be null or non-empty text")
+        row = conn.execute(
+            """
+            SELECT task_id, source_path, content_hash, has_target, target_col
+              FROM datasets
+             WHERE id = ?
+            """,
+            (dataset_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(dataset_id)
+        validate_authenticated_source()
+        if (
+            str(row["task_id"]) != expected_task_id
+            or str(row["source_path"]) != expected_source_path
+            or str(row["content_hash"] or "") != expected_content_hash
+        ):
+            raise ConflictError(
+                f"dataset {dataset_id} changed before C1 target persistence"
+            )
+        cursor = conn.execute(
+            """
+            UPDATE datasets
+               SET has_target = ?, target_col = ?
+             WHERE id = ?
+               AND task_id = ?
+               AND source_path = ?
+               AND content_hash = ?
+            """,
+            (
+                int(target_col is not None),
+                target_col,
+                dataset_id,
+                expected_task_id,
+                expected_source_path,
+                expected_content_hash,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ConflictError(
+                f"dataset {dataset_id} changed before C1 target persistence"
+            )
+        _write_audit_row(
+            conn,
+            kind="dataset.target.confirmed",
+            target_ref=dataset_id,
+            actor="user:c1",
+            outcome="succeeded",
+            detail={
+                "task_id": expected_task_id,
+                "dataset_id": dataset_id,
+                "content_hash": expected_content_hash,
+                "target_col": target_col,
+                "previous_has_target": bool(row["has_target"]),
+                "previous_target_col": (
+                    None if row["target_col"] is None else str(row["target_col"])
+                ),
+            },
+        )
 
     def create_join_plan(self, plan: JoinPlan) -> None:
         with connect(self.db_path) as conn:
@@ -215,11 +376,14 @@ class DatasetRepository:
 
 
 def _dataset_insert_values(dataset: Dataset) -> tuple:
+    canonical_source_path = canonical_relative_posix_path(dataset.source_path)
+    if canonical_source_path != dataset.source_path:
+        raise ValueError("dataset source_path must use canonical relative POSIX form")
     return (
         dataset.id,
         dataset.task_id,
         dataset.role,
-        dataset.source_path,
+        canonical_source_path,
         dataset.format,
         dataset.sheet,
         dataset.row_count,
@@ -416,37 +580,6 @@ def _diagnostics_from_dict(payload: dict) -> JoinDiagnostics:
         for item in divergences
     )
     return JoinDiagnostics(**data)
-
-
-def _write_audit_row(
-    conn: sqlite3.Connection,
-    *,
-    kind: str,
-    target_ref: str,
-    actor: str = "system",
-    inputs_hash: str | None = None,
-    outcome: str | None = None,
-    detail: dict | None = None,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO audit(
-            id, kind, actor, target_ref, inputs_hash, outcome,
-            detail_json, at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            uuid.uuid4().hex,
-            kind,
-            actor,
-            target_ref,
-            inputs_hash,
-            outcome,
-            json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
-            _now(),
-        ),
-    )
 
 
 def _optional_str(value) -> str | None:

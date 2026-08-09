@@ -32,6 +32,24 @@ def _task(client: TestClient, tmp_path: Path) -> str:
     return response.json()["id"]
 
 
+def _agent_task(client: TestClient, tmp_path: Path, suffix: str) -> str:
+    source = client.app.state.settings.workspace / f"agent-source-{tmp_path.name}-{suffix}"
+    source.mkdir(exist_ok=True)
+    response = client.post(
+        "/api/tasks",
+        json={
+            "model_name": f"语义分派-{suffix}",
+            "validator": "qa",
+            "source_dir": str(source),
+            "task_type": "strategy",
+            "run_mode": "agent",
+            "target_col": "bad",
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
 def _register(client: TestClient, task_id: str, tmp_path: Path):
     source = tmp_path / f"{task_id}.csv"
     pd.DataFrame(
@@ -116,6 +134,27 @@ def _last_assistant(response) -> dict:
         for message in response.json()["messages"]
         if message["role"] == "assistant"
     ][-1]
+
+
+def _configure_agent_model(client: TestClient) -> None:
+    response = client.put(
+        "/api/settings/llm",
+        json={
+            "default_model_id": "m1",
+            "models": [
+                {
+                    "model_id": "m1",
+                    "enabled": True,
+                    "display_name": "语义分派测试模型",
+                    "provider": "OpenAI Compatible",
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "intent-test",
+                    "api_key": "secret",
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
 
 
 def test_natural_language_transform_gets_first_refusal_and_activates_child(tmp_path):
@@ -265,6 +304,81 @@ def test_registry_target_is_protected_before_workspace_semantics_are_saved(tmp_p
     result = registry.get(active.active_dataset_id)
     assert result.target_col is None
     assert "bad" not in [column.name for column in result.columns]
+
+
+def test_agent_semantics_dispatches_dataset_and_strategy_routes_before_lexical_guards(
+    tmp_path,
+    monkeypatch,
+):
+    client = TestClient(create_app(tmp_path / "semantic-workspace"))
+    instructions = {
+        "把申请金额严格转成文本": "dataset_transform",
+        "给我一份这批样本的 Excel 文件": "dataset_export",
+        "帮我摸摸这批样本的底": "dataset_analysis",
+        "我想让风险和通过量更平衡一些": "strategy_workflow",
+    }
+
+    class SemanticLLM:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def complete(self, **kwargs):
+            if kwargs.get("caller") == "strategy_request_compiler":
+                return "not-json"
+            request = json.loads(kwargs["user_prompt"])
+            instruction = request["instruction"]
+            return json.dumps(
+                {
+                    "intent": instructions[instruction],
+                    "evidence_quote": instruction,
+                    "reason": "完整语义指向该受约束入口",
+                    "confidence": "high",
+                    "is_question": False,
+                    "is_conditional": False,
+                    "requests_change": False,
+                    "withholds_action": False,
+                },
+                ensure_ascii=False,
+            )
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.OpenAICompatibleLLMClient",
+        SemanticLLM,
+    )
+    _configure_agent_model(client)
+    responses: dict[str, dict] = {}
+    for index, instruction in enumerate(instructions):
+        task_id = _agent_task(client, tmp_path, str(index))
+        case_path = tmp_path / str(index)
+        case_path.mkdir()
+        _, dataset = _register(client, task_id, case_path)
+        _activate(client, task_id, dataset)
+        response = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json={"content": instruction, "model_id": "m1"},
+        )
+        assert response.status_code == 202, response.text
+        responses[instruction] = _last_assistant(response)
+
+    assert "数据加工完成" in responses["把申请金额严格转成文本"]["content"]
+    assert responses["给我一份这批样本的 Excel 文件"]["metadata"][
+        "intent"
+    ] == "dataset_export"
+    assert responses["给我一份这批样本的 Excel 文件"]["metadata"][
+        "code"
+    ] == "export_request_clarification"
+    assert responses["帮我摸摸这批样本的底"]["metadata"]["intent"] == (
+        "dataset_analysis"
+    )
+    assert responses["帮我摸摸这批样本的底"]["metadata"]["code"] == (
+        "analysis_request_clarification"
+    )
+    assert responses["我想让风险和通过量更平衡一些"]["metadata"]["intent"] == (
+        "strategy_request"
+    )
+    assert responses["我想让风险和通过量更平衡一些"]["metadata"]["kind"] == (
+        "clarification"
+    )
 
 
 def test_repeated_casts_run_as_two_ordered_tool_steps(tmp_path):

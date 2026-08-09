@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -624,6 +625,51 @@ def test_audit_loader_preserves_history_but_current_loader_rejects_live_ref_tamp
         load_current_strategy_project_context(fx["runtime"], task_id=fx["task"].id)
 
 
+def test_current_loader_rejects_registered_artifact_provenance_tamper(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    source = Path(fx["task"].source_dir) / "provenance.pdf"
+    source.write_bytes(b"registered provenance")
+    output = run_materialize_project_context(
+        _request_bound_to_message(
+            fx,
+            "使用 provenance.pdf 作为历史证据。",
+            external_report_filenames=[source.name],
+        ),
+        fx["ctx"],
+        fx["runtime"],
+    )
+    artifact_id = output["external_artifacts"][0]["artifact_id"]
+    record = fx["runtime"].task_artifacts.get_for_task(fx["task"].id, artifact_id)
+    assert record is not None
+    tampered = {
+        **record["provenance"],
+        "content_size": int(record["provenance"]["content_size"]) + 1,
+    }
+    with fx["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        conn.execute(
+            "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+            (
+                json.dumps(
+                    tampered,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                artifact_id,
+            ),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match="provenance"):
+        load_current_strategy_project_context(
+            fx["runtime"],
+            task_id=fx["task"].id,
+        )
+
+
 def test_both_loaders_reject_context_artifact_tamper(tmp_path: Path) -> None:
     fx = _setup(tmp_path)
     output = run_materialize_project_context(fx["request"], fx["ctx"], fx["runtime"])
@@ -856,6 +902,118 @@ def test_discovers_sample_design_before_missing_and_preserves_observed_zero(
         load_current_strategy_project_context(fx["runtime"], task_id=fx["task"].id)
         == output["revision"]
     )
+
+
+def test_current_loader_authenticates_each_supporting_artifact_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "apply_month": ["202601", "202601", "202602"],
+            "bad": [0, 1, 0],
+        }
+    )
+    source = tmp_path / "authenticated-once.parquet"
+    frame.to_parquet(source, index=False)
+    backend = DataBackend(fx["settings"].datasets_dir)
+    registry = DatasetRegistry(
+        DatasetRepository(fx["settings"].db_path),
+        backend,
+        fx["settings"].datasets_dir,
+    )
+    dataset = registry.register_existing(
+        source,
+        task_id=fx["task"].id,
+        role="strategy_sample",
+    )
+    workspaces = DataWorkspaceRepository(fx["settings"].db_path)
+    activated = workspaces.save(
+        fx["task"].id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+        ),
+        expected_revision=0,
+    )
+    mapping = DataSemanticMapping(
+        target_col="bad",
+        field_roles={"apply_month": "month", "bad": "target"},
+    )
+    workspace = workspaces.save(
+        fx["task"].id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+            semantic_mapping=mapping,
+        ),
+        expected_revision=activated.revision,
+    )
+    fx["runtime"].backend = backend
+    fx["runtime"].registry = registry
+    run_materialize_sample_design(
+        {
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": 1,
+            "performance_window_status": "provided",
+            "performance_window_days": 30,
+            "observation_window_status": "provided",
+            "observation_window_start": "2026-01-01",
+            "observation_window_end": "2026-02-28",
+            "maturity_status": "confirmed_matured",
+            "month_col": "apply_month",
+            "drop_nan_labels": False,
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
+    output = run_materialize_project_context(
+        {**fx["request"], "as_of": "2026-12-31"},
+        fx["ctx"],
+        fx["runtime"],
+    )
+    derived_refs = [
+        item
+        for item in output["revision"]["state"]["source_refs"]
+        if item["kind"]
+        in {"task_artifact", "sample_design", "metric_definition", "metric_observation"}
+    ]
+    assert len(derived_refs) > 1
+    sample_record = next(
+        item
+        for item in fx["runtime"].task_artifacts.list_for_task(fx["task"].id)
+        if item["kind"] == project_context_tools.SAMPLE_DESIGN_ARTIFACT_KIND
+    )
+    sample_path = Path(sample_record["path"])
+    authenticated_paths: list[Path] = []
+    original_read = project_context_tools._read_regular_nofollow
+
+    def counted_read(path: Path, *, max_bytes: int) -> tuple[bytes, str]:
+        normalized = Path(path)
+        if normalized == sample_path:
+            authenticated_paths.append(normalized)
+        return original_read(normalized, max_bytes=max_bytes)
+
+    monkeypatch.setattr(
+        project_context_tools,
+        "_read_regular_nofollow",
+        counted_read,
+    )
+
+    assert (
+        load_current_strategy_project_context(
+            fx["runtime"],
+            task_id=fx["task"].id,
+        )
+        == output["revision"]
+    )
+    assert authenticated_paths == [sample_path]
 
 
 def test_as_of_excludes_future_strategy_backtest_adoption_and_monitoring(

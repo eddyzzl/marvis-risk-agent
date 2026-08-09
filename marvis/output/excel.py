@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 import re
 from typing import Iterable
@@ -22,9 +23,15 @@ from marvis.output.styles import (
     BRAND_HEADER_FONT_COLOR,
     FONT_NAME,
     FONT_SIZE_PT,
-    ks_delta_cell_color,
+    STRESS_MEDIUM_FILL,
+    ks_drop_ratio,
+    stress_ks_risk,
+    stress_psi_risk,
+    stress_risk_cell_color,
     status_cell_color,
+    worst_stress_risk,
 )
+from marvis.output.xlsx_safety import safe_xlsx_cell
 from marvis.validation.results import (
     BinRow,
     ConsistencyStatus,
@@ -287,7 +294,11 @@ def _write_roc_ks_images(workbook: Workbook, results: ValidationResults, image_d
     image_dir.mkdir(parents=True, exist_ok=True)
     for index, split in enumerate(("train", "test", "oot")):
         start_row = index * 32 + 1
-        sheet.cell(row=start_row, column=1, value=f"{split} ROC曲线和KS曲线")
+        sheet.cell(
+            row=start_row,
+            column=1,
+            value=safe_xlsx_cell(f"{split} ROC曲线和KS曲线"),
+        )
         sheet.cell(row=start_row, column=1).font = Font(name=FONT_NAME, size=FONT_SIZE_PT, bold=True)
         image_path = render_roc_ks_graph(
             results.effectiveness.roc_ks_curves.get(split),
@@ -358,49 +369,295 @@ def _write_monthly_effectiveness(workbook: Workbook, results: ValidationResults)
 
 def _write_stress_summary(workbook: Workbook, results: ValidationResults) -> None:
     sheet = workbook.create_sheet("压力测试_汇总")
+    sheet.sheet_view.showGridLines = False
     rows: list[tuple] = [(
         "类别",
-        "状态",
-        "置 -9999 特征数",
         "KS_baseline",
         "KS_after",
         "KS_delta",
+        "KS衰减率",
         "PSI",
-        "错误",
+        "测试结果",
     )]
     baseline_ks = results.stress_test.baseline.ks
+    baseline_psi = _oot_psi(results)
+    rows.append(("baseline", baseline_ks, "", "", "", baseline_psi, ""))
+    category_risks: list[str | None] = []
+    for item in results.stress_test.per_category:
+        ks_risk = (
+            stress_ks_risk(baseline_ks, item.ks_after)
+            if item.ks_after is not None and item.status == "completed"
+            else None
+        )
+        psi_risk = (
+            stress_psi_risk(item.psi_vs_baseline)
+            if item.status == "completed"
+            else None
+        )
+        overall_risk = worst_stress_risk(ks_risk, psi_risk)
+        category_risks.append(overall_risk)
+        rows.append((
+            item.category,
+            baseline_ks,
+            item.ks_after if item.ks_after is not None else "",
+            item.ks_delta if item.ks_delta is not None else "",
+            (
+                ks_drop_ratio(baseline_ks, item.ks_after)
+                if item.ks_after is not None
+                else ""
+            ),
+            item.psi_vs_baseline if item.psi_vs_baseline is not None else "",
+            _stress_risk_label(overall_risk),
+        ))
+
+    _write_rows(
+        sheet,
+        rows,
+        header_rows=1,
+        decimal_columns={1, 2, 3, 5},
+        number_formats={4: "0.0%"},
+    )
+    sheet.freeze_panes = "A2"
+
+    if baseline_psi is not None:
+        _fill_stress_risk_cell(sheet.cell(row=2, column=6), stress_psi_risk(baseline_psi))
+    for row_index, (item, overall_risk) in enumerate(
+        zip(results.stress_test.per_category, category_risks, strict=True),
+        start=3,
+    ):
+        ks_risk = (
+            stress_ks_risk(baseline_ks, item.ks_after)
+            if item.ks_after is not None and item.status == "completed"
+            else None
+        )
+        psi_risk = (
+            stress_psi_risk(item.psi_vs_baseline)
+            if item.status == "completed"
+            else None
+        )
+        _fill_stress_risk_cell(sheet.cell(row=row_index, column=4), ks_risk)
+        _fill_stress_risk_cell(sheet.cell(row=row_index, column=5), ks_risk)
+        _fill_stress_risk_cell(sheet.cell(row=row_index, column=6), psi_risk)
+        if overall_risk is None:
+            sheet.cell(row=row_index, column=7).fill = PatternFill(
+                start_color=STRESS_MEDIUM_FILL,
+                end_color=STRESS_MEDIUM_FILL,
+                fill_type="solid",
+            )
+        else:
+            _fill_stress_risk_cell(sheet.cell(row=row_index, column=7), overall_risk)
+
+    notes_start = len(rows) + 2
     unclassified = results.stress_test.unclassified_features
     coverage_text = f"未分类特征 {len(unclassified)} 个"
     if unclassified:
         coverage_text += "：" + _feature_name_preview(unclassified)
-    rows.append((
-        "分类覆盖",
-        _stress_status_label(results.stress_test.status),
-        0,
-        baseline_ks,
-        "",
-        "",
-        "",
-        coverage_text,
-    ))
-    rows.extend(
-        (item.category, _stress_status_label(item.status), len(item.dropped_features), baseline_ks,
-         item.ks_after if item.ks_after is not None else "",
-         item.ks_delta if item.ks_delta is not None else "",
-         item.psi_vs_baseline if item.psi_vs_baseline is not None else "",
-         item.error or "")
-        for item in results.stress_test.per_category
+    source_counts = "，".join(
+        f"{source} {count}"
+        for source, count in sorted(results.stress_test.category_source_counts.items())
     )
-    _write_rows(sheet, rows, header_rows=1, decimal_columns={3, 4, 5, 6})
-    # color KS_delta cells based on threshold
-    for row_index, item in enumerate(results.stress_test.per_category, start=3):
-        if item.ks_delta is None:
-            continue
-        color = ks_delta_cell_color(item.ks_delta)
-        if color:
-            sheet.cell(row=row_index, column=6).fill = PatternFill(
-                start_color=color, end_color=color, fill_type="solid",
+    if source_counts:
+        coverage_text = f"{coverage_text}；类别映射来源：{source_counts}"
+    note_rows = [
+        (
+            "测试方法",
+            "压力测试主要基于某个信源缺失情景下模型关键指标的偏移情况及其影响进行测试，"
+            "关注有效性 KS、稳定性 PSI 及其 OOT 分数偏移。",
+        ),
+        (
+            f"分类覆盖：{_stress_status_label(results.stress_test.status)}",
+            coverage_text,
+        ),
+        (
+            "置 -9999 说明",
+            "每个类别对应的入模原始字段统一置 -9999，并在同一 OOT 样本上重新评分；"
+            "所有类别复用 baseline OOT 的等频分箱边界。",
+        ),
+    ]
+    _write_note_rows(sheet, note_rows, start_row=notes_start)
+
+    matrix_start = notes_start + len(note_rows) + 1
+    alignment_notes = _write_stress_bin_share_matrix(
+        sheet,
+        results,
+        category_risks,
+        start_row=matrix_start,
+    )
+    legend_start = matrix_start + len(results.stress_test.baseline.bin_table) + 4
+    if alignment_notes:
+        for offset, note in enumerate(alignment_notes):
+            sheet.cell(
+                row=legend_start + offset,
+                column=1,
+                value=safe_xlsx_cell(note),
             )
+        legend_start += len(alignment_notes) + 1
+    _write_stress_legend(sheet, start_row=legend_start)
+
+    sheet.column_dimensions["A"].width = 20
+    for column in range(2, max(8, len(results.stress_test.per_category) + 2)):
+        sheet.column_dimensions[get_column_letter(column)].width = 18
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.print_area = f"A1:{get_column_letter(max(7, len(results.stress_test.per_category) + 1))}{sheet.max_row}"
+
+
+def _oot_psi(results: ValidationResults) -> float | None:
+    for row in results.effectiveness.overall:
+        if str(row.split).lower() == "oot":
+            return float(row.psi_vs_train)
+    return None
+
+
+def _stress_risk_label(risk: str | None) -> str:
+    return {
+        "low": "低风险",
+        "medium": "中风险",
+        "high": "高风险",
+    }.get(str(risk or ""), "无法评估")
+
+
+def _fill_stress_risk_cell(cell, risk: str | None) -> None:
+    color = stress_risk_cell_color(risk)
+    if not color:
+        return
+    cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+
+
+def _write_note_rows(sheet, rows: list[tuple[str, str]], *, start_row: int) -> None:
+    label_font = Font(name=FONT_NAME, size=FONT_SIZE_PT, bold=True, color="C00000")
+    body_font = Font(name=FONT_NAME, size=FONT_SIZE_PT)
+    for offset, (label, body) in enumerate(rows):
+        row_index = start_row + offset
+        label_cell = sheet.cell(
+            row=row_index,
+            column=1,
+            value=safe_xlsx_cell(label),
+        )
+        body_cell = sheet.cell(
+            row=row_index,
+            column=2,
+            value=safe_xlsx_cell(body),
+        )
+        label_cell.font = label_font
+        body_cell.font = body_font
+        label_cell.alignment = Alignment(vertical="top", wrap_text=True)
+        body_cell.alignment = Alignment(vertical="top", wrap_text=True)
+        sheet.merge_cells(start_row=row_index, start_column=2, end_row=row_index, end_column=7)
+        sheet.row_dimensions[row_index].height = 34
+
+
+def _write_stress_bin_share_matrix(
+    sheet,
+    results: ValidationResults,
+    category_risks: list[str | None],
+    *,
+    start_row: int,
+) -> list[str]:
+    baseline_bins = results.stress_test.baseline.bin_table
+    categories = results.stress_test.per_category
+    aligned_shares: list[list[float] | None] = []
+    notes: list[str] = []
+    for item in categories:
+        shares = _aligned_stress_bin_shares(baseline_bins, item.bin_table)
+        if item.status != "completed" or shares is None:
+            aligned_shares.append(None)
+            reason = item.error or "分箱边界不可对齐"
+            notes.append(f"{item.category}：{reason}，分箱占比留空。")
+        else:
+            aligned_shares.append(shares)
+
+    rows: list[tuple] = [("OOT分箱", *(item.category for item in categories))]
+    for bin_position, baseline_bin in enumerate(baseline_bins):
+        rows.append((
+            _score_interval(baseline_bin.score_lower, baseline_bin.score_upper),
+            *(
+                shares[bin_position] if shares is not None else ""
+                for shares in aligned_shares
+            ),
+        ))
+    rows.append((
+        "合计",
+        *(sum(shares) if shares is not None else "" for shares in aligned_shares),
+    ))
+    _write_rows(
+        sheet,
+        rows,
+        header_rows=1,
+        number_formats={index: "0.0%" for index in range(1, len(categories) + 1)},
+        start_row=start_row,
+    )
+    for category_index, risk in enumerate(category_risks, start=1):
+        color = stress_risk_cell_color(risk) or "BFBFBF"
+        _apply_reference_conditional_formatting(
+            sheet,
+            start_row=start_row + 1,
+            end_row=start_row + len(baseline_bins),
+            data_bar_columns={category_index: color},
+            color_scale_columns=set(),
+        )
+    return notes
+
+
+def _aligned_stress_bin_shares(
+    baseline_bins: list[BinRow],
+    category_bins: list[BinRow],
+) -> list[float] | None:
+    if len(baseline_bins) != len(category_bins):
+        return None
+    for baseline, category in zip(baseline_bins, category_bins, strict=True):
+        if baseline.bin_index != category.bin_index:
+            return None
+        if not _same_score_bound(baseline.score_lower, category.score_lower):
+            return None
+        if not _same_score_bound(baseline.score_upper, category.score_upper):
+            return None
+    total = sum(row.sample_count for row in category_bins)
+    if total <= 0:
+        return None
+    return [row.sample_count / total for row in category_bins]
+
+
+def _same_score_bound(left: float, right: float) -> bool:
+    return math.isclose(float(left), float(right), rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _write_stress_legend(sheet, *, start_row: int) -> None:
+    headers = ("压力测试", "低风险", "中风险", "高风险")
+    descriptions = (
+        "压力测试关注信源缺失时的有效性 KS、稳定性 PSI 及 OOT 分数偏移。",
+        "✓ KS衰减范围：[0,10%)\nPSI范围：[0,0.10)\n特征缺失影响不大，可继续使用，但需常规稳定性监控。",
+        "— KS衰减范围：[10%,20%)\nPSI范围：[0.10,0.25)\n达到预警阈值，异常时需人工核验并及时通知模型团队。",
+        "! KS衰减范围：[20%,+∞)\nPSI范围：[0.25,+∞)\n需内置实时监控与熔断机制，必要时降级至备用评分或启动人工复核。",
+    )
+    header_fill = PatternFill(
+        start_color=BRAND_HEADER_FILL,
+        end_color=BRAND_HEADER_FILL,
+        fill_type="solid",
+    )
+    risk_fills = (None, "low", "medium", "high")
+    for column_index, header in enumerate(headers, start=1):
+        header_cell = sheet.cell(row=start_row, column=column_index, value=header)
+        header_cell.font = Font(
+            name=FONT_NAME,
+            size=FONT_SIZE_PT,
+            bold=True,
+            color=BRAND_HEADER_FONT_COLOR,
+        )
+        header_cell.fill = header_fill
+        header_cell.alignment = Alignment(horizontal="center", vertical="center")
+        body_cell = sheet.cell(
+            row=start_row + 1,
+            column=column_index,
+            value=descriptions[column_index - 1],
+        )
+        body_cell.font = Font(name=FONT_NAME, size=FONT_SIZE_PT)
+        body_cell.alignment = Alignment(vertical="top", wrap_text=True)
+        _fill_stress_risk_cell(body_cell, risk_fills[column_index - 1])
+        sheet.column_dimensions[get_column_letter(column_index)].width = 28
+    sheet.row_dimensions[start_row + 1].height = 86
 
 
 def _feature_name_preview(features: list[str], *, limit: int = 20) -> str:
@@ -470,6 +727,7 @@ def _write_rows(
     number_formats: dict[int, str] | None = None,
     data_bar_columns: dict[int, str] | None = None,
     color_scale_columns: set[int] | None = None,
+    start_row: int = 1,
 ) -> None:
     percent_columns = percent_columns or set()
     decimal_columns = decimal_columns or set()
@@ -495,14 +753,19 @@ def _write_rows(
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     column_count = max(len(row) for row in rows)
-    for row_index, row_values in enumerate(rows, start=1):
+    header_end_row = start_row + header_rows - 1
+    for row_index, row_values in enumerate(rows, start=start_row):
         for column_index in range(column_count):
             value = row_values[column_index] if column_index < len(row_values) else ""
-            cell = sheet.cell(row=row_index, column=column_index + 1, value=value)
-            cell.font = header_font if row_index <= header_rows else body_font
+            cell = sheet.cell(
+                row=row_index,
+                column=column_index + 1,
+                value=safe_xlsx_cell(value),
+            )
+            cell.font = header_font if row_index <= header_end_row else body_font
             cell.alignment = center
             cell.border = border
-            if row_index <= header_rows:
+            if row_index <= header_end_row:
                 cell.fill = header_fill
             else:
                 if column_index in percent_columns and isinstance(value, (int, float)):
@@ -514,8 +777,8 @@ def _write_rows(
 
     _apply_reference_conditional_formatting(
         sheet,
-        start_row=header_rows + 1,
-        end_row=len(rows),
+        start_row=start_row + header_rows,
+        end_row=start_row + len(rows) - 1,
         data_bar_columns=data_bar_columns,
         color_scale_columns=color_scale_columns,
     )

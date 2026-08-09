@@ -86,6 +86,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+from marvis.repositories.audit import _list_audit_rows
 
 
 TRAIN_MODEL_WITH_EVIDENCE_V2_TOOL_SCHEMA_VERSION = (
@@ -479,6 +480,7 @@ def validate_train_model_with_evidence_v2_tool_output(
     *,
     runtime,
     task_id: str,
+    trusted_inputs: object | None = None,
 ) -> dict[str, Any]:
     """Validate a Tool envelope through the live immutable registries.
 
@@ -536,6 +538,34 @@ def validate_train_model_with_evidence_v2_tool_output(
     )
     if obj != expected or governance != expected["governance"]:
         raise ModelingError("training-evidence output drifted from live artifacts")
+    if trusted_inputs is not None:
+        request = _validate_inputs(trusted_inputs)
+        if request["sample_design_ref"] != sample_ref:
+            raise ModelingError(
+                "training-evidence output is not bound to this step's inputs"
+            )
+        rows = _list_audit_rows(
+            Path(runtime.settings.db_path),
+            kind=TRAIN_MODEL_WITH_EVIDENCE_V2_AUDIT_KIND,
+            target_ref=str(obj["evidence_id"]),
+        )
+        expected_detail = {
+            "task_id": task_id,
+            "experiment_id": obj["experiment_id"],
+            "model_artifact_id": obj["model_artifact_id"],
+            "model_binary_artifact_id": model_output["artifact_id"],
+            "training_evidence_artifact_id": evidence_output["artifact_id"],
+        }
+        if not any(
+            row.get("outcome") == "succeeded"
+            and row.get("inputs_hash") == _request_hash(request)
+            and isinstance(row.get("detail"), Mapping)
+            and all(row["detail"].get(key) == expected_value for key, expected_value in expected_detail.items())
+            for row in rows
+        ):
+            raise ModelingError(
+                "training-evidence producer audit is not bound to this step's inputs"
+            )
     return obj
 
 

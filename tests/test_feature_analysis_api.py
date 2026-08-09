@@ -8,6 +8,7 @@ the wide table in one synchronous run, no screening gate.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -66,7 +67,9 @@ def _finish_optional_binning(
     response = client.post(f"/api/tasks/{task_id}/agent/messages", json={
         "content": "确认",
         "ui_action": "confirm_feature_binning",
+        "expected_plan_id": gate["metadata"]["plan_id"],
         "expected_step_id": gate["metadata"]["step_id"],
+        **gate["metadata"]["confirmation_snapshot"],
         "adjust_params": {"features": features or [], "bins": bins},
     })
     assert response.status_code == 202, response.text
@@ -113,7 +116,9 @@ def test_feature_analysis_end_to_end(client: TestClient, tmp_path: Path):
     response = client.post(f"/api/tasks/{task_id}/agent/messages", json={
         "content": "确认",
         "ui_action": "confirm_feature_binning",
+        "expected_plan_id": bin_gate["metadata"]["plan_id"],
         "expected_step_id": gate_step_id,
+        **bin_gate["metadata"]["confirmation_snapshot"],
         "adjust_params": {"features": ["sig1", "sig2"], "bins": 5},
     })
     assert response.status_code == 202, response.text
@@ -251,6 +256,267 @@ def test_feature_analysis_ambiguous_target_can_be_selected_and_persists(
     assert task["target_col"] == "label_a"
     done = _finish_optional_binning(client, task_id)
     assert "特征分析完成" in done["content"]
+
+
+def test_feature_analysis_agent_target_review_rejects_normalized_byte_swap(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A reviewed target choice cannot authorize different normalized bytes."""
+
+    class _SemanticClient:
+        normalized_path: Path | None = None
+        mutated = False
+
+        def complete(self, *_args, **kwargs):
+            if kwargs.get("prompt_name") == "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS":
+                assert self.normalized_path is not None
+                if not self.mutated:
+                    self.mutated = True
+                    frame = pd.read_parquet(self.normalized_path)
+                    frame["x1"] = frame["x1"].iloc[::-1].to_numpy()
+                    frame.to_parquet(self.normalized_path, index=False)
+                instruction = json.loads(kwargs["user_prompt"])["instruction"]
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": instruction,
+                        "reason": "用户明确选择 label_a 作为目标列。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "action": "confirm",
+                    "params": {},
+                    "constraint": "",
+                    "reason": "用户明确选择当前数据集中的 label_a。",
+                    "confidence": "high",
+                    "explicit_authorization": True,
+                },
+                ensure_ascii=False,
+            )
+
+    semantic_client = _SemanticClient()
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: semantic_client,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda _request, _task: semantic_client,
+    )
+
+    src = _ambiguous_target_dir(tmp_path)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "目标列语义复核漂移阻断",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "feature_analysis",
+            "run_mode": "agent",
+        },
+    ).json()["id"]
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert started.status_code == 202, started.text
+    datasets = client.get(f"/api/tasks/{task_id}/datasets").json()["datasets"]
+    assert len(datasets) == 1
+    semantic_client.normalized_path = (
+        client.app.state.settings.datasets_dir / datasets[0]["source_path"]
+    )
+    initial_target_col = client.get(f"/api/tasks/{task_id}").json()["target_col"]
+
+    selected = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "请使用 label_a 作为目标列并继续。"},
+    )
+
+    assert selected.status_code == 202, selected.text
+    assert semantic_client.mutated
+    messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    error = _last_assistant(messages)
+    assert error["metadata"].get("error") is True
+    assert "数据或 DataWorkspace 已变化" in error["content"]
+    assert "刷新后重新确认" in error["content"]
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert not any(
+        item.get("metadata", {}).get("intent") == "c1_semantic_authorization"
+        for item in messages
+    )
+    assert (
+        client.get(f"/api/tasks/{task_id}").json()["target_col"]
+        == initial_target_col
+    )
+
+
+def test_feature_target_plan_failure_rolls_back_target_and_authorization(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Target, C1 receipt, and plan publish as one recoverable transaction."""
+
+    from marvis.db import DatasetRepository
+
+    class _SemanticClient:
+        review_calls = 0
+
+        def complete(self, *_args, **kwargs):
+            if kwargs.get("prompt_name") == "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS":
+                instruction = json.loads(kwargs["user_prompt"])["instruction"]
+                self.review_calls += 1
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": instruction,
+                        "reason": "用户明确选择 label_a。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "action": "confirm",
+                    "params": {},
+                    "constraint": "",
+                    "reason": "用户明确选择当前数据集中的 label_a。",
+                    "confidence": "high",
+                    "explicit_authorization": True,
+                },
+                ensure_ascii=False,
+            )
+
+    semantic_client = _SemanticClient()
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: semantic_client,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda _request, _task: semantic_client,
+    )
+    src = _ambiguous_target_dir(tmp_path)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "目标列原子提交",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "feature_analysis",
+            "run_mode": "agent",
+        },
+    ).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    initial_target = client.get(f"/api/tasks/{task_id}").json()["target_col"]
+    c1_state = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )["metadata"]["join_c1"]
+    anchor_id = c1_state["anchor_id"]
+
+    def anchor_dataset():
+        return next(
+            item
+            for item in DatasetRepository(
+                client.app.state.settings.db_path
+            ).list_datasets(task_id)
+            if item.id == anchor_id
+        )
+
+    assert anchor_dataset().target_col is None
+
+    original_create_plan = client.app.state.plan_repo.create_plan
+    fail_once = True
+
+    def create_plan_with_callback_failure(plan, *, on_connection=None):
+        nonlocal fail_once
+        if not fail_once:
+            return original_create_plan(plan, on_connection=on_connection)
+        fail_once = False
+
+        def callback_then_fail(conn):
+            assert on_connection is not None
+            on_connection(conn)
+            raise RuntimeError("injected failure after setup persistence")
+
+        return original_create_plan(plan, on_connection=callback_then_fail)
+
+    monkeypatch.setattr(
+        client.app.state.plan_repo,
+        "create_plan",
+        create_plan_with_callback_failure,
+    )
+    instruction = "请使用 label_a 作为目标列并按当前方案执行。"
+    failed = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": instruction},
+    )
+
+    assert failed.status_code == 202, failed.text
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert client.get(f"/api/tasks/{task_id}").json()["target_col"] == initial_target
+    assert anchor_dataset().target_col is None
+    assert anchor_dataset().has_target is False
+    failed_messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert not any(
+        item.get("metadata", {}).get("intent") == "c1_semantic_authorization"
+        for item in failed_messages
+    )
+    assert not any(
+        item["role"] == "assistant"
+        and item.get("content", "").startswith("分析数据集 `")
+        for item in failed_messages
+    )
+
+    for non_retry in (
+        "为什么 label_a 会失败？",
+        "label_a 是原选择，但不要重试。",
+    ):
+        held = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json={"content": non_retry},
+        )
+        assert held.status_code == 202, held.text
+        assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+        assert semantic_client.review_calls == 1
+
+    retried = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": instruction},
+    )
+
+    assert retried.status_code == 202, retried.text
+    assert semantic_client.review_calls == 2
+    assert len(client.get(f"/api/tasks/{task_id}/plans").json()["plans"]) == 1
+    assert client.get(f"/api/tasks/{task_id}").json()["target_col"] == "label_a"
+    assert anchor_dataset().target_col == "label_a"
+    assert anchor_dataset().has_target is True
+    retried_messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert sum(
+        item.get("metadata", {}).get("intent") == "c1_semantic_authorization"
+        for item in retried_messages
+    ) == 1
+    assert sum(
+        item["role"] == "assistant"
+        and item.get("content", "").startswith("分析数据集 `")
+        for item in retried_messages
+    ) == 1
 
 
 def test_feature_analysis_honors_explicit_target_without_clarification(

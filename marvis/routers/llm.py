@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from marvis.db import llm_usage_summary
+from marvis.repositories.llm_calls import llm_usage_summary
 
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])

@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from marvis.agent.join_setup import (
+    authenticate_join_selection,
     JoinSetupError,
     build_join_proposal,
     discover_join_inputs,
@@ -81,6 +82,73 @@ def test_propose_roles_is_deterministic_anchor_first(tmp_path):
     b = _register_csv(registry, tmp_path, "b", pd.DataFrame({"acct": [10, 11, 12], "amt": [100, 200, 300]}), role="feature")
     ordered = propose_roles([b, a])
     assert ordered[0].id == a.id  # target-carrying first regardless of input order / row count
+
+
+def test_authenticate_join_selection_pins_exact_registered_bytes(tmp_path):
+    registry = _registry(tmp_path)
+    anchor = _register_csv(
+        registry,
+        tmp_path,
+        "sample",
+        pd.DataFrame({"acct": [10, 11], "bad_flag": [0, 1]}),
+        role="sample",
+    )
+    feature = _register_csv(
+        registry,
+        tmp_path,
+        "feature",
+        pd.DataFrame({"acct": [10, 11], "amount": [100, 200]}),
+        role="feature",
+    )
+
+    selection = authenticate_join_selection(
+        registry,
+        "task-1",
+        anchor_id=anchor.id,
+        feature_ids=[feature.id],
+        expected_content_hashes={
+            anchor.id: anchor.content_hash,
+            feature.id: feature.content_hash,
+        },
+    )
+
+    assert selection.anchor.dataset_id == anchor.id
+    assert selection.anchor.content_hash == anchor.content_hash
+    assert [item.dataset_id for item in selection.features] == [feature.id]
+    assert selection.anchor.relative_path == (
+        f"_cas/{anchor.content_hash}/{anchor.content_hash}.parquet"
+    )
+    assert selection.anchor.path.is_file()
+    assert registry.get(anchor.id).source_path == selection.anchor.relative_path
+    refreshed = build_join_proposal(registry, "task-1", source_dir=None)
+    assert {item.name for item in refreshed.files} == {"sample.csv", "feature.csv"}
+
+
+def test_authenticate_join_selection_rejects_normalized_parquet_swap(tmp_path):
+    registry = _registry(tmp_path)
+    anchor = _register_csv(
+        registry,
+        tmp_path,
+        "sample",
+        pd.DataFrame({"acct": [10, 11], "bad_flag": [0, 1]}),
+        role="sample",
+    )
+    normalized = registry.resolve_path(anchor.id)
+    pd.DataFrame({"acct": [10, 11], "bad_flag": [1, 1]}).to_parquet(
+        normalized,
+        index=False,
+    )
+
+    with pytest.raises(JoinSetupError, match="数据或 DataWorkspace 已变化"):
+        authenticate_join_selection(
+            registry,
+            "task-1",
+            anchor_id=anchor.id,
+            feature_ids=[],
+            expected_content_hashes={anchor.id: anchor.content_hash},
+        )
+
+    assert registry.get(anchor.id).source_path == anchor.source_path
 
 
 def test_build_proposal_reconciles_third_source_file_after_two_are_registered(tmp_path):

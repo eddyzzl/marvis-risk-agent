@@ -98,6 +98,7 @@ def test_flow_rate_hand_computed_matrix_and_exited(tmp_path):
         ToolRef("analysis", "flow_rate"),
         {
             "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
             "id_col": "loan_id",
             "snapshot_col": "snapshot_month",
             "bucket_col": "bucket",
@@ -127,6 +128,7 @@ def test_flow_rate_sparse_month_red_flag(tmp_path):
         ToolRef("analysis", "flow_rate"),
         {
             "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
             "id_col": "loan_id",
             "snapshot_col": "snapshot_month",
             "bucket_col": "bucket",
@@ -150,6 +152,7 @@ def test_flow_rate_unknown_bucket_typed_error(tmp_path):
         ToolRef("analysis", "flow_rate"),
         {
             "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
             "id_col": "loan_id",
             "snapshot_col": "snapshot_month",
             "bucket_col": "bucket",
@@ -170,6 +173,7 @@ def test_bucket_migration_hand_computed_avg(tmp_path):
         ToolRef("analysis", "bucket_migration"),
         {
             "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
             "id_col": "loan_id",
             "snapshot_col": "snapshot_month",
             "bucket_col": "bucket",
@@ -199,7 +203,12 @@ def test_segment_profile_hand_computed_hhi_and_other_merge(tmp_path):
     dataset = _register(registry, tmp_path, task.id, frame, "seg")
     result = runner.invoke(
         ToolRef("analysis", "segment_profile"),
-        {"dataset_id": dataset.id, "segment_col": "seg", "target_col": "y"},
+        {
+            "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
+            "segment_col": "seg",
+            "target_col": "y",
+        },
         task_id=task.id,
     )
     assert result.ok is True, result.error
@@ -212,7 +221,13 @@ def test_segment_profile_hand_computed_hhi_and_other_merge(tmp_path):
     # top_k=1 -> B,C merged into 「其他」
     merged = runner.invoke(
         ToolRef("analysis", "segment_profile"),
-        {"dataset_id": dataset.id, "segment_col": "seg", "target_col": "y", "top_k": 1},
+        {
+            "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
+            "segment_col": "seg",
+            "target_col": "y",
+            "top_k": 1,
+        },
         task_id=task.id,
     )
     assert merged.ok is True, merged.error
@@ -263,6 +278,7 @@ def test_expected_loss_absorbing_chain_hand_computed(tmp_path):
         ToolRef("analysis", "expected_loss_estimate"),
         {
             "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
             "id_col": "loan_id",
             "snapshot_col": "snapshot_month",
             "bucket_col": "bucket",

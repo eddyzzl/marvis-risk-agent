@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import pytest
@@ -28,6 +29,22 @@ def _join_dir(root: Path, n: int = 50) -> Path:
     pd.DataFrame({"mobile": phones, "bad_flag": [i % 2 for i in range(n)]}).to_parquet(src / "sample.parquet")
     pd.DataFrame({
         "phone_md5": [hashlib.md5(p.encode()).hexdigest() for p in phones],
+        "balance": list(range(n)),
+    }).to_parquet(src / "features.parquet")
+    return src
+
+
+def _join_dir_with_ambiguous_targets(root: Path, n: int = 50) -> Path:
+    src = root / "join_ambiguous_targets"
+    src.mkdir(parents=True, exist_ok=True)
+    phones = [f"138{i:08d}" for i in range(n)]
+    pd.DataFrame({
+        "mobile": phones,
+        "label_sqandzy": [i % 2 for i in range(n)],
+        "label_sqandzy_new": [(i + 1) % 2 for i in range(n)],
+    }).to_parquet(src / "sample.parquet")
+    pd.DataFrame({
+        "phone_md5": [hashlib.md5(phone.encode()).hexdigest() for phone in phones],
         "balance": list(range(n)),
     }).to_parquet(src / "features.parquet")
     return src
@@ -105,12 +122,85 @@ def _last_assistant(messages: list[dict]) -> dict:
     return [m for m in messages if m["role"] == "assistant"][-1]
 
 
+_TYPED_GATE_SNAPSHOT_FIELDS = frozenset(
+    {
+        "expected_plan_status",
+        "expected_plan_revision",
+        "expected_plan_fingerprint",
+        "expected_step_fingerprint",
+    }
+)
+
+
+def _typed_gate_action_payload(
+    message: dict,
+    *,
+    action: str,
+    content: str,
+    adjust_params: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a browser action from the exact gate snapshot returned by GET."""
+
+    metadata = message.get("metadata") or {}
+    snapshot = metadata.get("confirmation_snapshot") or {}
+    assert _TYPED_GATE_SNAPSHOT_FIELDS <= set(snapshot), metadata
+    assert metadata.get("plan_id") and metadata.get("step_id"), metadata
+    payload: dict[str, object] = {
+        "content": content,
+        "ui_action": action,
+        "expected_plan_id": metadata["plan_id"],
+        "expected_step_id": metadata["step_id"],
+        **snapshot,
+        "acceptance_mode": "manual",
+    }
+    if adjust_params is not None:
+        payload["adjust_params"] = adjust_params
+    return payload
+
+
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path))
 
 
-def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
+def _prebind_single_c1_workspace(
+    client: TestClient,
+    task_id: str,
+    c1_state: dict,
+) -> None:
+    from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft
+    from marvis.repositories.data_workspace import DataWorkspaceRepository
+    from marvis.repositories.datasets import DatasetRepository
+
+    dataset = DatasetRepository(
+        client.app.state.settings.db_path
+    ).get_dataset(c1_state["anchor_id"])
+    assert dataset is not None
+    target_col = c1_state["target_col"]
+    DataWorkspaceRepository(
+        client.app.state.settings.db_path
+    ).save_initial_binding(
+        task_id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+            page="overview",
+            selected_field=target_col,
+            semantic_mapping=DataSemanticMapping(
+                target_col=target_col,
+                field_roles={target_col: "target"},
+                business_names={},
+            ),
+        ),
+        expected_revision=0,
+    )
+
+
+def test_data_join_conversation_end_to_end(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+):
     src = _join_dir(tmp_path)
     resp = client.post("/api/tasks", json={
         "model_name": "拼接测试",
@@ -144,6 +234,12 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
         message["role"] == "assistant" and "收到角色与目标列确认" in message["content"]
         for message in role_messages
     )
+    from marvis.repositories.tasks import TaskRepository as CurrentTaskRepository
+
+    persisted_task = CurrentTaskRepository(
+        client.app.state.settings.db_path
+    ).get_task(task_id)
+    assert persisted_task.target_col == "bad_flag"
     overview = _last_assistant(role_messages)
     assert "手动模式请点击「开始执行」" in overview["content"]
     assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
@@ -163,13 +259,63 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
     assert "1:1 保持" in done["content"]
     result_dataset = done["metadata"]["result_dataset"]
     assert result_dataset["dataset_id"]
-    assert result_dataset["download_url"] == (
+    assert result_dataset["title"] == "拼接结果已生成"
+    assert result_dataset["download_label"] == "下载拼接结果"
+    parsed_download = urlparse(result_dataset["download_url"])
+    assert parsed_download.path == (
         f"/api/tasks/{task_id}/datasets/{result_dataset['dataset_id']}/download"
     )
+    bound_query = parse_qs(parsed_download.query)
+    assert bound_query == {
+        "plan_id": [result_dataset["plan_id"]],
+        "step_id": [result_dataset["step_id"]],
+        "output_ref": [result_dataset["output_ref"]],
+        "expected_content_hash": [result_dataset["content_hash"]],
+    }
     download = client.get(result_dataset["download_url"])
     assert download.status_code == 200
     assert download.content
     assert "attachment" in download.headers["content-disposition"]
+    partial = client.get(
+        result_dataset["download_url"],
+        headers={"Range": "bytes=0-31"},
+    )
+    assert partial.status_code == 206
+    assert partial.content == download.content[:32]
+    assert partial.headers["accept-ranges"] == "bytes"
+    assert partial.headers["content-range"] == (
+        f"bytes 0-31/{len(download.content)}"
+    )
+
+    # Close the verify-to-open race: replacing the source after registry
+    # verification but before the HTTP response opens it must not serve the
+    # replacement bytes.
+    from marvis.data.registry import DatasetRegistry
+
+    original_resolve = DatasetRegistry.resolve_verified_path
+    replaced_paths = []
+
+    def replace_after_registry_verification(registry, dataset_id):
+        path = original_resolve(registry, dataset_id)
+        path.write_bytes(b"replacement during response open")
+        replaced_paths.append(path)
+        return path
+
+    monkeypatch.setattr(
+        DatasetRegistry,
+        "resolve_verified_path",
+        replace_after_registry_verification,
+    )
+    raced_download = client.get(result_dataset["download_url"])
+    assert raced_download.status_code == 409
+    assert raced_download.content != b"replacement during response open"
+    monkeypatch.setattr(
+        DatasetRegistry,
+        "resolve_verified_path",
+        original_resolve,
+    )
+    assert replaced_paths
+    replaced_paths[0].write_bytes(download.content)
 
     # Compatibility: an old completion message has no download metadata.  A
     # reload recovers it from immutable plan output without changing the audit row.
@@ -186,6 +332,209 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
     recovered = reloaded["metadata"]["result_dataset"]
     assert recovered["dataset_id"] == result_dataset["dataset_id"]
     assert recovered["recovered_from_plan"] is True
+    assert recovered["title"] == "拼接结果已生成"
+    assert recovered["download_label"] == "下载拼接结果"
+
+    # The action is bound to the exact bytes committed by this plan.  Even if
+    # both the registry record and file are consistently replaced later, the
+    # old completion link must reject rather than silently serve the new bytes.
+    replacement = tmp_path / "datasets" / "replacement-result.parquet"
+    replacement.write_bytes(b"replacement result bytes")
+    replacement_hash = hashlib.sha256(replacement.read_bytes()).hexdigest()
+    from marvis.db import connect
+
+    with connect(tmp_path / "marvis.sqlite") as conn:
+        conn.execute(
+            "UPDATE datasets SET source_path = ?, content_hash = ? WHERE id = ?",
+            (
+                replacement.relative_to(tmp_path / "datasets").as_posix(),
+                replacement_hash,
+                result_dataset["dataset_id"],
+            ),
+        )
+    drifted_download = client.get(result_dataset["download_url"])
+    assert drifted_download.status_code == 409
+    assert "binding changed" in drifted_download.json()["detail"]
+
+
+def test_data_join_typed_replan_actions_use_live_get_snapshot_and_fail_closed(
+    client: TestClient,
+    tmp_path: Path,
+):
+    """JOIN key/exclusion controls reject malformed, stale, and withheld actions."""
+
+    src = _join_dir_with_two_conflicting_features(tmp_path, n=14)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "拼接 typed UI action",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    ).status_code == 202
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "开始"},
+    ).status_code == 202
+
+    join_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    plan = client.app.state.plan_repo.load_plan(join_gate["metadata"]["plan_id"])
+    propose_step = next(
+        step for step in plan.steps if step.tool_ref.tool == "propose_join"
+    )
+    feature_ids = list(propose_step.inputs["feature_ids"])
+    assert len(feature_ids) == 2
+    key_overrides = {feature_id: ["mobile"] for feature_id in feature_ids}
+
+    before_invalid = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    missing_keys = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            join_gate,
+            action="apply_join_keys",
+            content="重新诊断拼接键",
+        ),
+    )
+    assert missing_keys.status_code == 422, missing_keys.text
+    unknown_field_payload = _typed_gate_action_payload(
+        join_gate,
+        action="apply_join_keys",
+        content="重新诊断拼接键",
+        adjust_params={"key_overrides": key_overrides},
+    )
+    unknown_field_payload["unknown_top_level"] = True
+    unknown_field = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=unknown_field_payload,
+    )
+    assert unknown_field.status_code == 422, unknown_field.text
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == before_invalid
+
+    apply_keys_payload = _typed_gate_action_payload(
+        join_gate,
+        action="apply_join_keys",
+        content="重新诊断拼接键",
+        adjust_params={"key_overrides": key_overrides},
+    )
+    applied_keys = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=apply_keys_payload,
+    )
+    assert applied_keys.status_code == 202, applied_keys.text
+    revised_join_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    revised_plan = client.app.state.plan_repo.load_plan(
+        revised_join_gate["metadata"]["plan_id"]
+    )
+    revised_propose = next(
+        step for step in revised_plan.steps if step.tool_ref.tool == "propose_join"
+    )
+    assert revised_propose.inputs["key_overrides"] == key_overrides
+
+    after_keys = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    stale_keys = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=apply_keys_payload,
+    )
+    assert stale_keys.status_code == 409, stale_keys.text
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == after_keys
+
+    unknown_feature = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            revised_join_gate,
+            action="exclude_join_feature",
+            content="排除不存在的特征表",
+            adjust_params={"exclude_join_feature_id": "not-a-live-feature-id"},
+        ),
+    )
+    assert unknown_feature.status_code == 409, unknown_feature.text
+    assert "已不在当前拼接方案" in unknown_feature.json()["detail"]
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == after_keys
+    unchanged_unknown_plan = client.app.state.plan_repo.load_plan(
+        revised_join_gate["metadata"]["plan_id"]
+    )
+    unchanged_unknown_propose = next(
+        step
+        for step in unchanged_unknown_plan.steps
+        if step.tool_ref.tool == "propose_join"
+    )
+    assert unchanged_unknown_propose.inputs["feature_ids"] == feature_ids
+
+    excluded_feature_id = feature_ids[0]
+    exclude_params = {"exclude_join_feature_id": excluded_feature_id}
+    missing_feature = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            revised_join_gate,
+            action="exclude_join_feature",
+            content="排除一张特征表",
+        ),
+    )
+    assert missing_feature.status_code == 422, missing_feature.text
+
+    before_rejection = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    rejected = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            revised_join_gate,
+            action="exclude_join_feature",
+            content="先别执行",
+            adjust_params=exclude_params,
+        ),
+    )
+    assert rejected.status_code == 409, rejected.text
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == before_rejection
+    unchanged_plan = client.app.state.plan_repo.load_plan(
+        revised_join_gate["metadata"]["plan_id"]
+    )
+    unchanged_propose = next(
+        step for step in unchanged_plan.steps if step.tool_ref.tool == "propose_join"
+    )
+    assert unchanged_propose.inputs["feature_ids"] == feature_ids
+
+    excluded = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_typed_gate_action_payload(
+            revised_join_gate,
+            action="exclude_join_feature",
+            content=f"排除特征表 {excluded_feature_id}",
+            adjust_params=exclude_params,
+        ),
+    )
+    assert excluded.status_code == 202, excluded.text
+    final_gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    final_plan = client.app.state.plan_repo.load_plan(final_gate["metadata"]["plan_id"])
+    final_propose = next(
+        step for step in final_plan.steps if step.tool_ref.tool == "propose_join"
+    )
+    assert final_propose.inputs["feature_ids"] == [feature_ids[1]]
 
 
 def test_data_join_two_conflicting_features_reaches_diagnostic_gate(
@@ -236,9 +585,7 @@ def test_data_join_c1_lists_all_three_uploaded_tables_including_plain_named_exce
 
     assert len(files) == 3
     names = {item["name"] for item in files}
-    assert any(name.startswith("sample_") for name in names)
-    assert any(name.startswith("features_") for name in names)
-    assert any(name.startswith("vars_") for name in names)
+    assert names == {"sample.parquet", "features.parquet", "vars.xlsx"}
 
 
 def test_data_join_c2_gate_annotates_key_columns_with_dictionary_meaning(client: TestClient, tmp_path: Path):
@@ -369,7 +716,10 @@ def test_data_join_c1_form_assignment_drives_the_join(client: TestClient, tmp_pa
     anchor = state["anchor_id"]
     features = state["feature_ids"]
     payload = json.dumps({"anchor_id": anchor, "feature_ids": features, "target_col": state["target_col"]})
-    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": f"[C1]{payload}"})
+    resp = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": f"[C1]{payload}", "ui_action": "confirm_roles"},
+    )
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "手动模式请点击「开始执行」" in overview["content"]
@@ -378,6 +728,252 @@ def test_data_join_c1_form_assignment_drives_the_join(client: TestClient, tmp_pa
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "拼接诊断完成" in gate["content"]
+
+
+def test_data_join_c1_selected_target_is_registered_on_join_result(
+    client: TestClient,
+    tmp_path: Path,
+):
+    """The joined dataset retains the exact target selected at the C1 gate."""
+
+    src = _join_dir_with_ambiguous_targets(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "拼接多目标选择",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "data_join",
+        "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    state = c1["metadata"]["join_c1"]
+    assert state["target_col"] is None
+
+    selected_target = "label_sqandzy_new"
+    assignment = json.dumps({
+        "anchor_id": state["anchor_id"],
+        "feature_ids": state["feature_ids"],
+        "target_col": selected_target,
+    })
+    confirmed = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": f"[C1]{assignment}", "ui_action": "confirm_roles"},
+    )
+    assert confirmed.status_code == 202, confirmed.text
+    started = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "开始"},
+    )
+    assert started.status_code == 202, started.text
+    executed = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认"},
+    )
+    assert executed.status_code == 202, executed.text
+
+    done = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    result_id = done["metadata"]["result_dataset"]["dataset_id"]
+    result = next(
+        dataset
+        for dataset in client.get(f"/api/tasks/{task_id}/datasets").json()["datasets"]
+        if dataset["id"] == result_id
+    )
+    assert result["has_target"] is True
+    assert result["target_col"] == selected_target
+
+
+@pytest.mark.parametrize("invalid_target", ["balance", "column_that_does_not_exist"])
+def test_data_join_c1_typed_target_must_belong_to_authenticated_anchor(
+    client: TestClient,
+    tmp_path: Path,
+    invalid_target: str,
+):
+    """A tampered C1 control cannot bind a feature-only or unknown target."""
+
+    src = _join_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "拼接非法目标列",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "data_join",
+        "run_mode": "manual",
+    }).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    messages_before = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    state = _last_assistant(messages_before)["metadata"]["join_c1"]
+    assignment = json.dumps({
+        "anchor_id": state["anchor_id"],
+        "feature_ids": state["feature_ids"],
+        "target_col": invalid_target,
+    })
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": f"[C1]{assignment}",
+            "ui_action": "confirm_roles",
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert "目标列" in response.json()["detail"]
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    assert client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"] == messages_before
+
+
+@pytest.mark.parametrize(
+    "target_phrase",
+    [
+        "目标列用 balance",
+        "把 balance 设为目标列",
+        "用 balance 当目标列",
+    ],
+)
+def test_data_join_c1_natural_language_feature_only_target_requests_clarification(
+    client: TestClient,
+    tmp_path: Path,
+    target_phrase: str,
+):
+    """Free text preserves an invalid declared target long enough to reject it."""
+
+    src = _join_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "拼接自然语言非法目标列",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "data_join",
+        "run_mode": "manual",
+    }).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "sample.parquet 作为样本主表，features.parquet 作为特征表，"
+                f"{target_phrase}"
+            )
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    clarification = _last_assistant(messages)
+    assert "目标列" in clarification["content"]
+    assert "样本主表" in clarification["content"] or "样本锚表" in clarification["content"]
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+
+
+def test_data_join_c1_explicit_no_target_overrides_registry_inference(
+    client: TestClient,
+    tmp_path: Path,
+):
+    """The C1 ``不指定`` choice remains explicit through joined registration."""
+
+    src = _join_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "拼接明确无目标列",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "data_join",
+        "run_mode": "manual",
+    }).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    state = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )["metadata"]["join_c1"]
+    assignment = json.dumps({
+        "anchor_id": state["anchor_id"],
+        "feature_ids": state["feature_ids"],
+        "target_col": "",
+    })
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": f"[C1]{assignment}", "ui_action": "confirm_roles"},
+    ).status_code == 202
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"}
+    ).status_code == 202
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"}
+    ).status_code == 202
+
+    done = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    result_id = done["metadata"]["result_dataset"]["dataset_id"]
+    result = next(
+        dataset
+        for dataset in client.get(f"/api/tasks/{task_id}/datasets").json()["datasets"]
+        if dataset["id"] == result_id
+    )
+    assert result["has_target"] is False
+    assert result["target_col"] is None
+    assert client.get(f"/api/tasks/{task_id}").json()["target_col"] == ""
+
+
+def test_data_join_single_file_explicit_no_target_clears_all_target_facts(
+    client: TestClient,
+    tmp_path: Path,
+):
+    from marvis.db import DatasetRepository
+
+    src = tmp_path / "single_material_without_target"
+    src.mkdir()
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(
+        src / "only.parquet"
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "单文件明确无目标列",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )["metadata"]["join_c1"]
+    assignment = json.dumps(
+        {
+            "anchor_id": c1["anchor_id"],
+            "feature_ids": [],
+            "target_col": "",
+        }
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": f"[C1]{assignment}", "ui_action": "confirm_roles"},
+    )
+
+    assert response.status_code == 202, response.text
+    workspace = client.get(f"/api/tasks/{task_id}/data-workspace").json()
+    assert workspace["active_dataset_id"] == c1["anchor_id"]
+    assert workspace["semantic_mapping"]["target_col"] is None
+    anchor = next(
+        item
+        for item in DatasetRepository(
+            client.app.state.settings.db_path
+        ).list_datasets(task_id)
+        if item.id == c1["anchor_id"]
+    )
+    assert anchor.has_target is False
+    assert anchor.target_col is None
+    assert client.get(f"/api/tasks/{task_id}").json()["target_col"] == ""
 
 
 def test_data_join_c1_form_rejects_duplicate_sample_primary_role(client: TestClient, tmp_path: Path):
@@ -400,7 +996,10 @@ def test_data_join_c1_form_rejects_duplicate_sample_primary_role(client: TestCli
         "feature_ids": [],
         "target_col": state["target_col"],
     })
-    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": f"[C1]{payload}"})
+    resp = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": f"[C1]{payload}", "ui_action": "confirm_roles"},
+    )
     assert resp.status_code == 202, resp.text
     error = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert error["metadata"].get("error") is True
@@ -414,6 +1013,8 @@ def test_data_join_c1_form_rejects_duplicate_sample_primary_role(client: TestCli
 
 
 def test_data_join_single_file_confirms_then_skips(client: TestClient, tmp_path: Path):
+    from marvis.db import DatasetRepository
+
     src = tmp_path / "single_material"
     src.mkdir()
     pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(src / "only.parquet")
@@ -425,9 +1026,605 @@ def test_data_join_single_file_confirms_then_skips(client: TestClient, tmp_path:
     client.post(f"/api/tasks/{task_id}/agent/start", json={})
     c1 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert c1["metadata"]["join_c1"]["skip"] is True
+    anchor_id = c1["metadata"]["join_c1"]["anchor_id"]
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
     skip = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "无需拼接" in skip["content"]
+    workspace = client.get(f"/api/tasks/{task_id}/data-workspace").json()
+    assert workspace["active_dataset_id"] == anchor_id
+    assert len(workspace["active_dataset_content_hash"]) == 64
+    assert workspace["revision"] == 1
+    assert workspace["analysis_generation"] == 1
+    assert workspace["semantic_mapping"]["target_col"] == "bad_flag"
+    anchor = next(
+        item
+        for item in DatasetRepository(
+            client.app.state.settings.db_path
+        ).list_datasets(task_id)
+        if item.id == anchor_id
+    )
+    assert anchor.has_target is True
+    assert anchor.target_col == "bad_flag"
+    from marvis.repositories.tasks import TaskRepository
+
+    persisted_task = TaskRepository(
+        client.app.state.settings.db_path
+    ).get_task(task_id)
+    assert persisted_task.target_col == "bad_flag"
+
+
+def test_data_join_single_file_identical_prebinding_still_records_typed_confirmation(
+    client: TestClient,
+    tmp_path: Path,
+):
+    src = tmp_path / "single_material_prebound"
+    src.mkdir()
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(
+        src / "only.parquet"
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "单文件预绑定确认",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    c1_state = _last_assistant(messages)["metadata"]["join_c1"]
+    _prebind_single_c1_workspace(client, task_id, c1_state)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
+
+    assert response.status_code == 202, response.text
+    messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert sum(bool(item.get("metadata", {}).get("join_skip")) for item in messages) == 1
+    assert sum(
+        item.get("metadata", {}).get("ui_action") == "confirm_roles"
+        and item["role"] == "user"
+        for item in messages
+    ) == 1
+    assert sum(
+        item.get("metadata", {}).get("intent") == "ui_action_ack"
+        and item.get("metadata", {}).get("ui_action") == "confirm_roles"
+        for item in messages
+    ) == 1
+    workspace = client.get(f"/api/tasks/{task_id}/data-workspace").json()
+    assert workspace["revision"] == 1
+    assert workspace["active_dataset_id"] == c1_state["anchor_id"]
+
+    repeated = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
+    assert repeated.status_code == 202, repeated.text
+    repeated_messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert sum(
+        bool(item.get("metadata", {}).get("join_skip"))
+        for item in repeated_messages
+    ) == 1
+    assert sum(
+        item.get("metadata", {}).get("intent") == "ui_action_ack"
+        and item.get("metadata", {}).get("ui_action") == "confirm_roles"
+        for item in repeated_messages
+    ) == 1
+
+
+def test_data_join_single_file_identical_prebinding_persists_semantic_receipt(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    src = tmp_path / "single_material_semantic_prebound"
+    src.mkdir()
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(
+        src / "only.parquet"
+    )
+
+    class _SemanticClient:
+        def complete(self, *_args, **kwargs):
+            if kwargs.get("prompt_name") == "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS":
+                instruction = json.loads(kwargs["user_prompt"])["instruction"]
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": instruction,
+                        "reason": "用户明确接受当前展示值。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "action": "confirm",
+                    "params": {},
+                    "constraint": "",
+                    "reason": "用户明确接受当前展示值。",
+                    "confidence": "high",
+                    "explicit_authorization": True,
+                },
+                ensure_ascii=False,
+            )
+
+    semantic_client = _SemanticClient()
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: semantic_client,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda _request, _task: semantic_client,
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "单文件语义预绑定确认",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "agent",
+        },
+    ).json()["id"]
+    assert client.post(f"/api/tasks/{task_id}/agent/start", json={}).status_code == 202
+    messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    c1_state = _last_assistant(messages)["metadata"]["join_c1"]
+    _prebind_single_c1_workspace(client, task_id, c1_state)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "我确认采用当前唯一样本表和 bad_flag 目标列。"},
+    )
+
+    assert response.status_code == 202, response.text
+    messages = client.get(
+        f"/api/tasks/{task_id}/agent/messages"
+    ).json()["messages"]
+    assert sum(
+        item.get("metadata", {}).get("intent") == "c1_semantic_authorization"
+        for item in messages
+    ) == 1
+    assert sum(
+        bool(item.get("metadata", {}).get("join_skip")) for item in messages
+    ) == 1
+
+
+def test_data_join_agent_semantic_review_rejects_normalized_feature_byte_swap(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A two-pass C1 receipt never commits after normalized bytes drift."""
+
+    from marvis.db import DatasetRepository
+
+    src = _join_dir(tmp_path, n=12)
+
+    class _SemanticClient:
+        normalized_path: Path | None = None
+        route_calls = 0
+        review_calls = 0
+
+        def complete(self, *_args, **kwargs):
+            if kwargs.get("prompt_name") == "GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS":
+                self.review_calls += 1
+                assert self.normalized_path is not None
+                frame = pd.read_parquet(self.normalized_path)
+                frame["balance"] = list(reversed(frame["balance"].tolist()))
+                frame.to_parquet(self.normalized_path)
+                instruction = json.loads(kwargs["user_prompt"])["instruction"]
+                return json.dumps(
+                    {
+                        "verdict": "authorize",
+                        "evidence_quote": instruction,
+                        "reason": "用户明确接受当前展示值。",
+                        "confidence": "high",
+                        "is_question": False,
+                        "is_conditional": False,
+                        "requests_change": False,
+                        "withholds_authorization": False,
+                    },
+                    ensure_ascii=False,
+                )
+            self.route_calls += 1
+            return json.dumps(
+                {
+                    "action": "confirm",
+                    "params": {},
+                    "constraint": "",
+                    "reason": "用户明确接受当前展示值。",
+                    "confidence": "high",
+                    "explicit_authorization": True,
+                },
+                ensure_ascii=False,
+            )
+
+    semantic_client = _SemanticClient()
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda _request, _task, _payload: semantic_client,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda _request, _task: semantic_client,
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "拼接 C1 归一化数据漂移阻断",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "agent",
+        },
+    ).json()["id"]
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert started.status_code == 202, started.text
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )["metadata"]["join_c1"]
+    feature_id = c1["feature_ids"][0]
+    feature = next(
+        item
+        for item in DatasetRepository(
+            client.app.state.settings.db_path
+        ).list_datasets(task_id)
+        if item.id == feature_id
+    )
+    semantic_client.normalized_path = (
+        client.app.state.settings.datasets_dir / feature.source_path
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "我确认无误，请按推荐的样本主表和特征表继续。"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert semantic_client.route_calls == 1
+    assert semantic_client.review_calls == 1
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    error = _last_assistant(messages)
+    assert error["metadata"].get("error") is True
+    assert "数据或 DataWorkspace 已变化" in error["content"]
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    semantic_receipts = [
+        item
+        for item in messages
+        if item.get("metadata", {}).get("intent") == "c1_semantic_authorization"
+    ]
+    assert semantic_receipts == []
+    workspace = client.get(f"/api/tasks/{task_id}/data-workspace")
+    assert workspace.status_code == 200, workspace.text
+    assert workspace.json()["revision"] == 0
+    assert workspace.json()["active_dataset_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("selected_field", "semantic_mapping"),
+    [
+        (
+            "mobile",
+            {
+                "target_col": "mobile",
+                "field_roles": {"mobile": "target"},
+                "business_names": {},
+            },
+        ),
+        (
+            "bad_flag",
+            {
+                "target_col": "bad_flag",
+                "field_roles": {"bad_flag": "target"},
+                "business_names": {"bad_flag": "人工确认的违约标签"},
+            },
+        ),
+    ],
+)
+def test_data_join_single_file_repeat_confirmation_rejects_semantic_drift(
+    client: TestClient,
+    tmp_path: Path,
+    selected_field: str,
+    semantic_mapping: dict,
+):
+    src = tmp_path / f"single_semantic_drift_{selected_field}"
+    src.mkdir()
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(
+        src / "only.parquet"
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "单文件语义漂移",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
+    initial = client.get(f"/api/tasks/{task_id}/data-workspace").json()
+
+    changed = client.put(
+        f"/api/tasks/{task_id}/data-workspace",
+        headers={"If-Match": str(initial["revision"])},
+        json={
+            "active_dataset_id": initial["active_dataset_id"],
+            "active_dataset_content_hash": initial[
+                "active_dataset_content_hash"
+            ],
+            "page": "semantics",
+            "selected_field": selected_field,
+            "semantic_mapping": semantic_mapping,
+        },
+    )
+    assert changed.status_code == 200, changed.text
+
+    repeated = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
+    assert repeated.status_code == 202, repeated.text
+    error = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert error["metadata"].get("error") is True
+    assert "语义映射" in error["content"]
+
+
+def test_data_join_single_file_confirmation_rejects_changed_registered_bytes(
+    client: TestClient,
+    tmp_path: Path,
+):
+    src = tmp_path / "single_material_drift"
+    src.mkdir()
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(
+        src / "only.parquet"
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "单文件漂移",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    anchor_id = c1["metadata"]["join_c1"]["anchor_id"]
+    dataset = next(
+        item
+        for item in client.get(f"/api/tasks/{task_id}/datasets").json()["datasets"]
+        if item["id"] == anchor_id
+    )
+    registered_path = (
+        client.app.state.settings.datasets_dir / dataset["source_path"]
+    )
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [1, 1]}).to_parquet(
+        registered_path
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
+    assert response.status_code == 202, response.text
+    error = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert error["metadata"].get("error") is True
+    assert "数据或 DataWorkspace 已变化" in error["content"]
+
+    workspace = client.get(f"/api/tasks/{task_id}/data-workspace")
+    assert workspace.status_code == 200, workspace.text
+    assert workspace.json()["active_dataset_id"] is None
+    assert workspace.json()["revision"] == 0
+
+
+def test_data_join_single_file_race_after_precheck_rolls_back_workspace(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A byte swap after the caller's precheck must not create revision 1."""
+
+    from marvis.data.registry import DatasetRegistry
+
+    src = tmp_path / "single_material_toctou"
+    src.mkdir()
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(
+        src / "only.parquet"
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "单文件认证竞态",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    original_resolve = DatasetRegistry.resolve_verified_path
+    calls = 0
+
+    def swap_after_first_verification(self, dataset_id):
+        nonlocal calls
+        path = original_resolve(self, dataset_id)
+        calls += 1
+        if calls == 1:
+            pd.DataFrame(
+                {"mobile": ["a", "b"], "bad_flag": [1, 1]}
+            ).to_parquet(path)
+        return path
+
+    monkeypatch.setattr(
+        DatasetRegistry,
+        "resolve_verified_path",
+        swap_after_first_verification,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
+    assert response.status_code == 202, response.text
+    error = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert error["metadata"].get("error") is True
+    assert "数据或 DataWorkspace 已变化" in error["content"]
+    workspace = client.get(f"/api/tasks/{task_id}/data-workspace").json()
+    assert workspace["active_dataset_id"] is None
+    assert workspace["revision"] == 0
+
+
+def test_data_join_single_file_final_source_swap_binds_authenticated_cas_snapshot(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A mutable source swap after the last check cannot change the bound bytes."""
+
+    from marvis.data.registry import DatasetRegistry
+    from marvis.repositories.datasets import DatasetRepository
+
+    src = tmp_path / "single_material_final_source_race"
+    src.mkdir()
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(
+        src / "only.parquet"
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "单文件最终源竞态",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    repo = DatasetRepository(client.app.state.settings.db_path)
+    registered = repo.list_datasets(task_id)[0]
+    original_path = (
+        client.app.state.settings.datasets_dir / registered.source_path
+    ).resolve()
+    original_resolve = DatasetRegistry.resolve_verified_path
+    calls = 0
+
+    def swap_original_after_final_cas_verification(self, dataset_id):
+        nonlocal calls
+        path = original_resolve(self, dataset_id)
+        calls += 1
+        if calls == 2:
+            pd.DataFrame(
+                {"mobile": ["a", "b"], "bad_flag": [1, 1]}
+            ).to_parquet(original_path)
+        return path
+
+    monkeypatch.setattr(
+        DatasetRegistry,
+        "resolve_verified_path",
+        swap_original_after_final_cas_verification,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
+    assert response.status_code == 202, response.text
+    workspace = client.get(f"/api/tasks/{task_id}/data-workspace").json()
+    assert workspace["revision"] == 1
+    assert workspace["active_dataset_id"] == registered.id
+    pinned = repo.get_dataset(registered.id)
+    assert pinned is not None
+    assert pinned.source_path.startswith(f"_cas/{registered.content_hash}/")
+    pinned_path = client.app.state.settings.datasets_dir / pinned.source_path
+    assert hashlib.sha256(pinned_path.read_bytes()).hexdigest() == registered.content_hash
+    assert hashlib.sha256(original_path.read_bytes()).hexdigest() != registered.content_hash
+
+
+def test_data_join_single_file_final_cas_overwrite_attempt_rolls_back_workspace(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+):
+    """The object verified immediately before commit is not platform-writable."""
+
+    from marvis.data.registry import DatasetRegistry
+
+    src = tmp_path / "single_material_final_cas_race"
+    src.mkdir()
+    pd.DataFrame({"mobile": ["a", "b"], "bad_flag": [0, 1]}).to_parquet(
+        src / "only.parquet"
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "单文件最终 CAS 竞态",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "data_join",
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    original_resolve = DatasetRegistry.resolve_verified_path
+    calls = 0
+
+    def overwrite_after_final_verification(self, dataset_id):
+        nonlocal calls
+        path = original_resolve(self, dataset_id)
+        calls += 1
+        if calls == 2:
+            pd.DataFrame(
+                {"mobile": ["a", "b"], "bad_flag": [1, 1]}
+            ).to_parquet(path)
+        return path
+
+    monkeypatch.setattr(
+        DatasetRegistry,
+        "resolve_verified_path",
+        overwrite_after_final_verification,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
+    assert response.status_code == 202, response.text
+    workspace = client.get(f"/api/tasks/{task_id}/data-workspace").json()
+    assert workspace["active_dataset_id"] is None
+    assert workspace["revision"] == 0
 
 
 def test_data_join_double_confirm_second_request_gets_409_without_second_turn(

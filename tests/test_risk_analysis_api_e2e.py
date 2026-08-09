@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,80 @@ from marvis.app import create_app
 pytestmark = pytest.mark.e2e
 
 
+class _RiskAnalysisLLM:
+    """Strict caller-aware fake for Agent semantic routing and gate review."""
+
+    def complete(self, **kwargs) -> str:
+        caller = kwargs.get("caller")
+        if caller in {"semantic_intent_router", "semantic_intent_reviewer"}:
+            request = json.loads(kwargs["user_prompt"])
+            instruction = request["instruction"]
+            phase = request["current_context"]["risk_setup_phase"]
+            if phase == "ask_goal":
+                if "标准 Vintage" in instruction:
+                    intent = "risk_standard_vintage"
+                elif "VTG" in instruction:
+                    intent = "risk_vtg_terminal"
+                elif "收益" in instruction:
+                    intent = "risk_profitability"
+                else:
+                    raise AssertionError(f"unexpected risk selection: {instruction}")
+            else:
+                intent = "current_workflow"
+            return json.dumps(
+                {
+                    "intent": intent,
+                    "evidence_quote": instruction,
+                    "reason": "测试输入明确选择或继续当前风险分析流程。",
+                    "confidence": "high",
+                    "is_question": False,
+                    "is_conditional": False,
+                    "requests_change": False,
+                    "withholds_action": False,
+                },
+                ensure_ascii=False,
+            )
+        if caller == "router":
+            return json.dumps(
+                {
+                    "action": "confirm",
+                    "params": {},
+                    "constraint": "",
+                    "reason": "测试输入明确授权继续当前计划。",
+                    "confidence": "high",
+                    "explicit_authorization": True,
+                },
+                ensure_ascii=False,
+            )
+        if caller == "semantic_authorization_reviewer":
+            instruction = json.loads(kwargs["user_prompt"])["instruction"]
+            return json.dumps(
+                {
+                    "verdict": "authorize",
+                    "evidence_quote": instruction,
+                    "reason": "逐字复核确认当前输入为即时、无条件授权。",
+                    "confidence": "high",
+                    "is_question": False,
+                    "is_conditional": False,
+                    "requests_change": False,
+                    "withholds_authorization": False,
+                },
+                ensure_ascii=False,
+            )
+        raise AssertionError(f"unexpected LLM caller: {caller}")
+
+
 @pytest.fixture
-def client(tmp_path: Path) -> TestClient:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    llm = _RiskAnalysisLLM()
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda request, task, payload: llm,
+    )
     return TestClient(create_app(tmp_path))
 
 
@@ -28,15 +101,7 @@ def _post_message(client: TestClient, task_id: str, content: str):
 
 def test_agent_risk_analysis_upload_to_report_download_and_memory(
     client: TestClient,
-    monkeypatch,
 ):
-    # Intake and the report tool are deterministic. The test bypasses only the
-    # configured-model lookup so the real API/plan/tool/artifact path can run in
-    # an isolated workspace without a network LLM.
-    monkeypatch.setattr(
-        "marvis.routers.validation_agent.resolve_driver_agent_client",
-        lambda request, task, payload: None,
-    )
     created = client.post(
         "/api/tasks",
         json={
@@ -112,12 +177,7 @@ def test_agent_risk_analysis_upload_to_report_download_and_memory(
 
 def test_agent_profitability_analysis_computes_weighted_net_yield(
     client: TestClient,
-    monkeypatch,
 ):
-    monkeypatch.setattr(
-        "marvis.routers.validation_agent.resolve_driver_agent_client",
-        lambda request, task, payload: None,
-    )
     created = client.post(
         "/api/tasks",
         json={
@@ -164,12 +224,7 @@ def test_agent_profitability_analysis_computes_weighted_net_yield(
 
 def test_profitability_material_confirmation_with_no_missing_text_stays_in_intake(
     client: TestClient,
-    monkeypatch,
 ):
-    monkeypatch.setattr(
-        "marvis.routers.validation_agent.resolve_driver_agent_client",
-        lambda request, task, payload: None,
-    )
     created = client.post(
         "/api/tasks",
         json={
@@ -211,12 +266,7 @@ def test_profitability_material_confirmation_with_no_missing_text_stays_in_intak
 
 def test_standard_vintage_material_scope_does_not_trigger_dataset_transform(
     client: TestClient,
-    monkeypatch,
 ):
-    monkeypatch.setattr(
-        "marvis.routers.validation_agent.resolve_driver_agent_client",
-        lambda request, task, payload: None,
-    )
     created = client.post(
         "/api/tasks",
         json={
@@ -279,12 +329,7 @@ def test_standard_vintage_material_scope_does_not_trigger_dataset_transform(
 
 def test_agent_profitability_derives_sample_style_raw_cost_bridge(
     client: TestClient,
-    monkeypatch,
 ):
-    monkeypatch.setattr(
-        "marvis.routers.validation_agent.resolve_driver_agent_client",
-        lambda request, task, payload: None,
-    )
     created = client.post(
         "/api/tasks",
         json={
@@ -353,12 +398,7 @@ def test_agent_profitability_derives_sample_style_raw_cost_bridge(
 
 def test_agent_derives_turnover_from_real_style_chinese_mob_balance_curve(
     client: TestClient,
-    monkeypatch,
 ):
-    monkeypatch.setattr(
-        "marvis.routers.validation_agent.resolve_driver_agent_client",
-        lambda request, task, payload: None,
-    )
     created = client.post(
         "/api/tasks",
         json={

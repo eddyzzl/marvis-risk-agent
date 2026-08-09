@@ -14,6 +14,7 @@ from marvis.governance.contracts import (
 from marvis.governance.errors import ApprovalBindingError, ApprovalStateError
 from marvis.governance.repository import GovernanceRepository, canonical_payload_hash
 from marvis.orchestrator.contracts import Plan, PlanStep
+from marvis.orchestrator.references import parse_step_output_ref
 from marvis.plugins.manifest import (
     GovernancePolicy,
     PluginManifest,
@@ -67,6 +68,9 @@ class GovernanceService:
         reason: str,
         expected_plan_revision: int,
         input_updates: dict[str, Any] | None = None,
+        expected_step_fingerprint: str | None = None,
+        expected_plan_status: str | None = None,
+        expected_plan_fingerprint: str | None = None,
     ) -> AuthorizationGrant:
         plan, step = self._load_step(plan_id, step_id)
         self._assert_revision(plan, expected_plan_revision)
@@ -98,6 +102,9 @@ class GovernanceService:
             issue_effect_approval=policy.effect_authorization == "required",
             input_updates=reviewed_updates or None,
             expected_input_hash=canonical_payload_hash(merged_inputs),
+            expected_step_fingerprint=expected_step_fingerprint,
+            expected_plan_status=expected_plan_status,
+            expected_plan_fingerprint=expected_plan_fingerprint,
         )
 
     def reject_step(
@@ -108,6 +115,9 @@ class GovernanceService:
         principal: LocalPrincipal,
         reason: str,
         expected_plan_revision: int,
+        expected_step_fingerprint: str | None = None,
+        expected_plan_status: str | None = None,
+        expected_plan_fingerprint: str | None = None,
     ) -> AuthorizationGrant:
         plan, step = self._load_step(plan_id, step_id)
         self._assert_revision(plan, expected_plan_revision)
@@ -130,6 +140,11 @@ class GovernanceService:
             principal=principal,
             decision="reject",
             reason=reason,
+            expected_plan_revision=expected_plan_revision,
+            expected_plan_status=expected_plan_status,
+            expected_plan_fingerprint=expected_plan_fingerprint,
+            expected_step_fingerprint=expected_step_fingerprint,
+            expected_step_status="awaiting_confirm",
         )
 
     def execution_context_for(
@@ -394,7 +409,12 @@ class GovernanceService:
 
     def _resolve_value(self, value: Any) -> Any:
         if isinstance(value, str) and value.startswith("$ref:"):
-            step_id, field = _parse_ref(value)
+            try:
+                step_id, field = parse_step_output_ref(value)
+            except ValueError as exc:
+                raise ApprovalBindingError(
+                    f"invalid output reference: {value}"
+                ) from exc
             try:
                 output = self._plans.load_step_output(step_id)
             except KeyError as exc:
@@ -489,21 +509,6 @@ def _canonical_sort_key(value: Any) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
-
-
-def _parse_ref(value: str) -> tuple[str, str]:
-    raw = value[len("$ref:") :]
-    marker = ".output"
-    if marker not in raw:
-        raise ApprovalBindingError(f"invalid output reference: {value}")
-    step_id, tail = raw.split(marker, 1)
-    if not step_id:
-        raise ApprovalBindingError(f"invalid output reference: {value}")
-    if not tail:
-        return step_id, ""
-    if not tail.startswith(".") or tail == ".":
-        raise ApprovalBindingError(f"invalid output reference: {value}")
-    return step_id, tail[1:]
 
 
 def _dig(value: Any, path: str, *, ref: str) -> Any:

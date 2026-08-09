@@ -13,8 +13,8 @@ from marvis.notebook_cancellation import NotebookCancellationToken
 from marvis.notebooks import (
     _build_step_events,
     _finalize_successful_cell_events,
-    _notebook_worker_env,
     _notebook_worker_command,
+    _notebook_worker_env,
     _parse_notebook_worker_result,
     _record_cell_complete,
     _record_cell_start,
@@ -168,6 +168,49 @@ def test_notebook_worker_command_bootstraps_checkout_without_pythonpath(
     assert completed.returncode == 1
     assert NOTEBOOK_RESULT_SENTINEL in completed.stdout
     assert "ModuleNotFoundError" not in completed.stderr
+
+
+def test_isolated_worker_cannot_be_shadowed_by_notebook_directory(tmp_path: Path):
+    notebook_dir = tmp_path / "notebooks"
+    shadow_package = notebook_dir / "marvis"
+    shadow_package.mkdir(parents=True)
+    marker_path = notebook_dir / "shadow-worker-ran.txt"
+    (shadow_package / "__init__.py").write_text("", encoding="utf-8")
+    (shadow_package / "notebook_worker.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker_path)!r}).write_text('shadowed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    notebook_path = notebook_dir / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    output_path = notebook_dir / "trusted-worker-output.txt"
+    nbformat.write(
+        nbformat.v4.new_notebook(
+            cells=[
+                nbformat.v4.new_code_cell(
+                    "from pathlib import Path\n"
+                    f"Path({output_path.name!r}).write_text('ok', encoding='utf-8')"
+                )
+            ],
+            metadata={
+                "kernelspec": {"name": "python3", "display_name": "Python 3"}
+            },
+        ),
+        notebook_path,
+    )
+
+    result = run_notebook(
+        notebook_path,
+        executed_path,
+        log_path,
+        timeout=60,
+        isolated=True,
+    )
+
+    assert result.succeeded is True
+    assert marker_path.exists() is False
+    assert output_path.read_text(encoding="utf-8") == "ok"
 
 
 def test_notebook_worker_env_strips_host_secrets(monkeypatch):

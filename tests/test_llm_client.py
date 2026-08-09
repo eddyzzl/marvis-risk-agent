@@ -1,10 +1,54 @@
 import json
 from http.client import RemoteDisconnected
+import traceback
 from urllib.error import HTTPError, URLError
 
 import pytest
 
-from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from marvis.llm_client import (
+    LLMClientError,
+    LLMClientErrorKind,
+    OpenAICompatibleLLMClient,
+)
+
+
+def test_llm_client_error_legacy_message_constructor_keeps_safe_defaults():
+    error = LLMClientError("legacy message")
+
+    assert str(error) == "legacy message"
+    assert error.args == ("legacy message",)
+    assert error.error_kind is None
+    assert error.retry_count == 0
+    assert error.finish_reason is None
+    assert error.reasoning_tokens is None
+
+
+def test_llm_client_error_kind_accepts_only_the_fixed_enum():
+    error = LLMClientError(
+        "safe message",
+        error_kind=LLMClientErrorKind.TIMEOUT,
+    )
+
+    assert error.error_kind is LLMClientErrorKind.TIMEOUT
+    assert error.error_kind == "timeout"
+    with pytest.raises(TypeError, match="LLMClientErrorKind"):
+        LLMClientError("safe message", error_kind="raw response text")
+
+
+def test_llm_client_error_sanitizes_telemetry_scalars():
+    private_text = "response-body-must-not-be-an-attribute"
+    error = LLMClientError(
+        "safe message",
+        error_kind=LLMClientErrorKind.EMPTY_RESPONSE,
+        retry_count="2",
+        finish_reason=private_text,
+        reasoning_tokens="1900",
+    )
+
+    assert error.retry_count == 2
+    assert error.finish_reason == "other"
+    assert error.reasoning_tokens == 1900
+    assert private_text not in json.dumps(error.__dict__, default=str)
 
 
 class _StreamingResponse:
@@ -35,6 +79,17 @@ class _JsonResponse:
         return iter([
             b'{"choices":[{"message":{"content":"plain json"}}]}',
         ])
+
+
+class _MalformedJsonResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def __iter__(self):
+        return iter([b"response-body-must-not-leak"])
 
 
 class _ReasoningJsonResponse:
@@ -134,6 +189,58 @@ def test_client_rejects_non_http_base_url():
                 "api_key": "secret",
             }
         ).complete(system_prompt="s", user_prompt="u")
+
+
+@pytest.mark.parametrize(
+    ("profile", "complete_kwargs", "expected_kind"),
+    [
+        (
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "",
+            },
+            {},
+            LLMClientErrorKind.INCOMPLETE_PROFILE,
+        ),
+        (
+            {
+                "api_base_url": "file:///private/model",
+                "model_name": "m",
+                "api_key": "secret",
+            },
+            {},
+            LLMClientErrorKind.INVALID_URL,
+        ),
+        (
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+                "context_window": 100,
+            },
+            {"system_prompt": "s" * 500, "max_tokens": 50},
+            LLMClientErrorKind.CONTEXT_LENGTH_EXCEEDED,
+        ),
+    ],
+)
+def test_complete_preflight_failures_use_fixed_error_kinds(
+    monkeypatch,
+    profile,
+    complete_kwargs,
+    expected_kind,
+):
+    monkeypatch.setattr(
+        "marvis.llm_client.urlopen",
+        lambda *_args, **_kwargs: pytest.fail("preflight failure sent a request"),
+    )
+    kwargs = {"system_prompt": "s", "user_prompt": "u", **complete_kwargs}
+
+    with pytest.raises(LLMClientError) as exc_info:
+        OpenAICompatibleLLMClient(profile).complete(**kwargs)
+
+    assert exc_info.value.error_kind is expected_kind
+    assert exc_info.value.retry_count == 0
 
 
 def test_client_honors_reasoning_effort_from_profile(monkeypatch):
@@ -376,6 +483,20 @@ class _Http4xxError(HTTPError):
         return b""
 
 
+class _Http5xxError(HTTPError):
+    def __init__(self):
+        super().__init__(
+            url="https://api.example.com/v1/chat/completions",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=None,
+        )
+
+    def read(self):
+        return b""
+
+
 def test_transient_failure_is_retried_once_then_succeeds(monkeypatch):
     monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
     calls = {"n": 0}
@@ -406,6 +527,153 @@ def test_transient_failure_is_retried_once_then_succeeds(monkeypatch):
     assert calls["n"] == 2
     assert records[0]["ok"] is True
     assert records[0]["retry_count"] == 1
+
+
+def test_connection_retry_exhaustion_exposes_only_safe_typed_telemetry(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+    credential = "credential-must-not-leak"
+    response_text = "response-body-must-not-leak"
+    prompt_text = "prompt-must-not-leak"
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        raise URLError(f"{response_text} {credential}")
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError) as exc_info:
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": credential,
+                "transport_max_retries": 2,
+            }
+        ).complete(
+            system_prompt=prompt_text,
+            user_prompt=prompt_text,
+            stream=False,
+        )
+
+    error = exc_info.value
+    rendered = "".join(traceback.format_exception(error))
+    attributes = json.dumps(error.__dict__, default=str)
+    assert calls["n"] == 3
+    assert error.error_kind is LLMClientErrorKind.CONNECTION
+    assert error.retry_count == 2
+    assert error.finish_reason is None
+    assert error.reasoning_tokens is None
+    for private_text in (credential, response_text, prompt_text):
+        assert private_text not in str(error)
+        assert private_text not in attributes
+        assert private_text not in rendered
+
+
+def test_timeout_retry_exhaustion_exposes_fixed_error_kind(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        raise TimeoutError
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="timed out") as exc_info:
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+                "transport_max_retries": 2,
+            }
+        ).complete(system_prompt="s", user_prompt="u", stream=False)
+
+    assert calls["n"] == 3
+    assert exc_info.value.error_kind is LLMClientErrorKind.TIMEOUT
+    assert exc_info.value.retry_count == 2
+
+
+def test_http_5xx_retry_exhaustion_exposes_fixed_error_kind(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        raise _Http5xxError()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="LLM HTTP 503") as exc_info:
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+                "transport_max_retries": 2,
+            }
+        ).complete(system_prompt="s", user_prompt="u", stream=False)
+
+    assert calls["n"] == 3
+    assert exc_info.value.error_kind is LLMClientErrorKind.HTTP_5XX
+    assert exc_info.value.retry_count == 2
+
+
+def test_invalid_response_after_retry_exposes_safe_typed_telemetry(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise URLError("transient")
+        return _MalformedJsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError) as exc_info:
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+                "transport_max_retries": 2,
+            }
+        ).complete(system_prompt="s", user_prompt="u", stream=False)
+
+    error = exc_info.value
+    rendered = "".join(traceback.format_exception(error))
+    assert calls["n"] == 3
+    assert error.error_kind is LLMClientErrorKind.INVALID_RESPONSE
+    assert error.retry_count == 2
+    assert "response-body-must-not-leak" not in str(error)
+    assert "response-body-must-not-leak" not in json.dumps(error.__dict__, default=str)
+    assert "response-body-must-not-leak" not in rendered
+
+
+def test_invalid_response_is_retried_then_valid_response_succeeds(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    responses = iter([_MalformedJsonResponse(), _JsonResponse()])
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        return next(responses)
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    result = OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            "transport_max_retries": 1,
+        }
+    ).complete(system_prompt="s", user_prompt="u", stream=False)
+
+    assert result == "plain json"
+    assert calls["n"] == 2
 
 
 def test_empty_response_is_retried_then_nonempty_response_succeeds(monkeypatch):
@@ -452,7 +720,7 @@ def test_empty_response_retry_exhaustion_records_typed_failure(monkeypatch):
 
     monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
 
-    with pytest.raises(LLMClientError, match="empty response"):
+    with pytest.raises(LLMClientError, match="empty response") as exc_info:
         OpenAICompatibleLLMClient(
             {
                 "api_base_url": "https://api.example.com/v1",
@@ -472,6 +740,10 @@ def test_empty_response_retry_exhaustion_records_typed_failure(monkeypatch):
     assert records[0]["ok"] is False
     assert records[0]["error_kind"] == "empty_response"
     assert records[0]["retry_count"] == 2
+    assert exc_info.value.error_kind is LLMClientErrorKind.EMPTY_RESPONSE
+    assert exc_info.value.retry_count == 2
+    assert exc_info.value.finish_reason is None
+    assert exc_info.value.reasoning_tokens is None
 
 
 def test_empty_reasoning_only_response_records_safe_length_telemetry(
@@ -513,6 +785,44 @@ def test_empty_reasoning_only_response_records_safe_length_telemetry(
     assert "finish_reason=length" in caplog.text
     assert "reasoning_tokens=2048" in caplog.text
     assert f"reasoning_chars={len(private_reasoning)}" in caplog.text
+
+
+def test_reasoning_budget_exhaustion_after_two_retries_is_typed(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        return _ReasoningJsonResponse(
+            content="",
+            reasoning_content="private reasoning",
+            finish_reason="length",
+            reasoning_tokens=1900,
+        )
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="empty response") as exc_info:
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+                "transport_max_retries": 2,
+            }
+        ).complete(
+            system_prompt="s",
+            user_prompt="u",
+            stream=False,
+            max_tokens=2000,
+        )
+
+    error = exc_info.value
+    assert calls["n"] == 3
+    assert error.error_kind is LLMClientErrorKind.REASONING_BUDGET_EXHAUSTED
+    assert error.retry_count == 2
+    assert error.finish_reason == "length"
+    assert error.reasoning_tokens == 1900
 
 
 def test_nonempty_response_records_finish_reason_and_reasoning_length(monkeypatch):
@@ -588,7 +898,7 @@ def test_http_4xx_is_not_retried(monkeypatch):
 
     monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
 
-    with pytest.raises(LLMClientError, match="LLM HTTP 400"):
+    with pytest.raises(LLMClientError, match="LLM HTTP 400") as exc_info:
         OpenAICompatibleLLMClient(
             {
                 "api_base_url": "https://api.example.com/v1",
@@ -605,7 +915,10 @@ def test_http_4xx_is_not_retried(monkeypatch):
     assert calls["n"] == 1
     assert records[0]["ok"] is False
     assert records[0]["error_kind"] == "http_4xx"
+    assert type(records[0]["error_kind"]) is str
     assert records[0]["retry_count"] == 0
+    assert exc_info.value.error_kind is LLMClientErrorKind.HTTP_4XX
+    assert exc_info.value.retry_count == 0
 
 
 class _InterruptedAfterDeltaResponse:
@@ -631,7 +944,7 @@ def test_interruption_after_on_delta_is_not_retried(monkeypatch):
 
     monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
 
-    with pytest.raises(LLMClientError, match="LLM stream interrupted"):
+    with pytest.raises(LLMClientError, match="LLM stream interrupted") as exc_info:
         OpenAICompatibleLLMClient(
             {
                 "api_base_url": "https://api.example.com/v1",
@@ -642,6 +955,8 @@ def test_interruption_after_on_delta_is_not_retried(monkeypatch):
 
     assert calls["n"] == 1
     assert deltas == ["partial"]
+    assert exc_info.value.error_kind is LLMClientErrorKind.STREAM_INTERRUPTED
+    assert exc_info.value.retry_count == 0
 
 
 def _capture_payload(monkeypatch):

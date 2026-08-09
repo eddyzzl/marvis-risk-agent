@@ -174,9 +174,13 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
   // gates (join_c1 / screen / modeling_setup / dedup) already carry their own
   // primary action inside the widget, so this renders nothing for them.
   const renderGateConfirm = renderers.renderGateConfirm || emptyRenderer;
-  const stepStatus = typeof renderers.stepStatus === "function"
+  const hasStepStatusResolver = typeof renderers.stepStatus === "function";
+  const stepStatus = hasStepStatusResolver
     ? renderers.stepStatus
     : () => "";
+  const isGateActionable = typeof renderers.isGateActionable === "function"
+    ? renderers.isGateActionable
+    : () => true;
 
   const sections = [];
   // A retry keeps the original failure message for audit history. Once the
@@ -202,10 +206,17 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     // and intentionally carry `join_c1` without `kind: "gate"`. Treat that
     // structured pre-plan proposal as the pending gate too; otherwise Manual
     // mode renders its only actionable role/target form as historical/disabled.
-    const isPendingGate = (
+    const latestGateCandidate = (
       meta.kind === "gate"
       || Boolean(meta.join_c1)
     ) && String(message.id || "") === lastMessageId;
+    const prePlanC1 = Boolean(meta.join_c1) && !meta.kind && !meta.step_id;
+    const hasAuthoritativeAwaitingStep = prePlanC1
+      || !hasStepStatusResolver
+      || messageStatus === "awaiting_confirm";
+    const isPendingGate = latestGateCandidate
+      && hasAuthoritativeAwaitingStep
+      && isGateActionable(message, messageStatus) !== false;
     // A stable per-step anchor so the rail's lightweight "待确认" locate entry can
     // scroll to (and flash) exactly this middle gate section.
     const stepId = meta.step_id ? String(meta.step_id) : "";
@@ -258,7 +269,8 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
       continue;
     }
     if (meta.screen) {
-      const interactive = String(message.id || "") === latestScreenMessageId;
+      const interactive = isPendingGate
+        && String(message.id || "") === latestScreenMessageId;
       sections.push(
         `<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive })}</section>`,
       );

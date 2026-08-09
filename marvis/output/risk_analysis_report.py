@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from marvis.output.styles import FONT_NAME
+from marvis.spreadsheet_safety import safe_xlsx_text
 
 
 RISK_ANALYSIS_REPORT_SHEETS = ["结论摘要", "明细结果", "口径与假设", "数据质量"]
@@ -32,7 +32,6 @@ _WARN_FILL = "FFF2CC"
 _FAIL_FILL = "F4CCCC"
 _PASS_FILL = "D9EAD3"
 _BORDER_COLOR = "C9D2DC"
-_EXCEL_CELL_TEXT_MAX_CHARS = 32_767
 
 _ANALYSIS_LABELS = {
     "vtg_terminal": "VTG 终值与年化不良测算",
@@ -541,10 +540,7 @@ def _cell_value(value: Any) -> Any:
 def _safe_excel_text(value: str) -> str:
     """Keep uploaded labels/text from becoming formulas in the XLSX output."""
 
-    text = ILLEGAL_CHARACTERS_RE.sub(" ", str(value))
-    if text.lstrip().startswith(("=", "+", "-", "@")):
-        return "'" + text[: _EXCEL_CELL_TEXT_MAX_CHARS - 1]
-    return text[:_EXCEL_CELL_TEXT_MAX_CHARS]
+    return safe_xlsx_text(value)
 
 
 def _label(key: str) -> str:

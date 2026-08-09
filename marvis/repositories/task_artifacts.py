@@ -409,12 +409,6 @@ def stable_task_artifact_id(*, task_id: str, kind: str, path: str) -> str:
     ).hexdigest()
 
 
-def _stable_artifact_id(*, task_id: str, kind: str, path: str) -> str:
-    """Backward-compatible internal alias for existing artifact consumers."""
-
-    return stable_task_artifact_id(task_id=task_id, kind=kind, path=path)
-
-
 def _select_identity_row(
     conn: sqlite3.Connection, *, task_id: str, kind: str, path: str
 ) -> sqlite3.Row | None:

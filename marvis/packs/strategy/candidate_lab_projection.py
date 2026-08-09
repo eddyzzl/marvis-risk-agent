@@ -23,7 +23,8 @@ from urllib.parse import quote
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import ModelingRepository, TaskRepository
+from marvis.repositories.modeling import ModelingRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import STRATEGY_TYPES
 from marvis.output.strategy_candidate_report import (
     canonical_strategy_candidate_report_json,
@@ -242,7 +243,10 @@ from marvis.repositories.strategy_reports import (
     STRATEGY_REPORT_OUTPUT_KINDS,
     StrategyReportRepository,
 )
-from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.repositories.task_artifacts import (
+    TaskArtifactRepository,
+    stable_task_artifact_id,
+)
 from marvis.strategy_lifecycle import is_locally_adopted
 
 
@@ -3709,6 +3713,7 @@ def _scorecard_live_runtime(context: _ProjectionContext) -> Any:
         task_artifacts=context.artifact_repository,
         experiments=ExperimentStore(settings.db_path),
         modeling_repo=ModelingRepository(settings.db_path),
+        _model_score_evidence_request_cache={},
     )
     context.scorecard_runtime = runtime
     return runtime
@@ -5070,7 +5075,11 @@ def _require_record_identity(
         raise CandidateLabProjectionError("artifact task ownership drifted")
     kind = _text(record.get("kind"), "artifact kind")
     path = _text(record.get("path"), "artifact path")
-    expected_id = _stable_artifact_id(task_id=task_id, kind=kind, path=path)
+    expected_id = stable_task_artifact_id(
+        task_id=task_id,
+        kind=kind,
+        path=path,
+    )
     if record.get("id") != expected_id:
         raise CandidateLabProjectionError("artifact stable identity drifted")
     _sha256(record.get("content_hash"), "artifact content_hash")
@@ -5651,17 +5660,6 @@ def _object_without_duplicate_keys(
             raise CandidateLabProjectionError("artifact JSON has duplicate keys")
         value[key] = item
     return value
-
-
-def _stable_artifact_id(*, task_id: str, kind: str, path: str) -> str:
-    identity_json = json.dumps(
-        [task_id, kind, path],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(
-        f"marvis.task_artifact.v1:{identity_json}".encode("utf-8")
-    ).hexdigest()
 
 
 def _bounded_list(value: object, limit: int) -> tuple[list[Any], bool]:

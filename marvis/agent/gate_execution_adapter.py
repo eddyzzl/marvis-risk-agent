@@ -9,7 +9,17 @@ from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_payloads import screen_known_features
 from marvis.agent.gates.adapters import monitoring_verdict_error
 from marvis.agent.plan_utils import downstream_step_ids, find_step
-from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+from marvis.orchestrator.contracts import (
+    Plan,
+    PlanStatus,
+    PlanStep,
+    plan_fingerprint,
+    plan_step_confirmation_fingerprint,
+)
+
+
+ACTION_OUTCOME_METADATA_KEY = "action_outcome"
+ACTION_OUTCOME_REJECTED = "rejected"
 
 
 class GateExecutionAdapter:
@@ -52,31 +62,157 @@ class GateExecutionAdapter:
         clean = {str(key): str(value) for key, value in dedup_strategies.items() if str(value).strip()}
         if not clean:
             return
-        reset_any = False
+        replacement_inputs_by_step: dict[str, dict] = {}
         for dep_id in gate.depends_on or []:
             dep = find_step(plan, dep_id)
             if dep is None or dep.tool_ref.tool != "confirm_join":
                 continue
-            self._repo.reset_step(dep.id, inputs={**(dep.inputs or {}), "dedup_strategies": clean})
-            reset_any = True
-        if reset_any:
-            self._repo.reset_step(gate.id)
+            replacement_inputs_by_step[dep.id] = {
+                **(dep.inputs or {}),
+                "dedup_strategies": clean,
+            }
+        if replacement_inputs_by_step:
+            reset_ids = self._ordered_adjustment_reset_ids(
+                plan,
+                root_ids=list(replacement_inputs_by_step),
+                target_step_id=gate.id,
+            )
+            self._repo.apply_gate_adjustment(
+                plan.id,
+                target_step_id=gate.id,
+                reset_step_ids=reset_ids,
+                replacement_inputs_by_step=replacement_inputs_by_step,
+                expected_plan_status=plan.status,
+                expected_plan_revision=plan.replan_count,
+                expected_plan_fingerprint=plan_fingerprint(plan),
+                expected_target_step_fingerprint=(
+                    plan_step_confirmation_fingerprint(gate)
+                ),
+            )
 
-    def apply_screen_selection(self, plan: Plan, gate: PlanStep | None, selection) -> None:
-        """Persist an edited screen selection and bind it to the current gate.
+    def exclude_join_feature(
+        self,
+        plan: Plan,
+        gate: PlanStep,
+        feature_id: str,
+        run_seq: int,
+    ) -> DriverTurn:
+        """Exclude one reviewed feature table and rerun the join diagnosis.
+
+        This is the deterministic control behind the join conflict card's
+        ``排除该特征表`` action.  It accepts only an id from the persisted
+        ``propose_join.feature_ids`` input and never turns a multi-table join into
+        an empty join.  The proposal input revision and every dependent reset use
+        the same reviewed-snapshot transaction as other typed adjustments.
+        """
+
+        propose_steps = [
+            step
+            for step in plan.steps
+            if step.id in self._dependency_step_ids(plan, gate)
+            and step.tool_ref.tool == "propose_join"
+        ]
+        if len(propose_steps) != 1:
+            return self._instruction_message(
+                plan,
+                gate,
+                run_seq,
+                "无法唯一定位当前拼接诊断，未排除特征表。请刷新后重试。",
+            )
+        propose = propose_steps[0]
+        raw_feature_ids = (propose.inputs or {}).get("feature_ids")
+        if not isinstance(raw_feature_ids, (list, tuple)):
+            return self._instruction_message(
+                plan,
+                gate,
+                run_seq,
+                "当前拼接诊断没有可编辑的特征表清单，未执行排除。",
+            )
+        current_feature_ids = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in raw_feature_ids
+                if str(item).strip()
+            )
+        )
+        selected_feature_id = str(feature_id or "").strip()
+        if selected_feature_id not in current_feature_ids:
+            return self._instruction_message(
+                plan,
+                gate,
+                run_seq,
+                "该特征表已不在当前拼接方案中，未重复排除。请刷新后重试。",
+            )
+        remaining_feature_ids = [
+            item for item in current_feature_ids if item != selected_feature_id
+        ]
+        if not remaining_feature_ids:
+            return self._instruction_message(
+                plan,
+                gate,
+                run_seq,
+                "拼接方案必须至少保留一张特征表，未执行排除。",
+            )
+
+        reset_ids = self._ordered_adjustment_reset_ids(
+            plan,
+            root_ids=[propose.id],
+            target_step_id=gate.id,
+        )
+        self._repo.apply_gate_adjustment(
+            plan.id,
+            target_step_id=gate.id,
+            reset_step_ids=reset_ids,
+            replacement_inputs_by_step={
+                propose.id: {
+                    **(propose.inputs or {}),
+                    "feature_ids": remaining_feature_ids,
+                }
+            },
+            expected_plan_status=plan.status,
+            expected_plan_revision=plan.replan_count,
+            expected_plan_fingerprint=plan_fingerprint(plan),
+            expected_target_step_fingerprint=plan_step_confirmation_fingerprint(gate),
+        )
+        turn = self._run_and_handle(plan.id, run_seq=run_seq)
+        turn.messages.insert(
+            0,
+            DriverMessage(
+                "chat",
+                f"已排除特征表「{selected_feature_id}」并重新执行拼接诊断。",
+                {
+                    "plan_id": plan.id,
+                    "step_id": propose.id,
+                    "excluded_feature_id": selected_feature_id,
+                    "run_seq": run_seq,
+                },
+            ),
+        )
+        return turn
+
+    def screen_selection_input_updates(
+        self,
+        plan: Plan,
+        gate: PlanStep | None,
+        selection,
+    ) -> dict[str, list[str]]:
+        """Validate an edited screen selection for atomic gate confirmation.
 
         The current gate may sit behind a completed, deterministic
-        ``resolve_special_values`` no-op. Updating only the screen output would
-        leave that intermediary's already-materialized ``selected`` list stale,
-        so the gate must also receive the reviewed feature list as a concrete
-        input. This keeps the user's choice authoritative without rewriting a
-        completed step's execution evidence.
+        ``resolve_special_values`` no-op.  The reviewed feature list therefore
+        becomes a concrete gate input.  The completed ``screen_features`` Tool
+        output and its immutable run receipt remain unchanged: a human review
+        decision is not a second Tool execution and must not impersonate one.
+
+        The caller merges this patch into the same transaction that confirms
+        the gate, so a rejected/stale confirmation cannot leave revised inputs
+        behind.
         """
         if gate is None:
-            return
+            return {}
         selected = [str(feature) for feature in (selection or []) if str(feature).strip()]
         if not selected:
-            return
+            return {}
         chosen_for_gate: list[str] = []
         for dep_id in gate.depends_on or []:
             dep = find_step(plan, dep_id)
@@ -89,12 +225,10 @@ class GateExecutionAdapter:
             chosen = [feature for feature in dict.fromkeys(selected) if not known or feature in known]
             if not chosen:
                 continue
-            dep.output_ref = self._repo.store_step_output(dep_id, {**output, "selected": chosen})
-            self._repo.update_step(dep)
             chosen_for_gate = chosen
 
         if not chosen_for_gate or "features" not in (gate.inputs or {}):
-            return
+            return {}
         for dep_id in gate.depends_on or []:
             dep = find_step(plan, dep_id)
             if dep is None or dep.tool_ref.tool != "resolve_special_values":
@@ -114,12 +248,8 @@ class GateExecutionAdapter:
                 ]
             break
         if not chosen_for_gate:
-            return
-        gate.inputs = {
-            **(gate.inputs or {}),
-            "features": chosen_for_gate,
-        }
-        self._repo.update_step(gate)
+            return {}
+        return {"features": chosen_for_gate}
 
     def apply_replan(self, plan: Plan, gate: PlanStep | None, instruction, run_seq) -> DriverTurn:
         """Regenerate remaining steps from a structural instruction and continue."""
@@ -174,7 +304,7 @@ class GateExecutionAdapter:
             return self._instruction_message(plan, gate, run_seq, validation_error)
 
         primary = None
-        adjusted_ids: list[str] = []
+        replacement_inputs_by_step: dict[str, dict] = {}
         for dep in candidates:
             overrides = {key: value for key, value in params.items() if key in (dep.inputs or {})}
             # Backward compatibility for plans created before the join-key picker
@@ -191,8 +321,10 @@ class GateExecutionAdapter:
                         return self._instruction_message(plan, gate, run_seq, sample_weight_error)
             if not overrides:
                 continue
-            self._repo.reset_step(dep.id, inputs={**(dep.inputs or {}), **overrides})
-            adjusted_ids.append(dep.id)
+            replacement_inputs_by_step[dep.id] = {
+                **(dep.inputs or {}),
+                **overrides,
+            }
             if primary is None:
                 primary = dep
         if primary is None:
@@ -204,9 +336,22 @@ class GateExecutionAdapter:
                 run_seq,
                 f"没有识别到可调整的参数，未重算。{hint}",
             )
-        reset_ids = self._reset_downstream_steps(plan, adjusted_ids)
-        if gate.id not in reset_ids:
-            self._repo.reset_step(gate.id)
+        adjusted_ids = list(replacement_inputs_by_step)
+        reset_ids = self._ordered_adjustment_reset_ids(
+            plan,
+            root_ids=adjusted_ids,
+            target_step_id=gate.id,
+        )
+        self._repo.apply_gate_adjustment(
+            plan.id,
+            target_step_id=gate.id,
+            reset_step_ids=reset_ids,
+            replacement_inputs_by_step=replacement_inputs_by_step,
+            expected_plan_status=plan.status,
+            expected_plan_revision=plan.replan_count,
+            expected_plan_fingerprint=plan_fingerprint(plan),
+            expected_target_step_fingerprint=plan_step_confirmation_fingerprint(gate),
+        )
         turn = self._run_and_handle(plan.id, run_seq=run_seq)
         turn.messages.insert(
             0,
@@ -333,16 +478,41 @@ class GateExecutionAdapter:
                     return f"{check_id} 为 max 方向，必须满足 warn <= fail。"
         return None
 
-    def _reset_downstream_steps(self, plan: Plan, root_ids: list[str]) -> set[str]:
-        downstream_ids = downstream_step_ids(plan, root_ids)
-        reset_ids: set[str] = set()
-        for step in sorted(
-            (step for step in plan.steps if step.id in downstream_ids),
-            key=lambda item: (item.index, item.id),
-        ):
-            self._repo.reset_step(step.id)
-            reset_ids.add(step.id)
-        return reset_ids
+    @staticmethod
+    def _ordered_adjustment_reset_ids(
+        plan: Plan,
+        *,
+        root_ids: list[str],
+        target_step_id: str,
+    ) -> list[str]:
+        affected_ids = (
+            set(root_ids)
+            | downstream_step_ids(plan, root_ids)
+            | {target_step_id}
+        )
+        return [
+            step.id
+            for step in sorted(plan.steps, key=lambda item: (item.index, item.id))
+            if step.id in affected_ids
+        ]
+
+    @staticmethod
+    def _dependency_step_ids(plan: Plan, gate: PlanStep) -> set[str]:
+        by_id = {step.id: step for step in plan.steps}
+        dependency_ids = {
+            str(step_id) for step_id in (gate.depends_on or []) if str(step_id)
+        }
+        pending = list(dependency_ids)
+        while pending:
+            step = by_id.get(pending.pop())
+            if step is None:
+                continue
+            for parent_id in step.depends_on or []:
+                normalized = str(parent_id)
+                if normalized and normalized not in dependency_ids:
+                    dependency_ids.add(normalized)
+                    pending.append(normalized)
+        return dependency_ids
 
     def _sample_weight_adjust_error(self, step_id: str, value) -> str | None:
         selected = str(value or "").strip()
@@ -365,8 +535,23 @@ class GateExecutionAdapter:
         return DriverTurn(
             plan.id,
             plan.status.value,
-            [DriverMessage("gate", text, {"plan_id": plan.id, "step_id": gate.id if gate else None, "run_seq": run_seq})],
+            [
+                DriverMessage(
+                    "gate",
+                    text,
+                    {
+                        "plan_id": plan.id,
+                        "step_id": gate.id if gate else None,
+                        "run_seq": run_seq,
+                        ACTION_OUTCOME_METADATA_KEY: ACTION_OUTCOME_REJECTED,
+                    },
+                )
+            ],
         )
 
 
-__all__ = ["GateExecutionAdapter"]
+__all__ = [
+    "ACTION_OUTCOME_METADATA_KEY",
+    "ACTION_OUTCOME_REJECTED",
+    "GateExecutionAdapter",
+]

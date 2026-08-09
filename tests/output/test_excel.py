@@ -221,10 +221,14 @@ def test_stress_summary_labels_negative_9999_sentinel(tmp_path: Path):
     write_validation_excel(_make_results(), output)
     wb = load_workbook(output, data_only=True)
 
-    header_values = [cell.value for cell in wb["压力测试_汇总"][1]]
+    values = [
+        cell.value
+        for row in wb["压力测试_汇总"].iter_rows()
+        for cell in row
+    ]
 
-    assert "置 -9999 特征数" in header_values
-    assert "置 null 特征数" not in header_values
+    assert any(isinstance(value, str) and "置 -9999" in value for value in values)
+    assert not any(isinstance(value, str) and "置 null" in value for value in values)
 
 
 def test_stress_summary_includes_category_coverage_row(tmp_path: Path):
@@ -242,10 +246,102 @@ def test_stress_summary_includes_category_coverage_row(tmp_path: Path):
     write_validation_excel(results, output)
 
     sheet = load_workbook(output, data_only=True)["压力测试_汇总"]
-    values = [[cell.value for cell in row] for row in sheet.iter_rows()]
-    assert values[1][0] == "分类覆盖"
-    assert values[1][1] == "部分完成"
-    assert "未分类特征 1 个：BH_A044_C0580" in values[1][-1]
+    values = [cell.value for row in sheet.iter_rows() for cell in row]
+    assert "分类覆盖：部分完成" in values
+    assert any(
+        isinstance(value, str) and "未分类特征 1 个：BH_A044_C0580" in value
+        for value in values
+    )
+
+
+def test_stress_summary_matches_consolidated_pressure_contract(tmp_path: Path):
+    output = tmp_path / "out.xlsx"
+    write_validation_excel(_make_results(), output)
+
+    sheet = load_workbook(output)["压力测试_汇总"]
+    assert [cell.value for cell in sheet[1][:7]] == [
+        "类别", "KS_baseline", "KS_after", "KS_delta", "KS衰减率", "PSI", "测试结果",
+    ]
+    assert sheet["A2"].value == "baseline"
+    assert sheet["B2"].value == pytest.approx(0.25)
+    assert sheet["F2"].value == pytest.approx(0.12)
+    assert sheet["A3"].value == "征信"
+    assert sheet["D3"].value == pytest.approx(-0.05)
+    assert sheet["E3"].value == pytest.approx(0.20)
+    assert sheet["E3"].number_format == "0.0%"
+    assert sheet["G3"].value == "高风险"
+
+    assert sheet["D3"].fill.fgColor.rgb.endswith("FFC7CE")
+    assert sheet["E3"].fill.fgColor.rgb.endswith("FFC7CE")
+    assert sheet["F3"].fill.fgColor.rgb.endswith("C6EFCE")
+    assert sheet["G3"].fill.fgColor.rgb.endswith("FFC7CE")
+    assert sheet["F2"].fill.fgColor.rgb.endswith("FFEB9C")
+
+
+def test_stress_summary_treats_dictionary_category_names_as_plain_text(
+    tmp_path: Path,
+):
+    base = _make_results()
+    category = replace(
+        base.stress_test.per_category[0],
+        category="=HYPERLINK(\"https://evil.example\",\"open\")",
+    )
+    results = replace(
+        base,
+        stress_test=replace(base.stress_test, per_category=[category]),
+    )
+    output = tmp_path / "out.xlsx"
+
+    write_validation_excel(results, output)
+
+    sheet = load_workbook(output)["压力测试_汇总"]
+    assert sheet["A3"].data_type == "s"
+    assert sheet["A3"].value.startswith("'=HYPERLINK")
+    matrix_header_row = next(
+        row_index
+        for row_index in range(1, sheet.max_row + 1)
+        if sheet.cell(row=row_index, column=1).value == "OOT分箱"
+    )
+    assert sheet.cell(matrix_header_row, 2).data_type == "s"
+    assert sheet.cell(matrix_header_row, 2).value.startswith("'=HYPERLINK")
+
+
+def test_stress_summary_merges_oot_bin_shares_and_includes_risk_legend(tmp_path: Path):
+    output = tmp_path / "out.xlsx"
+    write_validation_excel(_make_results(), output)
+
+    sheet = load_workbook(output)["压力测试_汇总"]
+    matrix_header_row = next(
+        row_index
+        for row_index in range(1, sheet.max_row + 1)
+        if sheet.cell(row=row_index, column=1).value == "OOT分箱"
+    )
+    assert [cell.value for cell in sheet[matrix_header_row][:2]] == ["OOT分箱", "征信"]
+    assert sheet.cell(row=matrix_header_row + 1, column=1).value == "[0,0.5]"
+    assert sheet.cell(row=matrix_header_row + 1, column=2).value == pytest.approx(1.0)
+    assert sheet.cell(row=matrix_header_row + 1, column=2).number_format == "0.0%"
+    assert sheet.cell(row=matrix_header_row + 2, column=1).value == "合计"
+    assert sheet.cell(row=matrix_header_row + 2, column=2).value == pytest.approx(1.0)
+
+    values = [cell.value for row in sheet.iter_rows() for cell in row]
+    assert any(isinstance(value, str) and "KS衰减范围：[0,10%)" in value for value in values)
+    assert any(isinstance(value, str) and "PSI范围：[0.10,0.25)" in value for value in values)
+    assert any(isinstance(value, str) and "KS衰减范围：[20%,+∞)" in value for value in values)
+
+
+def test_stress_summary_does_not_misalign_incompatible_bin_tables(tmp_path: Path):
+    output = tmp_path / "out.xlsx"
+    write_validation_excel(_make_results_with_uneven_stress_bins(), output)
+
+    sheet = load_workbook(output, data_only=True)["压力测试_汇总"]
+    matrix_header_row = next(
+        row_index
+        for row_index in range(1, sheet.max_row + 1)
+        if sheet.cell(row=row_index, column=1).value == "OOT分箱"
+    )
+    assert sheet.cell(row=matrix_header_row + 1, column=2).value is None
+    values = [cell.value for row in sheet.iter_rows() for cell in row]
+    assert "征信：分箱边界不可对齐，分箱占比留空。" in values
 
 
 def test_header_style_applied(tmp_path: Path):

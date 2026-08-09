@@ -195,7 +195,7 @@ def test_strategy_development_runs_reversible_steps_to_only_adoption_gate(tmp_pa
     # current gate token in one request; task setup never pre-authorizes it.
     turn = driver.resume(
         plan_id=plan_id,
-        user_text="确认采纳",
+        user_text="确认",
         run_seq=2,
         adjust_params={"adoption_reason": "committee approved for Q3 rollout"},
         expected_step_id=adopt_step.id,
@@ -269,7 +269,7 @@ def test_strategy_development_double_adopt_confirm_conflicts_gracefully(tmp_path
     assert adopt_step.status.value == "awaiting_confirm"
     turn = driver.resume(
         plan_id=plan_id,
-        user_text="确认采纳",
+        user_text="确认",
         run_seq=2,
         adjust_params={"adoption_reason": "first adoption"},
         expected_step_id=adopt_step.id,

@@ -10,9 +10,19 @@ from marvis.agent.prompts import (
     WORD_CONCLUSION_SYSTEM_PROMPT,
     WORD_CONCLUSION_V2_SYSTEM_PROMPT,
 )
-from marvis.db import AGENT_REPORT_CONCLUSION_KEYS
+from marvis.agent.instruction_router import route_instruction
+from marvis.agent.semantic_authorization import review_semantic_authorization
+from marvis.repositories.tasks import AGENT_REPORT_CONCLUSION_KEYS
 from marvis.domain import TaskRecord
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from marvis.report_texts import report_text_values_from_results
+from marvis.validation.results import validation_results_from_dict
+from marvis.validation.stress_risk import (
+    stress_ks_risk,
+    stress_psi_risk,
+    stress_risk_label,
+    worst_stress_risk,
+)
 from marvis.agent_memory.prompting import (
     add_memory_to_prompt_payload,
     attach_memory_metadata,
@@ -181,6 +191,12 @@ _START_VALIDATION_ENGLISH_NEGATION = re.compile(
 # '跑吧' are legitimate start affirmatives in direct_commands, not questions.
 _START_QUESTION = re.compile(
     r"[?？]|吗|呢$|什么时候|何时|要不要|需不需要|能不能|可不可以|是不是",
+    re.IGNORECASE,
+)
+_VALIDATION_AUTHORIZATION_QUESTION = re.compile(
+    r"[?？]|吗(?:[\s。.!！]*$)|呢(?:[\s。.!！]*$)|为什么|怎么(?:样)?|如何|"
+    r"什么是|是什么|什么(?:意思|影响|原因|作用)|有什么(?:影响|区别|含义)|"
+    r"要不要|需不需要|能不能|可不可以|行不行|好不好|对不对|是不是",
     re.IGNORECASE,
 )
 
@@ -375,6 +391,63 @@ def _strip_continue_command_affixes(value: str) -> str:
 
 def is_agent_advance_intent(content: str) -> bool:
     return is_start_validation_intent(content) or is_continue_validation_intent(content)
+
+
+def review_validation_instruction_authorization(
+    model_profile: dict,
+    *,
+    gate_context: str,
+    instruction: str,
+) -> dict | None:
+    """Return audited evidence only for a two-pass, fail-closed authorization.
+
+    Legacy model validation does not have a PlanDriver gate object, but Agent mode
+    still exposes a free-text confirmation seam.  Reuse the same router and
+    independent semantic reviewer as PlanDriver while keeping the executable
+    decision parameter-free: a condition, question, adjustment, rejection,
+    malformed reply, or client failure can never become an advance command.
+    """
+
+    normalized_instruction = str(instruction or "").strip()
+    if (
+        not model_profile
+        or not normalized_instruction
+        or _VALIDATION_AUTHORIZATION_QUESTION.search(normalized_instruction)
+        or _is_greeting_message(normalized_instruction)
+    ):
+        return None
+    client = OpenAICompatibleLLMClient(model_profile)
+    try:
+        route = route_instruction(
+            client,
+            gate_context=gate_context,
+            instruction=instruction,
+            strict_contract=True,
+        )
+    except Exception:
+        return None
+    if (
+        route.get("action") != "confirm"
+        or route.get("confidence") != "high"
+        or route.get("explicit_authorization") is not True
+        or bool(route.get("constraint"))
+        or bool(route.get("params"))
+    ):
+        return None
+    review = review_semantic_authorization(
+        client,
+        gate_context=gate_context,
+        instruction=instruction,
+        proposed_params={},
+    )
+    if not review.authorized:
+        return None
+    return {
+        "evidence_quote": review.evidence_quote,
+        "reason": review.reason,
+        "confidence": review.confidence,
+        "route_reason": str(route.get("reason") or ""),
+    }
 
 
 def _compact_agent_command(content: str) -> str:
@@ -1004,8 +1077,17 @@ def generate_word_conclusions(
     )
 
 
-def fallback_word_conclusions(*, task: TaskRecord) -> dict[str, str]:
+def fallback_word_conclusions(
+    *,
+    task: TaskRecord,
+    evidence: dict | None = None,
+) -> dict[str, str]:
     name = task.model_name or "本模型"
+    deterministic = _fallback_conclusions_from_validation_evidence(
+        evidence=evidence,
+    )
+    if deterministic is not None:
+        return deterministic
     if task.validation_workflow_version == 2:
         return {
             "TEXT:pressure_test_summary": (
@@ -1035,6 +1117,82 @@ def fallback_word_conclusions(*, task: TaskRecord) -> dict[str, str]:
             "从当前平台产物看，核心验证流程已执行至报告结论候选生成阶段；最终是否符合要求仍应以结构化指标、"
             "压力测试明细和验证人员复核意见为准。建议在确认 Word 结论前重点核对 OOT 区分效果、PSI 稳定性和关键变量压力表现。"
         ),
+    }
+
+
+def _fallback_conclusions_from_validation_evidence(
+    *,
+    evidence: dict | None,
+) -> dict[str, str] | None:
+    if not isinstance(evidence, dict):
+        return None
+    raw_results = evidence.get("validation_results")
+    if not isinstance(raw_results, dict):
+        return None
+    payload = dict(raw_results)
+    payload.pop("overfitting_check", None)
+    try:
+        results = validation_results_from_dict(payload)
+    except ValueError:
+        return None
+
+    computed = report_text_values_from_results(results)
+    pressure_summary = computed.get(
+        "TEXT:pressure_test_summary",
+        "平台已完成压力测试，具体指标见 Excel 明细。",
+    )
+    baseline_ks = results.stress_test.baseline.ks
+    category_risks: list[str | None] = []
+    for item in results.stress_test.per_category:
+        if item.status != "completed":
+            category_risks.append(None)
+            continue
+        category_risks.append(worst_stress_risk(
+            stress_ks_risk(baseline_ks, item.ks_after)
+            if item.ks_after is not None
+            else None,
+            stress_psi_risk(item.psi_vs_baseline),
+        ))
+    pressure_risk = worst_stress_risk(*category_risks)
+    pressure_label = stress_risk_label(pressure_risk)
+    oot = next(
+        (row for row in results.effectiveness.overall if row.split == "oot"),
+        None,
+    )
+    oot_text = (
+        f"OOT KS {oot.ks:.4f}（仅展示，不参与通过判定），OOT PSI {oot.psi_vs_train:.4f}"
+        if oot is not None
+        else "OOT KS/PSI 数据缺失"
+    )
+    if results.pmml_scoring is not None:
+        scoring_text = f"PMML 打分测试{('通过' if results.pmml_scoring.status == 'pass' else '未通过')}"
+    else:
+        scoring_text = "Notebook 分数一致性结果见结构化验证明细"
+
+    if pressure_risk == "high":
+        recommendation = (
+            "压力测试存在高风险场景，应核对缺失信源、样本分布与分箱迁移；"
+            "投产前应配置监控和熔断，并准备备用评分或人工复核方案。"
+        )
+    elif pressure_risk == "medium":
+        recommendation = (
+            "压力测试达到预警阈值，建议人工核验异常类别并通知模型团队；"
+            "上线后需加强 KS、PSI 与信源缺失率监控。"
+        )
+    else:
+        recommendation = (
+            "压力测试未发现中高风险场景，可结合其他确定性门禁继续评估；"
+            "上线后仍应执行常规 KS、PSI 与信源稳定性监控。"
+        )
+    conclusion = (
+        f"{scoring_text}；{oot_text}；压力测试最高等级为{pressure_label}。"
+        "本段为大模型文本生成失败后的确定性保守回退结论，指标取自平台结果；"
+        "最终使用决定仍需结合稳定性、压力测试和报告完整性门禁复核。"
+    )
+    return {
+        "TEXT:pressure_test_summary": pressure_summary,
+        "TEXT:pressure_impact_recommendation": recommendation,
+        "TEXT:final_validation_conclusion": conclusion,
     }
 
 

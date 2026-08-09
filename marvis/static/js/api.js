@@ -8,6 +8,38 @@ export class ApiError extends Error {
   }
 }
 
+function errorDetailText(error) {
+  const candidates = [
+    error?.detail,
+    error?.payload?.detail,
+    error?.message,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return "";
+}
+
+export function apiConflictKind(error) {
+  if (Number(error?.status) !== 409) return "not_conflict";
+  const detail = errorDetailText(error);
+  if (
+    detail.includes("该任务正在执行上一步，请等待完成")
+    || detail === "task already has an active stage"
+  ) {
+    return "active_driver_job";
+  }
+  if (
+    /(?:当前待确认步骤|该确认按钮对应的步骤|该操作对应的计划|确认快照).*已变化/.test(detail)
+    || /^(?:stale gate|confirmation snapshot changed)$/i.test(detail)
+    || /(?:plan|plan step|step).*(?:changed|revision|snapshot|fingerprint).*confirm/i.test(detail)
+    || /(?:plan|plan step|step) (?:revision|snapshot|fingerprint) changed/i.test(detail)
+  ) {
+    return "confirmation_snapshot_stale";
+  }
+  return "other_conflict";
+}
+
 export function formatErrorDetail(detail) {
   if (Array.isArray(detail)) {
     return detail.map((item) => item.msg || JSON.stringify(item)).join("; ");

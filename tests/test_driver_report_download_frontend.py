@@ -90,6 +90,7 @@ def test_agent_message_report_download_renders_every_report_link():
     script = f"""
       import assert from "node:assert/strict";
       const escapeHtml = (value) => String(value);
+      let selectedTask = {{ task_type: "modeling" }};
       {function_source}
       const html = agentMessageReportDownloadHtml({{
         metadata: {{
@@ -118,6 +119,18 @@ def test_agent_message_report_download_renders_every_report_link():
       assert.equal(html.includes("/driver-reports/id-xgb/download"), true);
       assert.equal(html.includes("legacy primary"), false);
       assert.equal(html.includes("已生成 2 份分析报告"), true);
+
+      selectedTask = {{ task_type: "portfolio" }};
+      const historical = agentMessageReportDownloadHtml({{
+        metadata: {{
+          report_download: {{
+            label: "下载模型开发报告",
+            download_url: "/api/tasks/task-1/driver-report/download",
+          }},
+        }},
+      }});
+      assert.equal(historical.includes("下载组合分析报告"), true);
+      assert.equal(historical.includes("下载模型开发报告"), false);
     """
     subprocess.run(
         ["node", "--input-type=module", "-e", textwrap.dedent(script)],

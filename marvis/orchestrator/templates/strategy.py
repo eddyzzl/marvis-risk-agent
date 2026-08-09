@@ -1588,6 +1588,82 @@ STRATEGY_MODEL_EVIDENCE_V2 = WorkflowTemplate(
 )
 
 
+STRATEGY_MODEL_SCORE_COMPARISON_V2 = WorkflowTemplate(
+    id="strategy_model_score_comparison_v2",
+    title="同样本模型评分证据比较",
+    goal_patterns=(
+        "比较同一样本上的模型评分证据",
+        "生成不选优的模型评分比较证据",
+        "compare governed model score evidence without selection",
+        "materialize model score comparison v2",
+    ),
+    slots=(
+        SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Exact authenticated StrategySampleDesign V2 artifact pair",
+        ),
+        SlotSpec(
+            "model_score_evidence_refs",
+            True,
+            "task_context",
+            "At least two platform-discovered same-task score-evidence pairs",
+        ),
+        SlotSpec(
+            "population",
+            True,
+            "user",
+            "Explicit governed population to compare: approval or risk",
+        ),
+        SlotSpec(
+            "partition",
+            True,
+            "user",
+            "Explicit governed partition: overall, development, validation, or oot",
+        ),
+        SlotSpec(
+            "expected_registry_token",
+            True,
+            "task_context",
+            "CAS token for the complete platform-discovered score registry",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="生成不选优的模型评分比较证据",
+            tool_ref=ToolRef(
+                "strategy",
+                "materialize_model_score_comparison_v2",
+            ),
+            inputs_template={
+                "sample_design_ref": "{slot:sample_design_ref}",
+                "model_score_evidence_refs": (
+                    "{slot:model_score_evidence_refs}"
+                ),
+                "population": "{slot:population}",
+                "partition": "{slot:partition}",
+                "expected_registry_token": "{slot:expected_registry_token}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "comparison_id"}),
+                PostCheck("nonempty", {"field": "comparison_content_hash"}),
+                PostCheck("nonempty", {"field": "comparison.metrics"}),
+                PostCheck("nonempty", {"field": "comparison.selection.status"}),
+                PostCheck("nonempty", {"field": "artifact.artifact_id"}),
+                PostCheck("nonempty", {"field": "artifact.content_hash"}),
+                PostCheck("nonempty", {"field": "governance.selection_status"}),
+            ),
+            needs_confirmation=False,
+            decision_point=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_VOTING_CANDIDATE_BUILD = WorkflowTemplate(
     id="strategy_voting_candidate_build",
     title="Voting n-of-k 策略候选构建",
@@ -4513,6 +4589,12 @@ SLICE_AGGREGATE = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Ready dataset id to aggregate"),
         SlotSpec(
+            "expected_content_hash",
+            True,
+            "task_context",
+            "Confirmed SHA-256 identity of the ready dataset",
+        ),
+        SlotSpec(
             "metrics", True, "task_context", "Validated aggregate metrics (op/col)"
         ),
         SlotSpec("group_by", False, "task_context", "Optional group-by columns"),
@@ -4527,6 +4609,7 @@ SLICE_AGGREGATE = WorkflowTemplate(
             tool_ref=ToolRef("data_ops", "slice_aggregate"),
             inputs_template={
                 "dataset_id": "{slot:dataset_id}",
+                "expected_content_hash": "{slot:expected_content_hash}",
                 "metrics": "{slot:metrics}",
                 "group_by": "{slot:group_by}",
                 "filters": "{slot:filters}",

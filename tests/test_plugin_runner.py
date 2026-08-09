@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+from marvis.canonical_results import CanonicalResultAuthenticationError
 from marvis.db import PluginRepository, init_db
 from marvis.governance.errors import ApprovalBindingError, ApprovalStateError
 from marvis.job_cancellation import JobCancellationToken
@@ -142,6 +143,58 @@ def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
     assert result.output == {"echoed": "hi"}
     assert result.error is None
     assert result.duration_ms >= 0
+
+
+def test_tool_runner_signs_success_with_exact_invocation_and_raw_output_hash(
+    tmp_path,
+):
+    runner = _runner(tmp_path)
+
+    result = runner.invoke(
+        ToolRef("_sample", "echo"),
+        {"message": "hi"},
+        task_id="task-1",
+        invocation_id="step-run-1",
+    )
+
+    assert result.ok is True
+    assert result.invocation_id == "step-run-1"
+    assert result.raw_output_hash == (
+        "sha256:"
+        "449ef2c2d0f2d2dcc4c345edce89a34a8ee0cb1f5f4ba22a57660e1c8d5539e3"
+    )
+    assert result.tool_version == "0.1.0"
+    assert result.manifest_hash is not None
+    assert result.manifest_hash.startswith("sha256:")
+    assert result.canonical_binding_verified is False
+
+
+def test_tool_runner_fails_before_success_when_canonical_authentication_fails(
+    tmp_path,
+    monkeypatch,
+):
+    runner = _runner(tmp_path)
+
+    def reject(*_args, **_kwargs):
+        raise CanonicalResultAuthenticationError("substituted canonical envelope")
+
+    monkeypatch.setattr(
+        "marvis.plugins.runner.authenticate_canonical_result",
+        reject,
+    )
+
+    result = runner.invoke(
+        ToolRef("_sample", "echo"),
+        {"message": "hi"},
+        task_id="task-1",
+        invocation_id="step-run-1",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "integrity"
+    assert result.output is None
+    assert result.invocation_id == "step-run-1"
+    assert result.raw_output_hash is None
 
 
 def test_progress_path_setup_failure_does_not_fail_tool(tmp_path, monkeypatch):

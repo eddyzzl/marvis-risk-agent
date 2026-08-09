@@ -292,14 +292,6 @@ class _MemoryRecord:
         return getattr(self.entry, field_name, None)
 
 
-def _is_usable_model_experience(record: _MemoryRecord) -> bool:
-    if not _is_usable_memory(record):
-        return False
-    if record.memory_type != "model_experience":
-        return False
-    return True
-
-
 def _is_usable_memory(record: _MemoryRecord) -> bool:
     if record.status != "active":
         return False

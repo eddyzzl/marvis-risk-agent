@@ -1028,6 +1028,14 @@ def _validate_impact_provenance(value: object) -> dict[str, Any]:
     return provenance
 
 
+def validate_strategy_pool_impact_artifact_provenance(
+    value: object,
+) -> dict[str, Any]:
+    """Validate canonical provenance for every supported PoolImpact schema."""
+
+    return _validate_impact_provenance(value)
+
+
 def _impact_request_from_provenance(
     provenance: Mapping[str, Any],
     *,
@@ -1677,40 +1685,6 @@ def _pool_sample_binding(
     if not identities or any(identity != identities[0] for identity in identities[1:]):
         raise StrategyError("Strategy Pool entries do not share one sample identity")
     return {"task_id": task_id, **dict(identities[0])}
-
-
-def _require_pool_measurement_target(
-    lineages,
-    *,
-    expected_target_col: str,
-) -> None:
-    if not lineages:
-        raise StrategyError("Strategy Pool has no candidate lineages")
-    targets = [_lineage_target_col(lineage) for lineage in lineages]
-    if any(target != targets[0] for target in targets[1:]):
-        raise StrategyError(
-            "Strategy Pool candidates do not share one measurement target"
-        )
-    if targets[0] != expected_target_col:
-        raise StrategyError(
-            "Strategy Pool candidate target does not match the confirmed workspace target"
-        )
-
-
-def _require_pool_sample_design_ref(
-    lineages,
-    *,
-    expected: StrategyRiskDevelopmentRef,
-) -> None:
-    if not lineages:
-        raise StrategyError("Strategy Pool has no candidate lineages")
-    for lineage in lineages:
-        actual = _lineage_sample_design_ref(lineage)
-        if actual != expected:
-            raise StrategyError(
-                "Strategy Pool candidate sample-design reference does not match "
-                "the requested development sample"
-            )
 
 
 def _lineage_sample_design_ref(lineage) -> StrategyRiskDevelopmentRef:
@@ -2695,4 +2669,5 @@ __all__ = [
     "require_strategy_pool_impact_artifact_binding_on_connection",
     "run_measure_pool_impact",
     "validate_measure_pool_impact_tool_output",
+    "validate_strategy_pool_impact_artifact_provenance",
 ]

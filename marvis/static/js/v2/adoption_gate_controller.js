@@ -1,3 +1,9 @@
+import {
+  confirmationSnapshotAttributes,
+  confirmationSnapshotFromControl,
+  refreshAfterConfirmationConflict,
+} from "./driver_gate_confirm.js";
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -19,11 +25,15 @@ export function isAdoptionGate(message) {
 export function renderAdoptionGate(message, options = {}) {
   if (!isAdoptionGate(message)) return "";
   const interactive = options.interactive !== false;
+  const planId = String(message?.metadata?.plan_id || "");
   const stepId = String(message?.metadata?.step_id || "");
+  const snapshotAttrs = confirmationSnapshotAttributes(
+    message?.metadata?.confirmation_snapshot || {},
+  );
   const disabled = interactive ? "" : " disabled";
   const readonly = interactive ? "false" : "true";
   return [
-    `<div class="adoption-gate" data-adoption-step-id="${escapeHtml(stepId)}" data-adoption-readonly="${readonly}">`,
+    `<div class="adoption-gate" data-adoption-plan-id="${escapeHtml(planId)}" data-adoption-step-id="${escapeHtml(stepId)}" data-adoption-readonly="${readonly}"${snapshotAttrs}>`,
     '<label class="adoption-reason-field">',
     "<span>采纳理由</span>",
     `<textarea data-adoption-reason rows="3" maxlength="1000" placeholder="说明业务目标、验证证据和批准依据"${disabled}></textarea>`,
@@ -46,6 +56,7 @@ function contextValues(context = {}) {
     setAgentMessages: context.setAgentMessages || (() => {}),
     renderAgentConversation: context.renderAgentConversation || (() => {}),
     pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
+    refreshAgentMessages: context.refreshAgentMessages,
     resetFetchThrottle: context.resetFetchThrottle || (() => {}),
     renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
   };
@@ -54,18 +65,24 @@ function contextValues(context = {}) {
 export async function submitAdoption(button, context = {}) {
   const {
     taskId, api, setActionStatus, setAgentMessages, renderAgentConversation,
-    pollAgentMessagesUntilSettled, resetFetchThrottle, renderWorkflowStepper,
+    pollAgentMessagesUntilSettled, refreshAgentMessages, resetFetchThrottle,
+    renderWorkflowStepper,
   } = contextValues(context);
   const wrap = button?.closest?.("[data-adoption-step-id]");
   const reason = wrap?.querySelector?.("[data-adoption-reason]")?.value?.trim?.() || "";
+  const expectedPlanId = wrap?.dataset?.adoptionPlanId || "";
   const expectedStepId = wrap?.dataset?.adoptionStepId || "";
   if (!taskId || typeof api !== "function") return;
-  if (!expectedStepId) {
-    setActionStatus("缺少当前采纳步骤，请刷新后重试。", "error");
-    return;
-  }
   if (reason.length < 2) {
     setActionStatus("请填写真实、可审计的采纳理由。", "error");
+    return;
+  }
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    wrap,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
+    setActionStatus("缺少当前采纳步骤，请刷新后重试。", "error");
     return;
   }
 
@@ -78,7 +95,9 @@ export async function submitAdoption(button, context = {}) {
         content: "确认采纳",
         ui_action: "confirm_adoption",
         adjust_params: { adoption_reason: reason },
+        expected_plan_id: expectedPlanId,
         expected_step_id: expectedStepId,
+        ...confirmationSnapshot,
       }),
     });
     const pollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
@@ -87,8 +106,15 @@ export async function submitAdoption(button, context = {}) {
     setAgentMessages(result.messages);
     renderAgentConversation();
   } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "策略采纳失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId,
+      refreshAgentMessages,
+      setActionStatus,
+    });
+    if (!conflictHandled) {
+      button.disabled = false;
+      setActionStatus(error?.message || "策略采纳失败", "error");
+    }
   } finally {
     resetFetchThrottle(taskId);
     renderWorkflowStepper({ force: true });

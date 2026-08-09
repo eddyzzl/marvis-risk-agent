@@ -37,6 +37,7 @@ _RECOVERY_DIAGNOSTIC_FIELDS = (
     "expected_fields",
     "actual_fields",
     "auto_recoverable",
+    "retry_instruction_sha256",
 )
 _LEGACY_CSV_FIELD_COUNT_RE = re.compile(
     r"Expected\s+(?P<expected>\d+)\s+fields?\s+in\s+line\s+"

@@ -1,0 +1,1681 @@
+/* ====== VD-3: loading skeleton system ======
+   Site-wide primitive: a shimmering block/row/table stand-in for content that
+   has not arrived yet, used on first load / genuine state transitions only —
+   never re-triggered on in-place polling diffs (see skeleton.js template
+   helpers + call sites in app.js / plan_rail_controller.js). Degrades to a
+   static tint under prefers-reduced-motion. */
+.skeleton {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background: var(--surface-muted);
+  border-radius: var(--radius-control);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--text) 8%, transparent),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+    background: none;
+  }
+}
+
+.skeleton-block {
+  width: 100%;
+}
+
+.skeleton-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skeleton-row {
+  width: 100%;
+}
+
+.skeleton-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.skeleton-table-header,
+.skeleton-table-row {
+  display: flex;
+  gap: 10px;
+}
+.skeleton-table-cell {
+  flex: 1;
+  height: 14px;
+  border-radius: 4px;
+}
+.skeleton-table-cell-head {
+  height: 11px;
+  opacity: 0.7;
+}
+
+body[data-theme="dark"] .skeleton {
+  background: var(--surface-muted);
+}
+body[data-theme="dark"] .skeleton::after {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--text) 12%, transparent),
+    transparent
+  );
+  background-size: 200% 100%;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  opacity: 1;
+}
+
+body.app-booting .app-shell {
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.app-booting :is(.workspace-head, .workspace-body, .progress-rail),
+body.app-booting .validation-workspace:not(.is-empty) :is(.workspace-head, .workspace-body, .progress-rail) {
+  opacity: 0;
+}
+
+.validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .agent-composer, .progress-rail) {
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
+}
+
+/* VD-3: task switch — the workspace body fades to 0 opacity above while new
+   content loads (beginTaskContentLoad/finishTaskContentLoad in app.js). A
+   CSS-only shimmer overlay fills that blank moment so switching tasks reads
+   as "loading" rather than "did my click register" (co-exists with the
+   .task-pill "busy" pill — different DOM regions, no visual fight).
+   .result-workspace already declares position: relative in its own rule
+   below, so only the pseudo-elements are added here. */
+.validation-workspace.is-task-content-loading .result-workspace::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: var(--radius);
+  background:
+    linear-gradient(var(--surface-muted) 0 22px, transparent 22px 34px,
+      var(--surface-muted) 34px 56px, transparent 56px 68px,
+      var(--surface-muted) 68px 90px, transparent 90px 102px,
+      var(--surface-muted) 102px 124px) top / 100% 124px no-repeat;
+  overflow: hidden;
+  animation: task-content-skeleton-fade 160ms ease both;
+}
+.validation-workspace.is-task-content-loading .result-workspace::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 6%, transparent), transparent);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes task-content-skeleton-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+body[data-theme="dark"] .validation-workspace.is-task-content-loading .result-workspace::after {
+  background:
+    linear-gradient(var(--surface-muted) 0 22px, transparent 22px 34px,
+      var(--surface-muted) 34px 56px, transparent 56px 68px,
+      var(--surface-muted) 68px 90px, transparent 90px 102px,
+      var(--surface-muted) 102px 124px) top / 100% 124px no-repeat;
+}
+@media (prefers-reduced-motion: reduce) {
+  .validation-workspace.is-task-content-loading .result-workspace::before {
+    animation: none;
+  }
+}
+
+.validation-workspace.is-task-content-settling :is(.task-hero) {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--surface) 92%, transparent) 0%,
+    color-mix(in srgb, var(--surface) 86%, transparent) 100%
+  );
+  -webkit-backdrop-filter: blur(14px) saturate(1.18);
+  backdrop-filter: blur(14px) saturate(1.18);
+}
+
+body[data-theme="dark"] .validation-workspace.is-task-content-settling :is(.task-hero) {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--surface) 88%, transparent) 0%,
+    color-mix(in srgb, var(--surface-soft) 78%, transparent) 100%
+  );
+}
+
+/* Animate the collapse/expand slide, but not on first paint or while dragging. */
+body.anim-ready .app-shell {
+  transition:
+    grid-template-columns 300ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 180ms ease;
+}
+
+body.anim-ready.is-resizing .app-shell {
+  transition: none;
+}
+
+body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.workspace-head) {
+  transition: opacity 110ms ease;
+}
+
+body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.result-scroll-content) {
+  transition: opacity 150ms ease 90ms;
+}
+
+body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.agent-composer, .progress-rail) {
+  transition: opacity 160ms ease;
+}
+
+/* During the slide, pin the rail content to its final width so it is laid out once
+   and revealed/clipped by the animating column — no text reflow ("squishing"). */
+body.sidebar-sliding .app-shell .task-sidebar {
+  align-items: flex-start;
+}
+
+body.sidebar-sliding .app-shell:not(.sidebar-collapsed) .task-sidebar > * {
+  width: var(--rail-content-width);
+}
+
+.app-shell.sidebar-collapsed {
+  --sidebar-width: 0px;
+  --workspace-main-gutter: var(--workspace-collapsed-main-gutter);
+  --workspace-rail-gap: var(--workspace-collapsed-rail-gap);
+  --pet-default-workspace-offset: var(--pet-collapsed-workspace-offset);
+  --pet-min-workspace-offset: var(--pet-collapsed-workspace-offset);
+}
+
+.region {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.task-sidebar {
+  display: flex;
+  grid-column: 1;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--sidebar-border);
+  background: var(--sidebar-bg);
+}
+
+/* Let popovers (collapsed search flyout, settings menu) extend past the rail. */
+body.search-active .task-sidebar,
+.task-sidebar:has(.sidebar-settings[open]) {
+  overflow: visible;
+}
+
+.validation-workspace {
+  --workspace-mask-bg: var(--surface);
+  position: relative;
+  display: grid;
+  grid-column: 2;
+  grid-template-columns: minmax(0, 1fr) var(--workspace-rail-gap) var(--progress-width);
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  gap: 0;
+  background: var(--surface);
+}
+
+body[data-theme="dark"] .validation-workspace {
+  --workspace-mask-bg: var(--bg);
+  background: var(--bg);
+}
+
+.validation-workspace.is-empty {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 7px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--surface) 90%, var(--text) 10%);
+}
+
+.button:focus-visible,
+.task-row:focus-visible,
+.step:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.material-source-tab:focus-visible,
+.material-upload-dropzone:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+input.suppress-pointer-focus-ring:focus-visible,
+textarea.suppress-pointer-focus-ring:focus-visible,
+select.suppress-pointer-focus-ring:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.task-row:focus-visible,
+.sidebar-settings summary:focus-visible {
+  outline-color: var(--option-focus-ring);
+}
+
+.button:disabled {
+  color: var(--text-muted);
+  background: var(--button-disabled-bg);
+  border-color: var(--border);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.button.primary {
+  color: var(--button-primary-text);
+  background: var(--button-primary-bg);
+  border-color: var(--button-primary-border);
+  box-shadow: var(--button-solid-shadow);
+}
+
+.button.primary:hover:not(:disabled),
+.button.primary:focus-visible:not(:disabled) {
+  color: var(--button-primary-text-hover);
+  background: var(--button-primary-bg-hover);
+  border-color: var(--button-primary-border-hover);
+  box-shadow: var(--button-solid-shadow-hover);
+}
+
+.button.secondary {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  box-shadow: var(--button-secondary-shadow);
+}
+
+.button.secondary:hover:not(:disabled),
+.button.secondary:focus-visible:not(:disabled) {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--surface) 88%, var(--text) 12%);
+  box-shadow: var(--button-secondary-shadow-hover);
+}
+
+body[data-theme="dark"] .button.secondary {
+  color: var(--text);
+  background: var(--surface-soft);
+  border-color: var(--border-strong);
+  box-shadow: var(--button-secondary-shadow);
+}
+
+body[data-theme="dark"] .button.secondary:hover:not(:disabled),
+body[data-theme="dark"] .button.secondary:focus-visible:not(:disabled) {
+  background: color-mix(in srgb, var(--surface-soft) 82%, #ffffff 18%);
+  border-color: var(--border-strong);
+  box-shadow: var(--button-secondary-shadow-hover);
+}
+
+#refreshExecutionEnvironmentOptionsButton.button.primary,
+#addLLMModelButton.button.primary {
+  width: 84px;
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.governance-settings-dialog :is(
+  .settings-row-control > .button,
+  .agent-memory-toolbar > .button,
+  .agent-memory-load-more .button,
+  .agent-memory-actions .button,
+  .agent-memory-view-tab,
+  .draft-tool-run-section > .button,
+  .draft-governance-actions .button
+) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 84px;
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.button.compact {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.button.dialog-close-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  background: transparent;
+  box-shadow: none;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.button.dialog-close-button:hover:not(:disabled),
+.button.dialog-close-button:focus-visible:not(:disabled),
+.button.dialog-close-button:active:not(:disabled) {
+  outline: none;
+  border-color: transparent;
+  background: var(--option-hover);
+  box-shadow: none;
+  color: var(--text);
+}
+
+.button.dialog-close-button span {
+  display: block;
+  transform: translateY(-1px);
+}
+
+body[data-theme="dark"] .button.dialog-close-button {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+body[data-theme="dark"] .button.dialog-close-button:hover:not(:disabled),
+body[data-theme="dark"] .button.dialog-close-button:focus-visible:not(:disabled),
+body[data-theme="dark"] .button.dialog-close-button:active:not(:disabled) {
+  background: var(--option-hover);
+  box-shadow: none;
+  color: var(--text);
+}
+
+.button.full {
+  width: 100%;
+}
+
+.button.is-busy::before {
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: var(--radius-pill);
+  content: "";
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  background: var(--pill-bg);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pill.success {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.pill.warning {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.pill.run {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.pill.danger {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.sidebar-head {
+  padding: 18px 10px 14px 16px;
+}
+
+.brand-logo {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  inline-size: 100%;
+  min-width: 0;
+  column-gap: 8px;
+  container-type: inline-size;
+}
+
+.brand-logo .brand-mark {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.brand-logo h1 {
+  min-width: 0;
+  inline-size: 100%;
+  margin: 0;
+  font-size: clamp(16px, 7cqi, 22px);
+  line-height: 1.05;
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+
+.sidebar-collapse-button {
+  position: absolute;
+  top: 23px;
+  left: 14px;
+  z-index: 6;
+  display: inline-flex;
+  width: var(--sidebar-control-size);
+  height: var(--sidebar-control-size);
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+.sidebar-collapse-button:hover,
+.sidebar-collapse-button:focus-visible {
+  color: var(--text);
+  background: var(--option-hover);
+}
+
+.collapse-chevron {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 140ms ease;
+}
+
+.app-shell.sidebar-collapsed .task-sidebar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  width: var(--collapsed-hit-area-width);
+  border-right: 0;
+  background: transparent;
+  pointer-events: none;
+  overflow: visible;
+}
+
+body.search-active .app-shell.sidebar-collapsed .task-sidebar {
+  position: static;
+  z-index: auto;
+}
+
+.app-shell.sidebar-collapsed .sidebar-head {
+  position: fixed;
+  top: 18px;
+  left: var(--collapsed-entry-gutter);
+  z-index: 42;
+  width: var(--collapsed-entry-size);
+  padding: 0;
+  pointer-events: auto;
+}
+
+body.search-active .app-shell.sidebar-collapsed .sidebar-head {
+  pointer-events: none;
+}
+
+.app-shell.sidebar-collapsed .brand-logo {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr;
+  width: var(--collapsed-entry-size);
+  height: var(--collapsed-entry-size);
+  align-items: center;
+  justify-items: center;
+  justify-content: center;
+  gap: 0;
+  min-width: 0;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  pointer-events: auto;
+  container-type: normal;
+  transition: background 160ms ease, box-shadow 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.app-shell.sidebar-collapsed .brand-logo:hover {
+  color: var(--brand-icon-color);
+  background: transparent;
+  box-shadow: none;
+}
+
+.app-shell.sidebar-collapsed .brand-logo:focus-visible {
+  outline: none;
+  color: var(--brand-icon-color);
+  background: transparent;
+  box-shadow: none;
+}
+
+.app-shell.sidebar-collapsed .brand-logo:hover .brand-mark,
+.app-shell.sidebar-collapsed .brand-logo:focus-visible .brand-mark {
+  opacity: 0;
+  transform: scale(0.88);
+}
+
+.app-shell.sidebar-collapsed .brand-logo h1,
+.app-shell.sidebar-collapsed .list-head > span,
+.app-shell.sidebar-collapsed .nav-action span,
+.app-shell.sidebar-collapsed .sidebar-settings summary span,
+.app-shell.sidebar-collapsed .settings-menu,
+.app-shell.sidebar-collapsed .task-row-top,
+.app-shell.sidebar-collapsed .task-row-meta,
+.app-shell.sidebar-collapsed .delete-task-button,
+.app-shell.sidebar-collapsed .task-group-title,
+.app-shell.sidebar-collapsed .empty-state {
+  display: none;
+}
+
+.app-shell.sidebar-collapsed .brand-mark {
+  width: var(--collapsed-entry-size);
+  height: var(--collapsed-entry-size);
+}
+
+.app-shell.sidebar-collapsed .collapse-chevron {
+  transform: rotate(180deg);
+}
+
+.app-shell.sidebar-collapsed .sidebar-collapse-button {
+  position: fixed;
+  top: 18px;
+  left: var(--collapsed-entry-gutter);
+  z-index: 43;
+  width: var(--collapsed-entry-size);
+  height: var(--collapsed-entry-size);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-shell.sidebar-collapsed:has(.brand-logo:hover) .sidebar-collapse-button,
+.app-shell.sidebar-collapsed:has(.brand-logo:focus-visible) .sidebar-collapse-button {
+  opacity: 1;
+  background: var(--option-hover);
+  box-shadow: none;
+}
+
+.task-form h2,
+.list-head{
+  margin: 0;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 11px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: var(--surface);
+}
+
+input,
+select {
+  min-height: 34px;
+  padding: 7px 9px;
+}
+
+textarea {
+  min-height: 88px;
+  padding: 9px 10px;
+  resize: vertical;
+}
+
+.status {
+  min-height: 19px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.status {
+  margin-top: 10px;
+}
+
+.validation-contract-panel {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent-soft));
+}
+
+.validation-contract-panel h4,
+.validation-contract-panel p {
+  margin: 0;
+}
+
+.validation-contract-panel p {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.validation-contract-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin-top: 14px;
+}
+
+.validation-contract-grid label {
+  margin: 0;
+}
+
+.validation-contract-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.validation-contract-actions .status {
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .validation-contract-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.status.error {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.status.success {
+  color: var(--success);
+  font-weight: 700;
+}
+
+.status.warning {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+.action-status.busy {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.action-status:empty {
+  display: none;
+}
+
+.task-list-wrap {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  flex-direction: column;
+}
+
+.list-toolbar {
+  max-height: 80px;
+  /* Keep natural height: overflow:hidden (needed for the collapse anim) resets
+     this flex item's min-height:auto to 0, so without this the column shrinks
+     the toolbar below the button and clips it. */
+  flex-shrink: 0;
+  /* Bottom room so the "新建任务" button drop-shadow is not clipped into a hard line. */
+  padding: 2px 10px 16px;
+  overflow: hidden;
+  transition: max-height 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
+}
+
+body.search-active .list-toolbar {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.nav-action {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--button-primary-text);
+  background: var(--button-primary-bg);
+  text-align: left;
+  cursor: pointer;
+  font-size: 14px;
+  box-shadow: var(--button-solid-shadow);
+  transition: background 140ms ease, box-shadow 140ms ease;
+}
+
+.nav-action:hover,
+.nav-action:focus-visible {
+  outline: none;
+  color: var(--button-primary-text-hover);
+  background: var(--button-primary-bg-hover);
+  box-shadow: var(--button-solid-shadow-hover);
+}
+
+.nav-action svg,
+.task-search > svg,
+.sidebar-collapse-button svg,
+.list-search-toggle svg,
+.collapsed-create-toggle svg,
+.sidebar-settings summary svg{
+  width: var(--sidebar-control-icon-size);
+  height: var(--sidebar-control-icon-size);
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.nav-action span {
+  font-weight: 600;
+}
+
+.app-shell.sidebar-collapsed .list-toolbar,
+.app-shell.sidebar-collapsed .task-list {
+  display: none;
+}
+
+.app-shell.sidebar-collapsed .sidebar-footer {
+  position: fixed;
+  left: var(--collapsed-entry-gutter);
+  bottom: 16px;
+  z-index: 42;
+  width: var(--collapsed-entry-size);
+  padding: 0;
+  pointer-events: auto;
+}
+
+.app-shell.sidebar-collapsed .sidebar-settings summary {
+  justify-content: center;
+  width: var(--collapsed-entry-size);
+  min-height: var(--collapsed-entry-size);
+  padding: 0;
+}
+
+.app-shell.sidebar-collapsed .list-head {
+  position: fixed;
+  top: var(--collapsed-search-top);
+  left: var(--collapsed-entry-gutter);
+  z-index: 42;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: center;
+  width: var(--collapsed-entry-size);
+  padding: 0;
+  pointer-events: auto;
+}
+
+.app-shell.sidebar-collapsed .list-search-toggle {
+  width: var(--collapsed-entry-size);
+  height: var(--collapsed-entry-size);
+  margin: 0 auto;
+}
+
+.app-shell.sidebar-collapsed .collapsed-create-toggle {
+  display: inline-flex;
+}
+
+/* Collapsed into the toggle on the right; expands leftward to cover the header. */
+.task-search {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  left: auto;
+  width: 32px;
+  margin: 0;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 60;
+  transition: width 320ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms ease;
+}
+
+body.search-active .task-search {
+  width: calc(100% - 28px);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.task-search > svg {
+  position: absolute;
+  top: 50%;
+  left: 11px;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.task-search input {
+  padding-left: 36px;
+  padding-right: 38px;
+  background: var(--surface);
+  font-size: 14px;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+body.search-active .task-search input {
+  border-color: var(--button-outline-border);
+  box-shadow: 0 0 0 3px var(--brand-icon-ring);
+}
+
+.task-search-close {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  transition: background 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+.task-search-close:hover,
+.task-search-close:focus-visible {
+  color: var(--brand-icon-color);
+  background: var(--option-hover);
+}
+
+.task-search-close svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.list-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px 12px 16px;
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.list-search-toggle {
+  display: inline-flex;
+  width: var(--sidebar-control-size);
+  height: var(--sidebar-control-size);
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  transition: background 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+.collapsed-create-toggle {
+  display: none;
+  width: var(--collapsed-entry-size);
+  height: var(--collapsed-entry-size);
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  transition: background 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+.list-search-toggle:hover,
+.list-search-toggle:focus-visible,
+.collapsed-create-toggle:hover,
+.collapsed-create-toggle:focus-visible {
+  color: var(--text);
+  background: var(--option-hover);
+}
+
+body.search-active .list-search-toggle {
+  color: var(--text);
+  background: var(--option-hover);
+}
+
+/* Spotlight search: dim the screen and lift the task column above it.
+   Shares the same dim + blur as modal dialog backdrops (see .task-dialog::backdrop). */
+.search-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--scrim-bg);
+  -webkit-backdrop-filter: var(--scrim-blur);
+  backdrop-filter: var(--scrim-blur);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms ease;
+}
+
+body.search-active .search-scrim {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Only the search box and result cards rise above the dim, nothing else. */
+body.search-active #taskList {
+  position: relative;
+  z-index: 60;
+}
+
+/* Collapsed zero rail: search flies out from the floating search entry. */
+body.search-active .app-shell.sidebar-collapsed .task-list-wrap {
+  position: fixed;
+  left: var(--collapsed-popover-left);
+  top: calc(var(--collapsed-search-top) - 10px);
+  width: min(320px, calc(100vw - var(--collapsed-popover-left) - 16px));
+  max-height: calc(100dvh - var(--collapsed-search-top) - 16px);
+  z-index: 60;
+  overflow-y: auto;
+  padding: 10px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--sidebar-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-floating);
+  pointer-events: auto;
+  animation: search-flyout-right 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes search-flyout-right {
+  from {
+    clip-path: inset(0 100% 0 0 round var(--radius));
+    opacity: 0.4;
+  }
+  to {
+    clip-path: inset(0 0 0 0 round var(--radius));
+    opacity: 1;
+  }
+}
+
+body.search-active .app-shell.sidebar-collapsed .list-head {
+  position: relative;
+  top: auto;
+  left: auto;
+  justify-content: stretch;
+  width: 100%;
+  padding: 0 0 10px;
+  z-index: auto;
+}
+
+body.search-active .app-shell.sidebar-collapsed .list-search-toggle {
+  display: none;
+}
+
+body.search-active .app-shell.sidebar-collapsed .collapsed-create-toggle {
+  display: none;
+}
+
+body.search-active .app-shell.sidebar-collapsed .task-search {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  width: 100%;
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+  transition: none;
+}
+
+body.search-active .app-shell.sidebar-collapsed .list-toolbar {
+  display: none;
+}
+
+body.search-active .app-shell.sidebar-collapsed .task-list {
+  display: grid;
+  padding: 0;
+}
+
+body.search-active .app-shell.sidebar-collapsed .task-row {
+  display: grid;
+  min-height: auto;
+  place-items: stretch;
+  gap: 7px;
+  padding: 11px 42px 11px 12px;
+}
+
+body.search-active .app-shell.sidebar-collapsed .task-row-top,
+body.search-active .app-shell.sidebar-collapsed .task-row-meta {
+  display: grid;
+}
+
+body.search-active .app-shell.sidebar-collapsed .delete-task-button {
+  display: inline-flex;
+}
+
+.task-list {
+  display: grid;
+  gap: 8px;
+  /* overflow-y:auto alone leaves the x-axis computed as auto (CSS spec), so a
+     stray wide child could let the whole task list slide sideways. Pin it: the
+     rows already wrap long names (overflow-wrap:anywhere), so this only ever
+     scrolls vertically. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 3px 10px 14px;
+}
+
+.task-list,
+.task-list-wrap,
+.task-form,
+.metric-table-scroll,
+.agent-inline-table-scroll {
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+
+.task-list::-webkit-scrollbar,
+.task-list-wrap::-webkit-scrollbar,
+.task-form::-webkit-scrollbar,
+.metric-table-scroll::-webkit-scrollbar,
+.agent-inline-table-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.task-list::-webkit-scrollbar-track,
+.task-list-wrap::-webkit-scrollbar-track,
+.task-form::-webkit-scrollbar-track,
+.metric-table-scroll::-webkit-scrollbar-track,
+.agent-inline-table-scroll::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+.task-list::-webkit-scrollbar-thumb,
+.task-list-wrap::-webkit-scrollbar-thumb,
+.task-form::-webkit-scrollbar-thumb,
+.metric-table-scroll::-webkit-scrollbar-thumb,
+.agent-inline-table-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: var(--radius-pill);
+  background: var(--scrollbar-thumb);
+}
+
+.task-list::-webkit-scrollbar-thumb:hover,
+.task-list-wrap::-webkit-scrollbar-thumb:hover,
+.task-form::-webkit-scrollbar-thumb:hover,
+.metric-table-scroll::-webkit-scrollbar-thumb:hover,
+.agent-inline-table-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+.task-group-title {
+  padding: 8px 7px 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sidebar-footer {
+  display: grid;
+  padding: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sidebar-settings {
+  position: relative;
+}
+
+.sidebar-settings summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: var(--sidebar-control-size);
+  padding: 7px 8px;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+  list-style: none;
+}
+
+.sidebar-settings summary::-webkit-details-marker {
+  display: none;
+}
+
+.sidebar-settings summary:hover,
+.sidebar-settings summary:focus-visible,
+.sidebar-settings[open] summary {
+  color: var(--text);
+  background: var(--option-hover);
+}
+
+.settings-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--settings-menu-shadow);
+  z-index: 5;
+}
+
+.sidebar-settings:not([open]) .settings-menu {
+  display: none;
+}
+
+.settings-menu-section {
+  display: grid;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.settings-section-label {
+  padding: 0 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* Collapsed: the settings menu pops out to the right instead of expanding the rail. */
+.app-shell.sidebar-collapsed .sidebar-settings[open] .settings-menu {
+  position: fixed;
+  display: grid;
+  right: auto;
+  left: var(--collapsed-popover-left);
+  bottom: 12px;
+  width: min(calc(var(--rail-content-width, 314px) - 24px), calc(100vw - var(--collapsed-popover-left) - 16px));
+  max-width: none;
+  z-index: 30;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-row-title {
+  display: inline-flex;
+  align-self: center;
+  min-width: 0;
+  align-items: center;
+  height: 34px;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  pointer-events: none;
+}
+
+.settings-row-title svg,
+.settings-system-row > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.settings-select,
+.settings-system-row {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: var(--surface);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+}
+
+.settings-select {
+  min-width: 0;
+  padding: 6px 30px 6px 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+}
+
+.settings-select option {
+  font-size: 14px;
+}
+
+.settings-system-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  height: 34px;
+  min-height: 34px;
+  padding: 6px 12px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.settings-system-row .settings-row-title {
+  height: 20px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.settings-system-row:hover,
+.settings-select:hover,
+.settings-system-row:focus-visible,
+.settings-select:focus-visible {
+  border-color: var(--option-hover);
+  background: var(--option-hover);
+}
+
+.pet-companion {
+  position: fixed;
+  left: calc(var(--sidebar-width) + var(--pet-offset-left, var(--pet-default-workspace-offset)));
+  right: auto;
+  bottom: 28px;
+  z-index: 24;
+  display: grid;
+  width: 104px;
+  justify-items: center;
+  gap: 5px;
+  color: var(--text);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+body.anim-ready:not(.is-resizing) .pet-companion:not(.dragging) {
+  transition: left 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.pet-companion.hidden {
+  display: none;
+}
+
+.pet-companion.dragging {
+  cursor: grabbing;
+  transition: none;
+}
+
+.pet-sticker {
+  position: relative;
+  z-index: 1;
+  width: 102px;
+  height: 112px;
+  display: grid;
+  place-items: center;
+  transform-origin: 50% 100%;
+  animation: none;
+}
+
+.pet-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  pointer-events: none;
+  transform-origin: 50% 88%;
+  filter: drop-shadow(0 8px 11px rgba(26, 22, 18, 0.14));
+}
+
+.pet-sprite {
+  --pet-sheet-y: 0%;
+  --pet-frame-count: 6;
+  --pet-sheet-x-end: 85.7143%;
+  display: block;
+  width: 102px;
+  aspect-ratio: 192 / 208;
+  background-repeat: no-repeat;
+  background-position: 0% var(--pet-sheet-y);
+  background-size: 800% 900%;
+  filter: drop-shadow(0 8px 11px rgba(26, 22, 18, 0.14));
+  pointer-events: none;
+  transform-origin: 50% 88%;
+  animation: pet-sprite-frames 5s steps(var(--pet-frame-count)) infinite;
+}
+
+[data-pet-mood="idle"] .pet-image {
+  animation: none;
+}
+
+[data-pet-mood="idle"] .pet-sprite {
+  --pet-sheet-y: 0%;
+  --pet-frame-count: 6;
+  --pet-sheet-x-end: 85.7143%;
+  animation-duration: 5s;
+}
+
+[data-pet-mood="running"] .pet-image {
+  animation: pet-playful-bounce 2.4s ease-in-out infinite;
+}
+
+[data-pet-mood="running"] .pet-sprite {
+  --pet-sheet-y: 87.5%;
+  --pet-frame-count: 6;
+  --pet-sheet-x-end: 85.7143%;
+  animation-duration: 4.2s;
+}
+
+[data-pet-mood="running-right"] .pet-sprite {
+  --pet-sheet-y: 12.5%;
+  --pet-frame-count: 8;
+  --pet-sheet-x-end: 114.2857%;
+  animation-duration: 4.4s;
+}
+
+[data-pet-mood="running-left"] .pet-sprite {
+  --pet-sheet-y: 25%;
+  --pet-frame-count: 8;
+  --pet-sheet-x-end: 114.2857%;
+  animation-duration: 4.4s;
+}
+
+[data-pet-mood="success"] .pet-image,
+[data-pet-mood="complete"] .pet-image {
+  animation: pet-proud-nod 2.4s ease-in-out 1;
+  filter: drop-shadow(0 9px 12px rgba(28, 116, 75, 0.18));
+}
+
+[data-pet-mood="complete"] .pet-sprite {
+  --pet-sheet-y: 37.5%;
+  --pet-frame-count: 4;
+  --pet-sheet-x-end: 57.1429%;
+  animation-duration: 5s;
+  filter: drop-shadow(0 9px 12px rgba(28, 116, 75, 0.18));
+}
+
+[data-pet-mood="success"] .pet-sprite {
+  --pet-sheet-y: 50%;
+  --pet-frame-count: 5;
+  --pet-sheet-x-end: 71.4286%;
+  animation-duration: 5.5s;
+  filter: drop-shadow(0 9px 12px rgba(28, 116, 75, 0.18));
+}
+
+[data-pet-mood="failed"] .pet-image {
+  animation: pet-worry-shake 1.4s ease-in-out 1;
+  filter: drop-shadow(0 7px 10px rgba(161, 45, 45, 0.15)) saturate(0.9);
+}
+
+[data-pet-mood="failed"] .pet-sprite {
+  --pet-sheet-y: 62.5%;
+  --pet-frame-count: 8;
+  --pet-sheet-x-end: 114.2857%;
+  animation-duration: 7.5s;
+  filter: drop-shadow(0 7px 10px rgba(161, 45, 45, 0.15)) saturate(0.9);
+}
+
+[data-pet-mood="waiting"] .pet-sprite {
+  --pet-sheet-y: 75%;
+  --pet-frame-count: 6;
+  --pet-sheet-x-end: 85.7143%;
+  animation-duration: 5s;
+}
+
+[data-pet-mood="review"] .pet-sprite {
+  --pet-sheet-y: 100%;
+  --pet-frame-count: 6;
+  --pet-sheet-x-end: 85.7143%;
+  animation-duration: 5s;
+  filter: drop-shadow(0 8px 11px rgba(130, 92, 25, 0.15));
+}
+
+@keyframes pet-sprite-frames {
+  from { background-position: 0% var(--pet-sheet-y); }
+  to { background-position: var(--pet-sheet-x-end) var(--pet-sheet-y); }
+}
+
+@keyframes pet-playful-bounce {
+  0%, 100% { transform: rotate(0deg) scale(1); }
+  45% { transform: rotate(-1.8deg) scale(1.018); }
+}
+
+@keyframes pet-proud-nod {
+  0%, 100% { transform: scale(1); }
+  40% { transform: scale(1.035); }
+  72% { transform: scale(0.99); }
+}
+
+@keyframes pet-worry-shake {
+  0%, 100% { transform: translateX(0) rotate(0deg); }
+  20% { transform: translateX(-4px) rotate(-3deg); }
+  40% { transform: translateX(4px) rotate(3deg); }
+  60% { transform: translateX(-3px) rotate(-2deg); }
+  80% { transform: translateX(2px) rotate(1deg); }
+}
+
+@keyframes pet-tail-slow {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(8deg); }
+}
+
+@keyframes pet-tail-quick {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(15deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-sticker,
+  .pet-image,
+  .pet-sprite,
+  [data-pet-mood] .pet-sticker,
+  [data-pet-mood] .pet-image,
+  [data-pet-mood] .pet-sprite {
+    animation: none;
+  }
+}
+
+.resize-handle {
+  position: relative;
+  width: 12px;
+  min-width: 12px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resize-handle-left {
+  display: none;
+}
+
+.resize-handle-right {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  justify-self: start;
+  margin-left: -6px;
+  z-index: 2;
+}
+
+.resize-handle::after {
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 5px;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  content: "";
+}
+
+.resize-handle:hover::after,
+.resize-handle:focus-visible::after,
+body.is-resizing .resize-handle::after {
+  background: var(--border-strong);
+}
+
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.hidden,
+[hidden] {
+  display: none !important;
+}
+
+.task-dialog {
+  width: min(600px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.2);
+}
+
+.task-dialog:not(.environment-dialog) {
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
+}
+
+.task-dialog::backdrop {
+  background: var(--scrim-bg);
+  -webkit-backdrop-filter: var(--scrim-blur);
+  backdrop-filter: var(--scrim-blur);
+}
+
+.task-dialog-panel {
+  margin: 0;
+}
+
+.task-dialog:not(.environment-dialog) .task-dialog-panel {
+  display: flex;
+  max-height: calc(100dvh - 32px);
+  min-height: 0;
+  flex-direction: column;
+}

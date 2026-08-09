@@ -1,6 +1,5 @@
 import json
 import sqlite3
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from marvis.drafts.contracts import (
     LearningNote,
     assert_draft_status_transition,
 )
+from marvis.repositories.audit import _write_audit_row
 from marvis.state_machine import ConflictError
 
 
@@ -194,37 +194,6 @@ class DraftRepository:
                 (draft_id,),
             ).fetchall()
         return [_draft_run_from_row(row) for row in rows]
-
-
-def _write_audit_row(
-    conn: sqlite3.Connection,
-    *,
-    kind: str,
-    target_ref: str,
-    actor: str = "system",
-    inputs_hash: str | None = None,
-    outcome: str | None = None,
-    detail: dict | None = None,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO audit(
-            id, kind, actor, target_ref, inputs_hash, outcome,
-            detail_json, at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            uuid.uuid4().hex,
-            kind,
-            actor,
-            target_ref,
-            inputs_hash,
-            outcome,
-            json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
-            _now(),
-        ),
-    )
 
 
 def _learning_note_insert_values(note: LearningNote) -> tuple:

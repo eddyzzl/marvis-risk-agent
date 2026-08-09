@@ -17,9 +17,15 @@ from marvis.api_task_payloads import task_payload
 from marvis.api_task_helpers import (
     dispatch_platform_hook,
     get_task_or_404,
+    validation_batch_parent_id,
 )
-from marvis.db import TaskRepository
-from marvis.domain import TASK_TYPE_VALIDATION, TaskStatus
+from marvis.repositories.tasks import TaskRepository
+from marvis.domain import (
+    TASK_TYPE_VALIDATION,
+    TASK_TYPE_VALIDATION_BATCH,
+    TaskRecord,
+    TaskStatus,
+)
 from marvis.job_heartbeat import heartbeat_job
 from marvis.repositories.validation_contracts import ValidationContractRepository
 
@@ -31,12 +37,29 @@ def _repo(request: Request) -> TaskRepository:
     return TaskRepository(request.app.state.settings.db_path)
 
 
+def _reject_validation_batch_task(
+    repo: TaskRepository,
+    task: TaskRecord,
+) -> None:
+    if task.task_type == TASK_TYPE_VALIDATION_BATCH:
+        raise unprocessable(
+            "validation_batch 父任务不能使用通用模型验证扫描；"
+            "请使用专用批次 API /api/validation-batches。"
+        )
+    if validation_batch_parent_id(repo, task.id) is not None:
+        raise conflict(
+            "批次内模型验证子任务不能通过通用扫描或材料选择接口重跑；"
+            "请从专用批次流程继续。"
+        )
+
+
 @router.get("/tasks/{task_id}/materials")
 def task_material_candidates(
     task_id: str, request: Request, pmml_path: str | None = None
 ) -> dict:
     repo = _repo(request)
     task = get_task_or_404(repo, task_id)
+    _reject_validation_batch_task(repo, task)
     try:
         return material_candidates_payload(task, pmml_path_override=pmml_path)
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
@@ -50,7 +73,8 @@ def update_task_materials(
     request: Request,
 ) -> dict:
     repo = _repo(request)
-    get_task_or_404(repo, task_id)
+    task = get_task_or_404(repo, task_id)
+    _reject_validation_batch_task(repo, task)
     job_id = start_task_job(repo, task_id, "material_selection")
     if not repo.mark_job_running(job_id):
         repo.finish_job(job_id, status="failed")
@@ -135,7 +159,8 @@ def update_task_materials(
 @router.post("/tasks/{task_id}/scan")
 def scan_task(task_id: str, request: Request) -> dict:
     repo = _repo(request)
-    get_task_or_404(repo, task_id)
+    task = get_task_or_404(repo, task_id)
+    _reject_validation_batch_task(repo, task)
     job_id = start_task_job(repo, task_id, "scan")
     if not repo.mark_job_running(job_id):
         repo.finish_job(job_id, status="failed")

@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -20,9 +19,20 @@ import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.artifacts.transactional import ArtifactTransactionError
+from marvis.data.authenticated_snapshot import (
+    AuthenticatedSnapshotError,
+    SnapshotFailureReason,
+    read_authenticated_parquet_snapshot,
+)
 from marvis.files import sha256_file
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.pool_evidence_verifier import (
+    POOL_ID_RE as _POOL_ID_RE,
+    POOL_REF_FIELDS as _POOL_REF_FIELDS,
+    POOL_REVISION_ID_RE as _POOL_REVISION_ID_RE,
+    validate_pool_ref,
+)
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
     StrategyPoolDevelopmentExecutionBinding,
@@ -86,10 +96,6 @@ POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION = (
 POOL_VALIDATION_ORIGIN_TOOL = "strategy.measure_strategy_pool_validation"
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_POOL_ID_RE = re.compile(r"^strategy-pool-[0-9a-f]{32}$")
-_POOL_REVISION_ID_RE = re.compile(
-    r"^strategy-pool-revision-[0-9a-f]{32}$"
-)
 _INPUT_FIELDS = frozenset(
     {
         "strategy_type",
@@ -98,16 +104,6 @@ _INPUT_FIELDS = frozenset(
         "partition",
         "population",
         "comparison_mode",
-    }
-)
-_POOL_REF_FIELDS = frozenset(
-    {
-        "artifact_id",
-        "expected_artifact_content_hash",
-        "expected_pool_id",
-        "expected_revision",
-        "expected_revision_id",
-        "expected_snapshot_hash",
     }
 )
 _SAMPLE_DESIGN_REF_FIELDS = frozenset(
@@ -1559,47 +1555,13 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         raise StrategyError("comparison_mode must be absolute")
     return {
         "strategy_type": strategy_type,
-        "pool_ref": _validate_pool_ref(obj["pool_ref"]),
+        "pool_ref": validate_pool_ref(obj["pool_ref"]),
         "sample_design_ref": _validate_sample_design_ref(
             obj["sample_design_ref"]
         ),
         "partition": partition,
         "population": "risk",
         "comparison_mode": "absolute",
-    }
-
-
-def _validate_pool_ref(value: object) -> dict[str, Any]:
-    obj = _json_object(value, "pool_ref")
-    _exact_fields(obj, _POOL_REF_FIELDS, "pool_ref")
-    pool_id = _text(obj["expected_pool_id"], "pool_ref.expected_pool_id")
-    if _POOL_ID_RE.fullmatch(pool_id) is None:
-        raise StrategyError("pool_ref.expected_pool_id is invalid")
-    revision_id = _text(
-        obj["expected_revision_id"],
-        "pool_ref.expected_revision_id",
-    )
-    if _POOL_REVISION_ID_RE.fullmatch(revision_id) is None:
-        raise StrategyError("pool_ref.expected_revision_id is invalid")
-    return {
-        "artifact_id": _hash(
-            obj["artifact_id"],
-            "pool_ref.artifact_id",
-        ),
-        "expected_artifact_content_hash": _hash(
-            obj["expected_artifact_content_hash"],
-            "pool_ref.expected_artifact_content_hash",
-        ),
-        "expected_pool_id": pool_id,
-        "expected_revision": _positive_int(
-            obj["expected_revision"],
-            "pool_ref.expected_revision",
-        ),
-        "expected_revision_id": revision_id,
-        "expected_snapshot_hash": _hash(
-            obj["expected_snapshot_hash"],
-            "pool_ref.expected_snapshot_hash",
-        ),
     }
 
 
@@ -1974,115 +1936,38 @@ def _read_authenticated_parquet_snapshot(
     expected_content_hash: str,
     columns: list[str],
 ) -> pd.DataFrame:
-    """Read only bytes copied from one authenticated, retained source fd."""
-
-    _require_dataset_path(path, root=root)
-    source_fd = -1
-    snapshot = None
     try:
-        before = os.lstat(path)
-        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
-            raise StrategyError(
-                "Strategy Pool validation dataset must be a regular file"
-            )
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+        return read_authenticated_parquet_snapshot(
+            path,
+            root=root,
+            expected_sha256=expected_content_hash,
+            columns=columns,
         )
-        source_fd = os.open(path, flags)
-        opened = os.fstat(source_fd)
-        after_open = os.lstat(path)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or stat.S_ISLNK(after_open.st_mode)
-            or _file_identity(before) != _file_identity(opened)
-            or _file_identity(opened) != _file_identity(after_open)
-            or _stable_file_stat(before) != _stable_file_stat(opened)
-            or _stable_file_stat(opened) != _stable_file_stat(after_open)
-        ):
-            raise StrategyError(
+    except AuthenticatedSnapshotError as exc:
+        messages = {
+            SnapshotFailureReason.PATH_OUTSIDE_ROOT: (
+                "Strategy Pool validation dataset escaped dataset storage"
+            ),
+            SnapshotFailureReason.SOURCE_NOT_REGULAR: (
+                "Strategy Pool validation dataset must be a regular file"
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_WHILE_OPENING: (
                 "Strategy Pool validation dataset changed while opening"
-            )
-
-        snapshot = tempfile.TemporaryFile(mode="w+b", dir=root)
-        digest = hashlib.sha256()
-        copied = 0
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            copied += len(chunk)
-            snapshot.write(chunk)
-        snapshot.flush()
-        source_after_copy = os.fstat(source_fd)
-        if (
-            _stable_file_stat(source_after_copy)
-            != _stable_file_stat(opened)
-            or copied != int(opened.st_size)
-            or not hmac.compare_digest(
-                digest.hexdigest(),
-                expected_content_hash,
-            )
-        ):
-            raise StrategyError(
+            ),
+            SnapshotFailureReason.SOURCE_BYTES_CHANGED: (
                 "Strategy Pool validation dataset bytes changed before replay"
-            )
-
-        snapshot_stat = os.fstat(snapshot.fileno())
-        if int(snapshot_stat.st_size) != copied:
-            raise StrategyError(
+            ),
+            SnapshotFailureReason.PRIVATE_SNAPSHOT_INCOMPLETE: (
                 "Strategy Pool validation private snapshot is incomplete"
-            )
-        snapshot.seek(0)
-        frame = pd.read_parquet(snapshot, columns=columns)
-        snapshot_after_read = os.fstat(snapshot.fileno())
-        current = os.lstat(path)
-        if (
-            _stable_file_stat(snapshot_after_read)
-            != _stable_file_stat(snapshot_stat)
-            or _stable_file_stat(os.fstat(source_fd))
-            != _stable_file_stat(opened)
-            or stat.S_ISLNK(current.st_mode)
-            or _stable_file_stat(current) != _stable_file_stat(opened)
-        ):
-            raise StrategyError(
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_DURING_READ: (
                 "Strategy Pool validation dataset changed during replay"
-            )
-        return frame
-    except StrategyError:
-        raise
-    except (OSError, TypeError, ValueError) as exc:
-        raise StrategyError(
-            "Strategy Pool validation dataset could not be read"
-        ) from exc
-    finally:
-        if snapshot is not None:
-            snapshot.close()
-        if source_fd >= 0:
-            os.close(source_fd)
-
-
-def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(stat.S_IFMT(value.st_mode)),
-    )
-
-
-def _stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
-    return (
-        int(value.st_dev),
-        int(value.st_ino),
-        int(stat.S_IFMT(value.st_mode)),
-        int(value.st_nlink),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-    )
+            ),
+            SnapshotFailureReason.READ_FAILED: (
+                "Strategy Pool validation dataset could not be read"
+            ),
+        }
+        raise StrategyError(messages[exc.reason]) from exc
 
 
 def _expression_fields(value: object) -> set[str]:

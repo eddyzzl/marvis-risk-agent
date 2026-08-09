@@ -875,7 +875,7 @@ def _load_sources(
 def _modeling_runtime(runtime):
     if hasattr(runtime, "experiments") and hasattr(runtime, "modeling_repo"):
         return runtime
-    from marvis.db import ModelingRepository
+    from marvis.repositories.modeling import ModelingRepository
     from marvis.packs.modeling.experiment import ExperimentStore
 
     values = dict(vars(runtime))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import traceback
 from pathlib import Path
 import shutil
@@ -18,7 +19,11 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from marvis.download_snapshot import (
+    attachment_response,
+    SnapshotIntegrityError,
+    verified_file_snapshot,
+)
 from marvis.errors import (
     bad_request,
     conflict,
@@ -77,7 +82,8 @@ from marvis.data.workspace import (
     DataWorkspaceDraft,
     DataWorkspaceSnapshot,
 )
-from marvis.db import DatasetRepository, TaskRepository
+from marvis.repositories.datasets import DatasetRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.repositories.data_workspace import (
     DataWorkspaceDataError,
     DataWorkspaceDatasetNotFound,
@@ -794,26 +800,95 @@ def download_task_dataset(
     task_id: str,
     dataset_id: str,
     request: Request,
-) -> FileResponse:
+    plan_id: str | None = None,
+    step_id: str | None = None,
+    output_ref: str | None = None,
+    expected_content_hash: str | None = None,
+) -> Response:
     """Download the exact registered dataset artifact produced by a workflow."""
     _require_task(request, task_id)
     _repo_data, _backend, registry, _join_engine = _data_runtime(request)
+    binding_values = (plan_id, step_id, output_ref, expected_content_hash)
+    if any(value is not None for value in binding_values):
+        if not all(isinstance(value, str) and value for value in binding_values):
+            raise bad_request("complete result dataset binding is required")
+        if (
+            len(expected_content_hash) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_content_hash
+            )
+        ):
+            raise bad_request("expected_content_hash must be lowercase sha256")
+        try:
+            presentation = request.app.state.plan_repo.load_step_presentation_binding(
+                step_id,
+                output_ref,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise conflict("result dataset binding changed") from exc
+        evidence_bindings = presentation["evidence"].get(
+            "result_dataset_bindings"
+        )
+        expected_binding = next(
+            (
+                item
+                for item in evidence_bindings
+                if isinstance(item, dict)
+                and item.get("dataset_id") == dataset_id
+            ),
+            None,
+        ) if isinstance(evidence_bindings, list) else None
+        if (
+            presentation.get("plan_id") != plan_id
+            or presentation.get("task_id") != task_id
+            or presentation.get("step_id") != step_id
+            or presentation.get("output_ref") != output_ref
+            or not isinstance(expected_binding, dict)
+            or not isinstance(expected_binding.get("content_hash"), str)
+            or not hmac.compare_digest(
+                expected_content_hash,
+                expected_binding["content_hash"],
+            )
+        ):
+            raise conflict("result dataset binding changed")
     try:
         dataset = registry.get(dataset_id)
     except KeyError as exc:
         raise not_found("dataset not found") from exc
     if dataset.task_id != task_id:
         raise not_found("dataset not found")
+    if expected_content_hash is not None and (
+        not isinstance(dataset.content_hash, str)
+        or not hmac.compare_digest(expected_content_hash, dataset.content_hash)
+    ):
+        raise conflict("result dataset binding changed")
     try:
         path = registry.resolve_verified_path(dataset_id)
     except KeyError as exc:
         raise not_found("dataset not found") from exc
     except DatasetContentDriftError as exc:
         raise conflict(str(exc)) from exc
-    return FileResponse(
-        path,
+    try:
+        snapshot, content_length, _content_hash = verified_file_snapshot(
+            path,
+            required_content_hash=(
+                expected_content_hash
+                or (
+                    dataset.content_hash
+                    if isinstance(dataset.content_hash, str)
+                    else None
+                )
+            ),
+        )
+    except SnapshotIntegrityError as exc:
+        raise conflict("result dataset snapshot integrity check failed") from exc
+    return attachment_response(
+        snapshot,
         media_type="application/octet-stream",
         filename=path.name,
+        content_length=content_length,
+        range_header=request.headers.get("range"),
     )
 
 

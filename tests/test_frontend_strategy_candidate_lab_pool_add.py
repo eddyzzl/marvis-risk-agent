@@ -496,6 +496,52 @@ def test_pool_add_controls_use_all_materialized_sources_and_restore_pool_default
     )
 
 
+def test_pool_add_unsupported_source_does_not_hide_supported_sources() -> None:
+    run_node(
+        r"""
+        const crossRuleAsset = `cross-rule-asset-${"8".repeat(32)}`;
+        const payload = addPayload(
+          "strategy-a",
+          [
+            addSource(
+              "interactive_tree_frontier_selection",
+              singletonSelection,
+            ),
+            {
+              source_kind: "cross_threshold_rule",
+              candidate_asset_id: crossRuleAsset,
+              strategy_type: null,
+              candidate_stage: "development",
+              validation_status: "unvalidated",
+            },
+            addSource("scorecard_cutoff_selection", scorecardSelection),
+          ],
+        );
+        const harness = makeHarness({
+          payloads: new Map([["strategy-a", payload]]),
+        });
+        const controls = installPoolAddForm(harness);
+        await harness.controller.selectTask(
+          { id: "strategy-a", task_type: "strategy" },
+        );
+
+        controls.fields.strategyType.value = "reject";
+        harness.controller.handleChange({ target: controls.fields.strategyType });
+
+        assert.deepEqual(
+          controls.fields.source.options.map((option) => option.value),
+          ["", singletonSelection, scorecardSelection],
+        );
+        assert.equal(
+          controls.fields.source.options.some(
+            (option) => option.value === crossRuleAsset,
+          ),
+          false,
+        );
+        """
+    )
+
+
 def test_pool_add_rechecks_source_and_default_action_before_submission() -> None:
     run_node(
         r"""

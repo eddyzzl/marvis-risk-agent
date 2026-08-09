@@ -8,7 +8,7 @@ import threading
 from fastapi import APIRouter, Request
 
 from marvis.api_task_helpers import get_task_or_404
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.execution_environment import load_execution_environment
 from marvis.validation.results import (
     pmml_scoring_result_from_dict,

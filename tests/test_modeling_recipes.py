@@ -7,7 +7,8 @@ import pytest
 
 import marvis.packs.modeling.recipes.lgb_multiclass as lgb_multiclass_recipe
 import marvis.packs.modeling.recipes.lgb_regressor as lgb_regressor_recipe
-from marvis.agent.modeling_setup import build_modeling_proposal
+from marvis.agent.join_setup import authenticate_join_selection
+from marvis.agent.modeling_setup import ModelingSetupError, build_modeling_proposal
 from marvis.data.backend import DataBackend
 from marvis.data.errors import NanLabelNotConfirmedError
 from marvis.data.registry import DatasetRegistry
@@ -1991,6 +1992,184 @@ def _proposal_runtime(tmp_path):
     backend = DataBackend(settings.datasets_dir)
     registry = DatasetRegistry(repo, backend, settings.datasets_dir)
     return backend, registry
+
+
+def test_build_modeling_proposal_uses_authenticated_c1_selection(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    materials = tmp_path / "materials"
+    materials.mkdir()
+    source = materials / "authenticated_sample.csv"
+    pd.DataFrame(
+        {
+            "acct_id": list(range(rows)),
+            "signal": np.linspace(-1.0, 1.0, rows),
+            "bad_flag": np.arange(rows) % 2,
+            "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+        }
+    ).to_csv(source, index=False)
+    dataset = registry.register_from_upload("task-auth", source, role="sample")
+    selection = authenticate_join_selection(
+        registry,
+        "task-auth",
+        anchor_id=dataset.id,
+        feature_ids=[],
+        expected_content_hashes={dataset.id: dataset.content_hash},
+    )
+
+    proposal = build_modeling_proposal(
+        registry,
+        backend,
+        "task-auth",
+        materials,
+        anchor_id=dataset.id,
+        target_col="bad_flag",
+        authenticated_selection=selection,
+    )
+
+    assert proposal.dataset_id == dataset.id
+    assert proposal.dataset_name == "authenticated_sample.csv"
+    assert proposal.target_col == "bad_flag"
+    assert registry.get(dataset.id).source_path == selection.anchor.relative_path
+
+
+def test_build_modeling_proposal_allows_authenticated_c1_subset(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    materials = tmp_path / "materials_subset"
+    materials.mkdir()
+    sample_path = materials / "selected_sample.csv"
+    ignored_path = materials / "ignored_valid_table.csv"
+    pd.DataFrame(
+        {
+            "acct_id": list(range(20)),
+            "bad_flag": np.arange(20) % 2,
+            "split": ["train"] * 12 + ["test"] * 4 + ["oot"] * 4,
+        }
+    ).to_csv(sample_path, index=False)
+    pd.DataFrame(
+        {"acct_id": list(range(20)), "unused_signal": np.arange(20)}
+    ).to_csv(ignored_path, index=False)
+    sample = registry.register_from_upload(
+        "task-subset", sample_path, role="sample"
+    )
+    ignored = registry.register_from_upload(
+        "task-subset", ignored_path, role="feature"
+    )
+    reviewed_hashes = {
+        sample.id: sample.content_hash,
+        ignored.id: ignored.content_hash,
+    }
+    selection = authenticate_join_selection(
+        registry,
+        "task-subset",
+        anchor_id=sample.id,
+        feature_ids=[],
+        expected_content_hashes=reviewed_hashes,
+    )
+
+    proposal = build_modeling_proposal(
+        registry,
+        backend,
+        "task-subset",
+        materials,
+        anchor_id=sample.id,
+        target_col="bad_flag",
+        authenticated_selection=selection,
+        c1_expected_content_hashes=reviewed_hashes,
+    )
+
+    assert proposal.dataset_id == sample.id
+    assert proposal.join_feature_ids == []
+
+
+def test_build_modeling_proposal_rejects_ignored_c1_dataset_hash_drift(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    materials = tmp_path / "materials_ignored_drift"
+    materials.mkdir()
+    sample_path = materials / "selected_sample.csv"
+    ignored_path = materials / "ignored_valid_table.csv"
+    pd.DataFrame(
+        {
+            "acct_id": list(range(20)),
+            "bad_flag": np.arange(20) % 2,
+            "split": ["train"] * 12 + ["test"] * 4 + ["oot"] * 4,
+        }
+    ).to_csv(sample_path, index=False)
+    pd.DataFrame(
+        {"acct_id": list(range(20)), "unused_signal": np.arange(20)}
+    ).to_csv(ignored_path, index=False)
+    sample = registry.register_from_upload(
+        "task-ignored-drift", sample_path, role="sample"
+    )
+    ignored = registry.register_from_upload(
+        "task-ignored-drift", ignored_path, role="feature"
+    )
+    reviewed_hashes = {
+        sample.id: sample.content_hash,
+        ignored.id: ignored.content_hash,
+    }
+    selection = authenticate_join_selection(
+        registry,
+        "task-ignored-drift",
+        anchor_id=sample.id,
+        feature_ids=[],
+        expected_content_hashes=reviewed_hashes,
+    )
+    normalized_ignored = registry.resolve_verified_path(ignored.id)
+    pd.DataFrame(
+        {"acct_id": list(range(20)), "unused_signal": np.arange(20) + 1}
+    ).to_parquet(normalized_ignored)
+
+    with pytest.raises(ModelingSetupError, match="发生变化"):
+        build_modeling_proposal(
+            registry,
+            backend,
+            "task-ignored-drift",
+            materials,
+            anchor_id=sample.id,
+            target_col="bad_flag",
+            authenticated_selection=selection,
+            c1_expected_content_hashes=reviewed_hashes,
+        )
+
+
+def test_build_modeling_proposal_rejects_files_added_after_c1_binding(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    materials = tmp_path / "materials"
+    materials.mkdir()
+    sample_path = materials / "bound_sample.csv"
+    pd.DataFrame(
+        {
+            "acct_id": list(range(20)),
+            "bad_flag": np.arange(20) % 2,
+            "split": ["train"] * 12 + ["test"] * 4 + ["oot"] * 4,
+        }
+    ).to_csv(sample_path, index=False)
+    sample = registry.register_from_upload("task-bound", sample_path, role="sample")
+    selection = authenticate_join_selection(
+        registry,
+        "task-bound",
+        anchor_id=sample.id,
+        feature_ids=[],
+        expected_content_hashes={sample.id: sample.content_hash},
+    )
+    late_path = materials / "late_feature.csv"
+    pd.DataFrame({"acct_id": list(range(20)), "signal": range(20)}).to_csv(
+        late_path,
+        index=False,
+    )
+    registry.register_from_upload("task-bound", late_path, role="feature")
+
+    with pytest.raises(ModelingSetupError, match="文件集合"):
+        build_modeling_proposal(
+            registry,
+            backend,
+            "task-bound",
+            materials,
+            anchor_id=sample.id,
+            target_col="bad_flag",
+            authenticated_selection=selection,
+        )
 
 
 def test_build_modeling_proposal_derives_continuous_target_type_from_regressor(tmp_path):

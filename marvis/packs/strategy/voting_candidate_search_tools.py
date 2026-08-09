@@ -28,7 +28,7 @@ import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.labels import resolve_labeled_frame
-from marvis.db import ModelingRepository
+from marvis.repositories.modeling import ModelingRepository
 from marvis.domain import STRATEGY_TYPES
 from marvis.files import sha256_file
 from marvis.packs.modeling.experiment import ExperimentStore

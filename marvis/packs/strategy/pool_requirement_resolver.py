@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from marvis.db import ModelingRepository
+from marvis.repositories.modeling import ModelingRepository
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.evidence import RAW_SCORE_PRODUCT
 from marvis.packs.modeling.experiment import ExperimentStore
@@ -535,24 +535,6 @@ def validate_pool_requirement_bindings_provenance(
         "requirements_hash": requirements_hash,
         "requirements": requirements,
         "virtual_fields": virtual_fields,
-    }
-
-
-def _outer_requirement(value: object, *, index: int) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise StrategyError(f"compiled requirement[{index}] must be an object")
-    if set(value) != _OUTER_REQUIREMENT_FIELDS:
-        raise StrategyError(
-            f"compiled requirement[{index}] fields must be exactly "
-            "rule_id, fragment_id, requirement"
-        )
-    return {
-        "rule_id": _text(value["rule_id"], f"compiled requirement[{index}].rule_id"),
-        "fragment_id": _text(
-            value["fragment_id"],
-            f"compiled requirement[{index}].fragment_id",
-        ),
-        "requirement": _model_score_requirement(value["requirement"]),
     }
 
 

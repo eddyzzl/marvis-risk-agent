@@ -10,13 +10,25 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from marvis.governance.errors import AuthorizationError
 from marvis.errors import conflict, forbidden, not_found, unprocessable
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from marvis.agent.strategy_setup import strategy_development_slot_clarification
-from marvis.db import PlanRepository, TaskRepository
+from marvis.api_schemas import (
+    HumanPlanStepDecisionRequest,
+    PlanConfirmationRequest,
+    StepConfirmationRequest,
+)
+from marvis.repositories.plans import PlanRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.orchestrator.capability import TIERS, resolve_tier, tier_from_settings
 from marvis.agent.gates import build_failure_envelope
-from marvis.orchestrator.contracts import PlanStatus, StepStatus, plan_to_dict
+from marvis.orchestrator.contracts import (
+    PlanStatus,
+    StepStatus,
+    plan_fingerprint,
+    plan_step_confirmation_fingerprint,
+    plan_to_dict,
+)
 from marvis.orchestrator.errors import IllegalPlanTransition, PlanNotFoundError
 from marvis.orchestrator.planner import PlanningError
 from marvis.orchestrator.templates import get_template
@@ -53,14 +65,6 @@ class CreatePlanRequest(BaseModel):
 
 class RetryStepRequest(BaseModel):
     inputs: dict | None = None
-
-
-class HumanDecisionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    decision: Literal["approve", "reject"]
-    reason: str = Field(min_length=1, max_length=4000)
-    expected_plan_revision: int = Field(ge=0)
 
 
 @router.post("/tasks/{task_id}/plans", status_code=201)
@@ -115,6 +119,12 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
 
         plan.status = PlanStatus.VALIDATED
         repo.create_plan(plan)
+        # Serialize the persisted snapshot, not the pre-insert object.  The
+        # repository supplies created/updated timestamps when the planner did
+        # not, and those fields participate in the confirmation fingerprint.
+        # Returning the transient object would therefore hand the client a
+        # confirmation token that can never match the database row.
+        plan = repo.load_plan(plan.id)
         payload = _plan_payload(request, plan)
     except HTTPException as exc:
         _fail_plan_job(db_path, job_id, exc)
@@ -144,8 +154,15 @@ def list_capability_tiers() -> dict:
 def get_step_output(request: Request, step_id: str) -> dict:
     resolved_step_id, version = _parse_step_output_id(step_id)
     try:
-        return request.app.state.plan_repo.load_step_output(resolved_step_id, version=version)
-    except KeyError as exc:
+        repository = request.app.state.plan_repo
+        if version is None:
+            return repository.load_bound_step_output(resolved_step_id)
+        output_ref = f"metrics:{resolved_step_id}:v{version}"
+        return repository.load_step_presentation_binding(
+            resolved_step_id,
+            output_ref,
+        )["output"]
+    except (KeyError, TypeError, ValueError) as exc:
         raise not_found("step output not found") from exc
 
 
@@ -193,9 +210,20 @@ def get_plan(request: Request, plan_id: str) -> dict:
 
 
 @router.post("/plans/{plan_id}/confirm")
-def confirm_plan(request: Request, plan_id: str) -> dict:
+def confirm_plan(
+    request: Request,
+    plan_id: str,
+    body: PlanConfirmationRequest,
+) -> dict:
+    plan = _load_plan(request, plan_id)
+    _reject_agent_generic_confirmation(request, plan)
     try:
-        request.app.state.plan_repo.confirm_plan(plan_id)
+        request.app.state.plan_repo.confirm_plan(
+            plan_id,
+            expected_plan_status=body.expected_plan_status,
+            expected_plan_revision=body.expected_plan_revision,
+            expected_plan_fingerprint=body.expected_plan_fingerprint,
+        )
     except PlanNotFoundError as exc:
         raise not_found(str(exc)) from exc
     except (IllegalPlanTransition, ConflictError) as exc:
@@ -231,9 +259,11 @@ def confirm_step(
     request: Request,
     plan_id: str,
     step_id: str,
+    body: StepConfirmationRequest,
     background_tasks: BackgroundTasks,
 ) -> dict:
     plan = _load_plan(request, plan_id)
+    _reject_agent_generic_confirmation(request, plan)
     step = next((item for item in plan.steps if item.id == step_id), None)
     if step is None:
         raise not_found("step not found")
@@ -243,13 +273,21 @@ def confirm_step(
             requires_human_decision = governance_service.requires_human_decision(step)
         except AuthorizationError as exc:
             raise conflict(str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise unprocessable(str(exc)) from exc
         if requires_human_decision:
             raise conflict(
                 "this step requires the dedicated human decision endpoint"
             )
     job_id = _start_plan_job(request, plan.task_id)
     try:
-        request.app.state.plan_repo.confirm_step(step_id)
+        request.app.state.plan_repo.confirm_step(
+            step_id,
+            expected_plan_status=body.expected_plan_status,
+            expected_plan_revision=body.expected_plan_revision,
+            expected_plan_fingerprint=body.expected_plan_fingerprint,
+            expected_step_fingerprint=body.expected_step_fingerprint,
+        )
     except KeyError as exc:
         _fail_plan_job(_db_path(request), job_id, exc)
         raise not_found(str(exc)) from exc
@@ -274,7 +312,7 @@ def decide_step(
     request: Request,
     plan_id: str,
     step_id: str,
-    body: HumanDecisionRequest,
+    body: HumanPlanStepDecisionRequest,
     background_tasks: BackgroundTasks,
 ) -> dict:
     """Record an immutable, server-attributed human decision for one gate."""
@@ -294,9 +332,14 @@ def decide_step(
                 principal=principal,
                 reason=body.reason,
                 expected_plan_revision=body.expected_plan_revision,
+                expected_plan_status=body.expected_plan_status,
+                expected_plan_fingerprint=body.expected_plan_fingerprint,
+                expected_step_fingerprint=body.expected_step_fingerprint,
             )
         except AuthorizationError as exc:
             raise conflict(str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise unprocessable(str(exc)) from exc
         return {
             "ok": True,
             "decision": "reject",
@@ -317,6 +360,9 @@ def decide_step(
             principal=principal,
             reason=body.reason,
             expected_plan_revision=body.expected_plan_revision,
+            expected_plan_status=body.expected_plan_status,
+            expected_plan_fingerprint=body.expected_plan_fingerprint,
+            expected_step_fingerprint=body.expected_step_fingerprint,
         )
     except AuthorizationError as exc:
         _fail_plan_job(_db_path(request), job_id, exc)
@@ -413,6 +459,21 @@ def _load_plan(request: Request, plan_id: str):
 
 def _plan_payload(request: Request, plan) -> dict:
     payload = plan_to_dict(plan)
+    snapshot = {
+        "expected_plan_status": plan.status.value,
+        "expected_plan_revision": int(plan.replan_count),
+        "expected_plan_fingerprint": plan_fingerprint(plan),
+    }
+    payload["confirmation_snapshot"] = snapshot
+    step_payloads = payload.get("steps") or []
+    for step_payload, step in zip(step_payloads, plan.steps, strict=True):
+        step_payload["confirmation_snapshot"] = {
+            **snapshot,
+            "expected_step_fingerprint": plan_step_confirmation_fingerprint(
+                step,
+                confirmed=request.app.state.plan_repo.is_step_confirmed(step.id),
+            ),
+        }
     _attach_failure_envelopes(payload)
     _attach_running_step_started_at(request, payload, plan.id)
     payload["sub_agents"] = [
@@ -420,6 +481,23 @@ def _plan_payload(request: Request, plan) -> dict:
         for sub in request.app.state.plan_repo.list_sub_agents_for_plan(plan.id)
     ]
     return {"plan": payload}
+
+
+def _reject_agent_generic_confirmation(request: Request, plan) -> None:
+    """Agent plans must pass through the semantic/typed turn boundary.
+
+    The generic endpoints remain available to manual/API clients, but cannot be
+    used as a shortcut around the Agent's independent intent review.
+    """
+
+    try:
+        task = TaskRepository(_db_path(request)).get_task(plan.task_id)
+    except KeyError as exc:
+        raise not_found("task not found") from exc
+    if str(task.run_mode or "").strip().lower() == "agent":
+        raise conflict(
+            "agent plans must be confirmed through the task agent message endpoint"
+        )
 
 
 def _attach_running_step_started_at(request: Request, payload: dict, plan_id: str) -> None:

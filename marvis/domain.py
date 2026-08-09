@@ -22,6 +22,7 @@ class TaskStatus(StrEnum):
 TASK_STATUS_REASON_USER_CANCELLED = "user_cancelled"
 TASK_STATUS_REASON_SERVER_RESTART = "server_restart_while_running"
 TASK_TYPE_VALIDATION = "validation"
+TASK_TYPE_VALIDATION_BATCH = "validation_batch"
 TASK_TYPE_FEATURE_ANALYSIS = "feature_analysis"
 TASK_TYPE_DATA_JOIN = "data_join"
 TASK_TYPE_MODELING = "modeling"
@@ -32,6 +33,7 @@ TASK_TYPE_PORTFOLIO = "portfolio"
 # so _normalize_task_type can keep arbitrary strings out of the database.
 VALID_TASK_TYPES = frozenset({
     TASK_TYPE_VALIDATION,
+    TASK_TYPE_VALIDATION_BATCH,
     TASK_TYPE_FEATURE_ANALYSIS,
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_MODELING,

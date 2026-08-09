@@ -91,16 +91,19 @@ def pipeline_settings(tmp_path):
     from marvis.settings import build_settings
 
     app_settings = build_settings(tmp_path / "workspace")
-    app_settings.report_template_path.parent.mkdir(parents=True, exist_ok=True)
+    report_template_path = (
+        app_settings.workspace / "report_templates" / "default.docx"
+    )
+    report_template_path.parent.mkdir(parents=True, exist_ok=True)
     template = Document()
     template.add_paragraph("模型：{{TEXT:model_name}}")
     template.add_paragraph("{{TEXT:reproducibility_summary}}")
-    template.save(app_settings.report_template_path)
+    template.save(report_template_path)
     init_db(app_settings.db_path)
     return PipelineSettings(
         workspace=app_settings.workspace,
         db_path=app_settings.db_path,
-        report_template_path=app_settings.report_template_path,
+        report_template_path=report_template_path,
         pmml_scoring_chunk_size=2,
     )
 

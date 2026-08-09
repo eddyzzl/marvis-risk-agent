@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 import sqlite3
 import uuid
@@ -33,11 +34,21 @@ from marvis.governance.errors import (
     PrincipalInactive,
     PrincipalNotFound,
 )
+from marvis.orchestrator.contracts import (
+    Plan,
+    PlanStep,
+    plan_fingerprint,
+    plan_from_dict,
+    plan_step_confirmation_fingerprint,
+)
 
 
 Clock = Callable[[], datetime]
 DEFAULT_SESSION_TTL_SECONDS = 12 * 60 * 60
 DEFAULT_APPROVAL_TTL_SECONDS = 15 * 60
+LOCAL_SESSION_TOUCH_INTERVAL_SECONDS = 30
+
+logger = logging.getLogger(__name__)
 
 
 def canonical_payload_hash(payload: Any) -> str:
@@ -141,7 +152,6 @@ class GovernanceRepository:
             raise PrincipalNotFound("local session token is missing")
         now = self._now()
         with connect(self.db_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT * FROM local_principals WHERE session_token_hash = ?",
                 (_token_hash(raw_token),),
@@ -152,20 +162,70 @@ class GovernanceRepository:
             if state != "active":
                 raise PrincipalInactive(f"local session is {state}")
             if str(row["expires_at"]) <= now:
-                conn.execute(
-                    "UPDATE local_principals SET status = 'expired' WHERE id = ? AND status = 'active'",
-                    (row["id"],),
-                )
-                conn.commit()
+                conn.execute("PRAGMA busy_timeout=0")
+                try:
+                    conn.execute(
+                        "UPDATE local_principals SET status = 'expired' WHERE id = ? AND status = 'active'",
+                        (row["id"],),
+                    )
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    if not _is_sqlite_lock_error(exc):
+                        raise
+                    conn.rollback()
+                    logger.debug(
+                        "Skipped persisting expired local session while SQLite writer was busy"
+                    )
                 raise PrincipalInactive("local session is expired")
-            conn.execute(
-                "UPDATE local_principals SET last_seen_at = ? WHERE id = ?",
-                (now, row["id"]),
-            )
-            updated = conn.execute(
-                "SELECT * FROM local_principals WHERE id = ?",
-                (row["id"],),
-            ).fetchone()
+
+            principal = _principal_from_row(row)
+            if not _local_session_touch_due(
+                last_seen_at=principal.last_seen_at,
+                now=now,
+            ):
+                return principal
+
+            # Session expiry is fixed at creation; ``last_seen_at`` is audit-only.
+            # UI polling must therefore remain a read path when a workflow owns the
+            # SQLite writer. Try the audit touch without waiting and safely defer it
+            # to a later request when the database is busy.
+            conn.execute("PRAGMA busy_timeout=0")
+            try:
+                touched = conn.execute(
+                    """
+                    UPDATE local_principals
+                       SET last_seen_at = ?
+                     WHERE id = ? AND status = 'active' AND expires_at > ?
+                    """,
+                    (now, row["id"], now),
+                )
+                if touched.rowcount != 1:
+                    latest = conn.execute(
+                        "SELECT * FROM local_principals WHERE id = ?",
+                        (row["id"],),
+                    ).fetchone()
+                    if latest is None:
+                        raise PrincipalNotFound(str(row["id"]))
+                    latest_state = str(latest["status"])
+                    if latest_state != "active":
+                        raise PrincipalInactive(f"local session is {latest_state}")
+                    if str(latest["expires_at"]) <= now:
+                        raise PrincipalInactive("local session is expired")
+                    conn.commit()
+                    return _principal_from_row(latest)
+                updated = conn.execute(
+                    "SELECT * FROM local_principals WHERE id = ?",
+                    (row["id"],),
+                ).fetchone()
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_lock_error(exc):
+                    raise
+                conn.rollback()
+                logger.debug(
+                    "Deferred local session last-seen audit touch while SQLite writer was busy"
+                )
+                return principal
         return _principal_from_row(updated)
 
     def get_local_principal(self, principal_id: str) -> LocalPrincipal:
@@ -224,6 +284,11 @@ class GovernanceRepository:
         reason: str,
         issue_effect_approval: bool = False,
         ttl_seconds: int = DEFAULT_APPROVAL_TTL_SECONDS,
+        expected_plan_revision: int | None = None,
+        expected_plan_status: str | None = None,
+        expected_plan_fingerprint: str | None = None,
+        expected_step_fingerprint: str | None = None,
+        expected_step_status: str | None = None,
     ) -> AuthorizationGrant:
         normalized_decision = _decision(decision)
         normalized_reason = _reason(reason)
@@ -232,11 +297,78 @@ class GovernanceRepository:
             ttl = _positive_ttl(ttl_seconds, name="ttl_seconds")
         else:
             ttl = DEFAULT_APPROVAL_TTL_SECONDS
+        snapshot_expectations = (
+            expected_plan_revision,
+            expected_plan_status,
+            expected_plan_fingerprint,
+            expected_step_fingerprint,
+            expected_step_status,
+        )
+        snapshot_bound = any(value is not None for value in snapshot_expectations)
+        if snapshot_bound and any(value is None for value in snapshot_expectations):
+            raise ValueError(
+                "snapshot-bound decisions require plan revision, plan status, "
+                "plan fingerprint, step fingerprint, and step status"
+            )
+        expected_plan_state = _optional_expected_value(
+            expected_plan_status,
+            name="expected_plan_status",
+        )
+        expected_plan_snapshot = _optional_expected_value(
+            expected_plan_fingerprint,
+            name="expected_plan_fingerprint",
+        )
+        expected_step_snapshot = _optional_expected_value(
+            expected_step_fingerprint,
+            name="expected_step_fingerprint",
+        )
+        expected_step_state = _optional_expected_value(
+            expected_step_status,
+            name="expected_step_status",
+        )
         now = self._now()
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._require_active_principal(conn, principal, now)
-            return self._record_decision_tx(
+            if snapshot_bound:
+                plan, step, step_row = _load_authorization_snapshot_tx(
+                    conn,
+                    binding,
+                )
+                _assert_step_binding(plan, step, binding)
+                if int(plan.replan_count) != int(expected_plan_revision):
+                    raise ApprovalBindingError(
+                        "plan revision changed while recording decision"
+                    )
+                if plan.status.value != expected_plan_state:
+                    raise ApprovalStateError(
+                        f"plan status is {plan.status.value}, expected {expected_plan_state}"
+                    )
+                if not secrets.compare_digest(
+                    plan_fingerprint(plan),
+                    str(expected_plan_snapshot),
+                ):
+                    raise ApprovalBindingError(
+                        "plan snapshot changed while recording decision"
+                    )
+                if not secrets.compare_digest(
+                    plan_step_confirmation_fingerprint(
+                        step,
+                        confirmed=bool(step_row["confirmed"]),
+                    ),
+                    str(expected_step_snapshot),
+                ):
+                    raise ApprovalBindingError(
+                        "plan step snapshot changed while recording decision"
+                    )
+                if bool(step_row["confirmed"]):
+                    raise ApprovalStateError("plan step is already confirmed")
+                if str(step_row["status"]) != expected_step_state:
+                    raise ApprovalStateError(
+                        f"plan step status is {step_row['status']}, "
+                        f"expected {expected_step_state}"
+                    )
+            grant = self._record_decision_tx(
                 conn,
                 binding=binding,
                 principal_id=principal.id,
@@ -248,6 +380,49 @@ class GovernanceRepository:
                 ttl_seconds=ttl,
                 now=now,
             )
+            if normalized_decision == "reject" and snapshot_bound:
+                step_cursor = conn.execute(
+                    """
+                    UPDATE plan_steps
+                       SET status = 'skipped',
+                           error = ?
+                     WHERE id = ?
+                       AND plan_id = ?
+                       AND status = ?
+                       AND confirmed = 0
+                    """,
+                    (
+                        f"human_rejected:{grant.decision.id}",
+                        binding.step_id,
+                        binding.plan_id,
+                        expected_step_state,
+                    ),
+                )
+                if step_cursor.rowcount != 1:
+                    raise ApprovalStateError(
+                        "plan step changed while recording rejection"
+                    )
+                plan_cursor = conn.execute(
+                    """
+                    UPDATE plans
+                       SET status = 'cancelled',
+                           updated_at = ?
+                     WHERE id = ?
+                       AND status = ?
+                       AND replan_count = ?
+                    """,
+                    (
+                        now,
+                        binding.plan_id,
+                        expected_plan_state,
+                        int(expected_plan_revision),
+                    ),
+                )
+                if plan_cursor.rowcount != 1:
+                    raise ApprovalStateError(
+                        "plan changed while recording rejection"
+                    )
+            return grant
 
     def authorize_effect(
         self,
@@ -278,6 +453,9 @@ class GovernanceRepository:
         input_updates: dict[str, Any] | None = None,
         expected_input_hash: str | None = None,
         expected_step_status: str = "awaiting_confirm",
+        expected_step_fingerprint: str | None = None,
+        expected_plan_status: str | None = None,
+        expected_plan_fingerprint: str | None = None,
     ) -> AuthorizationGrant:
         """Atomically record approval and CAS-confirm its plan step.
 
@@ -291,6 +469,18 @@ class GovernanceRepository:
         expected = str(expected_step_status).strip()
         if not expected:
             raise ValueError("expected_step_status must not be empty")
+        expected_step_snapshot = _optional_expected_value(
+            expected_step_fingerprint,
+            name="expected_step_fingerprint",
+        )
+        expected_plan_state = _optional_expected_value(
+            expected_plan_status,
+            name="expected_plan_status",
+        )
+        expected_plan_snapshot = _optional_expected_value(
+            expected_plan_fingerprint,
+            name="expected_plan_fingerprint",
+        )
         if input_updates is not None and not isinstance(input_updates, dict):
             raise ValueError("input_updates must be an object")
         if issue_effect_approval:
@@ -302,20 +492,68 @@ class GovernanceRepository:
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._require_active_principal(conn, principal, now)
-            row = conn.execute(
+            plan_row = conn.execute(
                 """
-                SELECT s.id, s.plan_id, s.status, s.confirmed, s.inputs_json,
-                       s.tool_plugin, s.tool_name, s.tool_version,
-                       p.task_id, p.replan_count
-                  FROM plan_steps AS s
-                  JOIN plans AS p ON p.id = s.plan_id
-                 WHERE s.id = ?
+                SELECT id, task_id, goal, source, template_id, autonomy_level,
+                       status, novel_mode, tier, replan_count, loop_events_json,
+                       success_criteria_json, created_at, updated_at
+                  FROM plans
+                 WHERE id = ?
                 """,
-                (binding.step_id,),
+                (binding.plan_id,),
             ).fetchone()
-            if row is None:
+            if plan_row is None:
+                raise ApprovalBindingError(f"plan not found: {binding.plan_id}")
+            step_rows = conn.execute(
+                """
+                SELECT id, plan_id, idx, title, tool_plugin, tool_name,
+                       tool_version, inputs_json, depends_on_json,
+                       post_checks_json, needs_confirmation, policy_json,
+                       decision_point, sub_agent_scope, granted_tools_json,
+                       status, confirmed, sub_agent_id, output_ref, review_json,
+                       error, phase
+                  FROM plan_steps
+                 WHERE plan_id = ?
+                 ORDER BY idx, id
+                """,
+                (binding.plan_id,),
+            ).fetchall()
+            plan = _authorization_plan_from_rows(plan_row, step_rows)
+            step = next(
+                (item for item in plan.steps if item.id == binding.step_id),
+                None,
+            )
+            row = next(
+                (item for item in step_rows if str(item["id"]) == binding.step_id),
+                None,
+            )
+            if step is None or row is None:
                 raise ApprovalBindingError(f"plan step not found: {binding.step_id}")
-            _assert_step_binding(row, binding)
+            _assert_step_binding(plan, step, binding)
+            if (
+                expected_plan_state is not None
+                and plan.status.value != expected_plan_state
+            ):
+                raise ApprovalStateError(
+                    f"plan status is {plan.status.value}, expected {expected_plan_state}"
+                )
+            if expected_plan_snapshot is not None and not secrets.compare_digest(
+                plan_fingerprint(plan),
+                expected_plan_snapshot,
+            ):
+                raise ApprovalBindingError(
+                    "plan snapshot changed while authorizing"
+                )
+            if expected_step_snapshot is not None and not secrets.compare_digest(
+                plan_step_confirmation_fingerprint(
+                    step,
+                    confirmed=bool(row["confirmed"]),
+                ),
+                expected_step_snapshot,
+            ):
+                raise ApprovalBindingError(
+                    "plan step snapshot changed while authorizing"
+                )
             if int(row["confirmed"] or 0):
                 raise ApprovalStateError("plan step is already confirmed")
             if str(row["status"]) != expected:
@@ -1400,6 +1638,20 @@ def _principal_from_row(row: sqlite3.Row) -> LocalPrincipal:
     )
 
 
+def _local_session_touch_due(*, last_seen_at: str, now: str) -> bool:
+    try:
+        last_seen = datetime.fromisoformat(last_seen_at)
+        current = datetime.fromisoformat(now)
+    except ValueError:
+        return True
+    return current - last_seen >= timedelta(seconds=LOCAL_SESSION_TOUCH_INTERVAL_SECONDS)
+
+
+def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
 def _decision_from_row(row: sqlite3.Row) -> DecisionRecord:
     return DecisionRecord(
         id=str(row["id"]),
@@ -1467,16 +1719,145 @@ def _binding_from_row(row: sqlite3.Row) -> AuthorizationBinding:
     )
 
 
-def _assert_step_binding(row: sqlite3.Row, binding: AuthorizationBinding) -> None:
+def _authorization_plan_from_rows(
+    plan_row: sqlite3.Row,
+    step_rows: list[sqlite3.Row],
+) -> Plan:
+    """Rehydrate the persisted plan snapshot inside the authorization transaction."""
+
+    payload = {
+        "id": plan_row["id"],
+        "task_id": plan_row["task_id"],
+        "goal": plan_row["goal"],
+        "source": plan_row["source"],
+        "template_id": plan_row["template_id"],
+        "steps": [_authorization_step_payload(row) for row in step_rows],
+        "autonomy_level": int(plan_row["autonomy_level"]),
+        "status": plan_row["status"],
+        "created_at": plan_row["created_at"],
+        "updated_at": plan_row["updated_at"],
+        "novel_mode": plan_row["novel_mode"],
+        "tier": plan_row["tier"],
+        "replan_count": int(plan_row["replan_count"]),
+        "loop_events": _authorization_json_list(plan_row["loop_events_json"]),
+        "success_criteria": _authorization_json_list(
+            plan_row["success_criteria_json"]
+        ),
+    }
+    try:
+        return plan_from_dict(payload)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApprovalBindingError(
+            "persisted plan snapshot is invalid"
+        ) from exc
+
+
+def _load_authorization_snapshot_tx(
+    conn: sqlite3.Connection,
+    binding: AuthorizationBinding,
+) -> tuple[Plan, PlanStep, sqlite3.Row]:
+    """Load and bind one complete plan snapshot in the caller's writer tx."""
+
+    plan_row = conn.execute(
+        """
+        SELECT id, task_id, goal, source, template_id, autonomy_level,
+               status, novel_mode, tier, replan_count, loop_events_json,
+               success_criteria_json, created_at, updated_at
+          FROM plans
+         WHERE id = ?
+        """,
+        (binding.plan_id,),
+    ).fetchone()
+    if plan_row is None:
+        raise ApprovalBindingError(f"plan not found: {binding.plan_id}")
+    step_rows = conn.execute(
+        """
+        SELECT id, plan_id, idx, title, tool_plugin, tool_name,
+               tool_version, inputs_json, depends_on_json,
+               post_checks_json, needs_confirmation, policy_json,
+               decision_point, sub_agent_scope, granted_tools_json,
+               status, confirmed, sub_agent_id, output_ref, review_json,
+               error, phase
+          FROM plan_steps
+         WHERE plan_id = ?
+         ORDER BY idx, id
+        """,
+        (binding.plan_id,),
+    ).fetchall()
+    plan = _authorization_plan_from_rows(plan_row, step_rows)
+    step = next((item for item in plan.steps if item.id == binding.step_id), None)
+    row = next(
+        (item for item in step_rows if str(item["id"]) == binding.step_id),
+        None,
+    )
+    if step is None or row is None:
+        raise ApprovalBindingError(f"plan step not found: {binding.step_id}")
+    return plan, step, row
+
+
+def _authorization_step_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "plan_id": row["plan_id"],
+        "index": int(row["idx"]),
+        "title": row["title"],
+        "tool_ref": {
+            "plugin": row["tool_plugin"],
+            "tool": row["tool_name"],
+            "version": row["tool_version"] or "",
+        },
+        "inputs": _authorization_json_object(row["inputs_json"]),
+        "depends_on": _authorization_json_list(row["depends_on_json"]),
+        "post_checks": _authorization_json_list(row["post_checks_json"]),
+        "needs_confirmation": bool(row["needs_confirmation"]),
+        "policy": _authorization_json_object(row["policy_json"]),
+        "decision_point": bool(row["decision_point"]),
+        "sub_agent_scope": row["sub_agent_scope"],
+        "granted_tools": _authorization_json_list(row["granted_tools_json"]),
+        "status": row["status"],
+        "sub_agent_id": row["sub_agent_id"],
+        "output_ref": row["output_ref"],
+        "review_verdicts": _authorization_json_list(row["review_json"]),
+        "error": row["error"],
+        "phase": row["phase"],
+    }
+
+
+def _authorization_json_object(raw: Any) -> dict[str, Any]:
+    value = _authorization_json(raw, default="{}")
+    if not isinstance(value, dict):
+        raise ApprovalBindingError("persisted plan object field is invalid")
+    return value
+
+
+def _authorization_json_list(raw: Any) -> list[Any]:
+    value = _authorization_json(raw, default="[]")
+    if not isinstance(value, list):
+        raise ApprovalBindingError("persisted plan list field is invalid")
+    return value
+
+
+def _authorization_json(raw: Any, *, default: str) -> Any:
+    try:
+        return json.loads(str(raw if raw not in (None, "") else default))
+    except (TypeError, ValueError) as exc:
+        raise ApprovalBindingError("persisted plan JSON is invalid") from exc
+
+
+def _assert_step_binding(
+    plan: Plan,
+    step: PlanStep,
+    binding: AuthorizationBinding,
+) -> None:
     mismatches: list[str] = []
-    if str(row["plan_id"]) != binding.plan_id:
+    if step.plan_id != binding.plan_id or plan.id != binding.plan_id:
         mismatches.append("plan_id")
-    if str(row["task_id"]) != binding.task_id:
+    if plan.task_id != binding.task_id:
         mismatches.append("task_id")
-    if int(row["replan_count"]) != binding.plan_revision:
+    if int(plan.replan_count) != binding.plan_revision:
         mismatches.append("plan_revision")
-    label = f"{row['tool_plugin']}.{row['tool_name']}"
-    version = str(row["tool_version"] or "")
+    label = f"{step.tool_ref.plugin}.{step.tool_ref.tool}"
+    version = str(step.tool_ref.version or "")
     stored_ref = f"{label}@{version}" if version else label
     # Older/template plans commonly leave ToolRef.version empty and let the
     # registry resolve the installed manifest version at execution time. The
@@ -1493,6 +1874,15 @@ def _assert_step_binding(row: sqlite3.Row, binding: AuthorizationBinding) -> Non
         raise ApprovalBindingError(
             "approval binding mismatch: " + ", ".join(mismatches)
         )
+
+
+def _optional_expected_value(value: str | None, *, name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        raise ValueError(f"{name} must not be empty")
+    return normalized
 
 
 def _target_json(target: dict[str, Any]) -> str | None:

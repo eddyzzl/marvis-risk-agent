@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import textwrap
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,8 +56,8 @@ def test_dataset_table_html_escapes_columns_profiles_and_rows():
 
 
 def test_dataset_preview_styles_support_metadata_tooltip_and_crosshair_hover():
-    shared_css = (ROOT / "marvis/static/styles.css").read_text(encoding="utf-8")
-    workbench_css = (ROOT / "marvis/static/css/v2-workbench.css").read_text(encoding="utf-8")
+    shared_css = read_browser_stylesheets(ROOT / "marvis/static")
+    workbench_css = shared_css
 
     assert ".dataset-column-info:hover + .dataset-column-tooltip" in shared_css
     assert ".dataset-column-info:focus-visible + .dataset-column-tooltip" in shared_css

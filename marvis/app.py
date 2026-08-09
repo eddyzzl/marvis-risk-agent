@@ -1,4 +1,7 @@
+import hashlib
 import hmac
+from collections.abc import Callable, Mapping
+from datetime import datetime
 from html import escape
 import ipaddress
 import json
@@ -29,16 +32,21 @@ from marvis.branding import (
     resolve_branding_asset,
 )
 from marvis.data.backend import DUCKDB_TEMP_DIR_NAME, DataBackend, duckdb_health
-from marvis.db import (
-    DraftRepository,
-    record_llm_call,
-    PlanRepository,
-    PluginRepository,
-    StrategyRepository,
-    TaskRepository,
-    init_db,
-    sqlite_health,
+from marvis.data.dataset_source_gc import (
+    DatasetSourceGarbageCollector,
+    DatasetSourceGcSweepReport,
+    DatasetSourceGcWatchdog,
 )
+from marvis.data.task_filesystem_gc import (
+    TaskFilesystemGarbageCollector,
+    TaskFilesystemGcSweepReport,
+    TaskFilesystemGcWatchdog,
+)
+from marvis.data.validation_batch_upload_gc import (
+    ValidationBatchUploadGarbageCollector,
+    ValidationBatchUploadRecoveryReport,
+)
+from marvis.db_schema import init_db, sqlite_health
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.execution_environment import load_execution_environment
@@ -60,16 +68,27 @@ from marvis.orchestrator.subagent import SubAgentDispatcher
 from marvis.orchestrator.templates import clear_user_templates, load_builtin_templates
 from marvis.orchestrator.templates.skills import load_user_skill_templates
 from marvis.orchestrator.validator import PlanValidator
+from marvis.operations.integration import build_operations_runtime
+from marvis.operations.router import router as operations_router
+from marvis.operations.scheduler import MonitoringExecutor
 from marvis.plugins.hooks import HookDispatcher
 from marvis.plugins.loader import load_builtin_packs, sync_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.production_governance.router import router as production_governance_router
+from marvis.production_governance.evidence import ActivationEvidenceVerifier
 from marvis.job_watchdog import (
     JobHeartbeatWatchdog,
     heartbeat_timeout_seconds,
     sweep_heartbeat_lost_jobs,
 )
 from marvis.recovery import reclaim_running_plans, reclaim_stale_running_tasks
+from marvis.repositories.drafts import DraftRepository
+from marvis.repositories.llm_calls import record_llm_call
+from marvis.repositories.plans import PlanRepository
+from marvis.repositories.plugins import PluginRepository
+from marvis.repositories.strategy import StrategyRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.routers.agent_memory import router as agent_memory_router
 from marvis.routers.llm import router as llm_router
 from marvis.routers.artifacts import router as artifacts_router
@@ -91,10 +110,12 @@ from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.strategy_candidate_lab import router as strategy_candidate_lab_router
 from marvis.routers.tasks import router as tasks_router
 from marvis.routers.validation_agent import router as validation_agent_router
+from marvis.routers.validation_batches import router as validation_batches_router
 from marvis.routers.validation_contracts import router as validation_contracts_router
 from marvis.routers.validation_stages import router as validation_stages_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
+from marvis.validation_batch_ingress import ValidationBatchIngressLimitMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -197,21 +218,35 @@ def _is_public_read_path(path: str) -> bool:
 
 
 def _static_asset_version(static_dir: Path) -> str:
-    # PERF-9: scan every JS/CSS file under static/ (recursively, so js/v2/*
-    # and any future subdirectory are included) instead of a hardcoded
-    # 4-file allowlist -- editing any module now changes the version string,
-    # eliminating the "changed a v2 module, browser kept the old file"
-    # staleness window described in the review.
-    mtimes = []
-    for glob in _STATIC_VERSION_GLOBS:
-        for path in static_dir.rglob(glob):
-            try:
-                mtimes.append(path.stat().st_mtime_ns)
-            except OSError:
-                continue
-    if not mtimes:
+    # PERF-9: bind the year-long immutable-cache key to every JS/CSS path and
+    # byte, not to the largest mtime.  Build/copy tools may preserve mtimes,
+    # and changing any file older than the current maximum would otherwise
+    # leave the URL unchanged while the server advertises immutable content.
+    assets = sorted(
+        {
+            path
+            for glob in _STATIC_VERSION_GLOBS
+            for path in static_dir.rglob(glob)
+            if path.is_file()
+        },
+        key=lambda path: path.relative_to(static_dir).as_posix(),
+    )
+    digest = hashlib.sha256()
+    hashed_assets = 0
+    for path in assets:
+        try:
+            content = path.read_bytes()
+        except OSError:
+            continue
+        relative_path = path.relative_to(static_dir).as_posix().encode("utf-8")
+        digest.update(len(relative_path).to_bytes(8, "big"))
+        digest.update(relative_path)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+        hashed_assets += 1
+    if not hashed_assets:
         return __version__
-    return f"{__version__}-{max(mtimes)}"
+    return f"{__version__}-{digest.hexdigest()}"
 
 
 def _static_import_map(static_dir: Path, version: str) -> str:
@@ -246,6 +281,8 @@ def _is_local_only_path(path: str) -> bool:
     local-only, so the metadata route must match them."""
     return (
         path == "/api/branding"
+        or path.startswith("/api/operations")
+        or path.startswith("/api/production-governance")
         or path.startswith("/api/settings")
         or path == "/api/skills/reload"
         or path == "/api/skills/validate"
@@ -254,10 +291,35 @@ def _is_local_only_path(path: str) -> bool:
     )
 
 
-def create_app(workspace: str | Path | Settings) -> FastAPI:
+def create_app(
+    workspace: str | Path | Settings,
+    *,
+    operations_executor_allowlist: Mapping[str, MonitoringExecutor] | None = None,
+    operations_clock: Callable[[], datetime] | None = None,
+    production_activation_verifiers: Mapping[
+        str,
+        ActivationEvidenceVerifier,
+    ]
+    | None = None,
+) -> FastAPI:
     settings = workspace if isinstance(workspace, Settings) else build_settings(workspace)
     logger.info("MARVIS starting up workspace=%s version=%s", settings.workspace, __version__)
     init_db(settings.db_path)
+    validation_batch_upload_gc = ValidationBatchUploadGarbageCollector(
+        settings.db_path,
+        material_uploads_root=settings.workspace / "material_uploads",
+    )
+    try:
+        validation_batch_upload_recovery = (
+            validation_batch_upload_gc.reconcile_startup()
+        )
+    except Exception:
+        logger.exception("startup validation batch upload recovery failed")
+        validation_batch_upload_recovery = ValidationBatchUploadRecoveryReport(
+            examined=0,
+            removed=0,
+            failed=1,
+        )
     governance_repo = GovernanceRepository(settings.db_path)
     governance_reconciliation = governance_repo.reconcile_startup()
     reclaim_stale_running_tasks(settings.db_path, tasks_dir=settings.tasks_dir)
@@ -274,9 +336,66 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
             "startup artifact recovery: %d action(s), %d error(s)",
             _recovery_actions, len(artifact_recovery_report.errors),
         )
+    dataset_source_gc = DatasetSourceGarbageCollector(
+        settings.db_path,
+        settings.datasets_dir,
+    )
+    try:
+        dataset_source_gc_startup_report = dataset_source_gc.sweep(limit=100)
+        dataset_source_gc_startup_error = None
+    except Exception as exc:
+        logger.exception("startup dataset source GC sweep failed")
+        dataset_source_gc_startup_error = (
+            f"{exc.__class__.__name__}: {' '.join(str(exc).split())[:500]}"
+        )
+        dataset_source_gc_startup_report = DatasetSourceGcSweepReport(
+            examined=0,
+            deleted=0,
+            cancelled_referenced=0,
+            deferred=0,
+            quarantined=0,
+        )
+    task_filesystem_gc = TaskFilesystemGarbageCollector(
+        settings.db_path,
+        tasks_root=settings.tasks_dir,
+        datasets_root=settings.datasets_dir,
+        material_uploads_root=settings.workspace / "material_uploads",
+    )
+    try:
+        task_filesystem_gc_startup_report = task_filesystem_gc.sweep(limit=100)
+        task_filesystem_gc_startup_error = None
+    except Exception as exc:
+        logger.exception("startup task filesystem GC sweep failed")
+        task_filesystem_gc_startup_error = (
+            f"{exc.__class__.__name__}: {' '.join(str(exc).split())[:500]}"
+        )
+        task_filesystem_gc_startup_report = TaskFilesystemGcSweepReport(
+            examined=0,
+            deleted=0,
+            cancelled_referenced=0,
+            deferred=0,
+            quarantined=0,
+        )
 
     app = FastAPI(title="MARVIS-Agent")
+    app.add_middleware(ValidationBatchIngressLimitMiddleware, settings=settings)
     app.state.settings = settings
+    app.state.validation_batch_upload_gc = validation_batch_upload_gc
+    app.state.validation_batch_upload_recovery = validation_batch_upload_recovery
+    app.state.dataset_source_gc = dataset_source_gc
+    app.state.dataset_source_gc_startup_report = dataset_source_gc_startup_report
+    app.state.dataset_source_gc_startup_error = dataset_source_gc_startup_error
+    app.state.task_filesystem_gc = task_filesystem_gc
+    app.state.task_filesystem_gc_startup_report = task_filesystem_gc_startup_report
+    app.state.task_filesystem_gc_startup_error = task_filesystem_gc_startup_error
+    app.state.operations_runtime = build_operations_runtime(
+        settings,
+        executor_allowlist=operations_executor_allowlist,
+        clock=operations_clock,
+    )
+    app.state.production_activation_verifiers = dict(
+        production_activation_verifiers or {}
+    )
     app.state.governance_repo = governance_repo
     app.state.governance_reconciliation = governance_reconciliation
     # Per-workspace plugin-admin secret (replaces the old "local-dev" magic
@@ -297,6 +416,15 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     job_watchdog = JobHeartbeatWatchdog(task_repo)
     job_watchdog.start()
     app.state.job_watchdog = job_watchdog
+    dataset_source_gc_watchdog = DatasetSourceGcWatchdog(dataset_source_gc)
+    app.state.dataset_source_gc_watchdog = dataset_source_gc_watchdog
+    task_filesystem_gc_watchdog = TaskFilesystemGcWatchdog(task_filesystem_gc)
+    app.state.task_filesystem_gc_watchdog = task_filesystem_gc_watchdog
+    app.router.add_event_handler("startup", dataset_source_gc_watchdog.start)
+    app.router.add_event_handler("startup", task_filesystem_gc_watchdog.start)
+    app.router.add_event_handler("shutdown", task_filesystem_gc_watchdog.stop)
+    app.router.add_event_handler("shutdown", dataset_source_gc_watchdog.stop)
+    app.router.add_event_handler("shutdown", job_watchdog.stop)
     logger.info("MARVIS startup complete workspace=%s", settings.workspace)
 
     @app.middleware("http")
@@ -391,7 +519,9 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.include_router(evidence_router)
     app.include_router(materials_router)
     app.include_router(modeling_router)
+    app.include_router(operations_router)
     app.include_router(plans_router)
+    app.include_router(production_governance_router)
     app.include_router(report_fields_router)
     app.include_router(scans_router)
     app.include_router(skills_router)
@@ -400,6 +530,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.include_router(reports_router)
     app.include_router(tasks_router)
     app.include_router(validation_agent_router)
+    app.include_router(validation_batches_router)
     app.include_router(validation_contracts_router)
     app.include_router(validation_stages_router)
 

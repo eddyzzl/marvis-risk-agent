@@ -1,173 +1,106 @@
-from marvis.packs.strategy.backtest import backtest_strategy
-from marvis.packs.strategy.backtest_compat import (
-    BacktestRecord,
-    approval_backtest_projection,
-    backtest_record_payload,
-)
-from marvis.packs.strategy.bands import (
-    CutoffBandsResult,
-    RedFlag,
-    ScoreBand,
-    design_cutoff_bands,
-)
-from marvis.packs.strategy.compare import (
-    CompareCell,
-    CompareResult,
-    compare_strategies,
-)
-from marvis.packs.strategy.contracts import (
-    BacktestResult,
-    ProfitResult,
-    RollRateMatrix,
-    Strategy,
-    StrategyRule,
-    TradeoffPoint,
-    VintageCurve,
-)
-from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.dsl import (
-    STRATEGY_DSL_SCHEMA_VERSION,
-    StrategyAction,
-    StrategyRuleSpec,
-    StrategySpec,
-    canonical_strategy_json,
-    parse_strategy_spec,
-    strategy_spec_hash,
-)
-from marvis.packs.strategy.evaluator import (
-    FrameEvaluation,
-    RowEvaluation,
-    evaluate_expression,
-    evaluate_expression_frame,
-    evaluate_strategy_frame,
-    evaluate_strategy_row,
-    evaluate_strategy_rows,
-)
-from marvis.packs.strategy.economics import limit_metrics, pricing_metrics
-from marvis.packs.strategy.impact_cube import (
-    STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
-    STRATEGY_IMPACT_CUBE_SCHEMA_VERSION,
-    STRATEGY_IMPACT_SLICE_SCHEMA_VERSION,
-    build_strategy_impact_cube,
-    canonical_strategy_impact_cube_json,
-    validate_strategy_impact_cube,
-)
-from marvis.packs.strategy.pricing import (
-    LimitPricingResult,
-    PricingCell,
-    PricingParams,
-    limit_pricing_matrix,
-)
-from marvis.packs.strategy.pool_impact import (
-    STRATEGY_POOL_IMPACT_PRODUCER_VERSION,
-    STRATEGY_POOL_IMPACT_SCHEMA_VERSION,
-    build_strategy_pool_impact_assessment,
-    canonical_strategy_pool_impact_json,
-    validate_strategy_pool_impact_assessment,
-)
-from marvis.packs.strategy.pool_validation import (
-    STRATEGY_POOL_VALIDATION_PRODUCER_VERSION,
-    STRATEGY_POOL_VALIDATION_SCHEMA_VERSION,
-    build_strategy_pool_validation_evidence,
-    canonical_strategy_pool_validation_json,
-    validate_strategy_pool_validation_evidence,
-)
-from marvis.packs.strategy.profit import ProfitParams, profit_calc, vintage_profit
-from marvis.packs.strategy.roll_rate import roll_rate_matrix
-from marvis.packs.strategy.rules import CandidateRule, evaluate_rule_set, mine_rules
-from marvis.packs.strategy.strategy import (
-    apply_strategy,
-    build_strategy,
-    build_strategy_from_spec,
-    evaluate_condition_mask,
-)
-from marvis.packs.strategy.tradeoff import (
-    recommend_operating_point,
-    tradeoff_feasible_flags,
-    tradeoff_view,
-)
-from marvis.packs.strategy.typed_backtest import (
-    STRATEGY_BACKTEST_SCHEMA_VERSION,
-    ApprovalProfitInputs,
-    StrategyBacktestResult,
-    run_typed_backtest,
-)
-from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
+"""Public Strategy pack interface with lazy compatibility exports.
 
-__all__ = [
-    "BacktestResult",
-    "BacktestRecord",
-    "CompareCell",
-    "CompareResult",
-    "CutoffBandsResult",
-    "FrameEvaluation",
-    "ProfitParams",
-    "ProfitResult",
-    "RedFlag",
-    "RollRateMatrix",
-    "ScoreBand",
-    "STRATEGY_DSL_SCHEMA_VERSION",
-    "STRATEGY_BACKTEST_SCHEMA_VERSION",
-    "STRATEGY_IMPACT_CUBE_PRODUCER_VERSION",
-    "STRATEGY_IMPACT_CUBE_SCHEMA_VERSION",
-    "STRATEGY_IMPACT_SLICE_SCHEMA_VERSION",
-    "STRATEGY_POOL_IMPACT_PRODUCER_VERSION",
-    "STRATEGY_POOL_IMPACT_SCHEMA_VERSION",
-    "STRATEGY_POOL_VALIDATION_PRODUCER_VERSION",
-    "STRATEGY_POOL_VALIDATION_SCHEMA_VERSION",
-    "Strategy",
-    "StrategyAction",
-    "StrategyBacktestResult",
-    "StrategyError",
-    "StrategyRule",
-    "StrategyRuleSpec",
-    "StrategySpec",
-    "TradeoffPoint",
-    "VintageCurve",
-    "ApprovalProfitInputs",
-    "approval_backtest_projection",
-    "apply_strategy",
-    "backtest_strategy",
-    "backtest_record_payload",
-    "build_strategy",
-    "build_strategy_from_spec",
-    "build_strategy_impact_cube",
-    "build_strategy_pool_impact_assessment",
-    "build_strategy_pool_validation_evidence",
-    "canonical_strategy_json",
-    "canonical_strategy_impact_cube_json",
-    "canonical_strategy_pool_impact_json",
-    "canonical_strategy_pool_validation_json",
-    "compare_strategies",
-    "limit_pricing_matrix",
-    "limit_metrics",
-    "LimitPricingResult",
-    "PricingCell",
-    "PricingParams",
-    "design_cutoff_bands",
-    "profit_calc",
-    "pricing_metrics",
-    "recommend_operating_point",
-    "tradeoff_feasible_flags",
-    "roll_rate_matrix",
-    "run_typed_backtest",
-    "tradeoff_view",
-    "validate_strategy_pool_impact_assessment",
-    "validate_strategy_pool_validation_evidence",
-    "validate_strategy_impact_cube",
-    "vintage_curve",
-    "vintage_summary",
-    "CandidateRule",
-    "evaluate_condition_mask",
-    "evaluate_expression",
-    "evaluate_expression_frame",
-    "evaluate_rule_set",
-    "evaluate_strategy_row",
-    "evaluate_strategy_rows",
-    "evaluate_strategy_frame",
-    "mine_rules",
-    "parse_strategy_spec",
-    "RowEvaluation",
-    "strategy_spec_hash",
-    "vintage_profit",
-]
+Importing one Strategy leaf module must not initialize the full workflow graph.
+The package keeps its historical ``from marvis.packs.strategy import ...``
+interface, while resolving each public name only when a caller first uses it.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+
+
+_EXPORT_MODULES = {
+    "backtest_strategy": "marvis.packs.strategy.backtest",
+    "BacktestRecord": "marvis.packs.strategy.backtest_compat",
+    "approval_backtest_projection": "marvis.packs.strategy.backtest_compat",
+    "backtest_record_payload": "marvis.packs.strategy.backtest_compat",
+    "CutoffBandsResult": "marvis.packs.strategy.bands",
+    "RedFlag": "marvis.packs.strategy.bands",
+    "ScoreBand": "marvis.packs.strategy.bands",
+    "design_cutoff_bands": "marvis.packs.strategy.bands",
+    "CompareCell": "marvis.packs.strategy.compare",
+    "CompareResult": "marvis.packs.strategy.compare",
+    "compare_strategies": "marvis.packs.strategy.compare",
+    "BacktestResult": "marvis.packs.strategy.contracts",
+    "ProfitResult": "marvis.packs.strategy.contracts",
+    "RollRateMatrix": "marvis.packs.strategy.contracts",
+    "Strategy": "marvis.packs.strategy.contracts",
+    "StrategyRule": "marvis.packs.strategy.contracts",
+    "TradeoffPoint": "marvis.packs.strategy.contracts",
+    "VintageCurve": "marvis.packs.strategy.contracts",
+    "StrategyError": "marvis.packs.strategy.errors",
+    "STRATEGY_DSL_SCHEMA_VERSION": "marvis.packs.strategy.dsl",
+    "StrategyAction": "marvis.packs.strategy.dsl",
+    "StrategyRuleSpec": "marvis.packs.strategy.dsl",
+    "StrategySpec": "marvis.packs.strategy.dsl",
+    "canonical_strategy_json": "marvis.packs.strategy.dsl",
+    "parse_strategy_spec": "marvis.packs.strategy.dsl",
+    "strategy_spec_hash": "marvis.packs.strategy.dsl",
+    "FrameEvaluation": "marvis.packs.strategy.evaluator",
+    "RowEvaluation": "marvis.packs.strategy.evaluator",
+    "evaluate_expression": "marvis.packs.strategy.evaluator",
+    "evaluate_expression_frame": "marvis.packs.strategy.evaluator",
+    "evaluate_strategy_frame": "marvis.packs.strategy.evaluator",
+    "evaluate_strategy_row": "marvis.packs.strategy.evaluator",
+    "evaluate_strategy_rows": "marvis.packs.strategy.evaluator",
+    "limit_metrics": "marvis.packs.strategy.economics",
+    "pricing_metrics": "marvis.packs.strategy.economics",
+    "STRATEGY_IMPACT_CUBE_PRODUCER_VERSION": "marvis.packs.strategy.impact_cube",
+    "STRATEGY_IMPACT_CUBE_SCHEMA_VERSION": "marvis.packs.strategy.impact_cube",
+    "STRATEGY_IMPACT_SLICE_SCHEMA_VERSION": "marvis.packs.strategy.impact_cube",
+    "build_strategy_impact_cube": "marvis.packs.strategy.impact_cube",
+    "canonical_strategy_impact_cube_json": "marvis.packs.strategy.impact_cube",
+    "validate_strategy_impact_cube": "marvis.packs.strategy.impact_cube",
+    "LimitPricingResult": "marvis.packs.strategy.pricing",
+    "PricingCell": "marvis.packs.strategy.pricing",
+    "PricingParams": "marvis.packs.strategy.pricing",
+    "limit_pricing_matrix": "marvis.packs.strategy.pricing",
+    "STRATEGY_POOL_IMPACT_PRODUCER_VERSION": "marvis.packs.strategy.pool_impact",
+    "STRATEGY_POOL_IMPACT_SCHEMA_VERSION": "marvis.packs.strategy.pool_impact",
+    "build_strategy_pool_impact_assessment": "marvis.packs.strategy.pool_impact",
+    "canonical_strategy_pool_impact_json": "marvis.packs.strategy.pool_impact",
+    "validate_strategy_pool_impact_assessment": "marvis.packs.strategy.pool_impact",
+    "STRATEGY_POOL_VALIDATION_PRODUCER_VERSION": (
+        "marvis.packs.strategy.pool_validation"
+    ),
+    "STRATEGY_POOL_VALIDATION_SCHEMA_VERSION": "marvis.packs.strategy.pool_validation",
+    "build_strategy_pool_validation_evidence": "marvis.packs.strategy.pool_validation",
+    "canonical_strategy_pool_validation_json": "marvis.packs.strategy.pool_validation",
+    "validate_strategy_pool_validation_evidence": "marvis.packs.strategy.pool_validation",
+    "ProfitParams": "marvis.packs.strategy.profit",
+    "profit_calc": "marvis.packs.strategy.profit",
+    "vintage_profit": "marvis.packs.strategy.profit",
+    "roll_rate_matrix": "marvis.packs.strategy.roll_rate",
+    "CandidateRule": "marvis.packs.strategy.rules",
+    "evaluate_rule_set": "marvis.packs.strategy.rules",
+    "mine_rules": "marvis.packs.strategy.rules",
+    "apply_strategy": "marvis.packs.strategy.strategy",
+    "build_strategy": "marvis.packs.strategy.strategy",
+    "build_strategy_from_spec": "marvis.packs.strategy.strategy",
+    "evaluate_condition_mask": "marvis.packs.strategy.strategy",
+    "recommend_operating_point": "marvis.packs.strategy.tradeoff",
+    "tradeoff_feasible_flags": "marvis.packs.strategy.tradeoff",
+    "tradeoff_view": "marvis.packs.strategy.tradeoff",
+    "STRATEGY_BACKTEST_SCHEMA_VERSION": "marvis.packs.strategy.typed_backtest",
+    "ApprovalProfitInputs": "marvis.packs.strategy.typed_backtest",
+    "StrategyBacktestResult": "marvis.packs.strategy.typed_backtest",
+    "run_typed_backtest": "marvis.packs.strategy.typed_backtest",
+    "vintage_curve": "marvis.packs.strategy.vintage",
+    "vintage_summary": "marvis.packs.strategy.vintage",
+}
+
+__all__ = list(_EXPORT_MODULES)
+
+
+def __getattr__(name: str) -> object:
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

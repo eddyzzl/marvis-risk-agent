@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from numbers import Integral, Real
 from pathlib import Path
@@ -601,6 +601,137 @@ class DataBackend:
         # and corrupt a later cache hit (upholding determinism -- INV-1 -- across repeated
         # calls with the same path/n/seed within one diagnose session).
         return cached.copy()
+
+    def sample_rows_stratified(
+        self,
+        path: Path,
+        n: int,
+        *,
+        stratify_col: str,
+        seed: int,
+    ) -> pd.DataFrame:
+        """Return an exact-size deterministic sample that preserves strata.
+
+        CSV and Parquet sources stay inside DuckDB: only per-stratum counts and
+        the final sampled rows cross into Python.  This is the supported
+        production replacement for the legacy ``sample_dataset(...,
+        strategy="stratified")`` compatibility facade.
+        """
+
+        if isinstance(n, bool) or not isinstance(n, Integral) or int(n) <= 0:
+            raise DataBackendError("sample size must be positive")
+        if not isinstance(stratify_col, str) or not stratify_col.strip():
+            raise DataBackendError("stratified sampling requires stratify_col")
+        path = self._resolve_path(path)
+        column = stratify_col.strip()
+        allowed_columns = set(self.column_names(path))
+        if column not in allowed_columns:
+            raise DataBackendError(f"unknown stratify_col: {column}")
+        cached = self._memo(
+            "sample_rows_stratified",
+            path,
+            int(n),
+            column,
+            int(seed),
+            compute=lambda: self._sample_rows_stratified_uncached(
+                path,
+                int(n),
+                stratify_col=column,
+                seed=int(seed),
+            ),
+        )
+        return cached.copy()
+
+    def _sample_rows_stratified_uncached(
+        self,
+        path: Path,
+        n: int,
+        *,
+        stratify_col: str,
+        seed: int,
+    ) -> pd.DataFrame:
+        total = self.row_count(path)
+        if total <= n:
+            return self.read_frame(path).reset_index(drop=True)
+        if path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES:
+            return self._duckdb_stratified_sample(
+                path,
+                n,
+                stratify_col=stratify_col,
+                seed=seed,
+            )
+        return _stratified_sample_frame(
+            self.read_frame(path),
+            n=n,
+            stratify_col=stratify_col,
+            seed=seed,
+        )
+
+    def _duckdb_stratified_sample(
+        self,
+        path: Path,
+        n: int,
+        *,
+        stratify_col: str,
+        seed: int,
+    ) -> pd.DataFrame:
+        columns = self.column_names(path)
+        allowed_columns = set(columns)
+        stratum_sql = sql_identifier(stratify_col, allowed_columns)
+        stratum_order = (
+            f"CASE WHEN {stratum_sql} IS NULL THEN 1 ELSE 0 END, "
+            f"hash({stratum_sql}), CAST({stratum_sql} AS VARCHAR)"
+        )
+        relation = self._duckdb_rel(path)
+        with self._connect() as conn:
+            count_rows = conn.execute(
+                f"SELECT count(*) AS stratum_size FROM {relation} "
+                f"GROUP BY {stratum_sql} ORDER BY {stratum_order}"
+            ).fetchall()
+            allocations = _allocate_strata(
+                n,
+                [int(row[0]) for row in count_rows],
+            )
+            allocation_relation = "_marvis_stratified_allocations"
+            conn.register(
+                allocation_relation,
+                pd.DataFrame({
+                    "group_index": range(len(allocations)),
+                    "quota": allocations,
+                }),
+            )
+            source_order = _unused_column_name(columns, "__marvis_source_order")
+            group_index = _unused_column_name(columns, "__marvis_group_index")
+            stratum_rank = _unused_column_name(columns, "__marvis_stratum_rank")
+            source_stratum = f"s.{_quote_identifier(stratify_col)}"
+            ranked_order = (
+                f"CASE WHEN {source_stratum} IS NULL THEN 1 ELSE 0 END, "
+                f"hash({source_stratum}), CAST({source_stratum} AS VARCHAR)"
+            )
+            source_projection = ", ".join(
+                f"r.{_quote_identifier(column)}" for column in columns
+            )
+            query = (
+                "WITH source AS ("
+                f"SELECT *, row_number() OVER () - 1 AS {_quote_identifier(source_order)} "
+                f"FROM {relation}"
+                "), ranked AS ("
+                "SELECT s.*, "
+                f"dense_rank() OVER (ORDER BY {ranked_order}) - 1 "
+                f"AS {_quote_identifier(group_index)}, "
+                f"row_number() OVER (PARTITION BY {source_stratum} ORDER BY "
+                f"hash(s.{_quote_identifier(source_order)}, {int(seed)}), "
+                f"s.{_quote_identifier(source_order)}) AS {_quote_identifier(stratum_rank)} "
+                "FROM source s"
+                ") "
+                f"SELECT {source_projection} FROM ranked r "
+                f"JOIN {allocation_relation} a "
+                f"ON r.{_quote_identifier(group_index)} = a.group_index "
+                f"WHERE r.{_quote_identifier(stratum_rank)} <= a.quota "
+                f"ORDER BY hash(r.{_quote_identifier(source_order)}, {int(seed)}), "
+                f"r.{_quote_identifier(source_order)}"
+            )
+            return conn.execute(query).df().reset_index(drop=True)
 
     def _sample_rows_uncached(self, path: Path, n: int, *, seed: int) -> pd.DataFrame:
         total = self.row_count(path)
@@ -1552,6 +1683,82 @@ def _quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _unused_column_name(columns: Sequence[str], base: str) -> str:
+    existing = {str(column) for column in columns}
+    candidate = base
+    while candidate in existing:
+        candidate += "_"
+    return candidate
+
+
+def _stratified_sample_frame(
+    frame: pd.DataFrame,
+    *,
+    n: int,
+    stratify_col: str,
+    seed: int,
+) -> pd.DataFrame:
+    groups = [
+        group
+        for _, group in frame.groupby(
+            stratify_col,
+            group_keys=False,
+            dropna=False,
+        )
+    ]
+    allocations = _allocate_strata(n, [len(group) for group in groups])
+    samples = [
+        group.sample(n=count, random_state=int(seed))
+        for group, count in zip(groups, allocations, strict=True)
+        if count > 0
+    ]
+    if not samples:
+        return frame.head(0).reset_index(drop=True)
+    return pd.concat(samples).sample(
+        frac=1.0,
+        random_state=int(seed),
+    ).reset_index(drop=True)
+
+
+def _allocate_strata(n: int, sizes: Sequence[int]) -> list[int]:
+    total = sum(int(size) for size in sizes)
+    if total == 0:
+        return [0 for _ in sizes]
+    target = min(int(n), total)
+    allocations = [0 for _ in sizes]
+    positive = [index for index, size in enumerate(sizes) if int(size) > 0]
+    if target >= len(positive):
+        for index in positive:
+            allocations[index] = 1
+    else:
+        for index in sorted(
+            positive,
+            key=lambda item: (-int(sizes[item]), item),
+        )[:target]:
+            allocations[index] = 1
+        return allocations
+
+    raw = [target * int(size) / total for size in sizes]
+    while sum(allocations) < target:
+        candidates = [
+            index
+            for index, size in enumerate(sizes)
+            if allocations[index] < int(size)
+        ]
+        if not candidates:
+            break
+        index = max(
+            candidates,
+            key=lambda item: (
+                raw[item] - allocations[item],
+                int(sizes[item]) - allocations[item],
+                -item,
+            ),
+        )
+        allocations[index] += 1
+    return allocations
+
+
 def _unique_internal_name(base: str, columns: set[str]) -> str:
     """A synthetic SQL column name guaranteed absent from ``columns`` (append underscores
     until unique), so an internal rank/rowid column never collides with a real feature
@@ -1726,10 +1933,6 @@ def _transformed_key_value(value: Any, *, method: str, side: str, pair: KeyPair)
 
 def transformed_key_names(key_pairs: Sequence[KeyPair]) -> list[str]:
     return [f"__marvis_key_{index}" for index in range(len(key_pairs))]
-
-
-def _iter_strings(items: Iterable[str]) -> list[str]:
-    return [str(item) for item in items]
 
 
 __all__ = [

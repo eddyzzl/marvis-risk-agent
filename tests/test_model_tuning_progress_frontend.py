@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from tests.static_stylesheets import read_browser_stylesheets
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "marvis" / "static"
@@ -149,7 +151,7 @@ def test_plan_rail_keeps_running_subtask_spinner_and_adds_compact_progress():
 def test_app_wires_tool_progress_into_timeline_and_css_prevents_rail_overflow():
     app_js = (STATIC / "app.js").read_text(encoding="utf-8")
     plan_js = (STATIC / "js" / "v2" / "plan_rail_controller.js").read_text(encoding="utf-8")
-    css = (STATIC / "css" / "v2-workbench.css").read_text(encoding="utf-8")
+    css = read_browser_stylesheets(STATIC)
 
     assert 'from "./js/v2/model_tuning_progress.js"' in app_js
     assert "hideSupersededTuningThinking(" in app_js

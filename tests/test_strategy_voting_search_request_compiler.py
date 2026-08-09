@@ -9,6 +9,7 @@ from marvis.agent.strategy_request_compiler import (
     compile_strategy_request,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 RULE_A = "candidate-rule-" + "a" * 32
@@ -166,7 +167,7 @@ def test_voting_search_compiles_explicit_include_exclude_and_constraint() -> Non
 
     assert result.draft is not None
     assert result.draft.to_dict() == payload
-    assert llm.calls[0]["prompt_version"] == 52
+    assert llm.calls[0]["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "voting_candidate_search" in llm.calls[0]["system_prompt"]
 
 

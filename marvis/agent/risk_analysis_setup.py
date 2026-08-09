@@ -269,6 +269,7 @@ def advance_risk_analysis_setup(
     *,
     user_text: str | None,
     conversation: Sequence[dict],
+    analysis_kind_override: str | None = None,
     target_col: str | None = None,
     time_col: str | None = None,
 ) -> RiskAnalysisSetupDecision:
@@ -283,8 +284,13 @@ def advance_risk_analysis_setup(
         return _ask_goal()
 
     phase = str(previous.get("phase") or "")
+    semantic_kind = (
+        analysis_kind_override
+        if analysis_kind_override in {VTG_TERMINAL, PROFITABILITY, STANDARD_VINTAGE}
+        else None
+    )
     if phase == "ask_goal":
-        analysis_kind = parse_analysis_kind(user_text)
+        analysis_kind = semantic_kind or parse_analysis_kind(user_text)
         if analysis_kind is None:
             return _ask_goal(clarify=True)
         return _request_materials(
@@ -299,7 +305,7 @@ def advance_risk_analysis_setup(
 
     analysis_kind = str(previous.get("analysis_kind") or "")
     analysis_scope = _bounded_scope(previous.get("analysis_scope"))
-    changed_kind = _parse_explicit_analysis_switch(user_text)
+    changed_kind = semantic_kind or _parse_explicit_analysis_switch(user_text)
     if changed_kind is not None and changed_kind != analysis_kind:
         return _request_materials(
             changed_kind,

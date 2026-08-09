@@ -18,7 +18,7 @@ import re
 from typing import Any
 
 from marvis.agent.gates import DEFAULT_GATE_ACTIONS, extract_gate_envelope
-from marvis.agent.json_reply import load_json_object
+from marvis.agent.json_reply import load_json_object, rejects_positive_decision
 from marvis.llm_client import DEFAULT_CONTEXT_WINDOW, estimate_tokens
 from marvis.llm_prompts import GATE_SYSTEM_TEMPLATE as _GATE_SYSTEM_TEMPLATE_SPEC
 from marvis.orchestrator.context.budget import truncate_text_to_token_budget
@@ -421,6 +421,11 @@ def _parse_decision(raw, *, allowed_actions: tuple[str, ...] = DEFAULT_GATE_ACTI
     reason = str(data.get("reason") or "").strip()
     if not reason:
         reason = "结果正常，继续。" if action == "confirm" else "请人工确认。"
+    if action == "confirm" and rejects_positive_decision(reason):
+        return {
+            "action": "halt",
+            "reason": "模型动作与理由矛盾，已转人工确认。",
+        }, False
     decision: dict[str, Any] = {"action": action, "reason": reason}
     if action == "adjust":
         decision["params"] = _object_or_empty(data.get("params"))

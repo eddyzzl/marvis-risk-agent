@@ -35,3 +35,30 @@ def test_cross_rule_report_projection_is_aggregate_and_never_selects() -> None:
     assert "champion" not in rendered
     assert "selected_rule" not in rendered
     assert "Cross阈值规则已评估数" in rendered
+
+
+def test_cross_rule_report_projection_marks_missing_amount_lift_not_applicable() -> None:
+    request = _request()
+    request["population"]["loan_amount_sum"] = None
+    request["population"]["overdue_amount_sum"] = None
+    request["constraints"]["min_amount_lift"] = None
+    for trial in request["trials"]:
+        trial["loan_amount_sum"] = None
+        trial["overdue_amount_sum"] = None
+    result = search_cross_threshold_rules(request)
+    source_ref = {
+        "kind": "cross_rule_search",
+        "ref_id": "a" * 64,
+        "content_hash": "b" * 64,
+    }
+
+    projected = _cross_rule_search_report_projection(
+        result,
+        source_ref=source_ref,
+    )
+
+    for row in projected["table"]["rows"]:
+        amount_lift = row["cells"]["amount_lift"]
+        assert amount_lift["availability"] == "not_applicable"
+        assert amount_lift["value"] is None
+        assert amount_lift["source_refs"] == []

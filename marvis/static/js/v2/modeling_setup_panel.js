@@ -1,4 +1,9 @@
 import { escapeHtml } from "../ui-utils.js";
+import {
+  confirmationSnapshotAttributes,
+  confirmationSnapshotFromControl,
+  refreshAfterConfirmationConflict,
+} from "./driver_gate_confirm.js";
 
 export function renderModelingSetupPanel(message, options = {}) {
   const setup = message?.metadata?.modeling_setup;
@@ -6,6 +11,9 @@ export function renderModelingSetupPanel(message, options = {}) {
   const messageId = message?.id ? String(message.id) : "";
   const planId = message?.metadata?.plan_id ? String(message.metadata.plan_id) : "";
   const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  const snapshotAttrs = confirmationSnapshotAttributes(
+    message?.metadata?.confirmation_snapshot || {},
+  );
   const candidates = Array.isArray(setup.sample_weight_candidates)
     ? setup.sample_weight_candidates.map((value) => String(value)).filter(Boolean)
     : [];
@@ -212,7 +220,7 @@ export function renderModelingSetupPanel(message, options = {}) {
   const journeyNav = journey.map(([id, label, note], index) => `<button type="button" class="modeling-journey-node${index === 0 ? " is-active" : ""}" data-modeling-step-jump="${id}" data-step-index="${index + 1}" aria-current="${index === 0 ? "step" : "false"}"${disabledAttr}>
     <span>${index + 1}</span><strong>${label}</strong><small>${note}</small>
   </button>`).join("");
-  return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-plan-id="${escapeHtml(planId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}" data-current-split-config="${escapeHtml(JSON.stringify(splitConfig))}" data-modeling-active-step="split"${interactive ? "" : ' data-modeling-readonly="true"'}>
+  return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-plan-id="${escapeHtml(planId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}" data-current-split-config="${escapeHtml(JSON.stringify(splitConfig))}" data-modeling-active-step="split"${snapshotAttrs}${interactive ? "" : ' data-modeling-readonly="true"'}>
     <div class="modeling-setup-head">
       <span class="modeling-setup-title"><small>Agent 建模协作台</small><strong>一起确定这次模型怎么做</strong></span>
       <span class="modeling-setup-status"><i></i>${interactive ? "等待你逐步确认" : "历史规格"}</span>
@@ -292,7 +300,11 @@ export async function submitModelingWeightAdjust(button, context = {}) {
   }
   const expectedStepId = form.dataset.modelingGateStepId || "";
   const expectedPlanId = form.dataset.modelingPlanId || "";
-  if (!expectedStepId) {
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    form,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
     setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
@@ -321,6 +333,7 @@ export async function submitModelingWeightAdjust(button, context = {}) {
         ...(hasAdjustments ? { adjust_params: adjustParams } : {}),
         expected_plan_id: expectedPlanId,
         expected_step_id: expectedStepId,
+        ...confirmationSnapshot,
         acceptance_mode: typeof context.agentAcceptanceModeValue === "function"
           ? context.agentAcceptanceModeValue()
           : (context.acceptanceMode || "manual"),
@@ -336,8 +349,15 @@ export async function submitModelingWeightAdjust(button, context = {}) {
       context.renderAgentConversation();
     }
   } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "应用建模设置失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId,
+      refreshAgentMessages: context.refreshAgentMessages,
+      setActionStatus,
+    });
+    if (!conflictHandled) {
+      button.disabled = false;
+      setActionStatus(error?.message || "应用建模设置失败", "error");
+    }
   } finally {
     if (planRailTimer !== null) clearInterval(planRailTimer);
     resetFetchThrottle(taskId);

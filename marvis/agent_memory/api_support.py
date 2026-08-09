@@ -9,9 +9,10 @@ from marvis.agent_memory.extractors import (
     classify_user_preference_capture,
     extract_user_preference,
 )
+from marvis.agent_memory.capture import save_memory_candidate
 from marvis.agent_memory.retrieval import MemoryQuery, retrieve_with_distillations
 from marvis.agent_memory.store import AgentMemoryStore
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TaskRecord
 from marvis.memory_policy import load_memory_policy
 
@@ -59,12 +60,15 @@ def capture_user_preference_memory(
         return
     store = AgentMemoryStore(settings.db_path)
     try:
-        entry = store.create(
+        save_memory_candidate(
+            store,
             replace(
                 candidate,
                 source_task_id=task_id,
                 source_message_id=str(message.get("id") or ""),
-            )
+            ),
+            task_id=task_id,
+            hook_dispatcher=hook_dispatcher,
         )
     except Exception as exc:
         logger.warning(
@@ -73,10 +77,6 @@ def capture_user_preference_memory(
             exc,
         )
         return
-    if entry.status == "active":
-        dispatch_memory_after_save(hook_dispatcher, task_id=task_id, memory_type=entry.memory_type)
-
-
 def _add_reserved_topic_receipt(settings, task_id: str) -> None:
     try:
         TaskRepository(settings.db_path).add_agent_message(
@@ -92,36 +92,6 @@ def _add_reserved_topic_receipt(settings, task_id: str) -> None:
             task_id,
             exc,
         )
-
-
-def dispatch_memory_after_save(
-    hook_dispatcher,
-    *,
-    task_id: str | None,
-    memory_type: str,
-) -> None:
-    # The 'memory.after_save' consolidation trigger (CONSOLIDATION_TRIGGERS)
-    # previously had zero emit call sites: it was declared but never fired, so
-    # V2-only workflows -- which never touch the V1.1 validation.completed /
-    # report.after_generate hooks -- could accumulate raw memories forever
-    # without ever being distilled. This fires it from every active-memory
-    # capture point instead.
-    if hook_dispatcher is None or not task_id:
-        return
-    try:
-        hook_dispatcher.dispatch(
-            "memory.after_save",
-            {"task_id": task_id, "memory_type": memory_type},
-            task_id=task_id,
-        )
-    except Exception as exc:
-        logger.warning(
-            "memory.after_save hook dispatch failed for task %s: %s",
-            task_id,
-            exc,
-        )
-
-
 def memory_entry_payload(entry) -> dict:
     return {
         "id": entry.id,

@@ -12,6 +12,7 @@ from marvis.agent.strategy_request_compiler import (
     validate_strategy_request,
 )
 from marvis.api_schemas import ManualStrategyRequest
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 REVISION_A = "interactive-tree-revision-" + "a" * 32
@@ -171,7 +172,7 @@ def test_frontier_materialization_nl_is_exactly_grounded_and_bumps_prompt() -> N
 
     assert result.draft is not None
     assert result.draft.to_dict() == expected
-    assert llm.calls[0]["prompt_version"] == 52
+    assert llm.calls[0]["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "interactive_tree_frontier_materialization" in (
         llm.calls[0]["system_prompt"]
     )

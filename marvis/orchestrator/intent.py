@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import re
 
+from marvis.llm_client import LLMClientError
 from marvis.llm_prompts import CLASSIFY_SYS as _CLASSIFY_SYS_SPEC
 from marvis.orchestrator.templates import WorkflowTemplate, get_template, list_templates
 
@@ -24,9 +25,16 @@ class IntentResult:
 
 
 class IntentRouter:
-    def __init__(self, llm_factory, tool_registry):
+    def __init__(
+        self,
+        llm_factory,
+        tool_registry,
+        *,
+        propagate_llm_errors: bool = False,
+    ):
         self._llm_factory = llm_factory
         self._tools = tool_registry
+        self._propagate_llm_errors = propagate_llm_errors
 
     def route(self, goal: str, task_context: dict) -> IntentResult:
         hit = self._match_templates(goal)
@@ -82,6 +90,10 @@ class IntentRouter:
                 caller="router_intent",
                 stream=False,
             )
+        except LLMClientError:
+            if self._propagate_llm_errors:
+                raise
+            return "novel"
         except Exception:
             return "novel"
         return _extract_choice(str(raw), candidates)

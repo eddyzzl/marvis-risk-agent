@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+from dataclasses import replace
 
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
@@ -105,6 +106,19 @@ def test_dataset_repository_round_trips_datasets_and_roles(tmp_path):
     assert loaded.columns[0].fingerprint.value_kind == "categorical"
     assert task_datasets == [loaded]
     assert repo.list_datasets("task-2")[0].id == "dataset-2"
+
+
+def test_dataset_repository_rejects_noncanonical_source_path_alias(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+
+    with pytest.raises(ValueError, match="canonical relative POSIX"):
+        DatasetRepository(db_path).create_dataset(
+            replace(
+                _dataset("dataset-1"),
+                source_path="task-1/./dataset-1.parquet",
+            )
+        )
 
 
 def test_dataset_repository_round_trips_join_plans_and_updates_specs(tmp_path):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 
 from marvis.agent.service import agent_conclusions_confirmed
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TaskRecord, TaskStatus
 from marvis.pipeline import (
     METRICS_STAGE_FAILURE_PREFIX,

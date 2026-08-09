@@ -11,16 +11,20 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
+from marvis.app import create_app
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TASK_TYPE_PORTFOLIO, TaskCreate
+from marvis.files import sha256_file
 from marvis.governance.repository import GovernanceRepository
 from marvis.governance.service import GovernanceService
-from marvis.orchestrator.planner import Planner
+from marvis.orchestrator.planner import Planner, PlanningError
 from marvis.orchestrator.templates import get_template, load_builtin_templates
 from marvis.orchestrator.validator import PlanValidator
 from marvis.output.portfolio_report import (
@@ -29,10 +33,12 @@ from marvis.output.portfolio_report import (
     render_portfolio_report,
 )
 from marvis.packs.analysis.report import build_report, gate_summary_payload
+from marvis.packs.analysis.segment import segment_profile
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.repositories.strategy import StrategyRepository
 from marvis.sample_data import generate_performance_frame, generate_sample_frame
 from marvis.settings import build_settings
@@ -97,12 +103,16 @@ def test_portfolio_templates_instantiate_and_validate(tmp_path):
         template = get_template(template_id)
         slots = {
             "performance_dataset_id": "ds1",
+            "performance_dataset_content_hash": "a" * 64,
             "id_col": "loan_id",
             "snapshot_col": "snapshot_month",
             "bucket_col": "bucket",
             "states": _STATES,
             "balance_col": "balance",
             "segment_col": "seg",
+            "loss_state": "charged_off",
+            "lgd": 0.45,
+            "horizon_months": 18,
         }
         if template_id == "portfolio_analysis":
             slots["experiment_id"] = "exp1"
@@ -111,6 +121,99 @@ def test_portfolio_templates_instantiate_and_validate(tmp_path):
         # zero validation errors (tools exist, inputs schema, DAG, $ref compat)
         errors = PlanValidator(tool_registry).validate(plan)
         assert errors == [], errors
+        dataset_readers = {
+            "flow_rate",
+            "bucket_migration",
+            "segment_profile",
+            "expected_loss_estimate",
+        }
+        if template_id == "portfolio_analysis":
+            dataset_readers.add("score_stability_trend")
+        assert {
+            step.inputs["expected_content_hash"]
+            for step in plan.steps
+            if step.tool_ref.tool in dataset_readers
+        } == {"a" * 64}
+
+
+def test_portfolio_template_rejects_missing_balance_or_segment(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+    base_slots = {
+        "performance_dataset_id": "ds1",
+        "performance_dataset_content_hash": "a" * 64,
+        "id_col": "loan_id",
+        "snapshot_col": "snapshot_month",
+        "bucket_col": "bucket",
+        "states": _STATES,
+        "loss_state": "charged_off",
+        "lgd": 0.45,
+        "horizon_months": 18,
+    }
+
+    with pytest.raises(PlanningError, match="balance_col"):
+        planner.from_template(
+            get_template("portfolio_analysis_no_trend"),
+            {**base_slots, "segment_col": "seg"},
+            "task1",
+        )
+    with pytest.raises(PlanningError, match="segment_col"):
+        planner.from_template(
+            get_template("portfolio_analysis_no_trend"),
+            {**base_slots, "balance_col": "balance"},
+            "task1",
+        )
+
+
+def test_portfolio_no_trend_template_binds_explicit_el_contract_and_human_gate(
+    tmp_path,
+):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+    template = get_template("portfolio_analysis_no_trend")
+    base_slots = {
+        "performance_dataset_id": "ds1",
+        "performance_dataset_content_hash": "a" * 64,
+        "id_col": "loan_id",
+        "snapshot_col": "snapshot_month",
+        "bucket_col": "bucket",
+        "states": _STATES,
+        "balance_col": "balance",
+        "segment_col": "seg",
+    }
+
+    for field in ("loss_state", "lgd", "horizon_months"):
+        slots = {
+            **base_slots,
+            "loss_state": "charged_off",
+            "lgd": 0.45,
+            "horizon_months": 18,
+        }
+        slots.pop(field)
+        with pytest.raises(PlanningError, match=field):
+            planner.from_template(template, slots, "task1")
+
+    plan = planner.from_template(
+        template,
+        {
+            **base_slots,
+            "loss_state": "charged_off",
+            "lgd": 0.45,
+            "horizon_months": 18,
+        },
+        "task1",
+    )
+    loss_step = next(step for step in plan.steps if step.title == "损失估计")
+    assert loss_step.inputs["loss_state"] == "charged_off"
+    assert loss_step.inputs["lgd"] == 0.45
+    assert loss_step.inputs["horizon_months"] == 18
+    segment_step = next(step for step in plan.steps if step.title == "细分画像")
+    assert segment_step.inputs["ead_col"] == "balance"
+    gate = next(step for step in plan.steps if step.title == "组合分析汇总")
+    assert gate.needs_confirmation is True
+    assert gate.policy.human_decision_gate == "required"
 
 
 def test_portfolio_template_steps_1_to_4_have_no_dependencies():
@@ -160,6 +263,27 @@ def test_gate_summary_promotes_el_basis():
     assert payload["highlights"]["reference_snapshot"] == "2025-12"
 
 
+def test_segment_concentration_declares_count_basis_and_ead_concentration():
+    result = segment_profile(
+        pd.DataFrame(
+            {
+                "segment": ["A", "B"],
+                "balance": [90.0, 10.0],
+            }
+        ),
+        segment_col="segment",
+        ead_col="balance",
+    )
+
+    assert result.concentration_basis == "count"
+    assert result.concentration.top1_pct == pytest.approx(0.5)
+    assert result.concentration.hhi == pytest.approx(0.5)
+    assert result.ead_concentration_basis == "ead"
+    assert result.ead_concentration is not None
+    assert result.ead_concentration.top1_pct == pytest.approx(0.9)
+    assert result.ead_concentration.hhi == pytest.approx(0.82)
+
+
 def test_report_writes_el_basis(tmp_path):
     """A2: the 组合概览 sheet records the reference-snapshot 口径 annotation."""
     el = {
@@ -176,6 +300,34 @@ def test_report_writes_el_basis(tmp_path):
     assert "假设.total_el_basis" in cells
     assert "假设.reference_snapshot" in cells
     assert "2025-01" in cells
+
+
+def test_report_writes_count_and_ead_concentration_bases(tmp_path):
+    segment = {
+        "segments": [{"segment": "A", "count": 1, "pop_pct": 0.5}],
+        "concentration": {"top1_pct": 0.5, "top5_pct": 1.0, "hhi": 0.5},
+        "concentration_basis": "count",
+        "ead_concentration": {"top1_pct": 0.9, "top5_pct": 1.0, "hhi": 0.82},
+        "ead_concentration_basis": "ead",
+    }
+    path, _ = build_report(
+        project_meta={"名称": "T"},
+        flow=None,
+        migration=None,
+        segment=segment,
+        trend=None,
+        expected_loss=None,
+        out_path=tmp_path / "concentration.xlsx",
+    )
+
+    overview = load_workbook(path)["组合概览"]
+    cells = [cell.value for row in overview.iter_rows() for cell in row]
+    assert "concentration_basis" in cells
+    assert "count" in cells
+    assert "ead_concentration_basis" in cells
+    assert "ead" in cells
+    assert "ead_concentration.hhi" in cells
+    assert 0.82 in cells
 
 
 def test_report_carries_numbers_not_recompute(tmp_path):
@@ -215,15 +367,18 @@ def test_portfolio_report_tool_registers_artifact_audit(tmp_path):
     dataset = _perf_dataset(registry, tmp_path, task.id)
     # run the four analysis tools, then the report tool with their outputs injected
     flow = runner.invoke(ToolRef("analysis", "flow_rate"), {
-        "dataset_id": dataset.id, "id_col": "loan_id", "snapshot_col": "snapshot_month",
+        "dataset_id": dataset.id, "expected_content_hash": dataset.content_hash,
+        "id_col": "loan_id", "snapshot_col": "snapshot_month",
         "bucket_col": "bucket", "states": _STATES, "balance_col": "balance",
     }, task_id=task.id)
     migration = runner.invoke(ToolRef("analysis", "bucket_migration"), {
-        "dataset_id": dataset.id, "id_col": "loan_id", "snapshot_col": "snapshot_month",
+        "dataset_id": dataset.id, "expected_content_hash": dataset.content_hash,
+        "id_col": "loan_id", "snapshot_col": "snapshot_month",
         "bucket_col": "bucket", "states": _STATES, "balance_col": "balance",
     }, task_id=task.id)
     el = runner.invoke(ToolRef("analysis", "expected_loss_estimate"), {
-        "dataset_id": dataset.id, "id_col": "loan_id", "snapshot_col": "snapshot_month",
+        "dataset_id": dataset.id, "expected_content_hash": dataset.content_hash,
+        "id_col": "loan_id", "snapshot_col": "snapshot_month",
         "bucket_col": "bucket", "states": _STATES, "balance_col": "balance", "loss_state": "charged_off",
     }, task_id=task.id)
     assert flow.ok and migration.ok and el.ok, (flow.error, migration.error, el.error)
@@ -236,6 +391,31 @@ def test_portfolio_report_tool_registers_artifact_audit(tmp_path):
     assert report.output["report_path"]
     assert Path(report.output["report_path"]).exists()
     assert report.output["sheets"] == PORTFOLIO_REPORT_SHEETS
+    assert report.output["artifact_id"]
+    assert report.output["artifact_content_hash"] == sha256_file(
+        Path(report.output["report_path"])
+    )
+
+    artifacts = TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    record = next(item for item in artifacts if item["id"] == report.output["artifact_id"])
+    assert record["kind"] == "portfolio_report_xlsx"
+    assert record["path"] == report.output["report_path"]
+    assert record["content_hash"] == report.output["artifact_content_hash"]
+    assert record["origin_tool"] == "analysis.portfolio_report"
+    assert record["provenance"]["schema_version"] == "portfolio-report-artifact.v1"
+
+    with TestClient(create_app(settings)) as client:
+        listed = client.get(f"/api/tasks/{task.id}/task-artifacts")
+        assert listed.status_code == 200
+        api_record = next(
+            item
+            for item in listed.json()["artifacts"]
+            if item["id"] == report.output["artifact_id"]
+        )
+        assert api_record["content_hash"] == report.output["artifact_content_hash"]
+        downloaded = client.get(api_record["download_url"])
+        assert downloaded.status_code == 200
+        assert downloaded.content == Path(report.output["report_path"]).read_bytes()
 
     audits = PluginRepository(settings.db_path).list_audit()
     assert any(
@@ -324,6 +504,7 @@ def _portfolio_driver(tmp_path):
 @pytest.mark.slow
 def test_portfolio_end_to_end_journey(tmp_path):
     """合成表现数据→并行分析(流量/迁徙/细分/损失)→汇总门→确认→报告落盘+审计行。"""
+    from marvis.agent.plan_driver import DriverError
     from marvis.orchestrator.contracts import PlanStatus
 
     driver, registry, plan_repo, settings, task = _portfolio_driver(tmp_path)
@@ -335,12 +516,16 @@ def test_portfolio_end_to_end_journey(tmp_path):
         template_id="portfolio_analysis_no_trend",
         slots={
             "performance_dataset_id": dataset.id,
+            "performance_dataset_content_hash": dataset.content_hash,
             "id_col": "loan_id",
             "snapshot_col": "snapshot_month",
             "bucket_col": "bucket",
             "states": _STATES,
             "balance_col": "balance",
             "segment_col": "bucket",
+            "loss_state": "charged_off",
+            "lgd": 0.45,
+            "horizon_months": 18,
             "project_meta": {"名称": "组合分析端到端"},
         },
     )
@@ -356,8 +541,19 @@ def test_portfolio_end_to_end_journey(tmp_path):
         assert next(s for s in plan.steps if s.title == title).status.value == "done", title
     assert next(s for s in plan.steps if s.title == "组合分析汇总").status.value == "awaiting_confirm"
 
+    gate = next(s for s in plan.steps if s.title == "组合分析汇总")
+    with pytest.raises(DriverError, match="AUTO.*强制人工"):
+        driver.resume(
+            plan_id=plan_id,
+            user_text="确认",
+            run_seq=2,
+            expected_step_id=gate.id,
+            confirmation_source="auto",
+        )
+    assert plan_repo.load_plan(plan_id).status == PlanStatus.AWAITING_CONFIRM
+
     # confirm the gate -> runs 汇总 + 生成组合报告 to DONE
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=2)
+    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=3)
     plan = plan_repo.load_plan(plan_id)
     report_step = next(s for s in plan.steps if s.title == "生成组合报告")
     assert report_step.status.value == "done", turn.status

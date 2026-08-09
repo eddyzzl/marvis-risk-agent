@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from marvis.db import TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.domain import FileArtifact, FileRole, TaskStatus
 from marvis.execution_environment import load_execution_environment
 from marvis.files import scan_source_dir

@@ -109,7 +109,9 @@
 - Microcopy rules: no double-language eyebrow; no README-style explanatory paragraphs in every section; Agent should distinguish current evidence, historical memory, and general domain guidance. Memory should sound like operational guidance, not a separate "AI memory found X" system notice.
 
 ## Implementation constraints
-- Framework/styling system: plain HTML/CSS/JS served by FastAPI.
+- Framework/styling system: plain HTML/CSS/JS served by FastAPI. `styles.css`
+  owns shared tokens and compatibility rules; feature-scoped styles live under
+  `static/css/` and are loaded through the tested immutable stylesheet bundle.
 - Design-token constraints: no new frontend dependency; keep proxy-safe relative paths.
 - Branding config should live outside committed source defaults under `workspace/branding/`.
 - Performance constraints: avoid unnecessary `backdrop-filter`, heavy shadows,
@@ -124,5 +126,8 @@
 ## Open questions
 - [ ] Memory management UI placement: settings modal first, then dedicated audit screen if volume requires it.
 - [ ] Plugin upload UI: administrator-only, ordinary user with confirmation, or local developer-only for public builds.
-- [ ] Portfolio/monitoring exposure: decide which backend-supported analysis workflows deserve first-screen task cards versus being launched from modeling/strategy outputs.
+- [x] Portfolio exposure: Portfolio Analysis is a governed first-screen task.
+  Its currently verified public slice is the no-trend local workflow; production
+  monitoring remains embedded in modeling/strategy and must not be advertised
+  as a delivered standalone operations service.
 - [ ] V2 multi-user governance: design maker-checker, role permissions, approval exports, production-operation confirmation, and recovery UX; the version scope is decided, only the interaction design remains open.

@@ -1,7 +1,7 @@
-"""Optional browser smoke tests for the V2 frontend panels.
+"""Browser smoke tests for the V2 frontend panels.
 
-These tests are skipped by default because CI currently does not install
-Playwright browsers. Run locally with:
+The explicit full-release CI lane installs Chromium and enables this suite.
+Run locally with:
 
     MARVIS_RUN_PLAYWRIGHT_SMOKE=1 python -m pytest tests/test_frontend_playwright_smoke.py -q
 """
@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 import pytest
 
 from marvis.app import _static_asset_version, _static_import_map
+from tests.static_stylesheets import browser_stylesheet_hrefs
 
 
 pytestmark = [
@@ -179,14 +180,17 @@ def _task_api_id(path: str, prefix: str, suffix: str) -> str | None:
 
 
 def _smoke_html() -> str:
-    return """
+    stylesheet_links = "\n".join(
+        f'<link rel="stylesheet" href="/{urlparse(href).path}" />'
+        for href in browser_stylesheet_hrefs(ROOT / "marvis/static")
+    )
+    html = """
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="/marvis/static/css/styles.css" />
-  <link rel="stylesheet" href="/marvis/static/css/v2-workbench.css" />
+  __MARVIS_SMOKE_STYLESHEETS__
   <style>
     body { margin: 0; padding: 18px; background: var(--app-bg, #f6f7f9); }
     #root { max-width: 1080px; margin: 0 auto; display: grid; gap: 14px; }
@@ -272,6 +276,7 @@ def _smoke_html() -> str:
 </body>
 </html>
 """
+    return html.replace("__MARVIS_SMOKE_STYLESHEETS__", stylesheet_links)
 
 
 def _real_modeling_task() -> dict:
@@ -307,6 +312,7 @@ def _real_modeling_messages() -> list[dict]:
     return [
         {
             "id": "msg-delivery",
+            "task_id": "task-modeling-smoke",
             "role": "assistant",
             "stage": "done",
             "content": "训练后交付动作完成，已生成最终模型卡、审批包和 Champion 对比。",
@@ -323,14 +329,14 @@ def _real_modeling_messages() -> list[dict]:
                     "recipe": "lgb",
                     "target_type": "binary",
                     "selection_metric": "oot_ks",
-                    "pmml_path": "/tmp/modeling-smoke/art-lgb.pmml",
+                    "pmml_path": "tasks/task-modeling-smoke/art-lgb.pmml",
                     "model_report_path": "/tmp/modeling-smoke/model_report.xlsx",
                     "validation_task_id": "task-validation",
-                    "approval_package_path": "/tmp/modeling-smoke/art-lgb.approval_package.md",
+                    "approval_package_path": "tasks/task-modeling-smoke/art-lgb.approval_package.md",
                     "monitoring_policy_path": "/tmp/modeling-smoke/art-lgb.monitoring_policy.md",
                     "champion_comparison_path": "/tmp/modeling-smoke/art-lgb.champion_comparison.md",
                     "model_card_path": "/tmp/modeling-smoke/art-lgb.model_card.json",
-                    "model_card_markdown_path": "/tmp/modeling-smoke/art-lgb.model_card.md",
+                    "model_card_markdown_path": "tasks/task-modeling-smoke/art-lgb.model_card.md",
                     "model_card": {
                         "version": "model_card_v1",
                         "artifact_id": "art-lgb",
@@ -652,7 +658,9 @@ def _assert_real_modeling_workspace_smoke(page, url: str) -> None:
           return {
             selectedRows: document.querySelectorAll("#taskList .task-row.selected").length,
             planSteps: document.querySelectorAll("#workflowStepper .plan-rail-step").length,
-            outputButtons: document.querySelectorAll(".step-output-button, .plan-step-output").length,
+            railOutputButtons: document.querySelectorAll("#workflowStepper .step-output-button, #workflowStepper .plan-step-output").length,
+            deliveryArtifactItems: document.querySelectorAll(".model-delivery-panel .model-delivery-artifacts > div").length,
+            deliveryDownloads: document.querySelectorAll(".model-delivery-panel [data-model-delivery-download]").length,
             deliveryWidth: delivery.width,
             deliveryHeight: delivery.height,
             analysisWidth: analysis.width,
@@ -669,7 +677,9 @@ def _assert_real_modeling_workspace_smoke(page, url: str) -> None:
     )
     assert metrics["selectedRows"] == 1
     assert metrics["planSteps"] == 3
-    assert metrics["outputButtons"] >= 1
+    assert metrics["railOutputButtons"] == 0
+    assert metrics["deliveryArtifactItems"] >= 3
+    assert metrics["deliveryDownloads"] >= 3
     assert metrics["deliveryWidth"] > 320
     assert metrics["deliveryHeight"] > 180
     assert metrics["analysisWidth"] > 320

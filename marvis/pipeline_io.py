@@ -32,7 +32,7 @@ from marvis.pipeline_errors import PipelineError
 from marvis.validation.results import validation_results_from_dict
 
 if TYPE_CHECKING:
-    from marvis.db import TaskRepository
+    from marvis.repositories.tasks import TaskRepository
     from marvis.pipeline import PipelineSettings
 
 logger = logging.getLogger(__name__)

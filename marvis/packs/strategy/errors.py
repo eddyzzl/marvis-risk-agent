@@ -83,9 +83,29 @@ class StrategySampleDesignV2NativeSourceUnsupportedError(StrategyError):
         }
 
 
+class StrategySampleDesignScopeIneligibleError(StrategyError):
+    """Authenticated sample evidence is not eligible for development execution."""
+
+    code = "strategy_sample_design_scope_ineligible"
+
+    def __init__(
+        self,
+        *,
+        scope: str,
+        required_scope: str = "strategy_development",
+    ) -> None:
+        self.scope = str(scope)
+        self.required_scope = str(required_scope)
+        super().__init__(
+            "strategy sample-design scope "
+            f"{self.scope} is not eligible for {self.required_scope} execution"
+        )
+
+
 __all__ = [
     "StrategyError",
     "StrategyNotAdoptedError",
     "StrategyPoolLegacyDraftNeedsRebuildError",
+    "StrategySampleDesignScopeIneligibleError",
     "StrategySampleDesignV2NativeSourceUnsupportedError",
 ]

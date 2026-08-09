@@ -1,5 +1,10 @@
 import { escapeHtml } from "../ui-utils.js";
 import { datasetTableHtml } from "./artifact_view.js";
+import {
+  confirmationSnapshotAttributes,
+  confirmationSnapshotFromControl,
+  refreshAfterConfirmationConflict,
+} from "./driver_gate_confirm.js";
 
 const DEDUP_STRATEGY_LABELS = { first: "保留首条（first）", last: "保留末条（last）" };
 // UX-6: first/last follows raw file row order (not a business timestamp), so the
@@ -20,6 +25,7 @@ function joinGateContext(context = {}) {
     setAgentMessages: context.setAgentMessages || (() => {}),
     renderAgentConversation: context.renderAgentConversation || (() => {}),
     pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
+    refreshAgentMessages: context.refreshAgentMessages,
     resetFetchThrottle: context.resetFetchThrottle || (() => {}),
     renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
     setDriverExecutionBusy: context.setDriverExecutionBusy || (() => {}),
@@ -67,11 +73,13 @@ export function renderJoinC1Form(message, options = {}) {
   // step — mirrors the screen/modeling-setup readonly convention.
   const interactive = options.interactive !== false;
   const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
-  const roleSelect = (datasetId, selected) => {
+  const roleSelect = (file, selected) => {
+    const datasetId = file?.dataset_id || "";
+    const targetOptions = c1TargetColumns(file);
     const opt = (value, label) =>
       `<option value="${value}"${selected === value ? " selected" : ""}>${label}</option>`;
     return (
-      `<select class="c1-role" data-c1-dataset="${escapeHtml(datasetId)}"${disabledAttr}>`
+      `<select class="c1-role" data-c1-dataset="${escapeHtml(datasetId)}" data-c1-target-options="${escapeHtml(JSON.stringify(targetOptions))}"${disabledAttr}>`
       + opt("anchor", "样本主表")
       + opt("feature", "特征表")
       + opt("ignore", "忽略")
@@ -85,27 +93,22 @@ export function renderJoinC1Form(message, options = {}) {
       <td>${escapeHtml(String(file.row_count ?? ""))}</td>
       <td>${escapeHtml(String(file.n_cols ?? ""))}</td>
       <td>${file.has_target ? "✓" : ""}</td>
-      <td>${roleSelect(file.dataset_id || "", file.proposed_role || "feature")}</td>
+      <td>${roleSelect(file, file.proposed_role || "feature")}</td>
     </tr>`,
     )
     .join("");
-  const columns = [];
-  const seen = new Set();
-  for (const file of c1.files) {
-    for (const col of file.columns || []) {
-      if (!seen.has(col)) {
-        seen.add(col);
-        columns.push(col);
-      }
-    }
-  }
-  const targetOptions = ['<option value="">（不指定）</option>']
-    .concat(
-      columns.map(
-        (col) => `<option value="${escapeHtml(col)}"${col === c1.target_col ? " selected" : ""}>${escapeHtml(col)}</option>`,
-      ),
-    )
-    .join("");
+  const selectedAnchorId = String(
+    c1.anchor_id
+      || c1.files.find((file) => file?.proposed_role === "anchor")?.dataset_id
+      || "",
+  );
+  const selectedAnchor = c1.files.find(
+    (file) => String(file?.dataset_id || "") === selectedAnchorId,
+  );
+  const targetOptions = c1TargetOptionsHtml(
+    c1TargetColumns(selectedAnchor),
+    String(c1.target_col || ""),
+  );
   return `<div class="c1-form" data-c1-form="${escapeHtml(messageId)}" data-c1-gate-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-c1-readonly="true"'}>
     <table class="c1-form-table">
       <thead><tr><th>文件</th><th>行数</th><th>列数</th><th>含目标</th><th>角色</th></tr></thead>
@@ -116,6 +119,63 @@ export function renderJoinC1Form(message, options = {}) {
       <button type="button" class="button compact primary c1-confirm"${interactive ? ` data-c1-confirm="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "确认角色" : "历史结果"}</button>
     </div>
   </div>`;
+}
+
+function c1TargetColumns(file) {
+  if (!file || typeof file !== "object") return [];
+  const candidates = Array.isArray(file.target_candidates)
+    ? file.target_candidates
+    : [];
+  const source = candidates.length
+    ? candidates
+    : (Array.isArray(file.columns) ? file.columns : []);
+  return [...new Set(source.map(String).filter(Boolean))];
+}
+
+function c1TargetOptionsHtml(columns, selected = "") {
+  const selectedValue = columns.includes(selected) ? selected : "";
+  return ['<option value="">（不指定）</option>']
+    .concat(columns.map(
+      (column) => `<option value="${escapeHtml(column)}"${column === selectedValue ? " selected" : ""}>${escapeHtml(column)}</option>`,
+    ))
+    .join("");
+}
+
+function c1RoleTargetColumns(roleSelect) {
+  const raw = roleSelect?.getAttribute?.("data-c1-target-options");
+  if (raw === null || raw === undefined) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? [...new Set(parsed.map(String).filter(Boolean))]
+      : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+export function syncC1TargetOptions(form) {
+  const target = form?.querySelector?.(".c1-target");
+  if (!target) return;
+  const anchors = [...(form.querySelectorAll?.(".c1-role") || [])]
+    .filter((select) => select.value === "anchor");
+  const columns = anchors.length === 1
+    ? (c1RoleTargetColumns(anchors[0]) || [])
+    : [];
+  const selected = columns.includes(String(target.value || ""))
+    ? String(target.value || "")
+    : "";
+  target.innerHTML = c1TargetOptionsHtml(columns, selected);
+  target.value = selected;
+}
+
+export function handleC1RoleChange(event) {
+  const roleSelect = event.target?.closest?.(".c1-role");
+  if (!roleSelect) return false;
+  const form = roleSelect.closest?.(".c1-form");
+  if (!form || form.dataset?.c1Readonly === "true") return false;
+  syncC1TargetOptions(form);
+  return true;
 }
 
 function c1PreviewDocument(context = {}) {
@@ -172,9 +232,13 @@ export async function submitC1Assignment(button, rawContext = {}) {
   }
   const anchorIds = [];
   const featureIds = [];
+  let anchorSelect = null;
   for (const select of form.querySelectorAll(".c1-role")) {
     const datasetId = select.getAttribute("data-c1-dataset");
-    if (select.value === "anchor") anchorIds.push(datasetId);
+    if (select.value === "anchor") {
+      anchorIds.push(datasetId);
+      anchorSelect = select;
+    }
     else if (select.value === "feature") featureIds.push(datasetId);
   }
   if (!anchorIds.length) {
@@ -186,7 +250,15 @@ export async function submitC1Assignment(button, rawContext = {}) {
     return;
   }
   const targetCol = form.querySelector(".c1-target")?.value || "";
-  const expectedStepId = form.dataset.c1GateStepId || "";
+  const anchorTargetColumns = c1RoleTargetColumns(anchorSelect);
+  if (
+    targetCol
+    && anchorTargetColumns !== null
+    && !anchorTargetColumns.includes(targetCol)
+  ) {
+    setActionStatus("目标列必须来自当前样本主表。", "error");
+    return;
+  }
   button.disabled = true;
   const context = joinGateContext(rawContext);
   try {
@@ -196,11 +268,9 @@ export async function submitC1Assignment(button, rawContext = {}) {
         ui_action: "confirm_roles",
         acceptance_mode: acceptanceMode,
       };
-      // C1 is a pre-plan role-assignment gate and therefore normally has no
-      // PlanDriver step id.  Keep stale-step protection for any future / legacy
-      // C1 message that does carry one, but do not reject the canonical
-      // pre-plan contract used by data, feature and modeling workflows.
-      if (expectedStepId) body.expected_step_id = expectedStepId;
+      // C1 is authenticated against the latest pre-plan dataset/content card;
+      // a historical PlanDriver step id is neither meaningful nor accepted by
+      // the backend confirmation contract.
       const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -236,7 +306,11 @@ export function renderJoinKeyPicker(message, options = {}) {
   const interactive = options.interactive !== false;
   const disabledAttr = interactive ? "" : ' disabled aria-disabled="true"';
   const messageId = String(message?.id || "");
+  const planId = String(message?.metadata?.plan_id || "");
   const stepId = String(message?.metadata?.step_id || "");
+  const snapshotAttrs = confirmationSnapshotAttributes(
+    message?.metadata?.confirmation_snapshot || {},
+  );
   const cards = payload.features.map((feature) => {
     const featureId = String(feature.feature_id || "");
     const featureName = String(feature.feature_name || featureId);
@@ -270,7 +344,7 @@ export function renderJoinKeyPicker(message, options = {}) {
       ${alternatives ? `<div class="join-key-alternatives"><span>Agent 候选方案（点击即可选中）</span>${alternatives}</div>` : ""}
     </article>`;
   }).join("");
-  return `<section class="join-key-picker" data-join-key-form="${escapeHtml(messageId)}" data-join-key-gate-step-id="${escapeHtml(stepId)}"${interactive ? "" : ' data-join-key-readonly="true"'}>
+  return `<section class="join-key-picker" data-join-key-form="${escapeHtml(messageId)}" data-join-key-plan-id="${escapeHtml(planId)}" data-join-key-gate-step-id="${escapeHtml(stepId)}"${snapshotAttrs}${interactive ? "" : ' data-join-key-readonly="true"'}>
     <div class="join-key-picker-intro"><strong>逐表确认拼接键</strong><p>这里仍是 ${payload.features.length} 张特征表；每张表只能生成一个最终拼接方案。选择后会先重新诊断，不会立即拼接。</p></div>
     <div class="join-key-card-list">${cards}</div>
     <div class="gate-action-bar">${interactive
@@ -298,8 +372,13 @@ export async function submitJoinKeySelection(button, rawContext = {}) {
     }
     keyOverrides[featureId] = selected;
   }
+  const expectedPlanId = form.dataset.joinKeyPlanId || "";
   const expectedStepId = form.dataset.joinKeyGateStepId || "";
-  if (!expectedStepId) {
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    form,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
     setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
@@ -312,7 +391,9 @@ export async function submitJoinKeySelection(button, rawContext = {}) {
           content: "重新诊断拼接键",
           ui_action: "apply_join_keys",
           adjust_params: { key_overrides: keyOverrides },
+          expected_plan_id: expectedPlanId,
           expected_step_id: expectedStepId,
+          ...confirmationSnapshot,
           acceptance_mode: acceptanceMode,
         }),
       });
@@ -323,8 +404,15 @@ export async function submitJoinKeySelection(button, rawContext = {}) {
       renderAgentConversation();
     });
   } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "拼接键重诊断失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId,
+      refreshAgentMessages: context.refreshAgentMessages,
+      setActionStatus,
+    });
+    if (!conflictHandled) {
+      button.disabled = false;
+      setActionStatus(error?.message || "拼接键重诊断失败", "error");
+    }
   }
 }
 
@@ -401,7 +489,11 @@ export function renderDedupPicker(message, options = {}) {
   const dedup = message?.metadata?.dedup;
   if (!dedup || !Array.isArray(dedup.features) || !dedup.features.length) return "";
   const messageId = message?.id ? String(message.id) : "";
+  const planId = message?.metadata?.plan_id ? String(message.metadata.plan_id) : "";
   const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  const snapshotAttrs = confirmationSnapshotAttributes(
+    message?.metadata?.confirmation_snapshot || {},
+  );
   // UX-2: an earlier dedup gate (superseded by a later gate) renders read-only
   // so a stale tab cannot re-submit strategies against an already-advanced
   // step — mirrors the screen/modeling-setup readonly convention.
@@ -440,7 +532,7 @@ export function renderDedupPicker(message, options = {}) {
     </article>`;
     })
     .join("");
-  return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-dedup-readonly="true"'}>
+  return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-plan-id="${escapeHtml(planId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}"${snapshotAttrs}${interactive ? "" : ' data-dedup-readonly="true"'}>
     <p class="dedup-note">以下特征表的拼接键不唯一（同键多行），请选择去重策略后再拼接:</p>
     <p class="dedup-strategy-note">${escapeHtml(DEDUP_STRATEGY_NOTE)}</p>
     <div class="dedup-feature-list">${cards}</div>
@@ -463,8 +555,13 @@ export async function submitDedupStrategies(button, rawContext = {}) {
     const featureId = select.getAttribute("data-dedup-feature");
     if (featureId) dedupStrategies[featureId] = select.value;
   }
+  const expectedPlanId = form.dataset.dedupPlanId || "";
   const expectedStepId = form.dataset.dedupGateStepId || "";
-  if (!expectedStepId) {
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    form,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
     setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
@@ -478,7 +575,9 @@ export async function submitDedupStrategies(button, rawContext = {}) {
           content: "确认",
           ui_action: "confirm_dedup",
           dedup_strategies: dedupStrategies,
+          expected_plan_id: expectedPlanId,
           expected_step_id: expectedStepId,
+          ...confirmationSnapshot,
           acceptance_mode: acceptanceMode,
         }),
       });
@@ -489,8 +588,15 @@ export async function submitDedupStrategies(button, rawContext = {}) {
       renderAgentConversation();
     });
   } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "应用去重失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId,
+      refreshAgentMessages: context.refreshAgentMessages,
+      setActionStatus,
+    });
+    if (!conflictHandled) {
+      button.disabled = false;
+      setActionStatus(error?.message || "应用去重失败", "error");
+    }
   }
 }
 
@@ -502,11 +608,9 @@ export function handleDedupConfirmClick(event, context = {}) {
   return true;
 }
 
-// UX-6: "排除该特征表" — sends the same free-text instruction channel a typed
-// composer message would use (agent mode's instruction router treats it as a
-// structural replan dropping the table; manual mode has no LLM router, so the
-// driver responds with its existing canned adjust hint rather than applying it
-// silently — never a broken request either way).
+// UX-6: "排除该特征表" is a typed, snapshot-bound structural adjustment. The
+// server validates the feature id and atomically recomputes the join proposal;
+// display copy is audit text only and is never reparsed as authority.
 export async function submitDedupExclude(button, rawContext = {}) {
   const form = button.closest(".dedup-picker");
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
@@ -517,7 +621,16 @@ export async function submitDedupExclude(button, rawContext = {}) {
   }
   const featureId = button.getAttribute("data-dedup-exclude") || "";
   if (!featureId) return;
+  const expectedPlanId = form.dataset.dedupPlanId || "";
   const expectedStepId = form.dataset.dedupGateStepId || "";
+  const confirmationSnapshot = confirmationSnapshotFromControl(
+    form,
+    { requireStep: true },
+  );
+  if (!expectedPlanId || !expectedStepId || !confirmationSnapshot) {
+    setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
+    return;
+  }
   button.disabled = true;
   const context = joinGateContext(rawContext);
   try {
@@ -526,7 +639,11 @@ export async function submitDedupExclude(button, rawContext = {}) {
         method: "POST",
         body: JSON.stringify({
           content: `排除特征表 ${featureId}，其余按当前拼接方案继续`,
+          ui_action: "exclude_join_feature",
+          adjust_params: { exclude_join_feature_id: featureId },
+          expected_plan_id: expectedPlanId,
           expected_step_id: expectedStepId,
+          ...confirmationSnapshot,
           acceptance_mode: acceptanceMode,
         }),
       });
@@ -537,8 +654,15 @@ export async function submitDedupExclude(button, rawContext = {}) {
       renderAgentConversation();
     });
   } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "排除特征表失败", "error");
+    const conflictHandled = await refreshAfterConfirmationConflict(error, {
+      taskId,
+      refreshAgentMessages: context.refreshAgentMessages,
+      setActionStatus,
+    });
+    if (!conflictHandled) {
+      button.disabled = false;
+      setActionStatus(error?.message || "排除特征表失败", "error");
+    }
   }
 }
 

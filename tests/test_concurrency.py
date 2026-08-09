@@ -261,13 +261,22 @@ def test_sequential_double_confirm_step_conflicts(tmp_path):
 
 def test_concurrent_double_confirm_over_http_yields_exactly_one_success(tmp_path):
     client = _confirm_race_client(tmp_path)
+    plan = client.get("/api/plans/plan-race").json()["plan"]
+    snapshot = next(
+        step["confirmation_snapshot"]
+        for step in plan["steps"]
+        if step["id"] == "step-race"
+    )
 
     results: list[int] = []
     barrier = threading.Barrier(2)
 
     def confirm_once():
         barrier.wait(timeout=5.0)
-        resp = client.post("/api/plans/plan-race/steps/step-race/confirm")
+        resp = client.post(
+            "/api/plans/plan-race/steps/step-race/confirm",
+            json=snapshot,
+        )
         results.append(resp.status_code)
 
     threads = [threading.Thread(target=confirm_once) for _ in range(2)]

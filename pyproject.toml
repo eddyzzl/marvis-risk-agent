@@ -56,6 +56,7 @@ dev = [
   "pytest-timeout>=2,<3",
   "httpx>=0.27,<1",
   "httpx2>=2.4,<3",
+  "playwright>=1.49,<2",
   "ruff>=0.8,<1",
 ]
 
@@ -75,4 +76,4 @@ where = ["."]
 include = ["marvis*"]
 
 [tool.setuptools.package-data]
-marvis = ["static/*", "static/js/*", "static/js/v2/*", "static/css/*", "static/brand/*", "static/pets/*", "static/pets/naitang/*", "static/pets/xiaojiu/*", "static/pets/auditbot/*", "static/pets/auditbot-pro/*", "static/pets/auditbot-poly/*", "static/pets/auditbot-ink/*", "static/pets/auditbot-clay/*", "static/pets/auditbot-comic/*", "static/pets/auditbot-pixel/*", "packs/*/manifest.json"]
+marvis = ["static/*", "static/js/*", "static/js/v2/*", "static/css/*", "static/brand/*", "static/pets/*/*", "packs/*/manifest.json", "report_templates/*.docx"]

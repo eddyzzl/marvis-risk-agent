@@ -29,6 +29,12 @@ function formatBytes(value) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+export function materialCandidateSelectable(role, candidate) {
+  if (candidate?.available === false) return false;
+  if (role?.role !== "data_dictionary") return true;
+  return candidate?.metadata_compatibility?.status !== "incompatible";
+}
+
 function candidateText(candidate) {
   const size = formatBytes(candidate?.size_bytes);
   const metadataStatus = candidate?.metadata_compatibility?.status;
@@ -41,19 +47,28 @@ function candidateText(candidate) {
         : metadataStatus === "not_evaluated"
           ? " · 需人工确认"
           : "";
-  return `${candidate?.relative_path || candidate?.name || "未命名文件"}${size ? ` · ${size}` : ""}${compatibility}`;
+  const unavailable = metadataStatus === "incompatible" || candidate?.available === false
+    ? " · 不可选"
+    : "";
+  return `${candidate?.relative_path || candidate?.name || "未命名文件"}${size ? ` · ${size}` : ""}${compatibility}${unavailable}`;
 }
 
 function defaultSelectionForRole(role, candidates, selection) {
   const selected = String(selection?.[role.field] || "");
-  if (selected) return selected;
-  const recommendedCandidates = candidates.filter((candidate) => candidate.recommended);
+  const selectableCandidates = candidates.filter((candidate) => (
+    materialCandidateSelectable(role, candidate)
+  ));
+  const selectedCandidate = selectableCandidates.find((candidate) => (
+    String(candidate?.relative_path || "") === selected
+  ));
+  if (selected && selectedCandidate) return selected;
+  const recommendedCandidates = selectableCandidates.filter((candidate) => candidate.recommended);
   if (recommendedCandidates.length === 1) return recommendedCandidates[0].relative_path || "";
   const hasMetadataAssessment = candidates.some((candidate) => candidate.metadata_compatibility);
   if (role.role === "data_dictionary" && (hasMetadataAssessment || candidates.length > 1)) return "";
-  const exactRoleCandidates = candidates.filter((candidate) => candidate.role === role.role);
+  const exactRoleCandidates = selectableCandidates.filter((candidate) => candidate.role === role.role);
   if (exactRoleCandidates.length === 1) return exactRoleCandidates[0].relative_path || "";
-  if (candidates.length === 1) return candidates[0].relative_path || "";
+  if (selectableCandidates.length === 1) return selectableCandidates[0].relative_path || "";
   return "";
 }
 
@@ -61,19 +76,46 @@ function completeSelection(selection = {}) {
   return MATERIAL_BINDING_ROLES.every((role) => String(selection[role.field] || "").trim());
 }
 
-function renderRoleRow(role, candidates, value) {
-  const disabled = candidates.length === 0 ? " disabled" : "";
+export function materialSelectionIssue(selection = {}, payload = {}) {
+  const role = MATERIAL_BINDING_ROLES.find((item) => item.role === "data_dictionary");
+  const candidates = Array.isArray(payload?.candidates?.data_dictionary)
+    ? payload.candidates.data_dictionary
+    : [];
+  const selected = String(selection?.dictionary_path || "");
+  const selectedCandidate = candidates.find((candidate) => (
+    String(candidate?.relative_path || "") === selected
+  ));
+  const guidance = "请更换 PMML 或补齐 feature/category/importance 列后重新扫描。";
+  if (selectedCandidate && !materialCandidateSelectable(role, selectedCandidate)) {
+    return `当前特征元数据不可用；${guidance}`;
+  }
+  if (candidates.length && !candidates.some((candidate) => materialCandidateSelectable(role, candidate))) {
+    return `所选 PMML 没有可用的特征元数据；${guidance}`;
+  }
+  return "";
+}
+
+export function renderRoleRow(role, candidates, value) {
+  const selectableCandidates = candidates.filter((candidate) => (
+    materialCandidateSelectable(role, candidate)
+  ));
+  const disabled = selectableCandidates.length === 0 ? " disabled" : "";
   const icon = MATERIAL_BINDING_ROLE_ICONS[role.role] || "";
   const options = candidates.length
     ? [
         '<option value="">请选择</option>',
         ...candidates.map((candidate) => {
           const relativePath = candidate.relative_path || "";
-          const selected = relativePath === value ? " selected" : "";
-          return `<option value="${escapeHtml(relativePath)}"${selected}>${escapeHtml(candidateText(candidate))}</option>`;
+          const selectable = materialCandidateSelectable(role, candidate);
+          const selected = selectable && relativePath === value ? " selected" : "";
+          const unavailable = selectable ? "" : ' disabled aria-disabled="true"';
+          return `<option value="${escapeHtml(relativePath)}"${selected}${unavailable}>${escapeHtml(candidateText(candidate))}</option>`;
         }),
       ].join("")
     : '<option value="">未找到可选文件</option>';
+  const unavailableHint = candidates.length && !selectableCandidates.length
+    ? '<small class="material-binding-unavailable">所选 PMML 没有可用的特征元数据；请更换 PMML 或补齐 feature/category/importance 列后重新扫描。</small>'
+    : "";
   return [
     '<label class="material-binding-row">',
     '<span class="material-binding-role">',
@@ -84,6 +126,7 @@ function renderRoleRow(role, candidates, value) {
     "</span>",
     "</span>",
     `<select data-material-binding-field="${escapeHtml(role.field)}" aria-label="选择${escapeHtml(role.caption)}"${disabled}>${options}</select>`,
+    unavailableHint,
     "</label>",
   ].join("");
 }
@@ -91,6 +134,7 @@ function renderRoleRow(role, candidates, value) {
 export function createMaterialBindingDialogController({ $, api } = {}) {
   let pendingResolve = null;
   let activeTask = null;
+  let activePayload = null;
   let previewRequestSequence = 0;
 
   function setStatus(message, kind = "info") {
@@ -103,6 +147,7 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
   function render(payload) {
     const rows = $("materialBindingRows");
     if (!rows) return;
+    activePayload = payload || {};
     const selection = payload?.selection || {};
     rows.innerHTML = MATERIAL_BINDING_ROLES.map((role) => {
       const candidates = Array.isArray(payload?.candidates?.[role.role])
@@ -171,6 +216,7 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
   function closeWith(value) {
     previewRequestSequence += 1;
     activeTask = null;
+    activePayload = null;
     resolvePending(value);
     const dialog = $("materialBindingDialog");
     if (dialog?.open) dialog.close(value ? "confirm" : "cancel");
@@ -179,6 +225,11 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
   async function confirmSelection() {
     if (!activeTask?.id) return;
     const selection = collectSelection();
+    const issue = materialSelectionIssue(selection, activePayload || {});
+    if (issue) {
+      setStatus(issue, "error");
+      return;
+    }
     if (!completeSelection(selection)) {
       setStatus("请为四类材料都选择对应文件。", "error");
       return;
@@ -199,13 +250,14 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
   async function ensureMaterialSelection(task, { force = false } = {}) {
     if (!task || (task.task_type || "validation") !== "validation") return task;
     const payload = await api(`/api/tasks/${task.id}/materials`);
-    if (!force && completeSelection(payload.selection)) return task;
+    const selectionIssue = materialSelectionIssue(payload.selection || {}, payload);
+    if (!force && completeSelection(payload.selection) && !selectionIssue) return task;
     previewRequestSequence += 1;
     activeTask = task;
     render(payload);
     const confirmButton = $("materialBindingConfirmButton");
     if (confirmButton) confirmButton.disabled = false;
-    setStatus("");
+    setStatus(selectionIssue, selectionIssue ? "error" : "info");
     const dialog = $("materialBindingDialog");
     if (!dialog) return task;
     dialog.showModal();

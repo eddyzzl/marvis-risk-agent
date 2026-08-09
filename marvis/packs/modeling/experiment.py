@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from marvis.db import ModelingRepository
+from marvis.repositories.modeling import ModelingRepository
 from marvis.packs.modeling.contracts import Experiment, TrainConfig, TrainResult
 
 

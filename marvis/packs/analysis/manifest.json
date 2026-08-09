@@ -13,6 +13,7 @@
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string", "minLength": 1},
+          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "id_col": {"type": "string", "minLength": 1},
           "snapshot_col": {"type": "string", "minLength": 1},
           "bucket_col": {"type": "string", "minLength": 1},
@@ -20,7 +21,7 @@
           "balance_col": {"type": "string"},
           "bad_states": {"type": "array", "items": {"type": "string"}}
         },
-        "required": ["dataset_id", "id_col", "snapshot_col", "bucket_col", "states"],
+        "required": ["dataset_id", "expected_content_hash", "id_col", "snapshot_col", "bucket_col", "states"],
         "additionalProperties": false
       },
       "output_schema": {
@@ -50,6 +51,7 @@
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string", "minLength": 1},
+          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "id_col": {"type": "string", "minLength": 1},
           "snapshot_col": {"type": "string", "minLength": 1},
           "bucket_col": {"type": "string", "minLength": 1},
@@ -58,7 +60,7 @@
           "window": {"type": "array", "items": {"type": "string"}},
           "bad_states": {"type": "array", "items": {"type": "string"}}
         },
-        "required": ["dataset_id", "id_col", "snapshot_col", "bucket_col", "states"],
+        "required": ["dataset_id", "expected_content_hash", "id_col", "snapshot_col", "bucket_col", "states"],
         "additionalProperties": false
       },
       "output_schema": {
@@ -89,6 +91,7 @@
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string", "minLength": 1},
+          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "segment_col": {"type": "string", "minLength": 1},
           "target_col": {"type": "string"},
           "score_col": {"type": "string"},
@@ -98,7 +101,7 @@
           "pd_col": {"type": "string"},
           "top_k": {"type": "integer", "minimum": 1}
         },
-        "required": ["dataset_id", "segment_col"],
+        "required": ["dataset_id", "expected_content_hash", "segment_col"],
         "additionalProperties": false
       },
       "output_schema": {
@@ -106,9 +109,12 @@
         "properties": {
           "segments": {"type": "array", "items": {"type": "object"}},
           "concentration": {"type": "object"},
+          "concentration_basis": {"type": "string", "enum": ["count"]},
+          "ead_concentration": {"type": ["object", "null"]},
+          "ead_concentration_basis": {"type": ["string", "null"], "enum": ["ead", null]},
           "red_flags": {"type": "array", "items": {"type": "object"}}
         },
-        "required": ["segments", "concentration", "red_flags"],
+        "required": ["segments", "concentration", "concentration_basis", "ead_concentration", "ead_concentration_basis", "red_flags"],
         "additionalProperties": false
       },
       "determinism": "deterministic",
@@ -125,17 +131,18 @@
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string", "minLength": 1},
+          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "id_col": {"type": "string", "minLength": 1},
           "snapshot_col": {"type": "string", "minLength": 1},
           "bucket_col": {"type": "string", "minLength": 1},
           "states": {"type": "array", "items": {"type": "string"}, "minItems": 1},
           "balance_col": {"type": "string", "minLength": 1},
-          "loss_state": {"type": "string"},
+          "loss_state": {"type": "string", "minLength": 1},
           "lgd": {"type": "number", "minimum": 0, "maximum": 1},
           "horizon_months": {"type": "integer", "minimum": 1},
           "window": {"type": "array", "items": {"type": "string"}}
         },
-        "required": ["dataset_id", "id_col", "snapshot_col", "bucket_col", "states", "balance_col"],
+        "required": ["dataset_id", "expected_content_hash", "id_col", "snapshot_col", "bucket_col", "states", "balance_col"],
         "additionalProperties": false
       },
       "output_schema": {
@@ -168,6 +175,7 @@
           "dataset_ids": {"type": "array", "items": {"type": "string"}},
           "months": {"type": "array", "items": {"type": "string"}},
           "dataset_id": {"type": "string"},
+          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "month_col": {"type": "string"},
           "score_col": {"type": "string"},
           "thresholds": {"type": "object"}
@@ -259,6 +267,11 @@
       "timeout_seconds": 60,
       "failure_policy": "fail",
       "entrypoint": "tool_portfolio_gate_summary",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
       "side_effects": [],
       "memory_limit_mb": 2048
     },
@@ -282,9 +295,11 @@
         "type": "object",
         "properties": {
           "report_path": {"type": "string"},
-          "sheets": {"type": "array", "items": {"type": "string"}}
+          "sheets": {"type": "array", "items": {"type": "string"}},
+          "artifact_id": {"type": "string", "minLength": 1},
+          "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         },
-        "required": ["report_path", "sheets"],
+        "required": ["report_path", "sheets", "artifact_id", "artifact_content_hash"],
         "additionalProperties": false
       },
       "determinism": "deterministic",

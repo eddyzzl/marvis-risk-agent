@@ -94,6 +94,206 @@ def test_api_wrappers_keep_formdata_boundary_under_fetch_control():
     )
 
 
+def test_driver_gate_conflicts_are_classified_without_treating_every_409_as_stale():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { ApiError, apiConflictKind } from "./marvis/static/js/api.js";
+
+        const active = new ApiError("该任务正在执行上一步，请等待完成", {
+          status: 409,
+          detail: "该任务正在执行上一步，请等待完成",
+          payload: { detail: "该任务正在执行上一步，请等待完成" },
+        });
+        const stale = new ApiError("该操作对应的计划已变化，请刷新页面后重试。", {
+          status: 409,
+          detail: "该操作对应的计划已变化，请刷新页面后重试。",
+        });
+        const unrelated = new ApiError("cannot generate report in status created", {
+          status: 409,
+          detail: "cannot generate report in status created",
+        });
+
+        assert.equal(apiConflictKind(active), "active_driver_job");
+        assert.equal(apiConflictKind(stale), "confirmation_snapshot_stale");
+        assert.equal(apiConflictKind(new ApiError("step gate-1 fingerprint changed while confirming", {
+          status: 409,
+        })), "confirmation_snapshot_stale");
+        assert.equal(apiConflictKind(unrelated), "other_conflict");
+        assert.equal(apiConflictKind(new Error("network failed")), "not_conflict");
+        """
+    )
+
+
+def test_driver_gate_pending_claim_survives_rerender_until_authoritative_state_changes():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          claimDriverGateSubmission,
+          confirmationSnapshotsEqual,
+          driverGateActionable,
+          markDriverGateSubmission,
+          reconcileDriverGateSubmissions,
+        } from "./marvis/static/js/v2/driver_gate_confirm.js";
+
+        const snapshot1 = {
+          expected_plan_status: "awaiting_confirm",
+          expected_plan_revision: 1,
+          expected_plan_fingerprint: "a".repeat(64),
+          expected_step_fingerprint: "b".repeat(64),
+        };
+        const snapshot2 = {
+          ...snapshot1,
+          expected_plan_revision: 2,
+          expected_plan_fingerprint: "c".repeat(64),
+          expected_step_fingerprint: "d".repeat(64),
+        };
+        const gate = {
+          taskId: "task-1",
+          planId: "plan-1",
+          stepId: "step-1",
+          stepStatus: "awaiting_confirm",
+          snapshot: snapshot1,
+          localBusy: false,
+          serverBusy: false,
+        };
+
+        assert.equal(driverGateActionable(gate), true);
+        assert.equal(confirmationSnapshotsEqual(snapshot1, snapshot1, { requireStep: true }), true);
+        assert.equal(confirmationSnapshotsEqual(snapshot1, snapshot2, { requireStep: true }), false);
+        assert.equal(driverGateActionable({ ...gate, snapshot: {} }), false);
+        claimDriverGateSubmission({ ...gate, state: "submitting" });
+        assert.equal(driverGateActionable(gate), false);
+        // A DOM rebuild with the same task+plan+step must remain disabled.
+        assert.equal(driverGateActionable({ ...gate }), false);
+        // A new authoritative CAS snapshot is a new action and releases the old claim.
+        assert.equal(driverGateActionable({ ...gate, snapshot: snapshot2 }), true);
+
+        claimDriverGateSubmission({ ...gate, state: "submitting" });
+        markDriverGateSubmission({ ...gate, state: "active_driver_job" });
+        assert.equal(driverGateActionable({ ...gate, serverBusy: true }), false);
+        // The duplicate request was never accepted; once task polling proves the
+        // existing server job is idle, the still-current gate may be used again.
+        reconcileDriverGateSubmissions("task-1", { serverBusy: false });
+        assert.equal(driverGateActionable({ ...gate, serverBusy: false }), true);
+        assert.equal(driverGateActionable({ ...gate, stepStatus: "done" }), false);
+        """
+    )
+
+
+def test_driver_gate_request_binding_only_claims_typed_agent_confirmation_posts():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { driverGateRequestBinding } from "./marvis/static/js/v2/driver_gate_confirm.js";
+
+        const snapshot = {
+          expected_plan_status: "awaiting_confirm",
+          expected_plan_revision: 3,
+          expected_plan_fingerprint: "a".repeat(64),
+          expected_step_fingerprint: "b".repeat(64),
+        };
+        const binding = driverGateRequestBinding("/api/tasks/task-1/agent/messages", {
+          method: "POST",
+          body: JSON.stringify({
+            content: "确认",
+            ui_action: "confirm_features",
+            expected_plan_id: "plan-1",
+            expected_step_id: "step-1",
+            ...snapshot,
+          }),
+        });
+        assert.deepEqual(binding, {
+          taskId: "task-1",
+          planId: "plan-1",
+          stepId: "step-1",
+          snapshot,
+        });
+        assert.equal(driverGateRequestBinding("/api/tasks/task-1/agent/messages", {
+          method: "POST",
+          body: JSON.stringify({ content: "普通问题" }),
+        }), null);
+        assert.equal(driverGateRequestBinding("/api/tasks/task-1/agent/messages", {
+          method: "GET",
+        }), null);
+        """
+    )
+
+
+def test_shared_driver_gate_api_claims_before_request_and_keeps_accepted_gate_disabled():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          createDriverGateApi,
+          driverGateActionable,
+          reconcileDriverGateSubmissions,
+        } from "./marvis/static/js/v2/driver_gate_confirm.js";
+
+        const snapshot = {
+          expected_plan_status: "awaiting_confirm",
+          expected_plan_revision: 1,
+          expected_plan_fingerprint: "a".repeat(64),
+          expected_step_fingerprint: "b".repeat(64),
+        };
+        const gate = {
+          taskId: "task-1",
+          planId: "plan-1",
+          stepId: "step-1",
+          stepStatus: "awaiting_confirm",
+          snapshot,
+          localBusy: false,
+          serverBusy: false,
+        };
+        let resolveRequest;
+        const busy = [];
+        const states = [];
+        const request = new Promise((resolve) => { resolveRequest = resolve; });
+        const gateApi = createDriverGateApi({
+          api: async () => request,
+          getLocalBusyAction: () => "",
+          setDriverExecutionBusy: (active, taskId) => busy.push([active, taskId]),
+          onSubmissionStateChange: (binding, state) => states.push([binding.stepId, state]),
+        });
+        const pending = gateApi("/api/tasks/task-1/agent/messages", {
+          method: "POST",
+          body: JSON.stringify({
+            content: "确认",
+            ui_action: "confirm_gate",
+            expected_plan_id: "plan-1",
+            expected_step_id: "step-1",
+            ...snapshot,
+          }),
+        });
+        assert.equal(driverGateActionable(gate), false);
+        resolveRequest({ messages: [] });
+        await pending;
+        assert.equal(driverGateActionable(gate), false);
+        assert.deepEqual(busy, [[true, "task-1"], [false, "task-1"]]);
+        assert.deepEqual(states, [["step-1", "submitting"], ["step-1", "accepted"], ["step-1", "settled"]]);
+
+        const activeApi = createDriverGateApi({
+          api: async () => { throw Object.assign(new Error("该任务正在执行上一步，请等待完成"), { status: 409 }); },
+        });
+        await assert.rejects(() => activeApi("/api/tasks/task-2/agent/messages", {
+          method: "POST",
+          body: JSON.stringify({
+            content: "确认",
+            ui_action: "confirm_gate",
+            expected_plan_id: "plan-2",
+            expected_step_id: "step-2",
+            ...snapshot,
+          }),
+        }));
+        const activeGate = { ...gate, taskId: "task-2", planId: "plan-2", stepId: "step-2" };
+        assert.equal(driverGateActionable(activeGate), false);
+        reconcileDriverGateSubmissions("task-2", { serverBusy: false });
+        assert.equal(driverGateActionable(activeGate), true);
+        """
+    )
+
+
 def test_plugin_tools_render_contract_tables_and_runtime_metadata():
     run_node(
         """
@@ -273,6 +473,7 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
           confirmJoinSpec,
           confirmPlan,
           confirmStep,
+          decideStep,
           createPlan,
           distillDraftLearning,
           executeJoin,
@@ -328,12 +529,30 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
 
         await getPlan("plan/1");
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1");
-        await confirmPlan("plan/1");
+        const planSnapshot = {
+          expected_plan_status: "validated",
+          expected_plan_revision: 2,
+          expected_plan_fingerprint: "a".repeat(64),
+        };
+        const stepSnapshot = {
+          ...planSnapshot,
+          expected_step_fingerprint: "b".repeat(64),
+        };
+        await confirmPlan("plan/1", planSnapshot);
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/confirm");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), planSnapshot);
         await runPlan("plan/1");
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/run");
-        await confirmStep("plan/1", "step/a");
+        await confirmStep("plan/1", "step/a", stepSnapshot);
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/steps/step%2Fa/confirm");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), stepSnapshot);
+        await decideStep("plan/1", "step/a", "reject", "needs revision", stepSnapshot);
+        assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/steps/step%2Fa/decisions");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
+          decision: "reject",
+          reason: "needs revision",
+          ...stepSnapshot,
+        });
         await retryStep("plan/1", "step/a", { message: "new" });
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/steps/step%2Fa/retry");
         assert.deepEqual(JSON.parse(calls.at(-1).options.body), { inputs: { message: "new" } });

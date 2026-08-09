@@ -223,14 +223,14 @@ def generate_strategy_duckdb_sql_source(
         + ' AS "action_type"',
         _sql_case(
             match_names,
-            [_json_scalar(item["action_value"]) for item in results],
-            _json_scalar(default["action_value"]),
+            [_canonical_json(item["action_value"]) for item in results],
+            _canonical_json(default["action_value"]),
         )
         + ' AS "action_value_json"',
         _sql_case(
             match_names,
-            [_json_scalar(item["decision"]) for item in results],
-            _json_scalar(default["decision"]),
+            [_canonical_json(item["decision"]) for item in results],
+            _canonical_json(default["decision"]),
         )
         + ' AS "decision_json"',
         _sql_case(
@@ -813,16 +813,6 @@ def _nullable_sql_text(value: str | None) -> str:
         "CAST(NULL AS VARCHAR)"
         if value is None
         else _sql_literal(value)
-    )
-
-
-def _json_scalar(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
     )
 
 

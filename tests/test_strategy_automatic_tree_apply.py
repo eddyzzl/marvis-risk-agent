@@ -94,6 +94,51 @@ def _directory_entries(directory: Path) -> set[str]:
     return {entry.name for entry in directory.iterdir()}
 
 
+class _TrackedParquetFile:
+    def __init__(
+        self,
+        delegate,
+        *,
+        close_error: BaseException | None = None,
+    ) -> None:
+        self._delegate = delegate
+        self._close_error = close_error
+        self.close_calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self._delegate.close()
+        if self._close_error is not None:
+            raise self._close_error
+
+
+def _track_parquet_readers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    close_error: BaseException | None = None,
+) -> list[_TrackedParquetFile]:
+    opened_readers: list[_TrackedParquetFile] = []
+    original_open = automatic_tree_apply._open_source_parquet
+
+    def tracked_open(source_stream):
+        reader = _TrackedParquetFile(
+            original_open(source_stream),
+            close_error=close_error,
+        )
+        opened_readers.append(reader)
+        return reader
+
+    monkeypatch.setattr(
+        automatic_tree_apply,
+        "_open_source_parquet",
+        tracked_open,
+    )
+    return opened_readers
+
+
 def _apply(
     tmp_path: Path,
     columns: dict[str, pa.Array | list],
@@ -597,6 +642,7 @@ def test_restored_caller_path_aba_is_rejected_and_output_removed(
 
 def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_success(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _write_source(
         tmp_path / "source.parquet",
@@ -605,6 +651,7 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_success(
     output = tmp_path / "output.parquet"
     entries_before = _directory_entries(tmp_path)
     fd_count_before = _open_fd_count()
+    opened_readers = _track_parquet_readers(monkeypatch)
 
     apply_automatic_tree_to_parquet(
         _asset(),
@@ -615,12 +662,15 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_success(
     )
 
     assert _directory_entries(tmp_path) == entries_before | {output.name}
+    assert len(opened_readers) == 1
+    assert opened_readers[0].close_calls == 1
     if fd_count_before is not None:
         assert _open_fd_count() == fd_count_before
 
 
 def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_schema_failure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _write_source(
         tmp_path / "source.parquet",
@@ -628,6 +678,7 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_schema_failure(
     )
     entries_before = _directory_entries(tmp_path)
     fd_count_before = _open_fd_count()
+    opened_readers = _track_parquet_readers(monkeypatch)
 
     with pytest.raises(AutomaticTreeApplyError, match="unused"):
         apply_automatic_tree_to_parquet(
@@ -639,6 +690,8 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_schema_failure(
         )
 
     assert _directory_entries(tmp_path) == entries_before
+    assert len(opened_readers) == 1
+    assert opened_readers[0].close_calls == 1
     if fd_count_before is not None:
         assert _open_fd_count() == fd_count_before
 
@@ -653,6 +706,7 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_execution_error(
     )
     entries_before = _directory_entries(tmp_path)
     fd_count_before = _open_fd_count()
+    opened_readers = _track_parquet_readers(monkeypatch)
 
     def injected_failure(*_args, **_kwargs):
         raise RuntimeError("injected descriptor snapshot failure")
@@ -673,5 +727,182 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_execution_error(
         )
 
     assert _directory_entries(tmp_path) == entries_before
+    assert len(opened_readers) == 1
+    assert opened_readers[0].close_calls == 1
     if fd_count_before is not None:
         assert _open_fd_count() == fd_count_before
+
+
+def test_descriptor_snapshot_interrupt_closes_once_and_removes_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source(
+        tmp_path / "source.parquet",
+        {"x": [0.0, 1.0], "unused": [0.0, 1.0]},
+    )
+    output = tmp_path / "output.parquet"
+    opened_readers = _track_parquet_readers(monkeypatch)
+
+    def injected_interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt("injected descriptor snapshot interrupt")
+
+    monkeypatch.setattr(
+        automatic_tree_apply,
+        "_canonical_leaf_ids",
+        injected_interrupt,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="injected descriptor snapshot interrupt"):
+        apply_automatic_tree_to_parquet(
+            _asset(),
+            source,
+            output,
+            leaf_id_column="leaf_id",
+            rule_id_column="rule_id",
+        )
+
+    assert not output.exists()
+    assert len(opened_readers) == 1
+    assert opened_readers[0].close_calls == 1
+
+
+def test_reader_close_failure_after_success_removes_output_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source(
+        tmp_path / "source.parquet",
+        {"x": [0.0, 1.0], "unused": [0.0, 1.0]},
+    )
+    output = tmp_path / "output.parquet"
+    opened_readers = _track_parquet_readers(
+        monkeypatch,
+        close_error=RuntimeError("injected parquet close failure"),
+    )
+
+    with pytest.raises(
+        AutomaticTreeApplyError,
+        match="source Parquet reader could not be closed",
+    ) as exc_info:
+        apply_automatic_tree_to_parquet(
+            _asset(),
+            source,
+            output,
+            leaf_id_column="leaf_id",
+            rule_id_column="rule_id",
+        )
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert not output.exists()
+    assert len(opened_readers) == 1
+    assert opened_readers[0].close_calls == 1
+
+
+def test_reader_close_failure_does_not_mask_original_schema_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source(
+        tmp_path / "source.parquet",
+        {"x": [0.0, 1.0]},
+    )
+    output = tmp_path / "output.parquet"
+    opened_readers = _track_parquet_readers(
+        monkeypatch,
+        close_error=RuntimeError("injected parquet close failure"),
+    )
+
+    with pytest.raises(AutomaticTreeApplyError, match="unused") as exc_info:
+        apply_automatic_tree_to_parquet(
+            _asset(),
+            source,
+            output,
+            leaf_id_column="leaf_id",
+            rule_id_column="rule_id",
+        )
+
+    assert "could not be closed" not in str(exc_info.value)
+    assert any(
+        "reader close also failed" in note
+        for note in getattr(exc_info.value, "__notes__", ())
+    )
+    assert not output.exists()
+    assert len(opened_readers) == 1
+    assert opened_readers[0].close_calls == 1
+
+
+def test_competing_output_created_before_exclusive_open_is_preserved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source(
+        tmp_path / "source.parquet",
+        {"x": [0.0, 1.0], "unused": [0.0, 1.0]},
+    )
+    output = tmp_path / "output.parquet"
+    original_open = automatic_tree_apply._ExclusiveOutputOwnership.open
+
+    def competing_open(ownership):
+        ownership.path.write_bytes(b"other-actor")
+        return original_open(ownership)
+
+    monkeypatch.setattr(
+        automatic_tree_apply._ExclusiveOutputOwnership,
+        "open",
+        competing_open,
+    )
+
+    with pytest.raises(AutomaticTreeApplyError, match="must not already exist"):
+        apply_automatic_tree_to_parquet(
+            _asset(),
+            source,
+            output,
+            leaf_id_column="leaf_id",
+            rule_id_column="rule_id",
+        )
+
+    assert output.read_bytes() == b"other-actor"
+
+
+def test_cleanup_failure_does_not_mask_primary_execution_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source(
+        tmp_path / "source.parquet",
+        {"x": [0.0, 1.0], "unused": [0.0, 1.0]},
+    )
+    output = tmp_path / "output.parquet"
+
+    def injected_failure(*_args, **_kwargs):
+        raise RuntimeError("primary tree execution failure")
+
+    def denied_cleanup(_output):
+        return PermissionError("injected cleanup denial")
+
+    monkeypatch.setattr(
+        automatic_tree_apply,
+        "_canonical_leaf_ids",
+        injected_failure,
+    )
+    monkeypatch.setattr(
+        automatic_tree_apply,
+        "_unlink_failed_output",
+        denied_cleanup,
+    )
+
+    with pytest.raises(RuntimeError, match="primary tree execution failure") as exc_info:
+        apply_automatic_tree_to_parquet(
+            _asset(),
+            source,
+            output,
+            leaf_id_column="leaf_id",
+            rule_id_column="rule_id",
+        )
+
+    assert any(
+        "output cleanup also failed: PermissionError: injected cleanup denial" in note
+        for note in getattr(exc_info.value, "__notes__", ())
+    )
+    assert output.exists()

@@ -30,8 +30,19 @@ class FakeRegistry:
     def resolve_path(self, dataset_id: str):
         return self.paths[dataset_id]
 
-    def register_existing(self, path, *, task_id: str, role: str, anchor_target: str | None):
+    def register_existing(
+        self,
+        path,
+        *,
+        task_id: str,
+        role: str,
+        anchor_target: str | None,
+        target_col_override: str | None = None,
+    ):
         frame = pd.read_parquet(path)
+        columns = tuple(infer_dataset_schema(frame))
+        if target_col_override is not None:
+            assert target_col_override in {column.name for column in columns}
         dataset = Dataset(
             id=f"derived-{len(self.datasets)}",
             task_id=task_id,
@@ -40,9 +51,9 @@ class FakeRegistry:
             format="parquet",
             sheet=None,
             row_count=len(frame),
-            columns=tuple(infer_dataset_schema(frame)),
-            has_target=False,
-            target_col=None,
+            columns=columns,
+            has_target=target_col_override is not None,
+            target_col=target_col_override,
             created_at="2026-06-19T00:00:00Z",
         )
         self.add(dataset, path)
@@ -57,13 +68,18 @@ class FakeRegistry:
         task_id: str,
         role: str,
         anchor_target: str | None = None,
+        target_col_override: str | None = None,
     ) -> Dataset:
         # Mirrors DatasetRegistry.register_join_result_with_audit: register the dataset,
         # then write the join-executed audit through the shared repo (matching how the
         # real registry writes the audit via self._repo.record_join_result_with_audit,
         # not via the registry's own state).
         dataset = self.register_existing(
-            path, task_id=task_id, role=role, anchor_target=anchor_target
+            path,
+            task_id=task_id,
+            role=role,
+            anchor_target=anchor_target,
+            target_col_override=target_col_override,
         )
         audit = audit_factory(dataset)
         self._repo.set_join_plan_executed(join_plan_id, dataset.id)

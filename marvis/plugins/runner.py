@@ -15,7 +15,11 @@ import time
 from typing import Any, Callable
 import uuid
 
-from marvis.db import PluginRepository
+from marvis.canonical_results import (
+    CanonicalResultAuthenticationError,
+    authenticate_canonical_result,
+)
+from marvis.repositories.plugins import PluginRepository
 from marvis.governance.errors import AuthorizationError
 from marvis.job_cancellation import JobCancelled
 from marvis.plugins.contracts import MAX_PROGRESS_BYTES, PROTOCOL_VERSION, WORKER_RESULT_SENTINEL
@@ -23,6 +27,7 @@ from marvis.plugins.contracts import ToolContext as ToolContext  # noqa: F401 (r
 from marvis.plugins.manifest import (
     PluginManifest,
     ToolRef,
+    manifest_to_dict,
     python_requires_satisfied,
 )
 from marvis.plugins.registry import ToolRegistry
@@ -145,6 +150,11 @@ class ToolResult:
     stderr_tail: str = ""
     error_detail: dict | None = None
     resource_limits: dict | None = None
+    invocation_id: str | None = None
+    raw_output_hash: str | None = None
+    canonical_binding_verified: bool = False
+    tool_version: str | None = None
+    manifest_hash: str | None = None
 
 
 class ToolRunner:
@@ -219,6 +229,50 @@ class ToolRunner:
         return self._worker_python_version
 
     def invoke(
+        self,
+        ref: ToolRef,
+        inputs: dict,
+        *,
+        task_id: str,
+        seed: int | None = None,
+        execution_context=None,
+        progress_callback: Callable[[dict], None] | None = None,
+        cancellation_check: Callable[[], None] | None = None,
+        invocation_id: str | None = None,
+    ) -> ToolResult:
+        """Invoke a Tool and attach a receipt owned by the trusted runner.
+
+        The receipt is added only after the complete invocation path returns;
+        callers cannot ask the worker process to choose it.  Canonical result
+        authentication itself happens inside ``_invoke_without_receipt`` before
+        a successful result is finalized and audited.
+        """
+
+        normalized_invocation_id = None
+        if invocation_id is not None:
+            if (
+                not isinstance(invocation_id, str)
+                or not invocation_id.strip()
+                or "\x00" in invocation_id
+            ):
+                raise ValueError("invocation_id must be a non-empty safe string")
+            normalized_invocation_id = invocation_id.strip()
+        result = self._invoke_without_receipt(
+            ref,
+            inputs,
+            task_id=task_id,
+            seed=seed,
+            execution_context=execution_context,
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+        )
+        if normalized_invocation_id is not None:
+            result.invocation_id = normalized_invocation_id
+            if result.ok and isinstance(result.output, dict):
+                result.raw_output_hash = _result_payload_hash(result.output)
+        return result
+
+    def _invoke_without_receipt(
         self,
         ref: ToolRef,
         inputs: dict,
@@ -603,6 +657,32 @@ class ToolRunner:
                 seed=effective_seed,
             )
 
+        try:
+            canonical_binding_verified = authenticate_canonical_result(
+                ref.tool,
+                output,
+                trusted_inputs=inputs,
+                task_id=task_id,
+                workspace=self._workspace,
+            )
+        except CanonicalResultAuthenticationError as exc:
+            result = _failed_result(
+                started,
+                "integrity",
+                str(exc),
+                stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
+                stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
+                resource_limits=_protocol_resource_limits(protocol),
+            )
+            return self._finalize_effect_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                effect_execution=effect_execution,
+                seed=effective_seed,
+            )
+
         result = ToolResult(
             ok=True,
             output=output,
@@ -612,6 +692,10 @@ class ToolRunner:
             stdout_tail=_tail(protocol.get("stdout") or ""),
             stderr_tail=_tail(protocol.get("stderr") or ""),
             resource_limits=_protocol_resource_limits(protocol),
+            canonical_binding_verified=canonical_binding_verified,
+            tool_version=str(manifest.version or ref.version or "").strip()
+            or None,
+            manifest_hash=_manifest_receipt_hash(manifest),
         )
         return self._finalize_effect_result(
             started,
@@ -1959,6 +2043,27 @@ def _tail(value: str | bytes | None, *, limit: int = 4000) -> str:
 def _hash_inputs(inputs: dict) -> str:
     raw = json.dumps(inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _result_payload_hash(output: dict) -> str:
+    """Hash the exact in-process Tool payload with the Plan receipt codec."""
+
+    raw = json.dumps(
+        output,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _manifest_receipt_hash(manifest: PluginManifest) -> str:
+    """Return the exact manifest identity signed into a Tool result receipt."""
+
+    checksum = str(manifest.checksum or "").strip()
+    if checksum:
+        return checksum if checksum.startswith("sha256:") else f"sha256:{checksum}"
+    return _result_payload_hash(manifest_to_dict(manifest))
 
 
 def _effect_execution_id(effect_execution) -> str:

@@ -67,9 +67,17 @@ class Settings:
         primary = templates_dir / self.report_template_name
         if primary.exists():
             return primary
-        legacy = templates_dir / _LEGACY_REPORT_TEMPLATE_NAME
-        if legacy.exists():
-            return legacy
+        if self.report_template_name == DEFAULT_REPORT_TEMPLATE_NAME:
+            legacy = templates_dir / _LEGACY_REPORT_TEMPLATE_NAME
+            if legacy.exists():
+                return legacy
+            packaged_default = (
+                Path(__file__).resolve().parent
+                / "report_templates"
+                / DEFAULT_REPORT_TEMPLATE_NAME
+            )
+            if packaged_default.exists():
+                return packaged_default
         return primary
 
     @property

@@ -12,6 +12,7 @@ from marvis.agent.strategy_request_compiler import (
     compile_strategy_request,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 class _PayloadLLM:
@@ -119,7 +120,7 @@ def test_pool_validation_accepts_only_explicit_type_and_independent_partition(
     assert partition in result.confirmation
     assert "不会修改 Pool" in result.confirmation
     assert "不晋级、不采纳、不部署" in result.confirmation
-    assert llm.calls[0]["prompt_version"] == 52
+    assert llm.calls[0]["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "strategy_pool_validation" in llm.calls[0]["system_prompt"]
     assert "independent replay evidence" in llm.calls[0]["system_prompt"]
 

@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -22,6 +21,11 @@ import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.artifacts.transactional import ArtifactTransactionError
+from marvis.data.authenticated_snapshot import (
+    AuthenticatedSnapshotError,
+    SnapshotFailureReason,
+    read_authenticated_parquet_snapshot,
+)
 from marvis.packs.strategy.dsl import (
     StrategySpec,
     strategy_spec_hash,
@@ -34,6 +38,7 @@ from marvis.packs.strategy.impact_cube import (
     canonical_strategy_impact_cube_json,
     validate_strategy_impact_cube,
 )
+from marvis.packs.strategy.pool_evidence_verifier import validate_pool_ref
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
     StrategyPoolDevelopmentExecutionBinding,
@@ -71,7 +76,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
-    _stable_artifact_id,
+    stable_task_artifact_id,
 )
 
 _StrategySampleDesignV2Binding = (
@@ -94,10 +99,6 @@ IMPACT_CUBE_MEASUREMENT_AUDIT_KIND = (
 )
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_POOL_ID_RE = re.compile(r"^strategy-pool-[0-9a-f]{32}$")
-_POOL_REVISION_ID_RE = re.compile(
-    r"^strategy-pool-revision-[0-9a-f]{32}$"
-)
 _MEASUREMENT_RUN_ID_RE = re.compile(
     r"^strategy-impact-cube-run-[0-9a-f]{24}$"
 )
@@ -120,16 +121,6 @@ _INPUT_FIELDS = frozenset(
 )
 _OPTIONAL_INPUT_FIELDS = frozenset(
     {"current_strategy_ref", "economics_inputs"}
-)
-_POOL_REF_FIELDS = frozenset(
-    {
-        "artifact_id",
-        "expected_artifact_content_hash",
-        "expected_pool_id",
-        "expected_revision",
-        "expected_revision_id",
-        "expected_snapshot_hash",
-    }
 )
 _SAMPLE_DESIGN_REF_FIELDS = frozenset(
     {
@@ -577,7 +568,7 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         raise StrategyError("population must be risk")
     return {
         "strategy_type": strategy_type,
-        "pool_ref": _validate_pool_ref(obj["pool_ref"]),
+        "pool_ref": validate_pool_ref(obj["pool_ref"]),
         "sample_design_ref": _validate_sample_design_ref(
             obj["sample_design_ref"]
         ),
@@ -609,40 +600,6 @@ def _partition_list(value: object) -> list[str]:
         for partition in _PARTITION_ORDER
         if partition in set(normalized)
     ]
-
-
-def _validate_pool_ref(value: object) -> dict[str, Any]:
-    obj = _json_object(value, "pool_ref")
-    _exact_fields(obj, _POOL_REF_FIELDS, "pool_ref")
-    pool_id = _text(obj["expected_pool_id"], "pool_ref.expected_pool_id")
-    if _POOL_ID_RE.fullmatch(pool_id) is None:
-        raise StrategyError("pool_ref.expected_pool_id is invalid")
-    revision_id = _text(
-        obj["expected_revision_id"],
-        "pool_ref.expected_revision_id",
-    )
-    if _POOL_REVISION_ID_RE.fullmatch(revision_id) is None:
-        raise StrategyError("pool_ref.expected_revision_id is invalid")
-    return {
-        "artifact_id": _hash(
-            obj["artifact_id"],
-            "pool_ref.artifact_id",
-        ),
-        "expected_artifact_content_hash": _hash(
-            obj["expected_artifact_content_hash"],
-            "pool_ref.expected_artifact_content_hash",
-        ),
-        "expected_pool_id": pool_id,
-        "expected_revision": _positive_int(
-            obj["expected_revision"],
-            "pool_ref.expected_revision",
-        ),
-        "expected_revision_id": revision_id,
-        "expected_snapshot_hash": _hash(
-            obj["expected_snapshot_hash"],
-            "pool_ref.expected_snapshot_hash",
-        ),
-    }
 
 
 def _validate_sample_design_ref(value: object) -> dict[str, str]:
@@ -1257,89 +1214,38 @@ def _read_authenticated_parquet_snapshot(
     expected_content_hash: str,
     columns: list[str],
 ) -> pd.DataFrame:
-    """Read only bytes copied from one authenticated, retained source fd."""
-
-    _require_dataset_path(path, root=root)
-    source_fd = -1
-    snapshot = None
     try:
-        before = os.lstat(path)
-        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
-            raise StrategyError(
-                "ImpactCube dataset must be a regular file"
-            )
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+        return read_authenticated_parquet_snapshot(
+            path,
+            root=root,
+            expected_sha256=expected_content_hash,
+            columns=columns,
         )
-        source_fd = os.open(path, flags)
-        opened = os.fstat(source_fd)
-        after_open = os.lstat(path)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or stat.S_ISLNK(after_open.st_mode)
-            or _file_identity(before) != _file_identity(opened)
-            or _file_identity(opened) != _file_identity(after_open)
-            or _stable_file_stat(before) != _stable_file_stat(opened)
-            or _stable_file_stat(opened) != _stable_file_stat(after_open)
-        ):
-            raise StrategyError("ImpactCube dataset changed while opening")
-
-        snapshot = tempfile.TemporaryFile(mode="w+b", dir=root)
-        digest = hashlib.sha256()
-        copied = 0
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            copied += len(chunk)
-            snapshot.write(chunk)
-        snapshot.flush()
-        source_after_copy = os.fstat(source_fd)
-        if (
-            _stable_file_stat(source_after_copy)
-            != _stable_file_stat(opened)
-            or copied != int(opened.st_size)
-            or not hmac.compare_digest(
-                digest.hexdigest(),
-                expected_content_hash,
-            )
-        ):
-            raise StrategyError(
+    except AuthenticatedSnapshotError as exc:
+        messages = {
+            SnapshotFailureReason.PATH_OUTSIDE_ROOT: (
+                "ImpactCube dataset escaped dataset storage"
+            ),
+            SnapshotFailureReason.SOURCE_NOT_REGULAR: (
+                "ImpactCube dataset must be a regular file"
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_WHILE_OPENING: (
+                "ImpactCube dataset changed while opening"
+            ),
+            SnapshotFailureReason.SOURCE_BYTES_CHANGED: (
                 "ImpactCube dataset bytes changed before replay"
-            )
-
-        snapshot_stat = os.fstat(snapshot.fileno())
-        if int(snapshot_stat.st_size) != copied:
-            raise StrategyError(
+            ),
+            SnapshotFailureReason.PRIVATE_SNAPSHOT_INCOMPLETE: (
                 "ImpactCube private dataset snapshot is incomplete"
-            )
-        snapshot.seek(0)
-        frame = pd.read_parquet(snapshot, columns=columns)
-        snapshot_after_read = os.fstat(snapshot.fileno())
-        current = os.lstat(path)
-        if (
-            _stable_file_stat(snapshot_after_read)
-            != _stable_file_stat(snapshot_stat)
-            or _stable_file_stat(os.fstat(source_fd))
-            != _stable_file_stat(opened)
-            or stat.S_ISLNK(current.st_mode)
-            or _stable_file_stat(current) != _stable_file_stat(opened)
-        ):
-            raise StrategyError("ImpactCube dataset changed during replay")
-        return frame
-    except StrategyError:
-        raise
-    except (OSError, TypeError, ValueError) as exc:
-        raise StrategyError("ImpactCube dataset could not be read") from exc
-    finally:
-        if snapshot is not None:
-            snapshot.close()
-        if source_fd >= 0:
-            os.close(source_fd)
+            ),
+            SnapshotFailureReason.SOURCE_CHANGED_DURING_READ: (
+                "ImpactCube dataset changed during replay"
+            ),
+            SnapshotFailureReason.READ_FAILED: (
+                "ImpactCube dataset could not be read"
+            ),
+        }
+        raise StrategyError(messages[exc.reason]) from exc
 
 
 def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
@@ -1738,7 +1644,7 @@ def _persist_cube(
         task_id=task_id,
     )
     final_path = out_dir / f"{cube['cube_id']}.json"
-    artifact_id = _stable_artifact_id(
+    artifact_id = stable_task_artifact_id(
         task_id=task_id,
         kind=IMPACT_CUBE_ARTIFACT_KIND,
         path=str(final_path),
@@ -2073,7 +1979,7 @@ def _validate_provenance(value: object) -> dict[str, Any]:
         obj["cube_content_hash"],
         "ImpactCube provenance.cube_content_hash",
     )
-    _validate_pool_ref(obj["pool_ref"])
+    validate_pool_ref(obj["pool_ref"])
     _validate_sample_design_ref(obj["sample_design_ref"])
     dataset = _json_object(
         obj["dataset_binding"],

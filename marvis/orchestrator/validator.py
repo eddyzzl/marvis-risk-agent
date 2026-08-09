@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 import re
 
 from marvis.orchestrator.contracts import Plan, PlanStep
-from marvis.orchestrator.safety import is_draft_run_step, is_safety_step
+from marvis.orchestrator.references import parse_step_output_ref
+from marvis.orchestrator.safety import (
+    METRIC_FIELDS,
+    is_draft_run_step,
+    is_safety_step,
+    literal_metric_claims,
+)
 from marvis.plugins.errors import (
     PluginNotFoundError,
     SchemaValidationError,
@@ -13,20 +20,6 @@ from marvis.plugins.errors import (
 from marvis.plugins.schema_validation import validate_against_schema
 
 
-METRIC_FIELDS = frozenset({
-    "ks",
-    "auc",
-    "psi",
-    "iv",
-    "total_iv",
-    "lift",
-    "gini",
-    "bad_rate",
-    "approval_rate",
-    "approved_bad_rate",
-    "rejected_bad_rate",
-    "expected_profit",
-})
 POST_CHECK_KINDS = frozenset({
     "schema",
     "range",
@@ -38,25 +31,107 @@ POST_CHECK_KINDS = frozenset({
 })
 _SLOT_PLACEHOLDER_RE = re.compile(r"^\{slot:[A-Za-z_][A-Za-z0-9_:-]*\}$")
 
+JOIN_CONFIRMATION_REQUIRED = "inv3.join_confirmation_required"
+JOIN_ROWCOUNT_REQUIRED = "inv2.join_rowcount_required"
+JOIN_INVARIANT_REQUIRED = "inv2.join_invariant_required"
+METRIC_RANGE_REQUIRED = "inv1.metric_range_required"
+METRIC_LITERAL_UNBACKED = "inv1.metric_literal_unbacked"
+JOIN_SAFELY_GATED = "inv3.join_safely_gated"
+METRIC_TOOL_BACKED = "inv1.metric_tool_backed"
+
+
+@dataclass(frozen=True)
+class PlanValidationProblem:
+    """A validator-owned problem whose identity cannot be forged by plan text."""
+
+    code: str
+    message: str
+    step_id: str | None = None
+    field: str | None = None
+    source: str = "plan_validator"
+
 
 class PlanValidator:
     def __init__(self, tool_registry):
         self._tools = tool_registry
 
     def validate(self, plan: Plan) -> list[str]:
-        problems: list[str] = []
-        problems.extend(self._check_tools_exist(plan))
-        problems.extend(self._check_inputs_schema(plan))
-        problems.extend(self._check_dag(plan))
-        problems.extend(self._check_ref_compatibility(plan))
-        problems.extend(self._check_post_check_kinds(plan))
-        problems.extend(self._check_join_gates(plan))
-        problems.extend(self._check_draft_run_gates(plan))
-        problems.extend(self._check_determinism_checks(plan))
-        problems.extend(self._check_subagent_grants(plan))
-        problems.extend(self._check_decision_points(plan))
-        problems.extend(self._check_governance_policies(plan))
+        return [problem.message for problem in self.validate_problems(plan)]
+
+    def validate_problems(self, plan: Plan) -> list[PlanValidationProblem]:
+        """Return typed validation provenance while preserving legacy messages."""
+
+        problems: list[PlanValidationProblem] = []
+        problems.extend(_plain_problems("tool_catalog", self._check_tools_exist(plan)))
+        problems.extend(_plain_problems("input_schema", self._check_inputs_schema(plan)))
+        problems.extend(_plain_problems("dag", self._check_dag(plan)))
+        problems.extend(_plain_problems("reference", self._check_ref_compatibility(plan)))
+        problems.extend(
+            _plain_problems("post_check_kind", self._check_post_check_kinds(plan))
+        )
+        problems.extend(self._join_gate_problems(plan))
+        problems.extend(
+            _plain_problems("draft_confirmation", self._check_draft_run_gates(plan))
+        )
+        problems.extend(self._determinism_problems(plan))
+        problems.extend(self.unbacked_metric_literal_validation_problems(plan))
+        problems.extend(
+            _plain_problems("subagent_grant", self._check_subagent_grants(plan))
+        )
+        problems.extend(
+            _plain_problems("decision_point", self._check_decision_points(plan))
+        )
+        problems.extend(
+            _plain_problems("governance_policy", self._check_governance_policies(plan))
+        )
         return problems
+
+    def verified_safety_invariants(self, plan: Plan) -> frozenset[str]:
+        """Return positive safety evidence derived from resolved plan structure."""
+
+        verified: set[str] = set()
+        join_steps = [
+            step
+            for step in plan.steps
+            if step.tool_ref.tool == "execute_join"
+            and self._resolve_step_tool(step) is not None
+        ]
+        join_codes = {
+            problem.code for problem in self._join_gate_problems(plan)
+        }
+        if join_steps and not join_codes.intersection({
+            JOIN_CONFIRMATION_REQUIRED,
+            JOIN_ROWCOUNT_REQUIRED,
+            JOIN_INVARIANT_REQUIRED,
+        }):
+            verified.add(JOIN_SAFELY_GATED)
+
+        if self.verified_metric_fields(plan):
+            verified.add(METRIC_TOOL_BACKED)
+        return frozenset(verified)
+
+    def verified_metric_fields(self, plan: Plan) -> frozenset[str]:
+        """Metric leaf names backed by a resolved Tool and explicit bounds."""
+
+        if self.unbacked_metric_literal_validation_problems(plan):
+            return frozenset()
+        verified: set[str] = set()
+        for step in plan.steps:
+            tool = self._resolve_step_tool(step)
+            if tool is None:
+                continue
+            metric_fields = _metric_fields_in(tool.output_schema)
+            checked_fields = {
+                str(check.spec.get("field") or "")
+                for check in step.post_checks
+                if check.kind == "range"
+            }
+            if metric_fields and metric_fields.issubset(checked_fields):
+                verified.update(
+                    field.rsplit(".", 1)[-1].lower()
+                    for field in metric_fields
+                )
+        return frozenset(verified)
 
     def _check_tools_exist(self, plan: Plan) -> list[str]:
         problems = []
@@ -114,7 +189,7 @@ class PlanValidator:
         for step in plan.steps:
             for value in _iter_refs(step.inputs):
                 try:
-                    upstream_id, field = _parse_ref(value)
+                    upstream_id, field = parse_step_output_ref(value)
                 except ValueError as exc:
                     problems.append(f"step {step.title}: {exc}")
                     continue
@@ -136,16 +211,38 @@ class PlanValidator:
                     )
         return problems
 
-    def _check_join_gates(self, plan: Plan) -> list[str]:
-        problems = []
+    def _join_gate_problems(self, plan: Plan) -> list[PlanValidationProblem]:
+        problems: list[PlanValidationProblem] = []
         for step in plan.steps:
             if step.tool_ref.tool != "execute_join":
                 continue
+            # The invariant only belongs to a catalog-authenticated join Tool.
+            # An unknown plugin may choose the same LLM-controlled tool label;
+            # catalog failure remains generic planning failure, not INV-3 proof.
+            if self._resolve_step_tool(step) is None:
+                continue
             if not step.needs_confirmation:
-                problems.append(f"join step {step.title} must require confirmation (INV-3)")
+                problems.append(
+                    PlanValidationProblem(
+                        code=JOIN_CONFIRMATION_REQUIRED,
+                        message=(
+                            f"join step {step.title} must require confirmation (INV-3)"
+                        ),
+                        step_id=step.id,
+                    )
+                )
             check_kinds = {check.kind for check in step.post_checks}
             if "rowcount" not in check_kinds:
-                problems.append(f"join step {step.title} must include rowcount post_check (INV-2)")
+                problems.append(
+                    PlanValidationProblem(
+                        code=JOIN_ROWCOUNT_REQUIRED,
+                        message=(
+                            f"join step {step.title} must include rowcount "
+                            "post_check (INV-2)"
+                        ),
+                        step_id=step.id,
+                    )
+                )
             invariant_rules = {
                 str(check.spec.get("rule") or "").replace(" ", "")
                 for check in step.post_checks
@@ -153,7 +250,14 @@ class PlanValidator:
             }
             if "joined_rows<=anchor_rows" not in invariant_rules:
                 problems.append(
-                    f"join step {step.title} must include joined_rows<=anchor_rows invariant (INV-2)"
+                    PlanValidationProblem(
+                        code=JOIN_INVARIANT_REQUIRED,
+                        message=(
+                            f"join step {step.title} must include "
+                            "joined_rows<=anchor_rows invariant (INV-2)"
+                        ),
+                        step_id=step.id,
+                    )
                 )
         return problems
 
@@ -174,8 +278,8 @@ class PlanValidator:
                     )
         return problems
 
-    def _check_determinism_checks(self, plan: Plan) -> list[str]:
-        problems = []
+    def _determinism_problems(self, plan: Plan) -> list[PlanValidationProblem]:
+        problems: list[PlanValidationProblem] = []
         for step in plan.steps:
             tool = self._resolve_step_tool(step)
             if tool is None:
@@ -188,7 +292,55 @@ class PlanValidator:
             }
             for field in sorted(metric_fields - checked):
                 problems.append(
-                    f"step {step.title}: metric {field} lacks range post_check (INV-1)"
+                    PlanValidationProblem(
+                        code=METRIC_RANGE_REQUIRED,
+                        message=(
+                            f"step {step.title}: metric {field} lacks "
+                            "range post_check (INV-1)"
+                        ),
+                        step_id=step.id,
+                        field=field,
+                    )
+                )
+        return problems
+
+    def unbacked_metric_literal_problems(self, plan: Plan) -> list[str]:
+        """Reject claimed metric results that are not produced by the step's tool.
+
+        Numeric thresholds remain valid configuration. This guard only recognizes
+        explicit result-shaped literals such as ``ks=0.42`` or ``{"auc": 0.78}``;
+        refs/slots are evidence bindings and are therefore not treated as literals.
+        """
+
+        return [
+            problem.message
+            for problem in self.unbacked_metric_literal_validation_problems(plan)
+        ]
+
+    def unbacked_metric_literal_validation_problems(
+        self,
+        plan: Plan,
+    ) -> list[PlanValidationProblem]:
+        problems: list[PlanValidationProblem] = []
+        for step in plan.steps:
+            tool = self._resolve_step_tool(step)
+            if tool is None:
+                continue
+            backed_fields = {
+                path.rsplit(".", 1)[-1].lower()
+                for path in _metric_fields_in(tool.output_schema)
+            }
+            for field in sorted(literal_metric_claims(step.inputs) - backed_fields):
+                problems.append(
+                    PlanValidationProblem(
+                        code=METRIC_LITERAL_UNBACKED,
+                        message=(
+                            f"step {step.title}: metric {field} literal lacks "
+                            "tool-backed output (INV-1)"
+                        ),
+                        step_id=step.id,
+                        field=field,
+                    )
                 )
         return problems
 
@@ -280,6 +432,13 @@ class PlanValidator:
             return None
 
 
+def _plain_problems(code: str, messages: list[str]) -> list[PlanValidationProblem]:
+    return [
+        PlanValidationProblem(code=code, message=message)
+        for message in messages
+    ]
+
+
 def _is_slot_placeholder(value) -> bool:
     return isinstance(value, str) and bool(_SLOT_PLACEHOLDER_RE.fullmatch(value))
 
@@ -355,21 +514,6 @@ def _relax_required_combinators(schema: dict, deferred_keys: set[str]) -> None:
     negated = schema.get("not")
     if isinstance(negated, dict):
         _relax_required_combinators(negated, deferred_keys)
-
-
-def _parse_ref(value: str) -> tuple[str, str]:
-    raw = value[len("$ref:"):]
-    marker = ".output"
-    if marker not in raw:
-        raise ValueError(f"invalid ref {value}")
-    step_id, tail = raw.split(marker, 1)
-    if not step_id:
-        raise ValueError(f"invalid ref {value}")
-    if not tail:
-        return step_id, ""
-    if not tail.startswith(".") or tail == ".":
-        raise ValueError(f"invalid ref {value}")
-    return step_id, tail[1:]
 
 
 def _schema_has_path(schema: dict, path: str) -> bool:

@@ -10,6 +10,7 @@ from marvis.agent.strategy_request_compiler import (
     compile_strategy_request,
     validate_strategy_request,
 )
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 ASSET_A = "candidate-asset-" + "a" * 32
@@ -140,7 +141,7 @@ def test_automatic_tree_apply_compiles_one_exact_asset_and_explicit_columns() ->
     assert result.draft.to_dict() == reply
     assert len(llm.calls) == 1
     call = llm.calls[0]
-    assert call["prompt_version"] == 52
+    assert call["prompt_version"] == STRATEGY_REQUEST_COMPILER_SYS.version
     assert "automatic_tree_apply" in call["system_prompt"]
     assert "tree_asset_id" in call["system_prompt"]
     assert "artifact hash" in call["system_prompt"]
