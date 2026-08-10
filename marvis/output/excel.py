@@ -47,12 +47,32 @@ def write_validation_excel(
     output_path: Path,
     *,
     report_values: dict[str, object] | None = None,
+    image_output_dir: Path | None = None,
 ) -> Path:
+    """Write the validation workbook and its rendered chart images.
+
+    Normally this function owns an atomic workbook/image transaction.  A
+    caller that already owns a larger artifact transaction may instead supply
+    ``image_output_dir`` alongside a staged ``output_path``.  In that mode the
+    caller owns promotion and rollback of both paths; creating a nested unit
+    of work would otherwise leave chart images behind when the outer database
+    transaction fails.
+    """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    uow = ArtifactUnitOfWork()
-    workbook_artifact = uow.stage_file(output_path.parent, output_path.name)
-    image_artifact = uow.stage_directory(output_path.parent, "excel_images")
+    owns_artifacts = image_output_dir is None
+    uow: ArtifactUnitOfWork | None = None
+    if owns_artifacts:
+        uow = ArtifactUnitOfWork()
+        workbook_artifact = uow.stage_file(output_path.parent, output_path.name)
+        image_artifact = uow.stage_directory(output_path.parent, "excel_images")
+        workbook_output_path = workbook_artifact.path
+        chart_image_dir = image_artifact.path
+    else:
+        workbook_artifact = None
+        workbook_output_path = output_path
+        chart_image_dir = Path(image_output_dir)
+        chart_image_dir.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     workbook.remove(workbook.active)
 
@@ -65,7 +85,7 @@ def write_validation_excel(
         _write_feature_importance(workbook, results)
         _write_effectiveness_overall(workbook, results)
         _write_psi_stability(workbook, results)
-        _write_roc_ks_images(workbook, results, image_artifact.path)
+        _write_roc_ks_images(workbook, results, chart_image_dir)
         for split in ("train", "test", "oot"):
             _write_bins(
                 workbook,
@@ -85,12 +105,15 @@ def write_validation_excel(
                 include_bin_share=True,
             )
 
-        workbook.save(workbook_artifact.path)
+        workbook.save(workbook_output_path)
+        if uow is None:
+            return workbook_output_path
         uow.promote_all()
         uow.commit()
         return workbook_artifact.final_path
     except Exception:
-        uow.rollback()
+        if uow is not None:
+            uow.rollback()
         raise
 
 

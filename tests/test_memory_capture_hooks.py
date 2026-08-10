@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sqlite3
 
 from marvis.agent_memory.capture import save_memory_candidate
 from marvis.agent_memory.models import MemoryCandidate
@@ -132,3 +133,39 @@ def test_pipeline_failure_capture_uses_the_governed_hook_boundary(
         "store.create",
         "memory.after_save",
     ]
+
+
+def test_pipeline_failure_capture_does_not_mask_stage_failure_when_memory_is_locked(
+    tmp_path,
+    monkeypatch,
+):
+    import marvis.pipeline as pipeline
+
+    save_memory_policy(
+        tmp_path,
+        MemoryPolicySettings(reference_cross_task=True, auto_distill=True),
+    )
+
+    class _LockedStore:
+        def list_entries(self, **_kwargs):
+            return [_Entry()]
+
+        def record_negative_feedback(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        pipeline,
+        "AgentMemoryStore",
+        lambda *_args, **_kwargs: _LockedStore(),
+    )
+    monkeypatch.setattr(pipeline, "extract_validation_pitfall", lambda _payload: [])
+    monkeypatch.setattr(pipeline, "extract_task_experience", lambda _payload: None)
+
+    # This call runs from a stage's exception handler.  Its best-effort
+    # downgrade must not replace the original notebook/metrics/report error.
+    pipeline._capture_agent_memory_for_failure(
+        repo=type("Repo", (), {"db_path": tmp_path / "marvis.sqlite"})(),
+        task_id="task-1",
+        failure_kind="metrics",
+        message="original metrics failure",
+    )

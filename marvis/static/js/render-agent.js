@@ -1,4 +1,5 @@
 import { escapeHtml } from "./ui-utils.js";
+import { isSafeMarkdownHrefValue } from "./url-safety.js";
 
 export function renderAgentMarkdown(content) {
   const lines = String(content || "").replace(/\r\n?/g, "\n").split("\n");
@@ -293,14 +294,15 @@ export function renderMarkdownEmphasisText(content) {
 }
 
 export function markdownAnchorHtml(label, href) {
-  return `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+  // Safe root-relative links are application resources. Make them document-
+  // relative so a JupyterHub `/proxy/<port>/` mount is retained; absolute
+  // http(s) links and fragments intentionally keep their original meaning.
+  const mountedHref = String(href).startsWith("/") ? String(href).slice(1) : href;
+  return `<a href="${escapeHtml(mountedHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
 }
 
 export function isSafeMarkdownHref(href) {
-  // Reject protocol-relative URLs ("//evil.com") — browsers resolve them to an
-  // external https origin, so they must not pass as same-origin "/" links.
-  if (href.startsWith("//")) return false;
-  return /^https?:\/\//i.test(href) || href.startsWith("/") || href.startsWith("#");
+  return isSafeMarkdownHrefValue(href);
 }
 
 export function hasMarkdownBoundaries(source, offset, length) {

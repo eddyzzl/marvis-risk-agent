@@ -3,7 +3,12 @@ import json
 import pytest
 
 from marvis.drafts import AuthoringError, DraftTool, LearningNote
-from marvis.drafts.authoring import draft_script
+from marvis.drafts.authoring import (
+    _ALLOWED_IMPORT_ROOTS,
+    assert_draft_code_safe,
+    draft_script,
+)
+from marvis.plugins.subprocess_worker import _DRAFT_ALLOWED_IMPORT_ROOTS
 
 
 class _FakeLLM:
@@ -102,12 +107,16 @@ def test_draft_script_rejects_missing_schema_and_invalid_determinism():
 
 
 def test_draft_script_rejects_dangerous_code_and_invalid_json():
-    with pytest.raises(AuthoringError, match="banned"):
+    with pytest.raises(AuthoringError, match="Draft Language v1"):
         draft_script(
             "task-1",
             "bad",
             learning_note=None,
-            llm_factory=lambda: _FakeLLM(_valid_spec(code="def calc(inputs, ctx):\n    os.system('rm -rf /')\n")),
+            llm_factory=lambda: _FakeLLM(
+                _valid_spec(
+                    code="def calc_margin(inputs, ctx):\n    os.system('rm -rf /')\n"
+                )
+            ),
         )
     with pytest.raises(AuthoringError, match="JSON"):
         draft_script("task-1", "bad", learning_note=None, llm_factory=lambda: _FakeLLM("not json"))
@@ -134,7 +143,7 @@ def test_draft_script_rejects_dangerous_code_and_invalid_json():
     ],
 )
 def test_draft_script_rejects_network_file_write_and_file_delete_calls(code):
-    with pytest.raises(AuthoringError, match="banned"):
+    with pytest.raises(AuthoringError, match="Draft Language v1"):
         draft_script(
             "task-1",
             "bad",
@@ -150,13 +159,13 @@ def test_draft_script_rejects_network_file_write_and_file_delete_calls(code):
             "import sqlite3\n"
             "def calc_margin(inputs: dict, ctx) -> dict:\n"
             "    return {'margin': sqlite3.sqlite_version_info[0]}\n",
-            "import sqlite3",
+            "sqlite3",
         ),
         (
             "from marvis.repositories.strategy import StrategyRepository\n"
             "def calc_margin(inputs: dict, ctx) -> dict:\n"
             "    return {'margin': 0}\n",
-            "from marvis import",
+            "marvis.repositories",
         ),
     ],
 )
@@ -190,6 +199,83 @@ def test_draft_script_allows_pure_computation_standard_library_imports():
     )
 
     assert draft.name == "calc_margin"
+
+
+def test_draft_worker_import_allowlist_matches_authoring_gate():
+    assert _DRAFT_ALLOWED_IMPORT_ROOTS == _ALLOWED_IMPORT_ROOTS
+
+
+@pytest.mark.parametrize(
+    ("code", "blocked_evidence"),
+    [
+        (
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    import_name = '__im' + 'port__'\n"
+            "    importer = getattr(__builtins__, import_name)\n"
+            "    os_module = importer('os')\n"
+            "    native_module = importer('ct' + 'ypes')\n"
+            "    return {'margin': native_module.CDLL(None).getpid()}\n",
+            "getattr",
+        ),
+        (
+            "import statistics\n"
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    modules = statistics.sys.modules\n"
+            "    return {'margin': len(modules)}\n",
+            "sys",
+        ),
+        (
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    return {'margin': len(inputs.__class__.__mro__)}\n",
+            "reflection",
+        ),
+        (
+            "from operator import attrgetter as lookup\n"
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    return {'margin': len(lookup('__class__')(inputs).__name__)}\n",
+            "attrgetter",
+        ),
+        (
+            "from random import _os\n"
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    return {'margin': _os.getpid()}\n",
+            "_os",
+        ),
+        (
+            "import re\n"
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    import_name = '__im' + 'port__'\n"
+            "    importer = re.enum.bltns.getattr(re.enum.bltns, import_name)\n"
+            "    native_module = importer('ct' + 'ypes')\n"
+            "    return {'margin': native_module.CDLL(None).getpid()}\n",
+            "enum",
+        ),
+        (
+            "import json\n"
+            "def calc_margin(inputs: dict, ctx) -> dict:\n"
+            "    match json.loads:\n"
+            "        case object(__globals__=globals_dict):\n"
+            "            pass\n"
+            "    return {'margin': len(globals_dict)}\n",
+            "match statements",
+        ),
+        (
+            "def calc_margin[T](inputs, ctx):\n"
+            "    return {'margin': 0}\n",
+            "type parameters",
+        ),
+    ],
+)
+def test_draft_safety_rejects_dynamic_import_and_private_introspection(
+    code,
+    blocked_evidence,
+):
+    with pytest.raises(AuthoringError) as exc_info:
+        assert_draft_code_safe(code)
+
+    message = str(exc_info.value)
+    assert "Draft Language v1" in message
+    assert blocked_evidence in message
 
 
 class _SequenceLLM:
@@ -257,7 +343,7 @@ def test_draft_script_retry_still_enforces_safety_floor():
     unsafe = _valid_spec(code="def calc_margin(inputs, ctx):\n    os.system('rm -rf /')\n")
     llm = _SequenceLLM([unsafe, unsafe])
 
-    with pytest.raises(AuthoringError, match="banned"):
+    with pytest.raises(AuthoringError, match="Draft Language v1"):
         draft_script(
             "task-1",
             "bad",

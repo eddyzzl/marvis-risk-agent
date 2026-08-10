@@ -216,6 +216,19 @@ def test_draft_fetch_url_endpoint_maps_fetch_errors_to_controlled_response(tmp_p
     assert response.json()["detail"] == "HTTP 404"
 
 
+def test_draft_fetch_url_endpoint_blocks_private_network_targets(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+    monkeypatch.setattr("marvis.drafts.web_search.network_available", lambda: True)
+
+    response = client.post(
+        "/api/drafts/fetch-url",
+        json={"url": "http://127.0.0.1/admin", "max_bytes": 1200},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "URL is not allowed"
+
+
 def test_draft_learning_note_endpoint_distills_and_returns_saved_note(tmp_path, monkeypatch):
     client = TestClient(create_app(tmp_path))
 

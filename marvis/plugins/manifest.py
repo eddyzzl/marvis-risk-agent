@@ -12,6 +12,18 @@ from marvis.plugins.errors import ManifestError
 
 DETERMINISM_CHOICES = frozenset({"deterministic", "stochastic"})
 FAILURE_POLICY_CHOICES = frozenset({"fail", "retry", "skip"})
+EXECUTION_PROFILE_STANDARD = "standard"
+EXECUTION_PROFILE_DRAFT_RESTRICTED_V1 = "draft_restricted_v1"
+EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED = "draft_repromotion_required"
+EXECUTION_PROFILE_CHOICES = frozenset({
+    EXECUTION_PROFILE_STANDARD,
+    EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
+    EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED,
+})
+RUNNABLE_EXECUTION_PROFILE_CHOICES = frozenset({
+    EXECUTION_PROFILE_STANDARD,
+    EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
+})
 GOVERNANCE_POLICY_SCHEMA_VERSION = "tool-policy.v1"
 GOVERNANCE_REQUIREMENT_CHOICES = frozenset({"none", "required"})
 PERMISSION_CHOICES = frozenset({
@@ -241,12 +253,41 @@ class ToolSpec:
     entrypoint: str
     memory_limit_mb: int = 2048
     policy: GovernancePolicy = field(default_factory=GovernancePolicy)
+    execution_profile: str = EXECUTION_PROFILE_STANDARD
 
 
 @dataclass(frozen=True)
 class HookSpec:
     event: str
     tool: str
+
+
+@dataclass(frozen=True)
+class DraftPromotionReceipt:
+    """Persistent identity binding for a promoted Draft artifact.
+
+    Tool execution profiles are deliberately manifest-owned.  This receipt
+    additionally binds the Draft provenance to the concrete installed plugin
+    artifact so a later same-name ordinary plugin cannot inherit Draft-only
+    restrictions from an old audit row.
+    """
+
+    draft_id: str
+    plugin_name: str
+    plugin_version: str
+    plugin_checksum: str
+    tool_name: str
+    execution_profile: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "draft_id": self.draft_id,
+            "plugin_name": self.plugin_name,
+            "plugin_version": self.plugin_version,
+            "plugin_checksum": self.plugin_checksum,
+            "tool_name": self.tool_name,
+            "execution_profile": self.execution_profile,
+        }
 
 
 @dataclass(frozen=True)
@@ -262,6 +303,7 @@ class PluginManifest:
     permissions: tuple[str, ...] = ()
     builtin: bool = False
     checksum: str = ""
+    draft_promotion: DraftPromotionReceipt | None = None
 
 
 def parse_manifest(data: dict[str, Any], *, builtin: bool = False) -> PluginManifest:
@@ -297,6 +339,14 @@ def parse_manifest(data: dict[str, Any], *, builtin: bool = False) -> PluginMani
     hooks = tuple(_parse_hooks(data.get("hooks", []), seen_tools))
     _validate_hook_governance(hooks, tools)
     checksum = "" if builtin else str(data.get("checksum") or "")
+    draft_promotion = _parse_draft_promotion_receipt(
+        data.get("draft_promotion"),
+        name=name,
+        version=version,
+        checksum=checksum,
+        tools=tools,
+        builtin=bool(builtin),
+    )
 
     return PluginManifest(
         name=name,
@@ -310,11 +360,12 @@ def parse_manifest(data: dict[str, Any], *, builtin: bool = False) -> PluginMani
         permissions=permissions,
         builtin=bool(builtin),
         checksum=checksum,
+        draft_promotion=draft_promotion,
     )
 
 
 def manifest_to_dict(manifest: PluginManifest) -> dict[str, Any]:
-    return {
+    data = {
         "name": manifest.name,
         "version": manifest.version,
         "display_name": manifest.display_name,
@@ -334,6 +385,7 @@ def manifest_to_dict(manifest: PluginManifest) -> dict[str, Any]:
                 "entrypoint": tool.entrypoint,
                 "memory_limit_mb": tool.memory_limit_mb,
                 "policy": tool.policy.to_dict(),
+                "execution_profile": tool.execution_profile,
             }
             for tool in manifest.tools
         ],
@@ -345,6 +397,74 @@ def manifest_to_dict(manifest: PluginManifest) -> dict[str, Any]:
         "builtin": manifest.builtin,
         "checksum": manifest.checksum,
     }
+    if manifest.draft_promotion is not None:
+        data["draft_promotion"] = manifest.draft_promotion.to_dict()
+    return data
+
+
+def draft_promotion_receipt_from_dict(value: Any) -> DraftPromotionReceipt:
+    """Parse the durable receipt shape before it is bound to a manifest.
+
+    Registry migration consumes historical audit receipts too, where the
+    current plugin identity is checked separately.  Keeping the syntax parser
+    here prevents that migration from accepting a loosely shaped audit detail.
+    """
+
+    if not isinstance(value, dict):
+        raise ManifestError("draft_promotion must be an object")
+    draft_id = _required_text(value, "draft_id", context="draft_promotion")
+    plugin_name = _required_text(value, "plugin_name", context="draft_promotion")
+    plugin_version = _required_text(value, "plugin_version", context="draft_promotion")
+    plugin_checksum = _required_text(value, "plugin_checksum", context="draft_promotion")
+    tool_name = _required_text(value, "tool_name", context="draft_promotion")
+    execution_profile = _required_text(
+        value,
+        "execution_profile",
+        context="draft_promotion",
+    )
+    _validate_identifier(plugin_name, "draft_promotion.plugin_name")
+    _validate_identifier(tool_name, "draft_promotion.tool_name")
+    _validate_semver(plugin_version)
+    if execution_profile != EXECUTION_PROFILE_DRAFT_RESTRICTED_V1:
+        raise ManifestError(
+            "draft_promotion.execution_profile must be draft_restricted_v1"
+        )
+    return DraftPromotionReceipt(
+        draft_id=draft_id,
+        plugin_name=plugin_name,
+        plugin_version=plugin_version,
+        plugin_checksum=plugin_checksum,
+        tool_name=tool_name,
+        execution_profile=execution_profile,
+    )
+
+
+def _parse_draft_promotion_receipt(
+    value: Any,
+    *,
+    name: str,
+    version: str,
+    checksum: str,
+    tools: list[ToolSpec],
+    builtin: bool,
+) -> DraftPromotionReceipt | None:
+    if value is None:
+        return None
+    receipt = draft_promotion_receipt_from_dict(value)
+    if builtin:
+        raise ManifestError("builtin plugins cannot declare draft_promotion")
+    if not checksum:
+        raise ManifestError("draft_promotion requires a plugin checksum")
+    if (
+        receipt.plugin_name != name
+        or receipt.plugin_version != version
+        or receipt.plugin_checksum != checksum
+    ):
+        raise ManifestError("draft_promotion does not match this plugin identity")
+    matching_tools = [tool for tool in tools if tool.name == receipt.tool_name]
+    if len(matching_tools) != 1 or matching_tools[0].execution_profile != receipt.execution_profile:
+        raise ManifestError("draft_promotion does not match the declared tool profile")
+    return receipt
 
 
 def _parse_tool(item: Any, index: int) -> ToolSpec:
@@ -372,6 +492,14 @@ def _parse_tool(item: Any, index: int) -> ToolSpec:
     side_effects = tuple(_parse_string_list(item.get("side_effects", []), f"tool {name} side_effects"))
     _validate_known_permissions(side_effects, label=f"tool {name} side_effects")
     policy = GovernancePolicy.from_dict(item.get("policy"))
+    execution_profile = str(
+        item.get("execution_profile", EXECUTION_PROFILE_STANDARD)
+    ).strip()
+    if execution_profile not in EXECUTION_PROFILE_CHOICES:
+        raise ManifestError(
+            f"tool {name} execution_profile must be one of: "
+            f"{', '.join(sorted(EXECUTION_PROFILE_CHOICES))}"
+        )
     if policy.effect_target is not None:
         properties = input_schema.get("properties")
         if (
@@ -393,6 +521,7 @@ def _parse_tool(item: Any, index: int) -> ToolSpec:
         entrypoint=entrypoint,
         memory_limit_mb=memory_limit_mb,
         policy=policy,
+        execution_profile=execution_profile,
     )
 
 

@@ -6,6 +6,7 @@ from openpyxl import load_workbook
 import pytest
 
 from marvis.output.excel import write_validation_excel
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.validation.results import (
     BasicInfoResult,
     BinRow,
@@ -498,6 +499,30 @@ def test_write_excel_rolls_back_existing_file_and_images_when_save_fails(
     assert not (tmp_path / ".staging").exists()
     assert not list(tmp_path.glob(".out.xlsx.*.bak"))
     assert not list(tmp_path.glob(".excel_images.*.bak"))
+
+
+def test_write_excel_can_join_a_callers_artifact_transaction(tmp_path: Path):
+    uow = ArtifactUnitOfWork()
+    staged_workbook = uow.stage_file(tmp_path, "out.xlsx")
+    staged_images = uow.stage_directory(tmp_path, "excel_images")
+
+    written_path = write_validation_excel(
+        _make_results(),
+        staged_workbook.path,
+        image_output_dir=staged_images.path,
+    )
+
+    assert written_path == staged_workbook.path
+    assert written_path.exists()
+    assert list(staged_images.path.glob("*.png"))
+    assert not (tmp_path / "out.xlsx").exists()
+    assert not (tmp_path / "excel_images").exists()
+
+    uow.rollback()
+
+    assert not (tmp_path / ".staging").exists()
+    assert not (tmp_path / "out.xlsx").exists()
+    assert not (tmp_path / "excel_images").exists()
 
 
 def test_reference_conditional_formatting_ranges_are_applied(tmp_path: Path):

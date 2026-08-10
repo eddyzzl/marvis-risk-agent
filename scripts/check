@@ -18,6 +18,7 @@ fi
 PYTHON_BIN="${PYTHON:-python}"
 NODE_BIN="${NODE:-node}"
 RUFF_BIN="${RUFF:-}"
+UV_BIN="${UV:-uv}"
 RUN_PYTEST=1
 RUN_RUFF=1
 RUN_NODE=1
@@ -59,6 +60,7 @@ Environment:
   PYTHON          Python executable to use. Defaults to "python".
   NODE            Node.js executable to use. Defaults to "node".
   RUFF            Ruff executable to use. Defaults to "$PYTHON -m ruff".
+  UV              uv executable used to export the locked audit manifest.
   CHECK_DIFF_RANGE
                   Optional git diff range used by --affected and diff checks,
                   for example origin/main...HEAD.
@@ -251,7 +253,16 @@ fi
 if [[ "$RUN_AUDIT" -eq 1 ]]; then
   echo "==> pip-audit"
   if "$PYTHON_BIN" -m pip_audit --version >/dev/null 2>&1; then
-    "$PYTHON_BIN" -m pip_audit
+    if ! command -v "$UV_BIN" >/dev/null 2>&1; then
+      echo "error: uv is required to audit the locked dependencies" >&2
+      exit 1
+    fi
+    # Audit the exact lockfile resolution, rather than the caller's ambient
+    # interpreter. Hashes and --disable-pip ensure pip-audit does not resolve
+    # a different dependency graph while it scans the pinned requirements.
+    "$UV_BIN" export --locked --all-extras --all-groups --no-emit-project \
+      --format requirements.txt \
+      | "$PYTHON_BIN" -m pip_audit --require-hashes --disable-pip -r /dev/stdin
   else
     echo "skipping pip-audit: not installed (pip install pip-audit to enable --audit)"
   fi

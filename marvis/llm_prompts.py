@@ -341,10 +341,14 @@ DISTILL_SYS = PromptSpec(
 # --- marvis.drafts.authoring -------------------------------------------------------
 AUTHOR_SYS = PromptSpec(
     name="AUTHOR_SYS",
-    version=1,
+    version=2,
     text=(
-        "你在为 MARVIS 写一个数据/特征/分析工具。只用 pandas/numpy/标准库做纯计算；"
-        "不读写任意文件、不联网、不执行系统命令。必须声明 input_schema/output_schema/determinism。"
+        "你在为 MARVIS 写 Draft Language v1 的纯计算工具。模块只能有受控标准库 capability "
+        "import 和一个名为 name 的函数 def name(inputs, ctx)。可用 inputs、ctx.task_id、ctx.seed，"
+        "以及 math/statistics/decimal/fractions/collections/functools/itertools/json/operator/random/re/"
+        "string 的受控成员；不得使用 pandas、numpy、文件、网络、系统命令、动态 import、反射、"
+        "类/对象定义、match、try/with/while/async 或嵌套函数。必须声明 "
+        "input_schema/output_schema/determinism。"
     ),
 )
 

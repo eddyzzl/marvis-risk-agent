@@ -1,4 +1,4 @@
-import { api } from "./api.js";
+import { api, localToken } from "./api.js";
 import { defaultTaskType, taskTypeDefinitions } from "./task-types.js";
 import { formatDateInput } from "./ui-utils.js";
 
@@ -417,7 +417,9 @@ export function createCreateTaskDialogController({
     });
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/material-uploads");
+      xhr.open("POST", "api/material-uploads");
+      const token = localToken();
+      if (token) xhr.setRequestHeader("X-Marvis-Token", token);
       if (xhr.upload && typeof onProgress === "function") {
         xhr.upload.onprogress = (event) => {
           if (!event.lengthComputable) return;

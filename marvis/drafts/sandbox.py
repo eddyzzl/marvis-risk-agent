@@ -26,7 +26,7 @@ class DraftSandbox:
         if str(draft.task_id) != str(task_id):
             raise DraftStateError(f"task mismatch for draft {draft_id}: {draft.task_id} != {task_id}")
         try:
-            assert_draft_code_safe(draft.code)
+            assert_draft_code_safe(draft.code, entrypoint=draft.name)
         except AuthoringError as exc:
             run = _failed_run(draft_id, inputs, task_id=task_id, error=str(exc))
             self._save_run_with_audit(run, status=None)

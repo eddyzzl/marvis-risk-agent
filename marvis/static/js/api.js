@@ -90,21 +90,58 @@ function requestBodyOptions(body, headers = {}) {
 }
 
 // GAP-5: when the server is started with MARVIS_LOCAL_TOKEN set, the index
-// page embeds it into <body data-marvis-local-token>. Non-GET requests must
-// echo it back via X-Marvis-Token or the shared-host access guard rejects
-// them (see marvis/app.py _local_access_guard). Left blank (the default,
-// MARVIS_LOCAL_TOKEN unset), this header is simply omitted and behavior is
-// unchanged.
-function localToken() {
+// page embeds it into <body data-marvis-local-token>. The shared-host guard
+// requires the credential for every private local API read, and requires this
+// explicit header (rather than browser-cached Basic credentials) for writes.
+// It is never attached to an off-origin URL.
+export function localToken() {
   return typeof document !== "undefined" ? document.body?.dataset?.marvisLocalToken || "" : "";
 }
 
-const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+function hasHeader(headers, expectedName) {
+  return Object.keys(headers).some((name) => name.toLowerCase() === expectedName.toLowerCase());
+}
+
+function applicationBaseUrl() {
+  if (typeof document !== "undefined" && typeof document.baseURI === "string" && document.baseURI) {
+    return document.baseURI;
+  }
+  if (typeof location !== "undefined" && typeof location.href === "string" && location.href) {
+    return location.href;
+  }
+  return "";
+}
+
+function normalizedApiEndpoint(endpoint) {
+  const value = String(endpoint || "").trim();
+  if (!value) throw new ApiError("API endpoint is required");
+  if (/^https?:\/\//i.test(value)) return value;
+  // A protocol-relative or non-HTTP URL would escape the mounted application
+  // prefix and must never inherit its credentials.
+  if (value.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(value)) {
+    throw new ApiError("invalid API endpoint");
+  }
+  // API callers historically used both `/api/...` and `api/...`. Resolve both
+  // below the document base so a JupyterHub `/proxy/<port>/` deployment keeps
+  // requests inside the application instead of jumping to the origin root.
+  const relative = value.replace(/^\/+/, "");
+  const base = applicationBaseUrl();
+  // Unit-test/SSR callers do not have a document location. Preserve the
+  // historic origin-root form there; browsers always take the mounted path.
+  return base ? new URL(relative, base).toString() : `/${relative}`;
+}
+
+function isSameOriginEndpoint(endpoint) {
+  const base = applicationBaseUrl() || "http://marvis.local/";
+  try {
+    return new URL(endpoint, base).origin === new URL(base).origin;
+  } catch (_error) {
+    return false;
+  }
+}
 
 export async function api(endpoint, options = {}) {
-  const normalizedEndpoint = endpoint.startsWith("/") || endpoint.startsWith("http")
-    ? endpoint
-    : `/${endpoint}`;
+  const normalizedEndpoint = normalizedApiEndpoint(endpoint);
   const body = options.body;
   const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
   const headers = { ...(options.headers || {}) };
@@ -113,7 +150,7 @@ export async function api(endpoint, options = {}) {
   }
   const method = (options.method || "GET").toUpperCase();
   const token = localToken();
-  if (token && !SAFE_METHODS.has(method) && !("X-Marvis-Token" in headers)) {
+  if (token && isSameOriginEndpoint(normalizedEndpoint) && !hasHeader(headers, "X-Marvis-Token")) {
     headers["X-Marvis-Token"] = token;
   }
   const response = await fetch(normalizedEndpoint, {

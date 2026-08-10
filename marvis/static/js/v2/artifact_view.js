@@ -78,7 +78,7 @@ function extensionOf(value) {
 }
 
 function artifactUrl(encodedId) {
-  return `/api/artifacts/${encodedId}`;
+  return `api/artifacts/${encodedId}`;
 }
 
 function isImageArtifact(id) {

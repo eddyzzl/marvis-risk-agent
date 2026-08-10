@@ -35,7 +35,7 @@ _LOCKED_HASHES = {
     "AGENT_SYSTEM_PROMPT": (2, "80ee6702aa4fc81e"),
     "WORD_CONCLUSION_SYSTEM_PROMPT": (2, "a3754910d82cf210"),
     "DISTILL_SYS": (1, "5d40eadf4107e9a8"),
-    "AUTHOR_SYS": (1, "b89568bdc0ca1710"),
+    "AUTHOR_SYS": (2, "4b57e8e17abd5cf9"),
     "LEARN_SYS": (1, "40267be3b94b3147"),
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),

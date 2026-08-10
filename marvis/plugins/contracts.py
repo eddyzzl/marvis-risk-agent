@@ -18,7 +18,9 @@ from marvis.safe_paths import assert_within
 # v2 framed the authoritative result as a sentinel-prefixed JSON line so
 # native-library stdout cannot corrupt the protocol payload. v3 adds opaque,
 # out-of-band effect execution metadata to ToolContext for governed writes.
-PROTOCOL_VERSION = 3
+# v5 carries a manifest-owned execution profile.  A promoted Draft must stay
+# on the restricted loader even when it is invoked through the normal runner.
+PROTOCOL_VERSION = 5
 WORKER_RESULT_SENTINEL = "@@MARVIS_PLUGIN_RESULT@@"
 MAX_PROGRESS_BYTES = 64 * 1024
 

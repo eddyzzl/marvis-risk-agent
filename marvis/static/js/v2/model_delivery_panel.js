@@ -354,7 +354,7 @@ function artifactList(delivery, { taskId = "" } = {}) {
 
 function taskArtifactDownloadUrl(value, taskId) {
   const relativePath = taskArtifactRelativePath(value, taskId);
-  return relativePath ? `/api/artifacts/${encodeURIComponent(relativePath)}` : "";
+  return relativePath ? `api/artifacts/${encodeURIComponent(relativePath)}` : "";
 }
 
 function taskArtifactRelativePath(value, taskId) {

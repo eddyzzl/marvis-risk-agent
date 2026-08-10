@@ -95,6 +95,21 @@ def test_unsupported_op_rejected():
     assert "median" in result.clarify
 
 
+def test_sort_by_rejects_ungrouped_source_column():
+    result = validate_slice_spec(
+        {
+            "group_by": ["channel"],
+            "metrics": [{"op": "count"}],
+            "sort_by": "amount",
+        },
+        _PROFILE,
+    )
+
+    assert result.needs_clarification is True
+    assert "amount" in result.clarify
+    assert "分组列" in result.clarify
+
+
 def test_llm_clarify_passthrough_when_intent_unclear():
     llm = _FakeLLM({"clarify": "请问你想看哪个指标？"})
 

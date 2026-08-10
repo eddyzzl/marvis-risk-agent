@@ -346,7 +346,7 @@ def test_nested_recipe_worker_stays_in_parent_process_group(tmp_path, monkeypatc
             {
                 "stdout": (
                     '@@MARVIS_PLUGIN_RESULT@@{"ok":true,"output":{},'
-                    '"worker_protocol_version":3}'
+                    f'"worker_protocol_version":{PROTOCOL_VERSION}}}'
                 ),
                 "stderr": "",
                 "returncode": 0,

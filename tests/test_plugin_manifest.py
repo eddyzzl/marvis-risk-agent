@@ -1,7 +1,13 @@
 import pytest
 
 from marvis.plugins.errors import ManifestError, SchemaValidationError, ToolExecutionError
-from marvis.plugins.manifest import manifest_to_dict, parse_manifest
+from marvis.plugins.manifest import (
+    EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED,
+    EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
+    EXECUTION_PROFILE_STANDARD,
+    manifest_to_dict,
+    parse_manifest,
+)
 
 
 def _manifest(**overrides):
@@ -54,6 +60,7 @@ def test_parse_manifest_round_trips_plugin_and_tool_contract():
     assert len(manifest.tools) == 1
     assert manifest.tools[0].name == "echo"
     assert manifest.tools[0].side_effects == ("read:input",)
+    assert manifest.tools[0].execution_profile == EXECUTION_PROFILE_STANDARD
     assert manifest.hooks[0].event == "task.created"
     assert manifest.hooks[0].tool == "echo"
 
@@ -113,6 +120,50 @@ def test_parse_manifest_rejects_invalid_tool_contract_values():
     tool["timeout_seconds"] = 0
     with pytest.raises(ManifestError, match="timeout_seconds"):
         parse_manifest(_manifest(tools=[tool]))
+
+
+def test_parse_manifest_requires_a_known_execution_profile():
+    tool = dict(_manifest()["tools"][0])
+    tool["execution_profile"] = EXECUTION_PROFILE_DRAFT_RESTRICTED_V1
+
+    restricted = parse_manifest(_manifest(tools=[tool]))
+    assert restricted.tools[0].execution_profile == EXECUTION_PROFILE_DRAFT_RESTRICTED_V1
+
+    tool["execution_profile"] = EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED
+    blocked = parse_manifest(_manifest(tools=[tool]))
+    assert blocked.tools[0].execution_profile == EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED
+
+    tool["execution_profile"] = "legacy_draft_blacklist"
+    with pytest.raises(ManifestError, match="execution_profile"):
+        parse_manifest(_manifest(tools=[tool]))
+
+
+def test_draft_promotion_receipt_binds_the_manifest_identity_and_tool_profile():
+    data = _manifest()
+    tool = dict(data["tools"][0])
+    tool["execution_profile"] = EXECUTION_PROFILE_DRAFT_RESTRICTED_V1
+    data["tools"] = [tool]
+    data["draft_promotion"] = {
+        "draft_id": "draft-123",
+        "plugin_name": data["name"],
+        "plugin_version": data["version"],
+        "plugin_checksum": data["checksum"],
+        "tool_name": tool["name"],
+        "execution_profile": EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
+    }
+
+    manifest = parse_manifest(data)
+
+    assert manifest.draft_promotion is not None
+    assert manifest_to_dict(manifest)["draft_promotion"] == data["draft_promotion"]
+    assert parse_manifest(manifest_to_dict(manifest)) == manifest
+
+    data["draft_promotion"] = {
+        **data["draft_promotion"],
+        "plugin_checksum": "different-artifact",
+    }
+    with pytest.raises(ManifestError, match="does not match this plugin identity"):
+        parse_manifest(data)
 
 
 def test_parse_manifest_requires_seed_input_for_stochastic_tools():

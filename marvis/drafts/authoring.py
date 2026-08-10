@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from datetime import UTC, datetime
 import re
 import uuid
@@ -10,6 +9,11 @@ from jsonschema import Draft202012Validator
 from marvis.agent.json_reply import load_json_object
 from marvis.drafts.contracts import DraftTool, LearningNote
 from marvis.drafts.errors import AuthoringError
+from marvis.draft_language import (
+    ALLOWED_IMPORT_ROOTS,
+    DraftLanguageError,
+    validate_draft_source,
+)
 from marvis.llm_prompts import AUTHOR_SYS as _AUTHOR_SYS_SPEC
 
 
@@ -33,64 +37,9 @@ REQUIRED_DRAFT_KEYS = (
 DETERMINISM_CHOICES = {"deterministic", "stochastic"}
 DRAFT_MAX_ATTEMPTS = 2
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-_BANNED_SNIPPETS = (
-    "os.system",
-    "subprocess",
-    "eval(",
-    "exec(",
-    "__import__",
-    "socket",
-    "shutil.rmtree",
-    "requests.",
-    "httpx.",
-    "urllib.",
-    "urlopen(",
-    "open(",
-    ".read_text(",
-    ".read_bytes(",
-    ".write_text(",
-    ".write_bytes(",
-    "os.remove",
-    "os.unlink",
-    "os.rmdir",
-)
-# Drafts execute in a subprocess, but that process still shares the host
-# filesystem and Python environment.  Keep imports fail-closed: adding a safe
-# computation module is an explicit platform decision, rather than trying to
-# enumerate every database, network, dynamic-import, or internal package that a
-# generated draft must not reach.
-_ALLOWED_IMPORT_ROOTS = frozenset({
-    "__future__",
-    "collections",
-    "decimal",
-    "fractions",
-    "functools",
-    "itertools",
-    "json",
-    "math",
-    "operator",
-    "random",
-    "re",
-    "statistics",
-    "string",
-})
-_BANNED_CALL_NAMES = {"eval", "exec", "open", "__import__"}
-_BANNED_ATTR_CALLS = {
-    "glob",
-    "mkdir",
-    "open",
-    "read_bytes",
-    "read_text",
-    "remove",
-    "rename",
-    "replace",
-    "rglob",
-    "rmdir",
-    "touch",
-    "unlink",
-    "write_bytes",
-    "write_text",
-}
+# Backward-compatible export for callers/tests that previously inspected the
+# authoring gate's import set. It now comes from the shared language policy.
+_ALLOWED_IMPORT_ROOTS = ALLOWED_IMPORT_ROOTS
 
 
 def draft_script(
@@ -102,9 +51,9 @@ def draft_script(
 ) -> DraftTool:
     """Generate one draft tool, with fence-tolerant JSON parsing + one retry.
 
-    The safety floor (assert_draft_code_safe AST scan) is a hard gate on every
-    attempt. On the first failure the model is fed its previous reply and the
-    exact validation error for a targeted correction; the second failure raises.
+    The Draft Language v1 gate is enforced on every attempt. On the first
+    failure the model is fed its previous reply and the exact validation error
+    for a targeted correction; the second failure raises.
     """
     base_prompt = _authoring_prompt(goal, learning_note)
     prompt = base_prompt
@@ -144,9 +93,7 @@ def _build_draft_tool(
     if determinism not in DETERMINISM_CHOICES:
         raise AuthoringError("determinism must be deterministic or stochastic")
     code = str(spec["code"])
-    assert_draft_code_safe(code)
-    if f"def {spec['name']}" not in code:
-        raise AuthoringError("code must define the named tool function")
+    assert_draft_code_safe(code, entrypoint=str(spec["name"]))
     return DraftTool(
         id=_new_id(),
         task_id=task_id,
@@ -173,38 +120,13 @@ def _retry_prompt(base_prompt: str, previous_reply: str, error: str) -> str:
     )
 
 
-def assert_draft_code_safe(code: str) -> None:
-    hits = [snippet for snippet in _BANNED_SNIPPETS if snippet in code]
-    hits.extend(_ast_safety_hits(code))
-    if hits:
-        ordered_hits = list(dict.fromkeys(hits))
-        raise AuthoringError(f"draft code contains banned calls: {', '.join(ordered_hits)}")
+def assert_draft_code_safe(code: str, *, entrypoint: str | None = None) -> None:
+    """Compatibility gate backed by the shared Draft Language v1 validator."""
 
-
-def _ast_safety_hits(code: str) -> list[str]:
     try:
-        tree = ast.parse(code)
-    except SyntaxError as exc:
-        raise AuthoringError(f"draft code is not valid Python: {exc.msg}") from exc
-    hits: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                root = str(alias.name).split(".", 1)[0]
-                if root not in _ALLOWED_IMPORT_ROOTS:
-                    hits.append(f"import {root}")
-        elif isinstance(node, ast.ImportFrom):
-            root = str(node.module or "").split(".", 1)[0]
-            if node.level:
-                hits.append("relative import")
-            elif root not in _ALLOWED_IMPORT_ROOTS:
-                hits.append(f"from {root} import")
-        elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in _BANNED_CALL_NAMES:
-                hits.append(f"{node.func.id}(")
-            elif isinstance(node.func, ast.Attribute) and node.func.attr in _BANNED_ATTR_CALLS:
-                hits.append(f".{node.func.attr}(")
-    return hits
+        validate_draft_source(code, entrypoint=entrypoint)
+    except DraftLanguageError as exc:
+        raise AuthoringError(str(exc)) from exc
 
 
 def _authoring_prompt(goal: str, learning_note: LearningNote | None) -> str:

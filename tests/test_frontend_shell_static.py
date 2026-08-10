@@ -56,7 +56,7 @@ def test_runtime_branding_hooks_exist():
 
     assert "export const defaultBranding" in state_js
     assert 'import { applyBranding, normalizeBranding } from "./js/branding.js";' in app_js
-    assert 'fetch("api/branding")' in app_js
+    assert 'api("api/branding")' in app_js
     assert "async function loadBranding()" in app_js
     assert "function applyBranding(branding)" not in app_js
     assert "export function normalizeBranding" in branding_js

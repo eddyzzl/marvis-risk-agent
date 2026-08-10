@@ -32,6 +32,7 @@ import { createMaterialBindingDialogController } from "./js/material-binding-dia
 import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
+import { safeSameOriginApiHref } from "./js/url-safety.js";
 import {
   attachCalibrationInteractions,
   attachMetricTooltip,
@@ -605,8 +606,7 @@ let agentValidatorAliases = {};
 
 async function loadBranding() {
   try {
-    const response = await fetch("api/branding");
-    const payload = response.ok ? await response.json() : {};
+    const payload = await api("api/branding");
     const branding = normalizeBranding(payload);
     agentValidatorAliases = branding.validatorAliases || {};
     applyBranding(branding);
@@ -6653,7 +6653,7 @@ function handleDriverReportDownloadClick(event) {
   const button = event.target?.closest?.("[data-driver-report-download]");
   if (!button || !selectedTaskId) return;
   event.preventDefault();
-  window.location.href = `/api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`;
+  window.location.href = `api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`;
 }
 
 function agentMessageResultDatasetHtml(message) {
@@ -6670,7 +6670,7 @@ function agentMessageResultDatasetHtml(message) {
     && persistedHref.includes("step_id=")
     && persistedHref.includes("output_ref=")
     && persistedHref.includes("expected_content_hash=")
-    ? persistedHref
+    ? safeSameOriginApiHref(persistedHref)
     : "";
   if (!href) return "";
   const title = String(result?.title || "结果数据集已生成");
@@ -6692,7 +6692,11 @@ function agentMessageReportDownloadHtml(message) {
     : [];
   const fallback = message?.metadata?.report_download;
   const reports = (multiple.length ? multiple : [fallback])
-    .filter((report) => String(report?.download_url || "").trim());
+    .map((report) => ({
+      ...report,
+      download_url: safeSameOriginApiHref(report?.download_url),
+    }))
+    .filter((report) => report.download_url);
   if (!reports.length) return "";
   const links = reports.map((report) => {
     const href = String(report.download_url || "").trim();
@@ -6705,7 +6709,7 @@ function agentMessageReportDownloadHtml(message) {
     // modeling fallback with the task's actual report type.
     const label = activeTaskType === "portfolio"
       && storedLabel === "下载模型开发报告"
-      && href.includes("/driver-report/download")
+      && href.includes("driver-report/download")
       ? "下载组合分析报告"
       : storedLabel;
     const detail = [report.recipe, report.experiment_id].filter(Boolean).join(" · ");

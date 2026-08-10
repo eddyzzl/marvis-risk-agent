@@ -283,9 +283,9 @@ export RMC_MATERIAL_ROOTS="/data/marvis/materials"
 
 | 变量 | 建议 | 作用 |
 |------|------|------|
-| `MARVIS_LOCAL_TOKEN` | 随机 32+ 字节 | 本机写操作必须带 token，防同机其他用户滥用 |
-| `MARVIS_TRUSTED_PROXY_HOSTS` | 如 `127.0.0.1` | 反向代理时用 `X-Forwarded-For` 识别真实客户端 |
-| `MARVIS_ALLOW_REMOTE_READ` | 按需 `1` | 允许非本机只读；写操作仍仅本机 |
+| `MARVIS_LOCAL_TOKEN` | 随机 32+ 字节 | 保护本机私有首页/API；写操作必须显式带 token，防同机其他用户读取或滥用 |
+| `MARVIS_TRUSTED_PROXY_HOSTS` | 如 `127.0.0.1` | 仅信任该代理的 `X-Forwarded-For`；与 local token 一起启用受令牌保护的代理工作台 |
+| `MARVIS_ALLOW_REMOTE_READ` | 按需 `1` | 允许非本机只读；写操作仍需本机或可信代理上的显式 token |
 | `JAVA_HOME` + PATH | 必配 | PMML |
 | `MARVIS_DUCKDB_MEMORY_LIMIT` | 默认 `4GB`，内存紧可改 `2GB` | DuckDB |
 | `MARVIS_DUCKDB_THREADS` | 默认约 `cpu/2` | DuckDB |
@@ -301,6 +301,8 @@ export RMC_MATERIAL_ROOTS="/data/marvis/materials"
 ```bash
 export MARVIS_LOCAL_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 ```
+
+设置后，直连本机或经 `MARVIS_TRUSTED_PROXY_HOSTS` 指定代理访问的浏览器首次打开首页都会收到 HTTP Basic 提示：用户名可任意填写，密码填该 token。认证可用于私有读取；后续写操作仍由页面显式发送 `X-Marvis-Token`，不能仅依赖浏览器缓存的 Basic 凭证。代理必须覆盖客户端伪造的 `X-Forwarded-For`，并使用 HTTPS。
 
 ---
 

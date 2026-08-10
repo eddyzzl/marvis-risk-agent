@@ -7,11 +7,42 @@ from marvis.plugins.errors import (
     PluginNotFoundError,
     ToolNotFoundError,
 )
-from marvis.plugins.manifest import ToolRef, parse_manifest
+from marvis.plugins.manifest import (
+    EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED,
+    ToolRef,
+    parse_manifest,
+)
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 
 
-def _manifest(version: str = "0.1.0", *, tool_name: str = "echo", python_requires: str = ""):
+def _manifest(
+    version: str = "0.1.0",
+    *,
+    tool_name: str = "echo",
+    python_requires: str = "",
+    execution_profile: str | None = None,
+):
+    tool = {
+        "name": tool_name,
+        "summary": "Echo a message",
+        "input_schema": {
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {"echoed": {"type": "string"}},
+            "required": ["echoed"],
+        },
+        "determinism": "deterministic",
+        "timeout_seconds": 10,
+        "failure_policy": "fail",
+        "entrypoint": "tool_echo",
+        "side_effects": ["read:input"],
+    }
+    if execution_profile is not None:
+        tool["execution_profile"] = execution_profile
     return parse_manifest(
         {
             "name": "_sample",
@@ -20,27 +51,7 @@ def _manifest(version: str = "0.1.0", *, tool_name: str = "echo", python_require
             "description": "Runtime smoke-test pack",
             "module": "marvis.packs._sample.tools",
             "python_requires": python_requires,
-            "tools": [
-                {
-                    "name": tool_name,
-                    "summary": "Echo a message",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"message": {"type": "string"}},
-                        "required": ["message"],
-                    },
-                    "output_schema": {
-                        "type": "object",
-                        "properties": {"echoed": {"type": "string"}},
-                        "required": ["echoed"],
-                    },
-                    "determinism": "deterministic",
-                    "timeout_seconds": 10,
-                    "failure_policy": "fail",
-                    "entrypoint": "tool_echo",
-                    "side_effects": ["read:input"],
-                }
-            ],
+            "tools": [tool],
             "hooks": [],
             "permissions": ["read:input"],
         },
@@ -192,6 +203,21 @@ def test_tool_registry_rejects_plugins_with_incompatible_python_requires(tmp_pat
     with pytest.raises(ToolNotFoundError, match="requires Python"):
         tools.resolve(ToolRef("_sample", "echo"))
     assert tools.catalog_for_planner() == []
+
+
+def test_tool_registry_rejects_repromotion_required_tools_everywhere(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    registry.register(
+        _manifest(execution_profile=EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED),
+        enabled=True,
+    )
+    tools = ToolRegistry(registry)
+
+    assert tools.catalog_for_planner() == []
+    with pytest.raises(ToolNotFoundError, match="re-promoted"):
+        tools.resolve(ToolRef("_sample", "echo"))
 
 
 def test_parse_manifest_requires_side_effects_to_be_declared_in_permissions():

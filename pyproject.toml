@@ -55,7 +55,6 @@ dev = [
   "pytest-asyncio>=1,<2",
   "pytest-timeout>=2,<3",
   "httpx>=0.27,<1",
-  "httpx2>=2.4,<3",
   "playwright>=1.49,<2",
   "ruff>=0.8,<1",
 ]

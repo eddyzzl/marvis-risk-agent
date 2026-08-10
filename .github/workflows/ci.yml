@@ -149,7 +149,7 @@ jobs:
     # For completed runs, aggregate every gate that applies to the event.
     if: ${{ !cancelled() }}
     needs:
-      [quality, fast_tests, full_checks, strategy_smoke, pmml_runtime, security]
+      [quality, fast_tests, full_checks, strategy_smoke, browser_smoke, pmml_runtime, security]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -161,6 +161,7 @@ jobs:
           FAST_TESTS_RESULT: ${{ needs.fast_tests.result }}
           FULL_CHECKS_RESULT: ${{ needs.full_checks.result }}
           STRATEGY_SMOKE_RESULT: ${{ needs.strategy_smoke.result }}
+          BROWSER_SMOKE_RESULT: ${{ needs.browser_smoke.result }}
           PMML_RUNTIME_RESULT: ${{ needs.pmml_runtime.result }}
           SECURITY_RESULT: ${{ needs.security.result }}
         run: |
@@ -170,12 +171,14 @@ jobs:
             test "$QUALITY_RESULT" = "skipped"
             test "$FAST_TESTS_RESULT" = "skipped"
             test "$STRATEGY_SMOKE_RESULT" = "skipped"
+            test "$BROWSER_SMOKE_RESULT" = "skipped"
             test "$PMML_RUNTIME_RESULT" = "skipped"
           else
             test "$FULL_CHECKS_RESULT" = "skipped"
             test "$QUALITY_RESULT" = "success"
             test "$FAST_TESTS_RESULT" = "success"
             test "$STRATEGY_SMOKE_RESULT" = "success"
+            test "$BROWSER_SMOKE_RESULT" = "success"
             test "$PMML_RUNTIME_RESULT" = "success"
           fi
 
@@ -211,6 +214,39 @@ jobs:
             tests/test_strategy_candidate_request_e2e.py::test_natural_language_candidate_auto_runs_to_only_adoption_gate_and_rerenders_doc \
             tests/test_strategy_standard_workflows_e2e.py::test_natural_language_standard_workflow_executes_and_exports \
             tests/test_strategy_monitoring_e2e.py::test_strategy_monitoring_e2e_red_then_new_version_then_report
+
+  browser_smoke:
+    # PRs and main pushes run a real Chromium smoke lane. The broader browser
+    # and product E2E suite remains part of the manually dispatched full gate.
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Install Playwright Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Run browser smoke tests
+        env:
+          MARVIS_RUN_PLAYWRIGHT_SMOKE: "1"
+        run: uv run python -m pytest -q tests/test_frontend_playwright_smoke.py
 
   pmml_runtime:
     # The manual dispatch already runs the unfiltered suite in `checks`.
@@ -250,10 +286,9 @@ jobs:
   security:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Blocking gate: pip-audit has zero known CVEs and every bandit medium
-    # finding was triaged as a false positive in the 2026-07-03 FIN-2 security
-    # review (docs/reviews/2026-07-03-fin2-fin3-closing-review.md) — bandit
-    # below fails on high-severity findings only, matching that adjudication.
+    # Blocking gate: pip-audit must report zero known CVEs. Bandit's reviewed
+    # medium/high findings are pinned in a baseline, so historical false
+    # positives stay documented without silently accepting new findings.
     continue-on-error: false
 
     steps:
@@ -277,7 +312,12 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: pip-audit (dependency CVE scan)
-        run: uv tool run pip-audit
+        # Scan the pinned project graph rather than pip-audit's isolated tool
+        # environment. The exported hashes prevent a second resolver from
+        # silently selecting a different set of packages.
+        run: >-
+          uv export --locked --all-extras --all-groups --no-emit-project --format requirements.txt
+          | uv tool run --from pip-audit==2.10.1 pip-audit --require-hashes --disable-pip -r /dev/stdin
 
-      - name: bandit (high-severity static security scan)
-        run: uv tool run bandit -r marvis -lll
+      - name: bandit (new medium/high findings)
+        run: uv tool run --from bandit==1.9.4 bandit -r marvis -ll -ii -b .bandit-baseline.json

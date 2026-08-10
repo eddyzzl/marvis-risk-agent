@@ -1282,6 +1282,7 @@ def run_report_stage(
         staged_report = report_uow.stage_file(outputs_dir, report_path.name)
         staged_excel = report_uow.stage_file(outputs_dir, excel_path.name)
         staged_images = report_uow.stage_directory(task_dir, images_dir.name)
+        staged_excel_images = report_uow.stage_directory(outputs_dir, "excel_images")
         results = _load_validation_results(outputs_dir)
         report_values, _ = repo.get_report_values(task_id)
         report_values = _report_values_with_manual_fallback(
@@ -1301,6 +1302,7 @@ def run_report_stage(
             results,
             staged_excel.path,
             report_values=report_values,
+            image_output_dir=staged_excel_images.path,
         )
         cancellation_token.raise_if_cancelled()
         if word_result.unresolved_placeholders:
@@ -1398,9 +1400,9 @@ def _terminal_validation_status(task: TaskRecord, results) -> TaskStatus:
     if results.reproducibility is None:
         return TaskStatus.SUCCEEDED
     return (
-        TaskStatus.REVIEW_REQUIRED
-        if results.reproducibility.summary.status is ConsistencyStatus.FAIL
-        else TaskStatus.SUCCEEDED
+        TaskStatus.SUCCEEDED
+        if results.reproducibility.summary.status is ConsistencyStatus.PASS
+        else TaskStatus.REVIEW_REQUIRED
     )
 
 
@@ -2082,13 +2084,20 @@ def _capture_agent_memory_for_failure(
     message: str,
     hook_dispatcher=None,
 ) -> None:
-    # Gate on auto_distill (see _capture_agent_memory_for_metrics_success).
-    if not load_memory_policy(repo.db_path.parent).auto_distill:
-        logger.debug("auto_distill disabled; skipping failure memory capture task_id=%s", task_id)
-        return
-    store = AgentMemoryStore(repo.db_path)
-    _downgrade_task_memory_on_failure(store, task_id=task_id, reason=f"task_failed:{failure_kind}")
+    # Memory is an optional audit/retrieval aid.  Never let an unavailable
+    # store, policy read, downgrade, or hook replace the stage failure that
+    # this function is recording.
     try:
+        # Gate on auto_distill (see _capture_agent_memory_for_metrics_success).
+        if not load_memory_policy(repo.db_path.parent).auto_distill:
+            logger.debug("auto_distill disabled; skipping failure memory capture task_id=%s", task_id)
+            return
+        store = AgentMemoryStore(repo.db_path)
+        _downgrade_task_memory_on_failure(
+            store,
+            task_id=task_id,
+            reason=f"task_failed:{failure_kind}",
+        )
         payload = {
             "task_id": task_id,
             "status": "failed",
@@ -2148,7 +2157,13 @@ def _downgrade_task_memory_on_failure(
                 task_id=task_id,
                 reason=reason,
             )
-        except (KeyError, ValueError):
+        except Exception:
+            logger.warning(
+                "agent memory downgrade failed task_id=%s memory_id=%s",
+                task_id,
+                entry.id,
+                exc_info=True,
+            )
             continue
 
 

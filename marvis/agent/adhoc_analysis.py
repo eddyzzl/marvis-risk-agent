@@ -216,8 +216,8 @@ def validate_slice_spec(parsed: dict, allowed_columns) -> SliceSpecResult:
 
     sort_by = _optional_str(parsed.get("sort_by"))
     metric_labels = {_metric_label(m.op, m.col) for m in metrics}
-    if sort_by and sort_by not in whitelist and sort_by not in metric_labels:
-        return _clarify(f"排序依据「{sort_by}」既不是现有列也不是所选指标。")
+    if sort_by and sort_by not in group_by and sort_by not in metric_labels:
+        return _clarify(f"排序依据「{sort_by}」必须是分组列或所选指标。")
 
     spec = SliceSpec(
         group_by=tuple(group_by),

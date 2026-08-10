@@ -145,6 +145,29 @@ def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
     assert result.duration_ms >= 0
 
 
+def test_registered_plugin_job_does_not_enable_draft_runtime_policy(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.plugins import runner as runner_module
+
+    runner = _runner(tmp_path)
+    original_run_worker = runner_module._run_worker
+    observed_job = {}
+
+    def capture_job(python_executable, job, **kwargs):
+        observed_job.update(job)
+        return original_run_worker(python_executable, job, **kwargs)
+
+    monkeypatch.setattr(runner_module, "_run_worker", capture_job)
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
+
+    assert result.ok is True, result.error
+    assert result.output == {"echoed": "hi"}
+    assert "mode" not in observed_job
+
+
 def test_tool_runner_signs_success_with_exact_invocation_and_raw_output_hash(
     tmp_path,
 ):
@@ -930,6 +953,7 @@ def test_worker_tool_context_receives_only_opaque_effect_execution_metadata(
             "plugin_paths": [],
             "side_effects": ["write:strategy"],
             "builtin": True,
+            "execution_profile": "standard",
             "effect_execution_id": "effect-1",
             "runtime_generation": "runtime-1",
         }
@@ -975,6 +999,7 @@ def test_builtin_worker_context_bridges_progress_path(tmp_path, monkeypatch):
         "plugin_paths": [],
         "side_effects": [],
         "builtin": True,
+        "execution_profile": "standard",
         "progress_path": str(progress_path),
     })
 
@@ -1567,7 +1592,7 @@ def test_tool_runner_redacts_stdout_and_stderr_tails(tmp_path):
         },
         timeout_seconds=10,
         task_id="task-1",
-        mode="draft",
+        mode="adhoc",
     )
 
     assert result.ok is True, result.error
@@ -1676,7 +1701,7 @@ def test_tool_runner_denies_network_for_adhoc_without_network_side_effect(tmp_pa
         },
         timeout_seconds=10,
         task_id="task-1",
-        mode="draft",
+        mode="adhoc",
     )
 
     assert result.ok is False
@@ -1716,7 +1741,7 @@ def test_tool_runner_denies_adhoc_file_read_outside_allowed_roots_at_runtime(tmp
         },
         timeout_seconds=10,
         task_id="task-1",
-        mode="draft",
+        mode="adhoc",
     )
 
     assert result.ok is False
@@ -1767,7 +1792,7 @@ def test_tool_runner_allows_loopback_for_local_kernels_without_network_side_effe
         },
         timeout_seconds=10,
         task_id="task-1",
-        mode="draft",
+        mode="adhoc",
     )
     thread.join(timeout=2)
 
@@ -1799,7 +1824,7 @@ def test_tool_runner_denies_adhoc_process_spawn_without_side_effect(tmp_path):
         },
         timeout_seconds=10,
         task_id="task-1",
-        mode="draft",
+        mode="adhoc",
     )
 
     assert result.ok is False
@@ -1842,7 +1867,7 @@ def test_tool_runner_denies_adhoc_os_symlink_without_write_side_effect(tmp_path)
         },
         timeout_seconds=10,
         task_id="task-1",
-        mode="draft",
+        mode="adhoc",
     )
 
     assert result.ok is False
@@ -3587,6 +3612,7 @@ def test_tool_runner_worker_subprocess_only_sees_allowlisted_env_vars(tmp_path, 
 
     result = runner.invoke(ToolRef("envpack", "echo_env"), {}, task_id="task-1")
 
+    assert manifest.tools[0].execution_profile == "standard"
     assert result.ok is True, result.error
     visible = set(result.output["env_keys"])
     assert "MARVIS_TEST_SECRET" not in visible

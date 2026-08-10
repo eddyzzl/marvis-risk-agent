@@ -3033,10 +3033,11 @@ def test_strategy_history_renders_local_champions_blockers_and_safe_artifacts():
         ]) {
           assert.ok(html.includes(expected), expected);
         }
-        assert.ok(
-          html.includes(
-            "/api/tasks/task-1/strategy-artifacts/strategy-artifact-limit-json/download",
-          ),
+        const artifactHref = "api/tasks/task-1/strategy-artifacts/strategy-artifact-limit-json/download";
+        assert.ok(html.includes(`href="${artifactHref}"`));
+        assert.equal(
+          new URL(artifactHref, "https://marvis.example/proxy/8123/").pathname,
+          "/proxy/8123/api/tasks/task-1/strategy-artifacts/strategy-artifact-limit-json/download",
         );
         assert.equal(html.includes("javascript:alert"), false);
         assert.equal(html.includes("<img src=x"), false);
@@ -3523,7 +3524,7 @@ def test_cross_auto_search_renders_aggregate_pairs_budget_and_safe_download():
           assert.ok(html.includes(expected), expected);
         }
         assert.ok(html.includes(
-          "/api/tasks/task-1/task-artifacts/artifact-cross-search-1/download",
+          "api/tasks/task-1/task-artifacts/artifact-cross-search-1/download",
         ));
         assert.equal(html.includes("<img src=x"), false);
         assert.equal(html.includes("最佳"), false);

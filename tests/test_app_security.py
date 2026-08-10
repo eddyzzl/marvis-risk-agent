@@ -238,6 +238,69 @@ def test_trusted_proxy_forwards_remote_client_and_guard_still_applies(tmp_path, 
     assert blocked_write.json()["detail"] == "unsafe API methods are limited to local clients"
 
 
+def test_token_authenticated_trusted_proxy_can_use_private_workbench(tmp_path, monkeypatch):
+    # A trusted reverse proxy is a transport boundary only. The forwarded
+    # browser must still prove possession of the shared-host token; XFF alone
+    # never turns it into a local client.
+    monkeypatch.setenv("MARVIS_TRUSTED_PROXY_HOSTS", "127.0.0.1")
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app, client=("127.0.0.1", 43210))
+    forwarded = {"X-Forwarded-For": "203.0.113.7"}
+
+    anonymous = client.get("/", headers=forwarded)
+    assert anonymous.status_code == 401
+    assert "s3cr3t-token" not in anonymous.text
+
+    bootstrap = client.get(
+        "/",
+        headers=forwarded,
+        auth=("marvis", "s3cr3t-token"),
+    )
+    assert bootstrap.status_code == 200
+    assert 'data-marvis-local-token="s3cr3t-token"' in bootstrap.text
+    assert f'data-marvis-plugin-admin-token="{app.state.plugin_admin_token}"' in bootstrap.text
+
+    read = client.get(
+        "/api/tasks",
+        headers={**forwarded, "X-Marvis-Token": "s3cr3t-token"},
+    )
+    assert read.status_code == 200
+    assert read.headers["cache-control"] == "no-store"
+    assert client.get(
+        "/api/branding",
+        headers={**forwarded, "X-Marvis-Token": "s3cr3t-token"},
+    ).status_code == 200
+
+    basic_write = client.post(
+        "/api/tasks",
+        headers=forwarded,
+        auth=("marvis", "s3cr3t-token"),
+        json={},
+    )
+    assert basic_write.status_code == 403
+    assert basic_write.json()["detail"] == "missing or invalid X-Marvis-Token"
+
+    header_write = client.post(
+        "/api/tasks",
+        headers={**forwarded, "X-Marvis-Token": "s3cr3t-token"},
+        json={},
+    )
+    assert header_write.status_code != 403
+
+
+def test_local_token_never_turns_a_direct_remote_client_into_a_proxy_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_TRUSTED_PROXY_HOSTS", "127.0.0.1")
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    remote = TestClient(app, client=("203.0.113.7", 43210))
+
+    response = remote.get("/api/tasks", headers={"X-Marvis-Token": "s3cr3t-token"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "API access is limited to local clients"
+
+
 def test_remote_client_cannot_register_dataset_from_local_path(tmp_path):
     # TST-2 (roadmap-1e): POST /api/tasks/{id}/datasets/register-path lets the
     # server read an arbitrary local file by path -- it must be rejected for a
@@ -462,17 +525,61 @@ def test_local_write_with_correct_token_is_accepted_when_local_token_configured(
     assert response.status_code != 403
 
 
-def test_local_token_does_not_gate_safe_get_requests(tmp_path, monkeypatch):
-    # GET stays token-free even when MARVIS_LOCAL_TOKEN is configured, so
-    # the index page (which hands the token to the frontend) is reachable
-    # without already holding it.
+def test_local_write_with_basic_password_is_rejected_when_local_token_configured(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/tasks",
+        json={},
+        auth=("marvis", "s3cr3t-token"),
+        headers={"Origin": "https://attacker.example"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "missing or invalid X-Marvis-Token"
+
+
+def test_local_token_gates_private_api_get_requests_on_a_shared_host(tmp_path, monkeypatch):
     monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
     app = create_app(tmp_path)
     client = TestClient(app)
 
     response = client.get("/api/tasks")
 
-    assert response.status_code == 200
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Basic realm="MARVIS"'
+    assert "s3cr3t-token" not in response.text
+    assert "marvis_local_session=" not in response.headers.get("set-cookie", "")
+
+    basic_response = client.get("/api/tasks", auth=("marvis", "s3cr3t-token"))
+    assert basic_response.status_code == 200
+
+    header_response = client.get(
+        "/api/tasks",
+        headers={"X-Marvis-Token": "s3cr3t-token"},
+    )
+    assert header_response.status_code == 200
+
+
+def test_local_token_does_not_gate_static_assets_but_gates_health(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    static_response = client.get("/static/css/task-shell.css")
+    assert static_response.status_code == 200
+    assert "marvis_local_session=" not in static_response.headers.get("set-cookie", "")
+    health_response = client.get("/api/health")
+    assert health_response.status_code == 401
+    assert "marvis_local_session=" not in health_response.headers.get("set-cookie", "")
+
+    options_response = client.options("/api/tasks")
+    assert "marvis_local_session=" not in options_response.headers.get("set-cookie", "")
 
 
 def test_local_token_also_blocks_other_local_users_not_just_remote_clients(tmp_path, monkeypatch):
@@ -490,16 +597,64 @@ def test_local_token_also_blocks_other_local_users_not_just_remote_clients(tmp_p
     assert response.json()["detail"] == "missing or invalid X-Marvis-Token"
 
 
-def test_index_embeds_local_token_for_local_client_when_configured(tmp_path, monkeypatch):
+def test_index_challenges_anonymous_local_client_without_disclosing_tokens(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
     app = create_app(tmp_path)
+    plugin_admin_token = app.state.plugin_admin_token
     client = TestClient(app)
 
     response = client.get("/")
 
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Basic realm="MARVIS"'
+    assert response.headers["cache-control"] == "no-store"
+    assert "s3cr3t-token" not in response.text
+    assert plugin_admin_token not in response.text
+
+
+def test_index_rejects_wrong_basic_password_without_disclosing_tokens(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    plugin_admin_token = app.state.plugin_admin_token
+    client = TestClient(app)
+
+    response = client.get("/", auth=("marvis", "wrong-token"))
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Basic realm="MARVIS"'
+    assert "s3cr3t-token" not in response.text
+    assert plugin_admin_token not in response.text
+
+
+def test_index_embeds_browser_tokens_after_basic_authentication(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    plugin_admin_token = app.state.plugin_admin_token
+    client = TestClient(app)
+
+    response = client.get("/", auth=("any-username", "s3cr3t-token"))
+
     assert response.status_code == 200
     assert 'data-marvis-local-token="s3cr3t-token"' in response.text
+    assert f'data-marvis-plugin-admin-token="{plugin_admin_token}"' in response.text
     assert "__MARVIS_LOCAL_TOKEN__" not in response.text
+    assert "__MARVIS_PLUGIN_ADMIN_TOKEN__" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["vary"] == "Authorization"
+
+
+def test_index_accepts_existing_local_token_header_for_api_clients(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/", headers={"X-Marvis-Token": "s3cr3t-token"})
+
+    assert response.status_code == 200
+    assert 'data-marvis-local-token="s3cr3t-token"' in response.text
 
 
 def test_index_omits_local_token_for_remote_client_even_with_remote_read_enabled(tmp_path, monkeypatch):
@@ -648,3 +803,27 @@ def test_remote_plugin_mutation_blocked_even_with_correct_admin_token(tmp_path):
     # The plugin was not mutated (verified via a local read).
     local = TestClient(app)
     assert local.get("/api/plugins").json()["plugins"][0]["enabled"] is True
+
+
+def test_basic_authenticated_browser_can_use_plugin_admin_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    bootstrap = client.get("/", auth=("marvis", "s3cr3t-token"))
+    assert bootstrap.status_code == 200
+
+    response = client.post(
+        "/api/plugins/_sample/disable",
+        headers={
+            "X-Marvis-Token": "s3cr3t-token",
+            "X-MARVIS-Plugin-Admin": app.state.plugin_admin_token,
+        },
+    )
+
+    assert response.status_code == 200
+    plugins = client.get(
+        "/api/plugins?include_disabled=true",
+        headers={"X-Marvis-Token": "s3cr3t-token"},
+    ).json()["plugins"]
+    assert plugins[0]["enabled"] is False

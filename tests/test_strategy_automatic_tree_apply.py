@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import threading
 
@@ -83,13 +85,6 @@ def _write_source(
     return path
 
 
-def _open_fd_count() -> int | None:
-    for directory in (Path("/proc/self/fd"), Path("/dev/fd")):
-        if directory.is_dir():
-            return len(os.listdir(directory))
-    return None
-
-
 def _directory_entries(directory: Path) -> set[str]:
     return {entry.name for entry in directory.iterdir()}
 
@@ -137,6 +132,66 @@ def _track_parquet_readers(
         tracked_open,
     )
     return opened_readers
+
+
+@dataclass
+class _TrackedSourceSnapshotClose:
+    source_fd: int
+    snapshot_fd: int
+    close_calls: int = 0
+    source_fstat_errno: int | None = None
+    snapshot_fstat_errno: int | None = None
+
+
+def _fstat_errno(fd: int) -> int | None:
+    try:
+        os.fstat(fd)
+    except OSError as exc:
+        return exc.errno
+    return None
+
+
+def _track_source_snapshot_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[_TrackedSourceSnapshotClose]:
+    records: list[_TrackedSourceSnapshotClose] = []
+    records_by_snapshot: dict[int, _TrackedSourceSnapshotClose] = {}
+    original_close = automatic_tree_apply._SourceSnapshot.close
+
+    def tracked_close(snapshot) -> None:
+        snapshot_id = id(snapshot)
+        record = records_by_snapshot.get(snapshot_id)
+        if record is None:
+            record = _TrackedSourceSnapshotClose(
+                source_fd=snapshot.source_fd,
+                snapshot_fd=snapshot.snapshot_fd,
+            )
+            records_by_snapshot[snapshot_id] = record
+            records.append(record)
+        record.close_calls += 1
+        try:
+            original_close(snapshot)
+        finally:
+            record.source_fstat_errno = _fstat_errno(record.source_fd)
+            record.snapshot_fstat_errno = _fstat_errno(record.snapshot_fd)
+
+    monkeypatch.setattr(
+        automatic_tree_apply._SourceSnapshot,
+        "close",
+        tracked_close,
+    )
+    return records
+
+
+def _assert_source_snapshot_closed(
+    records: list[_TrackedSourceSnapshotClose],
+) -> None:
+    assert len(records) == 1
+    record = records[0]
+    assert record.close_calls == 1
+    assert record.source_fd != record.snapshot_fd
+    assert record.source_fstat_errno == errno.EBADF
+    assert record.snapshot_fstat_errno == errno.EBADF
 
 
 def _apply(
@@ -583,8 +638,8 @@ def test_restored_caller_path_aba_is_rejected_and_output_removed(
     attack_done = threading.Event()
     attack_errors: list[BaseException] = []
     entries_before = _directory_entries(tmp_path)
-    fd_count_before = _open_fd_count()
     original_verify = automatic_tree_apply._SourceSnapshot.verify_unchanged
+    closed_snapshots = _track_source_snapshot_closes(monkeypatch)
 
     def synchronized_verify(snapshot) -> None:
         attack_ready.set()
@@ -630,8 +685,7 @@ def test_restored_caller_path_aba_is_rejected_and_output_removed(
         attacker.join(timeout=5)
 
     assert _directory_entries(tmp_path) == entries_before
-    if fd_count_before is not None:
-        assert _open_fd_count() == fd_count_before
+    _assert_source_snapshot_closed(closed_snapshots)
     if attack_errors:
         output.unlink(missing_ok=True)
         pytest.skip(f"platform denied deterministic path ABA: {attack_errors[0]}")
@@ -650,8 +704,8 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_success(
     )
     output = tmp_path / "output.parquet"
     entries_before = _directory_entries(tmp_path)
-    fd_count_before = _open_fd_count()
     opened_readers = _track_parquet_readers(monkeypatch)
+    closed_snapshots = _track_source_snapshot_closes(monkeypatch)
 
     apply_automatic_tree_to_parquet(
         _asset(),
@@ -664,8 +718,7 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_success(
     assert _directory_entries(tmp_path) == entries_before | {output.name}
     assert len(opened_readers) == 1
     assert opened_readers[0].close_calls == 1
-    if fd_count_before is not None:
-        assert _open_fd_count() == fd_count_before
+    _assert_source_snapshot_closed(closed_snapshots)
 
 
 def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_schema_failure(
@@ -677,8 +730,8 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_schema_failure(
         {"x": [0.0, 1.0]},
     )
     entries_before = _directory_entries(tmp_path)
-    fd_count_before = _open_fd_count()
     opened_readers = _track_parquet_readers(monkeypatch)
+    closed_snapshots = _track_source_snapshot_closes(monkeypatch)
 
     with pytest.raises(AutomaticTreeApplyError, match="unused"):
         apply_automatic_tree_to_parquet(
@@ -692,8 +745,7 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_schema_failure(
     assert _directory_entries(tmp_path) == entries_before
     assert len(opened_readers) == 1
     assert opened_readers[0].close_calls == 1
-    if fd_count_before is not None:
-        assert _open_fd_count() == fd_count_before
+    _assert_source_snapshot_closed(closed_snapshots)
 
 
 def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_execution_error(
@@ -705,8 +757,8 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_execution_error(
         {"x": [0.0, 1.0], "unused": [0.0, 1.0]},
     )
     entries_before = _directory_entries(tmp_path)
-    fd_count_before = _open_fd_count()
     opened_readers = _track_parquet_readers(monkeypatch)
+    closed_snapshots = _track_source_snapshot_closes(monkeypatch)
 
     def injected_failure(*_args, **_kwargs):
         raise RuntimeError("injected descriptor snapshot failure")
@@ -729,8 +781,7 @@ def test_descriptor_snapshot_leaves_no_path_or_fd_leak_on_execution_error(
     assert _directory_entries(tmp_path) == entries_before
     assert len(opened_readers) == 1
     assert opened_readers[0].close_calls == 1
-    if fd_count_before is not None:
-        assert _open_fd_count() == fd_count_before
+    _assert_source_snapshot_closed(closed_snapshots)
 
 
 def test_descriptor_snapshot_interrupt_closes_once_and_removes_output(

@@ -59,10 +59,25 @@ def test_api_wrappers_keep_formdata_boundary_under_fetch_control():
             text: async () => "",
           };
         };
+        globalThis.document = {
+          body: { dataset: { marvisLocalToken: "shared-host-token" } },
+          baseURI: "https://marvis.local/user/alice/proxy/8000/",
+        };
+        globalThis.location = new URL("https://marvis.local/user/alice/proxy/8000/");
 
         await apiGet("api/tasks");
-        assert.equal(calls.at(-1).url, "/api/tasks");
+        assert.equal(calls.at(-1).url, "https://marvis.local/user/alice/proxy/8000/api/tasks");
         assert.equal(calls.at(-1).options.method, "GET");
+        assert.equal(calls.at(-1).options.headers["X-Marvis-Token"], "shared-host-token");
+
+        await apiGet("https://outside.example.test/data");
+        assert.equal(calls.at(-1).options.headers["X-Marvis-Token"], undefined);
+
+        await apiGet("https://marvis.local/api/tasks", {
+          headers: { "x-marvis-token": "caller-provided" },
+        });
+        assert.equal(calls.at(-1).options.headers["x-marvis-token"], "caller-provided");
+        assert.equal(calls.at(-1).options.headers["X-Marvis-Token"], undefined);
 
         await apiPost("/api/plans/p1/confirm", { approved: true });
         assert.equal(calls.at(-1).options.method, "POST");
@@ -88,8 +103,12 @@ def test_api_wrappers_keep_formdata_boundary_under_fetch_control():
         );
 
         await apiDelete("/api/plugins/demo");
-        assert.equal(calls.at(-1).url, "/api/plugins/demo");
+        assert.equal(calls.at(-1).url, "https://marvis.local/user/alice/proxy/8000/api/plugins/demo");
         assert.equal(calls.at(-1).options.method, "DELETE");
+
+        const callCount = calls.length;
+        await assert.rejects(apiGet("//outside.example.test/api/tasks"), /invalid API endpoint/);
+        assert.equal(calls.length, callCount);
         """
     )
 

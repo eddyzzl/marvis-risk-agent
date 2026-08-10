@@ -473,6 +473,10 @@
 .task-pill.run::before { animation: pill-pulse 1.2s ease-in-out infinite; }
 @keyframes pill-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.6); } }
 
+@media (prefers-reduced-motion: reduce) {
+  .task-pill.run::before { animation: none; }
+}
+
 .action-error-detail {
   display: -webkit-box;
   margin: 7px 0 0;

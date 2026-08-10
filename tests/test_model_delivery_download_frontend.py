@@ -43,10 +43,10 @@ def test_model_delivery_panel_offers_one_safe_download_per_primary_artifact():
         });
 
         const expected = {
-          native_model: "/api/artifacts/tasks%2Ftask-42%2Fmodeling_artifacts%2Fartifact-1.pkl",
-          pmml: "/api/artifacts/tasks%2Ftask-42%2Fmodeling_artifacts%2Fartifact-1.pmml",
-          model_card: "/api/artifacts/tasks%2Ftask-42%2Fmodeling_artifacts%2Fartifact-1.model_card.md",
-          approval_package: "/api/artifacts/tasks%2Ftask-42%2Fmodeling_artifacts%2Fartifact-1.approval_package.md",
+          native_model: "api/artifacts/tasks%2Ftask-42%2Fmodeling_artifacts%2Fartifact-1.pkl",
+          pmml: "api/artifacts/tasks%2Ftask-42%2Fmodeling_artifacts%2Fartifact-1.pmml",
+          model_card: "api/artifacts/tasks%2Ftask-42%2Fmodeling_artifacts%2Fartifact-1.model_card.md",
+          approval_package: "api/artifacts/tasks%2Ftask-42%2Fmodeling_artifacts%2Fartifact-1.approval_package.md",
         };
         for (const [kind, href] of Object.entries(expected)) {
           const marker = `data-model-delivery-download="${kind}"`;

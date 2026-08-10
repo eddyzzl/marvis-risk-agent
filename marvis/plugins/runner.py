@@ -25,7 +25,11 @@ from marvis.job_cancellation import JobCancelled
 from marvis.plugins.contracts import MAX_PROGRESS_BYTES, PROTOCOL_VERSION, WORKER_RESULT_SENTINEL
 from marvis.plugins.contracts import ToolContext as ToolContext  # noqa: F401 (re-exported for compatibility)
 from marvis.plugins.manifest import (
+    EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED,
+    EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
+    EXECUTION_PROFILE_STANDARD,
     PluginManifest,
+    RUNNABLE_EXECUTION_PROFILE_CHOICES,
     ToolRef,
     manifest_to_dict,
     python_requires_satisfied,
@@ -296,6 +300,23 @@ class ToolRunner:
         except PermissionError as exc:
             result = _failed_result(started, "permission", str(exc))
             return self._finalize_audited_result(started, target_ref, inputs, result)
+        execution_profile = str(getattr(tool, "execution_profile", "")).strip()
+        if execution_profile == EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED:
+            result = _failed_result(
+                started,
+                "execution_profile",
+                f"tool {target_ref} is a legacy Draft with ambiguous provenance; "
+                "re-promote it before execution",
+            )
+            return self._finalize_audited_result(started, target_ref, inputs, result)
+        if execution_profile not in RUNNABLE_EXECUTION_PROFILE_CHOICES:
+            result = _failed_result(
+                started,
+                "execution_profile",
+                f"tool {target_ref} has unsupported execution profile "
+                f"{execution_profile!r}",
+            )
+            return self._finalize_audited_result(started, target_ref, inputs, result)
         environment_error = self._worker_environment_error(manifest, target_ref)
         if environment_error is not None:
             result = _failed_result(
@@ -444,7 +465,22 @@ class ToolRunner:
             "plugin_paths": [str(path) for path in self._plugin_paths],
             "side_effects": list(tool.side_effects),
             "builtin": bool(manifest.builtin),
+            "execution_profile": execution_profile,
         }
+        if execution_profile == EXECUTION_PROFILE_DRAFT_RESTRICTED_V1:
+            try:
+                job["module_path"] = str(
+                    _restricted_plugin_tools_path(manifest, self._plugin_paths)
+                )
+            except ValueError as exc:
+                result = _failed_result(started, "execution_profile", str(exc))
+                return self._finalize_audited_result(
+                    started,
+                    target_ref,
+                    inputs,
+                    result,
+                    seed=effective_seed,
+                )
         if effect_execution is not None:
             # Execution authorization is platform metadata, not a business
             # input.  Keeping it out-of-band means a model/client cannot forge
@@ -918,6 +954,12 @@ class ToolRunner:
             "plugin_paths": [str(path) for path in self._plugin_paths],
             "side_effects": [],
             "builtin": False,
+            "mode": mode,
+            "execution_profile": (
+                EXECUTION_PROFILE_DRAFT_RESTRICTED_V1
+                if mode == "draft"
+                else EXECUTION_PROFILE_STANDARD
+            ),
         }
         try:
             completed = _run_worker(
@@ -1236,6 +1278,31 @@ def _registered_manifest_for_module(
         if any(_same_module_file(requested, candidate) for candidate in candidates):
             return f"{manifest.name}@{manifest.version}"
     return None
+
+
+def _restricted_plugin_tools_path(
+    manifest: PluginManifest,
+    plugin_paths: tuple[Path, ...],
+) -> Path:
+    """Resolve the explicit on-disk source for a restricted promoted Draft.
+
+    This is driven by the signed/registered execution profile, never by a
+    ``draft_*`` module-name convention.  Restricted plugins deliberately use
+    the standard plugin-root ``tools.py`` layout written by promotion.
+    """
+
+    expected_module = f"{manifest.name}.tools"
+    if manifest.module != expected_module:
+        raise ValueError(
+            f"restricted tool {manifest.name} must declare module {expected_module!r}"
+        )
+    candidates = [Path(root) / manifest.name / "tools.py" for root in plugin_paths]
+    existing = [path for path in candidates if path.is_file()]
+    if len(existing) != 1:
+        raise ValueError(
+            f"restricted tool {manifest.name} requires exactly one plugin-root tools.py"
+        )
+    return existing[0].resolve()
 
 
 def _same_module_file(requested: Path, candidate: Path) -> bool:

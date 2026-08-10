@@ -94,22 +94,22 @@ MARVIS 的默认信任模型是"回环地址（127.0.0.1）即可信"——这�
 
 如果部署在共享主机 / 多账号 Linux 服务器上，按需组合下面三个环境变量：
 
-### `MARVIS_LOCAL_TOKEN`：本地写操作令牌（推荐，最先配置）
+### `MARVIS_LOCAL_TOKEN`：本机私有 API 令牌（推荐，最先配置）
 
-设置后，所有非 `GET` 请求（包括来自 `127.0.0.1` 的请求）都必须在 `X-Marvis-Token` 请求头中带上该值，否则返回 403。未设置时行为不变（当前单人体验不受影响）。
+设置后，除静态资源外的本机首页和 API 读取都需要该凭证；所有非安全请求（包括来自 `127.0.0.1` 的请求）还必须在 `X-Marvis-Token` 请求头中带上该值，否则返回 403。未设置时行为不变（当前单人体验不受影响）。
 
 ```bash
 export MARVIS_LOCAL_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 marvis serve --host 127.0.0.1 --port 8000 --workspace ./workspace
 ```
 
-浏览器打开首页（`GET /`）时，服务端会把该令牌注入页面（`<body data-marvis-local-token>`），前端 `api()` 封装自动在后续所有非 `GET` 请求上回传 `X-Marvis-Token`。该令牌只在本机客户端访问首页时下发，即使同时开启了 `MARVIS_ALLOW_REMOTE_READ`，远程客户端也读不到它。
+浏览器首次打开首页（直连本机或经已配置的可信代理，`GET /`）会收到 HTTP Basic 认证提示；用户名可任意填写，密码填上述令牌。认证成功后，服务端以 `Cache-Control: no-store` 返回页面并注入令牌，前端 `api()` 封装会在同源 API 请求中显式回传 `X-Marvis-Token`。Basic 可验证私有读取；写操作仍绝不只依赖浏览器缓存的 Basic 凭证，避免跨站表单请求滥用。该令牌只在已认证的本机首页或可信代理链路下发；即使同时开启了 `MARVIS_ALLOW_REMOTE_READ`，其他远程客户端也读不到它。
 
-这只是一层轻量防护：任何能读到 `MARVIS_LOCAL_TOKEN` 环境变量或首页 HTML 源码的本机用户仍然可以拿到令牌。真正的隔离需要更彻底的方案（例如监听 Unix domain socket 并设置 0700 权限，目前尚未实现）或系统级用户隔离（容器/虚拟机）。
+这只是一层轻量防护：任何能读到 `MARVIS_LOCAL_TOKEN` 环境变量，或已持有令牌并完成首页认证的本机用户，仍然可以拿到令牌。真正的隔离需要更彻底的方案（例如监听 Unix domain socket 并设置 0700 权限，目前尚未实现）或系统级用户隔离（容器/虚拟机）。
 
 ### `MARVIS_ALLOW_REMOTE_READ`：允许非本机客户端只读访问
 
-默认情况下，非本机（非回环地址）客户端只能访问 `/`、`/api/health` 和 `/static/`。设置为 `1`/`true` 后，非本机客户端可以读取任务、数据集等只读 API，但系统设置（`/api/settings*`）、品牌配置（`/api/branding`、`/branding/*`）和 `MARVIS_LOCAL_TOKEN` 本身依然只对本机客户端可见。所有写操作（非 `GET`）无论是否开启该变量，始终只允许本机客户端发起。
+默认情况下，非本机（非回环地址）客户端只能访问 `/`、`/api/health` 和 `/static/`。设置为 `1`/`true` 后，非本机客户端可以读取任务、数据集等只读 API，但系统设置（`/api/settings*`）、品牌配置（`/api/branding`、`/branding/*`）和 `MARVIS_LOCAL_TOKEN` 本身仍只对直连本机或经 `MARVIS_TRUSTED_PROXY_HOSTS` 且已认证的客户端可见。所有写操作（非 `GET`）无论是否开启该变量，仍只允许直连本机，或经可信代理并显式携带 `MARVIS_LOCAL_TOKEN` 的客户端发起。
 
 ```bash
 export MARVIS_ALLOW_REMOTE_READ=1
@@ -123,7 +123,7 @@ export MARVIS_ALLOW_REMOTE_READ=1
 export MARVIS_TRUSTED_PROXY_HOSTS="127.0.0.1"
 ```
 
-多个可信代理地址用逗号分隔。未在该列表中的回环对端携带的转发头会被直接忽略（fail closed），不会被当作本地请求。
+多个可信代理地址用逗号分隔。未在该列表中的回环对端携带的转发头会被直接忽略（fail closed），不会被当作本地请求。与 `MARVIS_LOCAL_TOKEN` 同时设置时，只有经这个可信代理、并且完成 Basic bootstrap 或显式携带 token 的客户端才可使用私有读写工作台；转发地址本身**不会**获得本地权限。代理必须覆盖来自客户端的 `X-Forwarded-For`，并通过 HTTPS 保护 Basic/token 传输。
 
 ### 三者的组合建议
 

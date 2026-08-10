@@ -2,6 +2,7 @@ import sys
 
 import pytest
 
+import marvis.drafts.sandbox as draft_sandbox_module
 import marvis.repositories.drafts as draft_repo_module
 from marvis.db import DraftRepository, PluginRepository, init_db
 from marvis.drafts import DraftStateError, DraftTool
@@ -84,7 +85,7 @@ def test_draft_sandbox_records_failure_without_raising(tmp_path):
     sandbox, drafts, repo, audit_repo, _tool_registry = _runtime(tmp_path)
     draft = _draft(
         "def calc_margin(inputs, ctx):\n"
-        "    raise RuntimeError('boom')\n"
+        "    return {'margin': inputs['missing']}\n"
     )
     drafts.add(draft)
 
@@ -92,7 +93,7 @@ def test_draft_sandbox_records_failure_without_raising(tmp_path):
 
     assert run.ok is False
     assert run.output is None
-    assert "boom" in run.error
+    assert "missing" in run.error
     assert repo.list_runs(draft.id) == [run]
     assert drafts.get(draft.id).status == "draft"
     run_audit = audit_repo.list_audit(kind="draft.run.record")[0]
@@ -117,8 +118,8 @@ def test_draft_sandbox_rejects_unsafe_draft_code_before_execution(tmp_path, monk
     run = sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")
 
     assert run.ok is False
-    assert "banned calls" in run.error
-    assert "open(" in run.error
+    assert "Draft Language v1" in run.error
+    assert "expression statements" in run.error
     assert repo.list_runs(draft.id) == [run]
     assert drafts.get(draft.id).status == "draft"
     run_audit = audit_repo.list_audit(kind="draft.run.record")[0]
@@ -143,8 +144,184 @@ def test_draft_sandbox_rejects_path_read_text_before_execution(tmp_path, monkeyp
     run = sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")
 
     assert run.ok is False
-    assert ".read_text(" in run.error
+    assert "Draft Language v1" in run.error
+    assert "Path" in run.error
     assert repo.list_runs(draft.id) == [run]
+
+
+def test_draft_sandbox_rejects_constructed_import_and_native_escape_before_execution(
+    tmp_path,
+    monkeypatch,
+):
+    sandbox, drafts, repo, _audit_repo, _tool_registry = _runtime(tmp_path)
+    draft = _draft(
+        "def calc_margin(inputs, ctx):\n"
+        "    import_name = '__im' + 'port__'\n"
+        "    importer = getattr(__builtins__, import_name)\n"
+        "    os_module = importer('os')\n"
+        "    native_module = importer('ct' + 'ypes')\n"
+        "    native_pid = native_module.CDLL(None).getpid()\n"
+        "    return {'margin': int(native_pid == os_module.getpid())}\n"
+    )
+    drafts.add(draft)
+    monkeypatch.setattr(
+        sandbox._runner,
+        "invoke_adhoc",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unsafe draft should not reach the worker")
+        ),
+    )
+
+    run = sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")
+
+    assert run.ok is False
+    assert "Draft Language v1" in run.error
+    assert "getattr" in run.error
+    assert repo.list_runs(draft.id) == [run]
+    assert drafts.get(draft.id).status == "draft"
+
+
+def test_draft_worker_rejects_dynamic_native_import_if_ast_gate_is_bypassed(
+    tmp_path,
+    monkeypatch,
+):
+    sandbox, drafts, repo, _audit_repo, _tool_registry = _runtime(tmp_path)
+    draft = _draft(
+        "def calc_margin(inputs, ctx):\n"
+        "    import_name = '__im' + 'port__'\n"
+        "    importer = __builtins__[import_name]\n"
+        "    native_module = importer('ct' + 'ypes')\n"
+        "    return {'margin': native_module.CDLL(None).getpid()}\n"
+    )
+    drafts.add(draft)
+    monkeypatch.setattr(
+        draft_sandbox_module,
+        "assert_draft_code_safe",
+        lambda _code, **_kwargs: None,
+    )
+
+    run = sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")
+
+    assert run.ok is False
+    assert "Draft Language v1 rewrite required" in run.error
+    assert "__builtins__" in run.error
+    assert repo.list_runs(draft.id) == [run]
+    assert drafts.get(draft.id).status == "draft"
+
+
+def test_draft_worker_revalidates_module_introspection_when_parent_gate_is_bypassed(
+    tmp_path,
+    monkeypatch,
+):
+    sandbox, drafts, repo, _audit_repo, _tool_registry = _runtime(tmp_path)
+    draft = _draft(
+        "import statistics\n"
+        "def calc_margin(inputs, ctx):\n"
+        "    builtins_module = statistics.sys.modules['builtins']\n"
+        "    import_name = '__im' + 'port__'\n"
+        "    importer = builtins_module.__dict__[import_name]\n"
+        "    native_module = importer('ct' + 'ypes')\n"
+        "    return {'margin': native_module.CDLL(None).getpid()}\n"
+    )
+    drafts.add(draft)
+    monkeypatch.setattr(
+        draft_sandbox_module,
+        "assert_draft_code_safe",
+        lambda _code, **_kwargs: None,
+    )
+
+    run = sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")
+
+    assert run.ok is False
+    assert "Draft Language v1 rewrite required" in run.error
+    assert "sys" in run.error
+    assert repo.list_runs(draft.id) == [run]
+    assert drafts.get(draft.id).status == "draft"
+
+
+def test_draft_worker_revalidates_match_case_escape_when_parent_gate_is_bypassed(
+    tmp_path,
+    monkeypatch,
+):
+    sandbox, drafts, repo, _audit_repo, _tool_registry = _runtime(tmp_path)
+    draft = _draft(
+        "import json\n"
+        "def calc_margin(inputs, ctx):\n"
+        "    match json.loads:\n"
+        "        case object(__globals__=globals_dict):\n"
+        "            pass\n"
+        "    key = '__' + 'builtins' + '__'\n"
+        "    builtins_dict = globals_dict[key]\n"
+        "    importer = builtins_dict['__' + 'import' + '__']\n"
+        "    os_module = importer('os')\n"
+        "    return {'margin': len(os_module.getcwd())}\n"
+    )
+    drafts.add(draft)
+    monkeypatch.setattr(
+        draft_sandbox_module,
+        "assert_draft_code_safe",
+        lambda _code, **_kwargs: None,
+    )
+
+    run = sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")
+
+    assert run.ok is False
+    assert "Draft Language v1 rewrite required" in run.error
+    assert "match statements" in run.error
+    assert repo.list_runs(draft.id) == [run]
+    assert drafts.get(draft.id).status == "draft"
+
+
+def test_draft_sandbox_allows_deterministic_calculation_imports(tmp_path):
+    sandbox, drafts, repo, _audit_repo, _tool_registry = _runtime(tmp_path)
+    draft = _draft(
+        "from __future__ import annotations\n"
+        "import collections\n"
+        "import functools\n"
+        "import itertools\n"
+        "import json\n"
+        "import math\n"
+        "import operator\n"
+        "import random\n"
+        "import re\n"
+        "import statistics\n"
+        "import string\n"
+        "from decimal import Decimal\n"
+        "from fractions import Fraction\n"
+        "def calc_margin(inputs, ctx):\n"
+        "    delta = Decimal(str(inputs['revenue'])) - Decimal(str(inputs['cost']))\n"
+        "    scaled = float(delta) * float(Fraction(1, 1))\n"
+        "    assert collections.Counter('aa')['a'] == 2\n"
+        "    assert functools.reduce(operator.add, itertools.repeat(1, 2)) == 2\n"
+        "    assert json.loads('{\"ok\": true}')['ok'] is True\n"
+        "    assert random.Random(7).randint(1, 1) == 1\n"
+        "    assert re.fullmatch('[a-z]+', string.ascii_lowercase)\n"
+        "    return {'margin': math.floor(statistics.fmean([scaled, scaled]))}\n"
+    )
+    drafts.add(draft)
+
+    run = sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")
+
+    assert run.ok is True, run.error
+    assert run.output == {"margin": 7}
+    assert repo.list_runs(draft.id) == [run]
+    assert drafts.get(draft.id).status == "tested"
+
+
+def test_draft_audit_hook_is_inert_after_restricted_execution_scope():
+    """A one-time audit-hook registration must not poison ordinary imports.
+
+    Python audit hooks cannot be unregistered, so the worker deliberately
+    gates its hook with a scope flag.  This directly regresses the former
+    process-wide ``ctypes`` denial which broke a later ordinary tool import.
+    """
+    from marvis.plugins import subprocess_worker
+
+    assert subprocess_worker._draft_audit_hook("ctypes.dlopen", ()) is None
+    with subprocess_worker._draft_audit_scope():
+        with pytest.raises(PermissionError, match="native library access denied"):
+            subprocess_worker._draft_audit_hook("ctypes.dlopen", ())
+    assert subprocess_worker._draft_audit_hook("ctypes.dlopen", ()) is None
 
 
 def test_draft_sandbox_rolls_back_run_and_tested_status_when_record_audit_fails(

@@ -190,6 +190,54 @@ def test_slice_aggregate_rejects_injected_column_name(tmp_path):
     assert "channel; DROP TABLE audit" in (injected.error or "")
 
 
+def test_slice_aggregate_sort_by_requires_group_or_metric_output(tmp_path):
+    runner, registry, _settings = _runtime(tmp_path)
+    ds = _register(registry, tmp_path, _frame())
+
+    # A real source column that is not selected in GROUP BY must be rejected before
+    # it can become an invalid ORDER BY expression in aggregate SQL.
+    ungrouped = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": ds.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "count"}],
+            "sort_by": "amount",
+        },
+        task_id="task-1",
+    )
+    assert ungrouped.ok is False
+    assert "sort_by must name a group_by column or selected metric output" in (
+        ungrouped.error or ""
+    )
+
+    grouped = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": ds.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "count"}],
+            "sort_by": "channel",
+        },
+        task_id="task-1",
+    )
+    assert grouped.ok is True, grouped.error
+    assert [row["channel"] for row in grouped.output["rows"]] == ["A", "B"]
+
+    metric = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": ds.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "mean", "col": "amount"}],
+            "sort_by": "mean_amount",
+        },
+        task_id="task-1",
+    )
+    assert metric.ok is True, metric.error
+    assert [row["channel"] for row in metric.output["rows"]] == ["B", "A"]
+
+
 def test_slice_aggregate_hallucinated_metric_column_rejected(tmp_path):
     runner, registry, _settings = _runtime(tmp_path)
     ds = _register(registry, tmp_path, _frame())

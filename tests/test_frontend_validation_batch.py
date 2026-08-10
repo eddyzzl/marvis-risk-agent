@@ -108,10 +108,10 @@ assert.deepEqual(payload.counts, {
   succeeded: 1,
   failed: 1,
 });
-assert.equal(payload.items[1].contractUrl, "/api/tasks/child-review/validation-input-contract");
+assert.equal(payload.items[1].contractUrl, "api/tasks/child-review/validation-input-contract");
 assert.equal(payload.items[1].inputContractStatus, "pending_confirmation");
-assert.equal(payload.items[0].wordReportDownloadUrl, "/api/tasks/child-pass/report/download");
-assert.equal(payload.items[0].analysisDownloadUrl, "/api/tasks/child-pass/analysis/download");
+assert.equal(payload.items[0].wordReportDownloadUrl, "api/tasks/child-pass/report/download");
+assert.equal(payload.items[0].analysisDownloadUrl, "api/tasks/child-pass/analysis/download");
 assert.equal(payload.items[2].errorMessage, "PMML 无法加载");
 
 const html = batch.renderValidationBatchOverview(payload, { requestedItemId: "child-review" });
@@ -122,9 +122,9 @@ assert.match(html, /PSI 达到预警阈值/);
 assert.match(html, /确认合同/);
 assert.match(html, /data-batch-contract-task-id="child-review"/);
 assert.doesNotMatch(html, /target="_blank"/);
-assert.doesNotMatch(html, /href="\/api\/tasks\/child-review\/validation-input-contract"/);
-assert.match(html, /href="\/api\/tasks\/child-pass\/report\/download">Word<\/a>/);
-assert.match(html, /href="\/api\/tasks\/child-pass\/analysis\/download">Excel<\/a>/);
+assert.doesNotMatch(html, /href="api\/tasks\/child-review\/validation-input-contract"/);
+assert.match(html, /href="api\/tasks\/child-pass\/report\/download">Word<\/a>/);
+assert.match(html, /href="api\/tasks\/child-pass\/analysis\/download">Excel<\/a>/);
 assert.match(html, /\?task=parent-1&amp;item=child-review/);
 assert.match(html, /下载汇总 Excel/);
 assert.match(html, /data-batch-child-task-id="child-review"/);

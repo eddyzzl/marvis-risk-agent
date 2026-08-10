@@ -8,11 +8,19 @@ from marvis.orchestrator.validator import (
     _schema_has_path,
 )
 from marvis.plugins.loader import load_builtin_packs
-from marvis.plugins.manifest import ToolRef, parse_manifest
+from marvis.plugins.manifest import (
+    EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED,
+    ToolRef,
+    parse_manifest,
+)
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 
 
-def _tool_registry(tmp_path: Path) -> ToolRegistry:
+def _tool_registry(
+    tmp_path: Path,
+    *,
+    include_repromotion_required: bool = False,
+) -> ToolRegistry:
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
     repo = PluginRepository(db_path)
@@ -20,7 +28,47 @@ def _tool_registry(tmp_path: Path) -> ToolRegistry:
     load_builtin_packs(registry, Path(__file__).parents[1] / "marvis" / "packs")
     registry.register(_metrics_manifest(), enabled=True)
     registry.register(_join_manifest(), enabled=True)
+    if include_repromotion_required:
+        registry.register(_repromotion_required_manifest(), enabled=True)
     return ToolRegistry(registry)
+
+
+def _repromotion_required_manifest():
+    return parse_manifest(
+        {
+            "name": "legacy_draft_pack",
+            "version": "0.1.0",
+            "display_name": "Legacy Draft Pack",
+            "description": "Requires re-promotion.",
+            "module": "legacy_draft_pack.tools",
+            "tools": [
+                {
+                    "name": "echo",
+                    "summary": "Echo a message",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                        "required": ["message"],
+                        "additionalProperties": False,
+                    },
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {"echoed": {"type": "string"}},
+                        "required": ["echoed"],
+                        "additionalProperties": False,
+                    },
+                    "determinism": "deterministic",
+                    "timeout_seconds": 10,
+                    "failure_policy": "fail",
+                    "entrypoint": "tool_echo",
+                    "execution_profile": EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED,
+                }
+            ],
+            "hooks": [],
+            "permissions": [],
+        },
+        builtin=False,
+    )
 
 
 def _metrics_manifest():
@@ -174,8 +222,17 @@ def _step(
     )
 
 
-def _validator(tmp_path: Path) -> PlanValidator:
-    return PlanValidator(_tool_registry(tmp_path))
+def _validator(
+    tmp_path: Path,
+    *,
+    include_repromotion_required: bool = False,
+) -> PlanValidator:
+    return PlanValidator(
+        _tool_registry(
+            tmp_path,
+            include_repromotion_required=include_repromotion_required,
+        )
+    )
 
 
 def test_plan_validator_accepts_basic_echo_plan(tmp_path):
@@ -219,6 +276,21 @@ def test_plan_validator_reports_unknown_tools(tmp_path):
     problems = _validator(tmp_path).validate(_plan(step))
 
     assert any("missing" in problem for problem in problems)
+
+
+def test_plan_validator_rejects_repromotion_required_tools(tmp_path):
+    step = _step(
+        "step-1",
+        ToolRef("legacy_draft_pack", "echo"),
+        {"message": "hi"},
+    )
+
+    problems = _validator(
+        tmp_path,
+        include_repromotion_required=True,
+    ).validate(_plan(step))
+
+    assert any("legacy Draft is re-promoted" in problem for problem in problems)
 
 
 def test_plan_validator_checks_literal_inputs_but_skips_deferred_inputs(tmp_path):

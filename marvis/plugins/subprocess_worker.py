@@ -1,24 +1,65 @@
 from __future__ import annotations
 
 import builtins
-from contextlib import redirect_stderr, redirect_stdout
+import collections
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import decimal
 import errno
+import fractions
+import functools
 import io
 from io import StringIO
 import importlib
 import importlib.util
 import ipaddress
+import itertools
 import json
+import math
+import operator
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import socket
+import statistics
+import string
 import subprocess
 import sys
 import traceback
+from types import ModuleType
 
+from marvis.draft_language import (
+    ALLOWED_BUILTINS,
+    ALLOWED_IMPORT_ROOTS,
+    DRAFT_EXECUTION_PROFILE,
+    DraftLanguageError,
+    ValidatedDraft,
+    validate_draft_source,
+)
 from marvis.plugins.contracts import PROTOCOL_VERSION, WORKER_RESULT_SENTINEL, ToolContext
+from marvis.plugins.manifest import (
+    EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
+    EXECUTION_PROFILE_STANDARD,
+    RUNNABLE_EXECUTION_PROFILE_CHOICES,
+)
+
+
+# Compatibility export for the pre-v1 validation test.  This now means the
+# shared language allowlist, not a list used by a runtime import hook.
+_DRAFT_ALLOWED_IMPORT_ROOTS = ALLOWED_IMPORT_ROOTS
+_DRAFT_BLOCKED_AUDIT_EVENTS = frozenset({
+    "os.exec",
+    "os.fork",
+    "os.forkpty",
+    "os.posix_spawn",
+    "os.spawn",
+    "os.system",
+    "pty.spawn",
+    "subprocess.Popen",
+})
+_DRAFT_AUDIT_ACTIVE = False
+_DRAFT_AUDIT_HOOK_INSTALLED = False
 
 
 def worker_main() -> None:
@@ -117,6 +158,7 @@ def _check_protocol_version(job: dict) -> None:
 
 
 def _run_tool(job: dict) -> dict:
+    execution_profile = _execution_profile(job)
     side_effects = [str(item) for item in (job.get("side_effects") or [])]
     plugin_paths = [Path(str(path)) for path in (job.get("plugin_paths") or []) if str(path)]
     _install_network_guard(side_effects)
@@ -134,43 +176,71 @@ def _run_tool(job: dict) -> dict:
         path_text = str(path)
         if path_text and path_text not in sys.path:
             sys.path.insert(0, path_text)
-    module = _load_module(job)
-    func = getattr(module, job["entrypoint"])
-    ctx = ToolContext(
-        task_id=str(job["task_id"]),
-        seed=job.get("seed"),
-        datasets_root=Path(job["datasets_root"]),
-        workspace=Path(job["workspace"]),
-        effect_execution_id=(
-            str(job["effect_execution_id"])
-            if job.get("effect_execution_id") is not None
-            else None
-        ),
-        runtime_generation=(
-            str(job["runtime_generation"])
-            if job.get("runtime_generation") is not None
-            else None
-        ),
-        # Only built-in tools receive the host-issued progress path.  External
-        # plugins cannot turn telemetry into an undeclared workspace write.
-        progress_path=(
-            Path(str(job["progress_path"]))
-            if bool(job.get("builtin")) and job.get("progress_path")
-            else None
-        ),
-    )
-    if ctx.seed is not None:
-        random.seed(ctx.seed)
-        try:
-            import numpy as np
+    if execution_profile == EXECUTION_PROFILE_DRAFT_RESTRICTED_V1:
+        module = _load_restricted_draft_module(job)
+        ctx = _DraftContext(task_id=str(job["task_id"]), seed=job.get("seed"))
+        if ctx.seed is not None:
+            random.seed(ctx.seed)
+        func = getattr(module, job["entrypoint"])
+        # The AST has been compiled and all safe capability modules were
+        # preloaded before this scope. The hook remains an active-only
+        # backstop, so it cannot poison any later normal-tool imports in a
+        # long-lived in-process test or nested runtime.
+        with _draft_audit_scope():
+            result = func(job["inputs"], ctx)
+    else:
+        module = _load_module(job)
+        func = getattr(module, job["entrypoint"])
+        ctx = ToolContext(
+            task_id=str(job["task_id"]),
+            seed=job.get("seed"),
+            datasets_root=Path(job["datasets_root"]),
+            workspace=Path(job["workspace"]),
+            effect_execution_id=(
+                str(job["effect_execution_id"])
+                if job.get("effect_execution_id") is not None
+                else None
+            ),
+            runtime_generation=(
+                str(job["runtime_generation"])
+                if job.get("runtime_generation") is not None
+                else None
+            ),
+            # Only built-in tools receive the host-issued progress path.
+            progress_path=(
+                Path(str(job["progress_path"]))
+                if bool(job.get("builtin")) and job.get("progress_path")
+                else None
+            ),
+        )
+        if ctx.seed is not None:
+            random.seed(ctx.seed)
+            try:
+                import numpy as np
 
-            np.random.seed(ctx.seed)
-        except Exception:
-            pass
-    result = func(job["inputs"], ctx)
+                np.random.seed(ctx.seed)
+            except Exception:
+                pass
+        result = func(job["inputs"], ctx)
     if not isinstance(result, dict):
         raise TypeError(f"tool must return dict, got {type(result).__name__}")
     return result
+
+
+def _execution_profile(job: dict) -> str:
+    # Existing direct/internal worker callers predate the manifest-owned field.
+    # They retain the ordinary standard profile; an explicit unknown profile
+    # still fails closed rather than silently becoming unrestricted.
+    profile = str(job.get("execution_profile") or EXECUTION_PROFILE_STANDARD).strip()
+    if profile not in RUNNABLE_EXECUTION_PROFILE_CHOICES:
+        raise PermissionError(f"unsupported execution profile: {profile!r}")
+    if profile == EXECUTION_PROFILE_DRAFT_RESTRICTED_V1 and (
+        DRAFT_EXECUTION_PROFILE != EXECUTION_PROFILE_DRAFT_RESTRICTED_V1
+    ):
+        # Keep a protocol/configuration mismatch fail-closed even if a future
+        # refactor accidentally edits only one side of the shared literal.
+        raise PermissionError("Draft Language execution profile is misconfigured")
+    return profile
 
 
 def _should_install_file_guard(job: dict) -> bool:
@@ -591,6 +661,281 @@ def _load_module(job: dict):
         spec.loader.exec_module(module)
         return module
     return importlib.import_module(job["module"])
+
+
+class _DraftContext:
+    """The only host context visible to Draft Language functions."""
+
+    __slots__ = ("_task_id", "_seed")
+
+    def __init__(self, *, task_id: str, seed: int | None):
+        self._task_id = task_id
+        self._seed = seed
+
+    @property
+    def task_id(self) -> str:
+        return self._task_id
+
+    @property
+    def seed(self) -> int | None:
+        return self._seed
+
+
+class _DraftCapability:
+    """A tiny attribute facade; only language-declared members exist."""
+
+    __slots__ = ("_values",)
+
+    def __init__(self, values: dict[str, object]):
+        self._values = dict(values)
+
+    def __getattribute__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        values = object.__getattribute__(self, "_values")
+        try:
+            return values[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class _DraftRandom:
+    """A narrow wrapper around a private deterministic random generator."""
+
+    __slots__ = ("_random",)
+
+    def __init__(self, seed=None):
+        self._random = random.Random(seed)
+
+    def choice(self, values):
+        return self._random.choice(values)
+
+    def randint(self, lower, upper):
+        return self._random.randint(lower, upper)
+
+    def random(self):
+        return self._random.random()
+
+    def uniform(self, lower, upper):
+        return self._random.uniform(lower, upper)
+
+
+def _draft_counter(*args, **kwargs):
+    return collections.Counter(*args, **kwargs)
+
+
+_DRAFT_MODULE_CAPABILITIES = {
+    "module:collections": _DraftCapability({"Counter": _draft_counter}),
+    "module:decimal": _DraftCapability({
+        "Decimal": decimal.Decimal,
+        "ROUND_DOWN": decimal.ROUND_DOWN,
+        "ROUND_HALF_EVEN": decimal.ROUND_HALF_EVEN,
+        "ROUND_HALF_UP": decimal.ROUND_HALF_UP,
+        "ROUND_UP": decimal.ROUND_UP,
+    }),
+    "module:fractions": _DraftCapability({"Fraction": fractions.Fraction}),
+    "module:functools": _DraftCapability({"reduce": functools.reduce}),
+    "module:itertools": _DraftCapability({
+        "chain": itertools.chain,
+        "repeat": itertools.repeat,
+    }),
+    "module:json": _DraftCapability({"dumps": json.dumps, "loads": json.loads}),
+    "module:math": _DraftCapability({
+        "ceil": math.ceil,
+        "e": math.e,
+        "exp": math.exp,
+        "fabs": math.fabs,
+        "floor": math.floor,
+        "inf": math.inf,
+        "isclose": math.isclose,
+        "isfinite": math.isfinite,
+        "log": math.log,
+        "log10": math.log10,
+        "nan": math.nan,
+        "pi": math.pi,
+        "pow": math.pow,
+        "sqrt": math.sqrt,
+        "trunc": math.trunc,
+    }),
+    "module:operator": _DraftCapability({
+        "add": operator.add,
+        "floordiv": operator.floordiv,
+        "mul": operator.mul,
+        "sub": operator.sub,
+        "truediv": operator.truediv,
+    }),
+    "module:random": _DraftCapability({
+        "Random": _DraftRandom,
+        "choice": random.choice,
+        "randint": random.randint,
+        "random": random.random,
+        "uniform": random.uniform,
+    }),
+    "module:re": _DraftCapability({
+        "findall": re.findall,
+        "fullmatch": re.fullmatch,
+        "match": re.match,
+        "search": re.search,
+        "split": re.split,
+        "sub": re.sub,
+    }),
+    "module:statistics": _DraftCapability({
+        "fmean": statistics.fmean,
+        "mean": statistics.mean,
+        "median": statistics.median,
+        "median_high": statistics.median_high,
+        "median_low": statistics.median_low,
+        "pstdev": statistics.pstdev,
+        "pvariance": statistics.pvariance,
+        "quantiles": statistics.quantiles,
+        "stdev": statistics.stdev,
+        "variance": statistics.variance,
+    }),
+    "module:string": _DraftCapability({
+        "ascii_letters": string.ascii_letters,
+        "ascii_lowercase": string.ascii_lowercase,
+        "ascii_uppercase": string.ascii_uppercase,
+        "digits": string.digits,
+        "hexdigits": string.hexdigits,
+        "punctuation": string.punctuation,
+        "whitespace": string.whitespace,
+    }),
+}
+_DRAFT_SYMBOL_CAPABILITIES = {
+    "symbol:collections.Counter": _draft_counter,
+    "symbol:decimal.Decimal": decimal.Decimal,
+    "symbol:decimal.ROUND_DOWN": decimal.ROUND_DOWN,
+    "symbol:decimal.ROUND_HALF_EVEN": decimal.ROUND_HALF_EVEN,
+    "symbol:decimal.ROUND_HALF_UP": decimal.ROUND_HALF_UP,
+    "symbol:decimal.ROUND_UP": decimal.ROUND_UP,
+    "symbol:fractions.Fraction": fractions.Fraction,
+    "symbol:functools.reduce": functools.reduce,
+    "symbol:itertools.chain": itertools.chain,
+    "symbol:itertools.repeat": itertools.repeat,
+    "symbol:json.dumps": json.dumps,
+    "symbol:json.loads": json.loads,
+    "symbol:math.ceil": math.ceil,
+    "symbol:math.e": math.e,
+    "symbol:math.exp": math.exp,
+    "symbol:math.fabs": math.fabs,
+    "symbol:math.floor": math.floor,
+    "symbol:math.inf": math.inf,
+    "symbol:math.isclose": math.isclose,
+    "symbol:math.isfinite": math.isfinite,
+    "symbol:math.log": math.log,
+    "symbol:math.log10": math.log10,
+    "symbol:math.nan": math.nan,
+    "symbol:math.pi": math.pi,
+    "symbol:math.pow": math.pow,
+    "symbol:math.sqrt": math.sqrt,
+    "symbol:math.trunc": math.trunc,
+    "symbol:operator.add": operator.add,
+    "symbol:operator.floordiv": operator.floordiv,
+    "symbol:operator.mul": operator.mul,
+    "symbol:operator.sub": operator.sub,
+    "symbol:operator.truediv": operator.truediv,
+    "symbol:random.Random": _DraftRandom,
+    "symbol:random.choice": random.choice,
+    "symbol:random.randint": random.randint,
+    "symbol:random.random": random.random,
+    "symbol:random.uniform": random.uniform,
+    "symbol:re.findall": re.findall,
+    "symbol:re.fullmatch": re.fullmatch,
+    "symbol:re.match": re.match,
+    "symbol:re.search": re.search,
+    "symbol:re.split": re.split,
+    "symbol:re.sub": re.sub,
+    "symbol:statistics.fmean": statistics.fmean,
+    "symbol:statistics.mean": statistics.mean,
+    "symbol:statistics.median": statistics.median,
+    "symbol:statistics.median_high": statistics.median_high,
+    "symbol:statistics.median_low": statistics.median_low,
+    "symbol:statistics.pstdev": statistics.pstdev,
+    "symbol:statistics.pvariance": statistics.pvariance,
+    "symbol:statistics.quantiles": statistics.quantiles,
+    "symbol:statistics.stdev": statistics.stdev,
+    "symbol:statistics.variance": statistics.variance,
+    "symbol:string.ascii_letters": string.ascii_letters,
+    "symbol:string.ascii_lowercase": string.ascii_lowercase,
+    "symbol:string.ascii_uppercase": string.ascii_uppercase,
+    "symbol:string.digits": string.digits,
+    "symbol:string.hexdigits": string.hexdigits,
+    "symbol:string.punctuation": string.punctuation,
+    "symbol:string.whitespace": string.whitespace,
+}
+
+
+def _load_restricted_draft_module(job: dict) -> ModuleType:
+    module_path = job.get("module_path")
+    if not module_path:
+        raise ImportError("restricted Draft execution requires a module path")
+    path = Path(str(module_path))
+    source = path.read_text(encoding="utf-8")
+    try:
+        validated = validate_draft_source(
+            source,
+            entrypoint=str(job["entrypoint"]),
+        )
+    except DraftLanguageError as exc:
+        raise PermissionError(f"Draft Language v1 rewrite required: {exc}") from exc
+    module = ModuleType(f"_marvis_restricted_draft_{path.stem}")
+    namespace = module.__dict__
+    namespace.update(_draft_globals(validated))
+    # The AST has passed the shared allowlist and has no import nodes; its only
+    # globals are the explicitly injected capabilities above.
+    exec(compile(validated.execution_tree, str(path), "exec"), namespace, namespace)  # nosec B102
+    return module
+
+
+def _draft_builtins() -> dict[str, object]:
+    namespace: dict[str, object] = {
+        name: getattr(builtins, name)
+        for name in ALLOWED_BUILTINS
+        if hasattr(builtins, name)
+    }
+    # ``assert`` compiles to an ``AssertionError`` lookup; it does not grant
+    # reflection or import capabilities.
+    namespace["AssertionError"] = AssertionError
+    return namespace
+
+
+def _draft_globals(validated: ValidatedDraft) -> dict[str, object]:
+    namespace: dict[str, object] = {"__builtins__": _draft_builtins()}
+    for binding in validated.bindings:
+        capability = binding.capability
+        if capability.startswith("module:"):
+            value = _DRAFT_MODULE_CAPABILITIES.get(capability)
+        else:
+            value = _DRAFT_SYMBOL_CAPABILITIES.get(capability)
+        if value is None:
+            raise PermissionError(
+                f"Draft Language v1 capability is unavailable: {capability}"
+            )
+        namespace[binding.name] = value
+    return namespace
+
+
+@contextmanager
+def _draft_audit_scope():
+    global _DRAFT_AUDIT_ACTIVE, _DRAFT_AUDIT_HOOK_INSTALLED
+    if not _DRAFT_AUDIT_HOOK_INSTALLED:
+        sys.addaudithook(_draft_audit_hook)
+        _DRAFT_AUDIT_HOOK_INSTALLED = True
+    prior_active = _DRAFT_AUDIT_ACTIVE
+    _DRAFT_AUDIT_ACTIVE = True
+    try:
+        yield
+    finally:
+        _DRAFT_AUDIT_ACTIVE = prior_active
+
+
+def _draft_audit_hook(event: str, _args) -> None:
+    if not _DRAFT_AUDIT_ACTIVE:
+        return
+    if event.startswith("ctypes."):
+        raise PermissionError("native library access denied for Draft Language v1")
+    if event in _DRAFT_BLOCKED_AUDIT_EVENTS:
+        raise PermissionError("process execution denied for Draft Language v1")
 
 
 def _apply_resource_limits(

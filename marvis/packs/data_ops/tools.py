@@ -1984,8 +1984,9 @@ def tool_slice_aggregate(inputs: dict, ctx) -> dict:
     )
     snapshot = runtime.registry.read_authenticated_binding_snapshot(binding)
     # The column whitelist IS the dataset profile: only names the backend can see in
-    # the physical file are legal anywhere in the spec (group_by/metrics/filters/
-    # month_col/sort_by). Anything else -> DataSecurityError from sql_identifier.
+    # the physical file are legal for source fields (group_by/metrics/filters/month_col).
+    # A sort_by source field must additionally be selected in group_by; metric labels
+    # are the other allowed sort keys.
     allowed_columns = {str(column) for column in snapshot.columns}
 
     group_by = [str(col) for col in (inputs.get("group_by") or [])]
@@ -2261,7 +2262,11 @@ def _order_clause(
     if sort_by:
         if sort_by in metric_labels:
             return f"{_quote(sort_by)} DESC"
-        # A group column must be whitelisted; sort ascending for stable ordering.
+        if sort_by not in group_by:
+            raise ValueError(
+                "sort_by must name a group_by column or selected metric output"
+            )
+        # A selected group column is whitelisted; sort ascending for stable ordering.
         return f"{sql_identifier(sort_by, allowed_columns)} ASC"
     if group_by:
         return ", ".join(f"{sql_identifier(col, allowed_columns)} ASC" for col in group_by)

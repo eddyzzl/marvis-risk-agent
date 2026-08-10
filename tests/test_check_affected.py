@@ -358,6 +358,73 @@ def test_check_fast_excludes_heavy_and_pmml_runtime_tests(tmp_path: Path):
     ]
 
 
+def test_check_audit_exports_and_scans_the_locked_project_graph(tmp_path: Path):
+    python_capture = tmp_path / "python-args.txt"
+    uv_capture = tmp_path / "uv-args.txt"
+    fake_python = tmp_path / "python"
+    fake_uv = tmp_path / "uv"
+    _write(
+        fake_python,
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" >> "$CHECK_PYTHON_CAPTURE"\n'
+        'if [ "$3" = "--version" ]; then exit 0; fi\n'
+        "cat >/dev/null\n",
+    )
+    _write(
+        fake_uv,
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" > "$CHECK_UV_CAPTURE"\n'
+        'printf "pillow==12.3.0 --hash=sha256:deadbeef\\n"\n',
+    )
+    fake_python.chmod(0o755)
+    fake_uv.chmod(0o755)
+    env = _isolated_check_env(
+        PYTHON=str(fake_python),
+        UV=str(fake_uv),
+        CHECK_PYTHON_CAPTURE=str(python_capture),
+        CHECK_UV_CAPTURE=str(uv_capture),
+    )
+
+    completed = subprocess.run(
+        [
+            str(ROOT / "scripts" / "check"),
+            "--audit",
+            "--skip-pytest",
+            "--skip-ruff",
+            "--skip-node",
+            "--skip-diff",
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert uv_capture.read_text(encoding="utf-8").splitlines() == [
+        "export",
+        "--locked",
+        "--all-extras",
+        "--all-groups",
+        "--no-emit-project",
+        "--format",
+        "requirements.txt",
+    ]
+    assert python_capture.read_text(encoding="utf-8").splitlines() == [
+        "-m",
+        "pip_audit",
+        "--version",
+        "-m",
+        "pip_audit",
+        "--require-hashes",
+        "--disable-pip",
+        "-r",
+        "/dev/stdin",
+    ]
+
+
 def test_check_help_documents_affected_mode_and_diff_range():
     completed = subprocess.run(
         [str(ROOT / "scripts" / "check"), "--help"],
@@ -395,7 +462,7 @@ def test_ci_runs_strategy_smoke_separately_without_jvm_or_manual_duplication():
         encoding="utf-8"
     )
     strategy_job = workflow.split("\n  strategy_smoke:\n", maxsplit=1)[1].split(
-        "\n  pmml_runtime:\n", maxsplit=1
+        "\n  browser_smoke:\n", maxsplit=1
     )[0]
 
     assert "if: github.event_name != 'workflow_dispatch'" in strategy_job
@@ -418,6 +485,34 @@ def test_ci_runs_strategy_smoke_separately_without_jvm_or_manual_duplication():
     )
 
 
+def test_ci_runs_browser_smoke_on_pr_and_main_pushes():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    browser_job = workflow.split("\n  browser_smoke:\n", maxsplit=1)[1].split(
+        "\n  pmml_runtime:\n", maxsplit=1
+    )[0]
+
+    assert "if: github.event_name != 'workflow_dispatch'" in browser_job
+    assert "uv run playwright install --with-deps chromium" in browser_job
+    assert 'MARVIS_RUN_PLAYWRIGHT_SMOKE: "1"' in browser_job
+    assert "uv run python -m pytest -q tests/test_frontend_playwright_smoke.py" in browser_job
+
+
+def test_ci_audits_the_locked_project_dependency_graph():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    security_job = workflow.split("\n  security:\n", maxsplit=1)[1]
+
+    assert "uv export --locked --all-extras --all-groups --no-emit-project" in security_job
+    assert "--format requirements.txt" in security_job
+    assert (
+        "uv tool run --from pip-audit==2.10.1 pip-audit "
+        "--require-hashes --disable-pip -r /dev/stdin"
+    ) in security_job
+
+
 def test_ci_keeps_manual_full_runs_independent_and_aggregates_every_gate():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
@@ -434,7 +529,7 @@ def test_ci_keeps_manual_full_runs_independent_and_aggregates_every_gate():
     assert (
         "needs:\n"
         "      [quality, fast_tests, full_checks, strategy_smoke, "
-        "pmml_runtime, security]"
+        "browser_smoke, pmml_runtime, security]"
         in checks_job
     )
     for result in (
@@ -442,6 +537,7 @@ def test_ci_keeps_manual_full_runs_independent_and_aggregates_every_gate():
         "FAST_TESTS_RESULT",
         "FULL_CHECKS_RESULT",
         "STRATEGY_SMOKE_RESULT",
+        "BROWSER_SMOKE_RESULT",
         "PMML_RUNTIME_RESULT",
         "SECURITY_RESULT",
     ):
@@ -472,6 +568,7 @@ def _ci_checks_script() -> str:
                 "FAST_TESTS_RESULT": "skipped",
                 "FULL_CHECKS_RESULT": "success",
                 "STRATEGY_SMOKE_RESULT": "skipped",
+                "BROWSER_SMOKE_RESULT": "skipped",
                 "PMML_RUNTIME_RESULT": "skipped",
             },
             0,
@@ -479,6 +576,7 @@ def _ci_checks_script() -> str:
         ("push", {"QUALITY_RESULT": "failure"}, 1),
         ("push", {"FAST_TESTS_RESULT": "cancelled"}, 1),
         ("push", {"STRATEGY_SMOKE_RESULT": "failure"}, 1),
+        ("push", {"BROWSER_SMOKE_RESULT": "failure"}, 1),
         ("push", {"PMML_RUNTIME_RESULT": "failure"}, 1),
         ("push", {"SECURITY_RESULT": "failure"}, 1),
         ("push", {"FULL_CHECKS_RESULT": "success"}, 1),
@@ -489,6 +587,7 @@ def _ci_checks_script() -> str:
                 "FAST_TESTS_RESULT": "skipped",
                 "FULL_CHECKS_RESULT": "failure",
                 "STRATEGY_SMOKE_RESULT": "skipped",
+                "BROWSER_SMOKE_RESULT": "skipped",
                 "PMML_RUNTIME_RESULT": "skipped",
             },
             1,
@@ -507,6 +606,7 @@ def test_ci_checks_script_enforces_event_specific_results(
         "FAST_TESTS_RESULT": "success",
         "FULL_CHECKS_RESULT": "skipped",
         "STRATEGY_SMOKE_RESULT": "success",
+        "BROWSER_SMOKE_RESULT": "success",
         "PMML_RUNTIME_RESULT": "success",
         "SECURITY_RESULT": "success",
         **overrides,

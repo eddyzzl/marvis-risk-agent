@@ -55,7 +55,8 @@ function safeLink(value) {
   const normalized = textValue(value);
   if (!normalized) return "";
   if (/^https?:\/\//i.test(normalized)) return normalized;
-  if (/^\/(?!\/)/.test(normalized) || normalized.startsWith("?")) return normalized;
+  if (/^\/(?!\/)/.test(normalized)) return normalized.slice(1);
+  if (normalized.startsWith("?")) return normalized;
   return "";
 }
 
@@ -104,7 +105,7 @@ function normalizeBatchItem(rawItem, parentTaskId, fallbackOrdinal) {
   ));
   const manualReviewUrl = explicitManualUrl || (
     parentTaskId && childTaskId
-      ? `/?task=${encodeURIComponent(parentTaskId)}&item=${encodeURIComponent(childTaskId)}`
+      ? `?task=${encodeURIComponent(parentTaskId)}&item=${encodeURIComponent(childTaskId)}`
       : ""
   );
   return {

@@ -1,3 +1,5 @@
+import base64
+import binascii
 import hashlib
 import hmac
 from collections.abc import Callable, Mapping
@@ -126,6 +128,7 @@ _REMOTE_READ_ENV = "MARVIS_ALLOW_REMOTE_READ"
 _TRUSTED_PROXY_ENV = "MARVIS_TRUSTED_PROXY_HOSTS"
 _LOCAL_TOKEN_ENV = "MARVIS_LOCAL_TOKEN"
 _LOCAL_TOKEN_HEADER = "x-marvis-token"
+_LOCAL_BASIC_REALM = "MARVIS"
 _LOCAL_SESSION_COOKIE = "marvis_local_session"
 _FORWARDED_CLIENT_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
 # PERF-9: cache busting must cover every JS/CSS asset the frontend can load,
@@ -193,6 +196,21 @@ def _effective_client_host(request) -> str | None:
     return direct
 
 
+def _is_forwarded_request_from_trusted_proxy(request) -> bool:
+    """True only for the X-Forwarded-For flow this app explicitly trusts.
+
+    A configured proxy is a transport boundary, not an authorization grant.
+    The middleware below still requires ``MARVIS_LOCAL_TOKEN`` before a
+    forwarded client can use the private workbench surface.
+    """
+
+    direct = request.client.host if request.client else None
+    if not direct or direct not in _trusted_proxy_hosts():
+        return False
+    forwarded = request.headers.get("x-forwarded-for", "")
+    return bool(forwarded.split(",")[0].strip())
+
+
 def _remote_read_enabled() -> bool:
     return os.environ.get(_REMOTE_READ_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -201,20 +219,68 @@ def _configured_local_token() -> str:
     """GAP-5: optional shared-host hardening. `_is_local_client` treats any
     loopback peer as trusted, which is correct for a single-user laptop but
     wrong on a shared JupyterHub-style host where any other logged-in user's
-    process can also reach 127.0.0.1 and would otherwise inherit full write
-    access (including installing plugins = arbitrary code execution). When
-    MARVIS_LOCAL_TOKEN is set, non-safe requests must also present it via the
-    X-Marvis-Token header; when unset (the default), behavior is unchanged."""
+    process can also reach 127.0.0.1 and would otherwise inherit the private
+    read/write surface (including installing plugins = arbitrary code
+    execution). When MARVIS_LOCAL_TOKEN is set, the credential-bearing browser
+    bootstrap and local reads use HTTP Basic (the token is the password) or
+    X-Marvis-Token, while writes must present X-Marvis-Token explicitly. When
+    unset (the default), behavior is unchanged."""
     return os.environ.get(_LOCAL_TOKEN_ENV, "").strip()
 
 
-def _request_has_valid_local_token(request, expected_token: str) -> bool:
-    presented = request.headers.get(_LOCAL_TOKEN_HEADER, "")
-    return hmac.compare_digest(presented, expected_token)
+def _request_has_valid_local_token(
+    request,
+    expected_token: str,
+    *,
+    allow_basic: bool = False,
+) -> bool:
+    header_token = request.headers.get(_LOCAL_TOKEN_HEADER, "")
+    expected_bytes = expected_token.encode("utf-8")
+    header_valid = hmac.compare_digest(header_token.encode("utf-8"), expected_bytes)
+    if not allow_basic:
+        return header_valid
+    basic_password = _request_basic_password(request)
+    basic_valid = hmac.compare_digest(basic_password.encode("utf-8"), expected_bytes)
+    return header_valid or basic_valid
+
+
+def _request_basic_password(request) -> str:
+    authorization = request.headers.get("authorization", "")
+    scheme, separator, encoded = authorization.partition(" ")
+    if not separator or scheme.lower() != "basic":
+        return ""
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return ""
+    _username, separator, password = decoded.partition(":")
+    return password if separator else ""
+
+
+def _local_basic_auth_challenge() -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "MARVIS authentication required"},
+        headers={
+            "WWW-Authenticate": f'Basic realm="{_LOCAL_BASIC_REALM}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 def _is_public_read_path(path: str) -> bool:
     return path == "/" or path == "/api/health" or path.startswith("/static/")
+
+
+def _is_local_token_public_path(path: str) -> bool:
+    """Assets needed to render a Basic-authenticated page without a header.
+
+    This is deliberately narrower than ``_is_public_read_path``: the latter
+    describes what a remote anonymous reader may receive, while a configured
+    local token is specifically a shared-host confidentiality boundary.
+    """
+
+    return path.startswith("/static/")
 
 
 def _static_asset_version(static_dir: Path) -> str:
@@ -432,20 +498,46 @@ def create_app(
         method = request.method.upper()
         path = request.url.path
         is_local = _is_local_client(_effective_client_host(request))
+        is_forwarded_trusted_proxy_request = _is_forwarded_request_from_trusted_proxy(request)
         pending_session_token = None
+        local_token_authenticated = False
         request.state.local_principal = None
-        if is_local:
-            session_token = request.cookies.get(_LOCAL_SESSION_COOKIE)
-            try:
-                if not session_token:
-                    raise AuthorizationError("local session cookie is missing")
-                principal = governance_repo.resolve_local_session(session_token)
-            except AuthorizationError:
-                session = governance_repo.create_local_session()
-                principal = session.principal
-                pending_session_token = session.token
-            request.state.local_principal = principal
-        if not is_local:
+        # GAP-5: on a shared host, "local" alone does not mean "the owning
+        # user" -- any other logged-in user's process is also a loopback peer.
+        # Keep both the credential-bearing bootstrap and every private read
+        # behind the token. Unsafe requests require X-Marvis-Token explicitly:
+        # accepting browser-cached Basic credentials there would make state
+        # changes vulnerable to cross-site form requests. Left unconfigured
+        # (the default), both checks are no-ops.
+        local_token = _configured_local_token()
+        if local_token and (is_local or is_forwarded_trusted_proxy_request):
+            if method in {"GET", "HEAD"}:
+                local_token_authenticated = _request_has_valid_local_token(
+                    request,
+                    local_token,
+                    allow_basic=True,
+                )
+                if not _is_local_token_public_path(path) and not local_token_authenticated:
+                    return _local_basic_auth_challenge()
+            elif method not in _SAFE_METHODS:
+                local_token_authenticated = _request_has_valid_local_token(request, local_token)
+                if not local_token_authenticated:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "missing or invalid X-Marvis-Token"},
+                    )
+        elif not local_token:
+            local_token_authenticated = True
+        proxy_token_authenticated = bool(
+            local_token
+            and is_forwarded_trusted_proxy_request
+            and local_token_authenticated
+        )
+        private_client_authenticated = bool(
+            (is_local and local_token_authenticated) or proxy_token_authenticated
+        )
+        request.state.private_client_authenticated = private_client_authenticated
+        if not is_local and not proxy_token_authenticated:
             if method not in _SAFE_METHODS:
                 return JSONResponse(
                     status_code=403,
@@ -461,20 +553,28 @@ def create_app(
                     status_code=403,
                     content={"detail": "API access is limited to local clients"},
                 )
-        # GAP-5: on a shared host, "local" alone does not mean "the owning
-        # user" -- any other logged-in user's process is also a loopback
-        # peer. When MARVIS_LOCAL_TOKEN is configured, every non-safe request
-        # (local or remote) must present it, tightening the trust boundary
-        # from "any loopback peer" to "whoever holds the token". Left
-        # unconfigured (the default), this check is a no-op.
-        local_token = _configured_local_token()
-        if local_token and method not in _SAFE_METHODS:
-            if not _request_has_valid_local_token(request, local_token):
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "missing or invalid X-Marvis-Token"},
-                )
+        # Do not allocate a governance session until the shared-host
+        # credential boundary has passed. Otherwise an unauthenticated
+        # loopback peer could create unbounded short-lived local principals.
+        if (
+            private_client_authenticated
+            and not path.startswith("/static/")
+        ):
+            session_token = request.cookies.get(_LOCAL_SESSION_COOKIE)
+            try:
+                if not session_token:
+                    raise AuthorizationError("local session cookie is missing")
+                principal = governance_repo.resolve_local_session(session_token)
+            except AuthorizationError:
+                session = governance_repo.create_local_session()
+                principal = session.principal
+                pending_session_token = session.token
+            request.state.local_principal = principal
         response = await call_next(request)
+        if local_token and private_client_authenticated and not path.startswith("/static/"):
+            # Authenticated task/data responses are private browser content,
+            # not reusable shared-host cache entries.
+            response.headers.setdefault("Cache-Control", "no-store")
         if pending_session_token is not None:
             response.set_cookie(
                 _LOCAL_SESSION_COOKIE,
@@ -600,27 +700,39 @@ def create_app(
         index_html = index_html.replace(
             "__MARVIS_STATIC_IMPORT_MAP__", _static_import_map(static_dir, static_version)
         )
-        is_local = _is_local_client(_effective_client_host(request))
+        is_private_client = bool(
+            getattr(request.state, "private_client_authenticated", False)
+        )
         branding = load_branding(settings.workspace)
-        if not is_local:
+        if not is_private_client:
             branding = dict(DEFAULT_BRANDING)
-        # GAP-5: hand the local UI its MARVIS_LOCAL_TOKEN so api.js can echo
-        # it back via X-Marvis-Token on non-GET requests. Never embedded for
-        # a remote client (even with MARVIS_ALLOW_REMOTE_READ on) -- leaking
-        # the token to a remote reader would let it mint itself write access.
-        local_token = _configured_local_token() if is_local else ""
+        # GAP-5: the access guard reaches this handler for a token-configured
+        # local client only after HTTP Basic or X-Marvis-Token authentication.
+        # Hand that authenticated UI its token so api.js can keep echoing the
+        # existing API header on non-GET requests. Remote clients never receive
+        # either credential, even when MARVIS_ALLOW_REMOTE_READ is enabled.
+        local_token = _configured_local_token() if is_private_client else ""
         index_html = index_html.replace(
             "__MARVIS_LOCAL_TOKEN__", escape(local_token, quote=True)
         )
         # Hand the local UI its plugin-admin token so draft-tools-panel.js can
         # echo it via X-Marvis-Plugin-Admin on plugin/draft governance calls.
         # Never embedded for a remote client (same reasoning as the local token).
-        plugin_admin_token = app.state.plugin_admin_token if is_local else ""
+        plugin_admin_token = app.state.plugin_admin_token if is_private_client else ""
         index_html = index_html.replace(
             "__MARVIS_PLUGIN_ADMIN_TOKEN__", escape(plugin_admin_token, quote=True)
         )
+        response_headers = None
+        if _configured_local_token():
+            # The response body contains credentials and varies by incoming
+            # authentication, so it must never be stored by a browser/proxy.
+            response_headers = {
+                "Cache-Control": "no-store",
+                "Vary": "Authorization",
+            }
         return HTMLResponse(
-            render_branded_index_html(index_html, branding)
+            render_branded_index_html(index_html, branding),
+            headers=response_headers,
         )
 
     return app

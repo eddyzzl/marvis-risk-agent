@@ -127,6 +127,15 @@ def test_done_strategy_plan_lazily_loads_escaped_artifacts_once_per_plan():
               available: true,
               download_url: "/api/tasks/task-A/task-artifacts/task-analysis-1/download?expected_content_hash={"a" * 64}",
             }},
+            {{
+              id: "task-unsafe-url",
+              filename: "unsafe-link.csv",
+              kind: "unsafe_url_probe",
+              origin_tool: "strategy.security_probe",
+              created_at: "2026-07-23T08:00:01Z",
+              available: true,
+              download_url: "javascript:alert(1)",
+            }},
             ...[
               ["report-json-old", "report.json", "strategy_report_bundle_json", "{"9" * 64}"],
               ["report-md-old", "report.md", "strategy_report_markdown", "{"a" * 64}"],
@@ -247,6 +256,8 @@ def test_done_strategy_plan_lazily_loads_escaped_artifacts_once_per_plan():
         in payload["firstHtml"]
     )
     assert "task-artifacts/task-duplicate/download" not in payload["firstHtml"]
+    assert "unsafe-link.csv" in payload["firstHtml"]
+    assert "javascript:alert(1)" not in payload["firstHtml"]
     assert "任务分析" in payload["firstHtml"]
     assert "策略报告" in payload["firstHtml"]
     assert "同一最新修订" in payload["firstHtml"]

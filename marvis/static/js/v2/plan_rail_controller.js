@@ -1,5 +1,6 @@
 import { api } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
+import { safeSameOriginApiHref } from "../url-safety.js";
 import { skeletonRowsHtml } from "../skeleton.js";
 import { listPluginTools, listStrategyArtifacts, listTaskArtifacts } from "./api_v2.js";
 import {
@@ -637,11 +638,7 @@ export function createPlanRailController({
       return Promise.resolve(v2PlanCache.get(taskId) || null);
     }
     v2PlanLastFetch.set(taskId, now);
-    return fetch(`/api/tasks/${encodeURIComponent(taskId)}/plans`)
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
+    return api(`/api/tasks/${encodeURIComponent(taskId)}/plans`)
       .then((data) => {
         const plans = (data && data.plans) || [];
         const next = plans.length ? plans[plans.length - 1] : null;
@@ -939,7 +936,7 @@ export function createPlanRailController({
     if (!byFormat.size) return "";
     const actions = ["JSON", "Markdown", "Excel", "Word"].map((format) => {
       const artifact = byFormat.get(format);
-      const downloadUrl = String(artifact?.download_url || "");
+      const downloadUrl = safeSameOriginApiHref(artifact?.download_url);
       const available = Boolean(artifact?.available && downloadUrl);
       return available
         ? `<a class="button compact secondary strategy-artifact-download" href="${escapeHtml(downloadUrl)}" download>${escapeHtml(format)}</a>`
@@ -979,7 +976,7 @@ export function createPlanRailController({
         scope = "策略交付";
         status = "离线交付";
       }
-      const downloadUrl = String(artifact?.download_url || "");
+      const downloadUrl = safeSameOriginApiHref(artifact?.download_url);
       const available = Boolean(artifact?.available && downloadUrl);
       const action = available
         ? `<a class="button compact secondary strategy-artifact-download" href="${escapeHtml(downloadUrl)}" download>下载</a>`

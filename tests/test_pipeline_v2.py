@@ -18,6 +18,7 @@ from marvis.domain import FileArtifact, FileRole, TaskCreate, TaskStatus
 from marvis.notebook_contract import RuntimeContract
 from marvis.notebook_cancellation import request_notebook_cancellation
 from marvis.notebooks import close_live_notebook_session, register_live_notebook_session
+from marvis.validation.results import ConsistencyStatus
 from marvis import pipeline as pipeline_module
 from marvis.pipeline import (
     LEGACY_LIVE_NOTEBOOK_ENV_VAR,
@@ -46,6 +47,30 @@ from marvis.pipeline import (
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.mark.parametrize(
+    ("consistency_status", "expected_task_status"),
+    [
+        (ConsistencyStatus.PASS, TaskStatus.SUCCEEDED),
+        (ConsistencyStatus.REVIEW, TaskStatus.REVIEW_REQUIRED),
+        (ConsistencyStatus.FAIL, TaskStatus.REVIEW_REQUIRED),
+    ],
+)
+def test_terminal_validation_status_requires_review_for_non_passing_reproducibility(
+    consistency_status: ConsistencyStatus,
+    expected_task_status: TaskStatus,
+):
+    results = SimpleNamespace(
+        reproducibility=SimpleNamespace(
+            summary=SimpleNamespace(status=consistency_status)
+        )
+    )
+
+    assert (
+        pipeline_module._terminal_validation_status(SimpleNamespace(), results)
+        is expected_task_status
+    )
 
 
 def test_pmml_job_cancellation_uses_agent_callback_without_job_token():
@@ -1955,12 +1980,12 @@ def test_report_stage_status_failure_rolls_back_promoted_docx_and_images(
         return SimpleNamespace(unresolved_placeholders=[])
 
     monkeypatch.setattr("marvis.pipeline.write_validation_word", fake_word_writer)
-    monkeypatch.setattr(
-        "marvis.pipeline.write_validation_excel",
-        lambda _results, output_path, **_kwargs: Path(output_path).write_bytes(
-            b"new-xlsx"
-        ),
-    )
+    def fake_excel_writer(_results, output_path, *, image_output_dir, **_kwargs):
+        Path(output_path).write_bytes(b"new-xlsx")
+        Path(image_output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(image_output_dir) / "new-chart.png").write_bytes(b"new-chart")
+
+    monkeypatch.setattr("marvis.pipeline.write_validation_excel", fake_excel_writer)
     original_update = TaskRepository.update_status_on_connection
 
     def failing_status_update(self, conn, *args, **kwargs):
@@ -1985,6 +2010,8 @@ def test_report_stage_status_failure_rolls_back_promoted_docx_and_images(
     assert report_path.read_bytes() == b"previous-docx"
     assert (images_dir / "old.png").read_bytes() == b"old-image"
     assert not (images_dir / "new.png").exists()
+    assert not (outputs_dir / "validation.xlsx").exists()
+    assert not (outputs_dir / "excel_images").exists()
     assert not (outputs_dir / ".validation_report.docx.tmp").exists()
     assert not (outputs_dir / ".staging").exists()
     assert not (task_dir / ".staging").exists()

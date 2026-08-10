@@ -7,6 +7,7 @@ a browser against the running FastAPI app.
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -121,7 +122,7 @@ def test_v2_plan_rail_fetch_errors_are_visible_without_rail_controls():
     assert "createPlanRailController" in app_js
     assert "planRailController.render({ force, renderSignatures })" in app_js
     assert "const v2PlanFetchErrors = new Map()" in plan_js
-    assert "if (!response.ok) throw new Error(`HTTP ${response.status}`)" in plan_js
+    assert "return api(`/api/tasks/${encodeURIComponent(taskId)}/plans`)" in plan_js
     assert "计划读取失败" in plan_js
     assert "当前显示的是上次缓存的计划" not in plan_js
     assert "const fetchErrorBanner = fetchError" not in plan_js
@@ -248,6 +249,64 @@ def _render_agent_markdown(markdown: str) -> str:
         [
             "import { renderAgentMarkdown } from './marvis/static/js/render-agent.js';",
             f"process.stdout.write(renderAgentMarkdown({json.dumps(markdown, ensure_ascii=False)}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def _safe_markdown_hrefs(hrefs: list[str]) -> list[bool]:
+    script = "\n".join(
+        [
+            "import { isSafeMarkdownHref } from './marvis/static/js/render-agent.js';",
+            f"const hrefs = {json.dumps(hrefs, ensure_ascii=False)};",
+            "process.stdout.write(JSON.stringify(hrefs.map(isSafeMarkdownHref)));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _safe_api_hrefs(hrefs: list[str]) -> list[str]:
+    script = "\n".join(
+        [
+            "import { safeSameOriginApiHref } from './marvis/static/js/url-safety.js';",
+            f"const hrefs = {json.dumps(hrefs, ensure_ascii=False)};",
+            "process.stdout.write(JSON.stringify(hrefs.map(safeSameOriginApiHref)));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _agent_report_download_html(reports: list[dict]) -> str:
+    app_js = _read_static("app.js")
+    start = app_js.index("function agentMessageReportDownloadHtml")
+    end = app_js.index("\nif (typeof document", start)
+    presenter = app_js[start:end]
+    script = "\n".join(
+        [
+            "import { safeSameOriginApiHref } from './marvis/static/js/url-safety.js';",
+            "import { escapeHtml } from './marvis/static/js/ui-utils.js';",
+            "const selectedTask = { task_type: 'modeling' };",
+            presenter,
+            f"const reports = {json.dumps(reports, ensure_ascii=False)};",
+            "process.stdout.write(agentMessageReportDownloadHtml({ metadata: { report_downloads: reports } }));",
         ]
     )
     result = subprocess.run(
@@ -2041,7 +2100,8 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
     assert 'formData.append("files"' in upload_body
     assert 'formData.append("relative_paths"' in upload_body
     assert "new XMLHttpRequest()" in upload_body
-    assert 'xhr.open("POST", "/api/material-uploads")' in upload_body
+    assert 'xhr.open("POST", "api/material-uploads")' in upload_body
+    assert 'xhr.setRequestHeader("X-Marvis-Token", token)' in upload_body
     assert "xhr.upload.onprogress" in upload_body
     assert "onProgress(event.loaded, event.total)" in upload_body
     # a 2xx response resolves with the parsed JSON payload; a non-2xx (or a
@@ -4083,6 +4143,26 @@ def test_running_visual_tone_uses_header_status_blue():
     step_running_end = styles_css.index("}", step_running_start)
     step_running_rule = styles_css[step_running_start:step_running_end]
     assert "color: var(--accent)" in step_running_rule
+
+
+def test_running_indicators_stop_animating_when_motion_is_reduced():
+    execution_css = (STATIC_DIR / "css" / "execution-workspace.css").read_text(
+        encoding="utf-8"
+    )
+    task_shell_css = (STATIC_DIR / "css" / "task-shell.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert re.search(
+        r"@media \(prefers-reduced-motion: reduce\)\s*\{\s*"
+        r"\.check-icon\.running\s*\{\s*animation: none;",
+        execution_css,
+    )
+    assert re.search(
+        r"@media \(prefers-reduced-motion: reduce\)\s*\{\s*"
+        r"\.task-pill\.run::before\s*\{\s*animation: none;",
+        task_shell_css,
+    )
 
 
 def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
@@ -7326,15 +7406,16 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
     assert payload["renderAllCalls"] == 1
 
 
-def test_api_paths_are_absolute_and_agent_start_rejects_missing_task_id():
+def test_api_paths_stay_below_current_mount_and_agent_start_rejects_missing_task_id():
     app_js = _read_static("app.js")
     api_js = _read_static("js/api.js")
 
     api_start = api_js.index("export async function api")
     api_end = api_js.index("export function sleep", api_start)
     api_body = api_js[api_start:api_end]
-    assert 'endpoint.startsWith("/")' in api_body
-    assert '`/${endpoint}`' in api_body
+    assert "function normalizedApiEndpoint" in api_js
+    assert 'value.replace(/^\\/+/, "")' in api_js
+    assert "new URL(relative, base).toString()" in api_js
     assert "fetch(normalizedEndpoint" in api_body
 
     dispatch_start = app_js.index("async function dispatchAgentValidation")
@@ -9937,6 +10018,85 @@ def test_agent_assistant_messages_render_markdown_safely():
     assert ".replace(/\\[([^\\]\\n]+)\\]\\(" not in render_agent_js
     assert ".replace(/_([^_]+)_/g" not in render_agent_js
     assert "isMarkdownBoundary" in render_agent_js
+
+
+def test_agent_markdown_rejects_browser_normalization_origin_bypasses():
+    unsafe_hrefs = [
+        "/\\\\evil.example/steal",
+        "\\\\evil.example/steal",
+        "///evil.example/steal",
+        "/api/tasks/task-1/report\\download",
+        "/api/tasks/task-1/report\ndownload",
+    ]
+
+    assert _safe_markdown_hrefs(unsafe_hrefs) == [False] * len(unsafe_hrefs)
+
+
+def test_agent_markdown_preserves_explicit_http_and_same_origin_links():
+    safe_hrefs = [
+        "https://docs.example.com/guide",
+        "http://docs.example.com/guide",
+        "/api/tasks/task-1/report/download",
+        "#validation-result",
+    ]
+
+    assert _safe_markdown_hrefs(safe_hrefs) == [True] * len(safe_hrefs)
+
+
+def test_agent_markdown_keeps_safe_local_links_below_proxy_mount():
+    html = _render_agent_markdown("[下载报告](/api/tasks/task-1/report/download)")
+
+    assert 'href="api/tasks/task-1/report/download"' in html
+    assert 'href="/api/tasks/task-1/report/download"' not in html
+
+
+def test_persisted_download_urls_are_limited_to_same_origin_api_paths():
+    unsafe_hrefs = [
+        "javascript:alert(1)",
+        "data:text/html,boom",
+        "//evil.example/report.xlsx",
+        "/\\\\evil.example/report.xlsx",
+        "/api/tasks/task-1/report\\download",
+        "/api/../admin",
+        "/api/plugins",
+        "https://marvis.example/api/tasks/task-1/report/download",
+    ]
+    safe_hrefs = [
+        "/api/tasks/task-1/report/download",
+        "/api/tasks/task-1/report/download?expected_content_hash=abc",
+    ]
+
+    assert _safe_api_hrefs(unsafe_hrefs) == [""] * len(unsafe_hrefs)
+    assert _safe_api_hrefs(safe_hrefs) == [href.removeprefix("/") for href in safe_hrefs]
+
+
+def test_report_and_strategy_download_renderers_use_same_origin_url_guard():
+    app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+
+    report_start = app_js.index("function agentMessageReportDownloadHtml")
+    report_end = app_js.index("\nif (typeof document", report_start)
+    assert "safeSameOriginApiHref(report?.download_url)" in app_js[report_start:report_end]
+    assert "safeSameOriginApiHref(artifact?.download_url)" in plan_js
+
+
+def test_report_download_presenter_drops_unsafe_persisted_urls():
+    html = _agent_report_download_html(
+        [
+            {"label": "安全报告", "download_url": "/api/tasks/task-1/report/download"},
+            {"label": "脚本", "download_url": "javascript:alert(1)"},
+            {"label": "跨站", "download_url": "//evil.example/report.xlsx"},
+            {"label": "反斜杠", "download_url": "/\\evil.example/report.xlsx"},
+        ]
+    )
+
+    assert "安全报告" in html
+    assert "api/tasks/task-1/report/download" in html
+    assert "javascript:" not in html
+    assert "evil.example" not in html
+    assert "脚本" not in html
+    assert "跨站" not in html
+    assert "反斜杠" not in html
 
 
 def test_agent_markdown_renders_highlighted_code_blocks():

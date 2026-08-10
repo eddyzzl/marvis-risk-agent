@@ -90,7 +90,7 @@ const COLLECTION_DEFINITIONS = Object.freeze([
 
 function safeDownloadUrl(value) {
   const url = nonEmptyText(value);
-  return url.startsWith("/api/") ? url : "";
+  return url.startsWith("/api/") ? url.slice(1) : "";
 }
 
 function collectionTotal(collection) {

@@ -4,11 +4,18 @@ from pathlib import Path
 import re
 
 from marvis.artifacts import TransactionalDirectoryStore
+from marvis.drafts.authoring import assert_draft_code_safe
 from marvis.drafts.contracts import DraftTool, PromotionCheck
-from marvis.drafts.errors import PromotionError
+from marvis.drafts.errors import AuthoringError, PromotionError
 from marvis.plugins.errors import DuplicatePluginError, PluginNotFoundError
 from marvis.plugins.loader import compute_checksum
-from marvis.plugins.manifest import PluginManifest, ToolSpec, manifest_to_dict
+from marvis.plugins.manifest import (
+    DraftPromotionReceipt,
+    EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
+    PluginManifest,
+    ToolSpec,
+    manifest_to_dict,
+)
 
 
 def validate_for_promotion(
@@ -18,6 +25,10 @@ def validate_for_promotion(
     test_cases: list[dict],
 ) -> PromotionCheck:
     problems = []
+    try:
+        assert_draft_code_safe(draft.code, entrypoint=draft.name)
+    except AuthoringError as exc:
+        problems.append(f"Draft Language v1 rewrite required: {exc}")
     if not draft.input_schema or not draft.output_schema:
         problems.append("missing schema")
     if draft.determinism not in {"deterministic", "stochastic"}:
@@ -58,6 +69,14 @@ def promote_draft(
 ) -> PluginManifest:
     if not check.passed:
         raise PromotionError(f"cannot promote: {', '.join(check.problems)}")
+    try:
+        # Promotion is a second trust boundary.  Never trust a stale check or
+        # a Draft record that changed after its tests completed.
+        assert_draft_code_safe(draft.code, entrypoint=draft.name)
+    except AuthoringError as exc:
+        raise PromotionError(
+            f"cannot promote: Draft Language v1 rewrite required: {exc}"
+        ) from exc
     plugin_name = _plugin_name(draft)
     plugins_root = Path(plugins_dir)
     staged = TransactionalDirectoryStore(plugins_root).stage(plugin_name)
@@ -108,7 +127,11 @@ def _register_promoted_draft(
         "kind": "draft.promote",
         "target_ref": draft.id,
         "outcome": "succeeded",
-        "detail": {"plugin": manifest.name, "tests": check.test_result},
+        "detail": {
+            "plugin": manifest.name,
+            "tests": check.test_result,
+            "draft_promotion": manifest.draft_promotion.to_dict(),
+        },
     }
     registry._repo.promote_draft_with_plugin_audits(
         manifest,
@@ -131,6 +154,14 @@ def reject_draft(draft: DraftTool, *, drafts, reason: str) -> None:
 
 
 def _manifest_from_draft(draft: DraftTool, plugin_name: str, *, checksum: str) -> PluginManifest:
+    promotion = DraftPromotionReceipt(
+        draft_id=draft.id,
+        plugin_name=plugin_name,
+        plugin_version="0.1.0",
+        plugin_checksum=checksum,
+        tool_name=draft.name,
+        execution_profile=EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
+    )
     return PluginManifest(
         name=plugin_name,
         version="0.1.0",
@@ -150,12 +181,14 @@ def _manifest_from_draft(draft: DraftTool, plugin_name: str, *, checksum: str) -
                 side_effects=(),
                 entrypoint=draft.name,
                 memory_limit_mb=2048,
+                execution_profile=EXECUTION_PROFILE_DRAFT_RESTRICTED_V1,
             ),
         ),
         hooks=(),
         permissions=(),
         builtin=False,
         checksum=checksum,
+        draft_promotion=promotion,
     )
 
 

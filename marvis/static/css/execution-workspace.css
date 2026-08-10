@@ -67,6 +67,12 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .check-icon.running {
+    animation: none;
+  }
+}
+
 .step {
   display: grid;
   gap: 1px;
