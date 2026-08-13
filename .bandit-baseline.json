@@ -1,19 +1,19 @@
 {
   "errors": [],
-  "generated_at": "2026-08-10T01:35:23Z",
+  "generated_at": "2026-08-13T15:50:39Z",
   "metrics": {
     "_totals": {
-      "CONFIDENCE.HIGH": 263,
+      "CONFIDENCE.HIGH": 264,
       "CONFIDENCE.LOW": 35,
       "CONFIDENCE.MEDIUM": 81,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 261,
+      "SEVERITY.LOW": 262,
       "SEVERITY.MEDIUM": 118,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 378041,
+      "loc": 379180,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 1
     },
     "marvis/__init__.py": {
       "CONFIDENCE.HIGH": 0,
@@ -375,7 +375,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1787,
+      "loc": 1788,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -1259,7 +1259,7 @@
       "SEVERITY.LOW": 3,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 711,
+      "loc": 764,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -1952,6 +1952,19 @@
       "nosec": 0,
       "skipped_tests": 0
     },
+    "marvis/draft_language.py": {
+      "CONFIDENCE.HIGH": 0,
+      "CONFIDENCE.LOW": 0,
+      "CONFIDENCE.MEDIUM": 0,
+      "CONFIDENCE.UNDEFINED": 0,
+      "SEVERITY.HIGH": 0,
+      "SEVERITY.LOW": 0,
+      "SEVERITY.MEDIUM": 0,
+      "SEVERITY.UNDEFINED": 0,
+      "loc": 583,
+      "nosec": 0,
+      "skipped_tests": 0
+    },
     "marvis/drafts/__init__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
@@ -1974,7 +1987,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 323,
+      "loc": 141,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -2004,6 +2017,19 @@
       "nosec": 0,
       "skipped_tests": 0
     },
+    "marvis/drafts/language.py": {
+      "CONFIDENCE.HIGH": 0,
+      "CONFIDENCE.LOW": 0,
+      "CONFIDENCE.MEDIUM": 0,
+      "CONFIDENCE.UNDEFINED": 0,
+      "SEVERITY.HIGH": 0,
+      "SEVERITY.LOW": 0,
+      "SEVERITY.MEDIUM": 0,
+      "SEVERITY.UNDEFINED": 0,
+      "loc": 27,
+      "nosec": 0,
+      "skipped_tests": 0
+    },
     "marvis/drafts/learning.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
@@ -2026,7 +2052,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 163,
+      "loc": 194,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -2078,7 +2104,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 161,
+      "loc": 234,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -2520,7 +2546,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 898,
+      "loc": 902,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -3378,7 +3404,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 804,
+      "loc": 826,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -3716,7 +3742,7 @@
       "SEVERITY.LOW": 2,
       "SEVERITY.MEDIUM": 2,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 2145,
+      "loc": 2149,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -5965,7 +5991,7 @@
       "SEVERITY.LOW": 3,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 2140,
+      "loc": 2152,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -6095,7 +6121,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 491,
+      "loc": 609,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -6108,7 +6134,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 124,
+      "loc": 345,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -6121,7 +6147,7 @@
       "SEVERITY.LOW": 5,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1861,
+      "loc": 1923,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -6152,17 +6178,17 @@
       "skipped_tests": 0
     },
     "marvis/plugins/subprocess_worker.py": {
-      "CONFIDENCE.HIGH": 2,
+      "CONFIDENCE.HIGH": 3,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 2,
+      "SEVERITY.LOW": 3,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 763,
+      "loc": 873,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 1
     },
     "marvis/production_governance/__init__.py": {
       "CONFIDENCE.HIGH": 0,
@@ -8443,7 +8469,7 @@
       "test_name": "blacklist"
     },
     {
-      "code": "2028         conn.register(\"_slice_snapshot\", snapshot)\n2029         scanned_row = conn.execute(f\"SELECT count(*) FROM {rel}{where_clause}\", params).fetchone()\n2030         frame = conn.execute(query, params).df()\n",
+      "code": "2029         conn.register(\"_slice_snapshot\", snapshot)\n2030         scanned_row = conn.execute(f\"SELECT count(*) FROM {rel}{where_clause}\", params).fetchone()\n2031         frame = conn.execute(query, params).df()\n",
       "col_offset": 37,
       "end_col_offset": 58,
       "filename": "marvis/packs/data_ops/tools.py",
@@ -8454,9 +8480,9 @@
       },
       "issue_severity": "MEDIUM",
       "issue_text": "Possible SQL injection vector through string-based query construction.",
-      "line_number": 2029,
+      "line_number": 2030,
       "line_range": [
-        2029
+        2030
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
       "test_id": "B608",

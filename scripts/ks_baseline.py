@@ -173,6 +173,39 @@ def _parse_params(raw: str | None) -> dict[str, Any]:
     return value
 
 
+def _write_evidence_report(
+    path: Path,
+    *,
+    dataset: str,
+    mode: str,
+    run_payload: dict[str, Any],
+    extra: str = "",
+) -> Path:
+    """Write a dated T4-2 evidence report; a directory argument gets an
+    auto-generated filename under the docs/ks_baseline/evidence convention."""
+    path = path.expanduser()
+    if path.is_dir() or not path.suffix:
+        stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
+        path = path / f"{dataset}-{stamp}-{mode}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"# T4-2 KS-baseline evidence: {dataset} ({mode})",
+        "",
+        f"- dataset: {dataset}",
+        f"- mode: {mode}",
+        f"- checked_at: {datetime.now(UTC).isoformat()}",
+        "",
+        "## run payload",
+        "```json",
+        json.dumps(run_payload, indent=2, ensure_ascii=False),
+        "```",
+    ]
+    if extra:
+        lines += ["", extra]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def _status_payload() -> dict[str, Any]:
     baselines = _load_baselines()
     datasets: dict[str, Any] = {}
@@ -263,6 +296,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="required with --record: reproducible tuning/review method",
     )
     parser.add_argument("--workdir", default=None, help="working directory (default: a temp dir)")
+    parser.add_argument(
+        "--report",
+        default=None,
+        help="write evidence report to <path>; a directory gets an auto-named "
+        "<dataset>-<UTC>-<mode>.md (convention: docs/ks_baseline/evidence/)",
+    )
     args = parser.parse_args(argv)
     if args.status:
         if args.dataset or args.record or args.input:
@@ -322,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
 
     baselines = _load_baselines()
     entry = baselines.get(args.dataset, {})
+    report_path = Path(args.report).expanduser() if args.report else None
 
     if args.record:
         data_path = _public_data_path(args.dataset, args.input)
@@ -348,6 +388,19 @@ def main(argv: list[str] | None = None) -> int:
         baselines[args.dataset] = entry
         _write_baselines(baselines)
         print(f"\nRecorded baseline_ks={result.test_ks} for {args.dataset} in {_BASELINES_PATH}")
+        if report_path:
+            written = _write_evidence_report(
+                report_path,
+                dataset=args.dataset,
+                mode="record",
+                run_payload=result.to_dict(),
+                extra=(
+                    f"## recorded baseline\n\n- baseline_ks: {result.test_ks}\n"
+                    f"- tuned_by: {args.tuned_by}\n- tuning_note: {args.tuning_note}\n"
+                    f"- dataset_sha256: {entry['provenance']['dataset_sha256']}\n"
+                ),
+            )
+            print(f"Evidence report: {written}")
         return 0
 
     baseline_ks = entry.get("baseline_ks")
@@ -368,6 +421,15 @@ def main(argv: list[str] | None = None) -> int:
 
     verdict = compare_to_baseline(result, float(baseline_ks), tolerance=args.tolerance)
     print("\n" + verdict.render())
+    if report_path:
+        written = _write_evidence_report(
+            report_path,
+            dataset=args.dataset,
+            mode="compare",
+            run_payload=result.to_dict(),
+            extra=f"## verdict\n\n```text\n{verdict.render()}\n```",
+        )
+        print(f"Evidence report: {written}")
     return 0 if verdict.passed else 1
 
 

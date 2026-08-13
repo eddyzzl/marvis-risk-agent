@@ -164,3 +164,22 @@ recorded yet. Sample output:
    features, recipe).
 2. Add a placeholder entry in `baselines.json`.
 3. Drop the raw file under `datasets/<name>/`, run `--record`, commit the number.
+
+## Evidence reports
+
+Every `--record` or compare run can also write a dated evidence report so T4-2
+closure has a canonical artifact location:
+
+```bash
+python scripts/ks_baseline.py --dataset give_me_some_credit \
+  --input /absolute/path/to/cs-training.csv --report docs/ks_baseline/evidence
+
+python scripts/ks_baseline.py --dataset give_me_some_credit \
+  --input /absolute/path/to/cs-training.csv --record \
+  --tuned-by "<name/team>" --tuning-note "<method and review>" \
+  --report docs/ks_baseline/evidence
+```
+
+A directory argument auto-names the file `<dataset>-<UTC>-<mode>.md`; a file path
+is used verbatim. Evidence reports embed the full run payload plus the verdict
+(compare mode) or the recorded provenance (record mode).

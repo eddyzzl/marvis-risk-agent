@@ -24,6 +24,7 @@ RUN_RUFF=1
 RUN_NODE=1
 RUN_DIFF=1
 RUN_AUDIT=0
+RUN_BANDIT=1
 FAST=0
 AFFECTED=0
 AFFECTED_FULL=0
@@ -41,6 +42,7 @@ Options:
   --skip-ruff     Skip ruff.
   --skip-node     Skip JavaScript syntax checks.
   --skip-diff     Skip git diff whitespace checks.
+  --skip-bandit   Skip the bandit check over changed marvis/*.py files.
   --fast          Run only the fast test tier
                   (-m "not slow and not e2e and not llm and not pmml_runtime").
   --affected      Run tests affected by the current git diff. Uses
@@ -88,6 +90,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-diff)
       RUN_DIFF=0
+      shift
+      ;;
+    --skip-bandit)
+      RUN_BANDIT=0
       shift
       ;;
     --fast)
@@ -231,6 +237,29 @@ if [[ "$RUN_NODE" -eq 1 ]]; then
   while IFS= read -r -d '' js_file; do
     "$NODE_BIN" --check "$js_file"
   done < <(find marvis/static -type f -name '*.js' -print0 | sort -z)
+fi
+
+if [[ "$RUN_BANDIT" -eq 1 ]]; then
+  echo "==> bandit (changed marvis/*.py files)"
+  if "$PYTHON_BIN" -m bandit --version >/dev/null 2>&1; then
+    if [[ -n "${CHECK_DIFF_RANGE:-}" ]]; then
+      BANDIT_BASE="${CHECK_DIFF_RANGE%%...*}"
+      BANDIT_BASE="${BANDIT_BASE%%..*}"
+    else
+      BANDIT_BASE="HEAD"
+    fi
+    changed_py=()
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && changed_py+=("$f")
+    done < <(git diff --name-only "$BANDIT_BASE" -- marvis | grep '\.py$' || true)
+    if [[ ${#changed_py[@]} -gt 0 ]]; then
+      "$PYTHON_BIN" -m bandit -ll -ii -b .bandit-baseline.json "${changed_py[@]}"
+    else
+      echo "no changed marvis/*.py files"
+    fi
+  else
+    echo "skipping bandit: not installed (pip install bandit to enable)"
+  fi
 fi
 
 if [[ "$RUN_PYTEST" -eq 1 ]]; then
