@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from pathlib import Path
 from types import MappingProxyType
 
 import pytest
@@ -370,7 +371,16 @@ def test_migrated_specs_declare_exact_template_presenter_refs() -> None:
 
 
 def test_compiler_has_no_family_validator_or_confirmation_shadows() -> None:
-    compiler_tree = ast.parse(inspect.getsource(strategy_request_compiler))
+    # The compiler is physically split across lane files executed into the
+    # package namespace (exec-merge design); parse the merged lane sources so
+    # the invariant still covers the whole module surface.
+    compiler_pkg = Path(inspect.getfile(strategy_request_compiler)).parent
+    merged_src = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(compiler_pkg.glob("*.py"))
+        if p.name != "__init__.py"
+    )
+    compiler_tree = ast.parse(merged_src)
     family_validators = sorted(
         node.name
         for node in compiler_tree.body
