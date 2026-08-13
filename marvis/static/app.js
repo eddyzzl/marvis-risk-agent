@@ -5,9 +5,7 @@ import {
 } from "./js/agent-memory-panel.js";
 import { createDraftToolsPanelController } from "./js/draft-tools-panel.js";
 import {
-  agentMessageContent,
   agentMessageIsAdvanceIntent,
-  agentMessageIsContinuePrompt,
   agentReportMessagesForDisplay,
   agentRerunMessageFingerprint,
   agentTimelineStageDefinitions,
@@ -181,8 +179,6 @@ import { createStrategyCandidateLabController } from "./js/v2/strategy_candidate
 import { getSelectedTier, onSelectedTierChange } from "./js/v2/state_v2.js";
 import {
   columnFractions,
-  columnHeatColors,
-  columnRanks,
   parseNumeric,
   psiTier,
   psiTooltipText,
@@ -215,7 +211,6 @@ import {
   escapeHtml,
   fileName,
   signatureFromParts,
-  splitListInput,
 } from "./js/ui-utils.js";
 
 let selectedTaskId = null;
@@ -740,24 +735,11 @@ function metricPreviewSignature(taskId, metricValues, tableSections, emptyMessag
   ]);
 }
 
-function resetMetricPreviewRenderSignature() {
-  renderSignatures.metricPreview = "";
-  renderSignatures.metricPreviewTaskId = "";
-}
-
 function resetReproducibilityRenderSignatures() {
   renderSignatures.reproducibilityEvidence = "";
   renderSignatures.reproducibilityEmpty = "";
   renderSignatures.reproducibilityTaskId = "";
   renderSignatures.reproducibilityAnimatedTaskId = "";
-}
-
-function resetValidationRenderSignatures() {
-  renderSignatures.actionStatus = "";
-  renderSignatures.currentTask = "";
-  renderSignatures.workflowStepper = "";
-  renderSignatures.taskList = "";
-  resetMetricPreviewRenderSignature();
 }
 
 function taskTypeDefinition(taskType = createTaskDialog.activeTaskType()) {
@@ -808,16 +790,6 @@ function closeTaskDialog() {
 
 function bindRunModeDeselectableCards() {
   createTaskDialog.bindRunModeDeselectableCards();
-}
-
-function openExecutionEnvironmentDialog() {
-  $("executionEnvironmentStatus").textContent = "正在读取执行环境...";
-  $("executionEnvironmentStatus").className = "status";
-  openGovernanceSettingsCenter("execution-environment");
-}
-
-function closeExecutionEnvironmentDialog() {
-  closeGovernanceSettingsDialog();
 }
 
 function openLLMSettingsDialog() {
@@ -2128,36 +2100,8 @@ function runGovernanceExtensionAction(action) {
   });
 }
 
-function renderAgentMemoryItems() {
-  agentMemoryPanel.renderItems();
-}
-
-function renderAgentMemoryDetail(memory = null, events = [], detailOptions = {}) {
-  agentMemoryPanel.renderDetail(memory, events, detailOptions);
-}
-
 async function loadAgentMemoryItems() {
   return agentMemoryPanel.loadItems();
-}
-
-async function inspectAgentMemory(memoryId) {
-  return agentMemoryPanel.inspect(memoryId);
-}
-
-async function disableAgentMemory(memoryId) {
-  return agentMemoryPanel.disable(memoryId);
-}
-
-async function enableAgentMemory(memoryId) {
-  return agentMemoryPanel.enable(memoryId);
-}
-
-async function deleteAgentMemory(memoryId) {
-  return agentMemoryPanel.remove(memoryId);
-}
-
-async function rollbackAgentMemoryDistillation(memoryId) {
-  return agentMemoryPanel.rollbackDistillation(memoryId);
 }
 
 async function loadAgentMessageMemoryReferences(taskId, messageId) {
@@ -2176,14 +2120,6 @@ function handleAgentMemoryInlineInspect(event) {
 
 function setDraftToolsStatus(message = "", kind = "") {
   draftToolsPanel.setStatus(message, kind);
-}
-
-function renderDraftToolsList() {
-  draftToolsPanel.renderList();
-}
-
-function renderDraftToolDetail(payload = null) {
-  draftToolsPanel.renderDetail(payload);
 }
 
 async function loadDraftTools({ preserveSelection = false } = {}) {
@@ -3118,25 +3054,6 @@ async function restoreResultScrollPositionAfterRender(taskId = selectedTaskId) {
   if (pendingResultScrollRestoreTaskId === taskId) pendingResultScrollRestoreTaskId = null;
   if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
   syncAgentAutoScrollFollowFromCurrentPosition(taskId);
-}
-
-function scheduleResultScrollRestore(taskId = selectedTaskId) {
-  if (!taskId) return;
-  prepareResultScrollRestoreForTask(taskId);
-  cancelResultScrollRestoreFrame();
-  resultScrollRestoreFrame = window.requestAnimationFrame(() => {
-    resultScrollRestoreFrame = window.requestAnimationFrame(() => {
-      resultScrollRestoreFrame = null;
-      if (pendingResultScrollRestoreTaskId !== taskId || selectedTaskId !== taskId) {
-        if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
-        return;
-      }
-      applyResultScrollPosition(taskId);
-      pendingResultScrollRestoreTaskId = null;
-      if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
-      syncAgentAutoScrollFollowFromCurrentPosition(taskId);
-    });
-  });
 }
 
 function scheduleTaskHeroGlassState() {
