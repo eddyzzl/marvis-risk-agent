@@ -393,6 +393,7 @@ def test_check_audit_exports_and_scans_the_locked_project_graph(tmp_path: Path):
             "--skip-ruff",
             "--skip-node",
             "--skip-diff",
+            "--skip-bandit",
         ],
         cwd=ROOT,
         env=env,

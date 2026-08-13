@@ -250,8 +250,13 @@ if [[ "$RUN_BANDIT" -eq 1 ]]; then
     fi
     changed_py=()
     while IFS= read -r f; do
-      [[ -n "$f" ]] && changed_py+=("$f")
-    done < <(git diff --name-only "$BANDIT_BASE" -- marvis | grep '\.py$' || true)
+      [[ -n "$f" ]] && [[ -f "$f" ]] && changed_py+=("$f")
+    done < <(
+      {
+        git diff --name-only "$BANDIT_BASE" -- marvis
+        git ls-files --others --exclude-standard -- marvis
+      } | grep '\.py$' | sort -u || true
+    )
     if [[ ${#changed_py[@]} -gt 0 ]]; then
       "$PYTHON_BIN" -m bandit -ll -ii -b .bandit-baseline.json "${changed_py[@]}"
     else
