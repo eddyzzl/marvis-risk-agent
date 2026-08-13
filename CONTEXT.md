@@ -1,6 +1,6 @@
 # MARVIS 领域词汇表
 
-本文件只是词汇表：记录项目的统一语言（ubiquitous language），不含实现细节。实现决策见 `docs/plans/`（计划与 spec）与 `docs/reviews/`（审查报告）。
+本文件只是词汇表：记录项目的统一语言（ubiquitous language），不含实现细节。当前执行计划见 `docs/superpowers/plans/2026-08-13-next-90-days-development-plan.md`；历史计划与审查已归档至 `docs/history-archive.md`；产品范围与验收状态见 `docs/roadmap.md` 与 `docs/capability-status.md`。
 
 ## 质量与信任
 

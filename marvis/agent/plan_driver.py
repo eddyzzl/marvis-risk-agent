@@ -1,6 +1,7 @@
 """Generic plan-conversation driver — one driver for all V2 task types.
 
-See docs/plans/v2-plan-driver-spec.md. Given a task's template + filled slots,
+(Original spec: v2-plan-driver-spec.md, archived at docs/history-archive.md.)
+Given a task's template + filled slots,
 the driver builds a plan, runs it on the real PlanExecutor, and at each
 ``needs_confirmation`` gate turns the *just-computed prior-step output* into an
 append-only assistant message (with inline rich tables). The executor pauses

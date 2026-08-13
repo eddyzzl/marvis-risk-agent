@@ -193,3 +193,5 @@ plan.replanned
 - `DESIGN.md`：产品体验、信息架构、视觉和交互约束。
 - `docs/notebook_contract.md`：Notebook 运行契约。
 - `docs/对notebook的要求.md`：给模型开发人员看的 Notebook 提交要求。
+- `docs/superpowers/plans/2026-08-13-next-90-days-development-plan.md`：当前 90 天执行计划，开发工作以此为准。
+- `docs/history-archive.md`：历史计划、审查与裁决归档（只读）；被移除文档的原文仍在 git 历史中。

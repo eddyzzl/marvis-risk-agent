@@ -175,7 +175,8 @@ def require_agent_task(task: TaskRecord, driver_agent_task_types: frozenset[str]
 # This is an ALLOWLIST, not a denylist: any task_type not listed here rejects
 # explicitly instead of silently falling through to the validation agent on a
 # goal prompt written for a different workflow. New task types must be added here
-# as their agent flow is wired (see docs/plans/v2-completion-plan.md SS8 step 0).
+# as their agent flow is wired (new task types follow the current execution
+# plan; the original V2-completion-plan is archived at docs/history-archive.md).
 WIRED_AGENT_TASK_TYPES = frozenset(
     {
         TASK_TYPE_VALIDATION,

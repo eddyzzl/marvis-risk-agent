@@ -38,7 +38,8 @@ from marvis.data.backend import DataBackend
 from marvis.packs.modeling.contracts import TrainConfig
 
 #: The default KS tolerance below the baseline that still counts as a pass
-#: (docs/plans/v2-trust-first-plan.md §0: "agent KS >= 人工精调基线 − 0.005").
+#: (T4 gate definition; Trust-First plan archived at docs/history-archive.md:
+#: "agent KS >= 人工精调基线 − 0.005").
 DEFAULT_KS_TOLERANCE = 0.005
 
 #: Recipe entry points the harness can drive. Maps recipe id -> importable trainer.

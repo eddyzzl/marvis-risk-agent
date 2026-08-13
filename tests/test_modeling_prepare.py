@@ -282,8 +282,8 @@ def test_prepare_modeling_frame_splits_oot_by_time_with_string_month_column(tmp_
     has no kernel for pandas/pyarrow string dtypes, so the OOT cutoff must be computed via
     a dtype-agnostic rank rather than the raw column values (see _make_split in prepare.py).
     This locks in that fix and its determinism, sourced from the six-journey smoke finding
-    that apply_month alone did not trigger a time split (docs/plans/v2-master-backlog.md
-    Appendix A, SEL-1)."""
+    that apply_month alone did not trigger a time split (SEL-1; see archived
+    v2-master-backlog Appendix A in docs/history-archive.md)."""
     months = ["2025-10", "2025-11", "2025-12", "2026-01"]
     frame = pd.DataFrame({
         "row_id": list(range(100)),

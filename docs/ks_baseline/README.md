@@ -2,8 +2,10 @@
 
 End-to-end harness that drives the MARVIS modeling stack (ingest → split → train →
 KS) on a tabular credit dataset and compares the resulting KS to a stored
-**ground-truth baseline**. It is the second of the three data-judgement layers in
-[`docs/plans/v2-trust-first-plan.md`](../plans/v2-trust-first-plan.md) (T4).
+**ground-truth baseline**. It is the second of the three data-judgement layers
+defined by the T4 gate (see the 阻断门 section of
+[`capability-status.md`](../capability-status.md); execution plan: A-2 / B-3 in
+[`docs/superpowers/plans/2026-08-13-next-90-days-development-plan.md`](../superpowers/plans/2026-08-13-next-90-days-development-plan.md)).
 
 There are two ways to run it:
 
