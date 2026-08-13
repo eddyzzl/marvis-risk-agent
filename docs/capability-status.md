@@ -7,6 +7,12 @@
 > [V2.3.0 发布就绪复审](reviews/2026-08-09-v2-3-0-release-readiness.md)。
 > 候选尚未在本文件写入时完成 commit、tag、release push 或对应 SHA 的远端 CI，
 > 因而这些交付层仍保持 `NOT_PROVEN`，不得由本地通过结果外推。
+>
+> 2026-08-13/14 增量更新（90 天计划执行）：SQL 只读接入、策略历史回溯、泄漏与
+> 选择偏差检测、额度/定价 typed 影响、公平性证据模块、反事实重放核心（均为
+> 核心+单测纵切，未接 Agent/UI 的层保持 NOT_PROVEN）；两个超大编排文件物理
+> 拆分完成（见本地架构表）。新增行的 API/Agent/Browser 层在接线并跑通对应
+> 旅程前保持 NOT_PROVEN，不因单测通过而升级。
 
 ## 状态口径
 
@@ -40,11 +46,15 @@
 | 能力 | Implemented | Unit | API | Agent | Browser | Fresh workspace | Real data | Sign-off | Production | 当前产品结论 |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 数据处理 / JOIN | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 八个正式桌面入口之一；双表上传、角色/键/目标确认、诊断、执行与下载已走通 |
+| SQL 只读数据接入 | VERIFIED | VERIFIED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 核心与单测完成（`data/sql_ingest.py`：DuckDB/SQLite/PostgreSQL 只读、单条 SELECT 白名单、行预算/超时、凭据脱敏、与文件导入同权同责注册；22 tests）；尚未接 Agent/UI，方向按 90 天计划 A-6 待用户确认 |
 | 特征分析 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 全指标、选定分箱与跳过分箱分支均已走通；指标与报告由确定性工具负责 |
 | 模型开发 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | LR 无 OOT、XGB 随机 OOT、LGB 时间 OOT 均以单轮调参产出结果；T4-2 未关闭 |
 | 模型验证 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 手动、Agent、失败阻断及报告下载均已走通；不替代独立验证责任 |
 | 批量模型验证 | VERIFIED | VERIFIED | VERIFIED | N/A | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 两套独立材料顺序执行，保留单模型 Word/Excel 并生成汇总 Excel；不自动确认输入合同 |
 | 策略开发 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 七阶段 Candidate Lab 与主要策略方法、稳定性/重放、编译/应用、ProjectContext 和四格式报告已走通；本地采纳不等于生产部署 |
+| 策略历史回溯打分 | VERIFIED | VERIFIED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | as-of 逐月重放核心与单测完成（`packs/strategy/historical_backtest.py`：缺月 fail-closed、backtested/unvalidated 标记；15 tests）；未接 Agent/UI |
+| 泄漏与选择偏差检测 | VERIFIED | VERIFIED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 时间泄漏红旗 + 双人群分布对比核心与单测完成（`packs/strategy/leakage_diagnostics.py`；12 tests），纯证据、不自动阻断；未接 Agent/UI |
+| 额度/定价 typed 影响 | VERIFIED | VERIFIED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 敞口/EL 增量、定价收益-坏账成本、segment×month 矩阵核心与单测完成（`packs/strategy/limit_pricing_impact.py`；20 tests），缺失口径=unavailable；未接 Agent/UI |
 | Vintage / roll-rate / 利润分析 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | Standard Vintage、VTG、base-only VTG、利润分析与不兼容混合场景阻断均已走通 |
 | 标签与样本定义 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 作为数据处理内的受治理 workflow；已有口径提案、成熟度门、双确认、派生数据集与下载的聚焦证据，不静默替换 active dataset；当前候选仍需重跑真实浏览器旅程 |
 | 多模型分数比较 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | NOT_PROVEN | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 认证最新 SampleDesign 与每个模型分数证据，至少两个模型才执行；输出比较证据但不自动选冠军、采纳或部署 |
@@ -54,8 +64,8 @@
 | 实时 / 批量评分决策服务 | PARTIAL | PARTIAL | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 本地打分与交付物存在，生产决策服务未交付 |
 | 多用户 RBAC / maker-checker | PARTIAL | VERIFIED | VERIFIED | NOT_DELIVERED | NOT_DELIVERED | PARTIAL | N/A | NOT_PROVEN | NOT_DELIVERED | 本地 session principal、maker/checker/admin、晋级与回滚 API 已有；不是企业身份源、SSO 或组织权限治理 |
 | 逐环境晋级 / 激活 / 回滚 | PARTIAL | VERIFIED | VERIFIED | NOT_DELIVERED | NOT_DELIVERED | PARTIAL | N/A | NOT_PROVEN | NOT_DELIVERED | 服务端生成不可变 deployment manifest，激活只接受 allowlisted verifier 的内容寻址证据；默认无 verifier 因而不能宣称真实激活 |
-| 信用决策数字孪生 | VERIFIED | VERIFIED | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 已有本地 CAS、冻结 manifest/facts/字段来源/adapter 及其 transitive helper、Champion/Challenger/反事实联合约束与 proposal-only FSP-8 桥；尚无正式 API、UI、外部签名或远端不可篡改存储 |
-| 公平性 / 拒绝原因 / 申诉 | PARTIAL | PARTIAL | NOT_DELIVERED | PARTIAL | NOT_DELIVERED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 只有局部证据与起草能力，不是完整合规工作台 |
+| 信用决策数字孪生 | VERIFIED | VERIFIED | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 已有本地 CAS、冻结 manifest/facts/字段来源/adapter 及其 transitive helper、Champion/Challenger/反事实联合约束与 proposal-only FSP-8 桥；2026-08-13 新增有界反事实重放核心（`decision_twin/counterfactual.py`：白名单 delta、行预算 fail-closed、counterfactual_only 标记，10 tests）；尚无正式 API、UI、外部签名或远端不可篡改存储 |
+| 公平性 / 拒绝原因 / 申诉 | PARTIAL | VERIFIED | NOT_DELIVERED | PARTIAL | NOT_DELIVERED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 2026-08-13 新增分群通过率/坏率/拒绝原因分布证据模块（`packs/strategy/fairness_evidence.py`，纯证据、无判定词、措辞模板待合规审阅，14 tests）；仍不是完整合规工作台 |
 | 催收 | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 不在当前已交付工作流内 |
 | 反欺诈 | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 通用建模能力不等于完整反欺诈系统 |
 | 征信 / 三方报文接入 | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_DELIVERED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 未交付生产解析与接入 |
@@ -65,6 +75,7 @@
 | 边界 | 状态 | 当前证据 | 不能外推的结论 |
 |---|---|---|---|
 | Strategy workflow 事实源 | VERIFIED | 44/44 spec 已迁移，validator/confirmation/preparer 齐全；compiler shadow 分支为 0；单一 canonical turn entry | 不代表两个超大编排文件已经完成物理拆分 |
+| 超大编排文件物理拆分 | VERIFIED | 2026-08-14：`turn_handlers.py`（17,868 行）拆为 17 车道包、`strategy_request_compiler.py`（14,449 行）拆为 10 车道包，均采用 exec-merge 命名空间设计（运行时语义与原单体一致，含 monkeypatch）；turn_handlers 相关 865 tests、compiler 相关 1,993 tests（1 个 `inspect.getsource` 测试迁移到合并车道源码，语义不变）通过；两包 ruff 干净；`__all__` 逐名一致 | 不代表剩余大车道文件（strategy_candidates 约 4.5k 行等）与 app.js 单体已继续细分 |
 | Canonical result 展示 | VERIFIED | 8 个 presenter；ToolRunner 在成功前做 live authentication，并绑定 invocation/output/tool version/manifest；Repository 与展示端重验 exact binding | 不代表外部存储或主机管理员不可篡改 |
 | 结果数据集下载 | VERIFIED | URL 绑定 plan/step/output/hash；registry、文件与 evidence 重验；单 descriptor 私有快照关闭 verify-to-open 竞态；冻结快照支持 Range/206/416 | 不代表远端对象存储、CDN 或跨区域传输已验收 |
 | 崩溃恢复 | VERIFIED | 父绑定完整性冲突会把 CHECKING step 与 RUNNING plan 收敛为 FAILED；startup reclaim 有回归 | 不代表生产级进程编排与故障演练已完成 |

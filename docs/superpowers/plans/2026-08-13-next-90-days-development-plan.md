@@ -11,6 +11,39 @@
 
 ---
 
+## 执行状态（2026-08-13/14 更新）
+
+**B 类（Agent 可直接完成）**：已全部执行完毕。状态与证据：
+
+| # | 状态 | 证据与说明 |
+|---|---|---|
+| B-1 测试真实性审计 | ✅ 完成 | `docs/reviews/2026-08-13-test-authenticity-audit.md`。PSI 无非退化黄金锚、10 条 C 类（自证）测试、补锚队列 P1–P4 已列出 |
+| B-2 僵尸代码清理 | ✅ 完成（结论修正） | vulture 函数级全扫：无死代码可删。此前判定的 `kernel_probe.py`/`sample_data.py` 经复核为**活代码**（Windows 打包运行时 `-m marvis.kernel_probe` / KS harness + 组合分析测试），保留 |
+| B-3 T4-2 harness 工程侧 | ✅ 工程侧完成；门仍 BLOCKED 待 A-2 | `scripts/ks_baseline.py` 新增 `--report` 证据产出；smoke 锚点绿（7 tests）；等待你提供数据集并登记基线 |
+| B-4 巨型文件拆分 | ✅ 完成 | `turn_handlers.py`（17,868 行）→ `turn_handlers/` 包 17 车道；`strategy_request_compiler.py`（14,449 行）→ `strategy_request_compiler/` 包 10 车道。采用 exec-merge 命名空间设计（车道文件顺序注入单一命名空间），运行时语义与单体一致（含 monkeypatch）。turn_handlers 相关 865 tests 通过；两包 ruff 干净；`__all__` 与原文件逐名一致 |
+| B-5 bandit baseline 重建 | ✅ 完成 | 基线重建：83 条 finding（净零漂移，非"过期大清单"）；`scripts/check` 新增变更文件 bandit 增量门（`--skip-bandit` 可跳过）；分类见 `docs/reviews/2026-08-13-bandit-baseline-review.md` |
+| B-6 前端单体收敛 | ✅ 完成（如实） | `app.js` 8,465→8,382（-83 行确认死代码）；核查发现 js/ 模块是刻意的薄适配层、无真正重复实现；507 个前端静态测试通过 |
+| B-7 SQL 只读接入 | ◐ 核心+测试完成；agent/UI 接线待续 | `marvis/data/sql_ingest.py`（DuckDB/SQLite/PostgreSQL 只读、凭据脱敏、与文件导入同权同责）；22 tests。已按 A-6 推荐默认（三后端只读）实现，A-6 决策仍待你确认 |
+| B-8 历史回溯打分 | ✅ 完成 | `marvis/packs/strategy/historical_backtest.py`（逐月 as-of 重放、缺月 fail-closed、backtested/unvalidated 标记）；15 tests |
+| B-9 泄漏与选择偏差检测 | ✅ 完成 | `marvis/packs/strategy/leakage_diagnostics.py`（时间泄漏红旗 + 双人群分布对比，纯证据）；12 tests |
+| B-10 额度/定价 typed 影响 | ✅ 完成 | `marvis/packs/strategy/limit_pricing_impact.py`（敞口/EL 增量、定价收益-坏账成本、segment×month 矩阵，缺失口径=unavailable）；20 tests |
+| B-11 反事实沙箱 | ◐ 核心+测试完成；首屏纵切待接线 | `marvis/decision_twin/counterfactual.py`（白名单 delta 有界重放、proposal-only、与 pool apply 同款 evaluator）；10 tests。agent/UI/API 接线与首屏纵切留待下一轮 |
+| B-12 兼容层契约加固 | ✅ 完成 | `tests/test_compat_cross_version_contract.py` 6 条：双轨坏样本归一、无隐式交集、空标签策略、legacy golden token；实现无偏离 |
+| B-13 架构文档 | ✅ 完成 | `docs/architecture.md`（294 行，7 主题 + 读码入口指引） |
+| B-14 公平性证据模块 | ✅ 核心完成；措辞待 A-8 | `marvis/packs/strategy/fairness_evidence.py`（分群通过率/坏率/拒绝原因分布，纯证据、无判定词，模板标注待合规审阅）；14 tests |
+| B-15 监控闭环 | ✅ 按计划降级 | 已核实现状：单次诊断与调整链路存在（`monitor_tools.py`）；调度/值班闭环按计划等待 A-9/A-10 决策，未建调度 |
+
+**A 类（需要你做的）**：全部仍待你，优先级不变：
+
+- A-1 范围收口三选一（推荐①本地纵深+差异化）——**第 1 周**
+- A-2 数据集授权与基线登记（B-3 工程侧已就绪，拿到数据集即可跑）
+- A-3/A-4 真实材料对账与独立人工复核
+- A-5 试点意向（第 8 周硬检查点）、A-6 SQL 方向确认、A-7 产品定位、A-8 合规审阅、A-9/A-10 值班决策
+
+**下一步（Agent 侧收尾）**：全量 `scripts/check` 发布门 → `capability-status.md` 分层矩阵更新（SQL 接入、数字孪生、架构健康等行）→ 分主题 commit。
+
+---
+
 ## 0. 优先级定义
 
 | 级别 | 含义 | 判断标准 |
