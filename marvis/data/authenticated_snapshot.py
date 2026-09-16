@@ -266,8 +266,10 @@ def materialize_authenticated_file_snapshot(
                 "content-addressed snapshot source bytes changed",
             )
 
-        os.chmod(staging_file, 0o444)
-        os.chmod(staging_dir, 0o555)
+        # ``mkdtemp`` keeps the unpublished staging directory private. Publish
+        # it before hardening because Windows refuses to rename a directory
+        # after ``chmod(..., 0o555)`` marks it read-only. The published bytes are
+        # still re-authenticated below before the final path becomes read-only.
         try:
             os.rename(staging_dir, absolute_destination.parent)
             staging_dir = None
