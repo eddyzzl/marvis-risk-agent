@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 import stat
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
+import marvis.data.authenticated_snapshot as snapshot_module
 from marvis.data.authenticated_snapshot import (
     AuthenticatedSnapshotError,
     SnapshotFailureReason,
@@ -119,6 +120,46 @@ def test_materialized_snapshot_reuses_only_matching_existing_object(
     )
 
     assert hashlib.sha256(reused.read_bytes()).hexdigest() == digest
+
+
+def test_materialized_snapshot_publishes_before_windows_read_only_hardening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows rejects renaming a directory after chmod marks it read-only."""
+
+    dataset = tmp_path / "dataset.parquet"
+    digest = _write_parquet(dataset)
+    destination = tmp_path / "_cas" / digest / f"{digest}.parquet"
+    read_only_paths: set[Path] = set()
+    original_chmod = snapshot_module.os.chmod
+    original_rename = snapshot_module.os.rename
+
+    def windows_chmod(path, mode):
+        normalized = Path(path)
+        original_chmod(path, mode)
+        if mode & stat.S_IWRITE:
+            read_only_paths.discard(normalized)
+        else:
+            read_only_paths.add(normalized)
+
+    def windows_rename(source, target):
+        if Path(source) in read_only_paths:
+            raise PermissionError("Windows cannot rename a read-only directory")
+        return original_rename(source, target)
+
+    monkeypatch.setattr(snapshot_module.os, "chmod", windows_chmod)
+    monkeypatch.setattr(snapshot_module.os, "rename", windows_rename)
+
+    pinned = materialize_authenticated_file_snapshot(
+        dataset,
+        root=tmp_path,
+        expected_sha256=digest,
+        destination=destination,
+    )
+
+    assert pinned == destination.resolve()
+    assert hashlib.sha256(pinned.read_bytes()).hexdigest() == digest
 
 
 def test_materialized_snapshot_rejects_drifted_source_when_cas_already_exists(
