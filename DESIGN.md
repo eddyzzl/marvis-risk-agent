@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-07-24
+- Last refreshed: 2026-09-17
 - Primary product surfaces: local MARVIS credit-risk-agent workbench, V2 workflow task entries, Agent-driven plan/gate execution, model-validation compatibility flow, structured evidence, downloads/reports, audit history, Agent memory, and runtime branding.
 - Evidence reviewed: current `README.md`, `README.zh-CN.md`, `docs/roadmap.md`, `docs/versioning.md`, `docs/branding.md`, `docs/notebook_contract.md`, `docs/runbook.md`, and the static FastAPI-served frontend.
 - Roadmap reference: use `docs/roadmap.md` for version phases and Plugin/Tool/Hook/Workflow terminology. Keep this file focused on product experience and interface decisions.
@@ -38,7 +38,7 @@
 
 ## Information architecture
 - Primary navigation: brand-configurable left task sidebar with platform title, task list, task search, create action, and settings for sort/group/theme.
-- Core current screen: single resizable workbench with task management on the left, live task evidence in the center, and report/output canvas on the right.
+- Core current screen: resizable workbench with task navigation on the left, the current working object in the center, and execution steps on the right. Agent model validation has task-local Conversation / Evidence / Report views. The manual validation document canvas remains available in its existing flow.
 - Agent surface: center-column conversation that sits with task evidence, not as a detached chatbot unrelated to the current task.
 - Memory surface: memory should appear inside Agent explanations, warnings, comparison summaries, report-draft rationale, and workflow choices. Do not add a fixed top/center memory block that lists matched memories.
 - Memory management surface: settings or audit management view for listing, inspecting, disabling, deleting, and exporting memory audit records. It is not a default task dashboard panel.
@@ -46,7 +46,7 @@
 
 ## Design principles
 - Principle 1: keep creation-time configuration in the create-task dialog, including manual/Agent mode selection.
-- Principle 2: keep real-time validation evidence in the center and the Word report as the right-side working output; report text and project information are edited in the document canvas, not in a separate form page.
+- Principle 2: preserve the current model and task context when moving between conversation, evidence and report editing. Agent report drafts use an editable table in the central Report view, with a persistent save state and confirmation action; the conversation holds a short link to that view.
 - Principle 3: default to human-readable summaries; raw data stays available behind details.
 - Principle 4: every Agent statement should be grounded in current task evidence, explicit memory references, or clearly labeled general explanation.
 - Principle 5: extension output must look native. A plugin/tool may add a table, chart, finding, or report section, but it should not introduce a separate visual language or bypass platform rendering.
@@ -54,8 +54,8 @@
 
 ## Visual language
 - Color: neutral light background and white panels. The default primary color is neutral charcoal (`#343438`); configured primary color drives primary actions such as create-task and Agent send.
-- Typography: system font, 12 / 14 / 17 / 22 / 28 size scale, 400 / 500 / 700 weights.
-- Spacing/layout rhythm: resizable workbench, central evidence console, right document canvas, 8px grid where practical.
+- Typography: system font, 12 / 14 / 15 / 17 / 22 / 28 size scale. Report prose uses 15px with comfortable line height; internal template keys belong in expandable details.
+- Spacing/layout rhythm: the default wide desktop shell uses a 256px task sidebar, a 278px right track (including its outer margin), and 24px column gaps. User resizing remains available, with 240px minimum tracks. Spend the recovered space on central report and evidence content.
 - Shape/radius/elevation: 8px is the base control radius. Functional workflow
   widgets may use the documented 12 / 16 / 18 / 22px component radii to express
   nested hierarchy; they remain border-first and use a single low-opacity
@@ -90,8 +90,8 @@
   entrance and progress animation must stop under `prefers-reduced-motion`.
 
 ## Responsive behavior
-- Supported breakpoints/devices: desktop, 13-inch laptop, tablet/narrow browser, mobile emergency use.
-- Layout adaptations: workbench columns on desktop, stacked sections below narrow widths; progress and report panels move below the main evidence flow on small screens.
+- Current supported QA scope: wide desktop at 1440, 1600 and 1920 CSS pixels. Narrow/mobile adaptations require a separate explicit product decision; existing fallback CSS is not a claim of verified mobile support.
+- Layout adaptations: preserve resizable desktop columns and internal horizontal scrolling for the model switcher. Additional models must not widen the status bar or the page.
 - Touch/hover differences: controls must work without hover-only affordances.
 
 ## Interaction states
@@ -102,6 +102,23 @@
 - Disabled: buttons carry titles explaining why they cannot be used.
 - Offline/slow network: long notebook/report actions remain visibly busy.
 - Memory comparison uncertainty: medium-confidence matches must be textually marked as requiring human confirmation. Low-confidence matches should not be used for historical comparison.
+
+## Validation editing and creation
+- Each model owns a draft buffer keyed by task ID and draft version. Autosave writes narrative fields to the local task database. It neither confirms the report nor changes metrics, task execution or Agent memory. Never persist report prose in browser storage.
+- Distinguish draft saving from report confirmation. Show pending, saving, saved, failed and conflict states. A stale write must fail visibly, preserve edits and offer a version comparison; a draft confirmed in another window must not silently discard this window's changes.
+- Confirmation binds the report revision, draft message ID and edit revision. Batch confirmation flushes all edited pending models first; its visible scope includes pending, failed, cancelled and unready models. Report confirmation means consent to generate documents, not that a model passed validation.
+- Creation starts with names and materials. Background narratives are optional expandable fields, empty until supplied; examples are placeholders, never assumed business facts. Keep required data dictionary and execution contracts intact.
+- Use one selected execution mode. Single-model creation prefers Agent when a model is configured, otherwise manual. Multiple-model validation always uses the existing automatic Agent workbench and explains that choice.
+- Collapse previous model details when adding another model. Keep the total, material-selection summary and create action visible in a fixed footer; validation errors reveal the relevant model without clearing other inputs.
+- Completed step groups collapse by default; active and exceptional groups expand. Respect the user's subsequent expansion choice per model. Preserve task-local view and scroll positions during navigation.
+- The model switcher is a radiogroup with an accessible model/status label, one checked value, roving focus, and Arrow / Home / End navigation.
+
+## Strategy navigation and visual restraint
+- Use the existing seven workflow stages to filter relevant tools. Search addresses all tools; expert access and contextual candidate actions preserve their original governed handlers and evidence bindings.
+- Collapse empty analysis categories, empty history and empty evidence details. Keep existing results accessible and expose structural risk flags; empty tasks must not show fictitious execution progress.
+- Primary action labels use business language. Precise Tool, version, hash, action and provenance details remain available for inspection.
+- Default task rows are compact and quiet; selected state carries the emphasis. Preserve single-line names, full hover/focus previews and keyboard access to delete.
+- Common small/medium/large radii are 8/12/16px. Ordinary controls use subtle borders and restrained shadows; avoid hover translation. During task work, the chosen pet is small, stationary and docked outside the working content; retain user branding and welcome-screen preferences.
 
 ## Content voice
 - Tone: concise operational Chinese in the product UI.

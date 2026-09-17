@@ -46,47 +46,35 @@
   --scrim-bg: rgba(0, 0, 0, 0.42);
   --scrim-blur: blur(2px);
   --radius: 16px;
-  --radius-sm: 16px;
-  --radius-md: 16px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
   --radius-lg: 16px;
   --radius-control: 10px;
   --radius-pill: 999px;
   --shadow-lift: 0 1px 3px rgba(15, 23, 42, 0.1);
   --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.6);
   --switch-on: #34c759;
-  --button-solid-shadow:
-    0 1px 1px rgba(0, 0, 0, 0.10),
-    0 3px 6px rgba(0, 0, 0, 0.10),
-    0 6px 10px rgba(0, 0, 0, 0.07);
-  --button-solid-shadow-hover:
-    0 1px 1px rgba(0, 0, 0, 0.12),
-    0 4px 8px rgba(0, 0, 0, 0.12),
-    0 7px 12px rgba(0, 0, 0, 0.08);
-  --button-secondary-shadow:
-    0 1px 1px rgba(0, 0, 0, 0.06),
-    0 2px 4px rgba(0, 0, 0, 0.04),
-    0 5px 8px rgba(0, 0, 0, 0.035);
-  --button-secondary-shadow-hover:
-    0 1px 1px rgba(0, 0, 0, 0.08),
-    0 3px 6px rgba(0, 0, 0, 0.06),
-    0 6px 10px rgba(0, 0, 0, 0.045);
+  --button-solid-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --button-solid-shadow-hover: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --button-secondary-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --button-secondary-shadow-hover: 0 1px 2px rgba(0, 0, 0, 0.06);
   --sidebar-control-size: 34px;
   --sidebar-control-icon-size: 17px;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-floating: 0 2px 8px rgba(0, 0, 0, 0.035);
   --settings-menu-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
   --progress-rail-shadow: 0 3px 12px rgba(0, 0, 0, 0.045);
-  --sidebar-width: 314px;
+  --sidebar-width: 256px;
   --collapsed-entry-size: 44px;
   --collapsed-entry-gutter: 16px;
   --collapsed-hit-area-width: calc(var(--collapsed-entry-gutter) * 2 + var(--collapsed-entry-size));
   --collapsed-search-top: 79px;
   --collapsed-popover-left: calc(var(--collapsed-entry-gutter) + var(--collapsed-entry-size) + 10px);
-  --progress-width: 314px;
-  --workspace-main-gutter: 106px;
-  --workspace-collapsed-main-gutter: 180px;
-  --workspace-rail-gap: 70px;
-  --workspace-collapsed-rail-gap: 78px;
+  --progress-width: 278px;
+  --workspace-main-gutter: 24px;
+  --workspace-collapsed-main-gutter: 76px;
+  --workspace-rail-gap: 24px;
+  --workspace-collapsed-rail-gap: 24px;
   --pet-default-workspace-offset: -2px;
   --pet-min-workspace-offset: -2px;
   --pet-collapsed-workspace-offset: 72px;

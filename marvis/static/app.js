@@ -35,7 +35,9 @@ import {
   hasReportDraftValues,
   latestPendingReportDraftMessageId,
   reportDraftTableHtml,
+  reportDraftFeedbackHtml,
 } from "./js/report-draft-table.js";
+import { createReportDraftState } from "./js/report-draft-state.js";
 import { bindTaskRowPreview } from "./js/task-row-preview.js";
 import { safeSameOriginApiHref } from "./js/url-safety.js";
 import {
@@ -323,6 +325,7 @@ const createTaskDialog = createCreateTaskDialogController({
   $,
   materialSourceController,
   getSelectedTier,
+  hasEnabledAgent: () => Boolean(llmSettings.enabled_models?.length),
   selectedTierStorageKey,
   onUnavailableTaskType: (message) => {
     showComingSoonToast(message);
@@ -2992,6 +2995,7 @@ async function applyProjectedValidationChild(childTaskId, { force = false } = {}
     return true;
   }
   const childChanged = projectedValidationChildTaskId !== normalizedChildId;
+  if (childChanged) rememberValidationView();
   const loadVersion = childChanged
     ? ++projectedChildContentLoadVersion
     : projectedChildContentLoadVersion;
@@ -3025,10 +3029,9 @@ async function applyProjectedValidationChild(childTaskId, { force = false } = {}
     if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
     renderAll();
     if (childChanged) {
-      const scrollContent = $("resultScrollContent");
-      if (scrollContent) scrollContent.scrollTop = 0;
       await nextAnimationFrame();
       await nextAnimationFrame();
+      selectValidationView(activeValidationView, { remember: false });
     }
     return true;
   } finally {
@@ -3110,11 +3113,13 @@ function beginTaskContentLoad(taskId) {
   const workspace = $("validationWorkspace");
   workspace?.classList.remove("is-task-content-settling");
   workspace?.classList.toggle("is-task-content-loading", Boolean(taskId));
+  $("validationWorkspaceNav")?.querySelectorAll("button").forEach((button) => { button.disabled = Boolean(taskId); });
 }
 
 function finishTaskContentLoad(taskId = pendingTaskContentLoadTaskId) {
   if (taskId && pendingTaskContentLoadTaskId !== taskId) return;
   pendingTaskContentLoadTaskId = null;
+  $("validationWorkspaceNav")?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
   const workspace = $("validationWorkspace");
   if (!workspace) return;
   workspace.classList.remove("is-task-content-loading");
@@ -3135,6 +3140,7 @@ function clearTaskContentLoad() {
     taskContentSettleTimer = null;
   }
   pendingTaskContentLoadTaskId = null;
+  $("validationWorkspaceNav")?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
   const workspace = $("validationWorkspace");
   workspace?.classList.remove("is-task-content-loading");
   workspace?.classList.remove("is-task-content-settling");
@@ -3783,6 +3789,7 @@ function stepAfterInLatestNotebookSteps(step) {
   return index >= 0 ? latestNotebookSteps[index + 1] || null : null;
 }
 
+const expandedValidationStages = new Map();
 function renderNotebookStepRail(
   notebookSteps = latestNotebookSteps,
   title = "分段进度",
@@ -3803,9 +3810,14 @@ function renderNotebookStepRail(
   const activeIndex = parentStatus === "running" && !hasRunning
     ? tones.findIndex((tone) => tone !== "succeeded" && tone !== "failed")
     : -1;
+  const expansionKey = `${workbenchTaskId()}:${stageId}`;
+  const hasException = tones.some((tone) => ["failed", "review", "stopped"].includes(tone));
+  const expanded = expandedValidationStages.get(expansionKey)
+    ?? (hasException || ["running", "review", "failed", "stopped"].includes(parentStatus));
+  const completed = tones.filter((tone) => tone === "succeeded").length;
   return [
-    '<section class="notebook-step-group">',
-    `<h4>${escapeHtml(title)} · ${notebookSteps.length}</h4>`,
+    `<details class="notebook-step-group" data-validation-stage-expansion="${escapeHtml(expansionKey)}"${expanded ? " open" : ""}>`,
+    `<summary>${escapeHtml(title)} · ${completed}/${notebookSteps.length} 完成</summary>`,
     ...notebookSteps.map((step, index) => {
       const title = step.title || step.heading || step.name || `步骤 ${step.step_order ?? index + 1}`;
       const tone = index === activeIndex ? "running" : tones[index];
@@ -3832,7 +3844,7 @@ function renderNotebookStepRail(
         "</div>",
       ].join("");
     }),
-    "</section>",
+    "</details>",
   ].join("");
 }
 
@@ -4402,6 +4414,7 @@ async function requestTaskSelection(task) {
 }
 
 function selectTask(task) {
+  rememberValidationView();
   rememberResultScrollPosition();
   if (selectedTaskId === task.id && selectedTask) {
     selectedTask = task;
@@ -5376,6 +5389,8 @@ function renderAgentModelOptions() {
   const select = $("agentModelSelect");
   if (!select) return;
   const enabledModels = llmSettings.enabled_models || [];
+  const configureModel = $("configureAgentModelButton");
+  if (configureModel) configureModel.hidden = enabledModels.length > 0;
   const preferred = agentPreferredModelId(enabledModels);
   const signature = JSON.stringify({
     default_model_id: llmSettings.default_model_id || "",
@@ -5505,6 +5520,7 @@ function autoAcceptLabel(taskType) {
 
 function requestAgentConversationScrollToLatest() {
   if (!selectedTaskIsAgentMode()) return;
+  if (workbenchTask()?.task_type === "validation" && activeValidationView !== "conversation") return;
   if (suppressAgentAutoScrollTaskId === selectedTaskId) return;
   if (!agentAutoScrollFollows) return;
   const scrollContent = $("resultScrollContent");
@@ -5519,7 +5535,100 @@ function requestAgentConversationScrollToLatest() {
   });
 }
 
+const reportDraftState = createReportDraftState({ api, onChange: updateReportDraftSaveStatus });
+const validationViewState = new Map();
+let activeValidationViewTaskId = "";
+let activeValidationView = "conversation";
+let renderedReportDraftSignature = "";
+
+function updateReportDraftSaveStatus(taskId, entry) {
+  if (taskId !== workbenchTaskId()) return;
+  const panel = $("reportDraftWorkspace");
+  const status = panel?.querySelector("[data-report-draft-save-status]");
+  if (status) status.textContent = entry.status;
+  const feedback = panel?.querySelector("[data-report-draft-feedback]");
+  if (feedback) feedback.innerHTML = reportDraftFeedbackHtml(entry);
+  const confirm = panel?.querySelector("[data-report-draft-confirm]");
+  if (confirm) confirm.disabled = Boolean(entry.conflict || entry.pending);
+}
+
+function rememberValidationView() {
+  if (!activeValidationViewTaskId) return;
+  const state = validationViewState.get(activeValidationViewTaskId) || { view: activeValidationView, scroll: {} };
+  const scroller = activeValidationView === "report" ? $("reportDraftWorkspace") : $("resultScrollContent");
+  state.view = activeValidationView;
+  state.scroll[activeValidationView] = scroller?.scrollTop || 0;
+  validationViewState.set(activeValidationViewTaskId, state);
+}
+
+function selectValidationView(view, { remember = true } = {}) {
+  if (remember) rememberValidationView();
+  activeValidationView = view;
+  const workspace = $("resultWorkspace");
+  workspace.dataset.validationView = view;
+  $("reportDraftWorkspace").hidden = view !== "report";
+  $("resultScrollContent").hidden = view === "report";
+  $("validationWorkspaceNav")?.querySelectorAll("[data-validation-view]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.validationView === view));
+  });
+  const state = validationViewState.get(activeValidationViewTaskId) || { scroll: {} };
+  state.view = view;
+  validationViewState.set(activeValidationViewTaskId, state);
+  const scroller = view === "report" ? $("reportDraftWorkspace") : $("resultScrollContent");
+  if (scroller) scroller.scrollTop = state.scroll[view] || 0;
+}
+
+function renderReportDraftWorkspace({ force = false } = {}) {
+  const enabled = workbenchTask()?.task_type === "validation" && selectedTaskIsAgentMode();
+  const nav = $("validationWorkspaceNav");
+  if (!nav) return;
+  nav.hidden = !enabled;
+  if (!enabled) {
+    activeValidationViewTaskId = "";
+    $("reportDraftWorkspace").hidden = true;
+    $("resultScrollContent").hidden = false;
+    delete $("resultWorkspace").dataset.validationView;
+    return;
+  }
+  const taskId = workbenchTaskId();
+  const taskMessages = agentMessages.filter((item) => !item.task_id || item.task_id === taskId);
+  const pendingId = latestPendingReportDraftMessageId(taskMessages);
+  const message = [...taskMessages].reverse().find((item) => item.stage === "word_conclusion_draft" && hasReportDraftValues(item.metadata?.draft_values));
+  const cached = reportDraftState.get(taskId);
+  const pending = Boolean(message && message.id === pendingId);
+  // Another window may confirm a draft while this window still has edits.
+  // Keep those edits reachable, with confirmation disabled, until copied or redrafted.
+  const retained = !pending && cached?.dirty;
+  const editable = pending || retained;
+  const entry = pending ? reportDraftState.receive(taskId, message) : retained ? cached : null;
+  if (retained) {
+    entry.conflict = { unavailable: true };
+    entry.status = "草稿已确认或撤回 · 当前修改仍保留";
+  }
+  const values = entry?.values || message?.metadata?.draft_values || {};
+  const signature = JSON.stringify([taskId, message?.id, editable, entry?.messageId, entry?.revision]);
+  if (force || signature !== renderedReportDraftSignature) {
+    const title = workbenchTask()?.model_name || "当前模型";
+    $("reportDraftWorkspace").innerHTML = `<div class="report-workspace-title"><span>当前模型</span><h2>${escapeHtml(title)}</h2></div>` + (message
+      ? reportDraftTableHtml(values, { editable, taskId, state: entry, revision: entry?.revision ?? message.metadata.report_revision, messageId: entry?.messageId || message.id })
+      : '<div class="report-workspace-empty"><h3>报告尚未就绪</h3><p>完成验证后，Agent 会在此起草报告。可以返回对话查看进展或处理待补材料。</p><button type="button" class="button compact" data-validation-view="conversation">返回对话</button></div>');
+    renderedReportDraftSignature = signature;
+  }
+  if (activeValidationViewTaskId !== taskId) {
+    activeValidationViewTaskId = taskId;
+    selectValidationView(validationViewState.get(taskId)?.view || activeValidationView, { remember: false });
+  }
+  if (entry) updateReportDraftSaveStatus(taskId, entry);
+  if (entry && !entry.dirty && !entry.pending) {
+    $("reportDraftWorkspace").querySelectorAll("[data-report-draft-key]").forEach((field) => {
+      const value = String(entry.values[field.dataset.reportDraftKey] || "");
+      if (field.value !== value) field.value = value;
+    });
+  }
+}
+
 function renderAgentConversation() {
+  renderReportDraftWorkspace();
   const panel = $("agentConversationPanel");
   const composer = $("agentComposer");
   const workspace = $("resultWorkspace");
@@ -6755,25 +6864,62 @@ function handleReportDraftConfirmClick(event) {
   void submitVisibleReportDraft(button);
 }
 
+if (typeof document !== "undefined") {
+  document.addEventListener("input", (event) => {
+    const field = event.target?.closest?.("[data-report-draft-key]");
+    const table = field?.closest("[data-report-draft-table]");
+    if (table) reportDraftState.edit(table.dataset.reportDraftTaskId, collectReportDraftValues(table));
+  });
+  document.addEventListener("click", (event) => {
+    const view = event.target?.closest?.("[data-validation-view]");
+    if (view) selectValidationView(view.dataset.validationView);
+    const save = event.target?.closest?.("[data-report-draft-save]");
+    if (save) void reportDraftState.save(workbenchTaskId()).catch(() => {});
+    const resolution = event.target?.closest?.("[data-report-draft-resolve]");
+    if (resolution) {
+      reportDraftState.resolve(workbenchTaskId(), resolution.dataset.reportDraftResolve);
+      renderReportDraftWorkspace({ force: true });
+    }
+    const revise = event.target?.closest?.("[data-report-draft-revise]");
+    if (revise) {
+      selectValidationView("conversation");
+      const input = $("agentComposerInput");
+      input.value = `请根据当前证据修订当前模型报告的「${revise.dataset.reportDraftRevise}」：`;
+      input.focus();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s"
+      && workbenchTask()?.task_type === "validation" && selectedTaskIsAgentMode()
+      && activeValidationView === "report") {
+      event.preventDefault();
+      void reportDraftState.save(workbenchTaskId()).catch(() => {});
+    }
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (reportDraftState.hasUnsaved()) { event.preventDefault(); event.returnValue = ""; }
+  });
+}
+
 async function submitVisibleReportDraft(button) {
   const table = button.closest("[data-report-draft-table]");
-  const taskId = workbenchTaskId();
-  if (!table || !taskId) return;
-  const revision = Number(table.dataset.reportRevision);
-  const textValues = collectReportDraftValues(table);
+  const taskId = table?.dataset.reportDraftTaskId;
+  if (!table || !taskId || taskId !== workbenchTaskId() || pendingTaskContentLoadTaskId) return;
   const originalLabel = button.textContent;
   button.disabled = true;
   button.textContent = "正在生成报告…";
   setBusy("report_confirm", "正在生成报告…", taskId);
   try {
+    await reportDraftState.save(taskId);
+    const draftPayload = reportDraftState.payload(taskId);
+    if (!draftPayload) throw new Error("当前草稿尚未就绪");
     const result = await api(`api/tasks/${encodeURIComponent(taskId)}/agent/report-draft/confirm`, {
       method: "POST",
-      body: {
-        revision: Number.isFinite(revision) ? revision : 0,
-        text_values: textValues,
-      },
+      body: JSON.stringify(draftPayload),
     });
-    if (Array.isArray(result?.messages)) agentMessages = result.messages;
+    reportDraftState.discard(taskId);
+    if (taskId === workbenchTaskId() && Array.isArray(result?.messages)) agentMessages = result.messages;
     renderAgentConversation();
     await pollAgentMessagesUntilSettled(taskId, Promise.resolve());
     await refreshTasks();
@@ -6790,24 +6936,21 @@ async function submitVisibleReportDraft(button) {
 async function confirmAllValidationBatchReportDrafts({ parentTaskId } = {}) {
   const parentId = String(parentTaskId || selectedTaskId || "").trim();
   if (!parentId) return;
-  const currentTable = document.querySelector(
-    "[data-report-draft-table][data-report-draft-editable='true']",
-  );
   const overrides = {};
-  const childId = workbenchTaskId();
-  if (currentTable && childId) {
-    const revision = Number(currentTable.dataset.reportRevision);
-    overrides[childId] = {
-      revision: Number.isFinite(revision) ? revision : 0,
-      text_values: collectReportDraftValues(currentTable),
-    };
-  }
   setBusy("report_confirm_all", "正在生成全部报告…", parentId);
   try {
+    const detail = normalizeValidationBatchPayload(await api(`api/validation-batches/${encodeURIComponent(parentId)}`));
+    const pendingIds = detail.items.filter((item) => item.pendingReportDraft && !["failed", "cancelled"].includes(item.status)).map((item) => item.childTaskId);
+    await reportDraftState.flush(pendingIds);
+    for (const id of pendingIds) {
+      const saved = reportDraftState.payload(id);
+      if (saved) overrides[id] = saved;
+    }
     await api(`api/validation-batches/${encodeURIComponent(parentId)}/report-drafts/confirm-all`, {
       method: "POST",
-      body: { overrides },
+      body: JSON.stringify({ overrides }),
     });
+    pendingIds.forEach((id) => reportDraftState.discard(id));
     setActionStatus("已确认全部报告草稿，正在生成 Word、Excel 和汇总文档…", "busy");
     const currentChildId = workbenchTaskId();
     if (currentChildId) {
@@ -7082,11 +7225,7 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     : "";
   const messageId = message?.id ? String(message.id) : "";
   const reportDraftHtml = hasDraftTable
-    ? reportDraftTableHtml(draftValues, {
-      editable: Boolean(options.isLatestPendingReportDraft),
-      revision: message?.metadata?.report_revision,
-      messageId,
-    })
+    ? '<section class="report-draft-link"><strong>报告草稿已就绪</strong><p>在报告视图中编辑结论、保存草稿并生成文件。</p><button type="button" class="button compact" data-validation-view="report">查看并编辑报告</button></section>'
     : "";
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
   const stageAttr = message?.stage
@@ -7185,6 +7324,7 @@ function shouldPreserveOptimisticAgentMessages(nextMessages = []) {
 
 function agentMessageCanPollIncrementally({ preserveOptimistic = false } = {}) {
   if (preserveOptimistic || !agentMessages.length) return false;
+  if (latestPendingReportDraftMessageId(agentMessages)) return false;
   return !agentMessages.some((message) => message?.metadata?.optimistic || message?.metadata?.streaming);
 }
 
@@ -7613,6 +7753,13 @@ async function runContinueAgentValidationBatch({ resumeChildId = "" } = {}) {
   }
   if (generation !== agentBatchAutoRunGeneration || selectedTaskId !== parentId) return;
   if (agentBatchAutoRunIsFinished(payload)) return;
+  if (!llmSettings.enabled_models?.length) {
+    await loadLLMSettings({ silent: true });
+    if (!llmSettings.enabled_models?.length) {
+      setActionStatus("待配置大模型", "info", "请在对话输入区配置大模型后继续自动审查。草稿仍可编辑和确认。");
+      return;
+    }
+  }
   const items = [...(payload.items || [])].sort((left, right) => left.ordinal - right.ordinal);
   const resumeId = String(resumeChildId || "").trim();
   let seenResume = !resumeId;
@@ -7621,6 +7768,7 @@ async function runContinueAgentValidationBatch({ resumeChildId = "" } = {}) {
     if (generation !== agentBatchAutoRunGeneration || selectedTaskId !== parentId) return;
     const childId = item.childTaskId;
     if (!childId) continue;
+    if (item.pendingReportDraft) continue;
     if (!seenResume) {
       if (childId === resumeId) seenResume = true;
       else continue;
@@ -8435,6 +8583,12 @@ function scrollToManualWorkflowSection(stepId) {
 }
 
 function handleWorkflowStepperClick(event) {
+  const summary = event.target.closest("[data-validation-stage-expansion] > summary");
+  if (summary) {
+    const details = summary.parentElement;
+    expandedValidationStages.set(details.dataset.validationStageExpansion, !details.open);
+    return;
+  }
   if (planRailController.handleClick(event)) return;
   const actionButton = event.target.closest("[data-step-action]");
   if (actionButton) {
@@ -8450,6 +8604,7 @@ function handleWorkflowStepperClick(event) {
 }
 
 function handleWorkflowStepperKeydown(event) {
+  if (event.target.closest("[data-validation-stage-expansion] > summary")) return;
   if (!["Enter", " "].includes(event.key)) return;
   const step = event.target.closest(".step[data-step-target]");
   if (!step || event.target.closest("[data-step-action]")) return;
@@ -8458,6 +8613,8 @@ function handleWorkflowStepperKeydown(event) {
 }
 
 $("createTaskOpenButton").onclick = openTaskTypeWelcome;
+$("configureAgentModelButton").onclick = openLLMSettingsDialog;
+$("createConfigureAgentModelButton").onclick = openLLMSettingsDialog;
 $("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;
 $("welcomeTaskCards").onclick = openTaskDialogFromCard;
 $("closeTaskDialogButton").onclick = closeTaskDialog;

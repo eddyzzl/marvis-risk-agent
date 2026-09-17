@@ -255,10 +255,10 @@ def test_unselected_workspace_shows_centered_welcome_only():
     logo_start = welcome_css.index(".workspace-brand-logo {")
     logo_end = welcome_css.index("}", logo_start)
     logo_rule = welcome_css[logo_start:logo_end]
-    assert "width: 128px" in logo_rule
-    assert "height: 128px" in logo_rule
+    assert "width: 76px" in logo_rule
+    assert "height: 76px" in logo_rule
     assert "object-fit: contain" in logo_rule
-    assert "margin: 0 0 28px" in logo_rule
+    assert "margin: 0 0 16px" in logo_rule
     assert "display: none" in welcome_css
     assert ".validation-workspace.is-empty .workspace-welcome" in welcome_css
     assert "display: grid" in welcome_css
@@ -266,8 +266,8 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert ".validation-workspace.is-empty .workspace-body" in styles_css
     root_rule = _css_rule(styles_css, ":root")
     assert "--radius: 16px" in root_rule
-    assert "--radius-sm: 16px" in root_rule
-    assert "--radius-md: 16px" in root_rule
+    assert "--radius-sm: 8px" in root_rule
+    assert "--radius-md: 12px" in root_rule
     assert "--radius-lg: 16px" in root_rule
     assert "--radius-control: 10px" in root_rule
     assert "--surface-subtle:" in root_rule
@@ -275,7 +275,7 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "--tone-modeling:" in root_rule
     assert "--tone-strategy:" in root_rule
     cards_rule = _css_rule(welcome_css, ".welcome-task-cards")
-    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in cards_rule
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in cards_rule
     assert "max-width: 1040px" in cards_rule
     assert "margin-top: clamp(24px, 4vh, 36px)" in cards_rule
     card_rule = _css_rule(welcome_css, ".welcome-task-card")

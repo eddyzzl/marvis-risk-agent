@@ -1295,6 +1295,12 @@ def test_confirm_all_batch_report_drafts_dispatches_reports_for_pending_children
     for child_id in (child_a, child_b):
         _advance_child_to_writing_artifacts(repo, child_id)
         _seed_pending_report_draft(repo, child_id)
+        draft_message = repo.list_agent_messages(child_id)[-1]
+        saved = client.put(f"/api/tasks/{child_id}/agent/report-draft", json={
+            "revision": 0, "draft_message_id": draft_message["id"], "draft_edit_revision": 0,
+            "text_values": {"TEXT:model_scope": f"已保存范围 {child_id}"},
+        })
+        assert saved.status_code == 200, saved.text
 
     detail = client.get(f"/api/validation-batches/{parent_task_id}").json()
     assert all(item["pending_report_draft"] for item in detail["items"])
@@ -1325,6 +1331,7 @@ def test_confirm_all_batch_report_drafts_dispatches_reports_for_pending_children
     assert repo.get_active_job_kind(child_b) is None
     values_a, _ = repo.get_report_values(child_a)
     assert values_a["TEXT:model_scope"] == "支用环节"
+    assert repo.get_report_values(child_b)[0]["TEXT:model_scope"] == f"已保存范围 {child_b}"
     assert repo.list_agent_messages(child_a)[-1]["stage"] in {
         "word_conclusion_confirmed",
         "word_report_ready",

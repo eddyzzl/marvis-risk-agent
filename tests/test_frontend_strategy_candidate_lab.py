@@ -787,7 +787,7 @@ def test_candidate_lab_renders_seven_stage_dual_population_and_report_spine():
           candidates: {},
           pools: {},
         });
-        assert.match(missing, /尚无当前受认证 SampleDesign V2/);
+        assert.match(missing, /请先明确审批人群、风险表现人群、分区与成熟度/);
         assert.match(missing, /尚未形成报告/);
         """
     )
@@ -2802,7 +2802,7 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
     assert "number:-9999" in index_html
     assert ".candidate-lab-layout" in workbench_css
     assert (
-        "grid-template-columns: minmax(260px, 0.72fr) minmax(0, 1.55fr)"
+        "grid-template-columns: minmax(0, 1fr)"
         in workbench_css
     )
     assert "@media" not in workbench_css[

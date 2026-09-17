@@ -58,6 +58,7 @@ from marvis.api_schemas import (
     AgentMessageRequest,
     AgentModelRequest,
     AgentReportDraftConfirmRequest,
+    AgentReportDraftSaveRequest,
     StrategyTaskInputRequest,
 )
 from marvis.api_task_helpers import get_task_or_404, reject_if_task_has_active_job
@@ -76,6 +77,7 @@ from marvis.domain import (
 from marvis.orchestrator.contracts import PlanStatus, StepStatus
 from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.state_machine import ConflictError
 from marvis.validation.suggested_confirmation import confirm_unambiguous_batch_contracts
 from marvis.validation_report_copy import (
     METRIC_REWRITE_REFUSAL,
@@ -1249,6 +1251,26 @@ def draft_agent_report_conclusions(
     }
 
 
+@router.put("/tasks/{task_id}/agent/report-draft")
+def save_agent_report_draft_route(
+    task_id: str, payload: AgentReportDraftSaveRequest, request: Request,
+) -> dict:
+    repo = agent_repo(request)
+    task = get_task_or_404(repo, task_id)
+    require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
+    try:
+        message = repo.save_agent_report_draft(
+            task_id, message_id=payload.draft_message_id,
+            edit_revision=payload.draft_edit_revision,
+            expected_revision=payload.revision, values=payload.text_values,
+        )
+    except ConflictError as exc:
+        raise conflict(str(exc)) from exc
+    except ValueError as exc:
+        raise unprocessable(str(exc)) from exc
+    return {"message": message}
+
+
 @router.post("/tasks/{task_id}/agent/report-draft/confirm", status_code=202)
 def confirm_agent_report_conclusions_route(
     task_id: str,
@@ -1266,6 +1288,8 @@ def confirm_agent_report_conclusions_route(
         settings=request.app.state.settings,
         text_values=payload.text_values,
         expected_revision=payload.revision,
+        draft_message_id=payload.draft_message_id,
+        draft_edit_revision=payload.draft_edit_revision,
         background_tasks=background_tasks,
         hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
     )

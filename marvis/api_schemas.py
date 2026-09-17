@@ -2264,6 +2264,17 @@ class AgentModelRequest(BaseModel):
 class AgentReportDraftConfirmRequest(BaseModel):
     revision: int
     text_values: dict[str, str] = Field(default_factory=dict)
+    draft_message_id: str | None = None
+    draft_edit_revision: int | None = Field(default=None, ge=0)
+
+
+class AgentReportDraftSaveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    draft_message_id: str = Field(min_length=1)
+    draft_edit_revision: int = Field(ge=0)
+    text_values: dict[str, str]
 
 
 def model_payload(payload: BaseModel) -> dict:

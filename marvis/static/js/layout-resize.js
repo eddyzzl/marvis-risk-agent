@@ -1,6 +1,6 @@
-export const SIDEBAR_WIDTH_MIN = 314;
+export const SIDEBAR_WIDTH_MIN = 240;
 export const SIDEBAR_WIDTH_MAX = 520;
-export const PROGRESS_WIDTH_MIN = 314;
+export const PROGRESS_WIDTH_MIN = 240;
 export const PROGRESS_WIDTH_MAX = 560;
 
 export function createLayoutResizeController({

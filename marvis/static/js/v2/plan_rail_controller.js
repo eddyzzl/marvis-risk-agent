@@ -764,7 +764,11 @@ export function createPlanRailController({
       // plan build doesn't read as a hang. Once a response has landed at
       // least once, fall back to the plain "计划生成中…" text for any later
       // still-empty state (this should be rare after the first response).
-      return firstLoad ? planRailSkeletonHtml() : '<div class="plan-rail-empty">计划生成中…</div>';
+      if (firstLoad) return planRailSkeletonHtml();
+      const running = Boolean(selectedTask()?.active_job_kind);
+      return running
+        ? '<div class="plan-rail-empty" role="status">正在准备执行计划…</div>'
+        : '<div class="plan-rail-empty"><strong>尚未开始</strong><p>补充任务材料，在对话中说明目标后开始。需要 Agent 时，请先在设置中配置可用模型。</p></div>';
     }
     return planRailPhaseRows(plan).map((row) => planPhaseHtml(row)).join("");
   }

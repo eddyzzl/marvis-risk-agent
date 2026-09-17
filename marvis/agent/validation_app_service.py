@@ -772,6 +772,8 @@ def confirm_agent_report_conclusions(
     model_profile: dict | None = None,
     model_metadata: Callable[[dict], dict] | None = None,
     hook_dispatcher=None,
+    draft_message_id: str | None = None,
+    draft_edit_revision: int | None = None,
 ) -> dict:
     initial_task = get_task_or_404(repo_, task_id)
     if expected_revision is None:
@@ -807,6 +809,8 @@ def confirm_agent_report_conclusions(
             task_id,
             text_values,
             expected_revision=expected_revision,
+            draft_message_id=draft_message_id,
+            draft_edit_revision=draft_edit_revision,
             audit={
                 "kind": "report.agent_conclusions.confirm",
                 "target_ref": task_id,
@@ -930,6 +934,8 @@ def confirm_all_batch_report_drafts(
             "task_id": item.child_task_id,
             "text_values": text_values,
             "expected_revision": expected_revision,
+            "draft_message_id": override.get("draft_message_id", pending["message_id"]),
+            "draft_edit_revision": override.get("draft_edit_revision", pending.get("draft_edit_revision", 0)),
         })
         pipeline_settings[item.child_task_id] = agent_pipeline_settings(
             settings, repo_.get_task(item.child_task_id),
@@ -1031,6 +1037,7 @@ def latest_pending_agent_report_draft(messages: list[dict]) -> dict:
             return {
                 "message_id": message.get("id"),
                 "report_revision": report_revision,
+                "draft_edit_revision": metadata.get("draft_edit_revision", 0),
                 "values": {
                     key: str(draft_values.get(key) or "").strip()
                     for key in AGENT_REPORT_WRITABLE_KEYS

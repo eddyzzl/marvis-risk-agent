@@ -82,7 +82,7 @@ def test_evidence_drawer_renders_authenticated_bindings_and_memory_refs() -> Non
           },
         });
 
-        assert.match(html, /Evidence Drawer/);
+        assert.match(html, /证据详情/);
         assert.match(html, /strategy\\.analyze_univariate_candidates/);
         assert.match(html, new RegExp(contentHash));
         assert.match(html, new RegExp(provenanceHash));

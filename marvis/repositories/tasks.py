@@ -1236,6 +1236,8 @@ class TaskRepository:
         expected_revision: int,
         *,
         audit: dict,
+        draft_message_id: str | None = None,
+        draft_edit_revision: int | None = None,
     ) -> int:
         _validate_report_values(values)
         invalid_keys = sorted(set(values) - AGENT_REPORT_WRITABLE_KEYS)
@@ -1244,12 +1246,73 @@ class TaskRepository:
                 "agent confirmation can only update agent conclusion keys: "
                 + ", ".join(invalid_keys)
             )
-        return self._merge_report_values(
-            task_id,
-            values,
-            expected_revision,
-            audit=audit,
-        )
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if draft_message_id is not None:
+                self._pending_report_draft_on_connection(
+                    conn, task_id, draft_message_id, draft_edit_revision,
+                )
+            return self._merge_report_values_on_connection(
+                conn, task_id, values, expected_revision, audit=audit,
+            )
+
+    @staticmethod
+    def _pending_report_draft_on_connection(conn, task_id, message_id, edit_revision):
+        row = conn.execute(
+            "SELECT * FROM agent_messages WHERE task_id = ? AND role = 'assistant' "
+            "AND stage IN ('word_conclusion_draft', 'word_conclusion_confirmed') "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["stage"] != "word_conclusion_draft" or row["id"] != message_id:
+            raise ConflictError("报告草稿已更新或确认，请查看最新版本；当前修改仍保留。")
+        metadata = json.loads(row["metadata_json"] or "{}")
+        if edit_revision is None or metadata.get("draft_edit_revision", 0) != edit_revision:
+            raise ConflictError("报告草稿已在其他窗口修改，请比较最新版本后再保存。")
+        return row, metadata
+
+    def save_agent_report_draft(
+        self, task_id: str, *, message_id: str, edit_revision: int,
+        expected_revision: int, values: dict[str, str],
+    ) -> dict:
+        """Save editable narrative only; never approve, queue work, or change metrics."""
+        _validate_report_values(values)
+        if set(values) - AGENT_REPORT_WRITABLE_KEYS:
+            raise ValueError("报告草稿只能保存可编辑的叙事字段")
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _, metadata = self._pending_report_draft_on_connection(
+                conn, task_id, message_id, edit_revision,
+            )
+            task = conn.execute(
+                "SELECT report_values_revision FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if task is None or task["report_values_revision"] != expected_revision:
+                raise ConflictError("报告版本已更新，请查看最新草稿；当前修改仍保留。")
+            if metadata.get("report_revision", 0) != expected_revision:
+                raise ConflictError("报告草稿引用的版本已过期，请重新起草。")
+            active = conn.execute(
+                "SELECT 1 FROM jobs WHERE task_id = ? AND status IN ('queued', 'running')",
+                (task_id,),
+            ).fetchone()
+            if active:
+                raise ConflictError("模型正在执行，请等待完成后再保存草稿。")
+            metadata.update(
+                draft_values={**metadata.get("draft_values", {}), **values},
+                draft_edit_revision=edit_revision + 1,
+                draft_saved_at=_now(),
+            )
+            conn.execute(
+                "UPDATE agent_messages SET metadata_json = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), message_id),
+            )
+            _write_audit_row(conn, **{
+                "kind": "report.draft.save", "target_ref": task_id, "outcome": "succeeded",
+                "detail": {"message_id": message_id, "edit_revision": edit_revision + 1,
+                           "keys": sorted(values)},
+            })
+            saved = conn.execute("SELECT * FROM agent_messages WHERE id = ?", (message_id,)).fetchone()
+        return _row_to_agent_message(saved)
 
     def add_agent_message(
         self,
@@ -1283,6 +1346,11 @@ class TaskRepository:
                 task_id = confirmation["task_id"]
                 values = confirmation["text_values"]
                 expected_revision = confirmation["expected_revision"]
+                if confirmation.get("draft_message_id") is not None:
+                    self._pending_report_draft_on_connection(
+                        conn, task_id, confirmation["draft_message_id"],
+                        confirmation.get("draft_edit_revision"),
+                    )
                 _validate_report_values(values)
                 invalid_keys = sorted(set(values) - AGENT_REPORT_WRITABLE_KEYS)
                 if invalid_keys:

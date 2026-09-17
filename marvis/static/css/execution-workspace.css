@@ -350,7 +350,7 @@ body[data-theme="dark"] .task-hero[data-tone="review"] { --hero-glow: rgba(255, 
   container: step-rail / inline-size;
   height: auto;
   max-height: calc(100dvh - 28px);
-  min-width: 300px;
+  min-width: 0;
   overflow: hidden;
   margin: 14px 14px 14px 0;
   padding: 12px 12px 8px;

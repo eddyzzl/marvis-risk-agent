@@ -1,6 +1,7 @@
 /** Candidate Lab state, network, event, and lifecycle coordination. */
 
 import { escapeHtml } from "../ui-utils.js";
+import { updateStrategyToolDirectory } from "./strategy-tool-directory.js";
 
 import {
   getStrategyCandidateLab,
@@ -189,7 +190,7 @@ function panelStatusText(state, dependencies) {
   const reason = blockedReason(state, dependencies);
   if (reason) return BLOCKED_REASON_COPY[reason] || "当前 Candidate Lab 暂不可启动新分析。";
   if (state.loading) return "正在刷新受认证候选证据…";
-  return "只展示平台已经登记并重新验真的候选；所有启动动作复用 Agent 的确定性治理链。";
+  return "候选按平台证据展示；选择当前阶段的操作即可开始。";
 }
 
 function stateSnapshot(state) {
@@ -350,6 +351,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     root.classList.toggle("hidden", !visible);
     root.setAttribute("aria-hidden", visible ? "false" : "true");
     if (!visible) return;
+    updateStrategyToolDirectory(root, state.payload, task.id);
     const results = $("strategyCandidateLabResults");
     if (results) {
       if (state.payload) {
@@ -357,7 +359,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       } else if (state.error) {
         results.innerHTML = [
           '<div class="candidate-lab-load-state" data-tone="error">',
-          "<strong>Candidate Lab 读取失败</strong>",
+          "<strong>策略候选读取失败</strong>",
           `<p>${escapeHtml(state.error)}</p>`,
           '<button type="button" class="button compact secondary" data-candidate-lab-retry="1">重新读取</button>',
           "</div>",
@@ -366,7 +368,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         results.innerHTML = [
           '<div class="candidate-lab-load-state">',
           "<strong>正在核验候选证据</strong>",
-          "<p>平台正在读取 task-owned artifact 与当前 Strategy Pool。</p>",
+          "<p>正在读取当前任务的分析证据与策略池。</p>",
           "</div>",
         ].join("");
       }

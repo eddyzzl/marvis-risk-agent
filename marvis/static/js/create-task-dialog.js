@@ -16,28 +16,11 @@ import { formatValidationBatchTaskName } from "./validation-batch.js";
 // case this is for) clear this easily.
 const MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES = 10 * 1024 * 1024;
 
-// Keep these editable form seeds aligned with validation_report_copy.py.
-export function validationNarrativeDefaults(modelName) {
-  const name = String(modelName || "").trim() || "本模型";
-  const displayName = name.endsWith("模型") ? name.slice(0, -2) : name;
-  const hasT = /t卡/i.test(name);
-  const hasA = /a卡/i.test(name);
-  const kind = hasT !== hasA ? (hasT ? "T" : "A") : "";
-  const boundary = /[AT]卡|MOB\s*\d+/i.exec(name);
-  let channel = boundary ? name.slice(0, boundary.index).replace(/^[ _\-/：:]+|[ _\-/：:]+$/g, "") : "";
-  if (["自营", "自营通用"].includes(channel)) channel = "自营通用";
-  else channel = channel.replace(/^自营/, "").replace(/^[ _\-/：:]+|[ _\-/：:]+$/g, "");
-  const cohort = channel ? `${channel}${kind ? `${kind}卡` : ""}` : "xx";
-  const stage = kind === "T" ? "支用" : "授信";
-  const audience = kind && cohort !== "xx" ? `${cohort}用户` : "xx用户";
-  const window = /MOB\s*([36])/i.exec(name);
-  return {
-    "TEXT:model_overview": `为了更好的对${audience}进行${stage}环节风险管控，现开发${displayName}模型，对${kind ? cohort : "xx"}客群做前置风险拦截，从${stage}申请阶段做好风险防范。`,
-    "TEXT:model_scope": `本模型适用于${cohort}渠道用户。`,
-    "TEXT:bad_sample_definition": window ? `MOB${window[1]} 逾期 >= 30 天` : "xx逾期 >= xx天",
-    "TEXT:good_sample_definition": window ? `MOB${window[1]} 未逾期` : "xx未逾期",
-    "TEXT:sample_audience": `申请${stage}的用户`,
-  };
+// Examples belong in placeholders. Model names do not establish business facts.
+export function validationNarrativeDefaults(_modelName) {
+  return Object.fromEntries([
+    "model_overview", "model_scope", "bad_sample_definition", "good_sample_definition", "sample_audience",
+  ].map((key) => [`TEXT:${key}`, ""]));
 }
 
 export function updateAutoReportValue(input, nextValue) {
@@ -55,21 +38,13 @@ export function validationExtraModelCardMarkup(rowId, ordinal) {
   const uploadPanelId = `${rowId}-upload-panel`;
   const uploadStatusId = `${rowId}-upload-status`;
   return [
-    `<article class="task-form-section validation-create-model-card" data-validation-extra-row-id="${rowId}">`,
-    `<header class="validation-create-model-head">`,
-    `<h3>模型 ${ordinal}</h3>`,
+    `<details open class="task-form-section validation-create-model-card" data-validation-extra-row-id="${rowId}">`,
+    `<summary class="validation-create-model-head">`,
+    `<h3>模型 ${ordinal}</h3><span data-extra-model-summary>待选择材料</span>`,
     `<button type="button" class="button compact secondary" data-remove-validation-extra-row="${rowId}">移除</button>`,
-    `</header>`,
+    `</summary><div class="validation-create-model-fields">`,
     `<label><span>模型名称</span>`,
     `<input data-extra-model-field="name" placeholder="例如：贷前评分卡 MOB3 v202604" autocomplete="off" /></label>`,
-    `<label class="wide-field"><span>模型概述</span>`,
-    `<textarea data-extra-model-field="overview"></textarea></label>`,
-    `<label class="wide-field"><span>适用范围</span>`,
-    `<input data-extra-model-field="scope" autocomplete="off" /></label>`,
-    `<label><span>坏样本定义</span>`,
-    `<input data-extra-model-field="bad-sample" autocomplete="off" /></label>`,
-    `<label><span>好样本定义</span>`,
-    `<input data-extra-model-field="good-sample" autocomplete="off" /></label>`,
     `<div class="material-source-section">`,
     `<div class="material-source-segment" role="tablist" aria-label="材料来源">`,
     `<button class="material-source-tab selected" type="button" role="tab" aria-selected="true"`,
@@ -93,7 +68,16 @@ export function validationExtraModelCardMarkup(rowId, ordinal) {
     `<strong>点击或拖拽上传</strong>`,
     `<span id="${uploadStatusId}" data-extra-upload-status>请选择文件或文件夹。</span>`,
     `</div></div></div>`,
-    `</article>`,
+    `<details class="create-narrative-details"><summary>补充报告背景（可稍后完善）</summary>`,
+    `<label class="wide-field"><span>模型概述</span>`,
+    `<textarea data-extra-model-field="overview"></textarea></label>`,
+    `<label class="wide-field"><span>适用范围</span>`,
+    `<input data-extra-model-field="scope" autocomplete="off" /></label>`,
+    `<label><span>坏样本定义</span>`,
+    `<input data-extra-model-field="bad-sample" autocomplete="off" /></label>`,
+    `<label><span>好样本定义</span>`,
+    `<input data-extra-model-field="good-sample" autocomplete="off" /></label>`,
+    `</details></div></details>`,
   ].join("");
 }
 
@@ -133,6 +117,7 @@ export function createCreateTaskDialogController({
   $,
   materialSourceController,
   getSelectedTier,
+  hasEnabledAgent = () => false,
   selectedTierStorageKey,
   onUnavailableTaskType,
 } = {}) {
@@ -173,6 +158,8 @@ export function createCreateTaskDialogController({
       : taskType;
     const definition = taskTypeDefinition(activeTaskType);
     $("taskType").value = activeTaskType;
+    $("taskDialog").dataset.taskType = activeTaskType;
+    if ($("validationPrimaryModel")) $("validationPrimaryModel").open = true;
     $("taskDialogTitle").textContent = definition.dialogTitle;
     $("taskDialogSubtitle").textContent = definition.dialogSubtitle;
     $("modelNameLabel").textContent = definition.nameLabel;
@@ -375,8 +362,9 @@ export function createCreateTaskDialogController({
   function openTaskDialog(taskType = defaultTaskType) {
     applyTaskTypeToDialog(taskType);
     resetCreateTaskSpecificInputs({ $ });
+    const defaultMode = hasEnabledAgent() || !taskTypeDefinition(taskType).manualEnabled ? "agent" : "manual";
     document.querySelectorAll('input[name="runMode"]').forEach((input) => {
-      input.checked = false;
+      input.checked = input.value === defaultMode;
     });
     resetModelAlgorithmChoices();
     resetStrategyTaskInput();
@@ -389,6 +377,7 @@ export function createCreateTaskDialogController({
     materialSourceController.reset();
     resetValidationExtraModels();
     prefillCreateTaskReportFields();
+    updateCreateModelSummary();
     $("taskDialog").showModal();
     $("modelName").focus();
   }
@@ -409,31 +398,16 @@ export function createCreateTaskDialogController({
     $("taskDialog").close();
   }
 
-  function handleRunModeCardPointerDown(event) {
-    const card = event.target.closest(".run-mode-card");
-    if (!card) return;
-    const input = card.querySelector('input[name="runMode"]');
-    if (!input) return;
-    card.dataset.wasChecked = input.checked ? "true" : "false";
-  }
-
-  function handleRunModeCardClick(event) {
-    const card = event.target.closest(".run-mode-card");
-    if (!card) return;
-    const input = card.querySelector('input[name="runMode"]');
-    if (!input) return;
-    if (card.dataset.wasChecked !== "true") return;
-    event.preventDefault();
-    input.checked = false;
-    card.dataset.wasChecked = "false";
-    input.dispatchEvent(new Event("change", { bubbles: true }));
+  function focusCreateField(field) {
+    if (!field) return;
+    for (let node = field.parentElement; node; node = node.parentElement) {
+      if (node.tagName === "DETAILS") node.open = true;
+    }
+    field.focus();
+    field.scrollIntoView({ block: "nearest" });
   }
 
   function bindRunModeDeselectableCards() {
-    document.querySelectorAll(".run-mode-card").forEach((card) => {
-      card.addEventListener("pointerdown", handleRunModeCardPointerDown);
-      card.addEventListener("click", handleRunModeCardClick);
-    });
     document.querySelectorAll('input[name="runMode"]').forEach((input) => {
       input.addEventListener("change", updateAlgorithmFieldVisibility);
     });
@@ -621,14 +595,25 @@ export function createCreateTaskDialogController({
       if (extraRows.length > 0) {
         if (!payload.model_name || !payload.validator) {
           setCreateStatus("请先填写模型名称和验证人员。", "error");
+          focusCreateField(!payload.model_name ? $("modelName") : $("validator"));
           return null;
         }
         const primaryRow = collectPrimaryValidationModel(payload);
-        if (!primaryRow || extraRows.some((row) => !validationModelMaterialsReady(row))) {
+        const rows = [primaryRow, ...extraRows];
+        const missingIndex = rows.findIndex((row) => !validationModelMaterialsReady(row));
+        if (missingIndex >= 0) {
+          const row = rows[missingIndex];
           setCreateStatus(
-            "添加多个模型时，请为每个模型填写材料目录，或上传 Notebook、样本、PMML 和数据字典。",
+            `模型 ${missingIndex + 1}：请补充模型名称和材料（目录，或 Notebook、样本、PMML 和数据字典）。`,
             "error",
           );
+          const card = missingIndex === 0 ? $("validationPrimaryModel")
+            : document.querySelector(`[data-validation-extra-row-id="${row.id}"]`);
+          if (card) card.open = true;
+          const field = !row.modelName
+            ? card?.querySelector('input[data-extra-model-field="name"], #modelName')
+            : card?.querySelector('.material-source-panel:not([hidden]) input:not([type="file"]), .material-source-panel:not([hidden]) .material-upload-dropzone');
+          focusCreateField(field);
           return null;
         }
         return await createMultiModelValidationTask(
@@ -783,6 +768,35 @@ export function createCreateTaskDialogController({
     };
   }
 
+  function updateCreateModelSummary() {
+    const primaryName = $("modelName")?.value.trim() || "未命名模型";
+    const primaryMaterial = materialSourceController.mode() === "upload"
+      ? Boolean(materialSourceController.selectedFiles()?.length)
+      : Boolean($("sourceDir")?.value.trim());
+    const summary = $("primaryModelSummary");
+    if (summary) summary.textContent = `${primaryName} · ${primaryMaterial ? "已选择材料" : "待选择材料"}`;
+    let missing = primaryMaterial ? 0 : 1;
+    for (const row of extraValidationModelRows) {
+      const card = document.querySelector(`[data-validation-extra-row-id="${row.id}"]`);
+      const hasMaterial = row.material.mode() === "upload" ? Boolean(row.material.selectedFiles()?.length) : Boolean(extraFieldValue(card, "source-dir").trim());
+      if (!hasMaterial) missing += 1;
+      const label = card?.querySelector("[data-extra-model-summary]");
+      if (label) label.textContent = `${extraFieldValue(card, "name").trim() || "未命名模型"} · ${hasMaterial ? "已选择材料" : "待选择材料"}`;
+    }
+    const count = $("createModelCount");
+    if (count) count.textContent = activeTaskType === "validation" ? `${extraValidationModelRows.length + 1} 个模型 · ${missing ? `${missing} 个待选择材料` : "材料已选择，创建后校验"}` : "创建后检查材料与执行条件";
+    const multiple = activeTaskType === "validation" && extraValidationModelRows.length > 0;
+    const manual = $("runModeManual");
+    if (manual) manual.disabled = multiple || !taskTypeDefinition(activeTaskType).manualEnabled;
+    if (multiple && $("runModeAgent")) $("runModeAgent").checked = true;
+    const modeHint = $("createTaskModeHint");
+    if (modeHint) modeHint.textContent = multiple ? "多模型任务统一使用 Agent 自动审查。" : "";
+    const configure = $("createConfigureAgentModelButton");
+    if (configure) configure.hidden = hasEnabledAgent();
+  }
+  $("taskDialog")?.addEventListener("input", updateCreateModelSummary);
+  $("taskDialog")?.addEventListener("change", updateCreateModelSummary);
+
   function extraFieldValue(root, field) {
     return root?.querySelector(`[data-extra-model-field="${field}"]`)?.value || "";
   }
@@ -806,6 +820,8 @@ export function createCreateTaskDialogController({
     const container = $("validationCreateExtraModels");
     if (!container) return;
     const ordinal = extraValidationModelRows.length + 2;
+    container.querySelectorAll("details.validation-create-model-card").forEach((card) => { card.open = false; });
+    if ($("validationPrimaryModel")) $("validationPrimaryModel").open = false;
     container.insertAdjacentHTML("beforeend", validationExtraModelCardMarkup(rowId, ordinal));
     const article = container.querySelector(`[data-validation-extra-row-id="${rowId}"]`);
     if (!article) return;
@@ -819,10 +835,13 @@ export function createCreateTaskDialogController({
     nameInput?.addEventListener("input", updateNarrativeDefaults);
     const material = bindExtraModelMaterialSource(article);
     extraValidationModelRows.push({ id: rowId, material });
+    updateCreateModelSummary();
+    nameInput?.focus();
     article.querySelector("[data-remove-validation-extra-row]")?.addEventListener("click", () => {
       extraValidationModelRows = extraValidationModelRows.filter((row) => row.id !== rowId);
       article.remove();
       renumberValidationExtraModels();
+      updateCreateModelSummary();
     });
   }
 

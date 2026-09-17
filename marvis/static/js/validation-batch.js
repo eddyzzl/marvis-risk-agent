@@ -488,18 +488,22 @@ export function validationBatchConfirmAllAction(
   const notReady = actionable.filter(
     (item) => !item.pendingReportDraft && !item.wordReportDownloadUrl,
   );
+  const failed = items.filter((item) => item.status === "failed").length;
+  const cancelled = items.filter((item) => item.status === "cancelled").length;
+  const scope = [`${pending.length} 份待确认`, failed ? `${failed} 个失败` : "", cancelled ? `${cancelled} 个已取消` : "", notReady.length ? `${notReady.length} 个未就绪` : ""].filter(Boolean).join(" · ");
   if (inFlight) {
-    return { visible: true, disabled: true, label: "正在生成全部报告…" };
+    return { visible: true, disabled: true, label: "正在生成全部报告…", scope };
   }
   return {
     visible: true,
     disabled: pending.length === 0 || notReady.length > 0,
     label: "全部确认",
+    scope,
     title: notReady.length > 0
       ? "还有模型尚未完成报告结论草稿"
       : pending.length === 0
         ? "没有待确认的报告草稿"
-        : "确认全部模型的报告结论并生成 Word、Excel 和汇总文档",
+        : `确认 ${pending.length} 份报告结论并生成文件；失败和取消的模型不在本次范围内`,
   };
 }
 
@@ -520,7 +524,7 @@ export function renderValidationBatchSwitcher(
       `<button type="button" class="validation-batch-switcher-item${isSelected ? " is-selected" : ""}"`,
       ` data-tone="${escapeHtml(tone)}"`,
       ` data-batch-switch-child="${escapeHtml(item.childTaskId)}"`,
-      ` aria-pressed="${isSelected ? "true" : "false"}">`,
+      ` role="radio" aria-checked="${isSelected ? "true" : "false"}" tabindex="${isSelected ? "0" : "-1"}">`,
       `<span class="validation-batch-switcher-name">${escapeHtml(item.modelName || `模型 ${item.ordinal}`)}${escapeHtml(version)}</span>`,
       `<small class="validation-batch-switcher-progress">${escapeHtml(progress)}</small>`,
       "</button>",
@@ -534,6 +538,7 @@ export function renderValidationBatchSwitcher(
       confirmAll.disabled ? ' disabled aria-disabled="true"' : "",
       confirmAll.title ? ` title="${escapeHtml(confirmAll.title)}"` : "",
       `>${escapeHtml(confirmAll.label)}</button>`,
+      `<span class="validation-batch-confirm-scope" role="status">${escapeHtml(confirmAll.scope || "")}</span>`,
     ].join("")
     : "";
   const summaryAction = !showSummary
@@ -546,7 +551,7 @@ export function renderValidationBatchSwitcher(
     : "";
   return [
     '<div class="validation-batch-switcher" aria-label="当前验证模型">',
-    `<div class="validation-batch-switcher-list" role="tablist">${buttons}</div>`,
+    `<div class="validation-batch-switcher-list" role="radiogroup" aria-label="选择验证模型">${buttons}</div>`,
     actions,
     "</div>",
   ].join("");
@@ -1114,6 +1119,18 @@ export function createValidationBatchPanelController({
     boundHosts.add(host);
     host.addEventListener("click", handleBatchClick);
     host.addEventListener("wheel", handleSwitcherWheel, { passive: false });
+    host.addEventListener("keydown", (event) => {
+      const current = event.target?.closest?.("[data-batch-switch-child]");
+      if (!current || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+      const buttons = [...host.querySelectorAll("[data-batch-switch-child]")];
+      const index = buttons.indexOf(current);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+        : (index + (["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 1) + buttons.length) % buttons.length;
+      event.preventDefault();
+      const childId = buttons[next].dataset.batchSwitchChild;
+      selectChild(childId);
+      [...host.querySelectorAll("[data-batch-switch-child]")].find((button) => button.dataset.batchSwitchChild === childId)?.focus();
+    });
   }
 
   function selectChild(childTaskId) {

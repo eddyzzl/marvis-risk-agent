@@ -3,15 +3,15 @@
 }
 
 .task-row {
-  --task-card-action-space: 36px;
+  --task-card-action-space: 24px;
   display: grid;
   width: 100%;
   gap: 0;
-  padding: 11px 12px;
+  padding: 9px 10px;
   border: 1px solid transparent;
   border-radius: var(--radius);
   color: inherit;
-  background: var(--surface);
+  background: transparent;
   font-size: 14px;
   text-align: left;
   cursor: pointer;
@@ -67,11 +67,14 @@
   overflow: hidden;
   color: var(--text);
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 550;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.delete-task-button { opacity: 0; }
+.task-row-shell:hover .delete-task-button, .task-row-shell:focus-within .delete-task-button { opacity: 1; }
 
 /* layered, multi-tone per-kind task icon — shared by sidebar rows and the
    task-hero snapshot; mirrors the welcome-card glyphs. The carried `color` is

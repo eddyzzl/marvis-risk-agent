@@ -32,11 +32,10 @@ def test_looks_like_metric_rewrite_request_detects_ks_auc_psi_changes():
     assert looks_like_metric_rewrite_request("KS 现在多少") is False
 
 
-def test_t_card_narrative_uses_drawdown_not_credit():
-    values = narrative_report_values("自营渠道甲T卡")
-    assert "支用" in values["TEXT:model_overview"]
-    assert "授信" not in values["TEXT:model_overview"]
-    assert "申请支用" in values["TEXT:sample_audience"]
+@pytest.mark.parametrize("model_name", ["自营渠道甲T卡", "渠道甲A卡 MOB3", "普通模型"])
+def test_unprovided_narrative_stays_empty(model_name):
+    values = narrative_report_values(model_name)
+    assert values and all(value == "" for value in values.values())
 
 
 @pytest.mark.parametrize(

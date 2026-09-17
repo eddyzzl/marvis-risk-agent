@@ -2,6 +2,11 @@ import { escapeHtml } from "./ui-utils.js";
 
 export const REPORT_DRAFT_FIELDS = [
   {
+    key: "TEXT:final_validation_conclusion",
+    label: "最终验证结论",
+    long: true,
+  },
+  {
     key: "TEXT:pressure_test_summary",
     label: "压力测试总结",
     long: true,
@@ -9,11 +14,6 @@ export const REPORT_DRAFT_FIELDS = [
   {
     key: "TEXT:pressure_impact_recommendation",
     label: "压力影响建议",
-    long: true,
-  },
-  {
-    key: "TEXT:final_validation_conclusion",
-    label: "最终验证结论",
     long: true,
   },
   {
@@ -93,6 +93,8 @@ export function reportDraftTableHtml(
     editable = false,
     revision = 0,
     messageId = "",
+    taskId = "",
+    state = null,
   } = {},
 ) {
   const rows = REPORT_DRAFT_FIELDS.map((field) => reportDraftRowHtml(
@@ -107,7 +109,8 @@ export function reportDraftTableHtml(
   const confirmHtml = editable
     ? [
       '<footer class="report-draft-actions">',
-      '<button type="button" class="button compact primary" data-report-draft-confirm>',
+      '<button type="button" class="button compact secondary" data-report-draft-save>保存草稿</button>',
+      `<button type="button" class="button compact primary" data-report-draft-confirm${state?.conflict ? " disabled" : ""}>`,
       "确认并生成报告",
       "</button>",
       "</footer>",
@@ -115,19 +118,24 @@ export function reportDraftTableHtml(
     : "";
   return [
     `<section class="report-draft-panel" data-report-draft-table="true"${messageAttr}`,
+    ` data-report-draft-task-id="${escapeHtml(taskId)}"`,
     ` data-report-revision="${escapeHtml(String(revisionValue))}"`,
     ` data-report-draft-editable="${editable ? "true" : "false"}">`,
     '<header class="report-draft-head">',
     "<h3>报告结论</h3>",
     editable
-      ? "<p>点击填写内容即可修改。确认后才生成 Word 和 Excel。</p>"
+      ? '<p>逐项编辑，草稿自动保存。确认后生成 Word 和 Excel。</p><span class="report-draft-save-status" role="status" aria-live="polite" data-report-draft-save-status>' + escapeHtml(state?.status || "已保存草稿") + '</span>'
       : "<p>该草稿已确认或已被更新版本替代。</p>",
     "</header>",
+    '<div data-report-draft-feedback>' + reportDraftFeedbackHtml(state) + '</div>',
+    confirmHtml,
     '<div class="report-draft-table-wrap"><table class="report-draft-table">',
     "<thead><tr><th>字段</th><th>填写内容</th></tr></thead>",
     `<tbody>${rows}</tbody>`,
     "</table></div>",
-    confirmHtml,
+    '<details class="report-draft-mapping"><summary>查看字段映射</summary>',
+    REPORT_DRAFT_FIELDS.map((field) => `<div>${escapeHtml(field.label)} <code>${escapeHtml(field.key)}</code></div>`).join(""),
+    '</details>',
     "</section>",
   ].join("");
 }
@@ -140,11 +148,24 @@ function reportDraftRowHtml(field, value, editable) {
     "<tr>",
     "<th scope=\"row\">",
     `<span class="report-draft-label">${escapeHtml(field.label)}</span>`,
-    `<code class="report-draft-key">${escapeHtml(field.key)}</code>`,
+    editable ? `<button type="button" class="report-draft-revise" data-report-draft-revise="${escapeHtml(field.label)}">请 Agent 修订</button>` : "",
     "</th>",
     `<td>${control}</td>`,
     "</tr>",
   ].join("");
+}
+
+export function reportDraftFeedbackHtml(state) {
+  if (!state) return "";
+  const error = state.error ? `<p role="alert">${escapeHtml(state.error)}</p>` : "";
+  if (!state.conflict) return error;
+  if (state.conflict.unavailable) return error + '<p>草稿已确认或撤回。请复制保留当前修改，并在对话中请求重新起草。</p>';
+  const differences = REPORT_DRAFT_FIELDS.filter((field) =>
+    String(state.values[field.key] || "") !== String(state.conflict.values[field.key] || ""));
+  return error + '<details class="report-draft-conflict" open><summary>比较版本 · 当前修改尚未覆盖服务器</summary>'
+    + differences.map((field) => `<div><strong>${escapeHtml(field.label)}</strong><p>当前修改：${escapeHtml(state.values[field.key] || "（空）")}</p><p>最新版本：${escapeHtml(state.conflict.values[field.key] || "（空）")}</p></div>`).join("")
+    + '<button type="button" class="button compact secondary" data-report-draft-resolve="server">使用最新版本</button> '
+    + '<button type="button" class="button compact secondary" data-report-draft-resolve="local">将当前修改应用到最新草稿</button></details>';
 }
 
 function reportDraftControlHtml(field, value) {
@@ -154,11 +175,11 @@ function reportDraftControlHtml(field, value) {
   if (field.long) {
     return [
       `<textarea class="report-draft-input" data-report-draft-key="${keyAttr}"`,
-      ` aria-label="${labelAttr}" rows="4">${valueAttr}</textarea>`,
+      ` aria-label="${labelAttr}" placeholder="待补充" rows="4">${valueAttr}</textarea>`,
     ].join("");
   }
   return [
     `<input class="report-draft-input" data-report-draft-key="${keyAttr}"`,
-    ` aria-label="${labelAttr}" type="text" value="${valueAttr}">`,
+    ` aria-label="${labelAttr}" placeholder="待补充" type="text" value="${valueAttr}">`,
   ].join("");
 }

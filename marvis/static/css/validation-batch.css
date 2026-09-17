@@ -511,3 +511,7 @@ button.validation-batch-link {
     transition: none;
   }
 }
+
+.validation-batch-confirm-scope { display: block; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+.validation-batch-switcher-actions { flex-wrap: wrap; }
+.validation-batch-switcher-list { min-width: 0; }

@@ -114,7 +114,7 @@ body.app-booting .validation-workspace:not(.is-empty) :is(.workspace-head, .work
   opacity: 0;
 }
 
-.validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .agent-composer, .progress-rail) {
+.validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .report-draft-workspace, .agent-composer, .progress-rail) {
   opacity: 0;
   pointer-events: none;
   transition: none;
@@ -1425,6 +1425,20 @@ body.anim-ready:not(.is-resizing) .pet-companion:not(.dragging) {
 .pet-companion.dragging {
   cursor: grabbing;
   transition: none;
+}
+
+/* Keep the chosen companion visible without covering work during a task.
+   The saved free placement is still available on the welcome screen. */
+body:has(.validation-workspace:not(.is-empty)) .pet-companion:not(.dragging) {
+  left: max(12px, calc(var(--sidebar-width) - 68px)) !important;
+  top: auto !important;
+  bottom: 64px !important;
+  width: 52px;
+}
+body:has(.validation-workspace:not(.is-empty)) .pet-companion:not(.dragging) .pet-sprite {
+  width: 48px;
+  animation: none;
+  filter: none;
 }
 
 .pet-sticker {

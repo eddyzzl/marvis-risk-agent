@@ -123,42 +123,8 @@ def cohort_from_model_name(model_name: str) -> str:
 
 
 def narrative_report_values(model_name: str) -> dict[str, str]:
-    display_name = display_model_name(model_name)
-    kind = infer_scorecard_kind(model_name)
-    stage, apply_stage = scorecard_stage_phrases(kind)
-    cohort = cohort_from_model_name(model_name)
-    window = infer_mob_window(model_name)
-    assumed_days = window is not None
-    sample_window = window or "xx"
-    overdue = "30 天" if assumed_days else "xx天"
-    if kind:
-        user_label = "xx用户" if cohort == "xx" else f"{cohort}用户"
-        overview = (
-            f"为了更好的对{user_label}进行{stage}风险管控，现开发{display_name}模型，"
-            f"对{cohort}客群做前置风险拦截，从{apply_stage}做好风险防范。"
-        )
-    else:
-        overview = (
-            f"为了更好的对xx用户进行授信环节风险管控，现开发{display_name}模型，"
-            "对xx客群做前置风险拦截，从授信申请阶段做好风险防范。"
-        )
-    return {
-        "TEXT:model_overview": overview,
-        "TEXT:model_scope": (
-            f"本模型适用于{cohort}渠道用户。"
-            if cohort != "xx"
-            else "本模型适用于xx渠道用户。"
-        ),
-        "TEXT:bad_sample_definition": (
-            f"{sample_window} 逾期 >= {overdue}"
-            if assumed_days
-            else "xx逾期 >= xx天"
-        ),
-        "TEXT:good_sample_definition": (
-            f"{sample_window} 未逾期" if assumed_days else "xx未逾期"
-        ),
-        "TEXT:sample_audience": sample_audience_phrase(kind),
-    }
+    """Unknown narrative facts stay blank until provided or grounded in evidence."""
+    return {key: "" for key in NARRATIVE_REPORT_KEYS}
 
 
 def identity_report_values(
@@ -196,7 +162,9 @@ def seed_report_values(
 ) -> dict[str, str]:
     return {
         **identity_report_values(model_name, model_version, validator, algorithm),
-        **narrative_report_values(model_name),
+        # A model name is not evidence for customer scope or bad-label rules.
+        # Leave narrative facts empty until supplied or drafted from evidence.
+        **{key: "" for key in NARRATIVE_REPORT_KEYS},
     }
 
 

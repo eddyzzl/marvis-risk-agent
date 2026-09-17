@@ -555,7 +555,7 @@ def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actio
     assert '<span class="step-copy">' in renderer
     assert '<div class="step-sub">' not in renderer
 
-    assert "export const PROGRESS_WIDTH_MIN = 314;" in layout_resize_js
+    assert "export const PROGRESS_WIDTH_MIN = 240;" in layout_resize_js
     assert "clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in layout_resize_js
     assert "clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in layout_resize_js
     assert 'from "./js/layout-resize.js"' in app_js
@@ -1680,21 +1680,9 @@ def test_create_dialog_auto_fills_removed_report_values():
         "modelName = '渠道甲A卡 MOB3'; const a = defaultCreateReportValues();",
         "process.stdout.write(JSON.stringify({ generic, t, a }));",
     ]))
-    generic = payload["generic"]
-    assert generic["TEXT:model_overview"] == (
-        "为了更好的对xx用户进行授信环节风险管控，现开发模型A模型，"
-        "对xx客群做前置风险拦截，从授信申请阶段做好风险防范。"
-    )
-    assert generic["TEXT:model_scope"] == "本模型适用于xx渠道用户。"
-    assert generic["TEXT:bad_sample_definition"] == "xx逾期 >= xx天"
-    assert generic["TEXT:good_sample_definition"] == "xx未逾期"
-    assert "支用环节" in payload["t"]["TEXT:model_overview"]
-    assert "授信" not in payload["t"]["TEXT:model_overview"]
-    assert payload["t"]["TEXT:sample_audience"] == "申请支用的用户"
-    assert payload["t"]["TEXT:bad_sample_definition"] == "MOB6 逾期 >= 30 天"
-    assert "授信环节" in payload["a"]["TEXT:model_overview"]
-    assert payload["a"]["TEXT:sample_audience"] == "申请授信的用户"
-    assert payload["a"]["TEXT:bad_sample_definition"] == "MOB3 逾期 >= 30 天"
+    for variant in payload.values():
+        for key in ("model_overview", "model_scope", "sample_audience", "bad_sample_definition", "good_sample_definition"):
+            assert variant[f"TEXT:{key}"] == "", "Model names must not invent business facts"
     assert '"TEXT:data_source_summary"' not in defaults
     assert '"TEXT:dataset_split_summary"' not in defaults
 
@@ -1810,7 +1798,7 @@ def test_create_dialog_updates_run_mode_copy_by_task_type():
             assert copy in task_definition
 
 
-def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
+def test_create_dialog_defaults_available_mode_without_preselecting_algorithms():
     index_html = _read_static("index.html")
     create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
@@ -1832,7 +1820,7 @@ def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
     dialog_start = create_dialog_js.index("function openTaskDialog")
     dialog_end = create_dialog_js.index("function openTaskDialogFromCard", dialog_start)
     dialog_body = create_dialog_js[dialog_start:dialog_end]
-    assert "input.checked = false;" in dialog_body
+    assert "input.checked = input.value === defaultMode;" in dialog_body
     assert "resetModelAlgorithmChoices();" in dialog_body
     assert "updateAlgorithmFieldVisibility();" in dialog_body
     assert "definition.defaultRunMode ===" not in dialog_body
@@ -1854,7 +1842,7 @@ def test_create_dialog_reopens_with_clean_task_specific_inputs_and_defaults():
 
     assert "resetCreateTaskSpecificInputs" in dialog_body
     assert 'document.querySelectorAll(\'input[name="runMode"]\')' in dialog_body
-    assert "input.checked = false;" in dialog_body
+    assert "input.checked = input.value === defaultMode;" in dialog_body
     assert "materialSourceController.reset();" in dialog_body
     assert dialog_body.index("resetCreateTaskSpecificInputs") < dialog_body.index(
         "prefillCreateTaskReportFields"
@@ -1914,7 +1902,7 @@ def test_create_task_requires_run_mode_and_allows_agent_mode():
     assert '?.value || "manual"' not in create_renderer
 
 
-def test_create_dialog_moves_material_source_to_bottom_segment():
+def test_create_dialog_prioritizes_materials_before_optional_report_background():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     create_dialog_js = _read_static("js/create-task-dialog.js")
@@ -1926,11 +1914,11 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     report_start = index_html.index('id="createTaskReportFields"')
     material_start = index_html.index('id="createTaskMaterialSection"')
     create_button_start = index_html.index('id="createTaskButton"')
-    assert task_info_start < report_start < material_start < create_button_start
+    assert task_info_start < material_start < report_start < create_button_start
 
-    task_info_section = index_html[task_info_start:report_start]
+    task_info_section = index_html[task_info_start:material_start]
     assert 'id="sourceDir"' not in task_info_section
-    assert index_html.index('id="createGoodSampleDefinition"') < index_html.index('id="sourceDir"')
+    assert index_html.index('id="sourceDir"') < index_html.index('id="createGoodSampleDefinition"')
 
     material_section = index_html[material_start:create_button_start]
     assert 'role="tablist"' in material_section
@@ -2398,18 +2386,14 @@ def test_manual_vintage_material_upload_control_runs_deterministic_intake():
     assert result.stdout == "ok"
 
 
-def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
+def test_run_mode_cards_keep_a_valid_default_selection():
     app_js = _read_static("app.js")
     create_dialog_js = _read_static("js/create-task-dialog.js")
 
     assert "function bindRunModeDeselectableCards" in create_dialog_js
-    assert "handleRunModeCardPointerDown" in create_dialog_js
-    assert "handleRunModeCardClick" in create_dialog_js
-    assert 'card.dataset.wasChecked = input.checked ? "true" : "false";' in create_dialog_js
-    assert 'if (card.dataset.wasChecked !== "true") return;' in create_dialog_js
-    assert "event.preventDefault();" in create_dialog_js
-    assert "input.checked = false;" in create_dialog_js
-    assert 'input.dispatchEvent(new Event("change", { bubbles: true }));' in create_dialog_js
+    assert "hasEnabledAgent()" in create_dialog_js
+    assert 'input.checked = input.value === defaultMode;' in create_dialog_js
+    assert "handleRunModeCardClick" not in create_dialog_js
     assert "bindRunModeDeselectableCards();" in app_js
 
 
@@ -2678,7 +2662,7 @@ def test_shell_has_collapsible_compact_sidebar():
     assert index_html.index('id="appShell"') < index_html.index('localStorage.getItem("sidebarCollapsed") === "1"')
     assert index_html.index('localStorage.getItem("sidebarCollapsed") === "1"') < index_html.index('id="taskSidebar"')
     assert ".app-shell.sidebar-collapsed" in styles_css
-    assert "--sidebar-width: 314px" in styles_css
+    assert "--sidebar-width: 256px" in styles_css
     assert "--sidebar-width: 0px" in styles_css
     assert ".app-shell.sidebar-collapsed .brand-logo h1" in styles_css
     assert "task-row-short" not in app_js
@@ -2992,7 +2976,7 @@ def test_sidebar_brand_title_stays_on_one_line():
     assert "letter-spacing: 0" in brand_rule
 
     layout_resize_js = _read_static("js/layout-resize.js")
-    assert "export const SIDEBAR_WIDTH_MIN = 314;" in layout_resize_js
+    assert "export const SIDEBAR_WIDTH_MIN = 240;" in layout_resize_js
     assert "export const SIDEBAR_WIDTH_MAX = 520;" in layout_resize_js
     assert "stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar" in layout_resize_js
     assert "clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in layout_resize_js
@@ -3211,14 +3195,14 @@ def test_workspace_cards_float_on_one_background_with_top_step_rail():
     styles_css = _read_browser_css()
 
     assert ".validation-workspace {" in styles_css
-    assert "--workspace-main-gutter: 106px" in styles_css
-    assert "--workspace-collapsed-main-gutter: 180px" in styles_css
-    assert "--workspace-rail-gap: 70px" in styles_css
-    assert "--workspace-collapsed-rail-gap: 78px" in styles_css
+    assert "--workspace-main-gutter: 24px" in styles_css
+    assert "--workspace-collapsed-main-gutter: 76px" in styles_css
+    assert "--workspace-rail-gap: 24px" in styles_css
+    assert "--workspace-collapsed-rail-gap: 24px" in styles_css
     assert "--pet-default-workspace-offset: -2px" in styles_css
     assert "--pet-min-workspace-offset: -2px" in styles_css
     assert "--pet-collapsed-workspace-offset: 72px" in styles_css
-    assert "--progress-width: 314px" in styles_css
+    assert "--progress-width: 278px" in styles_css
     assert "grid-template-columns: minmax(0, 1fr) var(--workspace-rail-gap) var(--progress-width)" in styles_css
     assert "grid-template-columns: minmax(340px, 1fr) var(--workspace-rail-gap) min(var(--progress-width), 340px)" in styles_css
     workspace_start = styles_css.index(".validation-workspace {")
@@ -3241,7 +3225,7 @@ def test_workspace_cards_float_on_one_background_with_top_step_rail():
     assert "height: auto" in rail_rule
     assert "gap: 0" in rail_rule
     assert "max-height: calc(100dvh - 28px)" in rail_rule
-    assert "min-width: 300px" in rail_rule
+    assert "min-width: 0" in rail_rule
     assert "margin: 14px 14px 14px 0" in rail_rule
     assert ".progress-panel {" in styles_css
     assert "--shadow-floating: 0 2px 8px rgba(0, 0, 0, 0.035)" in styles_css
@@ -3542,21 +3526,9 @@ def test_primary_step_action_hover_keeps_button_text_readable():
     styles_css = _read_browser_css()
     root_rule = _css_rule(styles_css, ":root")
 
-    assert "--button-solid-shadow:" in root_rule
-    assert "0 1px 1px rgba(0, 0, 0, 0.10)" in root_rule
-    assert "0 3px 6px rgba(0, 0, 0, 0.10)" in root_rule
-    assert "0 6px 10px rgba(0, 0, 0, 0.07)" in root_rule
-    assert "--button-solid-shadow-hover:" in root_rule
-    assert "0 1px 1px rgba(0, 0, 0, 0.12)" in root_rule
-    assert "0 4px 8px rgba(0, 0, 0, 0.12)" in root_rule
-    assert "0 7px 12px rgba(0, 0, 0, 0.08)" in root_rule
-    assert "--button-secondary-shadow:" in root_rule
-    assert "0 1px 1px rgba(0, 0, 0, 0.06)" in root_rule
-    assert "0 2px 4px rgba(0, 0, 0, 0.04)" in root_rule
-    assert "0 5px 8px rgba(0, 0, 0, 0.035)" in root_rule
-    assert "--button-secondary-shadow-hover:" in root_rule
-    assert "0 3px 6px rgba(0, 0, 0, 0.06)" in root_rule
-    assert "0 6px 10px rgba(0, 0, 0, 0.045)" in root_rule
+    for key in ("solid", "solid-shadow-hover", "secondary", "secondary-shadow-hover"):
+        name = key if "shadow" in key else f"{key}-shadow"
+        assert f"--button-{name}: 0 1px 2px rgba(0, 0, 0, 0.06)" in root_rule
     assert "--button-primary-bg: var(--brand-primary)" in root_rule
     assert "--button-primary-text: #ffffff" in root_rule
     assert "--button-outline-border: var(--brand-primary)" in root_rule
@@ -3729,8 +3701,8 @@ def test_sidebar_task_card_is_single_line_with_hover_preview():
     row_start = styles_css.index("\n.task-row {\n  --task-card-action-space")
     row_end = styles_css.index("}", row_start)
     row_rule = styles_css[row_start:row_end]
-    assert "--task-card-action-space: 36px" in row_rule
-    assert "padding: 11px 12px" in row_rule
+    assert "--task-card-action-space: 24px" in row_rule
+    assert "padding: 9px 10px" in row_rule
     assert "border: 1px solid transparent" in row_rule
     assert "padding: 11px 42px" not in row_rule
 
@@ -3746,7 +3718,7 @@ def test_sidebar_task_card_is_single_line_with_hover_preview():
     assert "min-width: 0" in name_rule
     assert "overflow: hidden" in name_rule
     assert "font-size: 14px" in name_rule
-    assert "font-weight: 700" in name_rule
+    assert "font-weight: 550" in name_rule
     assert "text-overflow: ellipsis" in name_rule
     assert "white-space: nowrap" in name_rule
 
@@ -4778,7 +4750,7 @@ def test_result_workspace_preserves_scroll_position_per_task_switch():
     assert "shouldRenderAfter = true;" in run_action
     assert "if (shouldRenderAfter) renderAll();" in run_action
 
-    assert ".validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .agent-composer, .progress-rail)" in styles_css
+    assert ".validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .report-draft-workspace, .agent-composer, .progress-rail)" in styles_css
     assert ".validation-workspace.is-task-content-loading :is(.result-workspace, .progress-rail)" not in styles_css
     assert ".validation-workspace.is-task-content-loading:has(#validationBatchSwitcher:not([hidden])) :is(.workspace-head)" in styles_css
     assert "body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.workspace-head)" in styles_css
@@ -6026,7 +5998,7 @@ def test_naitang_sprite_animation_uses_slower_frame_timing():
         end = styles_css.index("}", start)
         return styles_css[start:end]
 
-    sprite_rule = css_rule(".pet-sprite {")
+    sprite_rule = css_rule("\n.pet-sprite {")
     assert "animation: pet-sprite-frames 5s steps(var(--pet-frame-count)) infinite;" in sprite_rule
 
     expected_durations = {
@@ -12199,7 +12171,7 @@ def test_plan_rail_shows_skeleton_only_on_genuine_first_load():
     assert "计划生成中" not in payload["firstHtml"]
 
     assert 'data-skeleton="plan-rail"' not in payload["secondHtml"]
-    assert "计划生成中" in payload["secondHtml"]
+    assert "尚未开始" in payload["secondHtml"]
 
 
 def test_right_rail_has_no_artifact_panel_loading_state():
@@ -12326,7 +12298,7 @@ def test_plan_rail_shows_waiting_for_confirmation_not_generating():
     assert "计划生成中" not in html
 
 
-def test_plan_rail_falls_back_to_generating_when_no_open_gate():
+def test_plan_rail_reports_not_started_without_job_or_gate():
     """UX-10: a genuine still-generating wait (no plan yet, no open gate message)
     must keep showing "计划生成中…" — only the gate-waiting case changes.
     """
@@ -12364,7 +12336,7 @@ def test_plan_rail_falls_back_to_generating_when_no_open_gate():
     )
     html = result.stdout
 
-    assert "计划生成中" in html
+    assert "尚未开始" in html
     assert "等待确认" not in html
 
 

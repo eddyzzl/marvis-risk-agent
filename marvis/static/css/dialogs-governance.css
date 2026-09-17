@@ -2507,3 +2507,39 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
     transform: none;
   }
 }
+
+/* Keep material selection and the final action visible in batch creation. */
+#taskDialog { width: min(900px, calc(100vw - 64px)); max-width: 900px; overflow: hidden; }
+#taskDialog .task-dialog-panel { display: flex; flex-direction: column; max-height: calc(100vh - 64px); padding: 0; }
+#taskDialog .dialog-head { flex: 0 0 auto; padding: 22px 28px 18px; }
+#taskDialog .task-form { display: flex; flex-direction: column; gap: 16px; overflow: auto; padding: 0 28px 20px; min-height: 0; }
+#taskDialog .task-form-section { margin: 0; }
+#taskDialog .run-mode-section { border: 0; padding: 0; }
+#taskDialog .run-mode-section h3 { font-size: 13px; margin: 0 0 8px; }
+#taskDialog .run-mode-cards { display: flex; gap: 8px; }
+#taskDialog .run-mode-card { flex: 1; display: flex; gap: 8px; align-items: center; padding: 12px; min-height: 0; border-radius: 8px; }
+#taskDialog .run-mode-icon { display: none; }
+#taskDialog .run-mode-card input { position: static; opacity: 1; width: 16px; height: 16px; clip-path: none; }
+#taskDialog .run-mode-copy strong { font-size: 13px; }
+#taskDialog .run-mode-copy small { font-size: 12px; line-height: 1.5; }
+#taskDialog .validation-create-model-card { display: block; border: 1px solid var(--border); border-radius: 12px; padding: 0; background: var(--surface); }
+#taskDialog .validation-create-model-head { display: flex; align-items: center; gap: 12px; cursor: pointer; padding: 14px 16px; }
+#taskDialog .validation-create-model-head h3 { margin: 0; font-size: 14px; }
+#taskDialog .validation-create-model-head [data-extra-model-summary], #primaryModelSummary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
+#taskDialog .validation-create-model-head::before { content: "›"; color: var(--text-muted); }
+#taskDialog .validation-create-model-card[open] > summary::before { content: "⌄"; }
+#taskDialog .validation-create-model-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 16px 16px; }
+#taskDialog .validation-create-model-fields > .task-form-section, #taskDialog .material-source-section, #taskDialog .create-narrative-details { grid-column: 1 / -1; }
+#taskDialog .validation-create-model-fields > .task-form-section { padding: 0; border: 0; }
+#taskDialog .create-narrative-details { padding: 0; border: 0; }
+#taskDialog .create-narrative-details > summary { color: var(--text-secondary); font-size: 13px; padding: 10px 0; cursor: pointer; }
+#taskDialog .create-narrative-details > label { margin-bottom: 12px; }
+#taskDialog .create-task-footer { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px 20px; padding: 16px 28px; border-top: 1px solid var(--border); background: var(--surface); }
+#taskDialog .create-model-count { color: var(--text-secondary); font-size: 13px; }
+#taskDialog #statusMessage { grid-column: 1 / -1; margin: 0; }
+#taskDialog #statusMessage:empty { display: none; }
+#taskDialog:not([data-task-type="validation"]) #validationPrimaryModel { border: 0; }
+#taskDialog:not([data-task-type="validation"]) #validationPrimaryModel > summary { display: none; }
+
+.create-mode-help { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+.create-mode-help:has(span:empty):has(button[hidden]) { display: none; }

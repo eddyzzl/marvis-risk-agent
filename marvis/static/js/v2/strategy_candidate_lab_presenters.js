@@ -53,13 +53,13 @@ const COLLECTION_DEFINITIONS = Object.freeze([
   {
     key: "automatic_tree",
     title: "自动规则树",
-    description: "完整拟合拓扑、可见节点、当前 frontier 与现成效果证据",
+    description: "完整树结构、当前可用分支与效果证据",
     pointerKey: "leaves",
   },
   {
     key: "interactive_tree_revision",
     title: "交互式树修订",
-    description: "每条不可变分支各自保留完整拓扑、frontier、历史与回放证据",
+    description: "各版本保留完整树结构、可用分支、历史与验证证据",
     pointerKey: "frontier",
   },
   {
@@ -211,7 +211,7 @@ function pointerTableHtml(item, pointerKey) {
     : "";
   return [
     '<section class="candidate-lab-subsection">',
-    `<h5>${pointerKey === "bins" ? "候选分箱" : pointerKey === "cells" ? "矩阵单元格" : pointerKey === "frontier" ? "Frontier 规则" : "叶节点"}</h5>`,
+    `<h5>${pointerKey === "bins" ? "候选分箱" : pointerKey === "cells" ? "矩阵单元格" : pointerKey === "frontier" ? "可用分支规则" : "叶节点"}</h5>`,
     '<div class="candidate-lab-table-scroll">',
     `<table class="candidate-lab-table"><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table>`,
     "</div>",
@@ -1265,7 +1265,7 @@ function sampleDesignWorkflowHtml(sample) {
     return [
       '<section class="candidate-lab-subsection candidate-lab-sample-design" data-status="missing">',
       "<h5>双人群样本设计</h5>",
-      '<p class="candidate-lab-empty">尚无当前受认证 SampleDesign V2；请先让 Agent 明确审批人群、风险表现人群、分区与成熟度。</p>',
+      '<p class="candidate-lab-empty">请先明确审批人群、风险表现人群、分区与成熟度，完成样本设计。</p>',
       "</section>",
     ].join("");
   }
@@ -1332,11 +1332,11 @@ function workflowEvidenceHtml(latestEvidence) {
     '<section class="candidate-lab-subsection candidate-lab-workflow-evidence">',
     "<h5>最新效果与稳定性证据</h5>",
     '<div class="candidate-lab-result-list">',
-    workflowEvidenceItemHtml("Pool Stability", evidence.pool_stability),
-    workflowEvidenceItemHtml("Pool Impact", evidence.pool_impact),
-    workflowEvidenceItemHtml("ImpactCube", evidence.impact_cube),
-    workflowEvidenceItemHtml("Validation", validations.validation),
-    workflowEvidenceItemHtml("OOT", validations.oot),
+    workflowEvidenceItemHtml("策略池稳定性", evidence.pool_stability),
+    workflowEvidenceItemHtml("策略池影响", evidence.pool_impact),
+    workflowEvidenceItemHtml("综合影响测算", evidence.impact_cube),
+    workflowEvidenceItemHtml("验证样本", validations.validation),
+    workflowEvidenceItemHtml("时间外样本（OOT）", validations.oot),
     "</div>",
     "</section>",
   ].join("");
@@ -1381,16 +1381,19 @@ function workflowReportHtml(report) {
 
 function strategyWorkflowSpineHtml(workflow) {
   const value = isRecord(workflow) ? workflow : {};
+  const hasProgress = value.stages?.some((stage) => stage.status === "complete");
   return [
     '<section class="candidate-lab-result-group candidate-lab-workflow-spine">',
     '<header class="candidate-lab-result-head">',
-    "<div><h4>策略开发全流程</h4><p>七阶段状态、双人群样本、最新效果证据和最终报告均来自结构化任务投影。</p></div>",
+    "<div><h4>策略开发全流程</h4></div>",
     "</header>",
     workflowStageSpineHtml(value.stages),
+    `<details${hasProgress ? " open" : ""}><summary>阶段详情与结果</summary>`,
     projectContextWorkflowHtml(value.project_context),
     sampleDesignWorkflowHtml(value.sample_design),
     workflowEvidenceHtml(value.latest_evidence),
     workflowReportHtml(value.report),
+    "</details>",
     "</section>",
   ].join("");
 }
@@ -1706,10 +1709,11 @@ function strategyEvidenceDrawerHtml(drawer) {
   const artifactItems = Array.isArray(artifacts.all)
     ? artifacts.all.filter(isRecord)
     : [];
+  const hasRedFlags = Boolean(value.red_flags?.all?.length);
   return [
-    '<section class="candidate-lab-result-group candidate-lab-evidence-drawer">',
+    `<details class="candidate-lab-result-group candidate-lab-evidence-drawer"${artifactItems.length || hasRedFlags ? " open" : ""}><summary>证据详情 · ${artifactItems.length} 份产物${hasRedFlags ? " · 有风险提示" : ""}</summary>`,
     '<header class="candidate-lab-result-head">',
-    "<div><h4>Evidence Drawer</h4><p>统一查看当前页面已认证证据的数据集、产物、Tool/版本、内容与输入绑定 hash、红旗和最近 Agent 记忆引用。</p></div>",
+    "<div><h4>证据详情</h4><p>查看数据来源、产物、工具版本、风险提示和记忆引用。</p></div>",
     "</header>",
     '<p class="candidate-lab-boundary-note">仅展示当前任务且已经过对应领域 loader 重验的投影；不读取原始客户行，不把对话自由文本当成业务事实。缺少 Tool 原生输入 hash 时会明确标为 provenance 派生绑定摘要。</p>',
     '<details class="candidate-lab-evidence-card" open>',
@@ -1725,7 +1729,7 @@ function strategyEvidenceDrawerHtml(drawer) {
       : "",
     "</div>",
     "</details>",
-    '<details class="candidate-lab-evidence-card">',
+    `<details class="candidate-lab-evidence-card"${hasRedFlags ? " open" : ""}>`,
     "<summary><span class=\"candidate-lab-card-title\"><strong>数据集绑定与红旗</strong><small>跨产物去重后的 lineage</small></span><span class=\"candidate-lab-card-state\">查看</span></summary>",
     '<div class="candidate-lab-card-body">',
     evidenceDrawerDatasetsHtml(value.datasets),
@@ -1736,19 +1740,24 @@ function strategyEvidenceDrawerHtml(drawer) {
     "<summary><span class=\"candidate-lab-card-title\"><strong>Agent 记忆引用</strong><small>最近一条回复的 metadata 审计指针</small></span><span class=\"candidate-lab-card-state\">查看</span></summary>",
     `<div class="candidate-lab-card-body">${evidenceDrawerMemoryHtml(value.memory_references)}</div>`,
     "</details>",
-    "</section>",
+    "</details>",
   ].join("");
 }
 
 export function strategyCandidateLabResultsHtml(payload = {}) {
   const candidates = isRecord(payload.candidates) ? payload.candidates : {};
+  const populated = COLLECTION_DEFINITIONS.filter((definition) => collectionItems(candidates[definition.key]).length);
+  const empty = COLLECTION_DEFINITIONS.filter((definition) => !collectionItems(candidates[definition.key]).length);
   return [
     strategyWorkflowSpineHtml(payload.workflow),
     strategyEvidenceDrawerHtml(payload.evidence_drawer),
-    strategyHistoryHtml(payload.strategies),
-    ...COLLECTION_DEFINITIONS.map(
+    projectedStrategyItems({ strategies: payload.strategies }).length ? strategyHistoryHtml(payload.strategies)
+      : `<details class="candidate-lab-empty-results"><summary>策略版本历史 · 暂无版本</summary>${strategyHistoryHtml(payload.strategies)}</details>`,
+    ...populated.map(
       (definition) => candidateCollectionHtml(candidates, definition),
     ),
-    poolCollectionHtml(payload.pools),
+    empty.length ? `<details class="candidate-lab-empty-results"><summary>尚未生成的分析结果 · ${empty.length} 类</summary>${empty.map((definition) => candidateCollectionHtml(candidates, definition)).join("")}</details>` : "",
+    collectionItems(payload.pools).length ? poolCollectionHtml(payload.pools)
+      : `<details class="candidate-lab-empty-results"><summary>策略池 · 暂无规则</summary>${poolCollectionHtml(payload.pools)}</details>`,
   ].join("");
 }
