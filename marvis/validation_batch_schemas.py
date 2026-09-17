@@ -17,10 +17,10 @@ class ValidationBatchItemRequest(BaseModel):
     score_col: str = "pred"
     split_col: str = "split"
     time_col: str = "apply_month"
-    notebook_path: str = Field(min_length=1)
-    sample_path: str = Field(min_length=1)
-    pmml_path: str = Field(min_length=1)
-    dictionary_path: str = Field(min_length=1)
+    notebook_path: str = ""
+    sample_path: str = ""
+    pmml_path: str = ""
+    dictionary_path: str = ""
 
 
 class CreateValidationBatchRequest(BaseModel):
@@ -42,7 +42,14 @@ class StartValidationBatchRequest(BaseModel):
     effort: str | None = None
 
 
+class ConfirmAllBatchReportDraftsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    overrides: dict[str, dict] = Field(default_factory=dict)
+
+
 __all__ = [
+    "ConfirmAllBatchReportDraftsRequest",
     "CreateValidationBatchRequest",
     "StartValidationBatchRequest",
     "ValidationBatchItemRequest",

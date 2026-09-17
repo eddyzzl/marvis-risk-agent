@@ -1665,4 +1665,3 @@ def _ground_cross_matrix_cell_selection(
             fields=("next_action",),
         )
     return result
-

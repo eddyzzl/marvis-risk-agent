@@ -2546,4 +2546,3 @@ def _ground_strategy_pool_request(
             fields=("pool_mutation_intent",),
         )
     return result
-

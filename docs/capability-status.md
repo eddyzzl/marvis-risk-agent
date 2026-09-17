@@ -50,7 +50,7 @@
 | 特征分析 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 全指标、选定分箱与跳过分箱分支均已走通；指标与报告由确定性工具负责 |
 | 模型开发 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | LR 无 OOT、XGB 随机 OOT、LGB 时间 OOT 均以单轮调参产出结果；T4-2 未关闭 |
 | 模型验证 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 手动、Agent、失败阻断及报告下载均已走通；不替代独立验证责任 |
-| 批量模型验证 | VERIFIED | VERIFIED | VERIFIED | N/A | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 两套独立材料顺序执行，保留单模型 Word/Excel 并生成汇总 Excel；不自动确认输入合同 |
+| 模型验证（多模型） | VERIFIED | VERIFIED | VERIFIED | PARTIAL | PARTIAL | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 不再作为独立首屏入口；N≥2 从「模型验证」创建流编排，接通 Agent 对话确认合同；旧终态批次仍可下载。新工作台旅程需重跑浏览器验收，不能沿用旧独立入口的 VERIFIED 含义 |
 | 策略开发 | VERIFIED | VERIFIED | VERIFIED | VERIFIED | VERIFIED | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 七阶段 Candidate Lab 与主要策略方法、稳定性/重放、编译/应用、ProjectContext 和四格式报告已走通；本地采纳不等于生产部署 |
 | 策略历史回溯打分 | VERIFIED | VERIFIED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | as-of 逐月重放核心与单测完成（`packs/strategy/historical_backtest.py`：缺月 fail-closed、backtested/unvalidated 标记；15 tests）；未接 Agent/UI |
 | 泄漏与选择偏差检测 | VERIFIED | VERIFIED | NOT_PROVEN | NOT_PROVEN | NOT_PROVEN | PARTIAL | NOT_PROVEN | NOT_PROVEN | NOT_DELIVERED | 时间泄漏红旗 + 双人群分布对比核心与单测完成（`packs/strategy/leakage_diagnostics.py`；12 tests），纯证据、不自动阻断；未接 Agent/UI |

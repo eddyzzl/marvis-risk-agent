@@ -85,6 +85,30 @@ def test_extract_model_experience_summary_formats_long_float_metrics():
     assert "PSI为0.048773" in candidate.summary
 
 
+def test_extract_model_experience_appends_overfit_and_lift_when_present():
+    result = {
+        "task_id": "task-202601",
+        "model_name": "自营通用T卡",
+        "model_version": "v1",
+        "month": "202601",
+        "channel": "自营",
+        "scope": "自营通用T卡验证任务",
+        "metrics": {"ks": 0.31, "auc": 0.72, "psi": 0.12},
+        "important_feature_sources": ["征信"],
+        "overfitting_status": "fail",
+        "head_lift_5pct": 0.99,
+        "tail_lift_5pct": 1.05,
+    }
+
+    candidate = extract_model_experience(result)
+
+    assert candidate is not None
+    assert candidate.payload["overfitting_status"] == "fail"
+    assert candidate.payload["head_lift_5pct"] == 0.99
+    assert "过拟合检查未通过" in candidate.summary
+    assert "头部5% lift 0.99" in candidate.summary
+
+
 def test_extract_validation_pitfall_from_notebook_pmml_field_execution_and_report_failures():
     failures = [
         {"kind": "notebook", "message": "RMC_SCORE_FN missing, notebook cannot score sample"},

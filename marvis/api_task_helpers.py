@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 import os
 from pathlib import Path
@@ -15,6 +16,20 @@ from marvis.safe_paths import assert_within
 logger = logging.getLogger(__name__)
 MODEL_ID_RE = re.compile(r"^[\w一-鿿\- ()（）]{1,64}$", re.UNICODE)
 ACTIVE_JOB_DETAIL = "task already has an active stage"
+
+
+def format_validation_batch_parent_name(
+    item_count: int,
+    created_at: datetime | None = None,
+) -> str:
+    moment = created_at or datetime.now().astimezone()
+    if moment.tzinfo is not None:
+        moment = moment.astimezone()
+    count = max(int(item_count), 0)
+    date_text = f"{moment:%Y-%m-%d}"
+    if count > 0:
+        return f"{date_text} 模型验证批次 ({count}个模型)"
+    return f"{date_text} 模型验证批次"
 
 
 def get_task_or_404(repo: TaskRepository, task_id: str) -> TaskRecord:

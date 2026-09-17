@@ -100,4 +100,3 @@ _VINTAGE_SPEC = _TurnHandlerSpec(
     run_setup=_run_vintage_setup,
     format_user_display=_identity_display_text,
 )
-

@@ -368,4 +368,3 @@ def _auto_decision_content(decision: dict) -> str:
     if action == "confirm" and rationale:
         return f"🤖 {reason}\n\n为何可自动确认:{rationale}"
     return f"🤖 {reason}"
-

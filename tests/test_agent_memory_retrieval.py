@@ -302,6 +302,8 @@ def test_normalize_model_family_recognizes_english_and_chinese_examples():
     assert normalize_model_family("B卡贷中模型") == "b_card"
     assert normalize_model_family("C card") == "c_card"
     assert normalize_model_family("C卡模型") == "c_card"
+    assert normalize_model_family("T card") == "t_card"
+    assert normalize_model_family("自营通用T卡多头MOB6") == "t_card"
     assert normalize_model_family("amount model") == "amount"
     assert normalize_model_family("额度模型") == "amount"
     assert normalize_model_family("rate model") == "rate"
@@ -432,3 +434,51 @@ def test_memory_packet_annotates_summary_with_age_in_days():
     assert packet["summary"] == "A卡模型历史表现稳定（5 天前）"
     assert packet["age_days"] == 5
     assert packet["observed_at"] == "2026-06-27T00:00:00+00:00"
+
+
+def test_t_card_models_match_as_same_family():
+    entries = [
+        _candidate(
+            summary="自营通用T卡多头MOB6在自营渠道KS为0.32。",
+            payload_overrides={
+                "model_name": "自营通用T卡多头MOB6",
+                "scope": "自营通用T卡多头MOB6验证任务",
+                "channel": "自营",
+                "source_task_id": "task-hist-t",
+            },
+            source_task_id="task-hist-t",
+        )
+    ]
+    query = MemoryQuery(
+        model_name="自营渠道甲T卡多维度MOB6",
+        keywords=("T卡", "MOB6"),
+        exclude_source_task_ids=("task-current",),
+    )
+
+    results = retrieve_relevant_memories(entries, query)
+
+    assert len(results) == 1
+    assert results[0].confidence in {"medium", "high"}
+    assert "model family" in results[0].match_reason
+
+
+def test_retrieve_skips_current_task_memories():
+    entries = [
+        _candidate(source_task_id="task-current"),
+        _candidate(
+            summary="上一版A卡",
+            payload_overrides={"source_task_id": "task-hist"},
+            source_task_id="task-hist",
+        ),
+    ]
+    query = MemoryQuery(
+        model_name="分润通用A卡模型",
+        scope="mob3贷前A卡",
+        channel="自营",
+        month="202601",
+        exclude_source_task_ids=("task-current",),
+    )
+
+    results = retrieve_relevant_memories(entries, query)
+
+    assert [item.context_packet["source_task_id"] for item in results] == ["task-hist"]

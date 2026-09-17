@@ -130,6 +130,37 @@ def test_render_template_report_preserves_text_placeholder_run_formatting(tmp_pa
     assert str(replacement.font.color.rgb) == "C00000"
 
 
+def test_render_template_report_marks_risk_phrases_red_and_bold(tmp_path):
+    template = _save_template(
+        tmp_path / "template.docx",
+        ["结论：{{TEXT:final_validation_conclusion}}"],
+    )
+    output = tmp_path / "out.docx"
+
+    render_template_report(
+        TemplateReportPayload(
+            template_path=template,
+            output_path=output,
+            text_values={
+                "TEXT:final_validation_conclusion": (
+                    "区分能力尚可，但!!过拟合检查未通过!!，头部 lift 偏弱。"
+                )
+            },
+            image_values={},
+        )
+    )
+
+    generated = Document(output)
+    texts = [run.text for run in generated.paragraphs[0].runs]
+    assert "过拟合检查未通过" in texts
+    assert "!!" not in "".join(texts)
+    risk_run = next(
+        run for run in generated.paragraphs[0].runs if run.text == "过拟合检查未通过"
+    )
+    assert risk_run.bold is True
+    assert str(risk_run.font.color.rgb) == "C00000"
+
+
 def test_render_template_report_preserves_color_when_text_placeholder_is_split_across_runs(tmp_path):
     document = Document()
     paragraph = document.add_paragraph()

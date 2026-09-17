@@ -14,10 +14,11 @@ here directly.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import logging
 
 from fastapi import BackgroundTasks, HTTPException, Request
 
-from marvis.errors import conflict, not_implemented, unprocessable
+from marvis.errors import conflict, not_found, not_implemented, unprocessable
 
 from marvis.agent.orchestrator import (
     agent_next_stage,
@@ -35,6 +36,7 @@ from marvis.agent.service import (
     summarize_stage,
     REQUIRED_AGENT_REPORT_KEYS,
 )
+from marvis.repositories.tasks import AGENT_REPORT_WRITABLE_KEYS, TaskRepository
 from marvis.agent.turn_handlers import (
     DriverTurnRuntime,
     dispatch_driver_turn as dispatch_plan_driver_turn,
@@ -99,7 +101,6 @@ from marvis.api_stage_helpers import (
     start_task_job,
 )
 from marvis.api_task_helpers import get_task_or_404
-from marvis.repositories.tasks import TaskRepository
 from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_FEATURE_ANALYSIS,
@@ -107,6 +108,7 @@ from marvis.domain import (
     TASK_TYPE_PORTFOLIO,
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
+    TASK_TYPE_VALIDATION_BATCH,
     TASK_TYPE_VINTAGE,
     StrategyTaskInput,
     TaskRecord,
@@ -121,6 +123,12 @@ from marvis.pipeline import (
     run_pmml_scoring_stage,
     run_report_stage,
 )
+from marvis.validation.suggested_confirmation import confirm_unambiguous_contract
+from marvis.validation_batch_runner import (
+    sync_agent_batch_after_child_report,
+    sync_agent_batch_child_progress,
+)
+from marvis.repositories.validation_batches import ValidationBatchRepository
 from marvis.repositories.validation_contracts import (
     ValidationContractActiveJobConflict,
     ValidationContractRepository,
@@ -180,6 +188,7 @@ def require_agent_task(task: TaskRecord, driver_agent_task_types: frozenset[str]
 WIRED_AGENT_TASK_TYPES = frozenset(
     {
         TASK_TYPE_VALIDATION,
+        TASK_TYPE_VALIDATION_BATCH,
         TASK_TYPE_MODELING,
         TASK_TYPE_DATA_JOIN,
         TASK_TYPE_FEATURE_ANALYSIS,
@@ -196,7 +205,7 @@ def require_wired_agent_task_type(
     if task.task_type not in wired_agent_task_types:
         raise not_implemented(
             f"任务类型 '{task.task_type}' 的 Agent 流程尚未接入"
-            "（当前仅支持 模型验证 / 模型开发 / 数据拼接 / 特征分析 / 策略分析 / "
+            "（当前仅支持 模型验证 / 模型验证批次 / 模型开发 / 数据拼接 / 特征分析 / 策略分析 / "
             "Vintage风险分析 / 组合分析）"
         )
 
@@ -551,6 +560,31 @@ def dispatch_agent_validation_job(
         task,
         requested_stage=forced_stage,
     )
+    if awaiting_contract is not None and auto_accept:
+        try:
+            auto_confirmed = confirm_unambiguous_contract(
+                db_path=repo_.db_path,
+                task_id=task.id,
+            )
+        except Exception:
+            auto_confirmed = False
+        if auto_confirmed:
+            repo_.add_agent_message(
+                task.id,
+                role="assistant",
+                stage="scan",
+                content="字段合同无歧义，已按唯一识别结果自动确认，继续验证。",
+                metadata={
+                    **model_metadata(model_profile),
+                    "auto_confirmed_input_contract": True,
+                },
+            )
+            task = repo_.get_task(task.id)
+            stage, awaiting_contract = _agent_validation_stage_decision(
+                repo_,
+                task,
+                requested_stage=forced_stage,
+            )
     if awaiting_contract is not None:
         add_agent_input_confirmation_prompt_impl(
             repo_,
@@ -632,7 +666,10 @@ def dispatch_agent_validation_job(
         }
     register_agent_cancellation(task.id, job_id)
     try:
-        should_create_opening_message = not (auto_accept and stage and stage != "scan")
+        should_create_opening_message = (
+            not (auto_accept and stage and stage != "scan")
+            and stage != "word_conclusion_draft"
+        )
         opening_message = (
             add_streaming_agent_message(
                 repo_,
@@ -689,6 +726,40 @@ def dispatch_agent_validation_job(
     }
 
 
+def run_confirmed_agent_report_job(
+    *,
+    job_id: str,
+    task_id: str,
+    settings,
+    pipeline_settings,
+    hook_dispatcher=None,
+) -> None:
+    """Isolate each report failure so later accepted batch jobs still run."""
+    try:
+        run_stage_job(
+            job_id,
+            settings.db_path,
+            run_report_stage,
+            {
+                "task_id": task_id,
+                "settings": pipeline_settings,
+                "cancellation_job_id": job_id,
+            },
+            success_agent_notice="word_report_ready",
+            hook_dispatcher=hook_dispatcher,
+            before_hook_event="report.before_generate",
+            after_hook_event="report.after_generate",
+        )
+    except Exception:
+        # The stage runner persists the failure and traceback on the job.
+        logging.getLogger(__name__).warning("confirmed report job failed: %s", job_id)
+    finally:
+        try:
+            sync_agent_batch_after_child_report(settings=settings, child_task_id=task_id)
+        except Exception:
+            logging.getLogger(__name__).exception("failed to sync report job: %s", job_id)
+
+
 def confirm_agent_report_conclusions(
     *,
     repo_: TaskRepository,
@@ -724,6 +795,7 @@ def confirm_agent_report_conclusions(
     if latest_task.status not in {
         TaskStatus.WRITING_ARTIFACTS,
         TaskStatus.REVIEW_REQUIRED,
+        TaskStatus.SUCCEEDED,
     }:
         exc = ValueError(
             f"cannot generate report in status {latest_task.status.value}"
@@ -765,19 +837,12 @@ def confirm_agent_report_conclusions(
         metadata=metadata,
     )
     background_tasks.add_task(
-        run_stage_job,
-        job_id,
-        settings.db_path,
-        run_report_stage,
-        {
-            "task_id": task_id,
-            "settings": agent_pipeline_settings(settings, latest_task),
-            "cancellation_job_id": job_id,
-        },
-        success_agent_notice="word_report_ready",
+        run_confirmed_agent_report_job,
+        job_id=job_id,
+        task_id=task_id,
+        settings=settings,
+        pipeline_settings=agent_pipeline_settings(settings, latest_task),
         hook_dispatcher=hook_dispatcher,
-        before_hook_event="report.before_generate",
-        after_hook_event="report.after_generate",
     )
     return {
         "task_id": task_id,
@@ -785,6 +850,119 @@ def confirm_agent_report_conclusions(
         "revision": revision,
         "message": "agent conclusions confirmed; word report stage dispatched",
         "messages": repo_.list_agent_messages(task_id),
+    }
+
+
+_SKIPPED_BATCH_ITEM_STATUSES = frozenset({"failed", "cancelled"})
+
+
+def _child_already_confirmed_report(messages: list[dict], child: TaskRecord) -> bool:
+    if child.status == TaskStatus.SUCCEEDED:
+        return True
+    return any(
+        message.get("stage") in {"word_conclusion_confirmed", "word_report_ready"}
+        for message in messages
+    )
+
+
+def confirm_all_batch_report_drafts(
+    *,
+    repo_: TaskRepository,
+    parent_task_id: str,
+    settings,
+    background_tasks: BackgroundTasks,
+    overrides: dict[str, dict] | None = None,
+    hook_dispatcher=None,
+) -> dict:
+    batch_repo = ValidationBatchRepository(repo_.db_path)
+    try:
+        batch = batch_repo.get_batch(parent_task_id)
+    except KeyError as exc:
+        raise not_found("validation batch not found") from exc
+    items = batch_repo.list_items(parent_task_id)
+    if len(items) < 2:
+        raise conflict("全部确认仅用于两个及以上模型的验证批次")
+    override_map = {
+        str(child_id): payload
+        for child_id, payload in (overrides or {}).items()
+        if isinstance(payload, dict)
+    }
+    pending_items: list[tuple[object, dict]] = []
+    not_ready_names: list[str] = []
+    for item in items:
+        if item.status in _SKIPPED_BATCH_ITEM_STATUSES:
+            continue
+        try:
+            child = repo_.get_task(item.child_task_id)
+        except KeyError:
+            not_ready_names.append(item.model_name or item.child_task_id)
+            continue
+        if child.status == TaskStatus.FAILED:
+            continue
+        messages = repo_.list_agent_messages(item.child_task_id)
+        pending = latest_pending_agent_report_draft(messages)
+        if pending:
+            if repo_.get_active_job_kind(item.child_task_id):
+                raise conflict("有模型正在执行任务，请等待完成后再全部确认")
+            pending_items.append((item, pending))
+            continue
+        if _child_already_confirmed_report(messages, child):
+            continue
+        not_ready_names.append(item.model_name or item.child_task_id)
+    if not_ready_names:
+        raise conflict(
+            "还有模型尚未完成报告结论草稿，无法全部确认："
+            + "、".join(not_ready_names)
+        )
+    if not pending_items:
+        raise conflict("没有待确认的报告草稿")
+    confirmations: list[dict] = []
+    pipeline_settings: dict[str, object] = {}
+    for item, pending in pending_items:
+        override = override_map.get(item.child_task_id) or {}
+        text_values = override.get("text_values")
+        if not isinstance(text_values, dict) or not text_values:
+            text_values = pending["values"]
+        expected_revision = override.get("revision")
+        if expected_revision is None:
+            expected_revision = pending["report_revision"]
+        confirmations.append({
+            "task_id": item.child_task_id,
+            "text_values": text_values,
+            "expected_revision": expected_revision,
+        })
+        pipeline_settings[item.child_task_id] = agent_pipeline_settings(
+            settings, repo_.get_task(item.child_task_id),
+        )
+    try:
+        accepted = repo_.confirm_agent_report_batch(confirmations)
+    except ConflictError as exc:
+        raise conflict(str(exc)) from exc
+    except ValueError as exc:
+        raise unprocessable(str(exc)) from exc
+    confirmed: list[dict] = []
+    for result in accepted:
+        child_id = result["task_id"]
+        background_tasks.add_task(
+            run_confirmed_agent_report_job,
+            job_id=result["job_id"],
+            task_id=child_id,
+            settings=settings,
+            pipeline_settings=pipeline_settings[child_id],
+            hook_dispatcher=hook_dispatcher,
+        )
+        confirmed.append({
+            "child_task_id": child_id,
+            "status": "accepted",
+            "revision": result["revision"],
+        })
+    return {
+        "parent_task_id": parent_task_id,
+        "status": "accepted",
+        "confirmed_count": len(confirmed),
+        "confirmed": confirmed,
+        "batch_status": batch.status,
+        "message": "all pending report drafts confirmed; word report stages dispatched",
     }
 
 
@@ -855,7 +1033,9 @@ def latest_pending_agent_report_draft(messages: list[dict]) -> dict:
                 "report_revision": report_revision,
                 "values": {
                     key: str(draft_values.get(key) or "").strip()
-                    for key in REQUIRED_AGENT_REPORT_KEYS
+                    for key in AGENT_REPORT_WRITABLE_KEYS
+                    if str(draft_values.get(key) or "").strip()
+                    or key in REQUIRED_AGENT_REPORT_KEYS
                 },
             }
     return {}
@@ -954,6 +1134,8 @@ def validation_stage_dependencies() -> ValidationStageDependencies:
         generate_word_conclusions=generate_word_conclusions,
         fallback_word_conclusions=fallback_word_conclusions,
         failure_summary=failure_summary,
+        sync_agent_batch_after_child_report=sync_agent_batch_after_child_report,
+        sync_agent_batch_child_progress=sync_agent_batch_child_progress,
     )
 
 
@@ -1017,6 +1199,7 @@ def run_agent_validation_job(
             add_exception_summary=add_agent_job_exception_summary,
             clear_agent_cancellation=clear_agent_cancellation,
             stop_ack_content=AGENT_STOP_ACK_CONTENT,
+            sync_batch_after_job=sync_agent_batch_after_child_report,
         ),
     )
 

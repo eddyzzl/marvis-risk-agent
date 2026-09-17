@@ -532,4 +532,3 @@ def _impact_cube_explicit_economics_components(
         ):
             result.add(component)
     return result
-

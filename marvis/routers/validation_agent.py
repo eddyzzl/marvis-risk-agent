@@ -67,6 +67,8 @@ from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_PORTFOLIO,
     TASK_TYPE_STRATEGY,
+    TASK_TYPE_VALIDATION,
+    TASK_TYPE_VALIDATION_BATCH,
     TASK_TYPE_VINTAGE,
     StrategyProfitInput,
     StrategyTaskInput,
@@ -74,6 +76,12 @@ from marvis.domain import (
 from marvis.orchestrator.contracts import PlanStatus, StepStatus
 from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.validation.suggested_confirmation import confirm_unambiguous_batch_contracts
+from marvis.validation_report_copy import (
+    METRIC_REWRITE_REFUSAL,
+    looks_like_accept_suggested_contracts,
+    looks_like_metric_rewrite_request,
+)
 
 
 router = APIRouter(prefix="/api", tags=["validation-agent"])
@@ -627,6 +635,77 @@ def post_agent_message(
     content = payload.content.strip()
     if not content:
         raise unprocessable("message content is required")
+    if looks_like_metric_rewrite_request(content) and task.task_type in {
+        TASK_TYPE_VALIDATION,
+        TASK_TYPE_VALIDATION_BATCH,
+    }:
+        user_message = repo.add_agent_message(
+            task_id,
+            role="user",
+            stage="chat",
+            content=content,
+            metadata={"intent": "reject_metric_rewrite"},
+        )
+        capture_user_preference_memory(request, task_id, user_message)
+        repo.add_agent_message(
+            task_id,
+            role="assistant",
+            stage="chat",
+            content=METRIC_REWRITE_REFUSAL,
+            metadata={"intent": "reject_metric_rewrite"},
+        )
+        return {
+            "task_id": task_id,
+            "status": "message_saved",
+            "messages": repo.list_agent_messages(task_id),
+        }
+    if looks_like_accept_suggested_contracts(content) and task.task_type == TASK_TYPE_VALIDATION_BATCH:
+        user_message = repo.add_agent_message(
+            task_id,
+            role="user",
+            stage="chat",
+            content=content,
+            metadata={"intent": "accept_suggested_contracts"},
+        )
+        capture_user_preference_memory(request, task_id, user_message)
+        outcome = confirm_unambiguous_batch_contracts(
+            db_path=request.app.state.settings.db_path,
+            parent_task_id=task_id,
+        )
+        parts = []
+        if outcome["confirmed"]:
+            parts.append("已按识别结果确认：" + "、".join(outcome["confirmed"]) + "。")
+        if outcome["skipped"]:
+            parts.append(
+                "这些模型有歧义，请指出要改的模型名和字段："
+                + "、".join(outcome["skipped"])
+                + "。"
+            )
+        if outcome["failed"]:
+            parts.append("确认失败：" + "；".join(outcome["failed"]) + "。")
+        if not parts:
+            parts.append("当前没有等待确认的输入合同。")
+        elif outcome["skipped"] or outcome["failed"]:
+            parts.append("无冲突的模型不必再逐项点选；表单仍可展开核对。")
+        else:
+            parts.append("无冲突合同已确认。回复「继续」即可启动批次。")
+        repo.add_agent_message(
+            task_id,
+            role="assistant",
+            stage="input_confirmation",
+            content="\n".join(parts),
+            metadata={
+                "intent": "accept_suggested_contracts",
+                "confirmed": outcome["confirmed"],
+                "skipped": outcome["skipped"],
+                "failed": outcome["failed"],
+            },
+        )
+        return {
+            "task_id": task_id,
+            "status": "message_saved",
+            "messages": repo.list_agent_messages(task_id),
+        }
     _validate_confirmation_snapshot(payload)
     _validate_ui_action_contract(payload)
     if payload.strategy_request is not None:

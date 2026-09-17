@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 APP_JS = Path(__file__).resolve().parents[1] / "marvis" / "static" / "app.js"
 
@@ -25,17 +27,20 @@ def _function(source: str, signature: str) -> str:
 def _run(script: str) -> dict:
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
 
-def test_agent_message_polling_backs_off_and_resets_after_progress():
+@pytest.mark.parametrize("parent_id,child_id", [("task-A", ""), ("parent-A", "task-A")])
+def test_agent_message_polling_backs_off_and_resets_after_progress(parent_id, child_id):
     source = APP_JS.read_text(encoding="utf-8")
     functions = "\n".join(
         [
+            _function(source, "function isWorkbenchTaskId"),
             _function(source, "function agentMessagePollSignature"),
             _function(source, "function agentStreamPollDelay"),
             _function(source, "async function pollAgentMessagesUntilSettled"),
@@ -48,7 +53,8 @@ def test_agent_message_polling_backs_off_and_resets_after_progress():
             "const AGENT_STREAM_POLL_LONG_INTERVAL_MS = 3000;",
             "const AGENT_STREAM_POLL_IDLE_AFTER_MS = 2000;",
             "const AGENT_STREAM_POLL_LONG_AFTER_MS = 15000;",
-            "let selectedTaskId = 'task-A';",
+            f"let selectedTaskId = {json.dumps(parent_id)};",
+            f"let projectedValidationChildTaskId = {json.dumps(child_id)};",
             "let agentMessages = [{ id: 'thinking', role: 'assistant', content: '', metadata: { streaming: true } }];",
             "const delays = [];",
             "let loads = 0;",
@@ -82,10 +88,12 @@ def test_agent_message_polling_backs_off_and_resets_after_progress():
     )
 
 
-def test_agent_message_polling_stops_immediately_when_request_settles_during_wait():
+@pytest.mark.parametrize("parent_id,child_id", [("task-A", ""), ("parent-A", "task-A")])
+def test_agent_message_polling_stops_immediately_when_request_settles_during_wait(parent_id, child_id):
     source = APP_JS.read_text(encoding="utf-8")
     functions = "\n".join(
         [
+            _function(source, "function isWorkbenchTaskId"),
             _function(source, "function agentMessagePollSignature"),
             _function(source, "function agentStreamPollDelay"),
             _function(source, "async function pollAgentMessagesUntilSettled"),
@@ -98,7 +106,8 @@ def test_agent_message_polling_stops_immediately_when_request_settles_during_wai
             "const AGENT_STREAM_POLL_LONG_INTERVAL_MS = 3000;",
             "const AGENT_STREAM_POLL_IDLE_AFTER_MS = 2000;",
             "const AGENT_STREAM_POLL_LONG_AFTER_MS = 15000;",
-            "let selectedTaskId = 'task-A';",
+            f"let selectedTaskId = {json.dumps(parent_id)};",
+            f"let projectedValidationChildTaskId = {json.dumps(child_id)};",
             "let agentMessages = [];",
             "let loads = 0;",
             "let resolvePending;",
@@ -129,3 +138,34 @@ def test_agent_poll_backoff_constants_keep_fast_first_paint_and_cap_long_jobs():
     assert "Promise.race([" in _function(
         source, "async function pollAgentMessagesUntilSettled"
     )
+
+
+@pytest.mark.parametrize("reject", [False, True])
+def test_batch_auto_run_releases_lock_after_settlement(reject):
+    source = APP_JS.read_text(encoding="utf-8")
+    function = _function(source, "async function continueAgentValidationBatch")
+    payload = _run(f"""
+let selectedTask = {{}};
+let agentBatchAutoRunPromise = null;
+let calls = 0;
+let settle;
+const usesAgentValidationWorkbench = () => true;
+function runContinueAgentValidationBatch() {{
+  calls += 1;
+  return new Promise((resolve, reject) => {{
+    settle = () => {'reject(new Error("failure"))' if reject else 'resolve()'};
+  }});
+}}
+{function}
+const first = continueAgentValidationBatch();
+const duplicate = continueAgentValidationBatch();
+const concurrentCalls = calls;
+settle();
+await Promise.allSettled([first, duplicate]);
+const cleared = agentBatchAutoRunPromise === null;
+const second = continueAgentValidationBatch();
+settle();
+await Promise.allSettled([second]);
+process.stdout.write(JSON.stringify({{concurrentCalls, cleared, calls}}));
+""")
+    assert payload == {"concurrentCalls": 1, "cleared": True, "calls": 2}

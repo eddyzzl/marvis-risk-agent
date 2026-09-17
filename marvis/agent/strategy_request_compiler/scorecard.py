@@ -466,4 +466,3 @@ def _ground_candidate_monthly_stability_request(
             fields=("strategy_type", "entry_id"),
         )
     return result
-

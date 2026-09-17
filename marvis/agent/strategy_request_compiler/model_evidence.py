@@ -267,4 +267,3 @@ def _model_evidence_v2_has_positive_chain(utterance: str) -> bool:
         utterance,
         operation_re=_MODEL_EVIDENCE_CHAIN_RE,
     )
-

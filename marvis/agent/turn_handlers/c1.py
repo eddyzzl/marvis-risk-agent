@@ -540,4 +540,3 @@ def _natural_language_c1_declared_target(text: str) -> str | None:
 def _c1_dataset_names(c1_state: dict, dataset_ids: list[str]) -> list[str]:
     by_id = {f.get("dataset_id"): f.get("name") for f in c1_state.get("files") or []}
     return [by_id.get(dataset_id) or dataset_id for dataset_id in dataset_ids]
-

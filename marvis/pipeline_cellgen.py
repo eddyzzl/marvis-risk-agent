@@ -496,6 +496,7 @@ def _build_metrics_cell_sources(
         "from marvis.validation.config import ValidationConfig as _RmcValidationConfig",
         "from marvis.validation.effectiveness import build_effectiveness_result as _rmc_build_effectiveness_result",
         "from marvis.validation.effectiveness import compute_bin_tables as _rmc_compute_bin_tables",
+        "from marvis.validation.effectiveness import compute_independent_quantile_bin_tables as _rmc_compute_independent_quantile_bin_tables",
         "from marvis.validation.effectiveness import compute_monthly_ks as _rmc_compute_monthly_ks",
         "from marvis.validation.effectiveness import compute_monthly_psi as _rmc_compute_monthly_psi",
         "from marvis.validation.effectiveness import compute_overall_ks as _rmc_compute_overall_ks",
@@ -667,6 +668,10 @@ def _build_metrics_cell_sources(
         "    config=_rmc_config,",
         "    context=_rmc_effectiveness_context,",
         ")",
+        "_rmc_independent_quantile_bin_tables = _rmc_compute_independent_quantile_bin_tables(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        ")",
         "_rmc_effectiveness = _rmc_build_effectiveness_result(",
         "    overall=_rmc_effectiveness_overall,",
         "    bin_tables=_rmc_bin_tables,",
@@ -674,6 +679,7 @@ def _build_metrics_cell_sources(
         "    monthly_psi=_rmc_monthly_psi,",
         "    psi_stability_table=_rmc_psi_stability_table,",
         "    roc_ks_curves=_rmc_roc_ks_curves,",
+        "    independent_quantile_bin_tables=_rmc_independent_quantile_bin_tables,",
         ")",
     ]
     stress_lines = [

@@ -97,4 +97,3 @@ def _raise_corrupt_report_optional(
     if cause is None:
         raise error
     raise error from cause
-

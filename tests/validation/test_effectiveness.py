@@ -14,6 +14,7 @@ from marvis.validation.effectiveness import (
     compute_auc,
     compute_bin_tables,
     compute_head_tail_lift,
+    compute_independent_quantile_bin_tables,
     compute_monthly_ks,
     compute_monthly_psi,
     compute_overall_ks,
@@ -253,6 +254,43 @@ def test_bin_table_reuses_train_edges_for_each_split():
     assert len(edges_train) == 5
 
 
+def test_independent_quantile_bin_tables_are_per_split_equal_count():
+    """Train-aligned bins stay; each split also gets its own 10-quantile equal-count bins."""
+    rows = []
+    for split, scores in {
+        "train": [index / 99 for index in range(100)],
+        "test": [index / 199 for index in range(100)],
+        "oot": [0.5 + index / 199 for index in range(100)],
+    }.items():
+        for score in scores:
+            rows.append({
+                "x1": 0.0,
+                "sample_score": score,
+                "y": int(score >= 0.7),
+                "split": split,
+                "apply_month": "202503",
+            })
+    sample = pd.DataFrame(rows)
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+
+    aligned_train = [row.score_upper for row in result.bin_tables["train"]]
+    aligned_oot = [row.score_upper for row in result.bin_tables["oot"]]
+    assert aligned_train == aligned_oot
+    assert len(aligned_train) == 5
+
+    independent = result.independent_quantile_bin_tables
+    assert set(independent) == {"train", "test", "oot"}
+    for split, split_rows in independent.items():
+        assert len(split_rows) == 10
+        counts = [row.sample_count for row in split_rows]
+        assert sum(counts) == 100
+        assert max(counts) - min(counts) <= 1
+    independent_train = [row.score_upper for row in independent["train"]]
+    independent_oot = [row.score_upper for row in independent["oot"]]
+    assert independent_train != independent_oot
+    assert independent_oot != aligned_oot
+
+
 def test_psi_stability_uses_train_test_bins_against_oot_distribution():
     rows = []
     for split, scores in {
@@ -384,6 +422,10 @@ def test_effectiveness_can_be_built_from_separate_ks_psi_and_binning_steps():
     bin_tables = compute_bin_tables(sample=sample, config=config, context=context)
     psi_stability_table = compute_psi_stability_table(sample=sample, config=config)
     roc_ks_curves = compute_roc_ks_curves(sample=sample, config=config)
+    independent_quantile_bin_tables = compute_independent_quantile_bin_tables(
+        sample=sample,
+        config=config,
+    )
     separate = build_effectiveness_result(
         overall=overall,
         monthly_ks=monthly_ks,
@@ -391,6 +433,7 @@ def test_effectiveness_can_be_built_from_separate_ks_psi_and_binning_steps():
         bin_tables=bin_tables,
         psi_stability_table=psi_stability_table,
         roc_ks_curves=roc_ks_curves,
+        independent_quantile_bin_tables=independent_quantile_bin_tables,
     )
 
     combined = run_effectiveness(sample=sample, config=config)

@@ -6,7 +6,11 @@ import traceback
 from typing import Any
 
 from marvis.agent.orchestrator import AgentValidationCancelled
+from marvis.domain import TASK_TYPE_VALIDATION, TaskStatus
 from marvis.repositories.tasks import TaskRepository
+
+_LOW_RISK_CHAIN_STAGES = frozenset({"scan", "reproducibility", "metrics"})
+_LOW_RISK_FOLLOW_ON_STAGES = frozenset({"reproducibility", "metrics", "word_conclusion_draft"})
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ class ValidationJobCallbacks:
     add_exception_summary: Callable[..., None]
     clear_agent_cancellation: Callable[..., None]
     stop_ack_content: str
+    sync_batch_after_job: Callable[..., Any] | None = None
 
 
 def run_agent_validation_job(
@@ -70,6 +75,10 @@ def run_agent_validation_job(
                 repo.finish_job(job_id, status="succeeded")
                 return
             callbacks.raise_if_agent_cancelled(task_id)
+            stage_auto_accept = auto_accept or (
+                current_stage in _LOW_RISK_CHAIN_STAGES
+                and _should_chain_low_risk_stages(repo.get_task(task_id))
+            )
             callbacks.open_agent_stage(
                 repo,
                 task=task,
@@ -77,20 +86,20 @@ def run_agent_validation_job(
                 stage=current_stage,
                 model_profile=model_profile,
                 opening_message_id=current_opening_message_id,
-                auto_accept=auto_accept,
+                auto_accept=stage_auto_accept,
             )
             callbacks.raise_if_agent_cancelled(task_id)
             if current_stage == "scan":
                 stage_succeeded = callbacks.run_scan_stage(
-                    repo, settings, task_id, model_profile, auto_accept=auto_accept
+                    repo, settings, task_id, model_profile, auto_accept=stage_auto_accept
                 )
             elif current_stage == "reproducibility":
                 stage_succeeded = callbacks.run_reproducibility_stage(
-                    repo, settings, task_id, model_profile, auto_accept=auto_accept
+                    repo, settings, task_id, model_profile, auto_accept=stage_auto_accept
                 )
             elif current_stage == "metrics":
                 stage_succeeded = callbacks.run_metrics_stage(
-                    repo, settings, task_id, model_profile, auto_accept=auto_accept
+                    repo, settings, task_id, model_profile, auto_accept=stage_auto_accept
                 )
             elif current_stage == "word_conclusion_draft":
                 stage_succeeded = callbacks.run_word_conclusion_stage(
@@ -99,7 +108,7 @@ def run_agent_validation_job(
                     task_id,
                     model_profile,
                     draft_message_id=current_stage_message_id,
-                    auto_accept=auto_accept,
+                    auto_accept=False,
                     rewrite_instruction=current_stage_instruction,
                 )
             else:
@@ -107,10 +116,21 @@ def run_agent_validation_job(
             if not stage_succeeded:
                 repo.finish_job(job_id, status="failed")
                 return
-            if not auto_accept:
+            # Auto-review advances metrics and drafts, never the final report
+            # approval. Stop here even while the task is WRITING_ARTIFACTS.
+            if current_stage == "word_conclusion_draft":
                 repo.finish_job(job_id, status="succeeded")
                 return
-            current_stage = callbacks.agent_next_stage(repo, repo.get_task(task_id))
+            next_stage = callbacks.agent_next_stage(repo, repo.get_task(task_id))
+            should_chain = auto_accept or (
+                current_stage in _LOW_RISK_CHAIN_STAGES
+                and next_stage in _LOW_RISK_FOLLOW_ON_STAGES
+                and _should_chain_low_risk_stages(repo.get_task(task_id))
+            )
+            if not should_chain:
+                repo.finish_job(job_id, status="succeeded")
+                return
+            current_stage = next_stage
             current_opening_message_id = None
             current_stage_message_id = None
             current_stage_instruction = None
@@ -155,6 +175,18 @@ def run_agent_validation_job(
         raise
     finally:
         callbacks.clear_agent_cancellation(task_id, job_id=job_id)
+        if (
+            callbacks.sync_batch_after_job is not None
+            and repo.get_task(task_id).status == TaskStatus.FAILED
+        ):
+            callbacks.sync_batch_after_job(settings=settings, child_task_id=task_id)
+
+
+def _should_chain_low_risk_stages(task) -> bool:
+    return (
+        getattr(task, "task_type", "") == TASK_TYPE_VALIDATION
+        and int(getattr(task, "validation_workflow_version", 0) or 0) == 2
+    )
 
 
 __all__ = ["ValidationJobCallbacks", "run_agent_validation_job"]

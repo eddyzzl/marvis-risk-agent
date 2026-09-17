@@ -232,6 +232,27 @@ class ValidationBatchRepository:
             batch = _get_batch_on_connection(conn, parent_task_id)
         return batch
 
+    def item_counts_for_parents(
+        self,
+        parent_task_ids: Sequence[str],
+    ) -> dict[str, int]:
+        ids = [
+            str(task_id).strip()
+            for task_id in parent_task_ids
+            if str(task_id).strip()
+        ]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        # Only generated '?' placeholders are interpolated; IDs stay bound.
+        query = f"SELECT parent_task_id, item_count FROM validation_batches WHERE parent_task_id IN ({placeholders})"  # nosec B608
+        with connect(self.db_path) as conn:
+            rows = conn.execute(query, ids).fetchall()
+        return {
+            str(row["parent_task_id"]): int(row["item_count"])
+            for row in rows
+        }
+
     def list_items(self, parent_task_id: str) -> list[ValidationBatchItemRecord]:
         with connect(self.db_path) as conn:
             rows = conn.execute(

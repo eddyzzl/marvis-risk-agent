@@ -142,6 +142,7 @@ export function agentMessagesHtml(messages = [], labelStage, deps = {}) {
   // the id is resolved once by the caller and threaded through here rather
   // than recomputed per bucket.
   const latestGateMessageId = deps.latestGateMessageId || "";
+  const latestPendingReportDraftMessageId = deps.latestPendingReportDraftMessageId || "";
   let previousAssistantLabel = "";
   return messages.map((message) => {
     const resolvedLabelStage = labelStage === undefined ? message?.stage : labelStage;
@@ -149,7 +150,13 @@ export function agentMessagesHtml(messages = [], labelStage, deps = {}) {
     const hideMeta = Boolean(label && label === previousAssistantLabel);
     previousAssistantLabel = label || "";
     const isLatestGate = Boolean(latestGateMessageId) && String(message?.id || "") === latestGateMessageId;
-    return messageHtml(message, resolvedLabelStage, { hideMeta, isLatestGate });
+    const isLatestPendingReportDraft = Boolean(latestPendingReportDraftMessageId)
+      && String(message?.id || "") === latestPendingReportDraftMessageId;
+    return messageHtml(message, resolvedLabelStage, {
+      hideMeta,
+      isLatestGate,
+      isLatestPendingReportDraft,
+    });
   }).join("");
 }
 

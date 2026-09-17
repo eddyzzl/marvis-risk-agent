@@ -25,4 +25,3 @@ DRIVER_TURN_FUNCS = {
     TASK_TYPE_VINTAGE: run_vintage_driver_turn,
     TASK_TYPE_PORTFOLIO: run_portfolio_driver_turn,
 }
-

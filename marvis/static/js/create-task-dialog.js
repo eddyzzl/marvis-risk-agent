@@ -1,12 +1,101 @@
 import { api, localToken } from "./api.js";
 import { defaultTaskType, taskTypeDefinitions } from "./task-types.js";
 import { formatDateInput } from "./ui-utils.js";
+import { materialUploadSelectionText } from "./dialogs.js";
+import {
+  MAX_VALIDATION_BATCH_ROWS,
+  buildValidationBatchUploadFormData,
+  classifyValidationBatchFiles,
+  submitValidationBatchDraft,
+} from "./validation-batch-create.js";
+import { formatValidationBatchTaskName } from "./validation-batch.js";
 
 // UX-12: below this total upload size, plain "正在上传材料..." is enough — a
 // percentage readout for a few small files would jump straight to 100% and
 // add noise, not signal. Large credit-sample/feature-table files (the actual
 // case this is for) clear this easily.
 const MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES = 10 * 1024 * 1024;
+
+// Keep these editable form seeds aligned with validation_report_copy.py.
+export function validationNarrativeDefaults(modelName) {
+  const name = String(modelName || "").trim() || "本模型";
+  const displayName = name.endsWith("模型") ? name.slice(0, -2) : name;
+  const hasT = /t卡/i.test(name);
+  const hasA = /a卡/i.test(name);
+  const kind = hasT !== hasA ? (hasT ? "T" : "A") : "";
+  const boundary = /[AT]卡|MOB\s*\d+/i.exec(name);
+  let channel = boundary ? name.slice(0, boundary.index).replace(/^[ _\-/：:]+|[ _\-/：:]+$/g, "") : "";
+  if (["自营", "自营通用"].includes(channel)) channel = "自营通用";
+  else channel = channel.replace(/^自营/, "").replace(/^[ _\-/：:]+|[ _\-/：:]+$/g, "");
+  const cohort = channel ? `${channel}${kind ? `${kind}卡` : ""}` : "xx";
+  const stage = kind === "T" ? "支用" : "授信";
+  const audience = kind && cohort !== "xx" ? `${cohort}用户` : "xx用户";
+  const window = /MOB\s*([36])/i.exec(name);
+  return {
+    "TEXT:model_overview": `为了更好的对${audience}进行${stage}环节风险管控，现开发${displayName}模型，对${kind ? cohort : "xx"}客群做前置风险拦截，从${stage}申请阶段做好风险防范。`,
+    "TEXT:model_scope": `本模型适用于${cohort}渠道用户。`,
+    "TEXT:bad_sample_definition": window ? `MOB${window[1]} 逾期 >= 30 天` : "xx逾期 >= xx天",
+    "TEXT:good_sample_definition": window ? `MOB${window[1]} 未逾期` : "xx未逾期",
+    "TEXT:sample_audience": `申请${stage}的用户`,
+  };
+}
+
+export function updateAutoReportValue(input, nextValue) {
+  if (!input) return;
+  if (!input.value.trim() || input.value === input.dataset.createReportSeed) {
+    input.value = nextValue;
+  }
+  input.dataset.createReportSeed = nextValue;
+}
+
+export function validationExtraModelCardMarkup(rowId, ordinal) {
+  const pathTabId = `${rowId}-path-tab`;
+  const uploadTabId = `${rowId}-upload-tab`;
+  const pathPanelId = `${rowId}-path-panel`;
+  const uploadPanelId = `${rowId}-upload-panel`;
+  const uploadStatusId = `${rowId}-upload-status`;
+  return [
+    `<article class="task-form-section validation-create-model-card" data-validation-extra-row-id="${rowId}">`,
+    `<header class="validation-create-model-head">`,
+    `<h3>模型 ${ordinal}</h3>`,
+    `<button type="button" class="button compact secondary" data-remove-validation-extra-row="${rowId}">移除</button>`,
+    `</header>`,
+    `<label><span>模型名称</span>`,
+    `<input data-extra-model-field="name" placeholder="例如：贷前评分卡 MOB3 v202604" autocomplete="off" /></label>`,
+    `<label class="wide-field"><span>模型概述</span>`,
+    `<textarea data-extra-model-field="overview"></textarea></label>`,
+    `<label class="wide-field"><span>适用范围</span>`,
+    `<input data-extra-model-field="scope" autocomplete="off" /></label>`,
+    `<label><span>坏样本定义</span>`,
+    `<input data-extra-model-field="bad-sample" autocomplete="off" /></label>`,
+    `<label><span>好样本定义</span>`,
+    `<input data-extra-model-field="good-sample" autocomplete="off" /></label>`,
+    `<div class="material-source-section">`,
+    `<div class="material-source-segment" role="tablist" aria-label="材料来源">`,
+    `<button class="material-source-tab selected" type="button" role="tab" aria-selected="true"`,
+    ` data-extra-material-tab="path" id="${pathTabId}" aria-controls="${pathPanelId}">文件路径</button>`,
+    `<button class="material-source-tab" type="button" role="tab" aria-selected="false"`,
+    ` data-extra-material-tab="upload" id="${uploadTabId}" aria-controls="${uploadPanelId}">文件上传</button>`,
+    `</div>`,
+    `<div class="material-source-panel" role="tabpanel" data-extra-material-panel="path"`,
+    ` id="${pathPanelId}" aria-labelledby="${pathTabId}">`,
+    `<label class="wide-field"><span>材料目录</span>`,
+    `<input data-extra-model-field="source-dir" placeholder="/path/to/project" autocomplete="off" /></label>`,
+    `</div>`,
+    `<div class="material-source-panel material-upload-panel" hidden role="tabpanel"`,
+    ` data-extra-material-panel="upload" id="${uploadPanelId}" aria-labelledby="${uploadTabId}">`,
+    `<input class="visually-hidden" type="file" multiple data-extra-upload-input />`,
+    `<div class="material-upload-dropzone" role="button" tabindex="0" aria-describedby="${uploadStatusId}">`,
+    `<svg class="material-upload-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">`,
+    `<path d="M12 15V4"></path><path d="M7.5 8.5 12 4l4.5 4.5"></path>`,
+    `<path d="M5 15.5v2.2A2.3 2.3 0 0 0 7.3 20h9.4a2.3 2.3 0 0 0 2.3-2.3v-2.2"></path>`,
+    `</svg>`,
+    `<strong>点击或拖拽上传</strong>`,
+    `<span id="${uploadStatusId}" data-extra-upload-status>请选择文件或文件夹。</span>`,
+    `</div></div></div>`,
+    `</article>`,
+  ].join("");
+}
 
 export function modelRecipeFamily(recipe) {
   const normalized = String(recipe || "").trim().toLowerCase();
@@ -48,6 +137,8 @@ export function createCreateTaskDialogController({
   onUnavailableTaskType,
 } = {}) {
   let activeTaskType = defaultTaskType;
+  let extraValidationModelRows = [];
+  let extraValidationRowSequence = 0;
 
   function taskTypeDefinition(taskType = activeTaskType) {
     return taskTypeDefinitions[taskType] || taskTypeDefinitions[defaultTaskType];
@@ -90,6 +181,10 @@ export function createCreateTaskDialogController({
     $("validator").placeholder = definition.validatorPlaceholder;
     $("sourceDirLabel").textContent = definition.sourceLabel;
     $("sourceDir").placeholder = definition.sourcePlaceholder;
+    const primaryHeading = $("createTaskPrimaryModelHeading");
+    if (primaryHeading) {
+      primaryHeading.textContent = activeTaskType === "validation" ? "模型 1" : "任务信息";
+    }
     $("createTaskReportFields").hidden = !definition.reportFields;
     $("createTaskReportFields").classList.toggle("hidden", !definition.reportFields);
     toggleConditionalField("createTaskStrategyField", Boolean(definition.strategyField));
@@ -103,6 +198,7 @@ export function createCreateTaskDialogController({
       checked: false,
     });
     setRunModeDescription("agent", definition.agentModeDescription);
+    toggleConditionalField("validationCreateExtraModelsSection", activeTaskType === "validation");
     updateAlgorithmFieldVisibility();
   }
 
@@ -291,6 +387,7 @@ export function createCreateTaskDialogController({
     });
     setCreateStatus("");
     materialSourceController.reset();
+    resetValidationExtraModels();
     prefillCreateTaskReportFields();
     $("taskDialog").showModal();
     $("modelName").focus();
@@ -354,7 +451,7 @@ export function createCreateTaskDialogController({
     return {
       modelName,
       validator,
-      reportTitle: `${modelName}模型验证文档`,
+      reportTitle: `${modelName.endsWith("模型") ? modelName : `${modelName}模型`}验证文档`,
     };
   }
 
@@ -369,10 +466,7 @@ export function createCreateTaskDialogController({
       "TEXT:revision_date": today,
       "TEXT:revision_author": seed.validator,
       "TEXT:revision_description": "初稿",
-      "TEXT:model_overview": `为了更好的对xx用户进行授信环节风险管控，现开发${seed.modelName}模型，对xx客群做前置风险拦截，从授信申请阶段做好风险防范。`,
-      "TEXT:model_scope": "本模型适用于xx渠道用户。",
-      "TEXT:bad_sample_definition": "xx逾期 >= xx天",
-      "TEXT:good_sample_definition": "xx未逾期",
+      ...validationNarrativeDefaults(seed.modelName),
     };
   }
 
@@ -380,7 +474,7 @@ export function createCreateTaskDialogController({
     const defaults = defaultCreateReportValues();
     for (const input of document.querySelectorAll("[data-create-report-key]")) {
       const key = input.dataset.createReportKey;
-      if (!input.value.trim() && defaults[key]) input.value = defaults[key];
+      if (defaults[key] !== undefined) updateAutoReportValue(input, defaults[key]);
     }
   }
 
@@ -522,6 +616,28 @@ export function createCreateTaskDialogController({
       const tier = $("createTaskTier")?.value;
       if (tier) payload.capability_tier = tier;
     }
+    if (taskType === "validation") {
+      const extraRows = collectValidationExtraModels();
+      if (extraRows.length > 0) {
+        if (!payload.model_name || !payload.validator) {
+          setCreateStatus("请先填写模型名称和验证人员。", "error");
+          return null;
+        }
+        const primaryRow = collectPrimaryValidationModel(payload);
+        if (!primaryRow || extraRows.some((row) => !validationModelMaterialsReady(row))) {
+          setCreateStatus(
+            "添加多个模型时，请为每个模型填写材料目录，或上传 Notebook、样本、PMML 和数据字典。",
+            "error",
+          );
+          return null;
+        }
+        return await createMultiModelValidationTask(
+          payload,
+          [primaryRow, ...extraRows],
+          selectedRunMode,
+        );
+      }
+    }
     if (materialSourceController.mode() === "upload") {
       const files = materialSourceController.selectedFiles();
       if (files.length === 0 && !allowDeferredMaterials) {
@@ -567,9 +683,232 @@ export function createCreateTaskDialogController({
     });
   }
 
+  function resetValidationExtraModels() {
+    extraValidationModelRows = [];
+    extraValidationRowSequence = 0;
+    const container = $("validationCreateExtraModels");
+    if (container) container.innerHTML = "";
+    const addButton = $("addValidationModelRowButton");
+    if (addButton) addButton.disabled = false;
+  }
+
+  function extraNarrativeDefaults(modelName) {
+    const defaults = validationNarrativeDefaults(modelName);
+    return {
+      overview: defaults["TEXT:model_overview"],
+      scope: defaults["TEXT:model_scope"],
+      "bad-sample": defaults["TEXT:bad_sample_definition"],
+      "good-sample": defaults["TEXT:good_sample_definition"],
+    };
+  }
+
+  function classifiedFilesFromSelection(files) {
+    const raw = (files || []).map((item) => item?.file || item).filter(Boolean);
+    return classifyValidationBatchFiles(raw);
+  }
+
+  function validationModelMaterialsReady(row) {
+    if (String(row?.sourceDir || "").trim()) return true;
+    return Boolean(row?.files?.notebook && row?.files?.sample && row?.files?.pmml && row?.files?.dictionary);
+  }
+
+  function bindExtraModelMaterialSource(root) {
+    const state = { mode: "path", files: [] };
+    const pathTab = root.querySelector('[data-extra-material-tab="path"]');
+    const uploadTab = root.querySelector('[data-extra-material-tab="upload"]');
+    const pathPanel = root.querySelector('[data-extra-material-panel="path"]');
+    const uploadPanel = root.querySelector('[data-extra-material-panel="upload"]');
+    const input = root.querySelector("[data-extra-upload-input]");
+    const dropzone = root.querySelector(".material-upload-dropzone");
+    const status = root.querySelector("[data-extra-upload-status]");
+
+    function setMode(nextMode) {
+      state.mode = nextMode === "upload" ? "upload" : "path";
+      const isPath = state.mode === "path";
+      pathTab?.classList.toggle("selected", isPath);
+      uploadTab?.classList.toggle("selected", !isPath);
+      pathTab?.setAttribute("aria-selected", isPath ? "true" : "false");
+      uploadTab?.setAttribute("aria-selected", isPath ? "false" : "true");
+      if (pathPanel) {
+        pathPanel.hidden = !isPath;
+        pathPanel.classList.toggle("hidden", !isPath);
+      }
+      if (uploadPanel) {
+        uploadPanel.hidden = isPath;
+        uploadPanel.classList.toggle("hidden", isPath);
+      }
+    }
+
+    function renderStatus() {
+      if (!status) return;
+      status.textContent = materialUploadSelectionText(state.files);
+    }
+
+    pathTab?.addEventListener("click", () => setMode("path"));
+    uploadTab?.addEventListener("click", () => setMode("upload"));
+    dropzone?.addEventListener("click", () => input?.click());
+    dropzone?.addEventListener("keydown", (event) => {
+      if (!["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      input?.click();
+    });
+    if (input) {
+      input.onchange = () => {
+        state.files = Array.from(input.files || []);
+        renderStatus();
+      };
+    }
+    if (dropzone) {
+      ["dragenter", "dragover"].forEach((eventName) => {
+        dropzone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          dropzone.classList.add("is-dragover");
+        });
+      });
+      ["dragleave", "drop"].forEach((eventName) => {
+        dropzone.addEventListener(eventName, () => {
+          dropzone.classList.remove("is-dragover");
+        });
+      });
+      dropzone.ondrop = (event) => {
+        event.preventDefault();
+        state.files = Array.from(event.dataTransfer?.files || []);
+        renderStatus();
+      };
+    }
+    return {
+      mode: () => state.mode,
+      selectedFiles: () => [...state.files],
+      sourceDir: () => root.querySelector('[data-extra-model-field="source-dir"]')?.value.trim() || "",
+    };
+  }
+
+  function extraFieldValue(root, field) {
+    return root?.querySelector(`[data-extra-model-field="${field}"]`)?.value || "";
+  }
+
+  function renumberValidationExtraModels() {
+    extraValidationModelRows.forEach((row, index) => {
+      const heading = document.querySelector(
+        `[data-validation-extra-row-id="${row.id}"] .validation-create-model-head h3`,
+      );
+      if (heading) heading.textContent = `模型 ${index + 2}`;
+    });
+  }
+
+  function addValidationModelRow() {
+    if (extraValidationModelRows.length + 1 >= MAX_VALIDATION_BATCH_ROWS) {
+      setCreateStatus("一次最多验证 10 个模型。", "error");
+      return;
+    }
+    extraValidationRowSequence += 1;
+    const rowId = `validation-extra-${extraValidationRowSequence}`;
+    const container = $("validationCreateExtraModels");
+    if (!container) return;
+    const ordinal = extraValidationModelRows.length + 2;
+    container.insertAdjacentHTML("beforeend", validationExtraModelCardMarkup(rowId, ordinal));
+    const article = container.querySelector(`[data-validation-extra-row-id="${rowId}"]`);
+    if (!article) return;
+    const nameInput = article.querySelector('[data-extra-model-field="name"]');
+    const updateNarrativeDefaults = () => {
+      for (const [field, value] of Object.entries(extraNarrativeDefaults(nameInput?.value))) {
+        updateAutoReportValue(article.querySelector(`[data-extra-model-field="${field}"]`), value);
+      }
+    };
+    updateNarrativeDefaults();
+    nameInput?.addEventListener("input", updateNarrativeDefaults);
+    const material = bindExtraModelMaterialSource(article);
+    extraValidationModelRows.push({ id: rowId, material });
+    article.querySelector("[data-remove-validation-extra-row]")?.addEventListener("click", () => {
+      extraValidationModelRows = extraValidationModelRows.filter((row) => row.id !== rowId);
+      article.remove();
+      renumberValidationExtraModels();
+    });
+  }
+
+  function collectPrimaryValidationModel(payload) {
+    const uploadMode = materialSourceController.mode() === "upload";
+    return {
+      id: "validation-primary",
+      modelName: payload.model_name,
+      modelVersion: payload.model_version || "v1",
+      sourceDir: uploadMode ? "" : payload.source_dir,
+      files: uploadMode
+        ? classifiedFilesFromSelection(materialSourceController.selectedFiles()) || {}
+        : {},
+    };
+  }
+
+  function collectValidationExtraModels() {
+    return extraValidationModelRows.map((row) => {
+      const element = document.querySelector(`[data-validation-extra-row-id="${row.id}"]`);
+      const uploadMode = row.material?.mode() === "upload";
+      return {
+        id: row.id,
+        modelName: extraFieldValue(element, "name"),
+        modelVersion: "v1",
+        sourceDir: uploadMode ? "" : (row.material?.sourceDir() || extraFieldValue(element, "source-dir")),
+        files: uploadMode
+          ? classifiedFilesFromSelection(row.material?.selectedFiles()) || {}
+          : {},
+      };
+    });
+  }
+
+  async function createMultiModelValidationTask(firstPayload, rows, runMode) {
+    if (!Array.isArray(rows) || rows.length < 2) {
+      setCreateStatus(
+        "添加多个模型时，请为每个模型填写材料目录，或上传 Notebook、样本、PMML 和数据字典。",
+        "error",
+      );
+      return null;
+    }
+    void runMode;
+    setCreateStatus("正在创建多个模型的验证任务...", "busy");
+    try {
+      const created = await submitValidationBatchDraft(
+        {
+          batchName: formatValidationBatchTaskName(new Date(), rows.length),
+          validator: firstPayload.validator,
+          rows,
+        },
+        {
+          uploadMaterials: async ({ row }) => api("/api/validation-batches/material-uploads", {
+            method: "POST",
+            body: buildValidationBatchUploadFormData(row),
+          }),
+          createBatch: async (body) => api("/api/validation-batches", {
+            method: "POST",
+            body: JSON.stringify(body),
+          }),
+          cleanupMaterials: async (token) => api(
+            `/api/validation-batches/material-uploads/${encodeURIComponent(token)}`,
+            { method: "DELETE" },
+          ),
+        },
+      );
+      const parentTask = created?.parent_task;
+      const parentTaskId = parentTask?.id || created?.batch?.parent_task_id;
+      if (!parentTaskId) throw new Error("多个模型创建响应缺少父任务 ID。");
+      return parentTask || {
+        id: parentTaskId,
+        task_type: "validation_batch",
+        run_mode: "agent",
+      };
+    } catch (error) {
+      setCreateStatus(error?.message || "多个模型创建失败。", "error");
+      return null;
+    }
+  }
+
   function bindMaterialSourceControls() {
     materialSourceController.bindTabs();
     materialSourceController.bindDropzone();
+    $("modelName")?.addEventListener("input", prefillCreateTaskReportFields);
+    $("validator")?.addEventListener("input", prefillCreateTaskReportFields);
+    $("addValidationModelRowButton")?.addEventListener("click", () => {
+      addValidationModelRow();
+    });
   }
 
   return {

@@ -113,7 +113,12 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
     assert loaded.status_reason_code == ""
 
     values, revision = repo.get_report_values(task.id)
-    assert values == {"TEXT:report_title": "自定义标题"}
+    assert {
+        "TEXT:report_title": "自定义标题",
+        "TEXT:drafter": "验证人员A",
+        "TEXT:revision_author": "验证人员A",
+    }.items() <= values.items()
+    assert "贷前评分卡模型" in values["TEXT:model_overview"]
     assert revision == 0
 
 
@@ -486,6 +491,7 @@ def test_update_report_values_merges_and_increments_revision(tmp_path):
             }
         )
     )
+    initial_values, _ = repo.get_report_values(task.id)
 
     new_revision = repo.update_report_values(
         task.id,
@@ -495,7 +501,7 @@ def test_update_report_values_merges_and_increments_revision(tmp_path):
 
     assert new_revision == 1
     assert repo.get_report_values(task.id) == (
-        {"TEXT:report_title": "新标题", "TEXT:model_scope": "旧范围"},
+        {**initial_values, "TEXT:report_title": "新标题"},
         1,
     )
     assert repo.get_task(task.id).report_values_revision == 1
@@ -506,6 +512,7 @@ def test_update_report_values_with_audit_records_changed_keys(tmp_path):
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(_task_create(report_values={"TEXT:report_title": "旧标题"}))
+    initial_values, _ = repo.get_report_values(task.id)
 
     revision = repo.update_report_values_with_audit(
         task.id,
@@ -520,7 +527,7 @@ def test_update_report_values_with_audit_records_changed_keys(tmp_path):
     )
 
     assert revision == 1
-    assert repo.get_report_values(task.id) == ({"TEXT:report_title": "新标题"}, 1)
+    assert repo.get_report_values(task.id) == ({**initial_values, "TEXT:report_title": "新标题"}, 1)
     audit = db_module.PluginRepository(db_path).list_audit(kind="report.values.update")[0]
     assert audit["target_ref"] == task.id
     assert audit["detail"]["keys"] == ["TEXT:report_title"]
@@ -534,6 +541,7 @@ def test_update_report_values_with_audit_rolls_back_when_audit_fails(
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(_task_create(report_values={"TEXT:report_title": "旧标题"}))
+    before = repo.get_report_values(task.id)
 
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
@@ -552,7 +560,7 @@ def test_update_report_values_with_audit_rolls_back_when_audit_fails(
             },
         )
 
-    assert repo.get_report_values(task.id) == ({"TEXT:report_title": "旧标题"}, 0)
+    assert repo.get_report_values(task.id) == before
 
 
 def test_update_report_values_rejects_conflict(tmp_path):
@@ -644,6 +652,7 @@ def test_update_agent_report_conclusions_with_audit_rolls_back_when_audit_fails(
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(_task_create(run_mode="agent"))
+    before = repo.get_report_values(task.id)
     values = {
         "TEXT:pressure_test_summary": "压力测试显示整体稳定。",
         "TEXT:pressure_impact_recommendation": "建议持续监控关键数据源。",
@@ -667,7 +676,7 @@ def test_update_agent_report_conclusions_with_audit_rolls_back_when_audit_fails(
             },
         )
 
-    assert repo.get_report_values(task.id) == ({}, 0)
+    assert repo.get_report_values(task.id) == before
 
 
 def test_agent_messages_round_trip_with_metadata(tmp_path):

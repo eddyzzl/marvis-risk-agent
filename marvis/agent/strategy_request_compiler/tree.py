@@ -2398,4 +2398,3 @@ def _automatic_tree_number_text(field: str, value: float) -> str:
     if field in {"max_depth", "min_leaf_count", "seed"}:
         return str(int(value))
     return format(value, ".15g")
-

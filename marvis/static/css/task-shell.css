@@ -6,7 +6,7 @@
   --task-card-action-space: 36px;
   display: grid;
   width: 100%;
-  gap: 7px;
+  gap: 0;
   padding: 11px 12px;
   border: 1px solid transparent;
   border-radius: var(--radius);
@@ -35,13 +35,6 @@
   padding-right: var(--task-card-action-space);
 }
 
-.task-row-meta {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: center;
-  gap: 8px;
-}
-
 .task-row-top .pill {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -49,13 +42,11 @@
 
 .task-row-badges {
   display: inline-flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 5px;
 }
 
-.task-row-name,
-.task-row small,
 .workspace-subtitle,
 .summary-item strong {
   overflow-wrap: anywhere;
@@ -72,10 +63,14 @@
 .task-row-name {
   display: block;
   min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
   color: var(--text);
-  font-size: 16px;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 700;
   line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* layered, multi-tone per-kind task icon — shared by sidebar rows and the
@@ -131,26 +126,66 @@
   height: 30px;
 }
 
-.task-row small {
+.task-row-preview {
+  position: fixed;
+  z-index: 45;
+  box-sizing: border-box;
+  width: min(320px, calc(100vw - 24px));
+  max-width: 320px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--shadow-floating);
+  pointer-events: none;
+}
+
+.task-row-preview-title {
   display: block;
-  color: var(--text-secondary);
+  margin: 0 0 10px;
+  overflow-wrap: anywhere;
   font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
-.task-row .task-row-validator {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.task-row-preview-kind {
+  margin: -6px 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
-.task-row-validator-icon {
+.task-row-preview-kind:empty {
+  display: none;
+}
+
+.task-row-preview-meta {
+  display: grid;
+  gap: 8px;
+}
+
+.task-row-preview-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.task-row-preview-k {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.task-row-preview-icon {
   width: 16px;
   height: 16px;
-  flex: 0 0 auto;
+  margin-top: 2px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -159,22 +194,11 @@
   opacity: 0.86;
 }
 
-.task-row-validator-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-row .task-row-date {
-  font-size: 12px;
-  white-space: nowrap;
-}
-
 .delete-task-button {
   position: absolute;
-  top: 8px;
+  top: 50%;
   right: 8px;
+  transform: translateY(-50%);
   display: inline-flex;
   width: 28px;
   height: 28px;
@@ -238,7 +262,7 @@
     radial-gradient(circle calc(var(--radius) - 1px) at 100% 100%, transparent calc(var(--radius) - 1px), var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px)),
     radial-gradient(circle calc(var(--radius) - 1px) at 0 100%, transparent calc(var(--radius) - 1px), var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px));
   background-repeat: no-repeat;
-  background-position: left -1px top -1px, right -1px top -1px;
+  background-position: left 0 top 0, right 0 top 0;
   background-size: calc(var(--radius) + 2px) calc(var(--radius) + 2px);
 }
 
@@ -263,6 +287,10 @@
   position: relative;
   isolation: isolate;
   overflow: hidden;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 16px 18px 14px;
   border: 1px solid color-mix(in srgb, var(--border) 54%, transparent);
   border-radius: var(--radius);
@@ -275,7 +303,6 @@
   backdrop-filter: blur(18px) saturate(1.55);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.72);
-  contain: paint;
   transform: translateZ(0);
   will-change: transform;
   transition: border-color 140ms ease;
@@ -343,6 +370,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
 }
 
 .task-hero-top-right {

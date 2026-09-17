@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import date
 
 from marvis.domain import TaskRecord
-from marvis.model_algorithms import model_training_description
+from marvis.validation_report_copy import seed_report_values
 
 
 @dataclass(frozen=True)
@@ -44,30 +43,8 @@ def default_report_values(
     validator: str,
     algorithm: str = "",
 ) -> dict[str, str]:
-    today = date.today().isoformat()
-    version_suffix = f"{model_version}版" if model_version else ""
-    display_name = model_name or "本模型"
-    training_description = (
-        model_training_description(algorithm)
-        if str(algorithm or "").strip()
-        else "待 Notebook 契约 RMC_ALGORITHM 确认后自动生成模型训练说明。"
-    )
-    return {
-        "TEXT:report_title": f"{display_name}模型{version_suffix}验证文档",
-        "TEXT:drafter": validator,
-        "TEXT:draft_date": today,
-        "TEXT:revision_version": "V1",
-        "TEXT:revision_date": today,
-        "TEXT:revision_author": validator,
-        "TEXT:revision_description": "初稿",
-        "TEXT:model_overview": (
-            f"为了更好的对xx用户进行授信环节风险管控，现开发{display_name}模型，"
-            "对xx客群做前置风险拦截，从授信申请阶段做好风险防范。"
-        ),
-        "TEXT:model_scope": "本模型适用于xx渠道用户。",
-        "TEXT:bad_sample_definition": "xx逾期 >= xx天",
-        "TEXT:good_sample_definition": "xx未逾期",
-        "TEXT:model_training_description": training_description,
+    values = seed_report_values(model_name, model_version, validator, algorithm)
+    values.update({
         "TEXT:pressure_recommendation_summary": "待补充压力测试结果和风险提示。",
         "TEXT:pressure_impact_recommendation": "待补充压力测试结果和风险提示。",
         "TEXT:pressure_recommendation_action": "建议结合压力测试表现制定差异化准入和监控策略。",
@@ -76,7 +53,8 @@ def default_report_values(
         "TEXT:pressure_recommendation_medium_impact": "对于中等影响的特征类别，建议纳入上线后重点监控并设置预警阈值。",
         "TEXT:pressure_recommendation_low_impact": "对于影响较低的特征类别，建议保持常规监控并定期复核稳定性。",
         "TEXT:final_validation_conclusion": "待补充最终验证结论。",
-    }
+    })
+    return values
 
 
 def report_field_payload(
@@ -86,16 +64,20 @@ def report_field_payload(
     metric_values: dict[str, str] | None = None,
     metric_table_sections: list[dict] | None = None,
 ) -> dict:
-    text_values = default_report_values(
+    display_defaults = default_report_values(
         task.model_name,
         task.model_version,
         task.validator,
         task.algorithm,
     )
-    text_values.update(values)
+    stored_values = dict(values)
+    text_values = dict(display_defaults)
+    text_values.update(stored_values)
     return {
         "fields": [asdict(field) for field in REPORT_FIELDS],
         "text_values": text_values,
+        "stored_values": stored_values,
+        "display_defaults": display_defaults,
         "revision": revision,
         "metric_values": metric_values or {},
         "metric_table_sections": metric_table_sections or [],

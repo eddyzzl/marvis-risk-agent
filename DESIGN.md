@@ -84,7 +84,7 @@
 ## Accessibility
 - Target standard: practical WCAG AA for contrast and keyboard focus on the local tool.
 - Keyboard/focus behavior: visible `:focus-visible`, task list keyboard navigation, Enter task creation, Cmd/Ctrl+S save report text where supported.
-- Contrast/readability: muted text must remain readable on white; long names wrap instead of being clipped.
+- Contrast/readability: muted text must remain readable on white. Sidebar task names stay on one line with ellipsis; the full name, owner, and created time appear in a hover/focus preview card to the right of the row.
 - Screen-reader semantics: status and alert areas near the relevant actions; raw data and memory references are labelled.
 - Reduced motion and sensory considerations: no layout-shifting hover motion;
   entrance and progress animation must stop under `prefers-reduced-motion`.

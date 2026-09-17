@@ -49,7 +49,7 @@ const empty = batchCreate.validateValidationBatchDraft({
 assert.equal(empty.valid, false);
 assert.match(empty.formErrors.join(" "), /批次名称/);
 assert.match(empty.formErrors.join(" "), /验证人员/);
-assert.match(empty.formErrors.join(" "), /1 至 10/);
+assert.match(empty.formErrors.join(" "), /2 至 10/);
 
 const tooMany = batchCreate.validateValidationBatchDraft({
   batchName: "批次 A",
@@ -57,7 +57,15 @@ const tooMany = batchCreate.validateValidationBatchDraft({
   rows: Array.from({ length: 11 }, (_, index) => completeRow(`row-${index}`)),
 });
 assert.equal(tooMany.valid, false);
-assert.match(tooMany.formErrors.join(" "), /1 至 10/);
+assert.match(tooMany.formErrors.join(" "), /2 至 10/);
+
+const oneModel = batchCreate.validateValidationBatchDraft({
+  batchName: "批次 A",
+  validator: "Eddy",
+  rows: [completeRow("row-only")],
+});
+assert.equal(oneModel.valid, false);
+assert.match(oneModel.formErrors.join(" "), /2 至 10/);
 
 const invalid = batchCreate.validateValidationBatchDraft({
   batchName: "批次 A",
@@ -84,7 +92,7 @@ assert.match(invalid.rowErrors["row-bad"].join(" "), /数据字典/);
 const valid = batchCreate.validateValidationBatchDraft({
   batchName: "批次 A",
   validator: "Eddy",
-  rows: [completeRow()],
+  rows: [completeRow("row-1"), completeRow("row-2")],
 });
 assert.deepEqual(valid, { valid: true, formErrors: [], rowErrors: {} });
 """
@@ -258,9 +266,10 @@ def test_batch_create_dialog_and_welcome_card_are_wired_as_an_independent_flow()
     task_types = _read_static("js/task-types.js")
     create_js = _read_static("js/validation-batch-create.js")
 
-    assert 'id="welcomeValidationBatchCard"' in index_html
-    assert 'data-task-kind="validation_batch"' in index_html
-    assert '<strong>批量模型验证</strong>' in index_html
+    assert 'id="welcomeValidationBatchCard"' not in index_html
+    assert 'data-task-kind="validation_batch"' not in index_html
+    assert '<strong>批量模型验证</strong>' not in index_html
+    assert 'id="addValidationModelRowButton"' in index_html
     assert 'id="validationBatchCreateDialog"' in index_html
     assert 'id="validationBatchCreateForm"' in index_html
     assert 'id="validationBatchRows"' in index_html
@@ -273,7 +282,7 @@ def test_batch_create_dialog_and_welcome_card_are_wired_as_an_independent_flow()
 
     assert 'from "./js/validation-batch-create.js"' in app_js
     assert 'createValidationBatchCreateController({' in app_js
-    assert 'validationBatchCreateController.open()' in app_js
+    assert 'validationBatchCreateController.open()' not in app_js
     assert 'validationBatchCreateController.bind()' in app_js
     assert 'validationBatchCreateController.close()' in app_js
     assert 'payload.batch.parent_task_id' in app_js
@@ -287,7 +296,52 @@ def test_batch_create_dialog_and_welcome_card_are_wired_as_an_independent_flow()
     assert "body: JSON.stringify(payload)" in create_js
     assert '"/start"' not in create_js
     assert 'api/validation-batches/${' not in create_js
-    assert '/api/validation-batches' not in _read_static("js/create-task-dialog.js")
+    assert "/api/validation-batches" in _read_static("js/create-task-dialog.js")
+    assert "function addValidationModelRow" in _read_static("js/create-task-dialog.js")
+
+
+def test_classify_validation_batch_files_maps_roles_without_reusing_the_same_file():
+    _run_create_module(
+        r"""
+const files = [
+  { name: "model.ipynb", size: 10 },
+  { name: "sample.parquet", size: 11 },
+  { name: "score.pmml", size: 12 },
+  { name: "数据字典.xlsx", size: 13 },
+];
+const classified = batchCreate.classifyValidationBatchFiles(files);
+assert.equal(classified.notebook.name, "model.ipynb");
+assert.equal(classified.sample.name, "sample.parquet");
+assert.equal(classified.pmml.name, "score.pmml");
+assert.equal(classified.dictionary.name, "数据字典.xlsx");
+assert.equal(batchCreate.classifyValidationBatchFiles(files.slice(0, 3)), null);
+"""
+    )
+
+
+def test_batch_draft_accepts_source_dir_instead_of_four_file_uploads():
+    _run_create_module(
+        r"""
+const byPath = batchCreate.validateValidationBatchDraft({
+  batchName: "批次 A",
+  validator: "Eddy",
+  rows: [
+    { id: "row-1", modelName: "T卡", sourceDir: "/tmp/model-a" },
+    { id: "row-2", modelName: "A卡", sourceDir: "/tmp/model-b" },
+  ],
+});
+assert.equal(byPath.valid, true);
+assert.deepEqual(byPath.rowErrors, {});
+"""
+    )
+
+
+def test_multi_model_create_uses_classified_primary_files_not_first_extra_row():
+    create_js = _read_static("js/create-task-dialog.js")
+    assert "classifyValidationBatchFiles(" in create_js
+    assert "files: rows[0].files" not in create_js
+    assert "collectPrimaryValidationModel" in create_js
+    assert "classifiedFilesFromSelection" in create_js
 
 
 def test_batch_create_dialog_declares_four_explicit_file_roles_and_limits():
@@ -302,5 +356,5 @@ def test_batch_create_dialog_declares_four_explicit_file_roles_and_limits():
     assert ".csv,.parquet,.feather,.xlsx,.xls" in create_js
     assert ".csv,.parquet,.xlsx,.xls" in create_js
     assert "MAX_VALIDATION_BATCH_ROWS = 10" in create_js
-    assert "MIN_VALIDATION_BATCH_ROWS = 1" in create_js
+    assert "MIN_VALIDATION_BATCH_ROWS = 2" in create_js
     assert ".validation-batch-create" in create_css

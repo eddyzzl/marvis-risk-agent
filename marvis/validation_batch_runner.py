@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
 from typing import Any
 import zipfile
@@ -15,7 +16,7 @@ from marvis.agent.service import (
 from marvis.agent.validation_evidence import agent_evidence_from_settings
 from marvis.api_scan_helpers import perform_scan_task
 from marvis.api_stage_helpers import pipeline_settings_from_settings, run_stage_job
-from marvis.api_task_helpers import allowed_material_roots
+from marvis.api_task_helpers import allowed_material_roots, validation_batch_parent_id
 from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TaskStatus
 from marvis.job_heartbeat import heartbeat_job
@@ -23,7 +24,6 @@ from marvis.llm_settings import LLMSettingsError, resolve_llm_model
 from marvis.pipeline import (
     run_metrics_stage,
     run_pmml_scoring_stage,
-    run_report_stage,
 )
 from marvis.redaction import redact_text
 from marvis.repositories.validation_batches import (
@@ -41,8 +41,16 @@ from marvis.validation.stress_risk import (
 )
 
 
+logger = logging.getLogger(__name__)
+
 BatchSummaryWriter = Callable[..., Any]
 BatchRunner = Callable[..., ValidationBatchRecord]
+_AGENT_BATCH_ITEM_TERMINAL = frozenset(
+    {"succeeded", "review_required", "failed", "cancelled"}
+)
+_AGENT_BATCH_CHILD_RECORDABLE = frozenset(
+    {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}
+)
 
 
 @dataclass(frozen=True)
@@ -354,6 +362,18 @@ def run_validation_batch(
                 },
             )
             final_task = task_repo.get_task(task.id)
+            if final_task.status is TaskStatus.WRITING_ARTIFACTS:
+                # The legacy runner stops before report approval. This is a
+                # recoverable Agent hand-off, not a failed validation item.
+                batch_repo.update_item(
+                    item.id,
+                    status="awaiting_confirmation",
+                    stage="report_conclusion",
+                    outcome="",
+                    error_code="",
+                    error_message="",
+                )
+                continue
             if final_task.status not in {
                 TaskStatus.SUCCEEDED,
                 TaskStatus.REVIEW_REQUIRED,
@@ -391,7 +411,7 @@ def run_validation_batch(
         task_repo.update_status(
             parent_task_id,
             TaskStatus.SCANNED,
-            "批次等待逐项确认输入合同",
+            "批次等待确认输入合同或报告结论",
             expected=TaskStatus.RUNNING,
         )
         return waiting_batch
@@ -459,22 +479,7 @@ def _run_ready_item_pipeline(
             cancellation_job_id=cancellation_job_id,
         )
         task = repo.get_task(task_id)
-    if task.status in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
-        _write_report_conclusions(
-            repo=repo,
-            settings=settings,
-            task_id=task_id,
-            model_profile=model_profile,
-        )
-        _run_item_stage(
-            "report",
-            run_report_stage,
-            task_id=task_id,
-            settings=pipeline_settings,
-            cancellation_job_id=cancellation_job_id,
-        )
-        task = repo.get_task(task_id)
-    if task.status not in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}:
+    if task.status not in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED, TaskStatus.WRITING_ARTIFACTS}:
         raise ValidationBatchItemError("pipeline", task.status_message)
 
 
@@ -754,20 +759,147 @@ def _add_parent_waiting_message(
     parent_task_id: str,
     items: list[ValidationBatchItemRecord],
 ) -> None:
-    waiting_count = sum(item.status == "awaiting_confirmation" for item in items)
+    waiting_items = [item for item in items if item.status == "awaiting_confirmation"]
+    report_count = sum(item.stage == "report_conclusion" for item in waiting_items)
+    contract_count = len(waiting_items) - report_count
+    parts = []
+    if contract_count:
+        parts.append(
+            f"批次中有 {contract_count} 个模型等待确认输入合同。"
+            "无冲突时请在对话里回复「都按这个」按识别结果确认；"
+            "某个模型要改列时指出模型名和字段。"
+            "表单仍可展开核对，但不必逐项点选才能继续。"
+        )
+    if report_count:
+        parts.append(
+            f"有 {report_count} 个模型已完成指标，等待报告结论确认。"
+            "请在模型工作台继续生成并确认结论草稿，再生成 Word/Excel。"
+        )
     repo.add_agent_message(
         parent_task_id,
         role="assistant",
-        stage="input_confirmation",
-        content=(
-            f"批次中有 {waiting_count} 个模型等待确认输入合同。"
-            "平台不会自动选择字段口径；请逐项确认后再次启动批次。"
-        ),
+        stage="input_confirmation" if contract_count else "report_conclusion",
+        content="\n".join(parts),
         metadata={
             "awaiting_confirmation": True,
-            "waiting_item_count": waiting_count,
+            "waiting_item_count": len(waiting_items),
+            "waiting_report_count": report_count,
         },
     )
+
+
+def sync_agent_batch_child_progress(
+    *,
+    db_path,
+    child_task_id: str,
+    status: str,
+    stage: str,
+) -> ValidationBatchRecord | None:
+    """Mirror an Agent child's live stage onto its parent batch item.
+
+    Sequential ``run_validation_batch`` updates items as it walks the loop.
+    Agent workbench children run through conversation jobs, so the switcher
+    stays queued unless this catch-up runs at stage open / contract pause.
+    """
+
+    task_repo = TaskRepository(db_path)
+    parent_task_id = validation_batch_parent_id(task_repo, child_task_id)
+    if not parent_task_id:
+        return None
+    batch_repo = ValidationBatchRepository(db_path)
+    items = batch_repo.list_items(parent_task_id)
+    if len(items) < 2:
+        return batch_repo.get_batch(parent_task_id)
+    for item in items:
+        if item.child_task_id != child_task_id:
+            continue
+        if item.status in _AGENT_BATCH_ITEM_TERMINAL:
+            return batch_repo.get_batch(parent_task_id)
+        batch_repo.update_item(
+            item.id,
+            status=status,
+            stage=stage,
+            started=status == "running",
+        )
+        return batch_repo.get_batch(parent_task_id)
+    return batch_repo.get_batch(parent_task_id)
+
+
+def sync_agent_batch_after_child_report(
+    *,
+    settings,
+    child_task_id: str,
+    summary_writer: BatchSummaryWriter | None = None,
+    manual_review_base_url: str = "",
+) -> ValidationBatchRecord | None:
+    """Record an Agent child into its parent batch and write N≥2 summary Excel.
+
+    Sequential ``run_validation_batch`` already does this at the end of the job.
+    Agent workbench runs children one-by-one through the conversation, so the
+    parent items stay queued unless this catch-up runs after Word/Excel land.
+    """
+
+    task_repo = TaskRepository(settings.db_path)
+    parent_task_id = validation_batch_parent_id(task_repo, child_task_id)
+    if not parent_task_id:
+        return None
+    batch_repo = ValidationBatchRepository(settings.db_path)
+    items = batch_repo.list_items(parent_task_id)
+    if len(items) < 2:
+        return batch_repo.get_batch(parent_task_id)
+
+    for item in items:
+        if item.status in _AGENT_BATCH_ITEM_TERMINAL:
+            continue
+        try:
+            child = task_repo.get_task(item.child_task_id)
+        except KeyError:
+            continue
+        if child.status == TaskStatus.FAILED:
+            _record_item_failure(
+                batch_repo=batch_repo,
+                task_repo=task_repo,
+                settings=settings,
+                parent_task_id=parent_task_id,
+                item=item,
+                stage=item.stage or "validation",
+                exc=RuntimeError(child.status_message or "model validation failed"),
+            )
+            continue
+        if child.status not in _AGENT_BATCH_CHILD_RECORDABLE:
+            continue
+        try:
+            _record_completed_item(
+                batch_repo=batch_repo,
+                settings=settings,
+                item=item,
+                final_task=child,
+            )
+        except Exception:
+            logger.exception(
+                "failed to record agent batch item for child %s",
+                item.child_task_id,
+            )
+
+    items = batch_repo.list_items(parent_task_id)
+    if any(item.status not in _AGENT_BATCH_ITEM_TERMINAL for item in items):
+        return batch_repo.get_batch(parent_task_id)
+    try:
+        return _finalize_batch(
+            settings=settings,
+            parent_task_id=parent_task_id,
+            batch_repo=batch_repo,
+            task_repo=task_repo,
+            items=items,
+            manual_review_base_url=manual_review_base_url,
+            summary_writer=summary_writer,
+        )
+    except Exception:
+        logger.exception(
+            "failed to finalize agent validation batch %s",
+            parent_task_id,
+        )
+        return batch_repo.get_batch(parent_task_id)
 
 
 def _finalize_batch(
@@ -982,6 +1114,8 @@ __all__ = [
     "mark_validation_batch_parent_running",
     "run_validation_batch",
     "run_validation_batch_job",
+    "sync_agent_batch_after_child_report",
+    "sync_agent_batch_child_progress",
     "validation_batch_item_outcome",
     "validation_batch_stress_risk",
 ]

@@ -160,7 +160,35 @@ def test_packaged_default_template_renders_complete_neutral_report(tmp_path: Pat
 
     assert report_values["TEXT:report_title"] in text
     assert report_values["TEXT:drafter"] in text
-    assert report_values["TEXT:model_training_description"] in text
+    assert "LightGBM" in text
+    assert "max_depth=5" in text
+    assert "learning_rate=0.05" in text
+    assert "直方图分裂、叶子优先生长和特征并行" not in text
     assert "{{" not in text
     assert rendered_headings == expected_headings
     assert len(document.inline_shapes) >= 10
+
+
+def test_word_report_keeps_agent_pressure_and_training_narratives(tmp_path: Path):
+    document = Document()
+    document.add_paragraph("压测：{{TEXT:pressure_test_summary}}")
+    document.add_paragraph("算法：{{TEXT:model_training_description}}")
+    template = tmp_path / "narrative.docx"
+    document.save(template)
+
+    result = write_validation_word(
+        _make_results(),
+        template_path=template,
+        output_path=tmp_path / "narrative-report.docx",
+        image_output_dir=tmp_path / "narrative-images",
+        report_values={
+            "TEXT:pressure_test_summary": "Agent 分层总结：top10 为高风险。",
+            "TEXT:model_training_description": "浅树 LightGBM，max_depth=1。",
+        },
+    )
+
+    text = "\n".join(paragraph.text for paragraph in Document(result.output_path).paragraphs)
+    assert result.unresolved_placeholders == []
+    assert "Agent 分层总结：top10 为高风险。" in text
+    assert "置 -9999" not in text
+    assert "浅树 LightGBM，max_depth=1。" in text

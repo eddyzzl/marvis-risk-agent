@@ -28,12 +28,20 @@ from marvis.state_machine import (
     IllegalTransition,
     assert_transition,
 )
+from marvis.validation_report_copy import NARRATIVE_REPORT_KEYS, merge_seed_report_values
 
 AGENT_REPORT_CONCLUSION_KEYS = frozenset({
     "TEXT:pressure_test_summary",
     "TEXT:pressure_impact_recommendation",
     "TEXT:final_validation_conclusion",
 })
+AGENT_REPORT_NARRATIVE_KEYS = NARRATIVE_REPORT_KEYS
+AGENT_REPORT_TRAINING_KEYS = frozenset({"TEXT:model_training_description"})
+AGENT_REPORT_WRITABLE_KEYS = (
+    AGENT_REPORT_CONCLUSION_KEYS
+    | AGENT_REPORT_NARRATIVE_KEYS
+    | AGENT_REPORT_TRAINING_KEYS
+)
 TASK_FILESYSTEM_PROVISION_AUDIT_KIND = "task.filesystem.provisioned"
 
 
@@ -51,7 +59,11 @@ class TaskRepository:
     def create_task(self, payload: TaskCreate) -> TaskRecord:
         record = _task_record_from_create(payload)
         with connect(self.db_path) as conn:
-            _insert_task_record_row(conn, record, report_values=payload.report_values)
+            _insert_task_record_row(
+                conn,
+                record,
+                report_values=_seeded_report_values(payload),
+            )
         return record
 
     def create_task_on_connection(
@@ -61,7 +73,11 @@ class TaskRepository:
     ) -> TaskRecord:
         """Create a task inside a caller-owned transaction."""
         record = _task_record_from_create(payload)
-        _insert_task_record_row(conn, record, report_values=payload.report_values)
+        _insert_task_record_row(
+            conn,
+            record,
+            report_values=_seeded_report_values(payload),
+        )
         return record
 
     def record_task_filesystem_provision_on_connection(
@@ -1205,7 +1221,7 @@ class TaskRepository:
         expected_revision: int,
     ) -> int:
         _validate_report_values(values)
-        invalid_keys = sorted(set(values) - AGENT_REPORT_CONCLUSION_KEYS)
+        invalid_keys = sorted(set(values) - AGENT_REPORT_WRITABLE_KEYS)
         if invalid_keys:
             raise ValueError(
                 "agent confirmation can only update agent conclusion keys: "
@@ -1222,7 +1238,7 @@ class TaskRepository:
         audit: dict,
     ) -> int:
         _validate_report_values(values)
-        invalid_keys = sorted(set(values) - AGENT_REPORT_CONCLUSION_KEYS)
+        invalid_keys = sorted(set(values) - AGENT_REPORT_WRITABLE_KEYS)
         if invalid_keys:
             raise ValueError(
                 "agent confirmation can only update agent conclusion keys: "
@@ -1253,6 +1269,65 @@ class TaskRepository:
                 content=content,
                 metadata=metadata,
             )
+
+    def confirm_agent_report_batch(self, confirmations: Sequence[dict]) -> list[dict]:
+        """Commit report values, approvals and queued jobs as one transaction.
+
+        A stale or invalid later draft must roll back earlier confirmations;
+        otherwise an HTTP error discards the workers for already-queued jobs.
+        """
+        confirmed = []
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for confirmation in confirmations:
+                task_id = confirmation["task_id"]
+                values = confirmation["text_values"]
+                expected_revision = confirmation["expected_revision"]
+                _validate_report_values(values)
+                invalid_keys = sorted(set(values) - AGENT_REPORT_WRITABLE_KEYS)
+                if invalid_keys:
+                    raise ValueError(
+                        "agent confirmation can only update agent conclusion keys: "
+                        + ", ".join(invalid_keys)
+                    )
+                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"Task not found: {task_id}")
+                task = _row_to_task(row)
+                if task.status not in {
+                    TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED, TaskStatus.SUCCEEDED,
+                }:
+                    raise ConflictError(f"cannot generate report in status {task.status.value}")
+                if task.task_type == TASK_TYPE_VALIDATION and task.validation_workflow_version == 2:
+                    contract = conn.execute(
+                        "SELECT status FROM validation_input_contracts WHERE task_id = ?", (task_id,),
+                    ).fetchone()
+                    if contract is None or contract["status"] != "ready":
+                        raise ValueError("validation input contract requires confirmation")
+                job_id = uuid.uuid4().hex
+                try:
+                    conn.execute(
+                        "INSERT INTO jobs(id, task_id, kind, status, created_at) VALUES (?, ?, 'report', 'queued', ?)",
+                        (job_id, task_id, _now()),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise ConflictError(f"task {task_id} already has an active job") from exc
+                revision = self._merge_report_values_on_connection(
+                    conn, task_id, values, expected_revision,
+                    audit={
+                        "kind": "report.agent_conclusions.confirm",
+                        "target_ref": task_id,
+                        "outcome": "succeeded",
+                        "detail": {"keys": sorted(values), "expected_revision": expected_revision},
+                    },
+                )
+                self.add_agent_message_on_connection(
+                    conn, task_id, role="assistant", stage="word_conclusion_confirmed",
+                    content="三段报告结论已确认，将开始生成最终 Word 报告。",
+                    metadata={"revision": revision, "confirmed_keys": sorted(values)},
+                )
+                confirmed.append({"task_id": task_id, "job_id": job_id, "revision": revision})
+        return confirmed
 
     def add_agent_message_on_connection(
         self,
@@ -1471,46 +1546,45 @@ class TaskRepository:
         audit: dict | None = None,
     ) -> int:
         with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT report_values_json, report_values_revision
-                  FROM tasks
-                 WHERE id = ?
-                """,
-                (task_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(f"Task not found: {task_id}")
-            current_revision = int(row["report_values_revision"])
-            if current_revision != expected_revision:
-                raise ConflictError(
-                    f"stale report values revision: expected={expected_revision}, "
-                    f"server={current_revision}"
-                )
-            merged = _load_json_dict(row["report_values_json"])
-            merged.update(values)
-            new_revision = current_revision + 1
-            cursor = conn.execute(
-                """
-                UPDATE tasks
-                   SET report_values_json = ?,
-                       report_values_revision = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                   AND report_values_revision = ?
-                """,
-                (
-                    _dump_json_dict(merged),
-                    new_revision,
-                    _now(),
-                    task_id,
-                    current_revision,
-                ),
+            return self._merge_report_values_on_connection(
+                conn, task_id, values, expected_revision, audit=audit,
             )
-            if cursor.rowcount == 0:
-                raise ConflictError("stale report values revision")
-            if audit is not None:
-                _write_audit_row(conn, **audit)
+
+    def _merge_report_values_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        values: dict[str, str],
+        expected_revision: int,
+        *,
+        audit: dict | None = None,
+    ) -> int:
+        row = conn.execute(
+            "SELECT report_values_json, report_values_revision FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Task not found: {task_id}")
+        current_revision = int(row["report_values_revision"])
+        if current_revision != expected_revision:
+            raise ConflictError(
+                f"stale report values revision: expected={expected_revision}, server={current_revision}"
+            )
+        merged = _load_json_dict(row["report_values_json"])
+        merged.update(values)
+        new_revision = current_revision + 1
+        cursor = conn.execute(
+            """
+            UPDATE tasks
+               SET report_values_json = ?, report_values_revision = ?, updated_at = ?
+             WHERE id = ? AND report_values_revision = ?
+            """,
+            (_dump_json_dict(merged), new_revision, _now(), task_id, current_revision),
+        )
+        if cursor.rowcount == 0:
+            raise ConflictError("stale report values revision")
+        if audit is not None:
+            _write_audit_row(conn, **audit)
         return new_revision
 
 
@@ -1525,6 +1599,18 @@ def _row_to_agent_message(row: sqlite3.Row) -> dict:
         "created_at": row["created_at"],
         "metadata": metadata,
     }
+
+
+def _seeded_report_values(payload: TaskCreate) -> dict[str, str]:
+    if _normalize_task_type(payload.task_type) != TASK_TYPE_VALIDATION:
+        return dict(payload.report_values or {})
+    return merge_seed_report_values(
+        payload.report_values,
+        model_name=payload.model_name,
+        model_version=payload.model_version,
+        validator=payload.validator,
+        algorithm=payload.algorithm,
+    )
 
 
 def _task_record_from_create(payload: TaskCreate) -> TaskRecord:

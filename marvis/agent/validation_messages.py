@@ -18,7 +18,7 @@ def agent_stage_opening_text(
     if stage == "metrics":
         return "收到，我将继续执行模型效果与稳定性验证，计算 KS、PSI、分箱和压力测试等指标。"
     if stage == "word_conclusion_draft":
-        return "收到，我将基于已完成的验证结果起草 Word 报告中的三段结论，完成后会等你确认。"
+        return ""
     return "收到，我将继续执行下一步验证。"
 
 
@@ -40,20 +40,25 @@ def agent_stage_label(
     return "下一步验证"
 
 
+REPORT_DRAFT_FIELD_LABELS = {
+    "TEXT:pressure_test_summary": "压力测试总结",
+    "TEXT:pressure_impact_recommendation": "压力影响建议",
+    "TEXT:final_validation_conclusion": "最终验证结论",
+    "TEXT:model_overview": "模型概述",
+    "TEXT:model_scope": "适用范围",
+    "TEXT:sample_audience": "样本人群",
+    "TEXT:bad_sample_definition": "坏样本定义",
+    "TEXT:good_sample_definition": "好样本定义",
+    "TEXT:model_training_description": "模型训练说明",
+}
+REPORT_DRAFT_FIELD_ORDER = tuple(REPORT_DRAFT_FIELD_LABELS)
+
+
 def format_conclusion_values(values: dict[str, str]) -> str:
-    labels = {
-        "TEXT:pressure_test_summary": "压力测试总结",
-        "TEXT:pressure_impact_recommendation": "压力影响建议",
-        "TEXT:final_validation_conclusion": "最终验证结论",
-    }
-    ordered_keys = [
-        "TEXT:pressure_test_summary",
-        "TEXT:pressure_impact_recommendation",
-        "TEXT:final_validation_conclusion",
-    ]
-    ordered_keys.extend(key for key in values if key not in labels)
+    ordered_keys = [key for key in REPORT_DRAFT_FIELD_ORDER if key in values]
+    ordered_keys.extend(key for key in values if key not in REPORT_DRAFT_FIELD_LABELS)
     return "\n\n".join(
-        f"{labels.get(key, key)}\n{value}"
+        f"{REPORT_DRAFT_FIELD_LABELS.get(key, key)}\n{value}"
         for key in ordered_keys
         if (value := values.get(key))
     )

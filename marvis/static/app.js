@@ -30,6 +30,13 @@ import { createMaterialBindingDialogController } from "./js/material-binding-dia
 import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
+import {
+  collectReportDraftValues,
+  hasReportDraftValues,
+  latestPendingReportDraftMessageId,
+  reportDraftTableHtml,
+} from "./js/report-draft-table.js";
+import { bindTaskRowPreview } from "./js/task-row-preview.js";
 import { safeSameOriginApiHref } from "./js/url-safety.js";
 import {
   attachCalibrationInteractions,
@@ -59,9 +66,13 @@ import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
 import {
   createValidationBatchPanelController,
+  formatValidationBatchTaskName,
   isValidationBatchTask,
+  normalizeValidationBatchPayload,
   parseTaskDeepLink,
   preferredStartupTaskId,
+  syncTaskDeepLink,
+  usesAgentValidationWorkbench,
 } from "./js/validation-batch.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import { createDataWorkspaceController } from "./js/v2/data_workspace_controller.js";
@@ -215,6 +226,8 @@ import {
 
 let selectedTaskId = null;
 let selectedTask = null;
+let projectedValidationChildTaskId = "";
+let projectedValidationChildTask = null;
 let taskCache = [];
 const initialTaskDeepLink = parseTaskDeepLink(window.location.search);
 let lastMetricValues = {};
@@ -242,6 +255,8 @@ const agentComposerPreferences = restoreAgentComposerPreferences();
 let agentSelectedModelId = agentComposerPreferences.model_id || "";
 let agentSelectedEffort = agentComposerPreferences.effort || "high";
 let agentAcceptanceMode = agentComposerPreferences.acceptance_mode || "normal";
+let agentBatchAutoRunGeneration = 0;
+let agentBatchAutoRunPromise = null;
 let lastAgentRenderSignature = null;
 let lastAgentStructuralSignature = null;
 // Manual-mode driver tasks now host every interactive control (gate confirm,
@@ -276,6 +291,7 @@ let resultScrollPersistFrame = null;
 let suppressAgentAutoScrollTaskId = null;
 let pendingTaskContentLoadTaskId = null;
 let taskContentSettleTimer = null;
+let projectedChildContentLoadVersion = 0;
 let latestNotebookSteps = [];
 let latestValidationInputContract = null;
 let latestValidationInputContractTaskId = "";
@@ -341,12 +357,12 @@ const validationBatchPanelController = createValidationBatchPanelController({
     const continuingPartialBatch = status === "partial_failure";
     return showPlatformConfirm({
       title: continuingAfterContractReview
-        ? "确认已逐项核对输入合同？"
+        ? "确认输入合同并继续？"
         : continuingPartialBatch
           ? "继续模型验证批次？"
           : "启动模型验证批次？",
       message: continuingAfterContractReview
-        ? "所有模型输入合同已逐项确认；平台不会自动启动，请确认继续按批次顺序运行。"
+        ? "所有模型输入合同已确认；平台不会自动启动，请确认继续按批次顺序运行。"
         : continuingPartialBatch
           ? "平台会重开失败或未完成项；已通过项及其审计记录会保留。"
           : `平台将按顺序运行 ${itemCount || 0} 个模型；单项失败不会中断其余模型。`,
@@ -369,6 +385,12 @@ const validationBatchPanelController = createValidationBatchPanelController({
     return taskServerBusyAction(selectedTask) !== "validation_batch";
   },
   onRecovered: restoreValidationBatchActionStatusAfterRecovery,
+  onProjectedChildChange: ({ childTaskId, force } = {}) => {
+    void applyProjectedValidationChild(childTaskId, { force });
+  },
+  onLayoutChange: () => syncTaskHeroGlassLayout(),
+  onBatchMeta: ({ itemCount } = {}) => stampValidationBatchItemCount(itemCount),
+  confirmAllReportDrafts: confirmAllValidationBatchReportDrafts,
   onError: (message) => {
     setActionStatus(validationBatchErrorTitle, "error", message);
   },
@@ -569,6 +591,9 @@ function taskBusyAction(taskId = selectedTaskId) {
   const localBusyAction = taskBusyActions.get(taskId);
   if (localBusyAction) return localBusyAction;
   if (taskId === selectedTaskId) return taskServerBusyAction();
+  if (taskId === projectedValidationChildTaskId) {
+    return taskServerBusyAction(projectedValidationChildTask);
+  }
   return null;
 }
 
@@ -610,7 +635,7 @@ async function loadBranding() {
   }
 }
 
-function usesPmmlScoringWorkflow(task = selectedTask) {
+function usesPmmlScoringWorkflow(task = workbenchTask()) {
   return Number(task?.validation_workflow_version) === 2;
 }
 
@@ -654,6 +679,8 @@ function currentTaskSignature(task) {
     task.failure_stage || "",
     task.active_job_kind || "",
     task.status_message || "",
+    task.model_name || "",
+    task.item_count || "",
     task.validation_workflow_version || 0,
     task.report_available ? 1 : 0,
     taskStopped(task) ? 1 : 0,
@@ -706,6 +733,8 @@ function taskListSignature(tasks, totalTaskCount) {
     list.map((task) => [
       task.id || "",
       task.name || "",
+      task.model_name || "",
+      task.item_count || "",
       task.task_type || "",
       task.status || "",
       // Driver task rows display the active plan's derived status while the
@@ -761,11 +790,7 @@ function openTaskDialog(taskType = defaultTaskType) {
 
 function openTaskDialogFromCard(event) {
   const card = event.target.closest("[data-task-kind]");
-  if (card?.dataset.taskKind === "validation_batch") {
-    event.preventDefault();
-    validationBatchCreateController.open();
-    return;
-  }
+  if (!card) return;
   createTaskDialog.openTaskDialogFromCard(event);
 }
 
@@ -998,11 +1023,13 @@ function setAgentMemoryViewMode(mode, { reload = true } = {}) {
 }
 
 function openWordPreviewDialog() {
-  if (!selectedTaskId) return;
+  const taskId = workbenchTaskId();
+  if (!taskId) return;
   const frame = $("wordPreviewFrame");
-  const title = selectedTask ? reportTitleForTask(selectedTask) : "Word 报告预览";
+  const task = workbenchTask();
+  const title = task ? reportTitleForTask(task) : "Word 报告预览";
   $("wordPreviewTitle").textContent = `${title} · Word 报告预览`;
-  frame.src = `api/tasks/${selectedTaskId}/report/preview?t=${Date.now()}`;
+  frame.src = `api/tasks/${taskId}/report/preview?t=${Date.now()}`;
   $("wordPreviewDialog").showModal();
   setActionStatus("Word 报告预览已打开。", "success");
 }
@@ -1465,9 +1492,31 @@ function handleSettingsMenuChange(event) {
 
 function taskDisplayName(task) {
   if (!task) return "";
+  if (isValidationBatchTask(task)) {
+    if (Number.isInteger(Number(task.item_count)) && Number(task.item_count) > 0) {
+      return formatValidationBatchTaskName(task.created_at, task.item_count);
+    }
+    const stored = String(task.model_name || "").trim();
+    if (/^\d{4}-\d{2}-\d{2} 模型验证批次/.test(stored)) return stored;
+    return formatValidationBatchTaskName(task.created_at, task.item_count);
+  }
   const name = String(task.model_name || "").trim();
   const version = String(task.model_version || "").trim();
   return version ? `${name} · ${version}` : name;
+}
+
+function stampValidationBatchItemCount(itemCount) {
+  const count = Number(itemCount);
+  if (!selectedTaskIsValidationBatch() || !Number.isInteger(count) || count < 1) return;
+  const nextName = formatValidationBatchTaskName(selectedTask.created_at, count);
+  const currentName = String(selectedTask.model_name || "").trim();
+  if (Number(selectedTask?.item_count) === count && currentName === nextName) return;
+  selectedTask = { ...selectedTask, item_count: count, model_name: nextName };
+  taskCache = taskCache.map((task) => (
+    task.id === selectedTaskId ? { ...task, item_count: count, model_name: nextName } : task
+  ));
+  renderCurrentTask();
+  renderTaskList();
 }
 
 function reportTitleForTask(task) {
@@ -1907,21 +1956,17 @@ function notebookReproducibilityComplete(task = selectedTask) {
 }
 
 function shouldShowReproducibilitySection() {
-  return Boolean(selectedTaskId && notebookReproducibilityComplete(selectedTask));
+  return Boolean(workbenchTaskId() && notebookReproducibilityComplete(workbenchTask()));
 }
 
 function renderReproducibilitySectionVisibility() {
-  if (selectedTaskIsValidationBatch()) {
-    $("notebookSection")?.classList.add("hidden");
-    return;
-  }
   // Driver tasks (data_join / feature / modeling) have no validation notebook
   // section — they run through the conversation + plan rail.
   if (taskUsesPlanRail(selectedTask)) {
     $("notebookSection")?.classList.add("hidden");
     return;
   }
-  syncScoringSectionCopy(selectedTask);
+  syncScoringSectionCopy(workbenchTask());
   $("notebookSection")?.classList.toggle("hidden", !shouldShowReproducibilitySection());
 }
 
@@ -1934,14 +1979,10 @@ function metricOverviewComplete(task = selectedTask) {
 }
 
 function shouldShowMetricSection() {
-  return Boolean(selectedTaskId && metricOverviewComplete(selectedTask));
+  return Boolean(workbenchTaskId() && metricOverviewComplete(workbenchTask()));
 }
 
 function renderMetricSectionVisibility() {
-  if (selectedTaskIsValidationBatch()) {
-    $("metricSection")?.classList.add("hidden");
-    return;
-  }
   // Driver tasks render metrics inline in the conversation, not in the validation
   // metric section.
   if (taskUsesPlanRail(selectedTask)) {
@@ -1951,11 +1992,11 @@ function renderMetricSectionVisibility() {
   $("metricSection")?.classList.toggle("hidden", !shouldShowMetricSection());
 }
 
-function workflowIndex(status) {
-  if (!selectedTaskId) return -1;
-  if (taskFailedDuringScan(selectedTask)) return 0;
-  if (taskFailedDuringMetrics(selectedTask)) return 2;
-  if (taskFailedDuringReport(selectedTask)) return 3;
+function workflowIndex(status, task = selectedTask) {
+  if (!selectedTaskId && !task?.id) return -1;
+  if (taskFailedDuringScan(task)) return 0;
+  if (taskFailedDuringMetrics(task)) return 2;
+  if (taskFailedDuringReport(task)) return 3;
   if (status === "succeeded" || status === "review_required") return 3;
   if (status === "writing_artifacts") return 3;
   if (status === "computing_metrics" || status === "executed") return 2;
@@ -1967,8 +2008,8 @@ function taskFailureStepId(task = selectedTask) {
   return taskFailureStage(task);
 }
 
-function taskRunningStepId(status = selectedTask?.status) {
-  const selectedBusyAction = taskBusyAction();
+function taskRunningStepId(status = selectedTask?.status, taskId = selectedTaskId) {
+  const selectedBusyAction = taskBusyAction(taskId);
   if (selectedBusyAction === "scan") return "scan";
   if (selectedBusyAction === "notebook" || selectedBusyAction === "cancelNotebook") return "notebook";
   if (selectedBusyAction === "metrics" || selectedBusyAction === "cancelMetrics") return "metrics";
@@ -2019,7 +2060,7 @@ function setBusy(actionId, message = "", taskId = selectedTaskId) {
   } else {
     globalBusyAction = actionId;
   }
-  if (actionId && (!taskId || selectedTaskId === taskId)) {
+  if (actionId && (!taskId || isWorkbenchTaskId(taskId))) {
     setActionStatus(message || "正在处理...", "busy");
   }
   renderWorkflowStepper();
@@ -2566,6 +2607,12 @@ function applyAgentTaskComposerPreferences(taskId) {
   agentAcceptanceMode = override.acceptance_mode !== undefined
     ? override.acceptance_mode
     : fallback.acceptance_mode;
+  const task = selectedTaskId === taskId && selectedTask
+    ? selectedTask
+    : findTaskInCache(taskId);
+  if (override.acceptance_mode === undefined && usesAgentValidationWorkbench(task)) {
+    agentAcceptanceMode = "auto_accept";
+  }
 }
 
 function resetAgentComposerToGlobalDefaults() {
@@ -2804,6 +2851,18 @@ async function saveLLMEngineEdit() {
 
 function rememberSelectedTaskId(taskId) {
   rememberStoredSelectedTaskId(selectedTaskStorageKey, taskId);
+  if (!taskId) {
+    syncTaskDeepLink(window.history, window.location, { taskId: "", itemId: "" });
+    return;
+  }
+  const currentLink = parseTaskDeepLink(window.location.search);
+  const itemId = (
+    (taskId === selectedTaskId && projectedValidationChildTaskId)
+    || (currentLink.taskId === taskId ? currentLink.itemId : "")
+    || (taskId === initialTaskDeepLink.taskId ? initialTaskDeepLink.itemId : "")
+    || ""
+  );
+  syncTaskDeepLink(window.history, window.location, { taskId, itemId });
 }
 
 function storedSelectedTaskId() {
@@ -2872,8 +2931,16 @@ function findTaskInCache(taskId) {
 }
 
 function ensureActiveTaskProgressPolling(task = selectedTask) {
-  const taskId = task?.id || selectedTaskId;
+  if (usesAgentValidationWorkbench(task)) {
+    const childId = projectedValidationChildTaskId;
+    const child = projectedValidationChildTask;
+    if (!childId || !taskServerBusyAction(child)) return;
+    if (progressPolls.has(childId)) return;
+    pollValidationProgress(terminalTaskStatuses, childId, { background: true }).catch(() => null);
+    return;
+  }
   if (isValidationBatchTask(task)) return;
+  const taskId = task?.id || selectedTaskId;
   if (!taskId || !taskServerBusyAction(task)) return;
   if (progressPolls.has(taskId)) return;
   pollValidationProgress(terminalTaskStatuses, taskId, { background: true }).catch(() => null);
@@ -2889,6 +2956,89 @@ function selectedTaskIsAgentMode(task = selectedTask) {
 
 function selectedTaskIsValidationBatch(task = selectedTask) {
   return isValidationBatchTask(task);
+}
+
+function workbenchTask() {
+  if (usesAgentValidationWorkbench(selectedTask) && projectedValidationChildTask) {
+    return projectedValidationChildTask;
+  }
+  return selectedTask;
+}
+
+function workbenchTaskId() {
+  if (usesAgentValidationWorkbench(selectedTask) && projectedValidationChildTaskId) {
+    return projectedValidationChildTaskId;
+  }
+  return selectedTaskId;
+}
+
+function isWorkbenchTaskId(taskId) {
+  const id = String(taskId || "");
+  return Boolean(id) && (id === selectedTaskId || id === projectedValidationChildTaskId);
+}
+
+function isCurrentProjectedChildLoad(loadVersion, childChanged) {
+  return !childChanged || loadVersion === projectedChildContentLoadVersion;
+}
+
+async function applyProjectedValidationChild(childTaskId, { force = false } = {}) {
+  const normalizedChildId = String(childTaskId || "").trim();
+  if (!normalizedChildId || !usesAgentValidationWorkbench(selectedTask)) return false;
+  if (
+    !force
+    && projectedValidationChildTaskId === normalizedChildId
+    && projectedValidationChildTask
+  ) {
+    return true;
+  }
+  const childChanged = projectedValidationChildTaskId !== normalizedChildId;
+  const loadVersion = childChanged
+    ? ++projectedChildContentLoadVersion
+    : projectedChildContentLoadVersion;
+  if (childChanged) {
+    resetAgentTypingState();
+    beginTaskContentLoad(normalizedChildId);
+    suppressAgentAutoScrollTaskId = selectedTaskId;
+    const scrollContent = $("resultScrollContent");
+    if (scrollContent) scrollContent.scrollTop = 0;
+  }
+  projectedValidationChildTaskId = normalizedChildId;
+  try {
+    try {
+      projectedValidationChildTask = await api(`api/tasks/${encodeURIComponent(normalizedChildId)}`);
+    } catch (_error) {
+      projectedValidationChildTask = {
+        id: normalizedChildId,
+        task_type: "validation",
+        run_mode: "agent",
+        validation_workflow_version: 2,
+      };
+    }
+    if (!isWorkbenchTaskId(normalizedChildId)) return false;
+    if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
+    rememberSelectedTaskId(selectedTaskId);
+    await loadTaskEvidence(normalizedChildId);
+    if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
+    await loadAgentMessages(normalizedChildId);
+    if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
+    await loadReportFields(normalizedChildId);
+    if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
+    renderAll();
+    if (childChanged) {
+      const scrollContent = $("resultScrollContent");
+      if (scrollContent) scrollContent.scrollTop = 0;
+      await nextAnimationFrame();
+      await nextAnimationFrame();
+    }
+    return true;
+  } finally {
+    if (childChanged && loadVersion === projectedChildContentLoadVersion) {
+      if (suppressAgentAutoScrollTaskId === selectedTaskId) {
+        suppressAgentAutoScrollTaskId = null;
+      }
+      finishTaskContentLoad(normalizedChildId);
+    }
+  }
 }
 
 function selectedTaskIsRiskAnalysisAgent(task = selectedTask) {
@@ -3151,7 +3301,7 @@ function setTaskHeroCollapsed(collapsed) {
 function handleTaskHeroToggle(event) {
   // Interactive descendants (path-copy button, form controls) keep their own
   // behaviour instead of folding the card.
-  if (event.target.closest("a[href], button:not(#taskHeroToggle), [data-copy], input, select, textarea")) {
+  if (event.target.closest("a[href], button:not(#taskHeroToggle), [data-copy], input, select, textarea, .task-hero-batch-switcher")) {
     return;
   }
   // Don't fold when the user is finishing a text selection inside the card.
@@ -3202,14 +3352,14 @@ function renderCurrentTask({ force = false } = {}) {
   });
 }
 
-function workflowStepStatus(index, activeIndex) {
-  if (!selectedTaskId) return "pending";
-  const status = selectedTask?.status || "";
+function workflowStepStatus(index, activeIndex, task = selectedTask) {
+  if (!selectedTaskId && !task?.id) return "pending";
+  const status = task?.status || "";
   const step = workflowSteps[index];
-  const runningStepId = taskRunningStepId(status);
+  const runningStepId = taskRunningStepId(status, task?.id);
   if (runningStepId && step.id === runningStepId) return "running";
-  if (taskFailureWasRestartReclaim(selectedTask) && workflowStageCompleteFromEvidence(step.id)) return "succeeded";
-  const failedStepId = taskFailureStepId(selectedTask);
+  if (taskFailureWasRestartReclaim(task) && workflowStageCompleteFromEvidence(step.id)) return "succeeded";
+  const failedStepId = taskFailureStepId(task);
   if (failedStepId) {
     const failedIndex = workflowSteps.findIndex((candidate) => candidate.id === failedStepId);
     if (step.id === failedStepId) return "failed";
@@ -3229,7 +3379,7 @@ function workflowStepStatus(index, activeIndex) {
     return index < 2 ? "succeeded" : index === 2 ? "running" : "pending";
   }
   if (status === "writing_artifacts") {
-    return index < 3 ? "succeeded" : index === 3 && taskServerBusyAction() === "report" ? "running" : "pending";
+    return index < 3 ? "succeeded" : index === 3 && taskServerBusyAction(task) === "report" ? "running" : "pending";
   }
   if (status === "review_required") return "succeeded";
   if (status === "succeeded") return "succeeded";
@@ -3245,22 +3395,22 @@ function workflowStepStatusLabel(status, actionId) {
   return "未开始";
 }
 
-function stepStopAction(step) {
-  const status = selectedTask?.status || "";
-  const selectedBusyAction = taskBusyAction();
+function stepStopAction(step, task = workbenchTask()) {
+  const status = task?.status || "";
+  const selectedBusyAction = taskBusyAction(task?.id);
   if (step.action === "notebook" && status === "running") return "cancelNotebook";
   if (step.action === "metrics" && status === "computing_metrics") return "cancelMetrics";
-  if (step.action === "report" && (selectedBusyAction === "report" || taskServerBusyAction() === "report")) return "cancelReport";
+  if (step.action === "report" && (selectedBusyAction === "report" || taskServerBusyAction(task) === "report")) return "cancelReport";
   return null;
 }
 
-function completedReportReadyForDownloads(step) {
-  const selectedBusyAction = taskBusyAction();
+function completedReportReadyForDownloads(step, task = workbenchTask()) {
+  const selectedBusyAction = taskBusyAction(task?.id);
   return (
     step.action === "report" &&
     selectedBusyAction !== "report" &&
-    selectedTask?.report_available === true &&
-    ["succeeded", "review_required"].includes(selectedTask?.status)
+    task?.report_available === true &&
+    ["succeeded", "review_required"].includes(task?.status)
   );
 }
 
@@ -3714,13 +3864,6 @@ function refreshWorkflowStepperElapsedTimes() {
 function renderWorkflowStepper({ force = false } = {}) {
   const progressRail = $("progressRail");
   const railTitle = document.querySelector("#progressRail .step-rail-head h3");
-  if (selectedTaskIsValidationBatch()) {
-    progressRail?.classList.add("hidden");
-    const stepper = $("workflowStepper");
-    if (stepper) stepper.innerHTML = "";
-    renderSignatures.workflowStepper = "validation_batch";
-    return;
-  }
   progressRail?.classList.remove("hidden");
   if (planRailController.render({ force, renderSignatures })) {
     return;
@@ -3729,7 +3872,8 @@ function renderWorkflowStepper({ force = false } = {}) {
   planRailController.clearRetryPanel();
   planRailController.clearDriverActionsPanel();
   if (railTitle) railTitle.textContent = "验证步骤";
-  const nextSignature = workflowStepperSignature(selectedTask);
+  const task = workbenchTask();
+  const nextSignature = workflowStepperSignature(task);
   if (!force && renderSignatures.workflowStepper === nextSignature) {
     // Structure unchanged; still tick elapsed-seconds spans so running steps
     // do not freeze at the value captured during the last structural render.
@@ -3739,17 +3883,17 @@ function renderWorkflowStepper({ force = false } = {}) {
   renderSignatures.workflowStepper = nextSignature;
 
   const stepper = $("workflowStepper");
-  const activeIndex = workflowIndex(selectedTask?.status);
+  const activeIndex = workflowIndex(task?.status, task);
   const stepActionIds = ["scan", "notebook", "metrics", "report"];
-  const renderTaskId = selectedTaskId || "";
+  const renderTaskId = workbenchTaskId() || "";
   const previousScrollTop = stepper.dataset.taskId === renderTaskId ? stepper.scrollTop : 0;
   stepper.innerHTML = "";
   workflowSteps.forEach((step, index) => {
     if (step.action && !stepActionIds.includes(step.action)) return;
-    const displayStep = workflowStepForTask(step, selectedTask);
+    const displayStep = workflowStepForTask(step, task);
     const item = document.createElement("div");
     const classes = ["step"];
-    const stepStatus = workflowStepStatus(index, activeIndex);
+    const stepStatus = workflowStepStatus(index, activeIndex, task);
     if (stepStatus === "succeeded") {
       classes.push("succeeded");
     } else if (stepStatus === "running") {
@@ -3767,7 +3911,7 @@ function renderWorkflowStepper({ force = false } = {}) {
     item.dataset.stepTarget = displayStep.target;
     item.tabIndex = 0;
     item.setAttribute("role", "group");
-    const childSteps = usesPmmlScoringWorkflow(selectedTask)
+    const childSteps = usesPmmlScoringWorkflow(task)
       ? v2WorkflowSubsteps(step.id, stepStatus)
       : [];
     item.innerHTML = [
@@ -3780,15 +3924,15 @@ function renderWorkflowStepper({ force = false } = {}) {
       "</span>",
       stepActionButtonHtml(displayStep),
       "</div>",
-      stepDownloadActionsHtml(displayStep),
-      usesPmmlScoringWorkflow(selectedTask)
+      usesPmmlScoringWorkflow(task)
         ? renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)
         : step.id === "notebook"
           ? renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook")
           : "",
-      !usesPmmlScoringWorkflow(selectedTask) && step.id === "metrics"
+      !usesPmmlScoringWorkflow(task) && step.id === "metrics"
         ? renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics")
         : "",
+      stepDownloadActionsHtml(displayStep),
     ].join("");
     stepper.appendChild(item);
   });
@@ -3839,10 +3983,10 @@ function sortTaskTypeGroups([left], [right]) {
 
 function compareTasks(left, right) {
   if (taskSortMode === "name_asc") {
-    return left.model_name.localeCompare(right.model_name, "zh-CN");
+    return taskDisplayName(left).localeCompare(taskDisplayName(right), "zh-CN");
   }
   if (taskSortMode === "name_desc") {
-    return right.model_name.localeCompare(left.model_name, "zh-CN");
+    return taskDisplayName(right).localeCompare(taskDisplayName(left), "zh-CN");
   }
   const leftDate = Date.parse(left.created_at || left.updated_at || "") || 0;
   const rightDate = Date.parse(right.created_at || right.updated_at || "") || 0;
@@ -3855,6 +3999,7 @@ function applyTaskFilters(tasks = taskCache) {
     .filter((task) => {
       if (!query) return true;
       return [
+        taskDisplayName(task),
         task.model_name,
         task.model_version,
         task.validator,
@@ -3879,17 +4024,21 @@ const TASK_KIND_GLYPHS = {
     '<rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2.6"></rect><path class="mid" d="M2.6 8 V7 Q2.6 4.6 5 4.6 H19 Q21.4 4.6 21.4 7 V8 Z"></path><circle class="cut" cx="5.5" cy="6.2" r="0.82"></circle><circle class="cut" cx="7.7" cy="6.2" r="0.82"></circle><circle class="cut" cx="9.9" cy="6.2" r="0.82"></circle><path class="cs" d="M8.2 11.2 11 13.8 8.2 16.4"></path><rect class="cut" x="12" y="14.9" width="4" height="1.5" rx="0.75"></rect>',
   validation:
     '<rect class="back" x="7" y="3.5" width="11.5" height="16" rx="2.2"></rect><rect x="5" y="5" width="11.5" height="15.5" rx="2.2"></rect><rect class="mid" x="7.75" y="3.7" width="6" height="2.2" rx="1.1"></rect><rect class="cut" x="7.4" y="9" width="6.6" height="1.2" rx="0.6"></rect><rect class="cut" x="7.4" y="12" width="6.6" height="1.2" rx="0.6"></rect><rect class="cut" x="7.4" y="15" width="4.4" height="1.2" rx="0.6"></rect><circle class="cut" cx="16.6" cy="17.6" r="4.9"></circle><circle cx="16.6" cy="17.6" r="4"></circle><path class="cst" d="M14.8 17.7 16 18.9 18.4 16.4"></path>',
-  validation_batch:
-    '<rect class="back" x="3.5" y="5" width="14" height="14" rx="2.2"></rect><rect class="mid" x="6.5" y="3" width="14" height="14" rx="2.2"></rect><rect x="5" y="6.5" width="14" height="14" rx="2.2"></rect><path class="cs" d="M8 10h7M8 13.5h7M8 17h4"></path><circle class="cut" cx="18" cy="17.7" r="4"></circle><path class="cst" d="m16.4 17.7 1.1 1.1 2.1-2.2"></path>',
   strategy:
     '<rect class="back" x="4" y="13.8" width="16" height="4.6" rx="1.8"></rect><rect class="mid" x="4" y="9.6" width="16" height="4.6" rx="1.8"></rect><rect x="4" y="5" width="16" height="5.6" rx="1.8"></rect><rect class="cut" x="6.6" y="6.2" width="7.2" height="1.3" rx="0.65"></rect><rect class="cut" x="6.6" y="8.1" width="4.6" height="1.3" rx="0.65"></rect>',
   portfolio:
     '<circle class="back" cx="10" cy="12" r="7.2"></circle><path class="mid" d="M10 4.8a7.2 7.2 0 0 1 6.24 10.8L10 12Z"></path><path d="M11.5 3.5a8.7 8.7 0 0 1 7.53 13.05l-2.79-.95A7.2 7.2 0 0 0 10 4.8Z"></path><circle class="cut" cx="10" cy="12" r="2.35"></circle>',
 };
 
-function taskKindIconHtml(taskOrType = selectedTask, extraClass = "") {
+function taskKindIconKind(taskOrType = selectedTask) {
   const kind = typeof taskOrType === "string" ? taskOrType : taskOrType?.task_type;
-  const safeKind = TASK_KIND_GLYPHS[kind] ? kind : defaultTaskType;
+  // N≥2 仍是模型验证工作台，侧栏/标题图标与单模型验证共用剪贴板勾选。
+  if (kind === "validation_batch") return "validation";
+  return TASK_KIND_GLYPHS[kind] ? kind : defaultTaskType;
+}
+
+function taskKindIconHtml(taskOrType = selectedTask, extraClass = "") {
+  const safeKind = taskKindIconKind(taskOrType);
   const cls = "task-kind-icon" + (extraClass ? ` ${extraClass}` : "");
   return `<svg class="${cls}" data-kind="${escapeHtml(safeKind)}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${TASK_KIND_GLYPHS[safeKind] || ""}</svg>`;
 }
@@ -3897,41 +4046,43 @@ function taskKindIconHtml(taskOrType = selectedTask, extraClass = "") {
 // Per-row content fingerprint. When two poll ticks produce the same value the
 // row's inner DOM is left untouched, so the :hover target node under the cursor
 // is never rebuilt (the flicker fix) — only the shell node's mutable children
-// (name/status/validator/date/selected) refresh when this actually changes.
+// (name/status/selected/aria-label) refresh when this actually changes.
 function taskRowContentSignature(task) {
   return signatureFromParts([
     task.id === selectedTaskId ? 1 : 0,
-    task.model_name || "",
+    taskDisplayName(task),
+    task.item_count || "",
     task.task_type || "",
     taskStatusTone(task),
     taskStatusLabel(task),
     task.validator || "-",
-    formatDate(task.updated_at),
+    formatDate(task.created_at || task.updated_at),
   ]);
+}
+
+function taskRowAriaLabel(task) {
+  const ownerLabel = taskTypeDefinition(task.task_type).validatorLabel || "负责人";
+  const createdText = formatDate(task.created_at || task.updated_at);
+  return [
+    taskDisplayName(task),
+    taskStatusLabel(task),
+    `${ownerLabel} ${task.validator || "-"}`,
+    createdText ? `创建于 ${createdText}` : "",
+  ].filter(Boolean).join("，");
 }
 
 // Builds the innerHTML for the `.task-row` button. Shared by fresh creation and
 // in-place content refresh so both paths stay byte-for-byte identical.
 function taskRowInnerHtml(task) {
   const tone = taskStatusTone(task);
-  const validatorName = escapeHtml(task.validator || "-");
+  const displayName = taskDisplayName(task);
   return [
     '<span class="task-row-top">',
     '<span class="task-row-title">',
     taskKindIconHtml(task),
-    `<strong class="task-row-name">${escapeHtml(task.model_name)}</strong>`,
+    `<strong class="task-row-name">${escapeHtml(displayName)}</strong>`,
     "</span>",
     `<span class="task-row-badges"><span class="pill ${tone}">${escapeHtml(taskStatusLabel(task))}</span></span>`,
-    "</span>",
-    '<span class="task-row-meta">',
-    `<small class="task-row-validator" aria-label="验证人员：${validatorName}">`,
-    '<svg class="task-row-validator-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
-    '<circle cx="12" cy="8" r="3.2"></circle>',
-    '<path d="M5.5 19c0.9-3.5 3.2-5.4 6.5-5.4s5.6 1.9 6.5 5.4"></path>',
-    "</svg>",
-    `<span class="task-row-validator-text">${validatorName}</span>`,
-    "</small>",
-    `<small class="task-row-date">${escapeHtml(formatDate(task.updated_at))}</small>`,
     "</span>",
   ].join("");
 }
@@ -3949,6 +4100,7 @@ function createTaskRowShell(task) {
   row.type = "button";
   row.className = "task-row" + (task.id === selectedTaskId ? " selected" : "");
   row.setAttribute("aria-current", task.id === selectedTaskId ? "true" : "false");
+  row.setAttribute("aria-label", taskRowAriaLabel(task));
   row.innerHTML = taskRowInnerHtml(task);
   row.onclick = () => requestTaskSelection(task);
 
@@ -3956,7 +4108,7 @@ function createTaskRowShell(task) {
   deleteButton.type = "button";
   deleteButton.className = "delete-task-button";
   deleteButton.title = "删除任务";
-  deleteButton.setAttribute("aria-label", `删除任务 ${task.model_name}`);
+  deleteButton.setAttribute("aria-label", `删除任务 ${taskDisplayName(task)}`);
   deleteButton.innerHTML = [
     '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
     '<path d="M5 7h14"></path>',
@@ -3993,13 +4145,14 @@ function updateTaskRowShell(item, task) {
       event.stopPropagation();
       deleteTask(task);
     };
-    deleteButton.setAttribute("aria-label", `删除任务 ${task.model_name}`);
+    deleteButton.setAttribute("aria-label", `删除任务 ${taskDisplayName(task)}`);
   }
   if (item.dataset.rowSignature === nextSignature) return;
   item.dataset.rowSignature = nextSignature;
   if (row) {
     row.className = "task-row" + (task.id === selectedTaskId ? " selected" : "");
     row.setAttribute("aria-current", task.id === selectedTaskId ? "true" : "false");
+    row.setAttribute("aria-label", taskRowAriaLabel(task));
     row.innerHTML = taskRowInnerHtml(task);
   }
 }
@@ -4211,7 +4364,7 @@ async function resolveDataWorkspaceNavigationChoice() {
 
 async function reloadDataWorkspace(taskId = selectedTaskId, options = {}) {
   const normalizedTaskId = String(taskId || "").trim();
-  if (!normalizedTaskId) {
+  if (!normalizedTaskId || !taskUsesDataWorkspace(selectedTask)) {
     dataWorkspacePanel.clear();
     return false;
   }
@@ -4219,8 +4372,24 @@ async function reloadDataWorkspace(taskId = selectedTaskId, options = {}) {
   return dataWorkspacePanel.reload(normalizedTaskId, options);
 }
 
+function taskUsesDataWorkspace(task) {
+  return [
+    "data_join",
+    "feature_analysis",
+    "modeling",
+    "strategy",
+    "vintage",
+    "portfolio",
+  ].includes(task?.task_type);
+}
+
 async function requestTaskSelection(task) {
   if (!task?.id) return false;
+  if (!taskUsesDataWorkspace(task)) {
+    dataWorkspacePanel.clear();
+    selectTask(task);
+    return true;
+  }
   try {
     return await dataWorkspacePanel.requestNavigation(async () => {
       selectTask(task);
@@ -4252,6 +4421,11 @@ function selectTask(task) {
   // still-revealing message from the previous task can't re-reveal (or worse,
   // leak its visible-prefix via shared messageId) on the new task's panel.
   resetAgentTypingState();
+  if (selectedTaskId !== task.id) {
+    invalidateAgentBatchAutoRun();
+    projectedValidationChildTaskId = "";
+    projectedValidationChildTask = null;
+  }
   selectedTaskId = task.id;
   selectedTask = task;
   rememberSelectedTaskId(task.id);
@@ -4266,9 +4440,11 @@ function selectTask(task) {
   runAction(async () => {
     try {
       renderTaskList();
-      await loadTaskEvidence();
-      await loadReportFields();
-      await loadAgentMessages(task.id);
+      if (!usesAgentValidationWorkbench(task)) {
+        await loadTaskEvidence();
+        await loadReportFields();
+        await loadAgentMessages(task.id);
+      }
       await validationBatchLoadPromise;
       await candidateLabLoadPromise;
     } finally {
@@ -4277,14 +4453,18 @@ function selectTask(task) {
       validationBatchPanelController.focusRequestedItem();
       finishTaskContentLoad(task.id);
     }
+    maybeResumeAgentValidationBatch();
   }, { renderAfter: false });
 }
 
 function deselectCurrentTask() {
+  invalidateAgentBatchAutoRun();
   rememberResultScrollPosition();
   clearTaskContentLoad();
   selectedTaskId = null;
   selectedTask = null;
+  projectedValidationChildTaskId = "";
+  projectedValidationChildTask = null;
   rememberSelectedTaskId(null);
   validationBatchPanelController.clear();
   dataWorkspacePanel.clear();
@@ -4435,7 +4615,9 @@ function renderScanResult(result, notebookCells = []) {
     `<div class="chip-row">${materialChecks}</div>`,
     preflightChecks,
   ].join("");
-  renderValidationInputContract(result.validation_input_contract || null);
+  renderValidationInputContract(result.validation_input_contract || null, {
+    taskId: workbenchTaskId(),
+  });
   updateAgentScanSectionVisibility();
   renderNotebookSteps(result.notebook_steps || [], result.notebook_cells || notebookCells);
 }
@@ -4485,7 +4667,7 @@ function validationContractScalar(value) {
 }
 
 function renderValidationInputContract(record, options = {}) {
-  const taskId = String(options.taskId || selectedTaskId || "");
+  const taskId = String(options.taskId || workbenchTaskId() || selectedTaskId || "");
   const parentTaskId = String(options.parentTaskId || "");
   const item = options.item || null;
   const panelId = options.panelId || (
@@ -4496,7 +4678,7 @@ function renderValidationInputContract(record, options = {}) {
   const batchMode = Boolean(parentTaskId);
   const matchesWorkspace = batchMode
     ? selectedTaskId === parentTaskId && selectedTaskIsValidationBatch()
-    : usesPmmlScoringWorkflow();
+    : usesPmmlScoringWorkflow() && isWorkbenchTaskId(taskId);
   if (!record || !matchesWorkspace) {
     panel.classList.add("hidden");
     panel.innerHTML = "";
@@ -4541,9 +4723,7 @@ function renderValidationInputContract(record, options = {}) {
   }
   const contract = record.contract || {};
   const timeField = validationContractCandidates(contract, "time_col")[0] || "";
-  const timeGranularity = batchMode
-    ? ""
-    : /date|day|dt/i.test(String(timeField)) ? "date" : "month";
+  const timeGranularity = /date|day|dt/i.test(String(timeField)) ? "date" : "month";
   const algorithm = validationContractCandidates(contract, "algorithm")[0]
     || contract.pmml_manifest?.algorithm
     || "-";
@@ -4552,12 +4732,12 @@ function renderValidationInputContract(record, options = {}) {
     ` data-validation-contract-parent-task-id="${escapeHtml(parentTaskId)}"`,
     ` data-validation-contract-panel-id="${escapeHtml(panelId)}"`,
   ].join("");
-  const explicitChoice = { requireExplicit: batchMode };
+  const explicitChoice = { requireExplicit: false };
   panel.innerHTML = [
     `<form id="validationContractForm"${formContextAttributes}>`,
     batchHead,
     batchMode
-      ? `<p>已从此模型的 Notebook、PMML、样本和数据字典识别候选。算法：${escapeHtml(algorithm)}。请逐项主动选择并提交；平台不会自动选择或确认。</p>`
+      ? `<p>已从此模型的 Notebook、PMML、样本和数据字典识别候选。算法：${escapeHtml(algorithm)}。无冲突时请在对话里回复「都按这个」；某个模型要改列时指出模型名和字段。表单可展开核对。</p>`
       : `<p>已从 Notebook、PMML、样本和数据字典识别候选。算法：${escapeHtml(algorithm)}。请确认后继续。</p>`,
     '<div class="validation-contract-grid">',
     validationContractSelectHtml(contract, "target_col", "目标字段", explicitChoice),
@@ -4568,7 +4748,7 @@ function renderValidationInputContract(record, options = {}) {
     '<label>测试集取值<input name="split_test" value="test" /></label>',
     '<label>时间外样本取值<input name="split_oot" value="oot" /></label>',
     validationContractSelectHtml(contract, "time_col", "时间字段", explicitChoice),
-    `<label>时间粒度<select name="time_granularity"${batchMode ? " required" : ""}>${batchMode ? '<option value="" selected disabled>请选择时间粒度</option>' : ""}<option value="date"${timeGranularity === "date" ? " selected" : ""}>日</option><option value="month"${timeGranularity === "month" ? " selected" : ""}>月</option></select></label>`,
+    `<label>时间粒度<select name="time_granularity"><option value="date"${timeGranularity === "date" ? " selected" : ""}>日</option><option value="month"${timeGranularity === "month" ? " selected" : ""}>月</option></select></label>`,
     validationContractSelectHtml(contract, "pmml_output_field", "PMML 分数字段", explicitChoice),
     validationContractSelectHtml(contract, "model_params", "模型参数来源", explicitChoice),
     validationContractSelectHtml(contract, "feature_metadata_selection", "特征元数据列", explicitChoice),
@@ -4584,7 +4764,7 @@ function renderValidationInputContract(record, options = {}) {
   }
 }
 
-async function loadValidationInputContract(taskId = selectedTaskId, options = {}) {
+async function loadValidationInputContract(taskId = workbenchTaskId(), options = {}) {
   const parentTaskId = String(options.parentTaskId || "");
   const batchMode = Boolean(parentTaskId);
   if (!taskId || (!batchMode && !usesPmmlScoringWorkflow())) return null;
@@ -4601,7 +4781,7 @@ async function loadValidationInputContract(taskId = selectedTaskId, options = {}
     if (batchMode) {
       if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return null;
       renderValidationInputContract(record, renderOptions);
-    } else if (selectedTaskId === taskId) {
+    } else if (isWorkbenchTaskId(taskId)) {
       renderValidationInputContract(record, renderOptions);
     }
     return record;
@@ -4622,7 +4802,7 @@ async function loadValidationInputContract(taskId = selectedTaskId, options = {}
 
 async function submitValidationInputContract(form) {
   const record = latestValidationInputContract;
-  const taskId = form.dataset.validationContractTaskId || selectedTaskId;
+  const taskId = form.dataset.validationContractTaskId || workbenchTaskId() || selectedTaskId;
   const parentTaskId = form.dataset.validationContractParentTaskId || "";
   const context = latestValidationInputContractContext || {};
   if (
@@ -4633,7 +4813,7 @@ async function submitValidationInputContract(form) {
   ) return;
   if (parentTaskId) {
     if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;
-  } else if (selectedTaskId !== taskId) {
+  } else if (!isWorkbenchTaskId(taskId)) {
     return;
   }
   const contract = record.contract || {};
@@ -4699,22 +4879,16 @@ async function submitValidationInputContract(form) {
       const modelLabel = [context.item?.modelName, context.item?.modelVersion]
         .filter(Boolean)
         .join(" · ");
-      if (remaining > 0) {
-        setActionStatus(
-          `${modelLabel || "当前模型"}合同已确认，还有 ${remaining} 个模型需要确认。`,
-          "success",
-          "请继续点击其他待确认模型的“确认合同”。",
-        );
-      } else {
-        setActionStatus(
-          "当前批次所有待确认合同均已确认。",
-          "success",
-          "请点击“逐项确认合同后继续”，平台不会自动启动批次。",
-        );
-      }
+      setActionStatus(
+        remaining > 0
+          ? `${modelLabel || "当前模型"}字段已确认，正在继续自动审查。`
+          : "字段已确认，正在继续自动审查。",
+        "success",
+      );
+      await continueAgentValidationBatch({ resumeChildId: taskId });
       return;
     }
-    if (selectedTaskId !== taskId) return;
+    if (!isWorkbenchTaskId(taskId)) return;
     renderValidationInputContract(confirmed, { taskId });
     setActionStatus("验证字段已确认，正在继续 PMML 打分测试。", "success");
     if (selectedTaskIsAgentMode()) {
@@ -5088,18 +5262,18 @@ function renderEvidence(evidence = {}) {
   }
 }
 
-async function loadTaskEvidence(taskId = selectedTaskId) {
-  if (!taskId) {
+async function loadTaskEvidence(taskId = workbenchTaskId()) {
+  if (!taskId || (usesAgentValidationWorkbench(selectedTask) && taskId === selectedTaskId)) {
     resetEvidenceSummaries();
     return;
   }
   try {
     const evidence = await api(`/api/tasks/${taskId}/evidence`);
-    if (selectedTaskId !== taskId) return;
+    if (!isWorkbenchTaskId(taskId)) return;
     renderEvidence(evidence || {});
     await loadValidationInputContract(taskId);
   } catch (_) {
-    if (selectedTaskId === taskId && !notebookReproducibilityComplete(selectedTask)) {
+    if (isWorkbenchTaskId(taskId) && !notebookReproducibilityComplete(workbenchTask())) {
       resetEvidenceSummaries();
     }
   }
@@ -5124,10 +5298,6 @@ function scanSummaryHasResult() {
 function updateAgentScanSectionVisibility() {
   const scanSection = $("scanSection");
   if (!scanSection) return;
-  if (selectedTaskIsValidationBatch()) {
-    scanSection.classList.add("hidden");
-    return;
-  }
   // Driver tasks (data_join / feature / modeling) never use the validation
   // scan→notebook→metrics flow — they drive everything through the conversation +
   // plan rail. Hide the scan section entirely so a manual driver task doesn't show
@@ -5136,7 +5306,7 @@ function updateAgentScanSectionVisibility() {
     scanSection.classList.add("hidden");
     return;
   }
-  if (!selectedTaskIsAgentMode()) {
+  if (!selectedTaskIsAgentMode(workbenchTask())) {
     scanSection.classList.remove("hidden");
     return;
   }
@@ -5486,6 +5656,7 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
     }
     return "";
   })();
+  const latestPendingDraftId = latestPendingReportDraftMessageId(messages);
   let previousAssistantLabel = "";
   const skeleton = messages.map((message) => {
     const role = message?.role === "user" ? "user" : "assistant";
@@ -5539,6 +5710,16 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
         gate_actionable: (metadata.kind === "gate" || metadata.join_c1)
           ? driverGateMessageIsActionable(message)
           : false,
+        report_draft: message?.stage === "word_conclusion_draft"
+          ? {
+            keys: hasReportDraftValues(metadata.draft_values)
+              ? Object.keys(metadata.draft_values).sort().join(",")
+              : "",
+            editable: Boolean(latestPendingDraftId)
+              && String(message?.id || "") === latestPendingDraftId,
+            revision: metadata.report_revision ?? "",
+          }
+          : null,
         memory_references: Array.isArray(metadata.memory_references)
           ? metadata.memory_references.map((reference) => [
             reference.id || "",
@@ -6564,6 +6745,82 @@ function driverConfirmControllerContext() {
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleDriverConfirmClick);
+  document.addEventListener("click", handleReportDraftConfirmClick);
+}
+
+function handleReportDraftConfirmClick(event) {
+  const button = event.target?.closest?.("[data-report-draft-confirm]");
+  if (!button || button.disabled) return;
+  event.preventDefault();
+  void submitVisibleReportDraft(button);
+}
+
+async function submitVisibleReportDraft(button) {
+  const table = button.closest("[data-report-draft-table]");
+  const taskId = workbenchTaskId();
+  if (!table || !taskId) return;
+  const revision = Number(table.dataset.reportRevision);
+  const textValues = collectReportDraftValues(table);
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "正在生成报告…";
+  setBusy("report_confirm", "正在生成报告…", taskId);
+  try {
+    const result = await api(`api/tasks/${encodeURIComponent(taskId)}/agent/report-draft/confirm`, {
+      method: "POST",
+      body: {
+        revision: Number.isFinite(revision) ? revision : 0,
+        text_values: textValues,
+      },
+    });
+    if (Array.isArray(result?.messages)) agentMessages = result.messages;
+    renderAgentConversation();
+    await pollAgentMessagesUntilSettled(taskId, Promise.resolve());
+    await refreshTasks();
+    setActionStatus("报告结论已确认，正在生成 Word 和 Excel…", "busy");
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = originalLabel || "确认并生成报告";
+    setActionStatus("确认报告失败", "error", error?.message || "");
+  } finally {
+    setBusy(null, "", taskId);
+  }
+}
+
+async function confirmAllValidationBatchReportDrafts({ parentTaskId } = {}) {
+  const parentId = String(parentTaskId || selectedTaskId || "").trim();
+  if (!parentId) return;
+  const currentTable = document.querySelector(
+    "[data-report-draft-table][data-report-draft-editable='true']",
+  );
+  const overrides = {};
+  const childId = workbenchTaskId();
+  if (currentTable && childId) {
+    const revision = Number(currentTable.dataset.reportRevision);
+    overrides[childId] = {
+      revision: Number.isFinite(revision) ? revision : 0,
+      text_values: collectReportDraftValues(currentTable),
+    };
+  }
+  setBusy("report_confirm_all", "正在生成全部报告…", parentId);
+  try {
+    await api(`api/validation-batches/${encodeURIComponent(parentId)}/report-drafts/confirm-all`, {
+      method: "POST",
+      body: { overrides },
+    });
+    setActionStatus("已确认全部报告草稿，正在生成 Word、Excel 和汇总文档…", "busy");
+    const currentChildId = workbenchTaskId();
+    if (currentChildId) {
+      await loadAgentMessages(currentChildId);
+      await pollAgentMessagesUntilSettled(currentChildId, Promise.resolve());
+    }
+    await refreshTasks();
+  } catch (error) {
+    setActionStatus("全部确认失败", "error", error?.message || "");
+    throw error;
+  } finally {
+    setBusy(null, "", parentId);
+  }
 }
 
 function handleDriverReportDownloadClick(event) {
@@ -6804,10 +7061,15 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     : `agent-message assistant${isGate ? " has-gate" : ""}${conversationOnly ? " conversation-only-gate" : ""}${isStrategyClarification ? " has-strategy-clarification" : ""}${hasWorkflowError ? " has-workflow-error" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
+  const draftValues = message?.metadata?.draft_values;
+  const hasDraftTable = role === "assistant"
+    && message?.stage === "word_conclusion_draft"
+    && hasReportDraftValues(draftValues)
+    && !thinking;
   const visibleContent = role === "assistant" && agentGateUsesConversationOnly(options)
     ? normalizeAgentConversationGateContent(agentVisibleContent(message))
     : agentVisibleContent(message);
-  const legacyContentHtml = thinking
+  const legacyContentHtml = thinking || hasDraftTable
     ? ""
     : formatAgentMessageContent(visibleContent, { markdown: role === "assistant" });
   const contentHtml = thinking
@@ -6819,6 +7081,13 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     ? agentMemoryReferencesHtml(message?.metadata?.memory_references)
     : "";
   const messageId = message?.id ? String(message.id) : "";
+  const reportDraftHtml = hasDraftTable
+    ? reportDraftTableHtml(draftValues, {
+      editable: Boolean(options.isLatestPendingReportDraft),
+      revision: message?.metadata?.report_revision,
+      messageId,
+    })
+    : "";
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
   const stageAttr = message?.stage
     ? ` data-agent-stage="${escapeHtml(String(message.stage))}"`
@@ -6836,7 +7105,8 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     && Boolean(messageId)
     && messageId === lastAssistantMessageIdController(agentMessages);
   const rawBodyHtml = [
-    `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
+    `<div class="agent-message-content${hasDraftTable ? " hidden" : ""}" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
+    reportDraftHtml,
     isStrategyClarification
       ? agentMessageStrategyClarificationBodyHtml(message, clarificationInteractive)
       : "",
@@ -6927,8 +7197,12 @@ function mergeIncrementalAgentMessages(nextMessages = []) {
   return true;
 }
 
-async function loadAgentMessages(taskId = selectedTaskId, { preserveOptimistic = false } = {}) {
-  const messageTask = findTaskInCache(taskId) || selectedTask;
+async function loadAgentMessages(taskId = workbenchTaskId(), { preserveOptimistic = false } = {}) {
+  const messageTask = (
+    (taskId === projectedValidationChildTaskId && projectedValidationChildTask)
+    || findTaskInCache(taskId)
+    || selectedTask
+  );
   // Driver tasks have a conversation in manual mode too (controls, no LLM).
   const hasConversation = selectedTaskIsAgentMode(messageTask) || taskUsesPlanRail(messageTask);
   if (!taskId || !hasConversation) {
@@ -6940,7 +7214,7 @@ async function loadAgentMessages(taskId = selectedTaskId, { preserveOptimistic =
   const lastMessageId = useIncremental ? agentMessages[agentMessages.length - 1]?.id : "";
   const suffix = lastMessageId ? `?after_id=${encodeURIComponent(lastMessageId)}` : "";
   const payload = await api(`api/tasks/${taskId}/agent/messages${suffix}`);
-  if (selectedTaskId !== taskId) return;
+  if (!isWorkbenchTaskId(taskId)) return;
   const nextMessages = payload.messages || [];
   if (payload.incremental) {
     if (mergeIncrementalAgentMessages(nextMessages)) renderAgentConversation();
@@ -6995,13 +7269,13 @@ async function pollAgentMessagesUntilSettled(taskId, pendingPromise, { preserveO
     () => { settled = true; resolveSettlement("settled"); },
     () => { settled = true; resolveSettlement("settled"); },
   );
-  while (!settled && selectedTaskId === taskId) {
+  while (!settled && isWorkbenchTaskId(taskId)) {
     const delay = agentStreamPollDelay(unchangedForMs);
     const wakeReason = await Promise.race([
       sleep(delay).then(() => "poll"),
       settlementSignal,
     ]);
-    if (wakeReason === "settled" || settled || selectedTaskId !== taskId) break;
+    if (wakeReason === "settled" || settled || !isWorkbenchTaskId(taskId)) break;
     try {
       await loadAgentMessages(taskId, { preserveOptimistic });
       const nextSignature = agentMessagePollSignature();
@@ -7042,7 +7316,7 @@ async function handleAgentMaterialSelectionRequest(taskId) {
 }
 
 async function startAgentValidation() {
-  const taskId = selectedTaskId;
+  const taskId = workbenchTaskId();
   if (!taskId) return;
   const input = $("agentComposerInput");
   const originalValue = input.value;
@@ -7170,11 +7444,13 @@ async function dispatchAgentValidation(taskId = selectedTaskId) {
   });
   agentMessages = result.messages || agentMessages;
   renderAgentConversation();
-  if (result.status !== "accepted") return;
+  if (result.status !== "accepted") return result;
   await waitForAgentValidation(normalizedTaskId);
+  return result;
 }
 
-async function stopAgentValidation(taskId = selectedTaskId) {
+async function stopAgentValidation(taskId = workbenchTaskId()) {
+  invalidateAgentBatchAutoRun();
   const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "Agent 停止");
   const controller = agentRequestAbortControllers.get(normalizedTaskId);
   if (controller) controller.abort();
@@ -7191,7 +7467,8 @@ async function stopAgentValidation(taskId = selectedTaskId) {
   setActionStatus(result.message || "已停止当前动作，请问有什么指示？", "success");
 }
 
-async function stopAgentValidationByMessage(content, taskId = selectedTaskId) {
+async function stopAgentValidationByMessage(content, taskId = workbenchTaskId()) {
+  invalidateAgentBatchAutoRun();
   const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "Agent 停止");
   const text = String(content || "").trim();
   if (!agentComposerStopIntent(text)) {
@@ -7222,29 +7499,40 @@ async function waitForAgentValidation(taskId, { stopping = false } = {}) {
   const busyText = stopping ? "Agent 正在停止..." : "Agent 正在执行验证...";
   setBusy("agent", busyText, taskId);
   setActionStatus(busyText, "busy");
-  const progressPromise = pollValidationProgress(
-    new Set(["scanned", "executed", "writing_artifacts", "failed", "succeeded", "review_required"]),
-    taskId,
-    { stopping, settleWhenServerIdle: true },
-  );
-  const streamPollPromise = pollAgentMessagesUntilSettled(taskId, progressPromise);
-  const finalTask = await progressPromise;
-  await streamPollPromise;
-  if (selectedTaskId !== taskId) return;
-  await loadAgentMessages(taskId);
-  await loadReportFields(taskId);
-  if (stopping || agentValidationStopped(finalTask || selectedTask)) {
-    setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
-    return;
-  }
-  if (agentValidationPaused(finalTask || selectedTask)) {
-    setActionStatus("当前阶段已完成，等待你的下一步指令。", "success");
-    return;
-  }
-  if (finalTask?.status === "failed" || selectedTask?.status === "failed") {
-    setTaskFailureActionStatus(finalTask || selectedTask);
-  } else {
-    setActionStatus("Agent 已完成当前处理。", "success");
+  try {
+    const progressPromise = pollValidationProgress(
+      new Set(["scanned", "executed", "writing_artifacts", "failed", "succeeded", "review_required"]),
+      taskId,
+      { stopping, settleWhenServerIdle: true },
+    );
+    const streamPollPromise = pollAgentMessagesUntilSettled(taskId, progressPromise);
+    const finalTask = await progressPromise;
+    await streamPollPromise;
+    if (isWorkbenchTaskId(taskId)) {
+      await loadAgentMessages(taskId);
+      await loadReportFields(taskId);
+      if (stopping || agentValidationStopped(finalTask || workbenchTask())) {
+        setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
+        return finalTask;
+      }
+      if (agentValidationPaused(finalTask || workbenchTask())) {
+        setActionStatus("当前阶段已完成，等待你的下一步指令。", "success");
+        return finalTask;
+      }
+      if (finalTask?.status === "failed" || selectedTask?.status === "failed") {
+        setTaskFailureActionStatus(finalTask || selectedTask);
+      } else {
+        setActionStatus("Agent 已完成当前处理。", "success");
+      }
+    }
+    return finalTask;
+  } finally {
+    // Contract auto-continue nests startAgentValidation inside a parent-scoped
+    // runAction. That outer finally only clears the parent, so the child busy
+    // flag set here must be released or the composer stays in stop mode.
+    if (taskBusyAction(taskId) === "agent") {
+      setBusy(null, "", taskId);
+    }
   }
 }
 
@@ -7257,8 +7545,148 @@ function agentValidationPaused(task) {
   return ["scanned", "executed", "writing_artifacts", "review_required"].includes(status);
 }
 
+function invalidateAgentBatchAutoRun() {
+  agentBatchAutoRunGeneration += 1;
+}
+
+function maybeResumeAgentValidationBatch() {
+  if (!usesAgentValidationWorkbench(selectedTask)) return;
+  void continueAgentValidationBatch();
+}
+
+function agentBatchChildIsTerminal(task) {
+  return ["succeeded", "failed", "cancelled"].includes(
+    String(task?.status || "").toLowerCase(),
+  );
+}
+
+function agentBatchAutoRunIsFinished(payload) {
+  const parentStatus = String(payload?.status || "").toLowerCase();
+  if (["completed", "succeeded", "failed", "cancelled"].includes(parentStatus)) {
+    return true;
+  }
+  const items = payload?.items || [];
+  if (!items.length) return true;
+  return items.every((item) => {
+    const status = String(item.status || "").toLowerCase();
+    if (["succeeded", "failed", "cancelled"].includes(status)) return true;
+    return status === "review_required" && Boolean(item.reportComplete);
+  });
+}
+
+async function agentBatchChildNeedsInputConfirmation(childId) {
+  try {
+    const record = await api(
+      `/api/tasks/${encodeURIComponent(childId)}/validation-input-contract`,
+    );
+    return record?.status === "pending_confirmation" || record?.status === "blocked";
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function continueAgentValidationBatch({ resumeChildId = "" } = {}) {
+  if (!usesAgentValidationWorkbench(selectedTask)) return;
+  if (agentBatchAutoRunPromise) return agentBatchAutoRunPromise;
+  const run = runContinueAgentValidationBatch({ resumeChildId });
+  const tracked = run.finally(() => {
+    if (agentBatchAutoRunPromise === tracked) agentBatchAutoRunPromise = null;
+  });
+  agentBatchAutoRunPromise = tracked;
+  return agentBatchAutoRunPromise;
+}
+
+async function runContinueAgentValidationBatch({ resumeChildId = "" } = {}) {
+  const generation = agentBatchAutoRunGeneration;
+  const parentId = selectedTaskId;
+  if (!parentId || !usesAgentValidationWorkbench(selectedTask)) return;
+  agentAcceptanceMode = "auto_accept";
+  renderAgentAcceptanceModePreference();
+  let payload;
+  try {
+    await validationBatchPanelController.selectTask(selectedTask, { force: true });
+    const raw = await api(`api/validation-batches/${encodeURIComponent(parentId)}`);
+    payload = normalizeValidationBatchPayload(raw, parentId);
+  } catch (error) {
+    setActionStatus("读取多模型任务失败，无法自动审查。", "error", error?.message || "");
+    return;
+  }
+  if (generation !== agentBatchAutoRunGeneration || selectedTaskId !== parentId) return;
+  if (agentBatchAutoRunIsFinished(payload)) return;
+  const items = [...(payload.items || [])].sort((left, right) => left.ordinal - right.ordinal);
+  const resumeId = String(resumeChildId || "").trim();
+  let seenResume = !resumeId;
+  setActionStatus("正在按自动审查逐个执行模型验证…", "busy");
+  for (const item of items) {
+    if (generation !== agentBatchAutoRunGeneration || selectedTaskId !== parentId) return;
+    const childId = item.childTaskId;
+    if (!childId) continue;
+    if (!seenResume) {
+      if (childId === resumeId) seenResume = true;
+      else continue;
+    }
+    let child;
+    try {
+      child = await api(`api/tasks/${encodeURIComponent(childId)}`);
+    } catch (error) {
+      setActionStatus(
+        `${item.modelName || "当前模型"}读取失败，自动审查已停下。`,
+        "error",
+        error?.message || "",
+      );
+      return;
+    }
+    if (agentBatchChildIsTerminal(child)) continue;
+    if (typeof validationBatchPanelController.selectChild === "function") {
+      validationBatchPanelController.selectChild(childId);
+    }
+    await applyProjectedValidationChild(childId, { force: true });
+    if (generation !== agentBatchAutoRunGeneration || selectedTaskId !== parentId) return;
+    const modelLabel = [item.modelName, item.modelVersion].filter(Boolean).join(" · ")
+      || "当前模型";
+    setActionStatus(`正在自动审查：${modelLabel}`, "busy");
+    if (child.active_job_kind) {
+      await waitForAgentValidation(childId);
+    } else {
+      const result = await dispatchAgentValidation(childId);
+      if (result?.status === "awaiting_confirmation") {
+        setActionStatus(
+          `${modelLabel}字段有歧义，请确认后再继续自动审查。`,
+          "success",
+        );
+        return;
+      }
+    }
+    if (generation !== agentBatchAutoRunGeneration || selectedTaskId !== parentId) return;
+    let latest = child;
+    try {
+      latest = await api(`api/tasks/${encodeURIComponent(childId)}`);
+    } catch (_error) {
+      latest = child;
+    }
+    if (
+      !agentBatchChildIsTerminal(latest)
+      && await agentBatchChildNeedsInputConfirmation(childId)
+    ) {
+      setActionStatus(
+        `${modelLabel}字段有歧义，请确认后再继续自动审查。`,
+        "success",
+      );
+      return;
+    }
+    try {
+      await validationBatchPanelController.selectTask(selectedTask, { force: true });
+    } catch (_error) {
+      // Switcher refresh is presentational.
+    }
+  }
+  if (generation !== agentBatchAutoRunGeneration || selectedTaskId !== parentId) return;
+  setActionStatus("自动审查已完成全部模型。", "success");
+}
+
 function prefillAgentTaskInstruction(task) {
   if (task?.run_mode !== "agent") return;
+  if (usesAgentValidationWorkbench(task)) return;
   const input = $("agentComposerInput");
   if (!input || input.value.trim()) return;
   const definition = taskTypeDefinition(task.task_type || createTaskDialog.activeTaskType());
@@ -7370,6 +7798,12 @@ async function createTaskAndScan() {
     task = await ensureValidationMaterialSelection(task);
     if (!task) return;
     const isValidationTask = (task.task_type || createTaskDialog.activeTaskType() || defaultTaskType) === "validation";
+    if (usesAgentValidationWorkbench(task)) {
+      await requestTaskSelection(task);
+      setActionStatus("正在按自动审查逐个执行模型验证…", "busy");
+      await continueAgentValidationBatch();
+      return;
+    }
     if (task.run_mode === "agent") {
       const taskId = task.id || selectedTaskId;
       const activeDialogTaskType = createTaskDialog.activeTaskType();
@@ -7469,14 +7903,26 @@ async function pollValidationProgress(
       await sleep(1000);
       if (pollState.cancelled) return null;
       await refreshTasks();
-      const polledTask = findTaskInCache(taskId);
+      let polledTask = findTaskInCache(taskId);
+      if (!polledTask && isWorkbenchTaskId(taskId) && taskId !== selectedTaskId) {
+        try {
+          polledTask = await api(`api/tasks/${encodeURIComponent(taskId)}`);
+        } catch (_error) {
+          polledTask = null;
+        }
+      }
       if (!polledTask) return null;
-      if (selectedTaskId === taskId) {
+      if (taskId === projectedValidationChildTaskId) {
+        projectedValidationChildTask = polledTask;
+      }
+      if (isWorkbenchTaskId(taskId)) {
         await loadTaskEvidence(taskId);
         if (metricOverviewComplete(polledTask) && !currentMetricPreviewHasValues(taskId)) {
           await loadReportFields(taskId);
         }
-        if (selectedTaskIsAgentMode(polledTask)) await loadAgentMessages(taskId);
+        if (selectedTaskIsAgentMode(polledTask) || usesAgentValidationWorkbench(selectedTask)) {
+          await loadAgentMessages(taskId);
+        }
         renderChangedValidationViews();
       } else {
         renderTaskList();
@@ -7488,7 +7934,7 @@ async function pollValidationProgress(
       const settledOnServerIdle = settleWhenServerIdle && !serverBusyAction;
       const reachedTerminalStatus = doneStatuses.has(status) && !serverBusyAction;
       if (stopping && !serverBusyAction) {
-        if (selectedTaskId === taskId && !background) {
+        if (isWorkbenchTaskId(taskId) && !background) {
           setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
         }
       }
@@ -7498,7 +7944,7 @@ async function pollValidationProgress(
       // it is gone, return control to the composer instead of polling the stale
       // pre-stage status for an hour.
       if (!stopped && !settledOnServerIdle && reachedTerminalStatus) {
-        if (selectedTaskId === taskId && !background) {
+        if (isWorkbenchTaskId(taskId) && !background) {
           if (status === "failed" || status === "review_required") {
             setTaskFailureActionStatus(polledTask);
           } else {
@@ -7521,7 +7967,7 @@ async function pollValidationProgress(
       // between two sources every second.
 
       if (Date.now() - startedAt > timeoutMs) {
-        if (selectedTaskId === taskId && !background) {
+        if (isWorkbenchTaskId(taskId) && !background) {
           setActionStatus("验证仍在后台运行，请稍后刷新查看结果。", "error");
         }
         return polledTask;
@@ -7634,13 +8080,13 @@ async function generateMetrics() {
   }
 }
 
-async function loadReportFields(taskId = selectedTaskId) {
-  if (!taskId) {
+async function loadReportFields(taskId = workbenchTaskId()) {
+  if (!taskId || (usesAgentValidationWorkbench(selectedTask) && taskId === selectedTaskId)) {
     renderMetricPreview({});
     return;
   }
   const payload = await api(`api/tasks/${taskId}/report-fields`);
-  if (selectedTaskId !== taskId) return;
+  if (!isWorkbenchTaskId(taskId)) return;
   renderMetricPreview(
     payload.metric_values || {},
     payload.workbook_source,
@@ -7664,13 +8110,15 @@ async function generateReport() {
 }
 
 function downloadWordReport() {
-  if (!selectedTaskId) return;
-  window.location.href = `api/tasks/${selectedTaskId}/report/download`;
+  const taskId = workbenchTaskId();
+  if (!taskId) return;
+  window.location.href = `api/tasks/${taskId}/report/download`;
 }
 
 function downloadExcelAnalysis() {
-  if (!selectedTaskId) return;
-  window.location.href = `api/tasks/${selectedTaskId}/analysis/download`;
+  const taskId = workbenchTaskId();
+  if (!taskId) return;
+  window.location.href = `api/tasks/${taskId}/analysis/download`;
 }
 
 function previewWordReport() {
@@ -8052,6 +8500,15 @@ $("taskSearchToggle").onclick = toggleTaskSearch;
 $("taskSearchClose").onclick = () => closeTaskSearch({ focusToggle: true });
 $("searchScrim").onclick = () => closeTaskSearch({ focusToggle: true });
 $("taskList").addEventListener("click", () => closeTaskSearch());
+bindTaskRowPreview({
+  list: $("taskList"),
+  preview: $("taskRowPreview"),
+  sidebar: document.querySelector(".task-sidebar"),
+  getTask: (taskId) => taskCache.find((task) => task.id === taskId) || null,
+  displayName: taskDisplayName,
+  typeLabel: taskTypeLabel,
+  ownerLabel: (task) => taskTypeDefinition(task.task_type).validatorLabel || "负责人",
+});
 $("settingsMenu").onchange = handleSettingsMenuChange;
 $("agentMemoryList").addEventListener("click", handleAgentMemoryListClick);
 document.addEventListener("click", handleAgentMemoryInlineInspect);
@@ -8175,10 +8632,18 @@ $("riskMaterialUploadInput").addEventListener("change", (event) => {
 });
 $("sendAgentMessageButton").onclick = () => {
   if (agentSendIsStopMode()) {
-    runAction(stopAgentValidation, { actionId: "agent", busyText: "Agent 正在停止..." });
+    runAction(stopAgentValidation, {
+      actionId: "agent",
+      busyText: "Agent 正在停止...",
+      taskId: workbenchTaskId(),
+    });
     return;
   }
-  runAction(startAgentValidation, { actionId: "agent", busyText: "Agent 正在处理..." });
+  runAction(startAgentValidation, {
+    actionId: "agent",
+    busyText: "Agent 正在处理...",
+    taskId: workbenchTaskId(),
+  });
 };
 $("agentComposerInput").addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
@@ -8196,7 +8661,11 @@ $("agentComposerInput").addEventListener("keydown", (event) => {
     return;
   }
   if ($("sendAgentMessageButton")?.disabled) return;
-  runAction(startAgentValidation, { actionId: "agent", busyText: "Agent 正在处理..." });
+  runAction(startAgentValidation, {
+    actionId: "agent",
+    busyText: "Agent 正在处理...",
+    taskId: workbenchTaskId(),
+  });
 });
 $("agentComposerInput").addEventListener("input", () => {
   autoGrowComposerInput();
@@ -8212,7 +8681,10 @@ function autoGrowComposerInput() {
 }
 
 function agentSendIsStopMode() {
-  return Boolean(selectedTaskIsAgentMode() && taskBusyAction(selectedTaskId) === "agent");
+  return Boolean(selectedTaskIsAgentMode() && (
+    taskBusyAction(selectedTaskId) === "agent"
+    || taskBusyAction(workbenchTaskId()) === "agent"
+  ));
 }
 
 function agentComposerStopIntent(value) {
@@ -8339,6 +8811,8 @@ selectedTaskId = preferredStartupTaskId(
   storedSelectedTaskId(),
 ) || null;
 restoreSelectedTaskPlaceholder();
+if (selectedTaskId) rememberSelectedTaskId(selectedTaskId);
+else rememberSelectedTaskId(null);
 renderCurrentTask({ force: true });
 renderMetricPreview({});
 renderStoredStateSummaries();
@@ -8358,6 +8832,7 @@ function finishAppBoot() {
 }
 
 async function initializeApp() {
+  let ready = false;
   try {
     await refreshTasks();
     await reloadDataWorkspace(selectedTaskId, { silent: true });
@@ -8369,6 +8844,7 @@ async function initializeApp() {
     await loadAgentMessages();
     await validationBatchLoadPromise;
     await candidateLabLoadPromise;
+    ready = true;
   } catch (error) {
     const detail = error?.message || "";
     setActionStatus("服务连接失败，请检查后端是否运行。", "error", detail);
@@ -8379,4 +8855,5 @@ async function initializeApp() {
     validationBatchPanelController.focusRequestedItem();
     finishAppBoot();
   }
+  if (ready) maybeResumeAgentValidationBatch();
 }

@@ -47,12 +47,7 @@ def extract_model_experience(result: dict[str, Any]) -> MemoryCandidate | None:
 
     candidate = MemoryCandidate(
         memory_type="model_experience",
-        summary=(
-            f"{payload['model_name']}{payload['model_version']}在{payload['month']}"
-            f"{payload['channel']}渠道KS为{_metric_display(payload['ks'])}，"
-            f"AUC为{_metric_display(payload['auc'])}，"
-            f"PSI为{_metric_display(payload['psi'])}。"
-        ),
+        summary=_model_experience_summary(payload),
         payload=payload,
         source_task_id=str(payload["source_task_id"]),
         confidence="high",
@@ -614,6 +609,25 @@ def _bounded_risk_text(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
+def _model_experience_summary(payload: dict[str, Any]) -> str:
+    summary = (
+        f"{payload['model_name']}{payload['model_version']}在{payload['month']}"
+        f"{payload['channel']}渠道KS为{_metric_display(payload['ks'])}，"
+        f"AUC为{_metric_display(payload['auc'])}，"
+        f"PSI为{_metric_display(payload['psi'])}。"
+    )
+    if payload.get("overfitting_status") == "fail":
+        summary += "过拟合检查未通过。"
+    head_lift = payload.get("head_lift_5pct")
+    tail_lift = payload.get("tail_lift_5pct")
+    if not _is_missing(head_lift) and not _is_missing(tail_lift):
+        summary += (
+            f"头部5% lift {_metric_display(head_lift)}，"
+            f"尾部5% lift {_metric_display(tail_lift)}。"
+        )
+    return summary
+
+
 def _model_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
     metrics = result.get("metrics")
     if not isinstance(metrics, dict):
@@ -632,6 +646,10 @@ def _model_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
             result, metrics, "important_feature_sources", "feature_sources"
         ),
     }
+    for key in ("overfitting_status", "head_lift_5pct", "tail_lift_5pct"):
+        value = _first_value(result, metrics, key)
+        if not _is_missing(value):
+            payload[key] = value
     if any(_is_missing(payload[field]) for field in MODEL_EXPERIENCE_REQUIRED_FIELDS):
         return None
     return payload

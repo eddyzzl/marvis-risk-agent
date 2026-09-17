@@ -105,6 +105,121 @@
   line-height: 1.78;
 }
 
+.report-draft-panel {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.report-draft-head {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.report-draft-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.report-draft-head p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.report-draft-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.report-draft-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.report-draft-table th,
+.report-draft-table td {
+  padding: 8px 12px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.report-draft-table tbody tr:last-child th,
+.report-draft-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.report-draft-table thead th {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  background: color-mix(in srgb, var(--border) 28%, var(--surface));
+}
+
+.report-draft-table tbody th {
+  width: 28%;
+  min-width: 132px;
+  font-weight: 600;
+}
+
+.report-draft-label {
+  display: block;
+  font-size: 13px;
+}
+
+.report-draft-key {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.report-draft-input,
+.report-draft-readonly {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.report-draft-input {
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--border) 18%, var(--surface));
+  resize: vertical;
+}
+
+.report-draft-input:hover,
+.report-draft-input:focus {
+  border-color: var(--accent, #343438);
+  outline: none;
+}
+
+.report-draft-readonly {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.report-draft-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--border);
+}
+
 /* Structured workflow recovery and failure messages. These are operational
    evidence, so they use flat, border-first surfaces rather than chat styling. */
 .workflow-error-card,
@@ -641,6 +756,11 @@ body[data-theme="dark"] .workflow-ingest-notice {
 
 .agent-markdown strong {
   color: var(--text);
+  font-weight: 800;
+}
+
+.agent-markdown .agent-finding-fail {
+  color: var(--danger-strong);
   font-weight: 800;
 }
 

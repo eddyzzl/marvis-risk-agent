@@ -2706,4 +2706,3 @@ def _invalidate_pending_strategy_request(
         # The clarification path must remain safe under a concurrent confirm or
         # cancel. The winning transition is already audited by the repository.
         return
-

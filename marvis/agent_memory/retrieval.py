@@ -20,6 +20,9 @@ MODEL_PAYLOAD_FIELDS = (
     "model_version",
     "scope",
     "important_feature_sources",
+    "overfitting_status",
+    "head_lift_5pct",
+    "tail_lift_5pct",
 )
 GENERAL_PAYLOAD_FIELDS = (
     "target_col",
@@ -45,6 +48,7 @@ MODEL_FAMILY_PATTERNS = (
     ("a_card", (r"\ba\s*card\b", r"a卡")),
     ("b_card", (r"\bb\s*card\b", r"b卡")),
     ("c_card", (r"\bc\s*card\b", r"c卡")),
+    ("t_card", (r"\bt\s*card\b", r"t卡")),
     ("amount", (r"\bamount\b", r"额度")),
     ("rate", (r"\brate\b", r"利率")),
     ("pre_screening", (r"\bpre[-_\s]?screening\b", r"前筛")),
@@ -58,6 +62,7 @@ class MemoryQuery:
     channel: str | None = None
     month: str | None = None
     keywords: tuple[str, ...] = ()
+    exclude_source_task_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,11 @@ def retrieve_relevant_memories(
     for entry in entries:
         record = _MemoryRecord(entry)
         if not _is_usable_memory(record):
+            continue
+        if (
+            query.exclude_source_task_ids
+            and record.source_task_id in query.exclude_source_task_ids
+        ):
             continue
         score, reasons = (
             _score_record(record, query)
@@ -510,6 +520,11 @@ def _query_from_context(query_context: dict[str, Any] | MemoryQuery) -> MemoryQu
         channel=_optional_text(query_context.get("channel")),
         month=_optional_text(query_context.get("month")),
         keywords=tuple(str(item) for item in query_context.get("keywords", ()) if str(item).strip()),
+        exclude_source_task_ids=tuple(
+            str(item)
+            for item in query_context.get("exclude_source_task_ids", ())
+            if str(item).strip()
+        ),
     )
 
 

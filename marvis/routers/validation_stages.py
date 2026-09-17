@@ -240,7 +240,11 @@ def run_task_report(
     except Exception as exc:
         fail_queued_job(repo, job_id, exc)
         raise
-    if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
+    if task.status not in {
+        TaskStatus.WRITING_ARTIFACTS,
+        TaskStatus.REVIEW_REQUIRED,
+        TaskStatus.SUCCEEDED,
+    }:
         repo.finish_job(job_id, status="failed")
         raise conflict(f"cannot generate report in status {task.status.value}")
     background_tasks.add_task(

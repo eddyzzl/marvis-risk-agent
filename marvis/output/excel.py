@@ -91,8 +91,17 @@ def write_validation_excel(
                 workbook,
                 f"分箱_{split}",
                 results.effectiveness.bin_tables.get(split, []),
-                first_header=f"{split}(独立分箱)",
+                first_header=f"{split}(按照train分箱)",
             )
+        independent = results.effectiveness.independent_quantile_bin_tables or {}
+        if any(independent.get(split) for split in ("train", "test", "oot")):
+            for split in ("train", "test", "oot"):
+                _write_bins(
+                    workbook,
+                    f"分箱_独立10等分_{split}",
+                    independent.get(split, []),
+                    first_header=f"{split}(独立10等分)",
+                )
         _write_monthly_effectiveness(workbook, results)
         _write_stress_summary(workbook, results)
         for category_result in results.stress_test.per_category:

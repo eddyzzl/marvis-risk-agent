@@ -35,6 +35,8 @@ from marvis.validation.results import (
 )
 from marvis.validation.time_periods import month_key_series
 
+INDEPENDENT_QUANTILE_BIN_COUNT = 10
+
 
 @dataclass(frozen=True)
 class EffectivenessContext:
@@ -96,6 +98,11 @@ def run_effectiveness(
             cancellation_check=cancellation_check,
         ),
         roc_ks_curves=compute_roc_ks_curves(
+            sample=sample,
+            config=config,
+            cancellation_check=cancellation_check,
+        ),
+        independent_quantile_bin_tables=compute_independent_quantile_bin_tables(
             sample=sample,
             config=config,
             cancellation_check=cancellation_check,
@@ -206,6 +213,34 @@ def compute_bin_tables(
         bin_tables[split_key] = _model_analysis_eval_table(
             rows_split,
             edges=context.edges,
+            score_col=score_col,
+            target_col=target_col,
+        )
+    return bin_tables
+
+
+def compute_independent_quantile_bin_tables(
+    *,
+    sample: pd.DataFrame,
+    config: ValidationConfig,
+    cancellation_check: Callable[[], None] | None = None,
+) -> dict[str, list]:
+    score_col = config.score_col
+    target_col = config.target_col
+    split_col = config.split_col
+    splits = config.split_values
+    bin_tables: dict[str, list] = {}
+    for split_key in ("train", "test", "oot"):
+        _check_cancelled(cancellation_check)
+        rows_split = sample[sample[split_col] == splits[split_key]]
+        if rows_split.empty:
+            bin_tables[split_key] = []
+            continue
+        scores = rows_split[score_col].to_numpy(dtype=float)
+        edges = equal_frequency_bin_edges(scores, INDEPENDENT_QUANTILE_BIN_COUNT)
+        bin_tables[split_key] = _model_analysis_eval_table(
+            rows_split,
+            edges=edges,
             score_col=score_col,
             target_col=target_col,
         )
@@ -484,6 +519,7 @@ def build_effectiveness_result(
     monthly_psi: list[MonthlyPsiRow],
     psi_stability_table: list[PsiStabilityRow] | None = None,
     roc_ks_curves: dict[str, RocKsCurve] | None = None,
+    independent_quantile_bin_tables: dict[str, list] | None = None,
 ) -> EffectivenessResult:
     return EffectivenessResult(
         overall=overall,
@@ -492,6 +528,7 @@ def build_effectiveness_result(
         monthly_psi=monthly_psi,
         psi_stability_table=psi_stability_table or [],
         roc_ks_curves=roc_ks_curves or {},
+        independent_quantile_bin_tables=independent_quantile_bin_tables or {},
     )
 
 

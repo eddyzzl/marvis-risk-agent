@@ -141,7 +141,7 @@
             </div>
           </section>
           <section class="task-form-section">
-            <h3>任务信息</h3>
+            <h3 id="createTaskPrimaryModelHeading">任务信息</h3>
             <label>
               <span id="modelNameLabel">模型名称</span>
               <input id="modelName" placeholder="例如：贷前评分卡 MOB3 v202604" autocomplete="off" />
@@ -283,6 +283,10 @@
                 <span id="materialUploadStatus">请选择文件或文件夹。</span>
               </div>
             </div>
+          </section>
+          <section id="validationCreateExtraModelsSection" class="task-form-section validation-create-extra-section" hidden>
+            <div id="validationCreateExtraModels" class="validation-create-extra-list"></div>
+            <button id="addValidationModelRowButton" class="button compact secondary" type="button">添加模型</button>
           </section>
           <section id="createTaskAlgorithmField" class="task-form-section" hidden>
             <h3>建模算法</h3>
@@ -1363,40 +1367,6 @@
                 <span>PMML打分、效果稳定性验证，模型压力测试</span>
               </button>
               <button
-                id="welcomeValidationBatchCard"
-                class="welcome-task-card available"
-                type="button"
-                data-task-kind="validation_batch"
-              >
-                <span class="welcome-task-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" focusable="false">
-                    <g id="welcomeValidationBatchIconGlyph">
-                      <rect class="back" x="4" y="6" width="12" height="14" rx="2"></rect>
-                      <rect x="8" y="3" width="12" height="14" rx="2"></rect>
-                      <rect class="mid" x="10.5" y="5.7" width="7" height="1.7" rx="0.85"></rect>
-                      <rect class="cut" x="10.5" y="9" width="7" height="1.1" rx="0.55"></rect>
-                      <rect class="cut" x="10.5" y="11.8" width="4.7" height="1.1" rx="0.55"></rect>
-                      <circle class="cut" cx="17.4" cy="16.3" r="3.7"></circle>
-                      <circle cx="17.4" cy="16.3" r="2.9"></circle>
-                      <path class="cst" d="M16 16.4 17 17.4 18.9 15.4"></path>
-                    </g>
-                    <defs>
-                      <clipPath id="welcomeValidationBatchIconClip">
-                        <rect x="4" y="6" width="12" height="14" rx="2"></rect>
-                        <rect x="8" y="3" width="12" height="14" rx="2"></rect>
-                      </clipPath>
-                    </defs>
-                    <g class="icon-sheen" clip-path="url(#welcomeValidationBatchIconClip)">
-                      <rect x="-9" y="-4" width="8.5" height="32" rx="2.6" transform="skewX(-18)"></rect>
-                      <rect class="icon-sheen-soft" x="-0.5" y="-4" width="4" height="32" rx="1.8" transform="skewX(-18)"></rect>
-                    </g>
-                  </svg>
-                  <span class="welcome-task-sheen" aria-hidden="true"></span>
-                </span>
-                <strong>批量模型验证</strong>
-                <span>集中上传 1–10 个模型，隔离执行并汇总验证结果</span>
-              </button>
-              <button
                 id="welcomeStrategyDevelopmentCard"
                 class="welcome-task-card available"
                 type="button"
@@ -1454,6 +1424,13 @@
                     </button>
                   </div>
                 </div>
+                <div
+                  id="validationBatchSwitcher"
+                  class="task-hero-batch-switcher hidden"
+                  hidden
+                  aria-hidden="true"
+                  aria-label="切换验证模型"
+                ></div>
                 <div class="task-hero-details" id="taskHeroDetails" aria-hidden="true" inert>
                   <div class="task-hero-details-inner">
                     <p
@@ -3704,6 +3681,7 @@
       </script>
     </div>
     <div id="searchScrim" class="search-scrim" aria-hidden="true"></div>
+    <div id="taskRowPreview" class="task-row-preview" hidden aria-hidden="true"></div>
     <div id="metricTooltip" class="metric-tooltip" hidden></div>
     <script type="importmap">__MARVIS_STATIC_IMPORT_MAP__</script>
     <script type="module" src="static/app.js?v=__MARVIS_STATIC_VERSION__"></script>

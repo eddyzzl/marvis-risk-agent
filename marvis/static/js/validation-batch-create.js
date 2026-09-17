@@ -1,4 +1,4 @@
-export const MIN_VALIDATION_BATCH_ROWS = 1;
+export const MIN_VALIDATION_BATCH_ROWS = 2;
 export const MAX_VALIDATION_BATCH_ROWS = 10;
 
 const FILE_ROLE_ORDER = ["notebook", "sample", "pmml", "dictionary"];
@@ -40,6 +40,49 @@ function fileExtension(file) {
   return dot >= 0 ? name.slice(dot) : "";
 }
 
+const DICTIONARY_NAME_PATTERN = /字典|dict|dictionary|metadata|meta|feature/i;
+const SAMPLE_NAME_PATTERN = /样本|sample|train|oot|data/i;
+
+export function classifyValidationBatchFiles(files = []) {
+  const list = Array.from(files || []).filter(Boolean);
+  const assigned = {
+    notebook: null,
+    sample: null,
+    pmml: null,
+    dictionary: null,
+  };
+  const isAssigned = (file) => Object.values(assigned).includes(file);
+  const take = (role, predicate) => {
+    if (assigned[role]) return;
+    const match = list.find((file) => !isAssigned(file) && predicate(file));
+    if (match) assigned[role] = match;
+  };
+
+  take("notebook", (file) => fileExtension(file) === ".ipynb");
+  take("pmml", (file) => fileExtension(file) === ".pmml");
+  take("dictionary", (file) => {
+    const ext = fileExtension(file);
+    return VALIDATION_BATCH_FILE_RULES.dictionary.extensions.includes(ext)
+      && DICTIONARY_NAME_PATTERN.test(normalizedText(file.name));
+  });
+  take("sample", (file) => {
+    const ext = fileExtension(file);
+    return VALIDATION_BATCH_FILE_RULES.sample.extensions.includes(ext)
+      && SAMPLE_NAME_PATTERN.test(normalizedText(file.name));
+  });
+  take("sample", (file) => (
+    VALIDATION_BATCH_FILE_RULES.sample.extensions.includes(fileExtension(file))
+  ));
+  take("dictionary", (file) => (
+    VALIDATION_BATCH_FILE_RULES.dictionary.extensions.includes(fileExtension(file))
+  ));
+  if (!assigned.notebook || !assigned.sample || !assigned.pmml || !assigned.dictionary) {
+    return null;
+  }
+  if (assigned.sample === assigned.dictionary) return null;
+  return assigned;
+}
+
 function errorMessage(error, fallback = "请求失败") {
   const message = normalizedText(error?.message || error?.detail || error);
   return message || fallback;
@@ -73,13 +116,17 @@ export function validateValidationBatchDraft(draft = {}) {
   if (!normalizedText(draft.batchName)) formErrors.push("请填写批次名称。");
   if (!normalizedText(draft.validator)) formErrors.push("请填写验证人员。");
   if (rows.length < MIN_VALIDATION_BATCH_ROWS || rows.length > MAX_VALIDATION_BATCH_ROWS) {
-    formErrors.push("每个批次必须包含 1 至 10 个模型。");
+    formErrors.push("每个批次必须包含 2 至 10 个模型。");
   }
 
   rows.forEach((row, index) => {
     const errors = [];
     const rowKey = validationRowKey(row, index);
     if (!normalizedText(row?.modelName)) errors.push("请填写模型名称。");
+    if (normalizedText(row?.sourceDir)) {
+      if (errors.length) rowErrors[rowKey] = errors;
+      return;
+    }
     FILE_ROLE_ORDER.forEach((role) => {
       const rule = VALIDATION_BATCH_FILE_RULES[role];
       const file = row?.files?.[role];
@@ -163,6 +210,19 @@ export async function submitValidationBatchDraft(
     for (let index = 0; index < draft.rows.length; index += 1) {
       const row = draft.rows[index];
       const rowId = validationRowKey(row, index);
+      if (normalizedText(row.sourceDir) && !row.files?.notebook) {
+        onRowStatus(rowId, "uploaded", "已使用材料目录，等待创建批次。");
+        items.push({
+          model_name: normalizedText(row.modelName),
+          model_version: normalizedText(row.modelVersion) || "v1",
+          source_dir: normalizedText(row.sourceDir),
+          notebook_path: "",
+          sample_path: "",
+          pmml_path: "",
+          dictionary_path: "",
+        });
+        continue;
+      }
       const relativePaths = validationBatchRelativePaths(row.files);
       const fingerprint = uploadFingerprint(row);
       let upload = row.uploadCache?.fingerprint === fingerprint
@@ -463,6 +523,7 @@ export function createValidationBatchCreateController({
     $("validationBatchCreateForm")?.reset();
     $("validationBatchRows").replaceChildren();
     setStatus("");
+    addRow();
     addRow();
     return true;
   }

@@ -136,9 +136,148 @@ def normalize_algorithm(value: str | None, *, allow_empty: bool = False) -> str:
     )
 
 
+PENDING_MODEL_TRAINING_DESCRIPTION = (
+    "待 Notebook 契约 RMC_ALGORITHM 确认后自动生成模型训练说明。"
+)
+
+MODEL_TRAINING_OVERVIEWS: dict[str, str] = {
+    "xgb": (
+        "XGBoost 是梯度提升树集成算法，以多棵 CART 树逐轮拟合残差，"
+        "适合变量较多、非线性关系明显的信贷风控场景。"
+    ),
+    "lgb": (
+        "LightGBM 是基于直方图分裂和叶子优先生长的梯度提升树算法，"
+        "适合样本量较大、变量维度较高的信贷风控建模。"
+    ),
+    "lr": (
+        "逻辑回归是二分类线性模型，结构清晰、系数可解释，"
+        "适合评分卡、准入策略和基准模型。"
+    ),
+    "catboost": (
+        "CatBoost 是针对类别特征优化的梯度提升树算法，"
+        "适合枚举、渠道或行为类别字段较多的场景。"
+    ),
+    "scorecard": (
+        "评分卡通常以分箱、WOE 和逻辑回归系数映射分数，"
+        "强调变量方向、单调性和策略可解释性。"
+    ),
+    "dnn": (
+        "DNN 通过多层非线性变换学习复杂特征组合，"
+        "可解释性通常弱于树模型和评分卡，需更关注样本外稳定性和投产一致性。"
+    ),
+}
+
+_PREFERRED_HYPERPARAMETER_KEYS = (
+    "max_depth",
+    "num_leaves",
+    "learning_rate",
+    "n_estimators",
+    "num_boost_round",
+    "best_iteration",
+    "num_iterations",
+    "feature_fraction",
+    "colsample_bytree",
+    "bagging_fraction",
+    "subsample",
+    "min_child_samples",
+    "min_data_in_leaf",
+    "reg_lambda",
+    "lambda_l2",
+    "reg_alpha",
+    "lambda_l1",
+)
+
+
 def model_training_description(algorithm: str | None) -> str:
     normalized = normalize_algorithm(algorithm)
     return MODEL_TRAINING_DESCRIPTIONS[normalized]
+
+
+def model_training_report_text(
+    algorithm: str | None,
+    hyperparameters: dict | None = None,
+) -> str:
+    normalized = normalize_algorithm(algorithm)
+    label = ALGORITHM_LABELS[normalized]
+    overview = MODEL_TRAINING_OVERVIEWS[normalized]
+    clause = format_hyperparameter_clause(hyperparameters)
+    if clause:
+        return (
+            f"本模型采用 {label}。{overview}"
+            f"平台记录的本次训练参数包括：{clause}。"
+            "验证时应结合 Train/Test/OOT 的 KS、AUC、PSI 与压力测试，"
+            "判断这些参数是否带来过拟合或分数口径漂移，"
+            "不宜把树分裂或系数方向解释成单一变量因果关系。"
+        )
+    return (
+        f"本模型采用 {label}。{overview}"
+        "当前未见平台记录的训练超参明细，本节只说明算法类别，"
+        "不能当作本模型的参数证明。"
+    )
+
+
+def is_pending_model_training_description(value: str | None) -> bool:
+    return not str(value or "").strip() or (
+        str(value).strip() == PENDING_MODEL_TRAINING_DESCRIPTION
+    )
+
+
+def is_platform_default_training_description(
+    value: str | None,
+    algorithm: str | None = None,
+) -> bool:
+    text = str(value or "").strip()
+    if is_pending_model_training_description(text):
+        return True
+    if text in MODEL_TRAINING_DESCRIPTIONS.values():
+        return True
+    if text in MODEL_TRAINING_OVERVIEWS.values():
+        return True
+    candidates = [model_training_report_text(key) for key in ALLOWED_ALGORITHMS]
+    if algorithm:
+        try:
+            candidates.append(model_training_report_text(algorithm))
+        except ValueError:
+            pass
+    return text in candidates
+
+
+def format_hyperparameter_clause(
+    hyperparameters: dict | None,
+    *,
+    limit: int = 10,
+) -> str:
+    if not isinstance(hyperparameters, dict) or not hyperparameters:
+        return ""
+    preferred = [
+        key for key in _PREFERRED_HYPERPARAMETER_KEYS
+        if key in hyperparameters
+    ]
+    remaining = [
+        key for key in hyperparameters
+        if key not in preferred
+    ]
+    ordered = preferred + remaining
+    parts = [
+        f"{key}={_format_hyperparameter_value(hyperparameters[key])}"
+        for key in ordered[:limit]
+    ]
+    extra = f" 等 {len(hyperparameters)} 项" if len(ordered) > limit else ""
+    return "、".join(parts) + extra
+
+
+def _format_hyperparameter_value(value) -> str:
+    if isinstance(value, bool) or value is None:
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+        return text
+    text = str(value).strip()
+    return text if len(text) <= 48 else f"{text[:45]}..."
 
 
 def _algorithm_key(value: str) -> str:

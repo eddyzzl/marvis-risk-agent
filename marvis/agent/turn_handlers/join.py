@@ -372,4 +372,3 @@ def append_join_error(repo: TaskRepository, task_id: str, detail: str) -> dict:
         "status": "error",
         "messages": repo.list_agent_messages(task_id),
     }
-

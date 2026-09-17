@@ -2701,4 +2701,3 @@ _TYPE_LABELS = {
     "pricing": "定价策略",
     "segmentation": "分群策略",
 }
-

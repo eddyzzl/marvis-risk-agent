@@ -71,13 +71,26 @@ def render_all_images(results: ValidationResults, output_dir: Path) -> dict[str,
         images[f"IMAGE:ranking_table_{split}"] = _render_table(
             output_dir / f"ranking_table_{split}.png",
             header=[
-                f"{split}(独立分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
+                f"{split}(按照train分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
                 "累计逾期率", "单组lift", "累计lift", "ks",
             ],
             rows=_reference_bin_rows(results.effectiveness.bin_tables.get(split, [])),
             color_scale_columns={4},
             data_bar_columns={7: "63BE7B"},
         )
+    independent = results.effectiveness.independent_quantile_bin_tables or {}
+    if any(independent.get(split) for split in ("train", "test", "oot")):
+        for split in ("train", "test", "oot"):
+            images[f"IMAGE:independent_quantile_ranking_table_{split}"] = _render_table(
+                output_dir / f"independent_quantile_ranking_table_{split}.png",
+                header=[
+                    f"{split}(独立10等分)", "样本总数", "累计占比", "逾期数量", "逾期率",
+                    "累计逾期率", "单组lift", "累计lift", "ks",
+                ],
+                rows=_reference_bin_rows(independent.get(split, [])),
+                color_scale_columns={4},
+                data_bar_columns={7: "63BE7B"},
+            )
     images["IMAGE:model_parameters"] = _render_table(
         output_dir / "model_parameters.png",
         header=["参数", "取值"],

@@ -421,4 +421,3 @@ def _modeling_project_meta(task: TaskRecord) -> dict[str, str]:
         if text:
             meta[key] = text
     return meta
-

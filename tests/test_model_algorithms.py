@@ -2,7 +2,9 @@ import pytest
 
 from marvis.model_algorithms import (
     ALLOWED_ALGORITHMS,
+    is_platform_default_training_description,
     model_training_description,
+    model_training_report_text,
     normalize_algorithm,
 )
 
@@ -42,6 +44,31 @@ def test_model_training_descriptions_are_substantive():
         description = model_training_description(algorithm)
         assert len(description) >= 80
         assert "待补充" not in description
+
+
+def test_model_training_report_text_includes_this_model_hyperparameters():
+    text = model_training_report_text(
+        "lgb",
+        {"max_depth": 1, "learning_rate": 0.022631451052132007, "num_boost_round": 90},
+    )
+    assert "LightGBM" in text
+    assert "max_depth=1" in text
+    assert "learning_rate=0.022631" in text
+    assert "num_boost_round=90" in text
+    assert "直方图分裂、叶子优先生长和特征并行" not in text
+    assert is_platform_default_training_description(text, "lgb") is False
+
+
+def test_platform_default_training_description_detects_pending_and_generic_blurbs():
+    assert is_platform_default_training_description(
+        "待 Notebook 契约 RMC_ALGORITHM 确认后自动生成模型训练说明。"
+    )
+    assert is_platform_default_training_description(model_training_description("lgb"))
+    assert is_platform_default_training_description(model_training_report_text("lgb"))
+    assert is_platform_default_training_description(
+        "本模型为浅树 LightGBM，max_depth=1。",
+        "lgb",
+    ) is False
 
 
 @pytest.mark.parametrize("raw", ["unknown", "random forest", "svm"])

@@ -70,6 +70,9 @@ PAYLOAD_FIELD_ALLOWLISTS = {
         "scope",
         "source_task_id",
         "important_feature_sources",
+        "overfitting_status",
+        "head_lift_5pct",
+        "tail_lift_5pct",
     }),
     "feature_experience": frozenset({
         "feature_count",

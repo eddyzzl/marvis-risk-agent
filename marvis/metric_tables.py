@@ -74,6 +74,7 @@ SECTION_THEME = {
     "整体效果&稳定性": "warm-orange",
     "分月效果&稳定性": "deep-purple",
     "分箱排序性": "heatmap",
+    "独立10等分分箱": "heatmap",
     "特征重要性": "cool-blue",
     "压力测试": "warning-red",
     "ROC&KS 曲线": "deep-purple",
@@ -92,6 +93,9 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
     monthly_distribution = _as_list(basic_info.get("monthly_distribution"))
     overall = _as_list(effectiveness.get("overall"))
     bin_tables = _as_dict(effectiveness.get("bin_tables"))
+    independent_bin_tables = _as_dict(
+        effectiveness.get("independent_quantile_bin_tables")
+    )
     feature_importance = _as_list(basic_info.get("feature_importance"))
     per_category = _as_list(stress_test.get("per_category"))
     unclassified_features = [
@@ -167,30 +171,26 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
         },
         {
             "title": "分箱排序性",
-            "tables": [
-                _table(
-                    f"IMAGE:ranking_table_{split}",
-                    title,
-                    [
-                        title,
-                        "样本总数",
-                        "累计占比",
-                        "逾期数量",
-                        "逾期率",
-                        "累计逾期率",
-                        "单组lift",
-                        "累计lift",
-                        "ks",
-                    ],
-                    _ranking_rows(_as_list(bin_tables.get(split))),
-                )
-                for split, title in (
-                    ("train", "Train(独立分箱)"),
-                    ("test", "Test(独立分箱)"),
-                    ("oot", "OOT(独立分箱)"),
-                )
-            ],
+            "tables": _ranking_tables_for_splits(
+                bin_tables,
+                image_key_prefix="ranking_table",
+                title_suffix="按照train分箱",
+            ),
         },
+        *(
+            [
+                {
+                    "title": "独立10等分分箱",
+                    "tables": _ranking_tables_for_splits(
+                        independent_bin_tables,
+                        image_key_prefix="independent_quantile_ranking_table",
+                        title_suffix="独立10等分",
+                    ),
+                }
+            ]
+            if _bin_tables_have_rows(independent_bin_tables)
+            else []
+        ),
         {
             "title": "特征重要性",
             "tables": [
@@ -236,6 +236,41 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
     if any(isinstance(roc_ks_curves.get(split), dict) for split in ("train", "test", "oot")):
         sections.append(_roc_ks_section(roc_ks_curves))
     return [_tag_section(section) for section in sections]
+
+
+def _bin_tables_have_rows(bin_tables: dict[str, Any]) -> bool:
+    return any(_as_list(bin_tables.get(split)) for split in ("train", "test", "oot"))
+
+
+def _ranking_tables_for_splits(
+    bin_tables: dict[str, Any],
+    *,
+    image_key_prefix: str,
+    title_suffix: str,
+) -> list[dict[str, Any]]:
+    ranking_headers = [
+        "样本总数",
+        "累计占比",
+        "逾期数量",
+        "逾期率",
+        "累计逾期率",
+        "单组lift",
+        "累计lift",
+        "ks",
+    ]
+    return [
+        _table(
+            f"IMAGE:{image_key_prefix}_{split}",
+            title,
+            [title, *ranking_headers],
+            _ranking_rows(_as_list(bin_tables.get(split))),
+        )
+        for split, title in (
+            ("train", f"Train({title_suffix})"),
+            ("test", f"Test({title_suffix})"),
+            ("oot", f"OOT({title_suffix})"),
+        )
+    ]
 
 
 def _table(key: str, title: str, headers: list[str], rows: list[list[Any]]) -> dict[str, Any]:

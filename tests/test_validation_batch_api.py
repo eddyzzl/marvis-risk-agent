@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime
 from pathlib import Path
 import re
 import sqlite3
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 import httpx
 import pytest
 
+from marvis.api_task_helpers import format_validation_batch_parent_name
 from marvis.app import create_app
 from marvis.db import TaskRepository
 from marvis.db_schema import SCHEMA_VERSION, connect, init_db
@@ -575,6 +577,17 @@ def test_batch_creation_refuses_symlinked_owned_material_root(tmp_path: Path):
     assert list(outside.iterdir()) == []
 
 
+def test_validation_batch_parent_name_uses_date_and_model_count():
+    assert format_validation_batch_parent_name(
+        2,
+        datetime(2026, 8, 20, 15, 30, 0),
+    ) == "2026-08-20 模型验证批次 (2个模型)"
+    assert format_validation_batch_parent_name(
+        0,
+        datetime(2026, 8, 20),
+    ) == "2026-08-20 模型验证批次"
+
+
 def test_create_validation_batch_returns_parent_and_hidden_children(tmp_path: Path):
     client = _client(tmp_path)
     materials = tmp_path / "materials"
@@ -592,14 +605,61 @@ def test_create_validation_batch_returns_parent_and_hidden_children(tmp_path: Pa
     assert body["batch"]["item_count"] == 2
     assert [item["model_name"] for item in body["items"]] == ["模型A", "模型B"]
     assert all(item["child_task_id"] for item in body["items"])
+    parent_task = body["parent_task"]
+    assert parent_task["id"] == body["batch"]["parent_task_id"]
+    assert parent_task["task_type"] == "validation_batch"
+    assert parent_task["run_mode"] == "agent"
+    assert parent_task["model_name"] == (
+        f"{date.today():%Y-%m-%d} 模型验证批次 (2个模型)"
+    )
+    assert parent_task["item_count"] == 2
     task_list = client.get("/api/tasks").json()
     assert [task["id"] for task in task_list] == [body["batch"]["parent_task_id"]]
+    assert task_list[0]["model_name"] == parent_task["model_name"]
+    assert task_list[0]["item_count"] == 2
 
     detail = client.get(
         f"/api/validation-batches/{body['batch']['parent_task_id']}"
     )
     assert detail.status_code == 200
     assert detail.json()["items"] == body["items"]
+
+
+def test_task_list_rewrites_legacy_batch_parent_child_name(tmp_path: Path):
+    client = _client(tmp_path)
+    materials = tmp_path / "materials"
+    created = client.post(
+        "/api/validation-batches",
+        json={
+            "batch_name": "批次",
+            "validator": "qa",
+            "items": [_item(materials, "自营通用T卡多头 MOB6"), _item(materials, "模型B")],
+        },
+    ).json()
+    parent_task_id = created["batch"]["parent_task_id"]
+    expected_name = f"{date.today():%Y-%m-%d} 模型验证批次 (2个模型)"
+    db_path = client.app.state.settings.db_path
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET model_name = ? WHERE id = ?",
+            ("自营通用T卡多头 MOB6", parent_task_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT model_name FROM tasks WHERE id = ?",
+            (parent_task_id,),
+        ).fetchone()
+    assert row["model_name"] == "自营通用T卡多头 MOB6"
+
+    listed = client.get("/api/tasks").json()
+    assert listed[0]["id"] == parent_task_id
+    assert listed[0]["model_name"] == expected_name
+    assert listed[0]["item_count"] == 2
+    assert "自营通用T卡多头 MOB6" not in listed[0]["model_name"]
+
+    detail = client.get(f"/api/tasks/{parent_task_id}").json()
+    assert detail["model_name"] == expected_name
+    assert detail["item_count"] == 2
 
 
 def test_validation_batch_rejects_material_path_reuse_between_models(tmp_path: Path):
@@ -979,6 +1039,7 @@ def test_batch_payload_exposes_only_existing_safe_report_urls(tmp_path: Path):
     assert created["batch"]["summary_download_url"] == ""
     assert item["word_report_download_url"] == ""
     assert item["analysis_download_url"] == ""
+    assert item["pending_report_draft"] is False
 
     parent_outputs = (
         client.app.state.settings.tasks_dir / parent_task_id / "outputs"
@@ -1119,3 +1180,197 @@ def test_batch_summary_download_rejects_outputs_directory_symlink(tmp_path: Path
     assert detail["batch"]["summary_download_url"] == ""
     assert response.status_code == 404
     assert response.content != b"OTHER_TASK_SECRET"
+
+
+_REQUIRED_AGENT_CONCLUSIONS = {
+    "TEXT:pressure_test_summary": "压力测试显示模型整体稳定。",
+    "TEXT:pressure_impact_recommendation": "建议继续监测缺失率较高的数据源。",
+    "TEXT:final_validation_conclusion": "模型整体满足验证要求。",
+}
+
+
+def _advance_child_to_writing_artifacts(repo: TaskRepository, task_id: str) -> None:
+    repo.update_status(task_id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED)
+    repo.update_status(task_id, TaskStatus.RUNNING, "running", expected=TaskStatus.SCANNED)
+    repo.update_status(task_id, TaskStatus.EXECUTED, "executed", expected=TaskStatus.RUNNING)
+    repo.update_status(
+        task_id,
+        TaskStatus.COMPUTING_METRICS,
+        "metrics",
+        expected=TaskStatus.EXECUTED,
+    )
+    repo.update_status(
+        task_id,
+        TaskStatus.WRITING_ARTIFACTS,
+        "writing",
+        expected=TaskStatus.COMPUTING_METRICS,
+    )
+
+
+def _seed_pending_report_draft(repo: TaskRepository, task_id: str) -> None:
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="word_conclusion_draft",
+        content="压力测试总结\n压力测试显示模型整体稳定。",
+        metadata={
+            "draft_values": _REQUIRED_AGENT_CONCLUSIONS,
+            "report_revision": 0,
+        },
+    )
+
+
+def test_confirm_all_batch_report_drafts_rejects_unfinished_children(tmp_path: Path):
+    client = _client(tmp_path)
+    created = client.post(
+        "/api/validation-batches",
+        json={
+            "batch_name": "批次",
+            "validator": "qa",
+            "items": [
+                _item(tmp_path / "materials", "模型A"),
+                _item(tmp_path / "materials", "模型B"),
+            ],
+        },
+    ).json()
+    parent_task_id = created["batch"]["parent_task_id"]
+    child_a, child_b = [item["child_task_id"] for item in created["items"]]
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    with connect(tmp_path / "marvis.sqlite") as conn:
+        conn.execute(
+            "UPDATE tasks SET validation_workflow_version = 1 WHERE id IN (?, ?)",
+            (child_a, child_b),
+        )
+    _advance_child_to_writing_artifacts(repo, child_a)
+    _seed_pending_report_draft(repo, child_a)
+
+    response = client.post(
+        f"/api/validation-batches/{parent_task_id}/report-drafts/confirm-all",
+        json={"overrides": {}},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "尚未完成报告结论草稿" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_confirm_all_batch_report_drafts_dispatches_reports_for_pending_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_fails: bool,
+):
+    calls: list[str] = []
+    def run_report(**kwargs):
+        calls.append(kwargs["task_id"])
+        if first_fails and len(calls) == 1:
+            TaskRepository(tmp_path / "marvis.sqlite").update_status(
+                kwargs["task_id"], TaskStatus.FAILED, "report rendering failed",
+                expected=TaskStatus.WRITING_ARTIFACTS,
+            )
+            raise RuntimeError("report rendering failed")
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_report_stage",
+        run_report,
+    )
+    client = _client(tmp_path)
+    created = client.post(
+        "/api/validation-batches",
+        json={
+            "batch_name": "批次",
+            "validator": "qa",
+            "items": [
+                _item(tmp_path / "materials", "模型A"),
+                _item(tmp_path / "materials", "模型B"),
+            ],
+        },
+    ).json()
+    parent_task_id = created["batch"]["parent_task_id"]
+    child_a, child_b = [item["child_task_id"] for item in created["items"]]
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    with connect(tmp_path / "marvis.sqlite") as conn:
+        conn.execute(
+            "UPDATE tasks SET validation_workflow_version = 1 WHERE id IN (?, ?)",
+            (child_a, child_b),
+        )
+    for child_id in (child_a, child_b):
+        _advance_child_to_writing_artifacts(repo, child_id)
+        _seed_pending_report_draft(repo, child_id)
+
+    detail = client.get(f"/api/validation-batches/{parent_task_id}").json()
+    assert all(item["pending_report_draft"] for item in detail["items"])
+
+    response = client.post(
+        f"/api/validation-batches/{parent_task_id}/report-drafts/confirm-all",
+        json={
+            "overrides": {
+                child_a: {
+                    "revision": 0,
+                    "text_values": {
+                        **_REQUIRED_AGENT_CONCLUSIONS,
+                        "TEXT:model_scope": "支用环节",
+                    },
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["confirmed_count"] == 2
+    assert sorted(item["child_task_id"] for item in body["confirmed"]) == sorted(
+        [child_a, child_b]
+    )
+    assert calls == [child_a, child_b]
+    assert repo.get_active_job_kind(child_a) is None
+    assert repo.get_active_job_kind(child_b) is None
+    values_a, _ = repo.get_report_values(child_a)
+    assert values_a["TEXT:model_scope"] == "支用环节"
+    assert repo.list_agent_messages(child_a)[-1]["stage"] in {
+        "word_conclusion_confirmed",
+        "word_report_ready",
+    }
+
+
+@pytest.mark.parametrize("invalid", ["stale_revision", "computed_value", "active_job", "unconfirmed_contract"])
+def test_confirm_all_batch_report_drafts_rejects_atomically(tmp_path: Path, invalid):
+    client = _client(tmp_path)
+    created = client.post(
+        "/api/validation-batches",
+        json={
+            "batch_name": "批次", "validator": "qa",
+            "items": [_item(tmp_path / "materials", "模型A"), _item(tmp_path / "materials", "模型B")],
+        },
+    ).json()
+    parent_id = created["batch"]["parent_task_id"]
+    child_a, child_b = [item["child_task_id"] for item in created["items"]]
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    with connect(repo.db_path) as conn:
+        conn.execute("UPDATE tasks SET validation_workflow_version = 1 WHERE id IN (?, ?)", (child_a, child_b))
+    for child_id in (child_a, child_b):
+        _advance_child_to_writing_artifacts(repo, child_id)
+        _seed_pending_report_draft(repo, child_id)
+    before = {child_id: repo.get_report_values(child_id) for child_id in (child_a, child_b)}
+    override = {"revision": 0, "text_values": dict(_REQUIRED_AGENT_CONCLUSIONS)}
+    expected_status = 409
+    if invalid == "stale_revision":
+        override["revision"] = 99
+    elif invalid == "computed_value":
+        override["text_values"]["TEXT:oot_ks"] = "0.99"
+        expected_status = 422
+    elif invalid == "active_job":
+        repo.start_job(child_b, "report")
+    else:
+        with connect(repo.db_path) as conn:
+            conn.execute("UPDATE tasks SET validation_workflow_version = 2 WHERE id = ?", (child_b,))
+        expected_status = 422
+
+    response = client.post(
+        f"/api/validation-batches/{parent_id}/report-drafts/confirm-all",
+        json={"overrides": {child_b: override}},
+    )
+
+    assert response.status_code == expected_status, response.text
+    assert repo.get_active_job_kind(child_a) is None
+    for child_id in (child_a, child_b):
+        assert repo.get_report_values(child_id) == before[child_id]
+        assert not any(message["stage"] == "word_conclusion_confirmed" for message in repo.list_agent_messages(child_id))

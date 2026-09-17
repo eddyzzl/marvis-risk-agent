@@ -19,12 +19,13 @@ from marvis.agent_memory.api_support import (
     audit_agent_memory_use_from_store,
 )
 from marvis.agent_memory.store import AgentMemoryStore
-from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TASK_TYPE_VALIDATION, TaskRecord, TaskStatus
+from marvis.repositories.tasks import AGENT_REPORT_WRITABLE_KEYS, TaskRepository
 from marvis.repositories.validation_contracts import (
     ValidationContractRepository,
     require_confirmed_validation_input_contract,
 )
+from marvis.validation.suggested_confirmation import confirm_unambiguous_contract
 
 
 MAX_INPUT_CONFIRMATION_CANDIDATE_LINES = 24
@@ -62,6 +63,8 @@ class ValidationStageDependencies:
     generate_word_conclusions: Callable
     fallback_word_conclusions: Callable
     failure_summary: Callable
+    sync_agent_batch_after_child_report: Callable | None = None
+    sync_agent_batch_child_progress: Callable | None = None
 
 
 def open_agent_stage(
@@ -75,6 +78,13 @@ def open_agent_stage(
     auto_accept: bool = False,
     deps: ValidationStageDependencies,
 ) -> None:
+    if deps.sync_agent_batch_child_progress is not None:
+        deps.sync_agent_batch_child_progress(
+            db_path=repo.db_path,
+            child_task_id=task_id,
+            status="running",
+            stage=stage,
+        )
     if auto_accept and stage != "scan":
         add_agent_auto_stage_start_message(
             repo,
@@ -112,6 +122,8 @@ def open_agent_stage(
         )
         return
     if auto_accept:
+        return
+    if stage == "word_conclusion_draft":
         return
     finalize_agent_opening_message(
         repo,
@@ -231,13 +243,41 @@ def run_agent_scan_stage(
     raise_if_agent_cancelled(task_id)
     contract_payload = _pending_validation_contract_payload(scan_payload)
     if contract_payload is not None:
-        add_agent_input_confirmation_prompt(
-            repo,
-            task_id=task_id,
-            model_profile=model_profile,
-            contract_payload=contract_payload,
-        )
-        return True
+        auto_confirmed = False
+        if auto_accept:
+            try:
+                auto_confirmed = confirm_unambiguous_contract(
+                    db_path=repo.db_path,
+                    task_id=task_id,
+                )
+            except Exception:
+                auto_confirmed = False
+        if auto_confirmed:
+            repo.add_agent_message(
+                task_id,
+                role="assistant",
+                stage="scan",
+                content="字段合同无歧义，已按唯一识别结果自动确认，继续验证。",
+                metadata={
+                    **model_metadata(model_profile),
+                    "auto_confirmed_input_contract": True,
+                },
+            )
+        else:
+            if deps.sync_agent_batch_child_progress is not None:
+                deps.sync_agent_batch_child_progress(
+                    db_path=repo.db_path,
+                    child_task_id=task_id,
+                    status="awaiting_confirmation",
+                    stage="input_confirmation",
+                )
+            add_agent_input_confirmation_prompt(
+                repo,
+                task_id=task_id,
+                model_profile=model_profile,
+                contract_payload=contract_payload,
+            )
+            return True
     if not auto_accept:
         add_agent_continue_prompt(
             repo,
@@ -634,7 +674,6 @@ def run_agent_word_conclusion_stage(
             metadata=draft_result.get("metadata"),
         )
         return False
-    narrative_source = str(draft_result.get("narrative_source") or "agent_generated")
     if auto_accept:
         return generate_agent_report_from_conclusions(
             repo=repo,
@@ -643,22 +682,11 @@ def run_agent_word_conclusion_stage(
             model_profile=model_profile,
             values=draft_result.get("values"),
             expected_revision=draft_result.get("report_revision"),
-            narrative_source=narrative_source,
+            narrative_source=str(
+                draft_result.get("narrative_source") or "agent_generated"
+            ),
             deps=deps,
         )
-    repo.add_agent_message(
-        task_id,
-        role="assistant",
-        stage="chat",
-        content=(
-            "三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。"
-        ),
-        metadata={
-            **model_metadata(model_profile),
-            "awaiting_confirmation": True,
-            "narrative_source": narrative_source,
-        },
-    )
     return True
 
 
@@ -743,8 +771,11 @@ def generate_agent_report_from_conclusions(
         raise RuntimeError("agent report narratives are incomplete; cannot generate report")
     conclusion_values = {
         key: str(values.get(key) or "").strip()
-        for key in REQUIRED_AGENT_REPORT_KEYS
+        for key in AGENT_REPORT_WRITABLE_KEYS
+        if str(values.get(key) or "").strip()
     }
+    for key in REQUIRED_AGENT_REPORT_KEYS:
+        conclusion_values[key] = str(values.get(key) or "").strip()
     revision = repo.update_agent_report_conclusions_with_audit(
         task_id,
         conclusion_values,
@@ -796,6 +827,11 @@ def generate_agent_report_from_conclusions(
         )
         return False
     deps.add_agent_report_ready_message(repo, task_id)
+    if deps.sync_agent_batch_after_child_report is not None:
+        deps.sync_agent_batch_after_child_report(
+            settings=settings,
+            child_task_id=task_id,
+        )
     return True
 
 

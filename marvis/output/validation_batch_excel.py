@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from marvis.artifacts import ArtifactUnitOfWork
@@ -26,6 +27,10 @@ from marvis.validation.stress_risk import stress_risk_label
 
 
 SUMMARY_SHEET_NAME = "模型验证汇总"
+OPS_SHEET_NAME = "运营汇总"
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_PASS_MARK_PATH = _ASSETS_DIR / "validation_pass_mark.png"
+_FAIL_MARK_PATH = _ASSETS_DIR / "validation_fail_mark.png"
 
 _VISIBLE_HEADERS = (
     "模型版本",
@@ -68,7 +73,7 @@ def write_validation_batch_excel(
     rows: Iterable[ValidationBatchSummaryRow],
     output_path: Path,
 ) -> Path:
-    """Write the one-sheet audit summary for a validation batch.
+    """Write the batch workbook: audit sheet plus the operational KS/PSI sheet.
 
     OOT KS is deliberately informational. The workbook only visualizes the
     deterministic gates supplied by the batch runner; it does not recompute a
@@ -91,6 +96,7 @@ def write_validation_batch_excel(
             created_at=created_at,
             rows=row_values,
         )
+        _write_ops_sheet(workbook.create_sheet(OPS_SHEET_NAME), created_at=created_at, rows=row_values)
         workbook.save(artifact.path)
         uow.promote_all()
         uow.commit()
@@ -173,6 +179,106 @@ def _write_summary_sheet(
     sheet.sheet_properties.pageSetUpPr.fitToPage = True
     sheet.print_title_rows = "1:3"
     sheet.print_area = f"A1:I{legend_row + 4}"
+
+
+_OPS_HEADERS = (
+    "模型版本",
+    "有效性 KS",
+    "稳定性 PSI",
+    "一致性",
+    "可复现性",
+    "完整性",
+)
+
+
+def _write_ops_sheet(sheet, *, created_at: str | datetime, rows: list[ValidationBatchSummaryRow]) -> None:
+    """Write the operator-facing sheet matching the 2026-08 nine-model workbook."""
+
+    year, month = _year_month(created_at)
+    title = f"模型验证：{year}年{month}月验证{len(rows)}个模型"
+
+    sheet.merge_cells("A1:F1")
+    title_cell = sheet["A1"]
+    title_cell.value = title
+    title_cell.font = Font(name=FONT_NAME, size=18, bold=True, color="E25555")
+    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+    sheet.row_dimensions[1].height = 32
+
+    for column, header in enumerate(_OPS_HEADERS, start=1):
+        cell = sheet.cell(row=2, column=column, value=header)
+        cell.fill = PatternFill("solid", fgColor=BRAND_HEADER_FILL)
+        cell.font = Font(name=FONT_NAME, size=11, bold=True, color=BRAND_HEADER_FONT_COLOR)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = _BORDER
+    sheet.row_dimensions[2].height = 24
+
+    for output_row, summary in enumerate(rows, start=3):
+        _write_ops_model_row(sheet, output_row, summary)
+
+    last_row = max(2, 2 + len(rows))
+    widths = {"A": 32, "B": 14, "C": 14, "D": 12, "E": 12, "F": 12}
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+    sheet.freeze_panes = "A3"
+    sheet.sheet_view.showGridLines = False
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.print_title_rows = "1:2"
+    sheet.print_area = f"A1:F{last_row}"
+
+
+def _write_ops_model_row(sheet, output_row: int, summary: ValidationBatchSummaryRow) -> None:
+    model_label = summary.model_name.strip() or f"模型 {summary.ordinal}"
+    values = (
+        model_label,
+        _ks_percent(summary.oot_ks),
+        _finite_number(summary.oot_psi),
+        None,
+        None,
+        None,
+    )
+    for column, value in enumerate(values, start=1):
+        cell = sheet.cell(row=output_row, column=column, value=safe_xlsx_cell(value) if value is not None else None)
+        cell.font = Font(name=FONT_NAME, size=11, color="333333")
+        cell.alignment = Alignment(
+            horizontal="left" if column == 1 else "center",
+            vertical="center",
+        )
+        cell.border = _BORDER
+        cell.fill = _WHITE_FILL
+    sheet.row_dimensions[output_row].height = 28
+    sheet.cell(output_row, 2).number_format = "0.0"
+    sheet.cell(output_row, 3).number_format = "0.00"
+
+    consistency, reproducibility, completeness = _ops_gate_flags(summary)
+    for column, passed in enumerate((consistency, reproducibility, completeness), start=4):
+        _add_ops_mark(sheet, output_row, column, passed)
+
+
+def _ops_gate_flags(summary: ValidationBatchSummaryRow) -> tuple[bool, bool, bool]:
+    consistency = str(summary.pmml_status).lower() == "pass"
+    # V2 主路径把 Notebook 分数一致性换成 PMML 全量打分；可复现性绿灯与一致性同源。
+    reproducibility = consistency and str(summary.outcome).lower() not in {"failed", "fail"}
+    completeness = bool(summary.report_complete)
+    return consistency, reproducibility, completeness
+
+
+def _add_ops_mark(sheet, row: int, column: int, passed: bool) -> None:
+    mark_path = _PASS_MARK_PATH if passed else _FAIL_MARK_PATH
+    if not mark_path.is_file():
+        cell = sheet.cell(row, column)
+        cell.value = "✓" if passed else "!"
+        cell.font = Font(name=FONT_NAME, size=14, bold=True, color="548235" if passed else "C00000")
+        return
+    image = XLImage(str(mark_path))
+    image.anchor = f"{_column_letter(column)}{row}"
+    sheet.add_image(image)
+
+
+def _column_letter(column: int) -> str:
+    return chr(ord("A") + column - 1)
 
 
 def _write_model_row(sheet, output_row: int, summary: ValidationBatchSummaryRow) -> None:
@@ -330,6 +436,7 @@ def _year_month(value: str | datetime) -> tuple[int, int]:
 
 
 __all__ = [
+    "OPS_SHEET_NAME",
     "SUMMARY_SHEET_NAME",
     "ValidationBatchSummaryRow",
     "write_validation_batch_excel",

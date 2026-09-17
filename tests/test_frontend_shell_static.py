@@ -98,6 +98,7 @@ def test_app_entry_is_split_into_frontend_modules():
         "state.js",
         "step-checker.js",
         "task-search.js",
+        "task-row-preview.js",
         "theme.js",
         "toast.js",
         "ui-utils.js",
@@ -120,6 +121,7 @@ def test_app_entry_is_split_into_frontend_modules():
     assert 'from "./js/state.js"' in app_js
     assert 'from "./js/step-checker.js"' in app_js
     assert 'from "./js/task-search.js"' in app_js
+    assert 'from "./js/task-row-preview.js"' in app_js
     assert 'from "./js/theme.js"' in app_js
     assert 'from "./js/toast.js"' in app_js
     assert 'from "./js/ui-utils.js"' in app_js
@@ -158,7 +160,7 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert 'id="welcomeVintageAnalysisCard"' in welcome_markup
     assert 'id="welcomeModelDevelopmentCard"' in welcome_markup
     assert 'id="welcomeModelValidationCard"' in welcome_markup
-    assert 'id="welcomeValidationBatchCard"' in welcome_markup
+    assert 'id="welcomeValidationBatchCard"' not in welcome_markup
     assert 'id="welcomeStrategyDevelopmentCard"' in welcome_markup
     assert "自动识别主键，关联各种XY数据，诊断数据情况" in welcome_markup
     assert "上传多表、识别主键、诊断膨胀和确认 join" not in welcome_markup
@@ -204,7 +206,7 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "Vintage、FPD、营利性测算" not in welcome_markup
     assert "Vintage分析" not in welcome_markup
     assert "Vintage 分析" not in welcome_markup
-    expected_card_titles = ["数据处理", "特征分析", "风险分析", "模型开发", "模型验证", "批量模型验证", "策略开发"]
+    expected_card_titles = ["数据处理", "特征分析", "风险分析", "模型开发", "模型验证", "策略开发"]
     title_offsets = [welcome_markup.index(f"<strong>{title}</strong>") for title in expected_card_titles]
     assert title_offsets == sorted(title_offsets)
     assert 'data-task-kind="validation"' in welcome_markup

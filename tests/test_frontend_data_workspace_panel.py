@@ -269,3 +269,18 @@ def test_data_workspace_panel_is_mounted_in_the_task_workspace():
     assert ".data-workspace-field-row" in css
     assert ".data-workspace-state-conflict" in css
     assert ".data-workspace-state-dirty" in css
+
+
+def test_validation_tasks_do_not_open_data_workspace():
+    app_js = (ROOT / "marvis/static/app.js").read_text(encoding="utf-8")
+    assert "function taskUsesDataWorkspace" in app_js
+    helper = app_js.split("function taskUsesDataWorkspace", 1)[1].split("function ", 1)[0]
+    assert '"data_join"' in helper
+    assert '"validation"' not in helper
+    assert '"validation_batch"' not in helper
+    assert "if (!taskUsesDataWorkspace(task))" in app_js
+    request_fn = app_js.split("async function requestTaskSelection", 1)[1].split(
+        "function selectTask",
+        1,
+    )[0]
+    assert "dataWorkspacePanel.clear()" in request_fn

@@ -1,9 +1,154 @@
-.task-kind-icon[data-kind="validation_batch"] {
-  color: var(--tone-validation);
-}
-
 .validation-batch-panel {
   width: 100%;
+}
+
+.task-hero-batch-switcher {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin-top: 10px;
+}
+
+.task-hero-batch-switcher .validation-batch-switcher {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.validation-batch-switcher {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.validation-batch-switcher-list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.validation-batch-switcher-item {
+  --switcher-tone: transparent;
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  max-width: 220px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 var(--switcher-tone);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: left;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.validation-batch-switcher-item:hover {
+  background: color-mix(in srgb, var(--surface) 90%, var(--text) 10%);
+}
+
+.validation-batch-switcher-item:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.validation-batch-switcher-name {
+  max-width: 200px;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.validation-batch-switcher-progress {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.validation-batch-switcher-item[data-tone="running"] {
+  --switcher-tone: var(--accent);
+}
+
+.validation-batch-switcher-item[data-tone="running"] .validation-batch-switcher-progress {
+  color: var(--accent);
+}
+
+.validation-batch-switcher-item[data-tone="success"] {
+  --switcher-tone: var(--success);
+}
+
+.validation-batch-switcher-item[data-tone="success"] .validation-batch-switcher-progress {
+  color: var(--success-strong);
+}
+
+.validation-batch-switcher-item[data-tone="warning"] {
+  --switcher-tone: var(--warning);
+}
+
+.validation-batch-switcher-item[data-tone="warning"] .validation-batch-switcher-progress {
+  color: var(--warning-strong);
+}
+
+.validation-batch-switcher-item[data-tone="danger"] {
+  --switcher-tone: var(--danger);
+}
+
+.validation-batch-switcher-item[data-tone="danger"] .validation-batch-switcher-progress {
+  color: var(--danger-strong);
+}
+
+.validation-batch-switcher-item.is-selected {
+  border-color: var(--button-primary-border);
+  background: color-mix(in srgb, var(--surface) 92%, var(--brand-primary) 8%);
+}
+
+.validation-batch-switcher-item.is-selected:hover {
+  border-color: var(--button-primary-border-hover);
+  background: color-mix(in srgb, var(--surface) 88%, var(--brand-primary) 12%);
+}
+
+.validation-batch-switcher-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.validation-batch-switcher .validation-batch-download,
+.validation-batch-switcher [data-batch-confirm-all] {
+  flex: none;
+}
+
+.validation-batch-switcher-loading {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .validation-batch-overview,
@@ -361,6 +506,7 @@ button.validation-batch-link {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .validation-batch-switcher-item,
   .validation-batch-table tbody tr {
     transition: none;
   }

@@ -120,6 +120,17 @@ body.app-booting .validation-workspace:not(.is-empty) :is(.workspace-head, .work
   transition: none;
 }
 
+/* Model chips live in the hero — same role as the left task list. Keep them
+   visible while the center uses the sidebar hide-until-ready skeleton. */
+.validation-workspace.is-task-content-loading:has(#validationBatchSwitcher:not([hidden])) :is(.workspace-head) {
+  opacity: 1;
+  pointer-events: auto;
+}
+.validation-workspace.is-task-content-loading:has(#validationBatchSwitcher:not([hidden])) .result-workspace::after,
+.validation-workspace.is-task-content-loading:has(#validationBatchSwitcher:not([hidden])) .result-workspace::before {
+  top: var(--workspace-head-space);
+}
+
 /* VD-3: task switch — the workspace body fades to 0 opacity above while new
    content loads (beginTaskContentLoad/finishTaskContentLoad in app.js). A
    CSS-only shimmer overlay fills that blank moment so switching tasks reads
@@ -639,7 +650,6 @@ body.search-active .app-shell.sidebar-collapsed .sidebar-head {
 .app-shell.sidebar-collapsed .sidebar-settings summary span,
 .app-shell.sidebar-collapsed .settings-menu,
 .app-shell.sidebar-collapsed .task-row-top,
-.app-shell.sidebar-collapsed .task-row-meta,
 .app-shell.sidebar-collapsed .delete-task-button,
 .app-shell.sidebar-collapsed .task-group-title,
 .app-shell.sidebar-collapsed .empty-state {
@@ -1143,12 +1153,11 @@ body.search-active .app-shell.sidebar-collapsed .task-row {
   display: grid;
   min-height: auto;
   place-items: stretch;
-  gap: 7px;
+  gap: 0;
   padding: 11px 42px 11px 12px;
 }
 
-body.search-active .app-shell.sidebar-collapsed .task-row-top,
-body.search-active .app-shell.sidebar-collapsed .task-row-meta {
+body.search-active .app-shell.sidebar-collapsed .task-row-top {
   display: grid;
 }
 
@@ -1159,10 +1168,6 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
 .task-list {
   display: grid;
   gap: 8px;
-  /* overflow-y:auto alone leaves the x-axis computed as auto (CSS spec), so a
-     stray wide child could let the whole task list slide sideways. Pin it: the
-     rows already wrap long names (overflow-wrap:anywhere), so this only ever
-     scrolls vertically. */
   overflow-x: hidden;
   overflow-y: auto;
   padding: 3px 10px 14px;

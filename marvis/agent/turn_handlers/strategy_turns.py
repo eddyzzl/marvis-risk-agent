@@ -3011,4 +3011,3 @@ def _strategy_request_clarification_response(
     if normalized_notices:
         response["ingest_notices"] = normalized_notices
     return response
-

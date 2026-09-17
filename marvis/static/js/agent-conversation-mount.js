@@ -3,6 +3,7 @@ import {
   agentMessagesHtml,
   agentTimelineItems,
 } from "./agent-conversation-view.js";
+import { latestPendingReportDraftMessageId } from "./report-draft-table.js";
 
 // UX-2: same "only the latest assistant gate is interactive" rule manual mode
 // uses (driver_manual_analysis.js's lastAssistantMessageId), narrowed to
@@ -126,6 +127,8 @@ export function renderAgentTimeline(messages = [], deps = {}) {
     }),
   });
   const latestGateMessageId = deps.latestGateMessageId ?? lastGateMessageId(messages);
+  const pendingReportDraftMessageId = deps.latestPendingReportDraftMessageId
+    ?? latestPendingReportDraftMessageId(messages);
   const appendedSections = new Set();
   let basePanelUsed = false;
 
@@ -152,6 +155,7 @@ export function renderAgentTimeline(messages = [], deps = {}) {
       agentStageLabel: deps.agentStageLabel,
       agentMessageHtml: deps.agentMessageHtml,
       latestGateMessageId,
+      latestPendingReportDraftMessageId: pendingReportDraftMessageId,
     });
     scrollContent.appendChild(bucket);
   }

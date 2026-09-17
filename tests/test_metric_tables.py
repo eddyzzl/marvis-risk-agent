@@ -82,6 +82,52 @@ def payload() -> dict:
     }
 
 
+def test_independent_quantile_bins_are_a_separate_section(payload):
+    payload["effectiveness"]["independent_quantile_bin_tables"] = {
+        "train": [
+            {"bin_index": 1, "score_lower": 0.0, "score_upper": 0.12,
+             "sample_count": 10, "bad_count": 1, "bad_rate": 0.10,
+             "cum_sample_pct": 0.10, "cum_bad_pct": 0.10, "lift": 1.0, "ks": 0.01},
+        ],
+        "test": [
+            {"bin_index": 1, "score_lower": 0.0, "score_upper": 0.08,
+             "sample_count": 10, "bad_count": 1, "bad_rate": 0.10,
+             "cum_sample_pct": 0.10, "cum_bad_pct": 0.10, "lift": 1.0, "ks": 0.01},
+        ],
+        "oot": [
+            {"bin_index": 1, "score_lower": 0.70, "score_upper": 0.82,
+             "sample_count": 10, "bad_count": 6, "bad_rate": 0.60,
+             "cum_sample_pct": 0.10, "cum_bad_pct": 0.60, "lift": 6.0, "ks": 0.12},
+        ],
+    }
+
+    sections = metric_table_sections_from_payload(payload)
+    titles = [section["title"] for section in sections]
+    assert "分箱排序性" in titles
+    assert "独立10等分分箱" in titles
+    assert titles.index("独立10等分分箱") == titles.index("分箱排序性") + 1
+
+    aligned = next(section for section in sections if section["title"] == "分箱排序性")
+    independent = next(section for section in sections if section["title"] == "独立10等分分箱")
+    assert [table["key"] for table in aligned["tables"]] == [
+        "IMAGE:ranking_table_train",
+        "IMAGE:ranking_table_test",
+        "IMAGE:ranking_table_oot",
+    ]
+    assert aligned["tables"][0]["headers"][0] == "Train(按照train分箱)"
+    assert aligned["tables"][1]["headers"][0] == "Test(按照train分箱)"
+    assert aligned["tables"][2]["headers"][0] == "OOT(按照train分箱)"
+    assert [table["key"] for table in independent["tables"]] == [
+        "IMAGE:independent_quantile_ranking_table_train",
+        "IMAGE:independent_quantile_ranking_table_test",
+        "IMAGE:independent_quantile_ranking_table_oot",
+    ]
+    assert independent["tables"][0]["headers"][0] == "Train(独立10等分)"
+    assert independent["tables"][2]["headers"][0] == "OOT(独立10等分)"
+    assert independent["section_theme"] == "heatmap"
+    assert independent["tables"][2]["rows"][0][0] != aligned["tables"][0]["rows"][0][0]
+
+
 def test_sections_basic_titles_preserved(payload):
     sections = metric_table_sections_from_payload(payload)
     titles = [section["title"] for section in sections]

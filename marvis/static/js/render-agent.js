@@ -280,6 +280,19 @@ export function renderMarkdownInlineText(content) {
 }
 
 export function renderMarkdownEmphasisText(content) {
+  return String(content || "")
+    .split(/(!![^!\n]+!!)/g)
+    .map((segment) => {
+      const risk = /^!!([^!\n]+)!!$/.exec(segment);
+      if (risk) {
+        return `<strong class="agent-finding-fail">${renderMarkdownBoldText(risk[1])}</strong>`;
+      }
+      return renderMarkdownBoldText(segment);
+    })
+    .join("");
+}
+
+export function renderMarkdownBoldText(content) {
   return escapeHtml(content)
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_\n]+?)__/g, (match, value, offset, source) =>

@@ -361,4 +361,3 @@ def _handle_structured_portfolio_request_turn(
             exc,
             setup_error=True,
         )
-

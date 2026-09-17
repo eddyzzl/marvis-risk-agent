@@ -258,7 +258,7 @@ if [[ "$RUN_BANDIT" -eq 1 ]]; then
       } | grep '\.py$' | sort -u || true
     )
     if [[ ${#changed_py[@]} -gt 0 ]]; then
-      "$PYTHON_BIN" -m bandit -ll -ii -b .bandit-baseline.json "${changed_py[@]}"
+      "$PYTHON_BIN" scripts/check_bandit.py "${changed_py[@]}"
     else
       echo "no changed marvis/*.py files"
     fi

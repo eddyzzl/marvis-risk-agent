@@ -7,7 +7,7 @@ from PIL import Image
 from marvis.output import image_render
 from marvis.output.image_render import get_matplotlib_font, render_all_images
 from marvis.output.styles import CJK_FONT_CANDIDATES
-from marvis.validation.results import FeatureImportanceRow, RocKsCurve
+from marvis.validation.results import BinRow, FeatureImportanceRow, RocKsCurve
 from tests.output.test_excel import _make_results, _make_results_with_uneven_stress_bins
 
 
@@ -39,6 +39,28 @@ def test_renders_required_image_keys(tmp_path: Path):
     assert required.issubset(image_paths.keys())
     assert isinstance(image_paths["IMAGE:pressure_score_shift"], list)
     assert len(image_paths["IMAGE:pressure_score_shift"]) == 1
+
+
+def test_renders_independent_quantile_ranking_tables(tmp_path: Path):
+    aligned = BinRow(1, 0.0, 0.5, 50, 5, 0.1, 0.5, 0.5, 1.0, 0.0)
+    independent = BinRow(1, 0.70, 0.82, 10, 6, 0.60, 0.10, 0.60, 6.0, 0.12)
+    base = _make_results()
+    results = replace(
+        base,
+        effectiveness=replace(
+            base.effectiveness,
+            bin_tables={"train": [aligned], "test": [aligned], "oot": [aligned]},
+            independent_quantile_bin_tables={
+                "train": [independent],
+                "test": [independent],
+                "oot": [independent],
+            },
+        ),
+    )
+    image_paths = render_all_images(results, tmp_path)
+    assert "IMAGE:independent_quantile_ranking_table_train" in image_paths
+    assert "IMAGE:independent_quantile_ranking_table_test" in image_paths
+    assert "IMAGE:independent_quantile_ranking_table_oot" in image_paths
 
 
 def test_pressure_score_shift_placeholder_collects_all_actual_category_images(
@@ -137,11 +159,11 @@ def test_word_image_tables_use_reference_model_analysis_headers(monkeypatch, tmp
         "累计逾期率", "单组lift", "累计lift", "ks",
     ]
     assert captured["ranking_table_train.png"]["header"] == [
-        "train(独立分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
+        "train(按照train分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
         "累计逾期率", "单组lift", "累计lift", "ks",
     ]
-    assert captured["ranking_table_test.png"]["header"][0] == "test(独立分箱)"
-    assert captured["ranking_table_oot.png"]["header"][0] == "oot(独立分箱)"
+    assert captured["ranking_table_test.png"]["header"][0] == "test(按照train分箱)"
+    assert captured["ranking_table_oot.png"]["header"][0] == "oot(按照train分箱)"
     assert captured["psi_stability_table.png"]["header"] == [
         "分箱", "train+test样本数", "train+test占比", "oot样本数", "oot占比", "PSI",
     ]

@@ -25,6 +25,25 @@ const stressLabels = {
   high: "高风险",
 };
 
+const stageLabels = {
+  queued: "排队中",
+  created: "待启动",
+  batch_created: "待启动",
+  scan: "材料扫描",
+  input_confirmation: "确认字段",
+  reproducibility: "可复现性",
+  pmml_scoring: "PMML打分",
+  notebook: "Notebook 复现",
+  metrics: "效果评估",
+  word_conclusion_draft: "报告结论",
+  word_conclusion_generated: "报告结论",
+  report_conclusion: "报告结论",
+  report: "生成报告",
+  summary: "汇总",
+  completed: "已完成",
+  failure: "失败",
+};
+
 function objectValue(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -150,6 +169,7 @@ function normalizeBatchItem(rawItem, parentTaskId, fallbackOrdinal) {
       item.analysis_download_url,
       item.analysisDownloadUrl,
     )),
+    pendingReportDraft: booleanValue(item.pending_report_draft ?? item.pendingReportDraft),
     manualReviewUrl,
   };
 }
@@ -166,8 +186,80 @@ export function preferredStartupTaskId(deepLink, storedTaskId = "") {
   return firstText(objectValue(deepLink).taskId, storedTaskId);
 }
 
+export function taskSelectionSearch(currentSearch, { taskId = "", itemId = "" } = {}) {
+  const params = new URLSearchParams(String(currentSearch || "").replace(/^\?/, ""));
+  const normalizedTaskId = textValue(taskId);
+  const normalizedItemId = textValue(itemId);
+  if (normalizedTaskId) {
+    params.set("task", normalizedTaskId);
+    if (normalizedItemId) params.set("item", normalizedItemId);
+    else params.delete("item");
+  } else {
+    params.delete("task");
+    params.delete("item");
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+export function syncTaskDeepLink(historyLike, locationLike, selection = {}) {
+  if (!historyLike?.replaceState || !locationLike) return "";
+  const nextSearch = taskSelectionSearch(locationLike.search, selection);
+  const currentSearch = String(locationLike.search || "");
+  if (nextSearch === currentSearch) return nextSearch;
+  const path = locationLike.pathname || "/";
+  const hash = locationLike.hash || "";
+  try {
+    historyLike.replaceState(historyLike.state, "", `${path}${nextSearch}${hash}`);
+  } catch (_) {
+    // Some embedded or sandboxed browsers block history mutation.
+  }
+  return nextSearch;
+}
+
 export function isValidationBatchTask(task) {
   return task?.task_type === validationBatchTaskType;
+}
+
+function formatLocalIsoDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatValidationBatchDate(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return formatLocalIsoDate(value);
+  }
+  const raw = textValue(value);
+  const parsed = raw ? new Date(raw) : new Date();
+  if (Number.isNaN(parsed.getTime())) return formatLocalIsoDate(new Date());
+  return formatLocalIsoDate(parsed);
+}
+
+export function formatValidationBatchTaskName(createdAt, itemCount) {
+  const dateText = formatValidationBatchDate(createdAt);
+  const count = Number(itemCount);
+  if (Number.isInteger(count) && count > 0) {
+    return `${dateText} 模型验证批次 (${count}个模型)`;
+  }
+  return `${dateText} 模型验证批次`;
+}
+
+export function usesAgentValidationWorkbench(task) {
+  return isValidationBatchTask(task) && textValue(task?.run_mode).toLowerCase() === "agent";
+}
+
+export function resolveProjectedChildTaskId(batchPayload, requestedId = "") {
+  const batch = batchPayload?.counts && Array.isArray(batchPayload?.items)
+    ? batchPayload
+    : normalizeValidationBatchPayload(batchPayload);
+  const requested = textValue(requestedId);
+  const match = (batch.items || []).find((item) => (
+    item.childTaskId === requested || item.id === requested
+  ));
+  return match?.childTaskId || batch.items?.[0]?.childTaskId || "";
 }
 
 export function normalizeValidationBatchPayload(rawPayload = {}, fallbackParentTaskId = "") {
@@ -243,6 +335,20 @@ function itemStatusLabel(item) {
   return statusLabels[item.status] || statusLabels[item.outcome] || item.status || "状态未知";
 }
 
+function itemStageLabel(item) {
+  const stage = firstText(item?.stage);
+  if (!stage) return "";
+  return stageLabels[stage] || stage;
+}
+
+function itemProgressLabel(item) {
+  const status = itemStatusLabel(item);
+  const stage = itemStageLabel(item);
+  const terminal = ["succeeded", "completed", "failed", "cancelled"].includes(item.status);
+  if (!stage || terminal || stage === status || item.stage === item.status) return status;
+  return `${status} · ${stage}`;
+}
+
 export function validationBatchItemNeedsContractConfirmation(item) {
   const contractStatus = firstText(
     item?.inputContractStatus,
@@ -286,7 +392,7 @@ export function validationBatchStartAction(
     return {
       visible: true,
       disabled: awaitingConfirmationCount > 0,
-      label: "逐项确认合同后继续",
+      label: "确认合同后继续",
     };
   }
   if (normalized === "partial_failure") {
@@ -368,6 +474,84 @@ function itemRowHtml(item, requestedItemId, confirmedContractTaskIds) {
   ].join("");
 }
 
+export function validationBatchConfirmAllAction(
+  batch,
+  { inFlight = false } = {},
+) {
+  const items = batch?.items || [];
+  const total = Number(batch?.counts?.total);
+  if (!(total >= 2 || items.length >= 2)) {
+    return { visible: false, disabled: true, label: "全部确认" };
+  }
+  const actionable = items.filter((item) => !["failed", "cancelled"].includes(item.status));
+  const pending = actionable.filter((item) => item.pendingReportDraft);
+  const notReady = actionable.filter(
+    (item) => !item.pendingReportDraft && !item.wordReportDownloadUrl,
+  );
+  if (inFlight) {
+    return { visible: true, disabled: true, label: "正在生成全部报告…" };
+  }
+  return {
+    visible: true,
+    disabled: pending.length === 0 || notReady.length > 0,
+    label: "全部确认",
+    title: notReady.length > 0
+      ? "还有模型尚未完成报告结论草稿"
+      : pending.length === 0
+        ? "没有待确认的报告草稿"
+        : "确认全部模型的报告结论并生成 Word、Excel 和汇总文档",
+  };
+}
+
+export function renderValidationBatchSwitcher(
+  batchPayload,
+  { selectedChildTaskId = "", confirmAllInFlight = false } = {},
+) {
+  const batch = batchPayload?.counts && Array.isArray(batchPayload?.items)
+    ? batchPayload
+    : normalizeValidationBatchPayload(batchPayload);
+  const selected = textValue(selectedChildTaskId) || batch.items[0]?.childTaskId || "";
+  const buttons = (batch.items || []).map((item) => {
+    const isSelected = item.childTaskId === selected;
+    const tone = itemTone(item);
+    const progress = itemProgressLabel(item);
+    const version = item.modelVersion ? ` · ${item.modelVersion}` : "";
+    return [
+      `<button type="button" class="validation-batch-switcher-item${isSelected ? " is-selected" : ""}"`,
+      ` data-tone="${escapeHtml(tone)}"`,
+      ` data-batch-switch-child="${escapeHtml(item.childTaskId)}"`,
+      ` aria-pressed="${isSelected ? "true" : "false"}">`,
+      `<span class="validation-batch-switcher-name">${escapeHtml(item.modelName || `模型 ${item.ordinal}`)}${escapeHtml(version)}</span>`,
+      `<small class="validation-batch-switcher-progress">${escapeHtml(progress)}</small>`,
+      "</button>",
+    ].join("");
+  }).join("");
+  const showSummary = Number(batch.counts.total) >= 2;
+  const confirmAll = validationBatchConfirmAllAction(batch, { inFlight: confirmAllInFlight });
+  const confirmAllAction = confirmAll.visible
+    ? [
+      `<button type="button" class="button compact primary" data-batch-confirm-all="true"`,
+      confirmAll.disabled ? ' disabled aria-disabled="true"' : "",
+      confirmAll.title ? ` title="${escapeHtml(confirmAll.title)}"` : "",
+      `>${escapeHtml(confirmAll.label)}</button>`,
+    ].join("")
+    : "";
+  const summaryAction = !showSummary
+    ? ""
+    : batch.summaryDownloadUrl
+      ? `<a class="button compact validation-batch-download" href="${escapeHtml(batch.summaryDownloadUrl)}">下载汇总 Excel</a>`
+      : "";
+  const actions = confirmAllAction || summaryAction
+    ? `<div class="validation-batch-switcher-actions">${confirmAllAction}${summaryAction}</div>`
+    : "";
+  return [
+    '<div class="validation-batch-switcher" aria-label="当前验证模型">',
+    `<div class="validation-batch-switcher-list" role="tablist">${buttons}</div>`,
+    actions,
+    "</div>",
+  ].join("");
+}
+
 export function renderValidationBatchOverview(
   batchPayload,
   {
@@ -394,7 +578,10 @@ export function renderValidationBatchOverview(
       `>${escapeHtml(startAction.label)}</button>`,
     ].join("")
     : "";
-  const summaryAction = batch.summaryDownloadUrl
+  const showSummary = Number(batch.counts.total) >= 2;
+  const summaryAction = !showSummary
+    ? ""
+    : batch.summaryDownloadUrl
     ? `<a class="button compact validation-batch-download" href="${escapeHtml(batch.summaryDownloadUrl)}">下载汇总 Excel</a>`
     : '<span class="validation-batch-summary-pending" aria-disabled="true">汇总待生成</span>';
   const rows = batch.items.length
@@ -408,8 +595,8 @@ export function renderValidationBatchOverview(
   const contractGuidance = batch.status === "awaiting_confirmation"
     ? [
       '<p class="validation-batch-contract-guidance">',
-      "请先打开各待确认模型的“确认合同”逐项核对。",
-      "平台不会自动确认合同；确认完成后再继续批次。",
+      "无冲突时请在对话里回复「都按这个」按识别结果确认；某个模型要改列时指出模型名和字段。",
+      "表单仍可展开核对，但不必逐项点选才能继续。",
       "</p>",
     ].join("")
     : "";
@@ -472,6 +659,10 @@ export function createValidationBatchPanelController({
   refreshParentTask = async () => true,
   onError = () => {},
   onRecovered = () => {},
+  onProjectedChildChange = () => {},
+  onLayoutChange = () => {},
+  onBatchMeta = () => {},
+  confirmAllReportDrafts = async () => {},
   schedulePoll = (callback, delay) => setTimeout(callback, delay),
   cancelPoll = (handle) => clearTimeout(handle),
   pollIntervalMs = 1500,
@@ -480,14 +671,58 @@ export function createValidationBatchPanelController({
   let currentPayload = null;
   let requestVersion = 0;
   let startInFlight = false;
+  let confirmAllInFlight = false;
   let pollHandle = null;
   let detailLoadErrorMessage = "";
   const confirmedContractTaskIds = new Set();
+  const boundHosts = new Set();
   const initialTaskId = textValue(deepLink.taskId);
   const initialItemId = textValue(deepLink.itemId);
+  let selectedChildTaskId = initialItemId;
+  let lastNotifiedItemCount;
 
   function panelElement() {
     return getElementById("batchOverviewPanel");
+  }
+
+  function switcherHost() {
+    const host = getElementById("validationBatchSwitcher");
+    const panel = panelElement();
+    return host && host !== panel ? host : null;
+  }
+
+  function usesHeroSwitcher() {
+    return Boolean(switcherHost()) && usesAgentValidationWorkbench(getSelectedTask());
+  }
+
+  function notifyLayout() {
+    try {
+      onLayoutChange();
+    } catch (_) {
+      // Layout sync is presentational.
+    }
+  }
+
+  function notifyBatchMeta() {
+    if (!currentPayload) return;
+    const itemCount = currentPayload.counts?.total;
+    if (lastNotifiedItemCount === itemCount) return;
+    lastNotifiedItemCount = itemCount;
+    try {
+      onBatchMeta({
+        itemCount,
+        createdAt: currentPayload.createdAt,
+      });
+    } catch (_) {
+      // Title stamping is presentational.
+    }
+  }
+
+  function setHostVisible(host, visible) {
+    if (!host) return;
+    host.classList?.toggle("hidden", !visible);
+    host.toggleAttribute?.("hidden", !visible);
+    host.setAttribute?.("aria-hidden", visible ? "false" : "true");
   }
 
   function requestedItemId() {
@@ -495,36 +730,77 @@ export function createValidationBatchPanelController({
   }
 
   function setVisible(visible) {
-    const panel = panelElement();
-    panel?.classList.toggle("hidden", !visible);
-    panel?.setAttribute("aria-hidden", visible ? "false" : "true");
+    const isBatch = Boolean(visible) && isValidationBatchTask(getSelectedTask());
+    const heroSwitcher = usesHeroSwitcher();
+    setHostVisible(panelElement(), isBatch && !heroSwitcher);
+    setHostVisible(switcherHost(), isBatch && heroSwitcher);
+    notifyLayout();
   }
 
   function renderLoading() {
-    const panel = panelElement();
-    if (!panel) return;
-    panel.innerHTML = '<div class="validation-batch-loading" role="status">正在读取批次状态…</div>';
+    const loadingHtml = usesHeroSwitcher()
+      ? '<div class="validation-batch-switcher-loading" role="status">正在读取模型状态…</div>'
+      : '<div class="validation-batch-loading" role="status">正在读取批次状态…</div>';
+    const host = usesHeroSwitcher() ? switcherHost() : panelElement();
+    if (host) host.innerHTML = loadingHtml;
   }
 
   function renderError(message) {
-    const panel = panelElement();
-    if (!panel) return;
-    panel.innerHTML = [
+    const errorHtml = [
       '<div class="validation-batch-load-error" role="alert">',
       `<strong>批次状态读取失败</strong><span>${escapeHtml(message || "请稍后重试。")}</span>`,
       '<button type="button" class="button compact secondary" data-batch-refresh="true">重新加载</button>',
       "</div>",
     ].join("");
+    const host = usesHeroSwitcher() ? switcherHost() : panelElement();
+    if (host) host.innerHTML = errorHtml;
   }
 
   function renderCurrent() {
     const panel = panelElement();
-    if (!panel || !currentPayload) return;
+    const switcher = switcherHost();
+    if (!currentPayload) return;
+    if (usesAgentValidationWorkbench(getSelectedTask())) {
+      selectedChildTaskId = resolveProjectedChildTaskId(currentPayload, selectedChildTaskId);
+      const html = renderValidationBatchSwitcher(currentPayload, {
+        selectedChildTaskId,
+        confirmAllInFlight,
+      });
+      if (switcher) {
+        switcher.innerHTML = html;
+        if (panel) panel.innerHTML = "";
+      } else if (panel) {
+        panel.innerHTML = html;
+      }
+      notifyBatchMeta();
+      notifyLayout();
+      return;
+    }
+    if (switcher) switcher.innerHTML = "";
+    if (!panel) return;
     panel.innerHTML = renderValidationBatchOverview(currentPayload, {
       requestedItemId: requestedItemId(),
       startInFlight,
       confirmedContractTaskIds,
     });
+    notifyBatchMeta();
+    notifyLayout();
+  }
+
+  function notifyProjectedChild({ force = false } = {}) {
+    const childTaskId = resolveProjectedChildTaskId(currentPayload, selectedChildTaskId);
+    selectedChildTaskId = childTaskId;
+    if (!activeTaskId || !childTaskId) return;
+    try {
+      onProjectedChildChange({
+        parentTaskId: activeTaskId,
+        childTaskId,
+        item: currentPayload?.items?.find((candidate) => candidate.childTaskId === childTaskId) || null,
+        force,
+      });
+    } catch (_) {
+      // Projection is presentational; batch detail remains authoritative.
+    }
   }
 
   function clearScheduledPoll() {
@@ -550,7 +826,17 @@ export function createValidationBatchPanelController({
 
   function scheduleCurrentPoll() {
     clearScheduledPoll();
-    if (!activeTaskId || currentPayload?.status !== "running") return;
+    if (!activeTaskId || !currentPayload) return;
+    const workbench = usesAgentValidationWorkbench(getSelectedTask());
+    const items = currentPayload.items || [];
+    const unfinished = items.some((item) => (
+      !["succeeded", "failed", "cancelled", "completed"].includes(item.status)
+    ));
+    if (workbench) {
+      if (!unfinished) return;
+    } else if (currentPayload.status !== "running") {
+      return;
+    }
     const taskId = activeTaskId;
     pollHandle = schedulePoll(async () => {
       pollHandle = null;
@@ -587,11 +873,14 @@ export function createValidationBatchPanelController({
     if (!force && activeTaskId === taskId && currentPayload) {
       renderCurrent();
       scheduleCurrentPoll();
+      notifyProjectedChild({ force: false });
       return currentPayload;
     }
     if (activeTaskId && activeTaskId !== taskId) {
       confirmedContractTaskIds.clear();
       detailLoadErrorMessage = "";
+      selectedChildTaskId = taskId === initialTaskId ? initialItemId : "";
+      lastNotifiedItemCount = undefined;
     }
     const previousPayload = activeTaskId === taskId ? currentPayload : null;
     activeTaskId = taskId;
@@ -607,7 +896,12 @@ export function createValidationBatchPanelController({
       detailLoadErrorMessage = "";
       confirmedContractTaskIds.clear();
       currentPayload = normalizeValidationBatchPayload(raw, taskId);
+      selectedChildTaskId = resolveProjectedChildTaskId(
+        currentPayload,
+        selectedChildTaskId || requestedItemId(),
+      );
       renderCurrent();
+      notifyProjectedChild({ force });
       focusRequestedItem();
       scheduleCurrentPoll();
       if (recoveredMessage) {
@@ -747,14 +1041,19 @@ export function createValidationBatchPanelController({
     activeTaskId = "";
     currentPayload = null;
     startInFlight = false;
+    confirmAllInFlight = false;
     detailLoadErrorMessage = "";
+    selectedChildTaskId = initialItemId;
+    lastNotifiedItemCount = undefined;
     confirmedContractTaskIds.clear();
     const panel = panelElement();
+    const switcher = switcherHost();
     setVisible(false);
     if (panel) panel.innerHTML = "";
+    if (switcher) switcher.innerHTML = "";
   }
 
-  panelElement()?.addEventListener("click", (event) => {
+  function handleBatchClick(event) {
     if (event.target?.closest?.("[data-batch-start]")) {
       void startOrContinue();
       return;
@@ -763,11 +1062,72 @@ export function createValidationBatchPanelController({
       void selectTask(getSelectedTask(), { force: true });
       return;
     }
+    if (event.target?.closest?.("[data-batch-confirm-all]")) {
+      void confirmAll();
+      return;
+    }
+    const switchButton = event.target?.closest?.("[data-batch-switch-child]");
+    if (switchButton) {
+      const nextChild = textValue(switchButton.dataset.batchSwitchChild);
+      if (nextChild && nextChild !== selectedChildTaskId) {
+        selectedChildTaskId = nextChild;
+        renderCurrent();
+        notifyProjectedChild({ force: true });
+      }
+      return;
+    }
     const contractButton = event.target?.closest?.("[data-batch-contract-task-id]");
     if (contractButton) {
       void openItemContract(contractButton);
     }
-  });
+  }
+
+  async function confirmAll() {
+    const parentTaskId = currentPayload?.parentTaskId || activeTaskId;
+    if (!parentTaskId || confirmAllInFlight) return;
+    const action = validationBatchConfirmAllAction(currentPayload, { inFlight: false });
+    if (!action.visible || action.disabled) return;
+    confirmAllInFlight = true;
+    renderCurrent();
+    try {
+      await confirmAllReportDrafts({ parentTaskId });
+      await selectTask(getSelectedTask(), { force: true });
+    } catch (error) {
+      onError(error?.message || "全部确认失败，请稍后重试。");
+    } finally {
+      confirmAllInFlight = false;
+      renderCurrent();
+    }
+  }
+
+  function handleSwitcherWheel(event) {
+    const list = event.target?.closest?.(".validation-batch-switcher-list");
+    if (!list) return;
+    if (list.scrollWidth <= list.clientWidth + 1) return;
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    event.preventDefault();
+    list.scrollLeft += event.deltaY;
+  }
+
+  function bindHost(host) {
+    if (!host || boundHosts.has(host)) return;
+    boundHosts.add(host);
+    host.addEventListener("click", handleBatchClick);
+    host.addEventListener("wheel", handleSwitcherWheel, { passive: false });
+  }
+
+  function selectChild(childTaskId) {
+    const nextId = textValue(childTaskId);
+    if (!nextId) return;
+    selectedChildTaskId = currentPayload
+      ? resolveProjectedChildTaskId(currentPayload, nextId)
+      : nextId;
+    if (currentPayload) renderCurrent();
+    notifyProjectedChild({ force: true });
+  }
+
+  bindHost(panelElement());
+  bindHost(switcherHost());
 
   return {
     clear,
@@ -776,6 +1136,7 @@ export function createValidationBatchPanelController({
     remainingContractConfirmations,
     renderVisibility,
     selectTask,
+    selectChild,
     openItemContract,
     startOrContinue,
     statusIsTerminal: (status) => terminalBatchStatuses.has(textValue(status).toLowerCase()),

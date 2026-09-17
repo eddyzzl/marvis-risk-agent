@@ -547,7 +547,7 @@ def test_agent_auto_accept_runs_all_remaining_stages_without_continue_prompts(
         "open:metrics",
         "metrics:True",
         "open:word_conclusion_draft",
-        "word:True:None:None",
+        "word:False:None:None",
     ]
     assert not [
         message
@@ -728,7 +728,7 @@ def test_agent_auto_accept_does_not_add_received_intro_when_auto_advancing(
         auto_accept=False,
         rewrite_instruction=None,
     ):
-        assert auto_accept is True
+        assert auto_accept is False
         repo.update_agent_report_conclusions(task_id, REQUIRED_AGENT_CONCLUSIONS, expected_revision=0)
         return True
 
@@ -862,6 +862,117 @@ def test_agent_dispatch_auto_accept_cannot_bypass_pending_input_confirmation(
     assert forced["stage"] == "input_confirmation"
     assert repo.task_has_active_job(task_id) is False
     assert calls == []
+
+
+def test_agent_dispatch_auto_accept_confirms_unambiguous_pending_contract(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.validation_app_service import dispatch_agent_validation_job
+    from marvis.db_schema import connect
+    from marvis.repositories.validation_contracts import ValidationContractRepository
+    from tests.validation_builders import make_candidate_contract
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(
+        task_id,
+        TaskStatus.SCANNED,
+        "scanned",
+        expected=TaskStatus.CREATED,
+    )
+    ValidationContractRepository(tmp_path / "marvis.sqlite").replace_candidates(
+        task_id,
+        make_candidate_contract(),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_agent_validation_job",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_confirm(*, db_path, task_id):
+        with connect(db_path) as conn:
+            conn.execute(
+                "UPDATE validation_input_contracts SET status = 'ready' WHERE task_id = ?",
+                (task_id,),
+            )
+        return True
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.confirm_unambiguous_contract",
+        fake_confirm,
+    )
+
+    payload = dispatch_agent_validation_job(
+        repo_=repo,
+        task=repo.get_task(task_id),
+        settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        model_profile={"model_id": "m1"},
+        acceptance_mode="auto_accept",
+        background_tasks=BackgroundTasks(),
+    )
+
+    assert payload["status"] == "accepted"
+    assert payload["stage"] == "reproducibility"
+    assert repo.task_has_active_job(task_id) is True
+    assert any(
+        "无歧义" in (message.get("content") or "")
+        for message in repo.list_agent_messages(task_id)
+    )
+
+
+def test_agent_scan_auto_accept_confirms_unambiguous_contract_and_continues(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.validation_app_service import run_agent_scan_stage
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    contract_payload = {
+        "status": "pending_confirmation",
+        "revision": 1,
+        "contract": {"candidates": {}},
+    }
+
+    def fake_scan(repo_, task, _settings):
+        repo_.update_status(
+            task.id,
+            TaskStatus.SCANNED,
+            "scanned",
+            expected=TaskStatus.CREATED,
+        )
+        return {"validation_input_contract": contract_payload}
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.perform_scan_task",
+        fake_scan,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.summarize_stage",
+        lambda **_kwargs: ("材料扫描完成。", {"fallback": True}),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_stages.confirm_unambiguous_contract",
+        lambda **_kwargs: True,
+    )
+
+    assert run_agent_scan_stage(
+        repo,
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        task_id,
+        {"model_id": "m1"},
+        auto_accept=True,
+    ) is True
+
+    messages = repo.list_agent_messages(task_id)
+    assert not any(
+        message.get("metadata", {}).get("awaiting_validation_input_confirmation")
+        for message in messages
+    )
+    assert any("无歧义" in (message.get("content") or "") for message in messages)
 
 
 def test_direct_agent_reproducibility_stage_requires_ready_v2_contract_before_status_change(
@@ -1114,6 +1225,38 @@ def test_clear_agent_cancellation_is_scoped_to_one_task():
         clear_agent_cancellation("task-b")
 
 
+def test_agent_auto_review_stops_at_real_report_draft(tmp_path, monkeypatch):
+    from marvis.api import _run_agent_validation_job
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    _advance_to_writing_artifacts(repo, task_id)
+    before = repo.get_report_values(task_id)
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.generate_word_conclusions",
+        lambda **_kwargs: (REQUIRED_AGENT_CONCLUSIONS, {"source": "test"}),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.agent_evidence_from_settings_impl",
+        lambda *_args: {},
+    )
+    job_id = repo.start_job(task_id, "agent")
+    _run_agent_validation_job(
+        job_id, client.app.state.settings, task_id, {"model_id": "m1"},
+        stage="word_conclusion_draft", acceptance_mode="auto_accept",
+    )
+
+    assert repo.get_task(task_id).status == TaskStatus.WRITING_ARTIFACTS
+    assert repo.get_active_job_kind(task_id) is None
+    assert repo.get_report_values(task_id) == before
+    messages = repo.list_agent_messages(task_id)
+    assert not any(message["stage"] in {"word_report_ready", "word_conclusion_confirmed"} for message in messages)
+    draft = messages[-1]
+    assert draft["stage"] == "word_conclusion_draft"
+    assert REQUIRED_AGENT_CONCLUSIONS.items() <= draft["metadata"]["draft_values"].items()
+
+
 def test_agent_word_conclusions_auto_accept_generates_report_without_confirmation(
     tmp_path,
     monkeypatch,
@@ -1155,7 +1298,7 @@ def test_agent_word_conclusions_auto_accept_generates_report_without_confirmatio
     messages = repo.list_agent_messages(task_id)
     assert report_calls == [task_id]
     assert repo.get_task(task_id).status == TaskStatus.SUCCEEDED
-    assert repo.get_report_values(task_id)[0] == REQUIRED_AGENT_CONCLUSIONS
+    assert REQUIRED_AGENT_CONCLUSIONS.items() <= repo.get_report_values(task_id)[0].items()
     audit = PluginRepository(tmp_path / "marvis.sqlite").list_audit(
         kind="report.agent_conclusions.generated",
     )
@@ -1407,6 +1550,7 @@ def test_metrics_stage_evidence_drops_oversized_roc_curve_arrays():
     assert effectiveness["monthly_ks"] == [{"month": "202503", "ks": 0.33}]
     assert effectiveness["psi_stability_table"] == [{"split": "oot", "psi": 0.05}]
     assert len(effectiveness["bin_tables"]["train"]) == 10
+    assert "lift_ranking_assessment" in effectiveness
     assert len(scoped["validation_results"]["basic_info"]["feature_importance"]) == 20
     stress = scoped["validation_results"]["stress_test"]
     assert "bin_table" not in stress["baseline"]
@@ -1540,6 +1684,7 @@ def test_word_conclusion_draft_evidence_is_compact_and_keeps_business_summaries(
     assert "rows" not in validation_results["reproducibility"]
     assert "roc_ks_curves" not in validation_results["effectiveness"]
     assert "bin_tables" not in validation_results["effectiveness"]
+    assert "lift_ranking_assessment" in validation_results["effectiveness"]
     assert len(validation_results["effectiveness"]["monthly_ks"]) <= 12
     assert len(validation_results["basic_info"]["feature_importance"]) <= 20
     assert "bin_table" not in validation_results["stress_test"]["baseline"]
@@ -3477,10 +3622,10 @@ def test_agent_continue_generate_report_after_intervening_chat_dispatches_word_d
     assert calls == ["word_conclusion_draft"]
     assert chat_prompts == []
     messages = repo.list_agent_messages(task_id)
-    assert messages[-2]["stage"] == "word_conclusion_draft"
-    assert messages[-2]["metadata"]["draft_values"] == REQUIRED_AGENT_CONCLUSIONS
-    assert "压力测试总结" in messages[-2]["content"]
-    assert messages[-1]["metadata"]["awaiting_confirmation"] is True
+    assert messages[-1]["stage"] == "word_conclusion_draft"
+    assert REQUIRED_AGENT_CONCLUSIONS.items() <= messages[-1]["metadata"]["draft_values"].items()
+    assert "压力测试总结" in messages[-1]["content"]
+    assert not any(message.get("metadata", {}).get("awaiting_confirmation") for message in messages)
 
 
 def test_agent_reproducibility_summary_prompt_excludes_other_stage_evidence(
@@ -4140,7 +4285,7 @@ def test_agent_word_conclusion_stage_shows_thinking_while_llm_generates_draft(
     ]
     draft = messages[0]
     assert draft["metadata"]["streaming"] is False
-    assert draft["metadata"]["draft_values"] == REQUIRED_AGENT_CONCLUSIONS
+    assert REQUIRED_AGENT_CONCLUSIONS.items() <= draft["metadata"]["draft_values"].items()
     assert draft["metadata"]["report_revision"] == 0
     assert "压力测试总结" in draft["content"]
     assert "最终验证结论" in draft["content"]
@@ -4218,6 +4363,8 @@ def test_agent_word_conclusion_display_uses_fixed_business_order():
             "TEXT:final_validation_conclusion": "最终结论内容。",
             "TEXT:pressure_impact_recommendation": "影响建议内容。",
             "TEXT:pressure_test_summary": "压力测试内容。",
+            "TEXT:bad_sample_definition": "MOB6 逾期 >= 30 天",
+            "TEXT:model_overview": "支用环节模型概述。",
         }
     )
 
@@ -4225,6 +4372,8 @@ def test_agent_word_conclusion_display_uses_fixed_business_order():
         "压力测试总结\n压力测试内容。",
         "压力影响建议\n影响建议内容。",
         "最终验证结论\n最终结论内容。",
+        "模型概述\n支用环节模型概述。",
+        "坏样本定义\nMOB6 逾期 >= 30 天",
     ]
 
 
@@ -4251,14 +4400,14 @@ def test_agent_word_conclusion_dispatch_returns_draft_thinking_message(tmp_path)
     assert result["status"] == "accepted"
     assert result["stage"] == "word_conclusion_draft"
     messages = result["messages"]
-    assert messages[-2]["role"] == "assistant"
-    assert messages[-2]["stage"] == "chat"
-    assert messages[-2]["content"] == "收到，我将基于已完成的验证结果起草 Word 报告中的三段结论，完成后会等你确认。"
-    assert messages[-2]["metadata"]["streaming"] is False
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["stage"] == "word_conclusion_draft"
     assert messages[-1]["content"] == ""
     assert messages[-1]["metadata"]["streaming"] is True
+    assert not any(
+        "收到，我将基于已完成的验证结果" in str(message.get("content") or "")
+        for message in messages
+    )
     assert repo.get_active_job_kind(task_id) == "agent"
 
 
@@ -4595,7 +4744,8 @@ def test_agent_chat_confirm_report_draft_rejects_stale_revision_without_mutation
     assert "stale report values revision" in response.json()["detail"]
     values, revision = repo.get_report_values(task_id)
     assert revision == 1
-    assert values == {"TEXT:report_title": "人工修改"}
+    assert values["TEXT:report_title"] == "人工修改"
+    assert not REQUIRED_AGENT_CONCLUSIONS.items() <= values.items()
     assert report_calls == []
     assert not any(
         message["stage"] == "word_conclusion_confirmed"
@@ -4671,7 +4821,7 @@ def test_agent_chat_confirm_ignores_freeform_assistant_report_headings(
     assert report_calls == []
     values, revision = repo.get_report_values(task_id)
     assert revision == 0
-    assert values == {}
+    assert all(not str(values.get(key) or "").strip() for key in REQUIRED_AGENT_CONCLUSIONS)
 
 
 def test_agent_chat_confirm_ignores_draft_after_report_was_confirmed(
@@ -4817,13 +4967,19 @@ def test_agent_chat_regenerate_report_creates_structured_draft_not_plain_chat(
     assert response.json()["stage"] == "word_conclusion_draft"
     assert report_calls == []
     messages = repo.list_agent_messages(task_id)
-    assert messages[-4]["role"] == "user"
-    assert messages[-4]["metadata"]["intent"] == "regenerate_report_draft"
-    assert messages[-3]["stage"] == "chat"
-    assert messages[-3]["metadata"]["streaming"] is False
-    assert messages[-2]["stage"] == "word_conclusion_draft"
-    assert messages[-2]["metadata"]["draft_values"] == REQUIRED_AGENT_CONCLUSIONS
-    assert messages[-1]["metadata"]["awaiting_confirmation"] is True
+    assert messages[-2]["role"] == "user"
+    assert messages[-2]["metadata"]["intent"] == "regenerate_report_draft"
+    assert messages[-1]["stage"] == "word_conclusion_draft"
+    assert REQUIRED_AGENT_CONCLUSIONS.items() <= messages[-1]["metadata"]["draft_values"].items()
+    user_index = next(
+        index
+        for index, message in enumerate(messages)
+        if message.get("metadata", {}).get("intent") == "regenerate_report_draft"
+    )
+    assert not any(
+        message.get("metadata", {}).get("awaiting_confirmation")
+        for message in messages[user_index:]
+    )
 
 
 def test_agent_chat_regenerate_report_rejects_active_job_without_new_draft(

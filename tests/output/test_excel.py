@@ -165,6 +165,38 @@ def test_write_excel_includes_all_required_sheets(tmp_path: Path):
     assert expected.issubset(set(wb.sheetnames))
 
 
+def test_write_excel_includes_independent_quantile_bin_sheets(tmp_path: Path):
+    """Train-aligned 分箱_* stay; each split also gets its own 10-quantile sheet."""
+    aligned = BinRow(1, 0.0, 0.5, 50, 5, 0.1, 0.5, 0.5, 1.0, 0.0)
+    independent_train = BinRow(1, 0.0, 0.12, 10, 1, 0.10, 0.10, 0.10, 1.0, 0.01)
+    independent_oot = BinRow(1, 0.70, 0.82, 10, 6, 0.60, 0.10, 0.60, 6.0, 0.12)
+    base = _make_results()
+    results = replace(
+        base,
+        effectiveness=replace(
+            base.effectiveness,
+            bin_tables={"train": [aligned], "test": [aligned], "oot": [aligned]},
+            independent_quantile_bin_tables={
+                "train": [independent_train],
+                "test": [independent_train],
+                "oot": [independent_oot],
+            },
+        ),
+    )
+    output = tmp_path / "out.xlsx"
+    write_validation_excel(results, output)
+    wb = load_workbook(output, data_only=True)
+
+    assert "分箱_train" in wb.sheetnames
+    assert "分箱_独立10等分_train" in wb.sheetnames
+    assert "分箱_独立10等分_test" in wb.sheetnames
+    assert "分箱_独立10等分_oot" in wb.sheetnames
+    assert wb["分箱_oot"]["A1"].value == "oot(按照train分箱)"
+    assert wb["分箱_独立10等分_oot"]["A1"].value == "oot(独立10等分)"
+    assert wb["分箱_oot"]["A2"].value == "[0,0.5]"
+    assert wb["分箱_独立10等分_oot"]["A2"].value == "[0.7,0.82]"
+
+
 def test_overview_sheet_contains_status_text(tmp_path: Path):
     output = tmp_path / "out.xlsx"
     write_validation_excel(_make_results(), output)
@@ -413,7 +445,7 @@ def test_reference_bin_table_columns_and_formats(tmp_path: Path):
     sheet = wb["分箱_oot"]
 
     assert [cell.value for cell in sheet[1][:9]] == [
-        "oot(独立分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
+        "oot(按照train分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
         "累计逾期率", "单组lift", "累计lift", "ks",
     ]
     assert sheet.cell(row=2, column=1).value == "[0,0.5]"

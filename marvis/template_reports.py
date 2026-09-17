@@ -209,9 +209,41 @@ def _run_property_score(run) -> int:
 
 
 def _add_run_like(paragraph, text: str, source_run):
-    run = paragraph.add_run(text)
-    _copy_run_properties(source_run, run)
-    return run
+    if "!!" not in text and "**" not in text:
+        run = paragraph.add_run(text)
+        _copy_run_properties(source_run, run)
+        return run
+    last_run = None
+    for span in _report_markup_spans(text):
+        last_run = paragraph.add_run(span["text"])
+        _copy_run_properties(source_run, last_run)
+        if span["risk"]:
+            last_run.bold = True
+            last_run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
+        elif span["bold"]:
+            last_run.bold = True
+    return last_run if last_run is not None else paragraph.add_run("")
+
+
+_REPORT_MARKUP_PATTERN = re.compile(r"!!([^!\n]+)!!|\*\*([^*\n]+)\*\*")
+
+
+def _report_markup_spans(text: str) -> list[dict[str, object]]:
+    spans: list[dict[str, object]] = []
+    cursor = 0
+    for match in _REPORT_MARKUP_PATTERN.finditer(text):
+        if match.start() > cursor:
+            spans.append(
+                {"text": text[cursor:match.start()], "risk": False, "bold": False}
+            )
+        if match.group(1) is not None:
+            spans.append({"text": match.group(1), "risk": True, "bold": True})
+        else:
+            spans.append({"text": match.group(2), "risk": False, "bold": True})
+        cursor = match.end()
+    if cursor < len(text):
+        spans.append({"text": text[cursor:], "risk": False, "bold": False})
+    return spans or [{"text": text, "risk": False, "bold": False}]
 
 
 def _image_paths(value: ImageValue | None) -> list[Path]:

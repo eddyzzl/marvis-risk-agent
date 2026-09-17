@@ -1677,4 +1677,3 @@ def _sample_design_scalar_text(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
-

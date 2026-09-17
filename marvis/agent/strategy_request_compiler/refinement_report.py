@@ -1379,4 +1379,3 @@ def _strategy_report_status_span_is_negated(
 ) -> bool:
     prefix = utterance[max(0, start - 32) : start]
     return _STRATEGY_REPORT_STATUS_NEGATION_RE.search(prefix) is not None
-

@@ -1865,6 +1865,37 @@ dialog.agent-memory-dialog,
   grid-column: 1 / -1;
 }
 
+.validation-create-extra-section {
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+.validation-create-extra-list {
+  display: grid;
+  gap: 16px;
+}
+
+.validation-create-model-card {
+  padding: 14px 0 2px;
+  border-top: 1px solid var(--border);
+}
+
+.validation-create-model-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.validation-create-model-head h3 {
+  margin: 0;
+}
+
+.validation-create-model-card .material-source-section {
+  grid-column: 1 / -1;
+}
+
 .material-source-section {
   grid-template-columns: 1fr;
   gap: 10px;

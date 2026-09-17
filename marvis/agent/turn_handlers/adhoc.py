@@ -337,4 +337,3 @@ def _has_adhoc_dataset(settings, task_id: str) -> bool:
         )
     except Exception:  # noqa: BLE001 - routing hints fail closed
         return False
-

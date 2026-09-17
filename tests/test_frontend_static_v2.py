@@ -21,6 +21,34 @@ def _read_static(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 
+def _with_workbench_context(script: str, app_js: str) -> str:
+    """Supply the real workbench helpers to explicitly isolated Node fixtures."""
+    batch_js = _read_static("js/validation-batch.js")
+    states = {
+        "selectedTask": "null",
+        "projectedValidationChildTask": "null",
+        "projectedValidationChildTaskId": "''",
+        "agentBatchAutoRunGeneration": "0",
+        "validationBatchTaskType": "'validation_batch'",
+    }
+    prefix = [
+        f"let {name} = {value};"
+        for name, value in states.items()
+        if not re.search(rf"\b(?:let|const|var)\s+{name}\b", script)
+    ]
+    for source, names in (
+        (
+            app_js,
+            ("workbenchTask", "workbenchTaskId", "isWorkbenchTaskId", "invalidateAgentBatchAutoRun"),
+        ),
+        (batch_js, ("textValue", "isValidationBatchTask", "usesAgentValidationWorkbench")),
+    ):
+        for name in names:
+            if not re.search(rf"\bfunction\s+{name}\b", script):
+                prefix.append(_slice_function(source, f"function {name}("))
+    return "\n".join([*prefix, script])
+
+
 def _read_browser_css() -> str:
     return read_browser_stylesheets(STATIC_DIR)
 
@@ -470,9 +498,9 @@ def test_frontend_uses_v2_task_actions_only():
     assert "api/tasks/${taskId}/notebook" in app_js
     assert "api/tasks/${taskId}/metrics" in app_js
     assert "api/tasks/${taskId}/report" in app_js
-    assert "api/tasks/${selectedTaskId}/report/download" in app_js
-    assert "api/tasks/${selectedTaskId}/analysis/download" in app_js
-    assert "api/tasks/${selectedTaskId}/report/preview" in app_js
+    assert "api/tasks/${taskId}/report/download" in app_js
+    assert "api/tasks/${taskId}/analysis/download" in app_js
+    assert "api/tasks/${taskId}/report/preview" in app_js
     assert 'data-step-action="downloadWordReport"' in app_js
     assert 'data-step-action="downloadExcelAnalysis"' in app_js
     assert 'data-step-action="previewWordReport"' in app_js
@@ -1130,8 +1158,8 @@ def test_completed_report_actions_render_below_step_copy_with_office_colors():
     ready_end = app_js.index("function stepDownloadActionsHtml", ready_start)
     ready_helper = app_js[ready_start:ready_end]
     assert 'step.action === "report"' in ready_helper
-    assert "selectedTask?.report_available === true" in ready_helper
-    assert '["succeeded", "review_required"].includes(selectedTask?.status)' in ready_helper
+    assert "task?.report_available === true" in ready_helper
+    assert '["succeeded", "review_required"].includes(task?.status)' in ready_helper
 
     assert "function stepDownloadActionsHtml" in app_js
     downloads_start = app_js.index("function stepDownloadActionsHtml")
@@ -1215,6 +1243,7 @@ def test_report_download_readiness_requires_generated_report_flag():
         ]
     )
 
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -1278,8 +1307,8 @@ def test_stage_actions_capture_task_id_before_polling():
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
     poll_renderer = app_js[poll_start:poll_end]
     assert "taskId = selectedTaskId" in poll_renderer
-    assert "const polledTask = findTaskInCache(taskId)" in poll_renderer
-    assert "selectedTaskId === taskId" in poll_renderer
+    assert "let polledTask = findTaskInCache(taskId)" in poll_renderer
+    assert "isWorkbenchTaskId(taskId)" in poll_renderer
 
     for function_name in [
         "scanCurrentTask",
@@ -1328,8 +1357,8 @@ def test_selected_running_task_auto_polls_progress_after_refresh_or_reselect():
     assert "const claim = claimProgressPoll(progressPolls, taskId, { background });" in poll_body
     assert "if (!claim.claimed) return claim.existing.promise;" in poll_body
     assert "releaseProgressPoll(progressPolls, taskId, pollState)" in poll_body
-    assert "if (selectedTaskId === taskId && !background)" in poll_body
-    assert "if (selectedTaskId === taskId && !background) {" in poll_body
+    assert "if (isWorkbenchTaskId(taskId) && !background)" in poll_body
+    assert "if (isWorkbenchTaskId(taskId) && !background) {" in poll_body
 
 
 def test_create_dialog_enter_does_not_submit_textareas():
@@ -1554,6 +1583,15 @@ def test_task_display_does_not_require_model_version_separator():
     assert "taskDisplayName?.(selectedTask)" in workspace_view_js
     assert "${selectedTask.model_name} · ${selectedTask.model_version}" not in app_js
     assert "${task.model_name} · ${task.model_version}" not in app_js
+    display_fn = app_js.split("function taskDisplayName", 1)[1].split(
+        "function stampValidationBatchItemCount",
+        1,
+    )[0]
+    assert "formatValidationBatchTaskName(task.created_at, task.item_count)" in display_fn
+    assert "isValidationBatchTask(task)" in display_fn
+    assert "模型验证批次" in display_fn
+    assert "const displayName = taskDisplayName(task)" in app_js
+    assert "${escapeHtml(displayName)}" in app_js
 
 
 def test_create_dialog_hides_v2_config_controls():
@@ -1629,13 +1667,34 @@ def test_create_dialog_auto_fills_removed_report_values():
     assert '"TEXT:revision_version": "V1"' in defaults
     assert '"TEXT:revision_author": seed.validator' in defaults
     assert '"TEXT:revision_description": "初稿"' in defaults
-    assert (
-        '"TEXT:model_overview": `为了更好的对xx用户进行授信环节风险管控，现开发${seed.modelName}模型，对xx客群做前置风险拦截，从授信申请阶段做好风险防范。`'
-        in defaults
+    assert "...validationNarrativeDefaults(seed.modelName)" in defaults
+    narrative = _slice_function(create_dialog_js, "function validationNarrativeDefaults(")
+    payload = _run_node_capture_json("\n".join([
+        "let modelName = '模型A';",
+        "function taskTextSeed() { return { modelName, validator: 'qa', reportTitle: '测试报告' }; }",
+        "function formatDateInput() { return '2026-09-17'; }",
+        narrative,
+        defaults,
+        "const generic = defaultCreateReportValues();",
+        "modelName = '渠道甲T卡 MOB6'; const t = defaultCreateReportValues();",
+        "modelName = '渠道甲A卡 MOB3'; const a = defaultCreateReportValues();",
+        "process.stdout.write(JSON.stringify({ generic, t, a }));",
+    ]))
+    generic = payload["generic"]
+    assert generic["TEXT:model_overview"] == (
+        "为了更好的对xx用户进行授信环节风险管控，现开发模型A模型，"
+        "对xx客群做前置风险拦截，从授信申请阶段做好风险防范。"
     )
-    assert '"TEXT:model_scope": "本模型适用于xx渠道用户。"' in defaults
-    assert '"TEXT:bad_sample_definition": "xx逾期 >= xx天"' in defaults
-    assert '"TEXT:good_sample_definition": "xx未逾期"' in defaults
+    assert generic["TEXT:model_scope"] == "本模型适用于xx渠道用户。"
+    assert generic["TEXT:bad_sample_definition"] == "xx逾期 >= xx天"
+    assert generic["TEXT:good_sample_definition"] == "xx未逾期"
+    assert "支用环节" in payload["t"]["TEXT:model_overview"]
+    assert "授信" not in payload["t"]["TEXT:model_overview"]
+    assert payload["t"]["TEXT:sample_audience"] == "申请支用的用户"
+    assert payload["t"]["TEXT:bad_sample_definition"] == "MOB6 逾期 >= 30 天"
+    assert "授信环节" in payload["a"]["TEXT:model_overview"]
+    assert payload["a"]["TEXT:sample_audience"] == "申请授信的用户"
+    assert payload["a"]["TEXT:bad_sample_definition"] == "MOB3 逾期 >= 30 天"
     assert '"TEXT:data_source_summary"' not in defaults
     assert '"TEXT:dataset_split_summary"' not in defaults
 
@@ -1863,7 +1922,7 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     styles_css = _read_browser_css()
 
     assert "报告初始内容" not in index_html
-    task_info_start = index_html.index('<h3>任务信息</h3>')
+    task_info_start = index_html.index('id="createTaskPrimaryModelHeading"')
     report_start = index_html.index('id="createTaskReportFields"')
     material_start = index_html.index('id="createTaskMaterialSection"')
     create_button_start = index_html.index('id="createTaskButton"')
@@ -2231,6 +2290,7 @@ def test_manual_risk_analysis_intake_posts_content_without_model_configuration()
             "process.stdout.write(JSON.stringify(posted));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -2326,6 +2386,7 @@ def test_manual_vintage_material_upload_control_runs_deterministic_intake():
             'process.stdout.write("ok");',
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=False,
@@ -3038,6 +3099,7 @@ def test_task_selection_keeps_same_task_active_and_refresh_restores_remembered_t
     assert 'export const selectedTaskStorageKey = "marvis_selected_task_id";' in state_js
     assert "function rememberSelectedTaskId" in app_js
     assert "function storedSelectedTaskId" in app_js
+    assert "syncTaskDeepLink(window.history, window.location" in app_js
 
     sync_start = app_js.index("function syncSelectedTaskFromCache")
     sync_end = app_js.index("function runModeLabel", sync_start)
@@ -3446,7 +3508,7 @@ def test_dark_workspace_masks_match_center_background():
     head_rule = _css_rule(styles_css, ".workspace-head")
     assert "transparent calc(var(--radius) - 1px)" in head_rule
     assert "var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px)" in head_rule
-    assert "background-position: left -1px top -1px, right -1px top -1px" in head_rule
+    assert "background-position: left 0 top 0, right 0 top 0" in head_rule
     assert "background-size: calc(var(--radius) + 2px) calc(var(--radius) + 2px)" in head_rule
     assert "transparent 16px, var(--surface) 16.5px" not in head_rule
 
@@ -3619,9 +3681,11 @@ def test_theme_button_tokens_drive_create_environment_and_model_buttons():
     assert "border-color: var(--button-primary-border-hover)" in hover_rule
 
 
-def test_sidebar_task_card_is_two_line_compact_without_icon():
+def test_sidebar_task_card_is_single_line_with_hover_preview():
     app_js = _read_static("app.js")
     styles_css = _read_browser_css()
+    index_html = _read_static("index.html")
+    preview_js = _read_static("js/task-row-preview.js")
 
     append_start = app_js.index("function taskRowContentSignature")
     append_end = app_js.index("function renderTaskSnapshot", append_start)
@@ -3629,16 +3693,20 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
 
     assert "task-row-icon" not in append_renderer
     assert "task-row-top" in append_renderer
-    assert "task-row-meta" in append_renderer
-    assert "task-row-validator" in append_renderer
-    assert "task-row-validator-icon" in append_renderer
-    assert "task-row-validator-text" in append_renderer
-    assert "task-row-date" in append_renderer
-    assert 'aria-label="验证人员：${validatorName}"' in append_renderer
-    assert ">验证人员：" not in append_renderer
+    assert "task-row-meta" not in append_renderer
+    assert "task-row-validator" not in append_renderer
+    assert "task-row-date" not in append_renderer
+    assert "taskRowAriaLabel(task)" in append_renderer
     assert "delete-task-button" in append_renderer
-    assert "formatDate(task.updated_at)" in append_renderer
-    assert 'const validatorName = escapeHtml(task.validator || "-");' in append_renderer
+    assert "formatDate(task.created_at || task.updated_at)" in append_renderer
+    assert 'from "./js/task-row-preview.js"' in app_js
+    assert "bindTaskRowPreview" in app_js
+    assert 'id="taskRowPreview"' in index_html
+    assert "taskRowPreviewHtml" in preview_js
+    assert "创建时间" in preview_js
+    assert "function dismiss(shell)" in preview_js
+    assert 'list.addEventListener("pointerdown"' in preview_js
+    assert "suppressedShell" in preview_js
     delete_hover_rule = _css_rule(
         styles_css, ".delete-task-button:hover,\n.delete-task-button:focus-visible"
     )
@@ -3666,55 +3734,27 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     assert "border: 1px solid transparent" in row_rule
     assert "padding: 11px 42px" not in row_rule
 
-    top_start = styles_css.index(".task-row-top {")
+    top_start = styles_css.index("\n.task-row-top {")
     top_end = styles_css.index("}", top_start)
     top_rule = styles_css[top_start:top_end]
     assert "grid-template-columns: minmax(0, 1fr) max-content" in top_rule
     assert "padding-right: var(--task-card-action-space)" in top_rule
 
-    meta_start = styles_css.index("\n.task-row-meta {", top_end)
-    meta_end = styles_css.index("}", meta_start)
-    meta_rule = styles_css[meta_start:meta_end]
-    assert "display: grid" in meta_rule
-    assert "grid-template-columns: minmax(0, 1fr) max-content" in meta_rule
-    assert "padding-right" not in meta_rule
-
     name_start = styles_css.index(".task-row-name {")
     name_end = styles_css.index("}", name_start)
     name_rule = styles_css[name_start:name_end]
     assert "min-width: 0" in name_rule
+    assert "overflow: hidden" in name_rule
+    assert "font-size: 14px" in name_rule
+    assert "font-weight: 700" in name_rule
+    assert "text-overflow: ellipsis" in name_rule
+    assert "white-space: nowrap" in name_rule
 
-    validator_start = styles_css.index(".task-row .task-row-validator {")
-    validator_end = styles_css.index("}", validator_start)
-    validator_rule = styles_css[validator_start:validator_end]
-    assert "display: inline-flex" in validator_rule
-    assert "align-items: center" in validator_rule
-    assert "gap: 4px" in validator_rule
-    assert "text-overflow: ellipsis" in validator_rule
-    assert "white-space: nowrap" in validator_rule
-
-    validator_icon_start = styles_css.index(".task-row-validator-icon {")
-    validator_icon_end = styles_css.index("}", validator_icon_start)
-    validator_icon_rule = styles_css[validator_icon_start:validator_icon_end]
-    assert "width: 16px" in validator_icon_rule
-    assert "height: 16px" in validator_icon_rule
-    assert "width: 14px" not in validator_icon_rule
-    assert "height: 14px" not in validator_icon_rule
-    assert "stroke: currentColor" in validator_icon_rule
-    assert "flex: 0 0 auto" in validator_icon_rule
-
-    validator_text_start = styles_css.index(".task-row-validator-text {")
-    validator_text_end = styles_css.index("}", validator_text_start)
-    validator_text_rule = styles_css[validator_text_start:validator_text_end]
-    assert "overflow: hidden" in validator_text_rule
-    assert "text-overflow: ellipsis" in validator_text_rule
-    assert "white-space: nowrap" in validator_text_rule
-
-    date_start = styles_css.index(".task-row .task-row-date {")
-    date_end = styles_css.index("}", date_start)
-    date_rule = styles_css[date_start:date_end]
-    assert "font-size: 12px" in date_rule
-    assert "white-space: nowrap" in date_rule
+    preview_rule = _css_rule(styles_css, ".task-row-preview")
+    assert "position: fixed" in preview_rule
+    assert "pointer-events: none" in preview_rule
+    assert "border-radius: var(--radius-control)" in preview_rule
+    assert "box-shadow: var(--shadow-floating)" in preview_rule
 
     pill_start = styles_css.index(".task-row-top .pill {")
     pill_end = styles_css.index("}", pill_start)
@@ -4004,12 +4044,27 @@ def test_v2_validation_rail_uses_stable_logical_subtasks_and_hides_notebook_prev
     assert 'status: "succeeded"' in logical_body
 
     renderer = _slice_function(app_js, "function renderWorkflowStepper")
-    assert "usesPmmlScoringWorkflow(selectedTask)" in renderer
+    assert "usesPmmlScoringWorkflow(task)" in renderer
     assert "v2WorkflowSubsteps(step.id, stepStatus)" in renderer
     assert 'renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)' in renderer
     # V1 keeps its existing Notebook/metrics evidence rails.
     assert 'renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook")' in renderer
     assert 'renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics")' in renderer
+
+
+def test_report_download_buttons_render_after_report_substeps():
+    """预览 / Word / Excel 必须挂在报告子步骤下面，成为右侧栏最后一组控件。"""
+    app_js = _read_static("app.js")
+    renderer = _slice_function(app_js, "function renderWorkflowStepper")
+    download_at = renderer.index("stepDownloadActionsHtml(displayStep)")
+    child_rail_at = renderer.index(
+        'renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)'
+    )
+    assert download_at > child_rail_at
+    download_html = _slice_function(app_js, "function stepDownloadActionsHtml")
+    assert 'data-step-action="previewWordReport"' in download_html
+    assert 'data-step-action="downloadWordReport"' in download_html
+    assert 'data-step-action="downloadExcelAnalysis"' in download_html
 
 
 def test_validate_action_primes_reproducibility_system_steps_immediately():
@@ -4108,7 +4163,7 @@ def test_running_step_buttons_turn_into_cancel_buttons():
     assert '"cancelMetrics"' in renderer
     assert '"cancelReport"' in renderer
     assert '"cancelScan"' not in renderer
-    assert 'taskServerBusyAction() === "report"' in renderer
+    assert 'taskServerBusyAction(task) === "report"' in renderer
     assert '"停止"' in renderer
     assert "selectedBusy && !isStopAction" in renderer
     assert 'actionId === "cancelNotebook"' in handler
@@ -4192,8 +4247,8 @@ def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     downloads_ready_start = app_js.index("function completedReportReadyForDownloads")
     downloads_ready_end = app_js.index("function stepDownloadActionsHtml", downloads_ready_start)
     downloads_ready = app_js[downloads_ready_start:downloads_ready_end]
-    assert "const selectedBusyAction = taskBusyAction();" in downloads_ready
-    assert "selectedTask?.report_available === true" in downloads_ready
+    assert "const selectedBusyAction = taskBusyAction(task?.id);" in downloads_ready
+    assert "task?.report_available === true" in downloads_ready
 
     status_start = app_js.index("function taskActionStatusSnapshot")
     status_end = app_js.index("function clearStatus", status_start)
@@ -4255,6 +4310,7 @@ def test_global_settings_actions_do_not_mark_selected_task_busy():
         ]
     )
 
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -4324,8 +4380,8 @@ def test_workflow_step_status_separates_next_action_from_running_action():
     assert 'return index < 2 ? "succeeded" : "pending";' in status_renderer
     assert 'status === "computing_metrics"' in status_renderer
     assert 'return index < 2 ? "succeeded" : index === 2 ? "running" : "pending";' in status_renderer
-    assert 'taskServerBusyAction() === "report"' in status_renderer
-    assert 'return index < 3 ? "succeeded" : index === 3 && taskServerBusyAction() === "report" ? "running" : "pending";' in status_renderer
+    assert 'taskServerBusyAction(task) === "report"' in status_renderer
+    assert 'return index < 3 ? "succeeded" : index === 3 && taskServerBusyAction(task) === "report" ? "running" : "pending";' in status_renderer
     assert 'if (status === "review_required") return "succeeded";' in status_renderer
     assert 'if (runningStepId && step.id === runningStepId) return "running";' in status_renderer
     assert "if (index === activeIndex) return \"running\";" not in status_renderer
@@ -4658,8 +4714,8 @@ def test_missing_structured_failure_stage_stays_unknown():
 
     assert "status_message" not in helper_renderer
     assert "return null;" in helper_renderer
-    assert 'if (taskFailedDuringMetrics(selectedTask)) return 2;' in index_renderer
-    assert 'if (taskFailedDuringReport(selectedTask)) return 3;' in index_renderer
+    assert 'if (taskFailedDuringMetrics(task)) return 2;' in index_renderer
+    assert 'if (taskFailedDuringReport(task)) return 3;' in index_renderer
     assert _workflow_step_statuses_for(
         {
             "status": "failed",
@@ -4678,7 +4734,7 @@ def test_workflow_stepper_preserves_scroll_position_during_poll_rerender():
     renderer_end = app_js.index("function formatDate", renderer_start)
     renderer = app_js[renderer_start:renderer_end]
 
-    assert "const renderTaskId = selectedTaskId || \"\";" in renderer
+    assert "const renderTaskId = workbenchTaskId() || \"\";" in renderer
     assert "const previousScrollTop = stepper.dataset.taskId === renderTaskId ? stepper.scrollTop : 0;" in renderer
     assert "stepper.dataset.taskId = renderTaskId;" in renderer
     assert "stepper.scrollTop = previousScrollTop;" in renderer
@@ -4724,10 +4780,12 @@ def test_result_workspace_preserves_scroll_position_per_task_switch():
 
     assert ".validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .agent-composer, .progress-rail)" in styles_css
     assert ".validation-workspace.is-task-content-loading :is(.result-workspace, .progress-rail)" not in styles_css
+    assert ".validation-workspace.is-task-content-loading:has(#validationBatchSwitcher:not([hidden])) :is(.workspace-head)" in styles_css
     assert "body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.workspace-head)" in styles_css
     assert "body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.result-scroll-content)" in styles_css
     assert "transition: opacity 150ms ease 90ms;" in styles_css
     assert ".validation-workspace.is-task-content-settling :is(.task-hero)" in styles_css
+    assert ".validation-workspace.is-projected-child-loading" not in styles_css
 
     agent_scroll_start = app_js.index("function requestAgentConversationScrollToLatest")
     agent_scroll_end = app_js.index("function renderAgentConversation", agent_scroll_start)
@@ -6505,7 +6563,8 @@ def test_evidence_fetch_failure_preserves_completed_notebook_evidence():
     loader_end = app_js.index("function renderActionError", loader_start)
     loader = app_js[loader_start:loader_end]
 
-    assert "notebookReproducibilityComplete(selectedTask)" in loader
+    assert "notebookReproducibilityComplete(workbenchTask())" in loader
+    assert "isWorkbenchTaskId(taskId)" in loader
     assert "resetEvidenceSummaries();" in loader
 
 
@@ -6939,7 +6998,7 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     assert "border: 1px solid color-mix(in srgb, var(--border) 54%, transparent);" in hero_rule
     assert "border: 1px solid transparent;" not in hero_rule
     assert "transform: translateZ(0);" in hero_rule
-    assert "contain: paint;" in hero_rule
+    assert "contain: paint;" not in hero_rule
     assert "will-change: transform;" in hero_rule
     assert "backdrop-filter: blur(18px) saturate(1.55);" in hero_rule
     assert "background: linear-gradient" in hero_rule
@@ -7046,6 +7105,33 @@ def test_status_card_glass_glow_tracks_inner_scroll_position():
     assert "requestAnimationFrame(syncTaskHeroGlassLayout)" in app_js
 
 
+def test_task_hero_keeps_unclipped_top_glass_edge():
+    """Status card must keep a visible top border; paint containment and a
+    flush overflow parent clip the 1px edge so glassmorphism disappears."""
+    styles_css = _read_browser_css()
+    hero_rule = _css_rule(styles_css, ".task-hero")
+    assert "border: 1px solid" in hero_rule
+    assert "contain: paint;" not in hero_rule
+    assert "backdrop-filter: blur(18px) saturate(1.55);" in hero_rule
+    workspace_rule = _css_rule(styles_css, ".result-workspace")
+    assert "overflow: hidden;" in workspace_rule
+    assert "padding: 1px 0 0;" in workspace_rule
+    assert "padding: 0;" not in workspace_rule
+
+
+def test_workbench_has_no_full_width_top_hairline():
+    """Every module shares the workbench chrome; do not paint a 1px strip
+    above the hero via negative background offset or a workspace top border."""
+    styles_css = _read_browser_css()
+    for selector in (".app-shell", ".validation-workspace", ".region", ".result-workspace"):
+        rule = _css_rule(styles_css, selector)
+        assert "border-top:" not in rule
+        assert "border: 1px solid" not in rule
+    head_rule = _css_rule(styles_css, ".workspace-head")
+    assert "top -1px" not in head_rule
+    assert "background-position: left 0 top 0, right 0 top 0" in head_rule
+
+
 def test_validation_failure_writes_error_detail_to_global_action_status():
     app_js = _read_static("app.js")
 
@@ -7138,7 +7224,6 @@ def test_welcome_task_cards_share_the_same_visual_treatment():
         "vintage",
         "modeling",
         "validation",
-        "validation_batch",
         "strategy",
     ]:
         task_index = cards_markup.index(f'data-task-kind="{task_kind}"')
@@ -7391,6 +7476,7 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
             "process.stdout.write(JSON.stringify({ createApiCalls, disabled: elements.createTaskButton.disabled, busy: elements.createTaskButton.dataset.createBusy || '', statuses, renderAllCalls }));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -7690,6 +7776,7 @@ def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
             "process.stdout.write(JSON.stringify({ refreshed, apiCalls, hasBusy: taskBusyActions.has('task-1'), statuses }));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -7715,12 +7802,15 @@ def test_agent_stop_response_polls_until_active_agent_job_finishes():
     assert "await waitForAgentValidation(taskId, { stopping: true });" in start_agent_body
 
     wait_start = app_js.index("async function waitForAgentValidation")
-    wait_end = app_js.index("function handleTaskListKeydown", wait_start)
+    wait_end = app_js.index("function agentValidationStopped", wait_start)
     wait_body = app_js[wait_start:wait_end]
     assert '"scanned"' in wait_body
     assert '"executed"' in wait_body
     assert "{ stopping, settleWhenServerIdle: true }" in wait_body
     assert "agentValidationStopped(finalTask" in wait_body
+    assert "finally" in wait_body
+    assert 'taskBusyAction(taskId) === "agent"' in wait_body
+    assert 'setBusy(null, "", taskId)' in wait_body
 
     poll_start = app_js.index("async function pollValidationProgress")
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
@@ -7742,6 +7832,10 @@ def test_agent_wait_settles_when_failed_job_leaves_task_in_created_state():
             "const progressPolls = new Map();",
             "let selectedTaskId = 'task-1';",
             "let selectedTask = { id: 'task-1', status: 'created', active_job_kind: null };",
+            "let projectedValidationChildTaskId = '';",
+            "let projectedValidationChildTask = null;",
+            "function isWorkbenchTaskId() { return true; }",
+            "function usesAgentValidationWorkbench() { return false; }",
             "const taskCache = [selectedTask];",
             "const statuses = [];",
             "let refreshCount = 0;",
@@ -7802,7 +7896,7 @@ def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
     visibility_start = app_js.index("function updateAgentScanSectionVisibility")
     visibility_end = app_js.index("function renderStoredStateSummaries", visibility_start)
     visibility_body = app_js[visibility_start:visibility_end]
-    assert "selectedTaskIsAgentMode()" in visibility_body
+    assert "selectedTaskIsAgentMode(workbenchTask())" in visibility_body
     assert 'const hasScanResult = scanSummaryHasResult();' in visibility_body
     assert 'scanSection.classList.toggle("hidden", !hasScanResult);' in visibility_body
 
@@ -8598,7 +8692,8 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "agent-typing-cursor-blink" not in styles_css
     assert "function requestAgentConversationScrollToLatest" in app_js
     assert "scrollContent.scrollTo({ top: scrollContent.scrollHeight, behavior: \"auto\" });" in app_js
-    assert "agent/report-draft/confirm" not in app_js
+    assert "agent/report-draft/confirm" in app_js
+    assert "确认并生成报告" in app_js
     assert "confirmAgentDraft" not in app_js
     assert "confirmDraft" not in app_js
     assert "确认写入" not in app_js
@@ -9432,6 +9527,7 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
             "process.stdout.write(JSON.stringify({ apiCalls, focusedModel, inputValue: input.value, noticeText: notice.textContent, noticeClass: notice.className, status: statuses[statuses.length - 1] }));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9506,8 +9602,14 @@ def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     click_end = app_js.index('$("agentComposerInput").addEventListener("keydown"', click_start)
     click_handler = app_js[click_start:click_end]
     assert "if (agentSendIsStopMode())" in click_handler
-    assert 'runAction(stopAgentValidation, { actionId: "agent", busyText: "Agent 正在停止..." });' in click_handler
-    assert 'runAction(startAgentValidation, { actionId: "agent", busyText: "Agent 正在处理..." });' in click_handler
+    for callback, busy_text in (
+        ("stopAgentValidation", "Agent 正在停止..."),
+        ("startAgentValidation", "Agent 正在处理..."),
+    ):
+        options = click_handler.split(f"runAction({callback}, {{", 1)[1].split("});", 1)[0]
+        assert 'actionId: "agent",' in options
+        assert f'busyText: "{busy_text}",' in options
+        assert "taskId: workbenchTaskId()," in options
 
     keydown_start = app_js.index('$("agentComposerInput").addEventListener("keydown"')
     keydown_end = app_js.index('$("agentComposerInput").addEventListener("input"', keydown_start)
@@ -9614,6 +9716,7 @@ def test_agent_send_shows_thinking_message_before_network_wait():
             "process.stdout.write(JSON.stringify({ inputValue: input.value, pendingMessages, finalMessages: agentMessages, renderSnapshots }));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9688,6 +9791,7 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
             "process.stdout.write(JSON.stringify({ polledBeforeResponse, pollCount, firstPollOptions }));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9764,6 +9868,7 @@ def test_agent_stop_aborts_in_flight_message_request_and_clears_optimistic_state
             "process.stdout.write(JSON.stringify({ stopCalled, signalAborted: messageSignal?.aborted === true, optimisticCount, finalMessages: agentMessages.length, hasController: agentRequestAbortControllers.has('task-1'), statuses }));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -10184,6 +10289,18 @@ def test_agent_markdown_renders_pipe_tables():
     assert ".agent-markdown td" in styles_css
 
 
+def test_agent_markdown_renders_finding_fail_markup_as_red_strong():
+    styles_css = _read_browser_css()
+    html = _render_agent_markdown("总体判断：!!过拟合检查未通过（相对差 18%）!!，其余稳定性可接受。")
+
+    assert '<strong class="agent-finding-fail">过拟合检查未通过（相对差 18%）</strong>' in html
+    assert "!!" not in html
+    assert ".agent-markdown .agent-finding-fail" in styles_css
+    assert "color: var(--danger-strong)" in _css_rule(
+        styles_css, ".agent-markdown .agent-finding-fail"
+    )
+
+
 def test_agent_markdown_rejects_unsafe_links_and_escapes_html():
     html = _render_agent_markdown(
         "[bad](javascript:alert(1)) [data](data:text/html,test) "
@@ -10478,7 +10595,7 @@ def test_validation_evidence_sections_reveal_only_after_their_stage_completes():
         ]
     )
 
-    data = _run_node_capture_json(script)
+    data = _run_node_capture_json(_with_workbench_context(script, app_js))
 
     assert data == {
         "failedNotebook": {"reproducibility": False, "metrics": False},
@@ -13793,8 +13910,9 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     styles_css = _read_browser_css()
     app_js = _read_static("app.js")
 
-    # DOM: every detail below the title/status row is inside the collapsible
-    # wrapper, including failure text, so a large error can never defeat collapse.
+    # DOM: failure text, subtitle and meta stay inside the collapsible wrapper.
+    # The multi-model switcher sits between the title row and details so it
+    # remains clickable whether the card is expanded or collapsed.
     hero_start = index_html.index('id="taskHero"')
     hero_markup = index_html[hero_start:index_html.index("</header>", hero_start)]
     assert 'class="task-hero-top-right"' in hero_markup
@@ -13814,13 +13932,15 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     assert 'aria-hidden="true"' in details_tag
     assert "inert" in details_tag
     assert 'class="task-hero-details-inner"' in hero_markup
-    # The always-visible title row precedes the collapsible details.
-    assert hero_markup.index('class="task-hero-top"') < hero_markup.index('id="taskHeroDetails"')
+    # The always-visible title row and model switcher precede the collapsible details.
+    assert hero_markup.index('class="task-hero-top"') < hero_markup.index('id="validationBatchSwitcher"')
+    assert hero_markup.index('id="validationBatchSwitcher"') < hero_markup.index('id="taskHeroDetails"')
     # The status pill stays visible; failure detail, subtitle and meta fold away.
     details_at = hero_markup.index('id="taskHeroDetails"')
     for hidden_id in ("actionErrorDetail", "currentTaskSubtitle", "taskSnapshot"):
         assert f'id="{hidden_id}"' in hero_markup[details_at:]
     assert 'id="actionStatus"' in hero_markup[:details_at]
+    assert 'id="validationBatchSwitcher"' not in hero_markup[details_at:]
 
     # CSS: grid-rows 1fr<->0fr animates the height; the inner wrapper clips.
     details_rule = _css_rule(styles_css, ".task-hero-details")
@@ -13847,6 +13967,7 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     assert "function setTaskHeroCollapsed" in app_js
     assert 'hero.classList.toggle("is-collapsed", collapsed)' in app_js
     assert "button:not(#taskHeroToggle)" in app_js
+    assert ".task-hero-batch-switcher" in app_js
     assert "[data-copy]" in app_js
     assert '$("taskHero")?.addEventListener("click", handleTaskHeroToggle)' in app_js
     assert 'toggle.setAttribute("aria-expanded"' in app_js
@@ -13972,7 +14093,7 @@ def test_v2_pending_input_contract_has_an_interactive_confirmation_panel():
     assert "function submitValidationInputContract" in app_js
     assert "/validation-input-contract`" in app_js
     assert 'data-validation-contract-submit' in app_js
-    assert 'const taskId = form.dataset.validationContractTaskId || selectedTaskId;' in app_js
+    assert "const taskId = form.dataset.validationContractTaskId || workbenchTaskId() || selectedTaskId;" in app_js
     assert 'await loadValidationInputContract(taskId);' in app_js
     assert 'if (selectedTaskIsAgentMode()) {' in app_js
     assert 'await startAgentValidation();' in app_js

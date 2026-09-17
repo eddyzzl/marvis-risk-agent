@@ -32,7 +32,7 @@ def test_batch_poll_refreshes_shared_task_views_and_ready_contract_copy_is_termi
     assert "await refreshTasks();\n    renderChangedValidationViews();" in app
     assert "此模型的验证字段已经确认。</p>" in app
     assert "请继续确认其他待确认模型" not in app
-    assert "所有模型输入合同已逐项确认" in app
+    assert "所有模型输入合同已确认" in app
     assert "仍有 ${awaitingConfirmationCount || 0} 个模型等待输入合同确认" not in app
 
 
@@ -44,6 +44,21 @@ assert.deepEqual(link, { taskId: "parent-1", itemId: "child-2" });
 assert.equal(batch.preferredStartupTaskId(link, "stored-task"), "parent-1");
 assert.equal(batch.preferredStartupTaskId({ taskId: "", itemId: "child-only" }, "stored-task"), "stored-task");
 assert.notEqual(batch.preferredStartupTaskId(link, "stored-task"), link.itemId);
+assert.deepEqual(
+  batch.parseTaskDeepLink(batch.taskSelectionSearch("?task=stale-batch&item=child-1", { taskId: "other-task" })),
+  { taskId: "other-task", itemId: "" },
+);
+assert.deepEqual(
+  batch.parseTaskDeepLink(batch.taskSelectionSearch("?task=stale-batch&item=child-1", { taskId: "parent-1", itemId: "child-2" })),
+  { taskId: "parent-1", itemId: "child-2" },
+);
+assert.equal(batch.taskSelectionSearch("?task=stale-batch&item=child-1", { taskId: "" }), "");
+const history = { state: { keep: true }, url: "", replaceState(state, _title, url) { this.state = state; this.url = url; } };
+batch.syncTaskDeepLink(history, { pathname: "/", search: "?task=stale-batch&item=child-1", hash: "" }, { taskId: "stored-task" });
+assert.equal(history.url, "/?task=stored-task");
+assert.deepEqual(history.state, { keep: true });
+batch.syncTaskDeepLink(history, { pathname: "/", search: "?task=stale-batch", hash: "#x" }, { taskId: "" });
+assert.equal(history.url, "/#x");
 """
     )
 
@@ -133,7 +148,8 @@ assert.match(html, /is-deep-linked/);
 const withoutDownload = batch.renderValidationBatchOverview(
   batch.normalizeValidationBatchPayload({ batch: { parent_task_id: "p", status: "created", item_count: 1 }, items: [] }),
 );
-assert.match(withoutDownload, /汇总待生成/);
+assert.doesNotMatch(withoutDownload, /汇总待生成/);
+assert.doesNotMatch(withoutDownload, /下载汇总 Excel/);
 assert.match(withoutDownload, /data-batch-start="true"/);
 assert.match(withoutDownload, />启动批次</);
 
@@ -148,9 +164,9 @@ const awaiting = batch.renderValidationBatchOverview(
     }],
   }),
 );
-assert.match(awaiting, />逐项确认合同后继续</);
+assert.match(awaiting, />确认合同后继续</);
 assert.match(awaiting, /data-batch-start="true"[^>]*disabled/);
-assert.match(awaiting, /平台不会自动确认/);
+assert.match(awaiting, /都按这个/);
 
 const awaitingWithReadyContract = batch.renderValidationBatchOverview(
   batch.normalizeValidationBatchPayload({
@@ -453,7 +469,7 @@ const [runningHandle, runningPoll] = timers.entries().next().value;
 timers.delete(runningHandle);
 detailStatus = "awaiting_confirmation";
 await runningPoll();
-assert.match(panel.innerHTML, /逐项确认合同后继续/);
+assert.match(panel.innerHTML, /确认合同后继续/);
 assert.equal(task.active_job_kind, "validation_batch");
 assert.equal(gateRefreshAttempts, 1);
 assert.equal(timers.size, 1);
@@ -531,6 +547,11 @@ def test_validation_batch_uses_only_its_dedicated_progress_poll():
             "let genericPolls = 0;",
             "function taskServerBusyAction(task) { return task.active_job_kind || null; }",
             "function isValidationBatchTask(task) { return task.task_type === 'validation_batch'; }",
+            "function usesAgentValidationWorkbench(task) {",
+            "  return task?.task_type === 'validation_batch' && task?.run_mode === 'agent';",
+            "}",
+            "let projectedValidationChildTaskId = null;",
+            "let projectedValidationChildTask = null;",
             "async function pollValidationProgress() { genericPolls += 1; }",
             function_body,
             "const batchTask = {",
@@ -847,8 +868,9 @@ def test_batch_contract_submission_is_explicitly_bound_to_child_and_refreshes_pa
     assert 'parentTaskId,' in app_js
     assert 'data-validation-contract-task-id="${escapeHtml(taskId)}"' in app_js
     assert 'data-validation-contract-parent-task-id="${escapeHtml(parentTaskId)}"' in app_js
-    assert 'const taskId = form.dataset.validationContractTaskId || selectedTaskId;' in app_js
     assert 'const parentTaskId = form.dataset.validationContractParentTaskId || "";' in app_js
+    assert "form.dataset.validationContractTaskId || workbenchTaskId() || selectedTaskId" in app_js
+    assert "isWorkbenchTaskId(taskId)" in app_js
     assert 'api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`' in app_js
     assert 'if (selectedTaskId !== parentTaskId) return;' in app_js
     assert 'validationBatchPanelController.selectTask(selectedTask, { force: true })' in app_js
@@ -859,17 +881,23 @@ def test_batch_contract_submission_is_explicitly_bound_to_child_and_refreshes_pa
     )
     assert 'if (loadVersion !== validationInputContractLoadVersion) return null;' in app_js
     assert 'if (latestValidationInputContractTaskId === taskId) {' in app_js
-    assert '还有 ${remaining} 个模型需要确认' in app_js
-    assert '请点击“逐项确认合同后继续”' in app_js
+    assert "await continueAgentValidationBatch({ resumeChildId: taskId })" in app_js
+    assert "都按这个" in app_js
     assert 'requireExplicit ? \'<option value="" selected disabled>请选择候选值</option>\'' in app_js
-    assert 'const explicitChoice = { requireExplicit: batchMode };' in app_js
-    assert "平台不会自动选择或确认" in app_js
+    assert 'const explicitChoice = { requireExplicit: false };' in app_js
+    assert "请逐项主动选择并提交；平台不会自动选择或确认" not in app_js
 
     submit_start = app_js.index("async function submitValidationInputContract")
     submit_end = app_js.index('if (typeof document !== "undefined")', submit_start)
     submit_body = app_js[submit_start:submit_end]
     batch_branch = submit_body[submit_body.index("if (parentTaskId)") :]
     assert "startAgentValidation()" not in batch_branch.split("return;", 1)[0]
+    success_branch = submit_body.rsplit("if (parentTaskId)", 1)[-1]
+    assert "continueAgentValidationBatch" in success_branch
+    assert "startAgentValidation()" not in success_branch.split(
+        "if (!isWorkbenchTaskId(taskId))",
+        1,
+    )[0]
 
 
 def test_batch_frontend_is_wired_without_reusing_single_task_creation_dialog():
@@ -881,7 +909,8 @@ def test_batch_frontend_is_wired_without_reusing_single_task_creation_dialog():
     assert 'label: "模型验证批次"' in task_types
     assert 'available: true' in task_types
     assert 'unavailableMessage: "模型验证批次创建入口尚未接入' not in task_types
-    assert 'validation_batch:' in app_js
+    assert 'kind === "validation_batch"' in app_js
+    assert "taskKindIconKind" in app_js
     assert 'from "./js/validation-batch.js"' in app_js
     assert 'id="batchOverviewPanel"' in index_html
     assert 'static/css/validation-batch.css' in index_html
@@ -895,8 +924,288 @@ def test_batch_frontend_is_wired_without_reusing_single_task_creation_dialog():
     query_restore = app_js.index("preferredStartupTaskId")
     storage_restore = app_js.index("restoreSelectedTaskPlaceholder();")
     assert query_restore < storage_restore
+    remember_body = app_js.split("function rememberSelectedTaskId(taskId)", 1)[1].split(
+        "function storedSelectedTaskId",
+        1,
+    )[0]
+    assert "syncTaskDeepLink(window.history, window.location" in remember_body
+    boot = app_js[app_js.index("selectedTaskId = preferredStartupTaskId"):app_js.index("initializeApp();")]
+    assert "if (selectedTaskId) rememberSelectedTaskId(selectedTaskId);" in boot
+    assert "else rememberSelectedTaskId(null);" in boot
 
-    # Batch creation remains separate from the established single-model
-    # material-binding flow even after the dedicated entry point is enabled.
+    # Multi-model validation is created from the same 模型验证 dialog.
     create_dialog = _read_static("js/create-task-dialog.js")
-    assert "/api/validation-batches" not in create_dialog
+    assert "/api/validation-batches" in create_dialog
+    assert "function addValidationModelRow" in create_dialog
+
+
+def test_agent_batch_uses_compact_switcher_instead_of_old_overview():
+    batch_js = _read_static("js/validation-batch.js")
+    app_js = _read_static("app.js")
+
+    assert "export function usesAgentValidationWorkbench" in batch_js
+    assert "export function renderValidationBatchSwitcher" in batch_js
+    assert "export function validationBatchConfirmAllAction" in batch_js
+    assert "data-batch-confirm-all" in batch_js
+    assert "全部确认" in batch_js
+    assert "export function formatValidationBatchTaskName" in batch_js
+    assert "validation-batch-switcher" in batch_js
+    assert "data-batch-switch-child" in batch_js
+    assert "data-tone" in batch_js
+    assert "itemProgressLabel" in batch_js
+    assert "onProjectedChildChange" in batch_js
+    assert "function selectChild" in batch_js
+    assert "onLayoutChange" in batch_js
+    assert "validationBatchSwitcher" in batch_js
+    assert "usesAgentValidationWorkbench(task)" in batch_js
+    assert "renderValidationBatchOverview" in batch_js
+    assert 'id="validationBatchSwitcher"' in _read_static("index.html")
+    assert "stampValidationBatchItemCount" in app_js
+    stamp_fn = app_js.split("function stampValidationBatchItemCount", 1)[1].split(
+        "function reportTitleForTask",
+        1,
+    )[0]
+    assert "const nextName = formatValidationBatchTaskName" in stamp_fn
+    assert "currentName === nextName" in stamp_fn
+    assert "model_name: nextName" in stamp_fn
+    row_html = app_js.split("function taskRowInnerHtml", 1)[1].split(
+        "function createTaskRowShell",
+        1,
+    )[0]
+    assert "const displayName = taskDisplayName(task)" in row_html
+    assert "${escapeHtml(displayName)}" in row_html
+    assert "escapeHtml(task.model_name)" not in row_html
+    row_signature = app_js.split("function taskRowContentSignature", 1)[1].split(
+        "function taskRowInnerHtml",
+        1,
+    )[0]
+    assert "taskDisplayName(task)" in row_signature
+    list_signature = app_js.split("function taskListSignature", 1)[1].split(
+        "function metricPreviewSignature",
+        1,
+    )[0]
+    assert "task.item_count || \"\"" in list_signature
+    assert "task.model_name || \"\"" in list_signature
+    assert "lastNotifiedItemCount === itemCount" in batch_js
+    assert "formatValidationBatchTaskName(new Date(), rows.length)" in _read_static(
+        "js/create-task-dialog.js"
+    )
+    batch_css = _read_static("css/validation-batch.css")
+    assert "overflow-x: auto" in batch_css
+    assert 'data-tone="success"' in batch_css or ".validation-batch-switcher-item[data-tone=\"success\"]" in batch_css
+    switcher_item_css = batch_css.split(".validation-batch-switcher-item {", 1)[1].split(
+        ".validation-batch-switcher-actions {",
+        1,
+    )[0]
+    assert "background: var(--surface)" in switcher_item_css
+    assert "border-radius: var(--radius-control)" in switcher_item_css
+    assert "var(--border-strong)" in switcher_item_css
+    assert "var(--button-primary-border)" in switcher_item_css
+    assert "var(--brand-primary)" in switcher_item_css
+    assert "#3b6dff" not in switcher_item_css
+    assert "background: var(--warning-soft)" not in switcher_item_css
+    assert "background: var(--success-soft)" not in switcher_item_css
+    assert "background: var(--accent-soft)" not in switcher_item_css
+    assert "background: var(--danger-soft)" not in switcher_item_css
+    assert ".validation-batch-switcher-item[data-tone=\"success\"] .validation-batch-switcher-progress" in switcher_item_css
+
+    assert "function workbenchTask(" in app_js
+    assert "function workbenchTaskId(" in app_js
+    assert "projectedValidationChildTaskId" in app_js
+    assert "onProjectedChildChange:" in app_js
+    apply_start = app_js.index("async function applyProjectedValidationChild")
+    apply_end = app_js.index("function selectedTaskIsRiskAnalysisAgent", apply_start)
+    apply_body = app_js[apply_start:apply_end]
+    assert "agentMessages = [];" not in apply_body
+    assert "const childChanged = projectedValidationChildTaskId !== normalizedChildId;" in apply_body
+    assert "resetAgentTypingState();" in apply_body
+    assert "beginTaskContentLoad(normalizedChildId);" in apply_body
+    assert "finishTaskContentLoad(normalizedChildId);" in apply_body
+    assert "beginProjectedChildContentLoad" not in apply_body
+    assert "is-projected-child-loading" not in apply_body
+    assert "await nextAnimationFrame();" in apply_body
+    assert "isCurrentProjectedChildLoad(loadVersion, childChanged)" in apply_body
+    assert "scrollContent.scrollTop = 0;" in apply_body
+    assert "renderAll();" in apply_body
+    assert "function beginProjectedChildContentLoad" not in app_js
+    assert 'classList.add("is-projected-child-loading")' not in app_js
+    batch_css = _read_static("css/app-shell.css")
+    assert ".validation-workspace.is-projected-child-loading" not in batch_css
+    assert ".validation-workspace.is-task-content-loading:has(#validationBatchSwitcher:not([hidden])) :is(.workspace-head)" in batch_css
+    assert "top: var(--workspace-head-space);" in batch_css.split(
+        ".validation-workspace.is-task-content-loading:has(#validationBatchSwitcher:not([hidden])) .result-workspace::after",
+        1,
+    )[1].split("}", 1)[0]
+    assert "beginTaskContentLoad(task.id);" in app_js
+
+    notebook_vis = app_js.split("function renderReproducibilitySectionVisibility", 1)[1].split(
+        "function metricOverviewComplete",
+        1,
+    )[0]
+    metric_vis = app_js.split("function renderMetricSectionVisibility", 1)[1].split(
+        "function workflowIndex",
+        1,
+    )[0]
+    scan_vis = app_js.split("function updateAgentScanSectionVisibility", 1)[1].split(
+        "function updateAgentReportSectionVisibility",
+        1,
+    )[0]
+    assert "selectedTaskIsValidationBatch" not in notebook_vis
+    assert "selectedTaskIsValidationBatch" not in metric_vis
+    assert "selectedTaskIsValidationBatch" not in scan_vis
+
+    _run_batch_module(
+        r"""
+assert.equal(
+  batch.usesAgentValidationWorkbench({ task_type: "validation_batch", run_mode: "agent" }),
+  true,
+);
+assert.equal(
+  batch.usesAgentValidationWorkbench({ task_type: "validation_batch", run_mode: "manual" }),
+  false,
+);
+assert.equal(
+  batch.usesAgentValidationWorkbench({ task_type: "validation", run_mode: "agent" }),
+  false,
+);
+const html = batch.renderValidationBatchSwitcher(
+  {
+    batch: { parent_task_id: "parent-1", status: "running", item_count: 2 },
+    items: [
+      {
+        child_task_id: "child-a",
+        model_name: "模型A",
+        model_version: "v1",
+        ordinal: 1,
+        status: "succeeded",
+        stage: "completed",
+      },
+      {
+        child_task_id: "child-b",
+        model_name: "模型B",
+        model_version: "v1",
+        ordinal: 2,
+        status: "running",
+        stage: "pmml_scoring",
+      },
+    ],
+  },
+  { selectedChildTaskId: "child-a" },
+);
+assert.match(html, /class="validation-batch-switcher"/);
+assert.match(html, /data-batch-switch-child="child-a"/);
+assert.match(html, /data-batch-switch-child="child-b"/);
+assert.match(html, /data-tone="success"/);
+assert.match(html, /data-tone="running"/);
+assert.match(html, /is-selected/);
+assert.match(html, /模型A/);
+assert.match(html, /模型B/);
+assert.match(html, /已通过/);
+assert.match(html, /PMML打分/);
+assert.match(html, /全部确认/);
+assert.match(html, /data-batch-confirm-all="true"/);
+assert.match(html, /disabled/);
+assert.doesNotMatch(html, /正在验证/);
+assert.doesNotMatch(html, /批次总览/);
+assert.doesNotMatch(html, /MODEL VALIDATION BATCH/);
+assert.doesNotMatch(html, /启动批次/);
+assert.equal(
+  batch.formatValidationBatchTaskName(new Date(2026, 7, 20), 2),
+  "2026-08-20 模型验证批次 (2个模型)",
+);
+assert.equal(
+  batch.formatValidationBatchTaskName(new Date(2026, 7, 20), 0),
+  "2026-08-20 模型验证批次",
+);
+const readyHtml = batch.renderValidationBatchSwitcher(
+  {
+    batch: { parent_task_id: "parent-1", status: "running", item_count: 2 },
+    items: [
+      {
+        child_task_id: "child-a",
+        model_name: "模型A",
+        ordinal: 1,
+        status: "writing_artifacts",
+        pending_report_draft: true,
+      },
+      {
+        child_task_id: "child-b",
+        model_name: "模型B",
+        ordinal: 2,
+        status: "writing_artifacts",
+        pending_report_draft: true,
+      },
+    ],
+  },
+  { selectedChildTaskId: "child-a" },
+);
+assert.match(readyHtml, /全部确认/);
+assert.doesNotMatch(readyHtml, /disabled/);
+const action = batch.validationBatchConfirmAllAction(
+  batch.normalizeValidationBatchPayload({
+    batch: { parent_task_id: "parent-1", status: "running", item_count: 2 },
+    items: [
+      { child_task_id: "child-a", pending_report_draft: true, status: "writing_artifacts" },
+      { child_task_id: "child-b", pending_report_draft: true, status: "writing_artifacts" },
+    ],
+  }),
+);
+assert.equal(action.visible, true);
+assert.equal(action.disabled, false);
+assert.equal(action.label, "全部确认");
+"""
+    )
+
+
+def test_validation_batch_sidebar_icon_matches_model_validation():
+    app_js = _read_static("app.js")
+    glyphs_start = app_js.index("const TASK_KIND_GLYPHS")
+    glyphs_end = app_js.index("function taskKindIconKind", glyphs_start)
+    glyphs = app_js[glyphs_start:glyphs_end]
+    kind_fn = app_js[
+        app_js.index("function taskKindIconKind") : app_js.index("function taskKindIconHtml")
+    ]
+    html_fn = app_js[
+        app_js.index("function taskKindIconHtml") : app_js.index("function taskRowContentSignature")
+    ]
+
+    assert "validation_batch:" not in glyphs
+    assert 'cx="18" cy="17.7"' not in glyphs
+    assert 'kind === "validation_batch"' in kind_fn
+    assert 'return "validation"' in kind_fn
+    assert "taskKindIconKind(taskOrType)" in html_fn
+    assert 'data-kind="${escapeHtml(safeKind)}"' in html_fn
+    assert _read_static("css/validation-batch.css").count(
+        '.task-kind-icon[data-kind="validation_batch"]'
+    ) == 0
+
+
+def test_agent_batch_stepper_follows_projected_child_not_parent():
+    app_js = _read_static("app.js")
+    renderer = app_js.split("function renderWorkflowStepper", 1)[1].split(
+        "function formatDate",
+        1,
+    )[0]
+    assert "const task = workbenchTask();" in renderer
+    assert "workflowStepperSignature(task)" in renderer
+    assert "workflowIndex(task?.status, task)" in renderer
+    assert "workflowStepForTask(step, task)" in renderer
+    assert "workflowStepStatus(index, activeIndex, task)" in renderer
+    assert "usesPmmlScoringWorkflow(task)" in renderer
+    assert "const renderTaskId = workbenchTaskId() || \"\";" in renderer
+    assert "usesPmmlScoringWorkflow(selectedTask)" not in renderer
+    assert "workflowIndex(selectedTask?.status)" not in renderer
+
+    downloads = app_js.split("function downloadWordReport", 1)[1].split(
+        "function previewWordReport",
+        1,
+    )[0]
+    assert "workbenchTaskId()" in downloads
+    assert "selectedTaskId" not in downloads
+
+    preview = app_js.split("function openWordPreviewDialog", 1)[1].split(
+        "function closeWordPreviewDialog",
+        1,
+    )[0]
+    assert "workbenchTaskId()" in preview
+    assert "workbenchTask()" in preview

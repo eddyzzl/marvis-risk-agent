@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import sqlite3
 
+from marvis.api_task_helpers import format_validation_batch_parent_name
 from marvis.repositories.tasks import TaskRepository
 from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
@@ -13,11 +14,13 @@ from marvis.domain import (
     TASK_TYPE_PORTFOLIO,
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
+    TASK_TYPE_VALIDATION_BATCH,
     TASK_TYPE_VINTAGE,
     TaskRecord,
     TaskStatus,
 )
 from marvis.repositories.plans import PlanRepository
+from marvis.repositories.validation_batches import ValidationBatchRepository
 from marvis.safe_paths import safe_filename_component
 
 _UNSET = object()
@@ -62,6 +65,7 @@ def task_payload(
     *,
     active_job_kind: str | None | object = _UNSET,
     workflow_status: str | None | object = _UNSET,
+    batch_item_count: int | None | object = _UNSET,
 ) -> dict:
     """``active_job_kind`` defaults to a sentinel so callers can distinguish "not
     supplied, look it up" from "supplied, and it really is None" (PERF-6: batch
@@ -78,7 +82,7 @@ def task_payload(
         if workflow_status is _UNSET
         else workflow_status
     )
-    return {
+    payload = {
         **task_to_dict(task),
         "workflow_status": resolved_workflow_status,
         "active_job_kind": resolved_active_job_kind,
@@ -88,6 +92,12 @@ def task_payload(
         "stopped": task_stopped(repo, task),
         "report_available": task_report_available(tasks_dir, task.id),
     }
+    return _apply_validation_batch_display_fields(
+        payload,
+        task,
+        batch_item_count=batch_item_count,
+        repo=repo,
+    )
 
 
 def list_task_payloads(
@@ -103,6 +113,14 @@ def list_task_payloads(
     task_ids = [task.id for task in tasks]
     active_job_kinds = repo.get_active_job_kinds_for_tasks(task_ids)
     workflow_statuses = _latest_workflow_statuses(repo, task_ids)
+    batch_ids = [
+        task.id for task in tasks if task.task_type == TASK_TYPE_VALIDATION_BATCH
+    ]
+    batch_item_counts = (
+        ValidationBatchRepository(repo.db_path).item_counts_for_parents(batch_ids)
+        if batch_ids
+        else {}
+    )
     return [
         task_payload(
             repo,
@@ -110,6 +128,11 @@ def list_task_payloads(
             tasks_dir,
             active_job_kind=active_job_kinds.get(task.id),
             workflow_status=workflow_statuses.get(task.id),
+            batch_item_count=(
+                batch_item_counts.get(task.id)
+                if task.task_type == TASK_TYPE_VALIDATION_BATCH
+                else None
+            ),
         )
         for task in tasks
     ]
@@ -119,6 +142,43 @@ def task_to_dict(task: TaskRecord) -> dict:
     from dataclasses import asdict
 
     return asdict(task)
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _apply_validation_batch_display_fields(
+    payload: dict,
+    task: TaskRecord,
+    *,
+    batch_item_count: int | None | object,
+    repo: TaskRepository,
+) -> dict:
+    if task.task_type != TASK_TYPE_VALIDATION_BATCH:
+        return payload
+    if batch_item_count is _UNSET:
+        counts = ValidationBatchRepository(repo.db_path).item_counts_for_parents(
+            [task.id]
+        )
+        item_count = counts.get(task.id)
+    else:
+        item_count = batch_item_count
+    if item_count is None:
+        return payload
+    count = int(item_count)
+    payload["item_count"] = count
+    payload["model_name"] = format_validation_batch_parent_name(
+        count,
+        _parse_iso_datetime(task.created_at),
+    )
+    return payload
 
 
 def task_report_available(tasks_dir: Path | None, task_id: str) -> bool:

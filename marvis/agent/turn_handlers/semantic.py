@@ -505,4 +505,3 @@ def _semantic_c1_recommendation_authorization(
         ).hexdigest(),
         "proposed_assignment": proposed_assignment,
     }
-

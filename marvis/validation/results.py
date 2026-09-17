@@ -357,6 +357,7 @@ class EffectivenessResult:
     monthly_psi: list[MonthlyPsiRow]
     psi_stability_table: list[PsiStabilityRow] = field(default_factory=list)
     roc_ks_curves: dict[str, RocKsCurve] = field(default_factory=dict)
+    independent_quantile_bin_tables: dict[str, list[BinRow]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -636,6 +637,14 @@ def _normalize_persisted_validation_bin_tables(payload: dict[str, Any]) -> None:
             for split, rows in list(bin_tables.items()):
                 if isinstance(rows, list):
                     bin_tables[split] = _ordered_persisted_bin_rows(
+                        rows,
+                        reverse=_persisted_bin_rows_are_bad_to_good(rows),
+                    )
+        independent_tables = effectiveness.get("independent_quantile_bin_tables")
+        if isinstance(independent_tables, dict):
+            for split, rows in list(independent_tables.items()):
+                if isinstance(rows, list):
+                    independent_tables[split] = _ordered_persisted_bin_rows(
                         rows,
                         reverse=_persisted_bin_rows_are_bad_to_good(rows),
                     )

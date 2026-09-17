@@ -1124,4 +1124,3 @@ def _voting_n_bindings(utterance: str) -> tuple[tuple[int, int | None], ...]:
         if binding not in bindings:
             bindings.append(binding)
     return tuple(bindings)
-

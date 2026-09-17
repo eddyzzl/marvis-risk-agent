@@ -283,7 +283,7 @@ body[data-theme="dark"] .task-hero[data-tone="review"] { --hero-glow: rgba(255, 
   min-height: 0;
   overflow: hidden;
   margin: 14px 0 14px var(--workspace-main-gutter);
-  padding: 0;
+  padding: 1px 0 0;
 }
 
 .result-scroll-content {

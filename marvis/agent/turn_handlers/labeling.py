@@ -336,4 +336,3 @@ def _labeling_clarification_response(
         "status": "clarification_required",
         "messages": repo.list_agent_messages(task.id),
     }
-

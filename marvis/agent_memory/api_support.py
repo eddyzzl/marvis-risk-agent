@@ -235,6 +235,7 @@ def agent_memory_query(
         channel=dimensions.get("channel"),
         month=dimensions.get("month"),
         keywords=agent_memory_keywords(task, user_message, dimensions),
+        exclude_source_task_ids=(str(task.id),) if getattr(task, "id", None) else (),
     )
 
 
@@ -276,20 +277,24 @@ def agent_memory_keywords(
         dimensions.get("month"),
     ]
     compact_message = "".join(str(user_message or "").split())
+    searchable = f"{task.model_name or ''} {compact_message}"
     for marker in (
         "A卡",
         "B卡",
         "C卡",
+        "T卡",
         "额度",
         "利率",
         "前筛",
+        "MOB3",
+        "MOB6",
         "KS",
         "AUC",
         "PSI",
         "bad_flag",
         "RMC_SAMPLE_DF",
     ):
-        if marker.lower() in compact_message.lower():
+        if marker.lower() in searchable.lower():
             values.append(marker)
     return tuple(
         dict.fromkeys(str(value).strip() for value in values if str(value or "").strip())

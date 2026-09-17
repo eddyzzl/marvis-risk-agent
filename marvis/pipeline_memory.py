@@ -19,6 +19,8 @@ import json
 from pathlib import Path
 
 from marvis.domain import TaskRecord
+from marvis.validation.overfitting import overfitting_check_from_validation_results
+from marvis.validation_report_copy import channel_from_model_name
 
 SCAN_STAGE_FAILURE_PREFIX = "材料扫描失败："
 
@@ -40,13 +42,14 @@ def _memory_model_experience_payload(
     results: dict,
 ) -> dict:
     metrics_row = _memory_preferred_overall_row(results)
-    return {
+    overfitting = overfitting_check_from_validation_results(results)
+    payload = {
         "task_id": task.id,
         "source_task_id": task.id,
         "model_name": results.get("model_name") or task.model_name,
         "model_version": results.get("model_version") or task.model_version or "未标注",
         "scope": results.get("scope") or f"{task.model_name}验证任务",
-        "channel": results.get("channel") or "未标注",
+        "channel": _memory_channel(task, results),
         "month": results.get("month") or _memory_latest_month(results) or "未标注",
         "metrics": {
             "ks": _memory_metric_value(metrics_row, "ks"),
@@ -55,6 +58,24 @@ def _memory_model_experience_payload(
         },
         "important_feature_sources": _memory_important_feature_sources(results),
     }
+    status = overfitting.get("status")
+    if status not in (None, "", "not_available"):
+        payload["overfitting_status"] = status
+    head_lift = _memory_metric_value(metrics_row, "head_lift_5pct")
+    tail_lift = _memory_metric_value(metrics_row, "tail_lift_5pct")
+    if head_lift is not None:
+        payload["head_lift_5pct"] = head_lift
+    if tail_lift is not None:
+        payload["tail_lift_5pct"] = tail_lift
+    return payload
+
+
+def _memory_channel(task: TaskRecord, results: dict) -> str:
+    explicit = results.get("channel")
+    if explicit not in (None, "", "未标注"):
+        return str(explicit)
+    name = str(results.get("model_name") or task.model_name or "")
+    return channel_from_model_name(name) or "未标注"
 
 
 def _memory_field_convention_payload(task: TaskRecord) -> dict:

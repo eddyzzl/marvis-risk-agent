@@ -1336,4 +1336,3 @@ def _latest_strategy_nan_label_confirmation(
         return None
     state = (last_assistant.get("metadata") or {}).get(_STRATEGY_NAN_LABEL_META_KEY)
     return state if isinstance(state, dict) else None
-

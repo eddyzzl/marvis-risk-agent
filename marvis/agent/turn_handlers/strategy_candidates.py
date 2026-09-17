@@ -4548,4 +4548,3 @@ def _stored_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
     if draft.economics_inputs is not None:
         slots["economics_inputs"] = dict(draft.economics_inputs)
     return slots
-

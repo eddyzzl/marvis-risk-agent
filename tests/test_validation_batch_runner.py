@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+import asyncio
+import json
 import zipfile
 
 from docx import Document
+from fastapi import BackgroundTasks
 import pandas as pd
 import pytest
 
@@ -30,10 +33,15 @@ from marvis.validation_batch_runner import (
     mark_validation_batch_parent_running,
     run_validation_batch_job,
     run_validation_batch,
+    sync_agent_batch_after_child_report,
+    sync_agent_batch_child_progress,
     validation_batch_item_outcome,
     validation_batch_stress_risk,
 )
 from marvis.validation_materials import resolve_selected_validation_materials
+from marvis.validation.results import validation_results_to_dict
+from marvis.safe_paths import prepare_task_output_dir
+from tests.output.test_excel import _make_pmml_results
 from tests.validation_builders import make_validation_confirmation
 from tests.validation_material_builders import write_validation_material_bundle
 
@@ -423,7 +431,7 @@ def test_batch_runner_records_one_failure_and_continues_to_the_next_item(
 
 
 @pytest.mark.pmml_runtime
-def test_confirmed_batch_item_runs_pipeline_and_writes_summary_without_report_gate(
+def test_confirmed_batch_item_waits_for_report_approval_without_failing(
     tmp_path: Path,
 ):
     settings, repo, batch = _batch_with_valid_child(tmp_path)
@@ -473,33 +481,22 @@ def test_confirmed_batch_item_runs_pipeline_and_writes_summary_without_report_ga
     [item] = repo.list_items(batch.parent_task_id)
     final_child = task_repo.get_task(child.id)
     report_values, _revision = task_repo.get_report_values(child.id)
-    assert final_batch.status == "completed"
-    assert final_batch.summary_path.endswith("validation_batch_summary.xlsx")
-    assert Path(final_batch.summary_path).is_file()
-    assert item.status in {"succeeded", "review_required"}
-    assert item.stage == "completed"
-    assert final_child.status.value in {"succeeded", "review_required"}
-    assert item.report_complete is True
-    assert item.pmml_status == "pass"
-    assert item.oot_ks is not None
-    assert len(summary_calls) == 1
-    assert [row.ordinal for row in summary_calls[0]["rows"]] == [1]
-    assert {
-        "TEXT:pressure_test_summary",
-        "TEXT:pressure_impact_recommendation",
-        "TEXT:final_validation_conclusion",
-    } <= report_values.keys()
-    assert not any(
-        message.get("metadata", {}).get("awaiting_confirmation")
-        for message in task_repo.list_agent_messages(child.id)
-    )
+    assert final_batch.status == "awaiting_confirmation"
+    assert final_batch.summary_path == ""
+    assert item.status == "awaiting_confirmation"
+    assert item.stage == "report_conclusion"
+    assert item.error_message == ""
+    assert final_child.status is TaskStatus.WRITING_ARTIFACTS
+    assert item.report_complete is False
+    assert summary_calls == []
+    assert not report_values.get("TEXT:final_validation_conclusion")
+    assert not (settings.tasks_dir / child.id / "outputs" / "validation_report.docx").exists()
+    messages = task_repo.list_agent_messages(batch.parent_task_id)
+    assert messages[-1]["stage"] == "report_conclusion"
+    assert messages[-1]["metadata"]["waiting_report_count"] == 1
+    assert "等待报告结论确认" in messages[-1]["content"]
     parent = task_repo.get_task(batch.parent_task_id)
-    expected_parent_status = (
-        TaskStatus.REVIEW_REQUIRED
-        if item.status == "review_required"
-        else TaskStatus.SUCCEEDED
-    )
-    assert parent.status is expected_parent_status
+    assert parent.status is TaskStatus.SCANNED
     parent_job = task_repo.get_job(parent_job_id)
     assert parent_job is not None
     assert parent_job["status"] == "succeeded"
@@ -507,7 +504,7 @@ def test_confirmed_batch_item_runs_pipeline_and_writes_summary_without_report_ga
 
 
 @pytest.mark.pmml_runtime
-def test_two_confirmed_models_run_sequentially_and_keep_individual_reports(
+def test_two_models_complete_reports_only_after_explicit_confirmation(
     tmp_path: Path,
 ):
     settings, repo, batch = _batch_with_valid_child(tmp_path, child_count=2)
@@ -562,6 +559,34 @@ def test_two_confirmed_models_run_sequentially_and_keep_individual_reports(
         summary_writer=write_summary,
     )
 
+    pending_items = repo.list_items(batch.parent_task_id)
+    assert repo.get_batch(batch.parent_task_id).status == "awaiting_confirmation"
+    assert all(item.stage == "report_conclusion" for item in pending_items)
+    assert summary_calls == []
+    from marvis.agent.service import fallback_word_conclusions
+    from marvis.agent.validation_app_service import confirm_agent_report_conclusions
+    from marvis.agent.validation_evidence import agent_evidence_from_settings
+
+    for item in pending_items:
+        child = task_repo.get_task(item.child_task_id)
+        outputs = settings.tasks_dir / child.id / "outputs"
+        assert not (outputs / "validation_report.docx").exists()
+        background_tasks = BackgroundTasks()
+        _values, revision = task_repo.get_report_values(child.id)
+        confirm_agent_report_conclusions(
+            repo_=task_repo,
+            task=child,
+            task_id=child.id,
+            settings=settings,
+            text_values=fallback_word_conclusions(
+                task=child,
+                evidence=agent_evidence_from_settings(settings, child.id),
+            ),
+            expected_revision=revision,
+            background_tasks=background_tasks,
+        )
+        asyncio.run(background_tasks())
+
     final_items = repo.list_items(batch.parent_task_id)
     assert repo.get_batch(batch.parent_task_id).status == "completed"
     assert [item.ordinal for item in final_items] == [1, 2]
@@ -569,8 +594,7 @@ def test_two_confirmed_models_run_sequentially_and_keep_individual_reports(
         item.status in {"succeeded", "review_required"}
         for item in final_items
     )
-    assert len(summary_calls) == 1
-    assert len(summary_calls[0]["rows"]) == 2
+    assert Path(repo.get_batch(batch.parent_task_id).summary_path).is_file()
     for item in final_items:
         outputs = settings.tasks_dir / item.child_task_id / "outputs"
         assert (outputs / "validation_report.docx").is_file()
@@ -735,3 +759,189 @@ def test_partial_failure_retry_reconsiders_failed_item_after_material_repair(
     retried_batch = repo.get_batch(batch.parent_task_id)
     assert retried_batch.status == "awaiting_confirmation"
     assert retried_batch.finished_at is None
+
+
+def _advance_child_to_succeeded(task_repo: TaskRepository, task_id: str) -> None:
+    task_repo.update_status(
+        task_id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED,
+    )
+    task_repo.update_status(
+        task_id, TaskStatus.RUNNING, "running", expected=TaskStatus.SCANNED,
+    )
+    task_repo.update_status(
+        task_id, TaskStatus.EXECUTED, "executed", expected=TaskStatus.RUNNING,
+    )
+    task_repo.update_status(
+        task_id,
+        TaskStatus.COMPUTING_METRICS,
+        "metrics",
+        expected=TaskStatus.EXECUTED,
+    )
+    task_repo.update_status(
+        task_id,
+        TaskStatus.WRITING_ARTIFACTS,
+        "artifacts",
+        expected=TaskStatus.COMPUTING_METRICS,
+    )
+    task_repo.update_status(
+        task_id,
+        TaskStatus.SUCCEEDED,
+        "succeeded",
+        expected=TaskStatus.WRITING_ARTIFACTS,
+    )
+
+
+def _write_agent_child_outputs(settings, child_task_id: str) -> None:
+    output_dir = prepare_task_output_dir(settings.tasks_dir, child_task_id)
+    payload = validation_results_to_dict(_make_pmml_results())
+    (output_dir / "validation_results.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    for filename in ("validation_report.docx", "validation.xlsx"):
+        with zipfile.ZipFile(output_dir / filename, "w") as archive:
+            archive.writestr("placeholder.txt", "report")
+
+
+def test_agent_child_report_records_item_then_writes_n2_summary(tmp_path: Path):
+    settings, repo, batch = _batch_with_valid_child(tmp_path, child_count=2)
+    task_repo = TaskRepository(settings.db_path)
+    items = repo.list_items(batch.parent_task_id)
+    summary_calls: list[dict] = []
+
+    def write_summary(**kwargs):
+        summary_calls.append(kwargs)
+        return write_validation_batch_excel(**kwargs)
+
+    first = items[0]
+    _write_agent_child_outputs(settings, first.child_task_id)
+    _advance_child_to_succeeded(task_repo, first.child_task_id)
+    after_first = sync_agent_batch_after_child_report(
+        settings=settings,
+        child_task_id=first.child_task_id,
+        summary_writer=write_summary,
+    )
+
+    recorded_first = repo.get_item(first.id)
+    assert recorded_first.status in {"succeeded", "review_required"}
+    assert recorded_first.stage == "completed"
+    assert after_first is not None
+    assert after_first.status != "completed"
+    assert after_first.summary_path in {None, ""}
+    assert summary_calls == []
+
+    second = items[1]
+    _write_agent_child_outputs(settings, second.child_task_id)
+    _advance_child_to_succeeded(task_repo, second.child_task_id)
+    after_second = sync_agent_batch_after_child_report(
+        settings=settings,
+        child_task_id=second.child_task_id,
+        summary_writer=write_summary,
+    )
+
+    assert after_second is not None
+    assert after_second.status in {"completed", "partial_failure"}
+    assert after_second.summary_path.endswith("validation_batch_summary.xlsx")
+    assert Path(after_second.summary_path).is_file()
+    assert len(summary_calls) == 1
+    parent = task_repo.get_task(batch.parent_task_id)
+    assert parent.status in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}
+
+
+def test_agent_single_child_batch_does_not_write_summary_excel(tmp_path: Path):
+    settings, repo, batch = _batch_with_valid_child(tmp_path, child_count=1)
+    task_repo = TaskRepository(settings.db_path)
+    [item] = repo.list_items(batch.parent_task_id)
+    summary_calls: list[dict] = []
+    _write_agent_child_outputs(settings, item.child_task_id)
+    _advance_child_to_succeeded(task_repo, item.child_task_id)
+
+    result = sync_agent_batch_after_child_report(
+        settings=settings,
+        child_task_id=item.child_task_id,
+        summary_writer=lambda **kwargs: summary_calls.append(kwargs),
+    )
+
+    recorded = repo.get_item(item.id)
+    assert recorded.status == "queued"
+    assert summary_calls == []
+    assert result is not None
+    assert result.summary_path in {None, ""}
+    assert not (
+        settings.tasks_dir
+        / batch.parent_task_id
+        / "outputs"
+        / "validation_batch_summary.xlsx"
+    ).exists()
+
+
+@pytest.mark.parametrize("all_failed", [False, True])
+def test_agent_failed_children_are_recorded_and_batch_summary_finishes(tmp_path: Path, all_failed):
+    settings, batch_repo, batch = _batch_with_valid_child(tmp_path, child_count=2)
+    task_repo = TaskRepository(settings.db_path)
+    items = batch_repo.list_items(batch.parent_task_id)
+    for index, item in enumerate(items):
+        sync_agent_batch_child_progress(
+            db_path=settings.db_path, child_task_id=item.child_task_id,
+            status="running", stage="scan",
+        )
+        if index == 0 or all_failed:
+            task_repo.update_status(
+                item.child_task_id, TaskStatus.FAILED, "scan failed",
+                expected=TaskStatus.CREATED,
+            )
+        else:
+            _write_agent_child_outputs(settings, item.child_task_id)
+            _advance_child_to_succeeded(task_repo, item.child_task_id)
+
+    result = sync_agent_batch_after_child_report(
+        settings=settings, child_task_id=items[-1].child_task_id,
+    )
+
+    assert result.status == ("failed" if all_failed else "partial_failure")
+    assert Path(result.summary_path).is_file()
+    first = batch_repo.get_item(items[0].id)
+    assert first.status == "failed"
+    assert first.report_complete is False
+    assert "scan failed" in first.error_message
+
+
+def test_failed_agent_jobs_finalize_all_failed_batch(tmp_path: Path, monkeypatch):
+    from marvis.agent.validation_app_service import run_agent_validation_job
+
+    settings, batch_repo, batch = _batch_with_valid_child(tmp_path, child_count=2)
+    task_repo = TaskRepository(settings.db_path)
+    monkeypatch.setattr("marvis.agent.validation_app_service.open_agent_stage", lambda *_args, **_kwargs: None)
+    def fail_scan(repo, _settings, task_id, _profile, **_kwargs):
+        repo.update_status(task_id, TaskStatus.FAILED, "scan failed", expected=TaskStatus.CREATED)
+        return False
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_scan_stage", fail_scan)
+    for item in batch_repo.list_items(batch.parent_task_id):
+        job_id = task_repo.start_job(item.child_task_id, "agent")
+        run_agent_validation_job(
+            job_id, settings, item.child_task_id, {"model_id": "test"},
+            stage="scan", acceptance_mode="auto_accept",
+        )
+        assert task_repo.get_active_job_kind(item.child_task_id) is None
+    final = batch_repo.get_batch(batch.parent_task_id)
+    assert final.status == "failed"
+    assert Path(final.summary_path).is_file()
+
+
+def test_agent_child_progress_updates_batch_item_without_finalizing(tmp_path: Path):
+    settings, repo, batch = _batch_with_valid_child(tmp_path, child_count=2)
+    items = repo.list_items(batch.parent_task_id)
+    first = items[0]
+    sync_agent_batch_child_progress(
+        db_path=settings.db_path,
+        child_task_id=first.child_task_id,
+        status="running",
+        stage="scan",
+    )
+    recorded = repo.get_item(first.id)
+    assert recorded.status == "running"
+    assert recorded.stage == "scan"
+    other = repo.get_item(items[1].id)
+    assert other.status == "queued"
+    parent = repo.get_batch(batch.parent_task_id)
+    assert parent.status == "created"

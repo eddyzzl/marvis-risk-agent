@@ -8,6 +8,7 @@ from marvis.agent.service import (
     agent_conclusions_confirmed,
     generate_word_conclusions,
     summarize_stage,
+    _stage_prompt,
     _strip_agent_response_preamble,
 )
 from marvis.domain import TaskRecord, TaskStatus
@@ -115,6 +116,70 @@ def test_word_conclusion_uses_non_streaming_json_request(monkeypatch):
     assert metadata["fallback"] is False
 
 
+def test_word_conclusion_seeds_training_description_from_hyperparameters(monkeypatch):
+    class CapturingClient:
+        def complete(self, **_kwargs):
+            return json.dumps(
+                {
+                    "TEXT:pressure_test_summary": "平台压力测试摘要。",
+                    "TEXT:pressure_impact_recommendation": "建议关注高影响特征。",
+                    "TEXT:final_validation_conclusion": "模型可进入人工复核。",
+                },
+                ensure_ascii=False,
+            )
+
+    monkeypatch.setattr(
+        "marvis.agent.service._client",
+        lambda _profile: CapturingClient(),
+    )
+
+    values, metadata = generate_word_conclusions(
+        task=_task(),
+        evidence={
+            "validation_results": {
+                "algorithm": "lgb",
+                "basic_info": {
+                    "hyperparameters": {
+                        "max_depth": 1,
+                        "learning_rate": 0.022631,
+                        "num_boost_round": 90,
+                    }
+                },
+            }
+        },
+        model_profile={"api_base_url": "http://llm", "model_name": "m", "api_key": "k"},
+    )
+
+    assert metadata["fallback"] is False
+    description = values["TEXT:model_training_description"]
+    assert "LightGBM" in description
+    assert "max_depth=1" in description
+    assert "num_boost_round=90" in description
+    assert "直方图分裂、叶子优先生长和特征并行" not in description
+
+
+def test_word_conclusion_prompt_includes_hyperparameters():
+    prompt = json.loads(
+        _stage_prompt(
+            task=replace(_task(), validation_workflow_version=2),
+            stage="word_conclusion_draft",
+            evidence={
+                "validation_results": {
+                    "algorithm": "lgb",
+                    "basic_info": {
+                        "hyperparameters": {"max_depth": 1, "learning_rate": 0.02},
+                    },
+                }
+            },
+        )
+    )
+
+    hyperparameters = prompt["evidence"]["validation_results"]["basic_info"]["hyperparameters"]
+    assert hyperparameters["max_depth"] == 1
+    assert "TEXT:model_training_description" in prompt["instructions"]
+    assert "置 -9999" in prompt["instructions"]
+
+
 def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monkeypatch):
     captured = {}
 
@@ -145,6 +210,9 @@ def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monke
     assert "V2 PMML 打分工作流" in captured["system_prompt"]
     assert "不得使用“可复现”“一致性验证”" in captured["system_prompt"]
     assert "最终验证结论应直接评价模型的区分效果" in captured["system_prompt"]
+    assert "TEXT:model_training_description" in captured["system_prompt"]
+    assert "不得只粘贴该算法的通用教科书介绍" in captured["system_prompt"]
+    assert "不得只复述「置 -9999」的机械清单" in captured["system_prompt"]
     assert "不得复述材料扫描" in captured["system_prompt"]
     assert "不得写“可直接部署”或“可直接投产”" in captured["system_prompt"]
     assert "报告已进入" not in captured["system_prompt"]

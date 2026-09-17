@@ -986,6 +986,12 @@ def _execute_v2_metrics_stage(
                 begin_immediate=True,
             ),
         )
+        _capture_agent_memory_for_metrics_success(
+            repo=repo,
+            task_id=task_id,
+            outputs_dir=outputs_dir,
+            hook_dispatcher=settings.hook_dispatcher,
+        )
     except BaseException:
         if uow is not None:
             uow.rollback()
@@ -1273,7 +1279,11 @@ def run_report_stage(
     logger.info("report stage starting task_id=%s", task_id)
     try:
         cancellation_token.raise_if_cancelled()
-        if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
+        if task.status not in {
+            TaskStatus.WRITING_ARTIFACTS,
+            TaskStatus.REVIEW_REQUIRED,
+            TaskStatus.SUCCEEDED,
+        }:
             raise PipelineError(
                 f"word output requires generated metrics; current status is {task.status.value}"
             )
@@ -1315,7 +1325,10 @@ def run_report_stage(
                             task_id,
                             TaskStatus.REVIEW_REQUIRED,
                             message="报告已生成，需人工复核",
-                            expected=TaskStatus.WRITING_ARTIFACTS,
+                            expected={
+                                TaskStatus.WRITING_ARTIFACTS,
+                                TaskStatus.SUCCEEDED,
+                            },
                             begin_immediate=True,
                         ),
                     )
@@ -1327,6 +1340,16 @@ def run_report_stage(
                 report_uow.finalize(lambda: None)
             return
         terminal_status = _terminal_validation_status(task, results)
+        if (
+            task.status is TaskStatus.SUCCEEDED
+            and terminal_status is TaskStatus.SUCCEEDED
+        ):
+            report_uow.finalize(lambda: None)
+            logger.info(
+                "report stage regenerated task_id=%s without status change",
+                task_id,
+            )
+            return
         try:
             report_uow.finalize_with_connection(
                 repo.transaction,
@@ -1339,7 +1362,11 @@ def run_report_stage(
                         if terminal_status is TaskStatus.REVIEW_REQUIRED
                         else "pipeline succeeded"
                     ),
-                    expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+                    expected={
+                        TaskStatus.WRITING_ARTIFACTS,
+                        TaskStatus.REVIEW_REQUIRED,
+                        TaskStatus.SUCCEEDED,
+                    },
                     begin_immediate=True,
                 ),
             )

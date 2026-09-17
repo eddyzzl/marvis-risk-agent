@@ -1987,4 +1987,3 @@ def _merge_ingest_notices(*groups) -> list[dict]:
             seen.add(key)
             merged.append(dict(notice))
     return merged
-

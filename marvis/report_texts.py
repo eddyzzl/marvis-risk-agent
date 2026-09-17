@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from marvis.model_algorithms import model_training_description
+from marvis.model_algorithms import (
+    is_platform_default_training_description,
+    model_training_report_text,
+)
 from marvis.validation.results import (
     ConsistencyStatus,
     OverallRow,
@@ -29,12 +32,13 @@ COMPUTED_REPORT_TEXT_KEYS = frozenset({
     "TEXT:reproducibility_summary",
     "TEXT:pmml_scoring_summary",
     "TEXT:stress_test_summary",
-    "TEXT:pressure_test_summary",
 })
 
 AGENT_CONFIRMED_REPORT_TEXT_KEYS = frozenset({
+    "TEXT:pressure_test_summary",
     "TEXT:pressure_impact_recommendation",
     "TEXT:final_validation_conclusion",
+    "TEXT:model_training_description",
 })
 
 
@@ -59,7 +63,10 @@ def report_text_values_from_results(
         "TEXT:model_name": results.model_name,
         "TEXT:model_version": results.model_version,
         "TEXT:algorithm": results.algorithm,
-        "TEXT:model_training_description": model_training_description(results.algorithm),
+        "TEXT:model_training_description": model_training_report_text(
+            results.algorithm,
+            results.basic_info.hyperparameters,
+        ),
         "TEXT:sample_period": sample_period,
         "TEXT:sample_start_month": results.basic_info.sample_period[0],
         "TEXT:sample_end_month": results.basic_info.sample_period[1],
@@ -147,12 +154,35 @@ def merge_report_text_values(
         values.update({
             key: value
             for key, value in _with_text_prefix(candidate_values).items()
-            if (
-                (key not in COMPUTED_REPORT_TEXT_KEYS or key in allowed_computed_keys)
-                and (key not in AGENT_CONFIRMED_REPORT_TEXT_KEYS or key in allowed_computed_keys)
+            if _should_accept_report_text(
+                key,
+                value,
+                generated_values=generated_values,
+                allowed_computed_keys=allowed_computed_keys,
             )
         })
     return _apply_report_text_aliases(values)
+
+
+def _should_accept_report_text(
+    key: str,
+    value: str,
+    *,
+    generated_values: dict[str, str],
+    allowed_computed_keys: frozenset[str],
+) -> bool:
+    if not str(value or "").strip():
+        return False
+    if key in COMPUTED_REPORT_TEXT_KEYS and key not in allowed_computed_keys:
+        return False
+    if key in AGENT_CONFIRMED_REPORT_TEXT_KEYS and key not in allowed_computed_keys:
+        return False
+    if key == "TEXT:model_training_description" and is_platform_default_training_description(
+        value,
+        generated_values.get("TEXT:algorithm"),
+    ):
+        return False
+    return True
 
 
 def _apply_report_text_aliases(values: dict[str, str]) -> dict[str, str]:
@@ -160,6 +190,10 @@ def _apply_report_text_aliases(values: dict[str, str]) -> dict[str, str]:
     recommendation = values.get("TEXT:pressure_recommendation_summary")
     if recommendation is not None:
         values["TEXT:pressure_impact_recommendation"] = recommendation
+    pressure_summary = str(values.get("TEXT:pressure_test_summary") or "").strip()
+    stress_summary = str(values.get("TEXT:stress_test_summary") or "").strip()
+    if not pressure_summary and stress_summary:
+        values["TEXT:pressure_test_summary"] = stress_summary
     return values
 
 

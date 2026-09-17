@@ -19,6 +19,7 @@ from marvis.validation.checks import validate_required_splits
 from marvis.validation.effectiveness import (
     build_effectiveness_result,
     compute_bin_tables,
+    compute_independent_quantile_bin_tables,
     compute_monthly_ks,
     compute_monthly_psi,
     compute_overall_ks,
@@ -177,6 +178,10 @@ def write_platform_validation_metrics(
         context=effectiveness_context,
     )
     roc_ks_curves = compute_roc_ks_curves(sample=sample_scored, config=config)
+    independent_quantile_bin_tables = compute_independent_quantile_bin_tables(
+        sample=sample_scored,
+        config=config,
+    )
     effectiveness = build_effectiveness_result(
         overall=effectiveness_overall,
         bin_tables=bin_tables,
@@ -184,6 +189,7 @@ def write_platform_validation_metrics(
         monthly_psi=monthly_psi,
         psi_stability_table=psi_stability_table,
         roc_ks_curves=roc_ks_curves,
+        independent_quantile_bin_tables=independent_quantile_bin_tables,
     )
 
     category_resolution = stress_category_resolution_for_metrics(
@@ -419,6 +425,12 @@ def compute_existing_effectiveness(
         cancellation_check=cancellation_check,
     )
     _check_cancelled(cancellation_check)
+    independent_quantile_bin_tables = compute_independent_quantile_bin_tables(
+        sample=sample_scored,
+        config=config,
+        cancellation_check=cancellation_check,
+    )
+    _check_cancelled(cancellation_check)
     return build_effectiveness_result(
         overall=overall,
         bin_tables=bin_tables,
@@ -426,6 +438,7 @@ def compute_existing_effectiveness(
         monthly_psi=monthly_psi,
         psi_stability_table=psi_table,
         roc_ks_curves=curves,
+        independent_quantile_bin_tables=independent_quantile_bin_tables,
     )
 
 

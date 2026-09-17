@@ -12,10 +12,16 @@ from marvis.agent.prompts import (
 )
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.semantic_authorization import review_semantic_authorization
-from marvis.repositories.tasks import AGENT_REPORT_CONCLUSION_KEYS
+from marvis.model_algorithms import (
+    is_platform_default_training_description,
+    model_training_report_text,
+)
+from marvis.repositories.tasks import AGENT_REPORT_CONCLUSION_KEYS, AGENT_REPORT_WRITABLE_KEYS
 from marvis.domain import TaskRecord
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.report_texts import report_text_values_from_results
+from marvis.validation.lift_ranking import assess_lift_ranking
+from marvis.validation.overfitting import overfitting_check_from_validation_results
 from marvis.validation.results import validation_results_from_dict
 from marvis.validation.stress_risk import (
     stress_ks_risk,
@@ -23,6 +29,7 @@ from marvis.validation.stress_risk import (
     stress_risk_label,
     worst_stress_risk,
 )
+from marvis.validation_report_copy import narrative_report_values
 from marvis.agent_memory.prompting import (
     add_memory_to_prompt_payload,
     attach_memory_metadata,
@@ -512,6 +519,14 @@ def is_agent_report_revision_intent(content: str) -> bool:
         "压力测试总结",
         "压力影响建议",
         "最终验证结论",
+        "概述",
+        "适用范围",
+        "坏样本",
+        "好样本",
+        "word",
+        "excel",
+        "支用",
+        "授信",
     )
     return any(marker in compact for marker in revision_markers) and any(
         marker in compact for marker in report_markers
@@ -1066,10 +1081,16 @@ def generate_word_conclusions(
             stream=False,
         )
         values = _parse_conclusion_json(content)
+        values = _with_narrative_report_seeds(task, values)
+        values = _with_training_description_seed(task, values, evidence)
         if task.validation_workflow_version == 2:
             _validate_v2_word_conclusions(values)
     except (LLMClientError, ValueError) as exc:
-        return {}, {"llm_error": str(exc), "fallback": True, "confirmable": False}
+        return {}, attach_memory_metadata(
+            {"llm_error": str(exc), "fallback": True, "confirmable": False},
+            memory_context,
+            use_reason="word_conclusion_draft",
+        )
     return values, attach_memory_metadata(
         {"fallback": False},
         memory_context,
@@ -1085,44 +1106,64 @@ def fallback_word_conclusions(
     name = task.model_name or "本模型"
     deterministic = _fallback_conclusions_from_validation_evidence(
         evidence=evidence,
+        validation_workflow_version=task.validation_workflow_version,
     )
     if deterministic is not None:
-        return deterministic
+        return _with_training_description_seed(
+            task,
+            _with_narrative_report_seeds(task, deterministic),
+            evidence,
+        )
     if task.validation_workflow_version == 2:
-        return {
-            "TEXT:pressure_test_summary": (
-                "平台已完成模型压力测试相关指标产出。由于当前未能生成更细的模型解释文本，"
-                "建议验证人员结合结构化明细复核各压力场景下 KS、PSI 和打分分布变化。"
+        return _with_training_description_seed(
+            task,
+            _with_narrative_report_seeds(
+                task,
+                {
+                    "TEXT:pressure_test_summary": (
+                        "平台已完成模型压力测试相关指标产出。由于当前未能生成更细的模型解释文本，"
+                        "建议验证人员结合结构化明细复核各压力场景下 KS、PSI 和打分分布变化。"
+                    ),
+                    "TEXT:pressure_impact_recommendation": (
+                        "建议对模型压力测试中影响较大的数据源和特征类别设置上线后监控阈值；"
+                        "如出现显著稳定性或区分能力下降，应先复核信源质量和样本分布后再继续使用。"
+                    ),
+                    "TEXT:final_validation_conclusion": (
+                        f"当前缺少足以直接评价{name}区分效果、样本外稳定性、过拟合和压力风险的结构化证据，"
+                        "因此不能形成模型可用性结论。PMML部署可用。"
+                    ),
+                },
             ),
-            "TEXT:pressure_impact_recommendation": (
-                "建议对模型压力测试中影响较大的数据源和特征类别设置上线后监控阈值；"
-                "如出现显著稳定性或区分能力下降，应先复核信源质量和样本分布后再继续使用。"
-            ),
-            "TEXT:final_validation_conclusion": (
-                f"当前缺少足以直接评价{name}区分效果、样本外稳定性、过拟合和压力风险的结构化证据，"
-                "因此不能形成模型可用性结论。PMML部署可用。"
-            ),
-        }
-    return {
-        "TEXT:pressure_test_summary": (
-            "平台已完成压力测试相关指标产出。由于当前未能生成更细的模型解释文本，"
-            "建议验证人员结合 Excel 明细复核各压力场景下 KS、PSI 和打分分布变化。"
+            evidence,
+        )
+    return _with_training_description_seed(
+        task,
+        _with_narrative_report_seeds(
+            task,
+            {
+                "TEXT:pressure_test_summary": (
+                    "平台已完成压力测试相关指标产出。由于当前未能生成更细的模型解释文本，"
+                    "建议验证人员结合 Excel 明细复核各压力场景下 KS、PSI 和打分分布变化。"
+                ),
+                "TEXT:pressure_impact_recommendation": (
+                    "建议对压力测试中影响较大的数据源和特征类别设置上线后监控阈值；"
+                    "如出现显著稳定性或区分能力下降，应先复核信源质量和样本分布后再继续使用。"
+                ),
+                "TEXT:final_validation_conclusion": (
+                    f"本次验证已围绕{name}开展材料完备性、Notebook 可复现性、模型效果、稳定性和压力测试检查。"
+                    "从当前平台产物看，核心验证流程已执行至报告结论候选生成阶段；最终是否符合要求仍应以结构化指标、"
+                    "压力测试明细和验证人员复核意见为准。建议在确认 Word 结论前重点核对 OOT 区分效果、PSI 稳定性和关键变量压力表现。"
+                ),
+            },
         ),
-        "TEXT:pressure_impact_recommendation": (
-            "建议对压力测试中影响较大的数据源和特征类别设置上线后监控阈值；"
-            "如出现显著稳定性或区分能力下降，应先复核信源质量和样本分布后再继续使用。"
-        ),
-        "TEXT:final_validation_conclusion": (
-            f"本次验证已围绕{name}开展材料完备性、Notebook 可复现性、模型效果、稳定性和压力测试检查。"
-            "从当前平台产物看，核心验证流程已执行至报告结论候选生成阶段；最终是否符合要求仍应以结构化指标、"
-            "压力测试明细和验证人员复核意见为准。建议在确认 Word 结论前重点核对 OOT 区分效果、PSI 稳定性和关键变量压力表现。"
-        ),
-    }
+        evidence,
+    )
 
 
 def _fallback_conclusions_from_validation_evidence(
     *,
     evidence: dict | None,
+    validation_workflow_version: int | None = None,
 ) -> dict[str, str] | None:
     if not isinstance(evidence, dict):
         return None
@@ -1130,11 +1171,13 @@ def _fallback_conclusions_from_validation_evidence(
     if not isinstance(raw_results, dict):
         return None
     payload = dict(raw_results)
-    payload.pop("overfitting_check", None)
+    overfitting = payload.pop("overfitting_check", None)
     try:
         results = validation_results_from_dict(payload)
     except ValueError:
         return None
+    if not isinstance(overfitting, dict):
+        overfitting = overfitting_check_from_validation_results(payload)
 
     computed = report_text_values_from_results(results)
     pressure_summary = computed.get(
@@ -1184,15 +1227,177 @@ def _fallback_conclusions_from_validation_evidence(
             "压力测试未发现中高风险场景，可结合其他确定性门禁继续评估；"
             "上线后仍应执行常规 KS、PSI 与信源稳定性监控。"
         )
+    metrics_text = _effectiveness_metric_sentence(results.effectiveness.overall)
+    stability_text = _oot_stability_sentence(oot)
+    overfit_text = _overfitting_sentence(overfitting)
+    bin_text = _binning_sentence(results)
+    conclusion_parts = [
+        metrics_text,
+        oot_text,
+        stability_text,
+        overfit_text,
+        bin_text,
+        f"压力测试最高等级为{pressure_label}",
+    ]
+    if validation_workflow_version != 2:
+        conclusion_parts.insert(0, scoring_text)
     conclusion = (
-        f"{scoring_text}；{oot_text}；压力测试最高等级为{pressure_label}。"
-        "本段为大模型文本生成失败后的确定性保守回退结论，指标取自平台结果；"
+        "；".join(part for part in conclusion_parts if part)
+        + "。本段为大模型文本生成失败后的确定性保守回退结论，指标取自平台结果；"
         "最终使用决定仍需结合稳定性、压力测试和报告完整性门禁复核。"
     )
     return {
         "TEXT:pressure_test_summary": pressure_summary,
         "TEXT:pressure_impact_recommendation": recommendation,
         "TEXT:final_validation_conclusion": conclusion,
+        "TEXT:model_training_description": model_training_report_text(
+            results.algorithm,
+            results.basic_info.hyperparameters,
+        ),
+    }
+
+
+def _effectiveness_metric_sentence(overall: list) -> str:
+    by_split = {row.split: row for row in overall}
+    parts: list[str] = []
+    for split, label in (("train", "Train"), ("test", "Test"), ("oot", "OOT")):
+        row = by_split.get(split)
+        if row is None:
+            continue
+        parts.append(
+            f"{label} KS {row.ks:.4f}、AUC {row.auc:.4f}、PSI {row.psi_vs_train:.4f}"
+        )
+    return "；".join(parts) if parts else "KS/AUC/PSI 数据缺失"
+
+
+def _oot_stability_sentence(oot) -> str:
+    if oot is None:
+        return "样本外稳定性证据不足"
+    psi = float(oot.psi_vs_train)
+    if psi < 0.10:
+        return f"样本外稳定性可接受（OOT PSI {psi:.4f}）"
+    if psi < 0.25:
+        return f"样本外稳定性需关注（OOT PSI {psi:.4f}）"
+    return f"样本外分布迁移明显（OOT PSI {psi:.4f}）"
+
+
+def _overfitting_sentence(overfitting: dict | None) -> str:
+    if not isinstance(overfitting, dict):
+        return "过拟合检查证据不足"
+    status = str(overfitting.get("status") or "")
+    relative_diff = overfitting.get("train_test_relative_diff")
+    abs_diff = overfitting.get("train_oot_abs_diff")
+    relative_text = (
+        f"{relative_diff:.2%}"
+        if isinstance(relative_diff, (int, float))
+        else "未知"
+    )
+    abs_text = (
+        f"{abs_diff:.4f}"
+        if isinstance(abs_diff, (int, float))
+        else "未知"
+    )
+    if status == "fail":
+        return (
+            f"!!过拟合检查未通过（train-test 相对差 {relative_text}，"
+            f"train-OOT 绝对差 {abs_text}）!!，存在过拟合或样本外效果衰减风险"
+        )
+    if status == "pass":
+        return "过拟合检查通过，train/test/OOT 区分能力缺口在阈值内"
+    return "过拟合检查证据不足"
+
+
+_LIFT_STRENGTH_LABELS = {
+    "fail": "未达标",
+    "weak": "偏弱",
+    "ok": "尚可",
+    "strong": "较好",
+    "unknown": "证据不足",
+}
+_MONOTONICITY_LABELS = {
+    "monotonic": "逾期率大致单调",
+    "mostly_monotonic": "逾期率基本单调",
+    "broken": "逾期率存在多处倒挂",
+    "unknown": "单调性证据不足",
+}
+
+
+def _mark_fail_phrase(text: str, *, fail: bool) -> str:
+    return f"!!{text}!!" if fail else text
+
+
+def _binning_sentence(results) -> str:
+    ranking = assess_lift_ranking(_effectiveness_payload_for_lift(results))
+    oot = next(
+        (item for item in ranking.get("splits") or [] if item.get("split") == "oot"),
+        None,
+    )
+    if not isinstance(oot, dict):
+        return "分箱排序性明细见结构化结果"
+    bins = oot.get("independent_quantile") or oot.get("train_aligned") or {}
+    if not isinstance(bins, dict):
+        bins = {}
+    head_value = oot.get("head_lift_5pct")
+    tail_value = oot.get("tail_lift_5pct")
+    head_strength = str(oot.get("head_5pct_strength") or "unknown")
+    tail_strength = str(oot.get("tail_5pct_strength") or "unknown")
+    if head_value is None:
+        head_value = bins.get("head_group_lift")
+        head_strength = str(bins.get("head_group_strength") or head_strength)
+    if tail_value is None:
+        tail_value = bins.get("tail_group_lift")
+        tail_strength = str(bins.get("tail_group_strength") or tail_strength)
+    if head_value is None and tail_value is None:
+        return "分箱排序性明细见结构化结果"
+    kind = "独立10等分分箱" if oot.get("independent_quantile") else "分箱"
+    head_text = (
+        f"头部 lift {head_value:.2f}（{_LIFT_STRENGTH_LABELS.get(head_strength, '证据不足')}）"
+        if isinstance(head_value, (int, float))
+        else "头部 lift 缺失"
+    )
+    tail_text = (
+        f"尾部 lift {tail_value:.2f}（{_LIFT_STRENGTH_LABELS.get(tail_strength, '证据不足')}）"
+        if isinstance(tail_value, (int, float))
+        else "尾部 lift 缺失"
+    )
+    monotonicity = str(bins.get("bad_rate_monotonicity") or "unknown")
+    mono_text = _MONOTONICITY_LABELS.get(monotonicity, "单调性证据不足")
+    return (
+        f"OOT {kind}"
+        f"{_mark_fail_phrase(head_text, fail=head_strength in {'fail', 'weak'})}、"
+        f"{_mark_fail_phrase(tail_text, fail=tail_strength in {'fail', 'weak'})}，"
+        f"{_mark_fail_phrase(mono_text, fail=monotonicity == 'broken')}"
+    )
+
+
+def _effectiveness_payload_for_lift(results) -> dict:
+    def tables(payload: object) -> dict[str, list[dict[str, object]]]:
+        if not isinstance(payload, dict):
+            return {}
+        converted: dict[str, list[dict[str, object]]] = {}
+        for split, rows in payload.items():
+            converted[str(split)] = [
+                {
+                    "lift": getattr(row, "lift", None),
+                    "bad_rate": getattr(row, "bad_rate", None),
+                }
+                for row in rows or []
+            ]
+        return converted
+
+    return {
+        "overall": [
+            {
+                "split": row.split,
+                "head_lift_5pct": row.head_lift_5pct,
+                "tail_lift_5pct": row.tail_lift_5pct,
+            }
+            for row in results.effectiveness.overall
+        ],
+        "bin_tables": tables(results.effectiveness.bin_tables),
+        "independent_quantile_bin_tables": tables(
+            results.effectiveness.independent_quantile_bin_tables
+        ),
     }
 
 
@@ -1659,7 +1864,12 @@ def _compact_word_validation_results(
     if pmml_scoring:
         compact["pmml_scoring"] = pmml_scoring
 
-    effectiveness = _compact_effectiveness_for_word(slim.get("effectiveness"))
+    raw_effectiveness = slim.get("effectiveness")
+    effectiveness = _compact_effectiveness_for_word(raw_effectiveness)
+    if isinstance(raw_effectiveness, dict):
+        ranking = assess_lift_ranking(raw_effectiveness)
+        if ranking["splits"]:
+            effectiveness["lift_ranking_assessment"] = ranking
     if effectiveness:
         compact["effectiveness"] = effectiveness
 
@@ -1686,6 +1896,9 @@ def _compact_basic_info_for_word(basic_info: object) -> dict:
     feature_importance = basic_info.get("feature_importance")
     if isinstance(feature_importance, list):
         compact["feature_importance"] = feature_importance[:WORD_CONCLUSION_FEATURE_LIMIT]
+    hyperparameters = basic_info.get("hyperparameters")
+    if isinstance(hyperparameters, dict) and hyperparameters:
+        compact["hyperparameters"] = dict(list(hyperparameters.items())[:50])
     return compact
 
 
@@ -1796,13 +2009,6 @@ def _compact_metrics_validation_results(validation_results: dict) -> dict:
     raw_basic_info = validation_results.get("basic_info")
     basic_info = _compact_basic_info_for_word(raw_basic_info)
     if basic_info:
-        hyperparameters = (
-            raw_basic_info.get("hyperparameters")
-            if isinstance(raw_basic_info, dict)
-            else None
-        )
-        if isinstance(hyperparameters, dict):
-            basic_info["hyperparameters"] = dict(list(hyperparameters.items())[:50])
         compact["basic_info"] = basic_info
 
     effectiveness = _compact_effectiveness_for_word(
@@ -1810,13 +2016,17 @@ def _compact_metrics_validation_results(validation_results: dict) -> dict:
     )
     raw_effectiveness = validation_results.get("effectiveness")
     if isinstance(raw_effectiveness, dict):
-        bin_tables = raw_effectiveness.get("bin_tables")
-        if isinstance(bin_tables, dict):
-            effectiveness["bin_tables"] = {
-                str(split): rows[:METRICS_BIN_TABLE_LIMIT]
-                for split, rows in bin_tables.items()
-                if isinstance(rows, list)
-            }
+        for table_key in ("bin_tables", "independent_quantile_bin_tables"):
+            tables = raw_effectiveness.get(table_key)
+            if isinstance(tables, dict):
+                effectiveness[table_key] = {
+                    str(split): rows[:METRICS_BIN_TABLE_LIMIT]
+                    for split, rows in tables.items()
+                    if isinstance(rows, list)
+                }
+        ranking = assess_lift_ranking(raw_effectiveness)
+        if ranking["splits"]:
+            effectiveness["lift_ranking_assessment"] = ranking
     if effectiveness:
         compact["effectiveness"] = effectiveness
 
@@ -2211,6 +2421,14 @@ def _stage_instructions(
         return (
             reference_instruction
             + "只针对当前效果与稳定性阶段，分为“总体判断、效果表现、稳定性表现、压力测试风险、建议”。"
+            "效果表现的分析深度必须对齐稳定性表现和压力测试风险：不能只写 KS/AUC 数字或 lift 是否跨过 1。"
+            "必须结合 evidence.validation_results.effectiveness.lift_ranking_assessment "
+            "评价头尾 5% lift 的幅度、分箱逾期率/单组 lift 是否单调、头尾区分是否拉开；"
+            "头部 0.99 虽小于 1 仍应判为弱区分，不得写成通过。"
+            "未通过、过拟合、弱 lift、分箱倒挂、PSI≥0.25、高风险数据源等明显不好的判断，"
+            "必须用 !!关键短语!! 包住（只包短语），通过项不要用 !! !!。"
+            "若 cross_task_memory 含同类模型，必须对比历史 KS/AUC/PSI（及过拟合、头尾 lift 如有），"
+            "并标明来自历史记忆；没有可比记忆时在总体判断写「本次未见可比历史模型」，不要编造对比。"
             "压力测试风险必须完整覆盖高/中/低风险分层或明确说明证据不足，并用一句完整结论收束；"
             "不得停在半句话、项目符号中途或只有“KS 降幅”等未完成表述。"
             "不要回顾材料完备性或分数一致性的执行过程，不要生成最终报告综合结论。"
@@ -2230,12 +2448,24 @@ def _stage_instructions(
                 + "生成最终 Word 报告中的三段候选文字。只能使用 evidence 中已给出的 PMML 打分测试、"
                 "效果与稳定性指标、模型压力测试分层和阶段总结；不得编造未提供的 KS、AUC、PSI、样本量、"
                 "数据源名称或监管结论，也不得声称执行过 Notebook、代码模型评分或分数一致性比较。"
-                "输出必须是 JSON 对象，且必须完整包含三段键值："
+                "输出必须是 JSON 对象，且必须完整包含："
                 "TEXT:pressure_test_summary、TEXT:pressure_impact_recommendation、"
-                "TEXT:final_validation_conclusion。TEXT:pressure_test_summary 必须说明模型压力测试目的、"
-                "方法和观察到的高/中/低风险数据源分层；证据不足时明确说明无法完成某一档分层。"
+                "TEXT:final_validation_conclusion、TEXT:model_training_description。"
+                "TEXT:pressure_test_summary 必须说明模型压力测试目的、"
+                "方法和观察到的高/中/低风险数据源或特征类别分层，写清基线 KS 与各类别剔除后 KS/PSI；"
+                "不得只复述「置 -9999」机械清单。证据不足时明确说明无法完成某一档分层。"
+                "TEXT:model_training_description 必须介绍本模型实际算法，并引用 "
+                "evidence.validation_results.basic_info.hyperparameters 的关键参数"
+                "（如 max_depth、learning_rate、num_boost_round/best_iteration）；"
+                "不得只粘贴该算法的通用教科书介绍，也不得在有超参证据时写成待确认算法。"
                 "TEXT:pressure_impact_recommendation 必须围绕上述风险分层给出监控、替代、降级、"
-                "人工复核或上线限制建议。TEXT:final_validation_conclusion 必须比前两段更完整，"
+                "人工复核或上线限制建议。TEXT:final_validation_conclusion 必须针对本模型撰写专属叙事，"
+                "写入 Train/Test/OOT 的 KS、AUC、PSI，并评价稳定性、过拟合、压力测试与分箱排序性；"
+                "分箱与 lift 须使用 lift_ranking_assessment：看单调性、头尾幅度和区分是否拉开，"
+                "不得只因 lift 跨过 1 就判好。未通过或明显不好的短语用 !! !! 包住。"
+                "不得套用同一套套话。如 cross_task_memory 含历史同类模型，必须做一次克制对比；"
+                "没有则写「本次未见可比历史模型」。引用须克制且不得改写平台指标。"
+                "TEXT:final_validation_conclusion 必须比前两段更完整，"
                 "建议 1 到 2 个自然段，直接评价区分效果、样本外稳定性、过拟合风险、"
                 "模型压力测试主要发现和最终审慎判断；最多用一个短句说明 PMML 部署可用，"
                 "不得写可直接部署或可直接投产。"
@@ -2248,10 +2478,13 @@ def _stage_instructions(
             reference_instruction
             + "生成最终 Word 报告中的三段候选文字。只能使用 evidence 中已给出的结构化指标、"
             "复现结论、压力测试分层和阶段总结；不得编造未提供的 KS、AUC、PSI、样本量、"
-            "数据源名称或监管结论。输出必须是 JSON 对象，且必须完整包含三段键值："
+            "数据源名称或监管结论。输出必须是 JSON 对象，且必须完整包含："
             "TEXT:pressure_test_summary、TEXT:pressure_impact_recommendation、"
-            "TEXT:final_validation_conclusion。TEXT:pressure_test_summary 必须说明压力测试目的、"
-            "方法和观察到的高/中/低风险数据源分层；证据不足时明确说明无法完成某一档分层。"
+            "TEXT:final_validation_conclusion、TEXT:model_training_description。"
+            "TEXT:pressure_test_summary 必须说明压力测试目的、方法和观察到的高/中/低风险数据源分层；"
+            "不得只复述机械清单。证据不足时明确说明无法完成某一档分层。"
+            "TEXT:model_training_description 必须介绍本模型实际算法并引用已给出的训练超参，"
+            "不得只输出通用教科书介绍。"
             "TEXT:pressure_impact_recommendation 必须围绕上述风险分层给出监控、替代、降级、"
             "人工复核或上线限制建议。TEXT:final_validation_conclusion 必须比前两段更完整，"
             "建议 1 到 2 个自然段，覆盖开发过程或材料完备性、Notebook 可复现性、分数一致性、"
@@ -2283,7 +2516,55 @@ def _parse_conclusion_json(content: str) -> dict[str, str]:
     missing = [key for key, value in values.items() if not value]
     if missing:
         raise ValueError("word conclusion response missing keys: " + ", ".join(missing))
+    for key in AGENT_REPORT_WRITABLE_KEYS - AGENT_REPORT_CONCLUSION_KEYS:
+        extra = str(payload.get(key) or "").strip()
+        if extra:
+            values[key] = extra
     return values
+
+
+def _with_narrative_report_seeds(task: TaskRecord, values: dict[str, str]) -> dict[str, str]:
+    merged = dict(values)
+    for key, seed in narrative_report_values(task.model_name).items():
+        if not str(merged.get(key) or "").strip():
+            merged[key] = seed
+    return merged
+
+
+def _with_training_description_seed(
+    task: TaskRecord,
+    values: dict[str, str],
+    evidence: dict | None = None,
+) -> dict[str, str]:
+    merged = dict(values)
+    current = merged.get("TEXT:model_training_description")
+    if not is_platform_default_training_description(current, task.algorithm):
+        return merged
+    seeded = _training_description_from_evidence(task, evidence)
+    if seeded:
+        merged["TEXT:model_training_description"] = seeded
+    return merged
+
+
+def _training_description_from_evidence(
+    task: TaskRecord,
+    evidence: dict | None,
+) -> str:
+    algorithm = str(task.algorithm or "").strip()
+    hyperparameters = None
+    if isinstance(evidence, dict):
+        raw_results = evidence.get("validation_results")
+        if isinstance(raw_results, dict):
+            algorithm = str(raw_results.get("algorithm") or algorithm).strip()
+            basic_info = raw_results.get("basic_info")
+            if isinstance(basic_info, dict) and isinstance(basic_info.get("hyperparameters"), dict):
+                hyperparameters = basic_info.get("hyperparameters")
+    if not algorithm:
+        return ""
+    try:
+        return model_training_report_text(algorithm, hyperparameters)
+    except ValueError:
+        return ""
 
 
 def _validate_v2_word_conclusions(values: dict[str, str]) -> None:

@@ -11,10 +11,12 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from marvis.api_task_helpers import (
+    format_validation_batch_parent_name,
+    get_task_or_404,
     normalize_source_dir,
     validate_model_identifier,
 )
-from marvis.api_task_payloads import task_report_download_filename
+from marvis.api_task_payloads import task_payload, task_report_download_filename
 from marvis.data.task_filesystem_gc import (
     DATASET_IDENTITY_DIR,
     DATASET_TASK_DIR,
@@ -46,11 +48,19 @@ from marvis.validation_batch_runner import (
     run_validation_batch_job,
 )
 from marvis.validation_batch_ingress import MATERIAL_UPLOAD_MAX_FILES
+from marvis.agent.validation_app_service import (
+    confirm_all_batch_report_drafts,
+    latest_pending_agent_report_draft,
+)
 from marvis.validation_batch_schemas import (
+    ConfirmAllBatchReportDraftsRequest,
     CreateValidationBatchRequest,
     StartValidationBatchRequest,
 )
-from marvis.validation_materials import resolve_validation_material_paths
+from marvis.validation_materials import (
+    discover_validation_material_paths,
+    resolve_validation_material_paths,
+)
 
 
 router = APIRouter(prefix="/api/validation-batches", tags=["validation-batches"])
@@ -223,13 +233,22 @@ def create_validation_batch(
                     request.app.state.settings,
                 )
             try:
-                materials = resolve_validation_material_paths(
-                    source_dir=source_dir,
-                    notebook_path=item.notebook_path,
-                    sample_path=item.sample_path,
-                    pmml_path=item.pmml_path,
-                    dictionary_path=item.dictionary_path,
+                explicit_paths = (
+                    item.notebook_path,
+                    item.sample_path,
+                    item.pmml_path,
+                    item.dictionary_path,
                 )
+                if all(str(path or "").strip() for path in explicit_paths):
+                    materials = resolve_validation_material_paths(
+                        source_dir=source_dir,
+                        notebook_path=item.notebook_path,
+                        sample_path=item.sample_path,
+                        pmml_path=item.pmml_path,
+                        dictionary_path=item.dictionary_path,
+                    )
+                else:
+                    materials = discover_validation_material_paths(source_dir)
             except ValueError as exc:
                 raise unprocessable(str(exc)) from exc
             for role, path in (
@@ -298,7 +317,7 @@ def create_validation_batch(
         batch = _batch_repo(request).create_batch(
             TaskCreate(
                 task_type=TASK_TYPE_VALIDATION_BATCH,
-                model_name=payload.batch_name.strip(),
+                model_name=format_validation_batch_parent_name(len(payload.items)),
                 model_version="",
                 validator=payload.validator.strip(),
                 source_dir=str(parent_source),
@@ -587,12 +606,35 @@ def start_validation_batch(
     }
 
 
+@router.post("/{parent_task_id}/report-drafts/confirm-all", status_code=202)
+def confirm_all_validation_batch_report_drafts(
+    parent_task_id: str,
+    payload: ConfirmAllBatchReportDraftsRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    task_repo = TaskRepository(request.app.state.settings.db_path)
+    parent = get_task_or_404(task_repo, parent_task_id)
+    if parent.task_type != TASK_TYPE_VALIDATION_BATCH:
+        raise unprocessable("task is not a validation batch")
+    return confirm_all_batch_report_drafts(
+        repo_=task_repo,
+        parent_task_id=parent_task_id,
+        settings=request.app.state.settings,
+        background_tasks=background_tasks,
+        overrides=payload.overrides,
+        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
+    )
+
+
 def _batch_payload(request: Request, parent_task_id: str) -> dict:
     repo = _batch_repo(request)
+    task_repo = TaskRepository(request.app.state.settings.db_path)
     contract_repo = ValidationContractRepository(
         request.app.state.settings.db_path
     )
     batch = repo.get_batch(parent_task_id)
+    parent = task_repo.get_task(parent_task_id)
     batch_payload = asdict(batch)
     batch_payload.pop("summary_path", None)
     batch_payload["summary_download_url"] = (
@@ -603,9 +645,14 @@ def _batch_payload(request: Request, parent_task_id: str) -> dict:
     return {
         "batch": batch_payload,
         "items": [
-            _batch_item_payload(request, parent_task_id, item, contract_repo)
+            _batch_item_payload(request, parent_task_id, item, contract_repo, task_repo)
             for item in repo.list_items(parent_task_id)
         ],
+        "parent_task": task_payload(
+            task_repo,
+            parent,
+            request.app.state.settings.tasks_dir,
+        ),
     }
 
 
@@ -614,6 +661,7 @@ def _batch_item_payload(
     parent_task_id: str,
     item,
     contract_repo: ValidationContractRepository,
+    task_repo: TaskRepository,
 ) -> dict:
     tasks_dir = request.app.state.settings.tasks_dir
     return {
@@ -648,6 +696,11 @@ def _batch_item_payload(
             )
             is not None
             else ""
+        ),
+        "pending_report_draft": bool(
+            latest_pending_agent_report_draft(
+                task_repo.list_agent_messages(item.child_task_id)
+            )
         ),
     }
 

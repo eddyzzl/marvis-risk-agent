@@ -54,6 +54,7 @@ from marvis.validation_materials import (
     ResolvedValidationMaterials,
     resolve_selected_validation_materials,
 )
+from marvis.validation_report_copy import humanize_scan_check_message
 
 
 REQUIRED_SCAN_MATERIALS = (
@@ -123,7 +124,7 @@ def scan_error_checks(checks: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def scan_status_message(checks: list[dict[str, str]]) -> str:
     messages = [
-        check.get("message", "")
+        humanize_scan_check_message(check.get("message", ""))
         for check in scan_error_checks(checks)
         if check.get("message")
     ]

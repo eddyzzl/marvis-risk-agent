@@ -92,16 +92,17 @@ def test_pressure_test_summary_placeholder_gets_platform_fallback():
     assert values["TEXT:pressure_test_summary"] == values["TEXT:stress_test_summary"]
 
 
-def test_agent_report_values_cannot_replace_platform_pressure_test_summary():
+def test_agent_report_values_replace_platform_pressure_test_summary():
     values = report_text_values_from_results(
         _make_results(),
         report_values={
-            "TEXT:pressure_test_summary": "Agent 不应覆盖平台摘要",
+            "TEXT:pressure_test_summary": "Agent 压力测试分层总结",
             "TEXT:pressure_impact_recommendation": "Agent 可补充影响建议",
         },
     )
 
-    assert values["TEXT:pressure_test_summary"] == values["TEXT:stress_test_summary"]
+    assert values["TEXT:pressure_test_summary"] == "Agent 压力测试分层总结"
+    assert "置 -9999" in values["TEXT:stress_test_summary"]
     assert values["TEXT:pressure_impact_recommendation"] == "Agent 可补充影响建议"
 
 
@@ -178,13 +179,44 @@ def test_platform_generated_period_text_collapses_single_month_range():
     assert values["TEXT:oot_period"] == "202504"
 
 
-def test_model_training_description_uses_algorithm_default_text():
+def test_model_training_description_uses_this_model_hyperparameters():
     results = replace(_make_results(), algorithm="xgb")
 
     values = report_text_values_from_results(results)
 
     assert "XGBoost" in values["TEXT:model_training_description"]
-    assert "信贷风控" in values["TEXT:model_training_description"]
+    assert "max_depth=5" in values["TEXT:model_training_description"]
+    assert "learning_rate=0.05" in values["TEXT:model_training_description"]
+    assert "直方图分裂" not in values["TEXT:model_training_description"]
+
+
+def test_pending_training_description_does_not_override_hyperparameter_text():
+    values = report_text_values_from_results(
+        _make_results(),
+        report_values={
+            "TEXT:model_training_description": (
+                "待 Notebook 契约 RMC_ALGORITHM 确认后自动生成模型训练说明。"
+            ),
+        },
+    )
+
+    assert "max_depth=5" in values["TEXT:model_training_description"]
+    assert "RMC_ALGORITHM" not in values["TEXT:model_training_description"]
+
+
+def test_agent_training_description_replaces_platform_text():
+    values = report_text_values_from_results(
+        _make_results(),
+        report_values={
+            "TEXT:model_training_description": (
+                "本模型为浅树 LightGBM，max_depth=1、learning_rate=0.02。"
+            ),
+        },
+    )
+
+    assert values["TEXT:model_training_description"] == (
+        "本模型为浅树 LightGBM，max_depth=1、learning_rate=0.02。"
+    )
 
 
 def test_pressure_recommendation_alias_tracks_manual_summary():

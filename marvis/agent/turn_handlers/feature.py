@@ -279,4 +279,3 @@ def _feature_target_choice_state(
         "target_candidates": list(exc.candidates),
         "skip": True,
     }
-
