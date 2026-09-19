@@ -1294,13 +1294,12 @@ def test_report_fields_default_training_description_uses_task_algorithm(tmp_path
 
     assert got.status_code == 200
     text_values = got.json()["text_values"]
-    assert text_values["TEXT:model_overview"] == (
-        "为了更好的对xx用户进行授信环节风险管控，现开发A卡模型，"
-        "对xx客群做前置风险拦截，从授信申请阶段做好风险防范。"
-    )
-    assert text_values["TEXT:model_scope"] == "本模型适用于xx渠道用户。"
-    assert text_values["TEXT:bad_sample_definition"] == "xx逾期 >= xx天"
-    assert text_values["TEXT:good_sample_definition"] == "xx未逾期"
+    # A name and algorithm do not establish business scope or sample labels.
+    for key in (
+        "TEXT:model_overview", "TEXT:model_scope", "TEXT:sample_audience",
+        "TEXT:bad_sample_definition", "TEXT:good_sample_definition",
+    ):
+        assert text_values[key] == ""
     description = text_values["TEXT:model_training_description"]
     assert "XGBoost" in description
     assert "信贷风控" in description

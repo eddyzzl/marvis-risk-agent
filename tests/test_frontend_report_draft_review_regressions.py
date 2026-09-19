@@ -5,6 +5,45 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_agent_message_waits_for_draft_save_and_retains_prompt_on_failure():
+    script = r'''
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const app=fs.readFileSync('./marvis/static/app.js','utf8');
+const source=app.slice(app.indexOf('async function startAgentValidation()'),app.indexOf('async function uploadRiskAnalysisMaterials('));
+function setup(save) {
+  const input={value:'请只修订结论'};
+  const calls=[];
+  const context={workbenchTaskId:()=> 'a',$:(id)=>id==='agentComposerInput'?input:{value:'model'},
+    selectedTaskNeedsManualRiskIntake:()=>false,selectedTaskNeedsDeterministicPortfolioTurn:()=>false,
+    agentModelUnavailableMessage:()=>'',showAgentModelGuidance:()=>false,setAgentComposerNotice:()=>{},
+    autoGrowComposerInput:()=>{},updateAgentSendDisabled:()=>{},appendOptimisticAgentUserMessage:()=>({id:'user'}),
+    appendOptimisticAgentThinkingMessage:()=>({id:'thinking'}),agentRequestAbortControllers:new Map(),AbortController,
+    reportDraftState:{get:()=>({dirty:true}),save},agentEffort:()=> 'high',agentAcceptanceModeValue:()=> 'auto_accept',
+    api:async(url,options)=>{calls.push([url,JSON.parse(options.body)]);return {messages:[],status:'done'};},
+    pollAgentMessagesUntilSettled:async()=>{},removeOptimisticAgentMessage:()=>{},agentModelConfigurationErrorMessage:()=>'',
+    agentMessages:[],renderAgentConversation:()=>{},setActionStatus:()=>{}};
+  return {input,calls,start:new Function('ctx',`with(ctx){${source};return startAgentValidation;}`)(context)};
+}
+let finishSave;
+const success=setup(()=>new Promise(resolve=>{finishSave=resolve;}));
+const pending=success.start();
+assert.equal(success.calls.length,0);
+finishSave();await pending;
+assert.equal(success.calls.length,1);
+assert.equal(success.calls[0][1].content,'请只修订结论');
+const failure=setup(async()=>{throw new Error('保存失败');});
+await assert.rejects(failure.start(),/保存失败/);
+assert.equal(failure.calls.length,0);
+assert.equal(failure.input.value,'请只修订结论');
+'''
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], cwd=ROOT,
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_report_draft_switch_poll_and_confirmation_boundaries():
     script = r'''
 import assert from 'node:assert/strict';

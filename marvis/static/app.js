@@ -7505,6 +7505,9 @@ async function startAgentValidation() {
   agentRequestAbortControllers.set(taskId, controller);
   let result;
   try {
+    // A revision or chat confirmation must see the latest local edits, even
+    // when sent before the autosave delay or after a previous save failed.
+    if (reportDraftState.get(taskId)) await reportDraftState.save(taskId);
     const requestBody = { content };
     if (!deterministicTurn) {
       requestBody.model_id = modelId || null;
