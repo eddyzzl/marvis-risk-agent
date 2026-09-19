@@ -41,6 +41,7 @@ from marvis.agent.validation_app_service import (
     is_agent_report_confirm_intent,
     is_agent_report_regenerate_intent,
     latest_pending_agent_report_draft,
+    latest_report_draft_context,
     model_metadata,
     repo as agent_repo,
     require_agent_task,
@@ -975,6 +976,8 @@ def post_agent_message(
             settings=request.app.state.settings,
             text_values=pending_report_draft["values"],
             expected_revision=pending_report_draft["report_revision"],
+            draft_message_id=pending_report_draft["message_id"],
+            draft_edit_revision=pending_report_draft["draft_edit_revision"],
             background_tasks=background_tasks,
             hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
         )
@@ -1083,6 +1086,8 @@ def post_agent_message(
                 settings=request.app.state.settings,
                 text_values=pending_report_draft["values"],
                 expected_revision=pending_report_draft["report_revision"],
+                draft_message_id=pending_report_draft["message_id"],
+                draft_edit_revision=pending_report_draft["draft_edit_revision"],
                 background_tasks=background_tasks,
                 hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
             )
@@ -1218,6 +1223,9 @@ def draft_agent_report_conclusions(
     require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
     model_profile = resolve_agent_model(request, payload.model_id, payload.effort)
     evidence = agent_evidence(request, task_id)
+    saved_draft = latest_report_draft_context(repo.list_agent_messages(task_id))
+    if saved_draft:
+        evidence["report_draft"] = saved_draft
     memory_context = agent_memory_context(
         request,
         task,

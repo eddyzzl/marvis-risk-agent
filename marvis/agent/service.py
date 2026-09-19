@@ -60,6 +60,7 @@ GLOBAL_AGENT_EVIDENCE_KEYS = frozenset(
         "pmml_scoring",
         "validation_results",
         "report_fields",
+        "report_draft",
         "visible_stage_summaries",
     }
 )
@@ -792,6 +793,39 @@ def agent_conclusions_confirmed(values: dict[str, str]) -> bool:
     return all(str(values.get(key) or "").strip() for key in REQUIRED_AGENT_REPORT_KEYS)
 
 
+def latest_report_draft_context(messages: list[dict]) -> dict:
+    """Read the current editable narrative, including deliberate empty values.
+
+    A streaming placeholder has no draft values yet; it must not hide the saved
+    draft that a rewrite is based on. An incomplete saved draft is still the
+    current draft and must never fall back to an older confirmable version.
+    """
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        if message.get("stage") == "word_conclusion_confirmed":
+            return {}
+        if message.get("stage") != "word_conclusion_draft":
+            continue
+        metadata = message.get("metadata") or {}
+        values = metadata.get("draft_values")
+        revision = metadata.get("report_revision")
+        if not isinstance(values, dict):
+            continue
+        if not isinstance(revision, int) or isinstance(revision, bool):
+            return {}
+        return {
+            "message_id": message.get("id"),
+            "report_revision": revision,
+            "draft_edit_revision": metadata.get("draft_edit_revision", 0),
+            "text_values": {
+                key: value for key, value in values.items()
+                if key in AGENT_REPORT_WRITABLE_KEYS and isinstance(value, str)
+            },
+        }
+    return {}
+
+
 def summarize_stage(
     *,
     task: TaskRecord,
@@ -1437,6 +1471,13 @@ def _stage_prompt(
             + "本次是用户要求重新生成该阶段内容，必须优先满足 user_instruction 中的修改要求；"
             "不得因为已有旧草稿而复用旧措辞。"
         )
+    if stage == "word_conclusion_draft" and evidence.get("report_draft"):
+        payload["instructions"] += (
+            "evidence.report_draft.text_values 是当前已保存但尚未确认的报告草稿，"
+            "修订时以它为起点，保留用户未要求修改的业务事实和主动清空的字段；"
+            "按照 user_instruction 修改指定段落。草稿中的数值不是平台指标证据，"
+            "指标与通过判断仍只能依据确定性验证结果。"
+        )
     payload = add_memory_to_prompt_payload(payload, memory_context)
     return json.dumps(
         payload,
@@ -1715,6 +1756,9 @@ def _word_conclusion_stage_evidence(
     report_fields = evidence.get("report_fields")
     if report_fields is not None:
         scoped["report_fields"] = report_fields
+    report_draft = evidence.get("report_draft")
+    if isinstance(report_draft, dict):
+        scoped["report_draft"] = report_draft
 
     visible_summaries = _compact_visible_stage_summaries(
         evidence.get("visible_stage_summaries")
@@ -2226,9 +2270,13 @@ def _conversation_memory(
 
 def _conversation_memory_messages(conversation: list[dict], task: TaskRecord) -> list[dict]:
     messages = []
+    current_draft = latest_report_draft_context(conversation)
     for message in conversation:
+        content = str(message.get("content") or "")
+        if current_draft and message.get("id") == current_draft["message_id"]:
+            content = json.dumps(current_draft["text_values"], ensure_ascii=False)
         content = _truncate_llm_text(
-            _sanitize_llm_text(str(message.get("content") or ""), task),
+            _sanitize_llm_text(content, task),
             CONVERSATION_MEMORY_MESSAGE_MAX_CHARS,
         )
         if not content:
@@ -2298,6 +2346,9 @@ def _chat_instructions(user_message: str) -> str:
         "优先使用 available_evidence.validation_results、report_fields.metric_values、"
         "report_fields.text_values 和 visible_stage_summaries 作答；图表应按其底层结构化数据解释，"
         "不要假装直接看到了像素图。"
+        "available_evidence.report_draft.text_values 是用户当前已保存但尚未确认的报告文字，"
+        "讨论或修订当前草稿时优先使用它，不要把旧会话草稿当作最新版本；"
+        "草稿文字不能覆盖 report_fields.metric_values 或 validation_results 中的确定性指标。"
         "若用户询问 Notebook、RMC 契约字段或 RMC_ALGORITHM 当前值，优先使用 "
         "available_evidence.scan.notebook_contract；该证据来自平台对 Notebook 的只读静态扫描，"
         "可以说明原始填写值、归一化算法和错误原因，但不得声称修改过 Notebook，也不得要求用户手动打开"

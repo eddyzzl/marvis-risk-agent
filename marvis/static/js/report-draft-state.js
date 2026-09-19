@@ -3,6 +3,7 @@
 export function createReportDraftState({ api, onChange = () => {}, delay = 650 } = {}) {
   const entries = new Map();
   const timers = new Map();
+  const confirming = new Set();
   const snapshot = (message) => ({
     messageId: String(message.id),
     revision: Number(message.metadata?.report_revision || 0),
@@ -15,10 +16,12 @@ export function createReportDraftState({ api, onChange = () => {}, delay = 650 }
   function receive(taskId, message) {
     const incoming = snapshot(message);
     let entry = entries.get(taskId);
+    // Polls started before our save may arrive after the user starts another edit.
+    // A known older revision is never a competing version, even while dirty.
+    if (entry?.messageId === incoming.messageId && entry.revision === incoming.revision
+      && entry.editRevision > incoming.editRevision) return entry;
     if (!entry || (!entry.dirty && !entry.pending && !entry.conflict)) {
-      // Ignore delayed polls from before our most recent successful save.
-      if (entry?.messageId === incoming.messageId && entry.editRevision > incoming.editRevision) return entry;
-      entry = { ...incoming, dirty: false, status: "已保存草稿", error: "" };
+      entry = { ...incoming, dirty: false, confirming: confirming.has(taskId), status: "已保存草稿", error: "" };
       entries.set(taskId, entry);
     } else if (!sameVersion(entry, incoming) && !entry.pending) {
       entry.conflict = incoming;
@@ -29,7 +32,7 @@ export function createReportDraftState({ api, onChange = () => {}, delay = 650 }
 
   function edit(taskId, values) {
     const entry = entries.get(taskId);
-    if (!entry) return;
+    if (!entry || confirming.has(taskId)) return;
     entry.values = { ...values };
     entry.dirty = true;
     entry.status = entry.conflict ? "版本冲突 · 修改仍保留" : "有修改 · 等待保存";
@@ -89,7 +92,7 @@ export function createReportDraftState({ api, onChange = () => {}, delay = 650 }
 
   function resolve(taskId, choice) {
     const entry = entries.get(taskId);
-    if (!entry?.conflict || entry.conflict.unavailable) return;
+    if (!entry?.conflict || entry.conflict.unavailable || confirming.has(taskId)) return;
     const local = entry.values;
     Object.assign(entry, entry.conflict, { conflict: null, error: "" });
     entry.values = choice === "local" ? local : entry.values;
@@ -98,7 +101,20 @@ export function createReportDraftState({ api, onChange = () => {}, delay = 650 }
     onChange(taskId, entry);
   }
 
-  return { receive, edit, save, payload, resolve, get: (id) => entries.get(id),
+  function setConfirming(taskIds, active) {
+    for (const taskId of taskIds) {
+      if (active) confirming.add(taskId);
+      else confirming.delete(taskId);
+      const entry = entries.get(taskId);
+      if (entry) {
+        entry.confirming = Boolean(active);
+        onChange(taskId, entry);
+      }
+    }
+  }
+
+  return { receive, edit, save, payload, resolve, setConfirming,
+    isConfirming: (id) => confirming.has(id), get: (id) => entries.get(id),
     hasUnsaved: () => [...entries.values()].some((e) => e.dirty || e.pending),
     async flush(taskIds) { for (const id of taskIds) await save(id); },
     discard(taskId) { clearTimeout(timers.get(taskId)); entries.delete(taskId); },

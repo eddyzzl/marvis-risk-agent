@@ -32,11 +32,11 @@ from marvis.agent.service import (
     fallback_word_conclusions,
     failure_summary,
     generate_word_conclusions,
+    latest_report_draft_context,
     review_validation_instruction_authorization,
     summarize_stage,
-    REQUIRED_AGENT_REPORT_KEYS,
 )
-from marvis.repositories.tasks import AGENT_REPORT_WRITABLE_KEYS, TaskRepository
+from marvis.repositories.tasks import TaskRepository
 from marvis.agent.turn_handlers import (
     DriverTurnRuntime,
     dispatch_driver_turn as dispatch_plan_driver_turn,
@@ -861,12 +861,14 @@ _SKIPPED_BATCH_ITEM_STATUSES = frozenset({"failed", "cancelled"})
 
 
 def _child_already_confirmed_report(messages: list[dict], child: TaskRecord) -> bool:
-    if child.status == TaskStatus.SUCCEEDED:
-        return True
-    return any(
-        message.get("stage") in {"word_conclusion_confirmed", "word_report_ready"}
-        for message in messages
-    )
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        if message.get("stage") == "word_conclusion_draft":
+            return False
+        if message.get("stage") in {"word_conclusion_confirmed", "word_report_ready"}:
+            return True
+    return child.status == TaskStatus.SUCCEEDED
 
 
 def confirm_all_batch_report_drafts(
@@ -1018,34 +1020,15 @@ def is_agent_report_regenerate_intent(content: str) -> bool:
 
 
 def latest_pending_agent_report_draft(messages: list[dict]) -> dict:
-    for message in reversed(messages):
-        if message.get("stage") == "word_conclusion_confirmed":
-            return {}
-        if message.get("role") != "assistant":
-            continue
-        if message.get("stage") != "word_conclusion_draft":
-            continue
-        metadata = message.get("metadata") or {}
-        draft_values = metadata.get("draft_values")
-        report_revision = metadata.get("report_revision")
-        if (
-            isinstance(draft_values, dict)
-            and agent_conclusions_confirmed(draft_values)
-            and isinstance(report_revision, int)
-            and not isinstance(report_revision, bool)
-        ):
-            return {
-                "message_id": message.get("id"),
-                "report_revision": report_revision,
-                "draft_edit_revision": metadata.get("draft_edit_revision", 0),
-                "values": {
-                    key: str(draft_values.get(key) or "").strip()
-                    for key in AGENT_REPORT_WRITABLE_KEYS
-                    if str(draft_values.get(key) or "").strip()
-                    or key in REQUIRED_AGENT_REPORT_KEYS
-                },
-            }
-    return {}
+    current = latest_report_draft_context(messages)
+    if not current or not agent_conclusions_confirmed(current["text_values"]):
+        return {}
+    return {
+        "message_id": current["message_id"],
+        "report_revision": current["report_revision"],
+        "draft_edit_revision": current["draft_edit_revision"],
+        "values": current["text_values"],
+    }
 
 
 def agent_evidence(request: Request, task_id: str) -> dict:
@@ -1066,6 +1049,9 @@ def agent_chat_evidence(
         "text_values": report_payload["text_values"],
         "metric_values": report_payload["metric_values"],
     }
+    report_draft = latest_report_draft_context(conversation)
+    if report_draft:
+        evidence["report_draft"] = report_draft
     evidence["visible_stage_summaries"] = [
         {
             "stage": message["stage"],
@@ -1073,7 +1059,7 @@ def agent_chat_evidence(
         }
         for message in conversation[-16:]
         if message.get("role") == "assistant"
-        and message.get("stage") != "chat"
+        and message.get("stage") not in {"chat", "word_conclusion_draft"}
         and str(message.get("content") or "").strip()
     ]
     return evidence

@@ -1440,6 +1440,14 @@ body:has(.validation-workspace:not(.is-empty)) .pet-companion:not(.dragging) .pe
   animation: none;
   filter: none;
 }
+body:has(.validation-workspace:not(.is-empty)) .pet-companion:not(.dragging) .pet-sticker {
+  width: 52px;
+  height: 56px;
+}
+body:has(.validation-workspace:not(.is-empty)) .pet-companion:not(.dragging) .pet-image {
+  animation: none;
+  filter: none;
+}
 
 .pet-sticker {
   position: relative;

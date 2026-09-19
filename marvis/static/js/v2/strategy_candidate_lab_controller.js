@@ -1,7 +1,7 @@
 /** Candidate Lab state, network, event, and lifecycle coordination. */
 
 import { escapeHtml } from "../ui-utils.js";
-import { updateStrategyToolDirectory } from "./strategy-tool-directory.js";
+import { revealStrategyToolLauncher, updateStrategyToolDirectory } from "./strategy-tool-directory.js";
 
 import {
   getStrategyCandidateLab,
@@ -1049,7 +1049,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       );
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      if (launcher) launcher.open = true;
+      revealStrategyToolLauncher(panel(), launcher);
       dependencies.setActionStatus?.(
         "已带入受认证 revision 与前沿节点；确认后只物化该节点，不会自动入池。",
         "info",
@@ -1106,7 +1106,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       if (candidateField) candidateField.value = candidateId;
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      if (launcher) launcher.open = true;
+      revealStrategyToolLauncher(panel(), launcher);
       dependencies.setActionStatus?.(
         "已带入人工明确选择的 eligible 候选；请检查全部硬预算后再提交续建。",
         "info",
@@ -1196,7 +1196,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       }
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      if (launcher) launcher.open = true;
+      revealStrategyToolLauncher(panel(), launcher);
       dependencies.setActionStatus?.(
         "已回填受认证候选字段与阈值；尚未修改树，请检查理由并手动确认创建不可变 revision。",
         "info",
@@ -1253,7 +1253,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       );
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      if (launcher) launcher.open = true;
+      revealStrategyToolLauncher(panel(), launcher);
       dependencies.setActionStatus?.(
         "已带入受认证分支、字段与当前阈值；请明确填写不同的新阈值后创建不可变 revision。",
         "info",
@@ -1300,7 +1300,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       );
       setFormError(form, "");
       const launcher = form.closest?.(".candidate-lab-launcher");
-      if (launcher) launcher.open = true;
+      revealStrategyToolLauncher(panel(), launcher);
       dependencies.setActionStatus?.(
         "已带入受认证分支和节点；填写可选理由后确认创建不可变 revision。",
         "info",

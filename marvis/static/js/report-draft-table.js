@@ -101,6 +101,7 @@ export function reportDraftTableHtml(
     field,
     String(values[field.key] || ""),
     editable,
+    Boolean(state?.confirming),
   )).join("");
   const revisionValue = Number.isFinite(Number(revision)) ? Number(revision) : 0;
   const messageAttr = messageId
@@ -109,8 +110,8 @@ export function reportDraftTableHtml(
   const confirmHtml = editable
     ? [
       '<footer class="report-draft-actions">',
-      '<button type="button" class="button compact secondary" data-report-draft-save>保存草稿</button>',
-      `<button type="button" class="button compact primary" data-report-draft-confirm${state?.conflict ? " disabled" : ""}>`,
+      `<button type="button" class="button compact secondary" data-report-draft-save${state?.confirming ? " disabled" : ""}>保存草稿</button>`,
+      `<button type="button" class="button compact primary" data-report-draft-confirm${state?.conflict || state?.confirming ? " disabled" : ""}>`,
       "确认并生成报告",
       "</button>",
       "</footer>",
@@ -140,15 +141,15 @@ export function reportDraftTableHtml(
   ].join("");
 }
 
-function reportDraftRowHtml(field, value, editable) {
+function reportDraftRowHtml(field, value, editable, confirming) {
   const control = editable
-    ? reportDraftControlHtml(field, value)
+    ? reportDraftControlHtml(field, value, confirming)
     : `<div class="report-draft-readonly">${escapeHtml(value) || "—"}</div>`;
   return [
     "<tr>",
     "<th scope=\"row\">",
     `<span class="report-draft-label">${escapeHtml(field.label)}</span>`,
-    editable ? `<button type="button" class="report-draft-revise" data-report-draft-revise="${escapeHtml(field.label)}">请 Agent 修订</button>` : "",
+    editable ? `<button type="button" class="report-draft-revise" data-report-draft-revise="${escapeHtml(field.label)}"${confirming ? " disabled" : ""}>请 Agent 修订</button>` : "",
     "</th>",
     `<td>${control}</td>`,
     "</tr>",
@@ -168,18 +169,18 @@ export function reportDraftFeedbackHtml(state) {
     + '<button type="button" class="button compact secondary" data-report-draft-resolve="local">将当前修改应用到最新草稿</button></details>';
 }
 
-function reportDraftControlHtml(field, value) {
+function reportDraftControlHtml(field, value, confirming) {
   const keyAttr = escapeHtml(field.key);
   const labelAttr = escapeHtml(field.label);
   const valueAttr = escapeHtml(value);
   if (field.long) {
     return [
       `<textarea class="report-draft-input" data-report-draft-key="${keyAttr}"`,
-      ` aria-label="${labelAttr}" placeholder="待补充" rows="4">${valueAttr}</textarea>`,
+      ` aria-label="${labelAttr}" placeholder="待补充" rows="4"${confirming ? " readonly" : ""}>${valueAttr}</textarea>`,
     ].join("");
   }
   return [
     `<input class="report-draft-input" data-report-draft-key="${keyAttr}"`,
-    ` aria-label="${labelAttr}" placeholder="待补充" type="text" value="${valueAttr}">`,
+    ` aria-label="${labelAttr}" placeholder="待补充" type="text" value="${valueAttr}"${confirming ? " readonly" : ""}>`,
   ].join("");
 }

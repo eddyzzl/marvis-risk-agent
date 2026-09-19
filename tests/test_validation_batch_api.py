@@ -1253,6 +1253,34 @@ def test_confirm_all_batch_report_drafts_rejects_unfinished_children(tmp_path: P
     assert "尚未完成报告结论草稿" in response.json()["detail"]
 
 
+def test_confirm_all_does_not_skip_incomplete_new_draft_after_old_confirmation(tmp_path: Path):
+    client = _client(tmp_path)
+    created = client.post("/api/validation-batches", json={
+        "batch_name": "批次", "validator": "qa",
+        "items": [_item(tmp_path / "materials", "模型A"), _item(tmp_path / "materials", "模型B")],
+    }).json()
+    parent_id = created["batch"]["parent_task_id"]
+    child_a, child_b = [item["child_task_id"] for item in created["items"]]
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    for child_id in (child_a, child_b):
+        _advance_child_to_writing_artifacts(repo, child_id)
+    _seed_pending_report_draft(repo, child_a)
+    repo.add_agent_message(child_b, role="assistant", stage="word_conclusion_confirmed", content="上一版已确认")
+    _seed_pending_report_draft(repo, child_b)
+    message = repo.list_agent_messages(child_b)[-1]
+    saved = client.put(f"/api/tasks/{child_b}/agent/report-draft", json={
+        "revision": 0, "draft_message_id": message["id"], "draft_edit_revision": 0,
+        "text_values": {"TEXT:final_validation_conclusion": ""},
+    })
+    assert saved.status_code == 200, saved.text
+    response = client.post(f"/api/validation-batches/{parent_id}/report-drafts/confirm-all", json={"overrides": {}})
+    assert response.status_code == 409, response.text
+    assert "模型B" in response.json()["detail"]
+    assert repo.get_active_job_kind(child_a) is None
+    assert repo.get_active_job_kind(child_b) is None
+    assert repo.get_report_values(child_a)[1] == 0
+
+
 @pytest.mark.parametrize("first_fails", [False, True])
 def test_confirm_all_batch_report_drafts_dispatches_reports_for_pending_children(
     tmp_path: Path,

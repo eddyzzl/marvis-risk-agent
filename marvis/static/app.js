@@ -5545,11 +5545,13 @@ function updateReportDraftSaveStatus(taskId, entry) {
   if (taskId !== workbenchTaskId()) return;
   const panel = $("reportDraftWorkspace");
   const status = panel?.querySelector("[data-report-draft-save-status]");
-  if (status) status.textContent = entry.status;
+  if (status) status.textContent = entry.confirming ? "正在确认报告 · 编辑已暂停" : entry.status;
   const feedback = panel?.querySelector("[data-report-draft-feedback]");
   if (feedback) feedback.innerHTML = reportDraftFeedbackHtml(entry);
   const confirm = panel?.querySelector("[data-report-draft-confirm]");
-  if (confirm) confirm.disabled = Boolean(entry.conflict || entry.pending);
+  if (confirm) confirm.disabled = Boolean(entry.conflict || entry.pending || entry.confirming);
+  panel?.querySelectorAll("[data-report-draft-key]").forEach((field) => { field.readOnly = Boolean(entry.confirming); });
+  panel?.querySelectorAll("[data-report-draft-save], [data-report-draft-revise], [data-report-draft-resolve]").forEach((button) => { button.disabled = Boolean(entry.confirming); });
 }
 
 function rememberValidationView() {
@@ -5596,12 +5598,16 @@ function renderReportDraftWorkspace({ force = false } = {}) {
   const message = [...taskMessages].reverse().find((item) => item.stage === "word_conclusion_draft" && hasReportDraftValues(item.metadata?.draft_values));
   const cached = reportDraftState.get(taskId);
   const pending = Boolean(message && message.id === pendingId);
+  const latestReportEvent = [...taskMessages].reverse().find((item) =>
+    ["word_conclusion_draft", "word_conclusion_confirmed"].includes(item.stage));
   // Another window may confirm a draft while this window still has edits.
   // Keep those edits reachable, with confirmation disabled, until copied or redrafted.
   const retained = !pending && cached?.dirty;
   const editable = pending || retained;
   const entry = pending ? reportDraftState.receive(taskId, message) : retained ? cached : null;
-  if (retained) {
+  // Evidence renders before messages load during a model switch. Missing messages
+  // are a loading state; only an explicit confirmation can retire local edits.
+  if (retained && latestReportEvent?.stage === "word_conclusion_confirmed") {
     entry.conflict = { unavailable: true };
     entry.status = "草稿已确认或撤回 · 当前修改仍保留";
   }
@@ -6905,10 +6911,12 @@ if (typeof document !== "undefined") {
 async function submitVisibleReportDraft(button) {
   const table = button.closest("[data-report-draft-table]");
   const taskId = table?.dataset.reportDraftTaskId;
-  if (!table || !taskId || taskId !== workbenchTaskId() || pendingTaskContentLoadTaskId) return;
+  if (!table || !taskId || taskId !== workbenchTaskId() || pendingTaskContentLoadTaskId
+    || reportDraftState.isConfirming(taskId)) return;
   const originalLabel = button.textContent;
   button.disabled = true;
   button.textContent = "正在生成报告…";
+  reportDraftState.setConfirming([taskId], true);
   setBusy("report_confirm", "正在生成报告…", taskId);
   try {
     await reportDraftState.save(taskId);
@@ -6929,6 +6937,7 @@ async function submitVisibleReportDraft(button) {
     button.textContent = originalLabel || "确认并生成报告";
     setActionStatus("确认报告失败", "error", error?.message || "");
   } finally {
+    reportDraftState.setConfirming([taskId], false);
     setBusy(null, "", taskId);
   }
 }
@@ -6937,10 +6946,16 @@ async function confirmAllValidationBatchReportDrafts({ parentTaskId } = {}) {
   const parentId = String(parentTaskId || selectedTaskId || "").trim();
   if (!parentId) return;
   const overrides = {};
+  let confirmationTaskIds = [];
   setBusy("report_confirm_all", "正在生成全部报告…", parentId);
   try {
     const detail = normalizeValidationBatchPayload(await api(`api/validation-batches/${encodeURIComponent(parentId)}`));
     const pendingIds = detail.items.filter((item) => item.pendingReportDraft && !["failed", "cancelled"].includes(item.status)).map((item) => item.childTaskId);
+    if (pendingIds.some((id) => reportDraftState.isConfirming(id))) {
+      throw new Error("有模型正在确认报告，请等待本次确认完成。");
+    }
+    confirmationTaskIds = pendingIds;
+    reportDraftState.setConfirming(confirmationTaskIds, true);
     await reportDraftState.flush(pendingIds);
     for (const id of pendingIds) {
       const saved = reportDraftState.payload(id);
@@ -6962,6 +6977,7 @@ async function confirmAllValidationBatchReportDrafts({ parentTaskId } = {}) {
     setActionStatus("全部确认失败", "error", error?.message || "");
     throw error;
   } finally {
+    reportDraftState.setConfirming(confirmationTaskIds, false);
     setBusy(null, "", parentId);
   }
 }

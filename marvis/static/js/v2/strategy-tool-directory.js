@@ -15,6 +15,21 @@ export function strategyToolStage(workflow) {
 }
 
 const mounted = new WeakMap();
+
+export function revealStrategyToolLauncher(root, launcher) {
+  if (!launcher) return;
+  const state = mounted.get(root);
+  // Setting open=true on an already-open, filtered-out details emits no toggle.
+  // Contextual actions must reveal their target synchronously in either state.
+  if (state && launcher.hidden) {
+    state.directory.querySelector("select").value = "all";
+    state.directory.querySelector("input").value = "";
+    state.touched = true;
+    state.filter();
+  }
+  launcher.open = true;
+}
+
 export function updateStrategyToolDirectory(root, payload, taskId) {
   // Small presenter tests may supply a non-DOM host; real mounting requires a document.
   if (!root?.ownerDocument) return;
@@ -53,7 +68,7 @@ export function updateStrategyToolDirectory(root, payload, taskId) {
       // A candidate's existing contextual action may open its corresponding form.
       // Reveal that form without altering its binding, controls or submission.
       if (event.target.open && event.target.hidden) {
-        select.value = "all"; search.value = ""; state.touched = true; filter();
+        revealStrategyToolLauncher(root, event.target);
       }
     }, true);
   }

@@ -4,7 +4,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import json
 
-from marvis.agent.service import REQUIRED_AGENT_REPORT_KEYS, agent_conclusions_confirmed
+from marvis.agent.service import (
+    REQUIRED_AGENT_REPORT_KEYS,
+    agent_conclusions_confirmed,
+    latest_report_draft_context,
+)
 from marvis.agent.validation_messages import (
     add_and_stream_agent_message,
     agent_stage_label,
@@ -696,11 +700,13 @@ def _word_conclusion_evidence_with_stage_summaries(
     evidence: object,
 ) -> dict:
     payload = dict(evidence) if isinstance(evidence, dict) else {}
-    summaries = _visible_stage_summaries_for_word_conclusion(
-        repo.list_agent_messages(task_id)
-    )
+    messages = repo.list_agent_messages(task_id)
+    summaries = _visible_stage_summaries_for_word_conclusion(messages)
     if summaries:
         payload["visible_stage_summaries"] = summaries
+    report_draft = latest_report_draft_context(messages)
+    if report_draft:
+        payload["report_draft"] = report_draft
     return payload
 
 
