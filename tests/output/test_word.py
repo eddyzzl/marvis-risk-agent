@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from docx import Document
+import pytest
 
 from marvis.output.word import write_validation_word
 from marvis.report_fields import default_report_values
@@ -115,7 +116,10 @@ def test_word_report_renders_v2_pmml_scoring_summary_for_old_and_new_templates(
     assert len(document.inline_shapes) >= 1
 
 
-def test_packaged_default_template_renders_complete_neutral_report(tmp_path: Path):
+@pytest.mark.parametrize("with_narrative", [False, True])
+def test_packaged_default_template_preserves_missing_or_provided_facts(
+    tmp_path: Path, with_narrative: bool,
+):
     results = _make_pmml_results()
     template = Path("marvis/report_templates/default.docx")
     output = tmp_path / "default-report.docx"
@@ -126,6 +130,16 @@ def test_packaged_default_template_renders_complete_neutral_report(tmp_path: Pat
         validator,
         results.algorithm,
     )
+    narrative = {
+        "TEXT:model_overview": "合成测试模型，用于验证报告模板。",
+        "TEXT:model_scope": "仅用于合成样本测试。",
+        "TEXT:sample_audience": "无真实客户的合成样本。",
+        "TEXT:bad_sample_definition": "合成标签为 1。",
+        "TEXT:good_sample_definition": "合成标签为 0。",
+    }
+    assert all(report_values[key] == "" for key in narrative)
+    if with_narrative:
+        report_values.update(narrative)
 
     result = write_validation_word(
         results,
@@ -135,7 +149,11 @@ def test_packaged_default_template_renders_complete_neutral_report(tmp_path: Pat
         report_values=report_values,
     )
 
-    assert result.unresolved_placeholders == []
+    expected_missing = {
+        "{{TEXT:model_overview}}", "{{TEXT:model_scope}}",
+        "{{TEXT:bad_sample_definition}}", "{{TEXT:good_sample_definition}}",
+    }
+    assert set(result.unresolved_placeholders) == (set() if with_narrative else expected_missing)
     document = Document(output)
     text = "\n".join(
         [*(paragraph.text for paragraph in document.paragraphs)]
@@ -164,7 +182,14 @@ def test_packaged_default_template_renders_complete_neutral_report(tmp_path: Pat
     assert "max_depth=5" in text
     assert "learning_rate=0.05" in text
     assert "直方图分裂、叶子优先生长和特征并行" not in text
-    assert "{{" not in text
+    if with_narrative:
+        assert "{{" not in text
+        for key, value in narrative.items():
+            if f"{{{{{key}}}}}" in expected_missing:
+                assert value in text
+    else:
+        for placeholder in expected_missing:
+            assert placeholder in text
     assert rendered_headings == expected_headings
     assert len(document.inline_shapes) >= 10
 
