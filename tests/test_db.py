@@ -118,7 +118,7 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
         "TEXT:drafter": "验证人员A",
         "TEXT:revision_author": "验证人员A",
     }.items() <= values.items()
-    assert "贷前评分卡模型" in values["TEXT:model_overview"]
+    assert values["TEXT:model_overview"] == ""
     assert revision == 0
 
 

@@ -683,7 +683,8 @@ def _assert_real_modeling_workspace_smoke(page, url: str) -> None:
     assert metrics["deliveryWidth"] > 320
     assert metrics["deliveryHeight"] > 180
     assert metrics["analysisWidth"] > 320
-    assert metrics["planWidth"] > 240
+    # The compact 278px track leaves 238px inside the rail's border/padding.
+    assert metrics["planWidth"] >= 220
     assert metrics["hasModelCard"] is True
     assert metrics["hasChampionComparison"] is True
     assert metrics["hasApprovalPackage"] is True

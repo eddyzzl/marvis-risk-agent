@@ -30,6 +30,9 @@ def _with_workbench_context(script: str, app_js: str) -> str:
         "projectedValidationChildTaskId": "''",
         "agentBatchAutoRunGeneration": "0",
         "validationBatchTaskType": "'validation_batch'",
+        # These fixtures do not open a report editor. Draft-save lifecycle is
+        # exercised separately with populated state in the behavior regressions.
+        "reportDraftState": "{ get: () => null }",
     }
     prefix = [
         f"let {name} = {value};"
@@ -6019,7 +6022,8 @@ def test_naitang_sprite_animation_uses_slower_frame_timing():
 def test_pet_companion_does_not_auto_float_vertically():
     styles_css = _read_browser_css()
 
-    sticker_start = styles_css.index(".pet-sticker {")
+    # Match the base selector, not a task-workspace size override.
+    sticker_start = re.search(r"(?m)^\.pet-sticker \{", styles_css).start()
     sticker_end = styles_css.index("}", sticker_start)
     sticker_rule = styles_css[sticker_start:sticker_end]
     assert "animation: none" in sticker_rule

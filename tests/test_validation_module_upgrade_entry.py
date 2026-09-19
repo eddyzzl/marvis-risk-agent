@@ -85,7 +85,8 @@ def test_create_task_seeds_stored_report_values(tmp_path: Path):
     fields = client.get(f"/api/tasks/{task_id}/report-fields").json()
     stored = fields["stored_values"]
     assert stored["TEXT:drafter"] == "验证专员A"
-    assert "支用" in stored["TEXT:model_overview"]
+    assert stored["TEXT:model_overview"] == ""
+    assert fields["text_values"]["TEXT:model_overview"] == ""
     assert stored["TEXT:drafter"] == fields["text_values"]["TEXT:drafter"]
     assert "TEXT:drafter" in fields["display_defaults"]
 
