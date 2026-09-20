@@ -1,35 +1,35 @@
-"""adhoc driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Adhoc for governed Agent turns."""
+
 from __future__ import annotations
+
 from collections.abc import Mapping
-import hmac
-from marvis.agent.adhoc_analysis import build_slice_spec_from_utterance, detect_question_intent
-from marvis.agent.plan_driver import DriverError, is_confirm
-from marvis.agent.semantic_intent import INTENT_ADHOC_CONFIRM, INTENT_ADHOC_REJECT, INTENT_ADHOC_REVISE
+from marvis.agent.adhoc_analysis import build_slice_spec_from_utterance
+from marvis.agent.adhoc_analysis import detect_question_intent
+from marvis.agent.plan_driver import DriverError
+from marvis.agent.plan_driver import is_confirm
 from marvis.agent.risk_analysis_setup import latest_risk_analysis_intake
+from marvis.agent.semantic_intent import INTENT_ADHOC_CONFIRM
+from marvis.agent.semantic_intent import INTENT_ADHOC_REJECT
+from marvis.agent.semantic_intent import INTENT_ADHOC_REVISE
 from marvis.data.errors import DatasetContentDriftError
 from marvis.data.registry import AuthenticatedDatasetBinding
+from marvis.domain import TASK_TYPE_VINTAGE
+from marvis.domain import TaskRecord
 from marvis.repositories.tasks import TaskRepository
-from marvis.domain import TASK_TYPE_VINTAGE, TaskRecord
+import hmac
+from . import contracts as contracts_lane
+from . import data_context as data_context_lane
+from . import responses as responses_lane
+from . import shared as shared_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _active_plan
-    from . import _append_context_free_driver_messages
-    from . import _driver
-    from . import _modeling_data_runtime
-    from . import _resume_new_routed_plan
-    from . import append_join_error
-    from . import join_turn_response
-    from . import latest_open_gate
 
 _ADHOC_SPEC_META_KEY = "adhoc_spec"
 
 _ADHOC_DATA_ROLES = frozenset({"sample", "feature", "strategy_sample", "derived"})
 
+
 def _maybe_handle_adhoc_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -70,8 +70,9 @@ def _maybe_handle_adhoc_turn(
             if (
                 resolved is None
                 or not _adhoc_pending_matches_binding(pending, resolved[0])
-                or _active_plan(runtime.plan_repo, task.id) is not None
-                or latest_open_gate(repo.list_agent_messages(task.id)) is not None
+                or shared_lane._active_plan(runtime.plan_repo, task.id) is not None
+                or shared_lane.latest_open_gate(repo.list_agent_messages(task.id))
+                is not None
             ):
                 repo.add_agent_message(
                     task.id,
@@ -87,7 +88,7 @@ def _maybe_handle_adhoc_turn(
                         "code": "adhoc_pending_stale",
                     },
                 )
-                return join_turn_response(repo, task.id)
+                return responses_lane.join_turn_response(repo, task.id)
             return _run_adhoc_slice_plan(
                 runtime,
                 repo,
@@ -117,7 +118,7 @@ def _maybe_handle_adhoc_turn(
                     "code": "adhoc_pending_cancelled",
                 },
             )
-            return join_turn_response(repo, task.id)
+            return responses_lane.join_turn_response(repo, task.id)
         if decision == INTENT_ADHOC_REVISE:
             repo.add_agent_message(
                 task.id,
@@ -148,7 +149,7 @@ def _maybe_handle_adhoc_turn(
                         "code": "adhoc_pending_stale",
                     },
                 )
-                return join_turn_response(repo, task.id)
+                return responses_lane.join_turn_response(repo, task.id)
             binding, columns = resolved
             revised = build_slice_spec_from_utterance(
                 user_text or "",
@@ -172,7 +173,7 @@ def _maybe_handle_adhoc_turn(
                         _ADHOC_SPEC_META_KEY: dict(pending),
                     },
                 )
-                return join_turn_response(repo, task.id)
+                return responses_lane.join_turn_response(repo, task.id)
             repo.add_agent_message(
                 task.id,
                 role="assistant",
@@ -182,15 +183,15 @@ def _maybe_handle_adhoc_turn(
                     _ADHOC_SPEC_META_KEY: _adhoc_tool_inputs(revised.spec, binding)
                 },
             )
-            return join_turn_response(repo, task.id)
+            return responses_lane.join_turn_response(repo, task.id)
         return None
     # Round A: no pending spec. Enter only when the guards all hold — conservative
     # by design (窄不触发优于劫持).
     if not force_intent and not detect_question_intent(user_text):
         return None
-    if _active_plan(runtime.plan_repo, task.id) is not None:
+    if shared_lane._active_plan(runtime.plan_repo, task.id) is not None:
         return None
-    if latest_open_gate(conversation) is not None:
+    if shared_lane.latest_open_gate(conversation) is not None:
         return None
     resolved = _resolve_adhoc_dataset(runtime.settings, task.id)
     if resolved is None:
@@ -216,7 +217,7 @@ def _maybe_handle_adhoc_turn(
             content=result.clarify or "没能理解这个问题，请换一种说法。",
             metadata={"intent": "adhoc_query"},
         )
-        return join_turn_response(repo, task.id)
+        return responses_lane.join_turn_response(repo, task.id)
     # A validated spec: show the 口径确认门 and stash the exact tool inputs on it.
     repo.add_agent_message(
         task.id,
@@ -225,10 +226,11 @@ def _maybe_handle_adhoc_turn(
         content=result.confirmation_text or "",
         metadata={_ADHOC_SPEC_META_KEY: _adhoc_tool_inputs(result.spec, binding)},
     )
-    return join_turn_response(repo, task.id)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _run_adhoc_slice_plan(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     tool_inputs: dict,
@@ -241,7 +243,7 @@ def _run_adhoc_slice_plan(
     that runs straight to DONE and renders its own table. Because the 口径 was just
     confirmed turn-side, the plan-overview 开始 gate is auto-confirmed here so the
     aggregate runs in the same turn instead of pausing again."""
-    driver = _driver(runtime)
+    driver = shared_lane._driver(runtime)
     try:
         start = driver.start(
             task_id=task.id,
@@ -249,7 +251,7 @@ def _run_adhoc_slice_plan(
             slots=dict(tool_inputs),
             tier=runtime.tier,
         )
-        turn = _resume_new_routed_plan(
+        turn = shared_lane._resume_new_routed_plan(
             runtime,
             driver,
             plan_id=start.plan_id,
@@ -258,9 +260,10 @@ def _run_adhoc_slice_plan(
     except DriverError:
         raise
     except Exception as exc:
-        return append_join_error(repo, task.id, f"即席问数出错：{exc}")
-    _append_context_free_driver_messages(repo, task.id, turn)
-    return join_turn_response(repo, task.id)
+        return responses_lane.append_join_error(repo, task.id, f"即席问数出错：{exc}")
+    shared_lane._append_context_free_driver_messages(repo, task.id, turn)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _latest_adhoc_pending(conversation: list[dict]) -> dict | None:
     """The pending ad-hoc tool inputs, only when the LAST assistant message is the
@@ -275,10 +278,12 @@ def _latest_adhoc_pending(conversation: list[dict]) -> dict | None:
     spec = (last_assistant.get("metadata") or {}).get(_ADHOC_SPEC_META_KEY)
     return spec if isinstance(spec, dict) else None
 
+
 def _adhoc_tool_inputs(spec, binding: AuthenticatedDatasetBinding) -> dict:
     inputs = spec.tool_inputs(binding.dataset_id)
     inputs["expected_content_hash"] = binding.content_hash
     return inputs
+
 
 def _adhoc_pending_matches_binding(
     pending: Mapping[str, object],
@@ -292,6 +297,7 @@ def _adhoc_pending_matches_binding(
         and hmac.compare_digest(pending_content_hash, binding.content_hash)
     )
 
+
 def _resolve_adhoc_dataset(
     settings,
     task_id: str,
@@ -300,7 +306,7 @@ def _resolve_adhoc_dataset(
     no already-registered dataset (guard (a) — this branch never scans/ingests
     from source_dir; that is the setup flow's job). Prefers a target-carrying
     dataset, else the largest — same ranking feature/vintage setup use."""
-    _backend, registry = _modeling_data_runtime(settings)
+    _backend, registry = data_context_lane._modeling_data_runtime(settings)
     datasets = [
         d for d in registry.list_for_task(task_id) if d.role in _ADHOC_DATA_ROLES
     ]
@@ -326,10 +332,11 @@ def _resolve_adhoc_dataset(
         return None
     return binding, columns
 
+
 def _has_adhoc_dataset(settings, task_id: str) -> bool:
     """Cheap, non-mutating routing hint; execution performs full authentication."""
 
-    _backend, registry = _modeling_data_runtime(settings)
+    _backend, registry = data_context_lane._modeling_data_runtime(settings)
     try:
         return any(
             dataset.role in _ADHOC_DATA_ROLES

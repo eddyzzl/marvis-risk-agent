@@ -105,10 +105,7 @@ def test_old_active_backtest_plans_fail_closed_before_driver_resume(
     def _driver_must_not_be_built(_runtime):
         raise AssertionError("driver must not be built for a stale serialized plan")
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._driver",
-        _driver_must_not_be_built,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', _driver_must_not_be_built)
 
     response = run_strategy_driver_turn(
         SimpleNamespace(plan_repo=plan_repo),
@@ -163,10 +160,7 @@ def test_old_active_candidate_read_steps_also_require_exact_sample_ref(
         tool=tool,
     )
     plan_repo.create_plan(plan)
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._driver",
-        lambda _runtime: pytest.fail("stale plan reached the driver"),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda _runtime: pytest.fail('stale plan reached the driver'))
 
     response = run_strategy_driver_turn(
         SimpleNamespace(plan_repo=plan_repo),
@@ -186,10 +180,7 @@ def test_awaiting_confirmation_stale_plan_uses_legal_cancel_transition(
     task_repo, plan_repo, task = _repositories(tmp_path)
     plan = _plan(task.id, plan_status=PlanStatus.AWAITING_CONFIRM)
     plan_repo.create_plan(plan)
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._driver",
-        lambda _runtime: pytest.fail("stale plan reached the driver"),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda _runtime: pytest.fail('stale plan reached the driver'))
 
     response = run_strategy_driver_turn(
         SimpleNamespace(plan_repo=plan_repo),
@@ -235,7 +226,7 @@ def test_new_exactly_bound_plan_resumes_normally(tmp_path, monkeypatch):
             calls.append(kwargs)
             return DriverTurn(plan_id=plan.id, status=plan.status.value)
 
-    monkeypatch.setattr("marvis.agent.turn_handlers._driver", lambda _runtime: _Driver())
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda _runtime: _Driver())
 
     response = run_strategy_driver_turn(
         SimpleNamespace(plan_repo=plan_repo, settings=None),
@@ -287,7 +278,7 @@ def test_non_strategy_turn_is_not_subject_to_strategy_plan_migration_guard(
             calls.append(kwargs)
             return DriverTurn(plan_id=plan.id, status=plan.status.value)
 
-    monkeypatch.setattr("marvis.agent.turn_handlers._driver", lambda _runtime: _Driver())
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda _runtime: _Driver())
     feature_spec = _TurnHandlerSpec(
         intent="feature",
         setup_error_types=(),

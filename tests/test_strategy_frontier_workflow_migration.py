@@ -205,12 +205,8 @@ def test_migrated_preparation_precedes_legacy_routes_and_passes_criteria(
         started.update(kwargs)
         return {"status": "started"}
 
-    monkeypatch.setattr(turn_handlers, "prepare_strategy_plan", prepare)
-    monkeypatch.setattr(
-        turn_handlers,
-        "_start_confirmed_strategy_plan",
-        start,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request.prepare_strategy_plan', prepare)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', start)
 
     result = turn_handlers._run_validated_strategy_request(
         SimpleNamespace(),

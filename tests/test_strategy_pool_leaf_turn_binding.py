@@ -301,14 +301,10 @@ def test_same_tree_different_leaf_is_allowed_but_same_fragment_is_rejected(
             }
         ],
     }
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda db_path: _PoolRepository(current),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda pool: "9" * 64,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(current))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(current))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda pool: '9' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda pool: '9' * 64)
 
     second_slots = _strategy_pool_plan_slots(
         fx.runtime,
@@ -342,23 +338,11 @@ def test_univariate_candidate_asset_duplicate_keeps_preflight_rejection(
             }
         ],
     }
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda db_path: _PoolRepository(current),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda pool: "9" * 64,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._candidate_asset_artifact_slots",
-        lambda runtime, *, task_id, asset_id: {
-            "source_artifact_id": "artifact-univariate",
-            "expected_artifact_content_hash": "c" * 64,
-            "expected_asset_id": asset_id,
-            "expected_asset_hash": "d" * 64,
-        },
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(current))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(current))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda pool: '9' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda pool: '9' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates._candidate_asset_artifact_slots', lambda runtime, *, task_id, asset_id: {'source_artifact_id': 'artifact-univariate', 'expected_artifact_content_hash': 'c' * 64, 'expected_asset_id': asset_id, 'expected_asset_hash': 'd' * 64})
     draft = StandardWorkflowRequestDraft(
         workflow="strategy_pool_add_candidate",
         workflow_inputs={

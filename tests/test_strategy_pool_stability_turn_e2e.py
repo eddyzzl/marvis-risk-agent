@@ -81,39 +81,13 @@ def test_turn_routes_without_dataset_or_target_and_starts_two_step_template(
 ) -> None:
     draft = _draft("pricing")
     captured: dict = {}
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_pool_stability_plan_slots",
-        lambda runtime, task, candidate: {
-            "strategy_type": "pricing",
-            "pool_ref": {
-                "artifact_id": "1" * 64,
-                "expected_artifact_content_hash": "2" * 64,
-                "expected_pool_id": "strategy-pool-1",
-                "expected_revision": 1,
-                "expected_revision_id": "strategy-pool-revision-1",
-                "expected_snapshot_hash": "3" * 64,
-            },
-            "sample_design_ref": {
-                "membership_artifact_id": "4" * 64,
-                "expected_membership_artifact_content_hash": "5" * 64,
-                "bundle_artifact_id": "6" * 64,
-                "expected_bundle_artifact_content_hash": "7" * 64,
-                "expected_bundle_id": "sample-bundle-1",
-                "expected_sample_design_id": "sample-design-1",
-                "expected_sample_design_content_hash": "8" * 64,
-            },
-            "partitions": ["development", "oot"],
-        },
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates._strategy_pool_stability_plan_slots', lambda runtime, task, candidate: {'strategy_type': 'pricing', 'pool_ref': {'artifact_id': '1' * 64, 'expected_artifact_content_hash': '2' * 64, 'expected_pool_id': 'strategy-pool-1', 'expected_revision': 1, 'expected_revision_id': 'strategy-pool-revision-1', 'expected_snapshot_hash': '3' * 64}, 'sample_design_ref': {'membership_artifact_id': '4' * 64, 'expected_membership_artifact_content_hash': '5' * 64, 'bundle_artifact_id': '6' * 64, 'expected_bundle_artifact_content_hash': '7' * 64, 'expected_bundle_id': 'sample-bundle-1', 'expected_sample_design_id': 'sample-design-1', 'expected_sample_design_content_hash': '8' * 64}, 'partitions': ['development', 'oot']})
 
     def _start(runtime, repo, task, **kwargs):
         captured.update(kwargs)
         return {"status": "started"}
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._start_confirmed_strategy_plan",
-        _start,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', _start)
 
     assert _strategy_request_requires_dataset(draft) is False
     assert _strategy_request_requires_target(draft) is False

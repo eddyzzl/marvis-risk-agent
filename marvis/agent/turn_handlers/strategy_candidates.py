@@ -1,113 +1,251 @@
-"""strategy_candidates driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Strategy candidates for governed Agent turns."""
+
 from __future__ import annotations
-from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
-import hashlib
-import hmac
-import json
-from pathlib import Path
-import re
-import sqlite3
-from types import SimpleNamespace
+
+from collections.abc import Mapping
+from collections.abc import Sequence
+from datetime import UTC
+from datetime import datetime
+from marvis.agent.strategy_request_compiler import CompiledStrategyRequestDraft
+from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
+from marvis.agent.strategy_request_compiler import StrategyRequestDraft
 from marvis.agent.strategy_setup import StrategySetupError
-from marvis.agent.strategy_request_compiler import CompiledStrategyRequestDraft, StandardWorkflowRequestDraft, StrategyRequestDraft
 from marvis.agent.strategy_workflows import StrategyWorkflowValidationError
 from marvis.data.errors import DatasetContentDriftError
-from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft, data_semantic_mapping_hash
-from marvis.repositories.strategy import StrategyRepository
+from marvis.data.workspace import DataSemanticMapping
+from marvis.data.workspace import DataWorkspaceDraft
+from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.domain import TaskRecord
 from marvis.files import sha256_file
-from marvis.packs.strategy.automatic_tree_leaf_fragment import AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND, AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL, AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND, AUTOMATIC_TREE_SOURCE_ARTIFACT_ORIGIN_TOOL
-from marvis.packs.strategy.automatic_tree_leaf_tools import load_verified_automatic_tree_leaf_selection_artifact_on_connection, load_verified_automatic_tree_source_artifact_on_connection
-from marvis.packs.strategy.interactive_tree_frontier_selection import INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND, INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION, INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2, INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL
-from marvis.packs.strategy.interactive_tree_frontier_group_selection import INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND, INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION, INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2, INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL, interactive_tree_frontier_group_selection_to_verified_candidate_fragment
-from marvis.packs.strategy.interactive_tree_frontier_group_tools import load_verified_interactive_tree_frontier_group_selection_artifact_on_connection
-from marvis.packs.strategy.interactive_tree_frontier_tools import load_verified_interactive_tree_frontier_selection_artifact_on_connection
-from marvis.packs.strategy.interactive_tree_revision import interactive_tree_topology_evidence
-from marvis.packs.strategy.interactive_tree_tools import MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES, _RevisionReadBudget, _resolve_revision_source_on_connection, load_verified_interactive_tree_revision
-from marvis.packs.strategy.voting_candidate_fragment import VOTING_CANDIDATE_ARTIFACT_KIND, VOTING_CANDIDATE_ORIGIN_TOOL
-from marvis.packs.strategy.voting_candidate_tools import load_verified_voting_candidate_artifact_on_connection
-from marvis.packs.strategy.voting_candidate_search_tools import resolve_voting_candidate_search_selection, resolve_voting_candidate_search_inputs
-from marvis.packs.strategy.cross_matrix_candidate_tools import ASSET_ARTIFACT_KIND as CROSS_MATRIX_SOURCE_ARTIFACT_KIND, ASSET_ARTIFACT_SCHEMA_VERSION as CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION, ORIGIN_TOOL as CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL
-from marvis.packs.strategy.cross_candidate_search_tools import resolve_cross_candidate_search_pair
-from marvis.packs.strategy.cross_rule_search_tools import resolve_cross_rule_search_rule
-from marvis.packs.strategy.cross_matrix_cell_selection import CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND, CROSS_MATRIX_CELL_SELECTION_ARTIFACT_SCHEMA_VERSION, CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL
-from marvis.packs.strategy.cross_matrix_cell_selection_tools import load_verified_cross_matrix_cell_selection_artifact_on_connection, load_verified_cross_matrix_source_artifact_on_connection
-from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.dsl_delivery import MAX_EQUIVALENCE_ROWS
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.evidence import RAW_SCORE_PRODUCT
 from marvis.packs.modeling.evidence_tools import build_training_evidence_ref
-from marvis.packs.modeling.score_evidence import MODEL_SCORE_EVIDENCE_ARTIFACT_KIND, MODEL_SCORE_VECTOR_ARTIFACT_KIND
-from marvis.packs.modeling.score_evidence_tools import MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL, load_historical_model_score_evidence_artifacts, load_model_score_evidence_artifacts
-from marvis.packs.strategy.model_score_comparison_tools import model_score_comparison_registry_snapshot_token
-from marvis.packs.strategy.model_score_evidence_adapter import ModelScoreEvidenceComparisonError, build_model_score_comparison
-from marvis.packs.strategy.model_evidence import MAX_MODEL_EVIDENCE
+from marvis.packs.modeling.score_evidence import MODEL_SCORE_EVIDENCE_ARTIFACT_KIND
+from marvis.packs.modeling.score_evidence import MODEL_SCORE_VECTOR_ARTIFACT_KIND
+from marvis.packs.modeling.score_evidence_tools import (
+    MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+)
+from marvis.packs.modeling.score_evidence_tools import (
+    load_historical_model_score_evidence_artifacts,
+)
+from marvis.packs.modeling.score_evidence_tools import (
+    load_model_score_evidence_artifacts,
+)
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_SOURCE_ARTIFACT_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.automatic_tree_leaf_tools import (
+    load_verified_automatic_tree_leaf_selection_artifact_on_connection,
+)
+from marvis.packs.strategy.automatic_tree_leaf_tools import (
+    load_verified_automatic_tree_source_artifact_on_connection,
+)
+from marvis.packs.strategy.candidate_asset import canonical_candidate_asset_json
+from marvis.packs.strategy.candidate_asset import validate_candidate_asset
+from marvis.packs.strategy.candidate_asset_tools import (
+    load_verified_candidate_refinement_source,
+)
 from marvis.packs.strategy.candidate_fragment import verified_fragment_pool_parts
-from marvis.packs.strategy.scorecard_candidate import SCORECARD_BAND_ASSET_ARTIFACT_KIND, SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION, SCORECARD_BAND_ASSET_ORIGIN_TOOL, SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND, SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION, SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL, scorecard_cutoff_selection_to_verified_candidate_fragment
-from marvis.packs.strategy.scorecard_candidate_tools import load_scorecard_band_asset_artifact, load_scorecard_cutoff_selection_artifact
-from marvis.packs.strategy.model_evidence_tools import _MAX_UNIVARIATE_SOURCES, _load_candidate_sources, _validate_inputs as _validate_model_evidence_v2_inputs, derive_strategy_model_evidence_candidate_execution_ref
-from marvis.packs.strategy.pool_tools import load_current_strategy_candidate_pool_artifact
-from marvis.packs.strategy.pool_validation_tools import load_strategy_pool_validation_artifacts, select_latest_strategy_pool_validation_refs
+from marvis.packs.strategy.candidate_stability_tools import (
+    resolve_candidate_monthly_stability_inputs,
+)
+from marvis.packs.strategy.cross_candidate_search_tools import (
+    resolve_cross_candidate_search_pair,
+)
+from marvis.packs.strategy.cross_matrix_candidate_tools import (
+    ASSET_ARTIFACT_KIND as CROSS_MATRIX_SOURCE_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.cross_matrix_candidate_tools import (
+    ASSET_ARTIFACT_SCHEMA_VERSION as CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION,
+)
+from marvis.packs.strategy.cross_matrix_candidate_tools import (
+    ORIGIN_TOOL as CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection import (
+    CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection import (
+    CROSS_MATRIX_CELL_SELECTION_ARTIFACT_SCHEMA_VERSION,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection import (
+    CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
+    load_verified_cross_matrix_cell_selection_artifact_on_connection,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
+    load_verified_cross_matrix_source_artifact_on_connection,
+)
+from marvis.packs.strategy.cross_rule_search_tools import resolve_cross_rule_search_rule
+from marvis.packs.strategy.dsl_delivery import MAX_EQUIVALENCE_ROWS
+from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION,
+)
+from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
+)
+from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
+    interactive_tree_frontier_group_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.interactive_tree_frontier_group_tools import (
+    load_verified_interactive_tree_frontier_group_selection_artifact_on_connection,
+)
+from marvis.packs.strategy.interactive_tree_frontier_selection import (
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.interactive_tree_frontier_selection import (
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+)
+from marvis.packs.strategy.interactive_tree_frontier_selection import (
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
+)
+from marvis.packs.strategy.interactive_tree_frontier_selection import (
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.interactive_tree_frontier_tools import (
+    load_verified_interactive_tree_frontier_selection_artifact_on_connection,
+)
+from marvis.packs.strategy.interactive_tree_revision import (
+    interactive_tree_topology_evidence,
+)
+from marvis.packs.strategy.interactive_tree_tools import (
+    MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES,
+)
+from marvis.packs.strategy.interactive_tree_tools import _RevisionReadBudget
+from marvis.packs.strategy.interactive_tree_tools import (
+    _resolve_revision_source_on_connection,
+)
+from marvis.packs.strategy.interactive_tree_tools import (
+    load_verified_interactive_tree_revision,
+)
+from marvis.packs.strategy.model_evidence import MAX_MODEL_EVIDENCE
+from marvis.packs.strategy.model_evidence_tools import _MAX_UNIVARIATE_SOURCES
+from marvis.packs.strategy.model_evidence_tools import _load_candidate_sources
+from marvis.packs.strategy.model_evidence_tools import (
+    _validate_inputs as _validate_model_evidence_v2_inputs,
+)
+from marvis.packs.strategy.model_evidence_tools import (
+    derive_strategy_model_evidence_candidate_execution_ref,
+)
+from marvis.packs.strategy.model_score_comparison_tools import (
+    model_score_comparison_registry_snapshot_token,
+)
+from marvis.packs.strategy.model_score_evidence_adapter import (
+    ModelScoreEvidenceComparisonError,
+)
+from marvis.packs.strategy.model_score_evidence_adapter import (
+    build_model_score_comparison,
+)
 from marvis.packs.strategy.pool_requirement_resolver import resolve_pool_requirements
-from marvis.packs.strategy.project_context import strategy_project_context_structured_request_sha256
-from marvis.packs.strategy.project_context_tools import load_current_strategy_project_context_artifact
-from marvis.packs.strategy.report_bundle_adapters import build_strategy_report_bundle_source_inputs
+from marvis.packs.strategy.pool_tools import (
+    load_current_strategy_candidate_pool_artifact,
+)
+from marvis.packs.strategy.pool_validation_tools import (
+    load_strategy_pool_validation_artifacts,
+)
+from marvis.packs.strategy.pool_validation_tools import (
+    select_latest_strategy_pool_validation_refs,
+)
+from marvis.packs.strategy.project_context import (
+    strategy_project_context_structured_request_sha256,
+)
+from marvis.packs.strategy.project_context_tools import (
+    load_current_strategy_project_context_artifact,
+)
+from marvis.packs.strategy.report_bundle_adapters import (
+    build_strategy_report_bundle_source_inputs,
+)
 from marvis.packs.strategy.sample_design_execution import StrategyRiskDevelopmentRef
-from marvis.packs.strategy.sample_design_v2_tools import SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND, SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND, SAMPLE_DESIGN_V2_ORIGIN_TOOL
-from marvis.repositories.task_artifacts import TaskArtifactRepository
-from marvis.repositories.strategy_pool import ABSENT_POOL_REVISION, ABSENT_POOL_SNAPSHOT_HASH, StrategyCandidatePoolRepository, strategy_pool_snapshot_hash
-from marvis.repositories.strategy_project_context import StrategyProjectContextDataError, StrategyProjectContextRepository
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.sample_design_v2_tools import SAMPLE_DESIGN_V2_ORIGIN_TOOL
+from marvis.packs.strategy.scorecard_candidate import SCORECARD_BAND_ASSET_ARTIFACT_KIND
+from marvis.packs.strategy.scorecard_candidate import (
+    SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+)
+from marvis.packs.strategy.scorecard_candidate import SCORECARD_BAND_ASSET_ORIGIN_TOOL
+from marvis.packs.strategy.scorecard_candidate import (
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.scorecard_candidate import (
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
+)
+from marvis.packs.strategy.scorecard_candidate import (
+    SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.scorecard_candidate import (
+    scorecard_cutoff_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.scorecard_candidate_tools import (
+    load_scorecard_band_asset_artifact,
+)
+from marvis.packs.strategy.scorecard_candidate_tools import (
+    load_scorecard_cutoff_selection_artifact,
+)
+from marvis.packs.strategy.voting_candidate_fragment import (
+    VOTING_CANDIDATE_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.voting_candidate_fragment import VOTING_CANDIDATE_ORIGIN_TOOL
+from marvis.packs.strategy.voting_candidate_search_tools import (
+    resolve_voting_candidate_search_inputs,
+)
+from marvis.packs.strategy.voting_candidate_search_tools import (
+    resolve_voting_candidate_search_selection,
+)
+from marvis.packs.strategy.voting_candidate_tools import (
+    load_verified_voting_candidate_artifact_on_connection,
+)
+from marvis.repositories.data_workspace import DataWorkspaceDataError
+from marvis.repositories.data_workspace import DataWorkspaceDatasetNotFound
+from marvis.repositories.data_workspace import DataWorkspaceRepository
+from marvis.repositories.data_workspace import DataWorkspaceRevisionConflict
+from marvis.repositories.strategy import StrategyRepository
+from marvis.repositories.strategy_pool import ABSENT_POOL_REVISION
+from marvis.repositories.strategy_pool import ABSENT_POOL_SNAPSHOT_HASH
+from marvis.repositories.strategy_pool import StrategyCandidatePoolRepository
+from marvis.repositories.strategy_pool import strategy_pool_snapshot_hash
+from marvis.repositories.strategy_project_context import StrategyProjectContextDataError
+from marvis.repositories.strategy_project_context import (
+    StrategyProjectContextRepository,
+)
 from marvis.repositories.strategy_reports import StrategyReportRepository
-from marvis.packs.strategy.candidate_asset import canonical_candidate_asset_json, validate_candidate_asset
-from marvis.packs.strategy.candidate_asset_tools import load_verified_candidate_refinement_source
-from marvis.packs.strategy.candidate_stability_tools import resolve_candidate_monthly_stability_inputs
-from marvis.repositories.data_workspace import DataWorkspaceDataError, DataWorkspaceDatasetNotFound, DataWorkspaceRepository, DataWorkspaceRevisionConflict
+from marvis.repositories.task_artifacts import TaskArtifactRepository
+from pathlib import Path
+from types import SimpleNamespace
+import hashlib
+import hmac
+import json
+import re
+import sqlite3
+from . import contracts as contracts_lane
+from . import data_context as data_context_lane
+from . import strategy_contracts as strategy_contracts_lane
+from . import strategy_evidence as strategy_evidence_lane
+from . import strategy_sample as strategy_sample_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _STRATEGY_V2_ARTIFACT_ERRORS
-    from . import _StrategyV2EvidenceSetupError
-    from . import _latest_matching_strategy_sample_design_ref
-    from . import _latest_verified_strategy_sample_design_v2_binding
-    from . import _modeling_data_runtime
-    from . import _strategy_dataset_context
-    from . import _strategy_dataset_preview
-    from . import _strategy_dsl_delivery_strategy_ref
-    from . import _strategy_impact_cube_current_strategy_ref
-    from . import _strategy_impact_cube_dimensions
-    from . import _strategy_impact_cube_economics
-    from . import _strategy_impact_cube_partitions
-    from . import _strategy_impact_cube_registry_token
-    from . import _strategy_pool_complete_rule_order
-    from . import _strategy_pool_entries
-    from . import _strategy_pool_impact_column
-    from . import _strategy_pool_impact_pool_binding
-    from . import _strategy_pool_rule_id
-    from . import _strategy_report_current_pool_binding
-    from . import _strategy_report_identity
-    from . import _strategy_report_latest_candidate_stability_binding
-    from . import _strategy_report_latest_cross_rule_search_binding
-    from . import _strategy_report_latest_cross_search_binding
-    from . import _strategy_report_latest_impact_cube_binding
-    from . import _strategy_report_latest_pool_impact_binding
-    from . import _strategy_report_latest_pool_stability_binding
-    from . import _strategy_report_latest_sample_binding
-    from . import _strategy_report_latest_voting_search_binding
-    from . import _strategy_report_optional_model_evidence
-    from . import _strategy_report_optional_score_evidence
-    from . import _strategy_report_optional_training_evidence
-    from . import _strategy_report_read_runtime
-    from . import _strategy_report_requested_pool_type
-    from . import _strategy_report_sample_ref
-    from . import _strategy_v2_artifact_snapshot
-    from . import _strategy_v2_read_runtime
-    from . import _strategy_v2_registry_token
 
 def _bind_univariate_dataset_evidence(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     workflow_inputs: Mapping[str, object],
     *,
@@ -148,17 +286,20 @@ def _bind_univariate_dataset_evidence(
         raise StrategySetupError(
             "策略候选分析无法绑定当前数据工作区，请重新选择活动数据集。"
         )
-    binding["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
-        runtime,
-        task,
-        context=context,
-        drop_nan_labels=drop_nan_labels,
-        allow_native_risk_development=True,
-        weight_col=workflow_inputs.get("sample_weight_col"),
-        loan_amount_col=workflow_inputs.get("loan_amount_col"),
-        overdue_amount_col=workflow_inputs.get("overdue_amount_col"),
+    binding["sample_design_ref"] = (
+        strategy_sample_lane._latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=drop_nan_labels,
+            allow_native_risk_development=True,
+            weight_col=workflow_inputs.get("sample_weight_col"),
+            loan_amount_col=workflow_inputs.get("loan_amount_col"),
+            overdue_amount_col=workflow_inputs.get("overdue_amount_col"),
+        )
     )
     return binding
+
 
 def _platform_evidence_only(
     workflow_id: str,
@@ -187,8 +328,9 @@ def _platform_evidence_only(
         if key not in expected_user_slots
     }
 
+
 def _bind_candidate_monthly_stability_evidence(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     workflow_inputs: Mapping[str, object],
 ) -> dict[str, object]:
@@ -211,7 +353,7 @@ def _bind_candidate_monthly_stability_evidence(
         )
     try:
         resolved = resolve_candidate_monthly_stability_inputs(
-            _strategy_v2_read_runtime(runtime),
+            strategy_evidence_lane._strategy_v2_read_runtime(runtime),
             task_id=task.id,
             user_pointer=user_pointer,
         )
@@ -221,7 +363,7 @@ def _bind_candidate_monthly_stability_evidence(
         KeyError,
         TypeError,
         ValueError,
-        *_STRATEGY_V2_ARTIFACT_ERRORS,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
     ) as exc:
         message = str(exc)
         if "month field" in message:
@@ -247,6 +389,7 @@ def _bind_candidate_monthly_stability_evidence(
         resolved,
         expected_user_slots=expected_user_slots,
     )
+
 
 def _scorecard_registry_token(
     artifacts: Sequence[Mapping],
@@ -300,11 +443,12 @@ def _scorecard_registry_token(
             allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_registry_invalid",
             "Scorecard source artifact registry 无法规范化；本次未创建计划。",
         ) from exc
     return hashlib.sha256(payload).hexdigest()
+
 
 def _scorecard_artifact_snapshot(
     read_runtime: SimpleNamespace,
@@ -313,30 +457,32 @@ def _scorecard_artifact_snapshot(
 ) -> tuple[Mapping, ...]:
     try:
         artifacts = tuple(read_runtime.task_artifacts.list_for_task(task_id))
-    except _STRATEGY_V2_ARTIFACT_ERRORS as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_registry_unavailable",
             "无法读取当前任务的 Scorecard source artifact registry。",
         ) from exc
     if any(not isinstance(artifact, Mapping) for artifact in artifacts):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_registry_invalid",
             "Scorecard source artifact registry 含无效记录。",
         )
     return artifacts
 
+
 def _scorecard_ref_hash(value: object, *, field: str) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_source_ref_invalid",
             f"最新 Scorecard source 的 {field} 缺少完整 64 位 hash。",
         )
     return value
 
+
 def _scorecard_score_evidence_ref(record: Mapping) -> dict[str, str]:
     provenance = record.get("provenance")
     if not isinstance(provenance, Mapping):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_band_score_evidence_invalid",
             "待判定模型评分证据缺少完整 provenance；平台不会静默跳过或"
             "回退旧 Scorecard 证据。",
@@ -360,6 +506,7 @@ def _scorecard_score_evidence_ref(record: Mapping) -> dict[str, str]:
         ),
     }
 
+
 def _scorecard_score_evidence_contract(score: object) -> bool:
     """Return False only for a fully authenticated, clearly non-scorecard model."""
 
@@ -375,7 +522,7 @@ def _scorecard_score_evidence_contract(score: object) -> bool:
             evidence_model["algorithm"],
         )
     except (AttributeError, KeyError, TypeError) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_band_score_evidence_invalid",
             "待判定模型评分证据缺少一致的 recipe/algorithm 身份。",
         ) from exc
@@ -383,16 +530,14 @@ def _scorecard_score_evidence_contract(score: object) -> bool:
     if not any(scorecard_flags):
         return False
     if not all(scorecard_flags):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_band_score_evidence_invalid",
             "待判定评分证据的 Scorecard recipe/algorithm 身份不一致。",
         )
     metadata = evidence_model.get("scoring_metadata")
     envelope = getattr(score, "envelope", None)
     scoring_contract = (
-        envelope.get("scoring_contract")
-        if isinstance(envelope, Mapping)
-        else None
+        envelope.get("scoring_contract") if isinstance(envelope, Mapping) else None
     )
     if (
         not isinstance(metadata, Mapping)
@@ -407,7 +552,7 @@ def _scorecard_score_evidence_contract(score: object) -> bool:
         or not isinstance(metadata.get("scorecard_table"), list)
         or not metadata["scorecard_table"]
     ):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_band_score_contract_invalid",
             "最新 Scorecard 评分证据必须包含 raw uncalibrated bad probability、"
             "higher-is-riskier 分数方向、higher-is-better points 与完整"
@@ -415,18 +560,19 @@ def _scorecard_score_evidence_contract(score: object) -> bool:
         )
     return True
 
+
 def _bind_scorecard_model_score_evidence(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
 ) -> dict[str, object]:
     """Bind the latest authenticated SampleDesign V2 only."""
 
-    read_runtime = _strategy_v2_read_runtime(runtime)
-    artifacts = _strategy_v2_artifact_snapshot(
+    read_runtime = strategy_evidence_lane._strategy_v2_read_runtime(runtime)
+    artifacts = strategy_evidence_lane._strategy_v2_artifact_snapshot(
         read_runtime,
         task_id=task.id,
     )
-    sample = _latest_verified_strategy_sample_design_v2_binding(
+    sample = strategy_sample_lane._latest_verified_strategy_sample_design_v2_binding(
         read_runtime,
         task_id=task.id,
         artifacts=artifacts,
@@ -438,33 +584,34 @@ def _bind_scorecard_model_score_evidence(
             sample.membership_artifact_content_hash
         ),
         "bundle_artifact_id": sample.bundle_artifact_id,
-        "expected_bundle_artifact_content_hash": (
-            sample.bundle_artifact_content_hash
-        ),
+        "expected_bundle_artifact_content_hash": (sample.bundle_artifact_content_hash),
         "expected_bundle_id": sample.bundle["bundle_id"],
         "expected_sample_design_id": design["sample_design_id"],
         "expected_sample_design_content_hash": design["content_hash"],
     }
     return {"sample_design_ref": sample_design_ref}
 
+
 def _bind_scorecard_band_evidence(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
 ) -> dict[str, object]:
     """Bind the newest exact score evidence and latest compatible sample."""
 
-    read_runtime = _strategy_report_read_runtime(runtime)
+    read_runtime = strategy_evidence_lane._strategy_report_read_runtime(runtime)
     artifacts = _scorecard_artifact_snapshot(read_runtime, task_id=task.id)
     registry_token = _scorecard_registry_token(artifacts)
     try:
-        sample = _latest_verified_strategy_sample_design_v2_binding(
-            read_runtime,
-            task_id=task.id,
-            artifacts=artifacts,
+        sample = (
+            strategy_sample_lane._latest_verified_strategy_sample_design_v2_binding(
+                read_runtime,
+                task_id=task.id,
+                artifacts=artifacts,
+            )
         )
-        sample_ref = _strategy_report_sample_ref(sample)
-    except _StrategyV2EvidenceSetupError as exc:
-        raise _StrategyV2EvidenceSetupError(
+        sample_ref = strategy_evidence_lane._strategy_report_sample_ref(sample)
+    except strategy_contracts_lane._StrategyV2EvidenceSetupError as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_band_sample_invalid",
             "Scorecard 分数带需要最新且完整认证的 StrategySampleDesign V2；"
             "平台不会回退到旧样本。",
@@ -478,7 +625,7 @@ def _bind_scorecard_band_evidence(
         == MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL
     ]
     if not score_records:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_band_score_evidence_required",
             "当前任务还没有可用于 Scorecard 分数带的模型评分证据；"
             "请先生成受治理的 raw bad-probability score evidence。",
@@ -498,9 +645,9 @@ def _bind_scorecard_band_evidence(
             KeyError,
             TypeError,
             ValueError,
-            *_STRATEGY_V2_ARTIFACT_ERRORS,
+            *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
         ) as exc:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "scorecard_band_score_evidence_invalid",
                 "最新待判定模型评分证据未通过文件、hash、registry、模型或"
                 "分数向量完整认证；平台不会静默跳过或回退旧 Scorecard 证据。",
@@ -512,12 +659,12 @@ def _bind_scorecard_band_evidence(
         try:
             training_ref = build_training_evidence_ref(candidate.training)
         except (ModelingError, KeyError, TypeError, ValueError) as exc:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "scorecard_band_score_evidence_invalid",
                 "最新 Scorecard 评分证据的 TrainingEvidence 引用不完整。",
             ) from exc
         if training_ref.get("sample_design_ref") != sample_ref:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "scorecard_band_sample_incompatible",
                 "最新 Scorecard 评分证据与最新 StrategySampleDesign V2 "
                 "不属于同一不可变样本；请基于当前样本重新生成评分证据。",
@@ -525,7 +672,7 @@ def _bind_scorecard_band_evidence(
         score_ref = candidate_ref
         break
     if score_ref is None:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_band_score_evidence_required",
             "当前任务的模型评分证据均不是完整认证的 Scorecard raw-PD "
             "评分证据；请先完成 Scorecard 训练与评分证据物化。",
@@ -533,7 +680,7 @@ def _bind_scorecard_band_evidence(
 
     refreshed = _scorecard_artifact_snapshot(read_runtime, task_id=task.id)
     if _scorecard_registry_token(refreshed) != registry_token:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_band_source_changed",
             "Scorecard 的评分证据或 SampleDesign 在计划创建前发生变化；"
             "请基于最新证据重试。",
@@ -544,8 +691,9 @@ def _bind_scorecard_band_evidence(
         "sample_design_ref": sample_ref,
     }
 
+
 def _bind_scorecard_cutoff_evidence(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     workflow_inputs: Mapping[str, object],
@@ -554,7 +702,7 @@ def _bind_scorecard_cutoff_evidence(
 
     asset_id = workflow_inputs.get("asset_id")
     cutoff_id = workflow_inputs.get("cutoff_id")
-    read_runtime = _strategy_report_read_runtime(runtime)
+    read_runtime = strategy_evidence_lane._strategy_report_read_runtime(runtime)
     artifacts = _scorecard_artifact_snapshot(read_runtime, task_id=task_id)
     registry_token = _scorecard_registry_token(artifacts)
     matches = []
@@ -570,16 +718,15 @@ def _bind_scorecard_cutoff_evidence(
         ):
             matches.append(artifact)
     if not matches:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_cutoff_source_required",
             f"当前任务没有完整 Scorecard 分数带 {asset_id}；"
             "请从最新结果复制完整 asset ID。",
         )
     if len(matches) != 1:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_cutoff_source_ambiguous",
-            f"Scorecard 分数带 {asset_id} 对应多个 artifact，"
-            "当前不能安全选择来源。",
+            f"Scorecard 分数带 {asset_id} 对应多个 artifact，当前不能安全选择来源。",
         )
     record = matches[0]
     provenance = record["provenance"]
@@ -611,9 +758,9 @@ def _bind_scorecard_cutoff_evidence(
         KeyError,
         TypeError,
         ValueError,
-        *_STRATEGY_V2_ARTIFACT_ERRORS,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
     ) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_cutoff_source_invalid",
             "用户点名的完整 Scorecard 分数带未通过文件、hash、registry、"
             "score evidence 或 SampleDesign 完整认证。",
@@ -628,20 +775,19 @@ def _bind_scorecard_cutoff_evidence(
             [
                 cutoff
                 for cutoff in cutoffs
-                if isinstance(cutoff, Mapping)
-                and cutoff.get("cutoff_id") == cutoff_id
+                if isinstance(cutoff, Mapping) and cutoff.get("cutoff_id") == cutoff_id
             ]
         )
         != 1
     ):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_cutoff_pointer_invalid",
             "用户点名的 cutoff 不属于该完整 Scorecard 分数带；"
             "平台不会替换、排名或推荐其他 cutoff。",
         )
     refreshed = _scorecard_artifact_snapshot(read_runtime, task_id=task_id)
     if _scorecard_registry_token(refreshed) != registry_token:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "scorecard_cutoff_source_changed",
             "Scorecard 分数带在 selection 计划创建前发生变化；请重试。",
         )
@@ -652,21 +798,20 @@ def _bind_scorecard_cutoff_evidence(
         "expected_asset_hash": asset_hash,
     }
 
+
 def _bind_candidate_source_artifact_evidence(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     candidate_id: str,
     workflow_inputs: Mapping,
 ) -> dict[str, str]:
     artifact_repository = TaskArtifactRepository(runtime.settings.db_path)
-    matches = (
-        artifact_repository.find_for_task_kind_origin_by_provenance_candidate_id(
-            task_id,
-            "strategy_candidate_json",
-            "strategy.analyze_univariate_candidates",
-            candidate_id,
-        )
+    matches = artifact_repository.find_for_task_kind_origin_by_provenance_candidate_id(
+        task_id,
+        "strategy_candidate_json",
+        "strategy.analyze_univariate_candidates",
+        candidate_id,
     )
     if not matches:
         raise StrategySetupError(
@@ -723,8 +868,9 @@ def _bind_candidate_source_artifact_evidence(
         "expected_evidence_hash": verified.evidence_hash,
     }
 
+
 def _interactive_tree_split_search_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     draft: StandardWorkflowRequestDraft,
@@ -782,9 +928,7 @@ def _interactive_tree_split_search_plan_slots(
             "请刷新树视图并重新选择。"
         )
     feature_universe = set(
-        source.automatic_source.asset["tree_result"]["training"][
-            "feature_order"
-        ]
+        source.automatic_source.asset["tree_result"]["training"]["feature_order"]
     )
     requested = (
         feature_universe
@@ -793,13 +937,13 @@ def _interactive_tree_split_search_plan_slots(
     )
     if not requested or not requested.issubset(feature_universe):
         raise StrategySetupError(
-            "节点候选搜索的特征不属于来源树的认证特征全集；"
-            "请刷新候选实验室并重新选择。"
+            "节点候选搜索的特征不属于来源树的认证特征全集；请刷新候选实验室并重新选择。"
         )
     return dict(inputs)
 
+
 def _interactive_tree_auto_continuation_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     draft: StandardWorkflowRequestDraft,
@@ -846,8 +990,9 @@ def _interactive_tree_auto_continuation_plan_slots(
         )
     return dict(inputs)
 
+
 def _interactive_tree_revision_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     draft: StandardWorkflowRequestDraft,
@@ -864,14 +1009,12 @@ def _interactive_tree_revision_plan_slots(
     node_id = inputs.get("node_id")
     operation = inputs.get("operation")
     if (
-        operation
-        not in {"adjust_split_threshold", "replace_split_feature"}
+        operation not in {"adjust_split_threshold", "replace_split_feature"}
         or not isinstance(source_tree_id, str)
         or not isinstance(node_id, str)
     ):
         raise StrategySetupError(
-            "交互树分裂调整必须提供完整来源树、当前可见 split node 和"
-            "精确控制值。"
+            "交互树分裂调整必须提供完整来源树、当前可见 split node 和精确控制值。"
         )
 
     repository = TaskArtifactRepository(runtime.settings.db_path)
@@ -885,9 +1028,7 @@ def _interactive_tree_revision_plan_slots(
         matches = []
         for artifact in artifacts:
             if not isinstance(artifact, Mapping):
-                raise StrategySetupError(
-                    "当前任务的交互树 artifact 记录结构无效。"
-                )
+                raise StrategySetupError("当前任务的交互树 artifact 记录结构无效。")
             provenance = artifact.get("provenance")
             if (
                 artifact.get("kind") == AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND
@@ -926,18 +1067,14 @@ def _interactive_tree_revision_plan_slots(
                         expected_content_hash=str(artifact["content_hash"]),
                         expected_asset_id=source_tree_id,
                         expected_asset_hash=str(provenance["asset_hash"]),
-                        expected_tree_result_hash=str(
-                            provenance["tree_result_hash"]
-                        ),
+                        expected_tree_result_hash=str(provenance["tree_result_hash"]),
                     )
                 )
             topology = interactive_tree_topology_evidence(
                 verified_source.asset,
             )
             authenticated_feature_order = tuple(
-                verified_source.asset["tree_result"]["training"][
-                    "feature_order"
-                ]
+                verified_source.asset["tree_result"]["training"]["feature_order"]
             )
         except Exception as exc:
             raise StrategySetupError(
@@ -962,9 +1099,9 @@ def _interactive_tree_revision_plan_slots(
                 ancestor_revisions=(ancestors[1:] if ancestors else ()),
             )
             authenticated_feature_order = tuple(
-                verified_revision.automatic_source.asset["tree_result"][
-                    "training"
-                ]["feature_order"]
+                verified_revision.automatic_source.asset["tree_result"]["training"][
+                    "feature_order"
+                ]
             )
         except Exception as exc:
             raise StrategySetupError(
@@ -1018,8 +1155,9 @@ def _interactive_tree_revision_plan_slots(
         if field in inputs
     }
 
+
 def _automatic_tree_leaf_materialization_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     draft: StandardWorkflowRequestDraft,
@@ -1131,8 +1269,9 @@ def _automatic_tree_leaf_materialization_slots(
         slots["selection_reason"] = inputs["selection_reason"]
     return slots
 
+
 def _automatic_tree_apply_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     draft: StandardWorkflowRequestDraft,
@@ -1143,9 +1282,7 @@ def _automatic_tree_apply_slots(
     inputs = draft.to_dict()["workflow_inputs"]
     asset_id = inputs.get("tree_asset_id")
     if not isinstance(asset_id, str):
-        raise StrategySetupError(
-            "自动树全量写回必须提供完整 tree asset ID。"
-        )
+        raise StrategySetupError("自动树全量写回必须提供完整 tree asset ID。")
 
     repository = TaskArtifactRepository(runtime.settings.db_path)
     try:
@@ -1216,9 +1353,9 @@ def _automatic_tree_apply_slots(
             f"自动树资产 {asset_id} 缺少原始样本 lineage，请重新构建。"
         )
     try:
-        workspace = DataWorkspaceRepository(
-            runtime.settings.db_path
-        ).get_or_default(task_id)
+        workspace = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task_id
+        )
     except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
         raise StrategySetupError(
             "当前活动 DataWorkspace 无法验证，不能执行自动树写回。"
@@ -1252,19 +1389,14 @@ def _automatic_tree_apply_slots(
         )
 
     output_columns = {
-        "leaf_id_column": inputs.get(
-            "leaf_id_column", "automatic_tree_leaf_id"
-        ),
-        "rule_id_column": inputs.get(
-            "rule_id_column", "automatic_tree_rule_id"
-        ),
+        "leaf_id_column": inputs.get("leaf_id_column", "automatic_tree_leaf_id"),
+        "rule_id_column": inputs.get("rule_id_column", "automatic_tree_rule_id"),
     }
     folded_source_columns = {
         str(column).casefold() for column in getattr(context, "columns", ())
     }
     if any(
-        not isinstance(column, str)
-        or column.casefold() in folded_source_columns
+        not isinstance(column, str) or column.casefold() in folded_source_columns
         for column in output_columns.values()
     ):
         raise StrategySetupError(
@@ -1288,8 +1420,9 @@ def _automatic_tree_apply_slots(
             slots[field] = inputs[field]
     return slots
 
+
 def _cross_matrix_cell_selection_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     draft: StandardWorkflowRequestDraft,
@@ -1323,8 +1456,7 @@ def _cross_matrix_cell_selection_slots(
         provenance = artifact.get("provenance")
         if (
             artifact.get("kind") == CROSS_MATRIX_SOURCE_ARTIFACT_KIND
-            and artifact.get("origin_tool")
-            == CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL
+            and artifact.get("origin_tool") == CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL
             and isinstance(provenance, Mapping)
             and provenance.get("schema_version")
             == CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION
@@ -1426,8 +1558,9 @@ def _cross_matrix_cell_selection_slots(
         slots["selection_reason"] = inputs["selection_reason"]
     return slots
 
+
 def _latest_cross_candidate_search_source_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
 ) -> dict[str, str]:
@@ -1446,8 +1579,7 @@ def _latest_cross_candidate_search_source_slots(
         for artifact in artifacts
         if isinstance(artifact, Mapping)
         and artifact.get("kind") == "strategy_candidate_json"
-        and artifact.get("origin_tool")
-        == "strategy.analyze_univariate_candidates"
+        and artifact.get("origin_tool") == "strategy.analyze_univariate_candidates"
     ]
     if not matches:
         raise StrategySetupError(
@@ -1459,14 +1591,10 @@ def _latest_cross_candidate_search_source_slots(
     artifact_id = latest.get("id")
     content_hash = latest.get("content_hash")
     candidate_id = (
-        provenance.get("candidate_id")
-        if isinstance(provenance, Mapping)
-        else None
+        provenance.get("candidate_id") if isinstance(provenance, Mapping) else None
     )
     evidence_hash = (
-        provenance.get("evidence_hash")
-        if isinstance(provenance, Mapping)
-        else None
+        provenance.get("evidence_hash") if isinstance(provenance, Mapping) else None
     )
     if (
         not isinstance(artifact_id, str)
@@ -1489,17 +1617,16 @@ def _latest_cross_candidate_search_source_slots(
         "expected_evidence_hash": evidence_hash,
     }
 
+
 def _strategy_cross_candidate_search_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
     """Combine only user search controls with the platform-owned source."""
 
     if draft.workflow != "cross_matrix_candidate_search":
-        raise StrategySetupError(
-            "Cross 自动组合搜索 slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Cross 自动组合搜索 slots 收到了错误的 Workflow。")
     inputs = draft.to_dict()["workflow_inputs"]
     return {
         **_latest_cross_candidate_search_source_slots(
@@ -1510,20 +1637,19 @@ def _strategy_cross_candidate_search_plan_slots(
         "max_pairs": inputs["max_pairs"],
     }
 
+
 def _strategy_cross_candidate_build_from_search_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
     """Preflight exact pointers without copying recovered pair facts."""
 
     if draft.workflow != "cross_matrix_candidate_build_from_search":
-        raise StrategySetupError(
-            "Cross 搜索结果构建 slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Cross 搜索结果构建 slots 收到了错误的 Workflow。")
     inputs = draft.to_dict()["workflow_inputs"]
     try:
-        read_runtime = _strategy_report_read_runtime(runtime)
+        read_runtime = strategy_evidence_lane._strategy_report_read_runtime(runtime)
         resolve_cross_candidate_search_pair(
             read_runtime,
             task_id=task.id,
@@ -1537,17 +1663,16 @@ def _strategy_cross_candidate_build_from_search_plan_slots(
         "pair_id": inputs["pair_id"],
     }
 
+
 def _strategy_cross_rule_search_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
     """Bind platform evidence separately from explicit rule-search controls."""
 
     if draft.workflow != "cross_rule_search":
-        raise StrategySetupError(
-            "Cross 阈值规则搜索 slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Cross 阈值规则搜索 slots 收到了错误的 Workflow。")
     inputs = draft.to_dict()["workflow_inputs"]
     return {
         **_latest_cross_candidate_search_source_slots(
@@ -1560,21 +1685,20 @@ def _strategy_cross_rule_search_plan_slots(
         "max_trials": inputs["max_trials"],
     }
 
+
 def _strategy_cross_rule_candidate_build_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
     """Preflight one exact rule pointer; never infer from rank."""
 
     if draft.workflow != "cross_rule_candidate_build_from_search":
-        raise StrategySetupError(
-            "Cross 阈值规则候选 slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Cross 阈值规则候选 slots 收到了错误的 Workflow。")
     inputs = draft.to_dict()["workflow_inputs"]
     try:
         resolve_cross_rule_search_rule(
-            _strategy_report_read_runtime(runtime),
+            strategy_evidence_lane._strategy_report_read_runtime(runtime),
             task_id=task.id,
             search_id=inputs["search_id"],
             rule_id=inputs["rule_id"],
@@ -1587,8 +1711,9 @@ def _strategy_cross_rule_candidate_build_plan_slots(
         "selection_reason": inputs.get("selection_reason"),
     }
 
+
 def _strategy_voting_candidate_search_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
@@ -1597,7 +1722,7 @@ def _strategy_voting_candidate_search_plan_slots(
     if draft.workflow != "voting_candidate_search":
         raise StrategySetupError("Voting 组合搜索 slots 收到了错误的 Workflow。")
     try:
-        read_runtime = _strategy_report_read_runtime(runtime)
+        read_runtime = strategy_evidence_lane._strategy_report_read_runtime(runtime)
         return resolve_voting_candidate_search_inputs(
             read_runtime,
             task_id=task.id,
@@ -1606,20 +1731,19 @@ def _strategy_voting_candidate_search_plan_slots(
     except StrategyError as exc:
         raise StrategySetupError(str(exc)) from exc
 
+
 def _strategy_voting_candidate_build_from_search_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
     """Preflight exact pointers without copying recovered state into the plan."""
 
     if draft.workflow != "voting_candidate_build_from_search":
-        raise StrategySetupError(
-            "Voting 搜索结果构建 slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Voting 搜索结果构建 slots 收到了错误的 Workflow。")
     inputs = draft.to_dict()["workflow_inputs"]
     try:
-        read_runtime = _strategy_report_read_runtime(runtime)
+        read_runtime = strategy_evidence_lane._strategy_report_read_runtime(runtime)
         resolve_voting_candidate_search_selection(
             read_runtime,
             task_id=task.id,
@@ -1631,8 +1755,9 @@ def _strategy_voting_candidate_build_from_search_plan_slots(
         raise StrategySetupError(str(exc)) from exc
     return dict(inputs)
 
+
 def _strategy_voting_candidate_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
@@ -1653,9 +1778,9 @@ def _strategy_voting_candidate_plan_slots(
             "Voting 候选需要明确的策略池类型、完整 rule_id 列表和整数 n。"
         )
     try:
-        current = StrategyCandidatePoolRepository(
-            runtime.settings.db_path
-        ).get_current(task.id, strategy_type)
+        current = StrategyCandidatePoolRepository(runtime.settings.db_path).get_current(
+            task.id, strategy_type
+        )
     except Exception as exc:
         raise StrategySetupError(
             "当前 Strategy Pool 状态无法通过完整性校验，不能构建 Voting 候选。"
@@ -1665,7 +1790,7 @@ def _strategy_voting_candidate_plan_slots(
             f"当前任务没有 {strategy_type} Strategy Pool；请先把至少两条候选规则加入池中。"
         )
     try:
-        entries = _strategy_pool_entries(current)
+        entries = strategy_evidence_lane._strategy_pool_entries(current)
         revision = int(current["revision"])
         snapshot_hash = strategy_pool_snapshot_hash(current)
     except (KeyError, TypeError, ValueError) as exc:
@@ -1693,7 +1818,9 @@ def _strategy_voting_candidate_plan_slots(
         selected.append(entry)
     selected.sort(key=lambda item: int(item.get("position", -1)))
     if not 2 <= len(selected) <= 50 or not 1 <= n <= len(selected):
-        raise StrategySetupError("Voting 候选要求 2 到 50 条规则，且 n 必须位于 1 到 K。")
+        raise StrategySetupError(
+            "Voting 候选要求 2 到 50 条规则，且 n 必须位于 1 到 K。"
+        )
     return {
         "strategy_type": strategy_type,
         "expected_pool_revision": revision,
@@ -1702,23 +1829,22 @@ def _strategy_voting_candidate_plan_slots(
         "n": n,
     }
 
+
 def _strategy_pool_apply_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
     """Bind one specified current nonempty Pool without exposing its identity."""
 
     if draft.workflow != "strategy_pool_apply":
-        raise StrategySetupError(
-            "Strategy Pool 应用 slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Strategy Pool 应用 slots 收到了错误的 Workflow。")
     inputs = draft.to_dict()["workflow_inputs"]
     strategy_type = str(inputs["strategy_type"])
     try:
-        pool = StrategyCandidatePoolRepository(
-            runtime.settings.db_path
-        ).get_current(task.id, strategy_type)
+        pool = StrategyCandidatePoolRepository(runtime.settings.db_path).get_current(
+            task.id, strategy_type
+        )
     except Exception as exc:
         raise StrategySetupError(
             "当前 Strategy Pool 状态无法通过完整性校验，不能执行应用写回。"
@@ -1727,7 +1853,7 @@ def _strategy_pool_apply_plan_slots(
         raise StrategySetupError(
             f"当前任务没有 {strategy_type} Strategy Pool，无法应用到当前样本。"
         )
-    if not _strategy_pool_entries(pool):
+    if not strategy_evidence_lane._strategy_pool_entries(pool):
         raise StrategySetupError(
             f"当前 {strategy_type} Strategy Pool 为空；请先加入候选规则再执行应用。"
         )
@@ -1755,26 +1881,28 @@ def _strategy_pool_apply_plan_slots(
         slots["output_prefix"] = inputs["output_prefix"]
     return slots
 
+
 def _strategy_pool_materialize_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
     """Deeply authenticate one current nonempty Pool and freeze Tool identity."""
 
     if draft.workflow != "strategy_pool_materialize":
-        raise StrategySetupError(
-            "Strategy Pool 物化 slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Strategy Pool 物化 slots 收到了错误的 Workflow。")
     strategy_type = str(draft.workflow_inputs["strategy_type"])
-    read_runtime = _strategy_v2_read_runtime(runtime)
+    read_runtime = strategy_evidence_lane._strategy_v2_read_runtime(runtime)
     try:
         binding = load_current_strategy_candidate_pool_artifact(
             read_runtime,
             task_id=task.id,
             strategy_type=strategy_type,
         )
-    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
+    except (
+        StrategyError,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
         raise StrategySetupError(
             f"当前 {strategy_type} Strategy Pool 的 artifact、来源、编译结果"
             "或 lineage 未通过完整认证，不能创建 draft Strategy。"
@@ -1786,7 +1914,7 @@ def _strategy_pool_materialize_plan_slots(
         if (
             binding.task_id != task.id
             or binding.strategy_type != strategy_type
-            or not _strategy_pool_entries(pool)
+            or not strategy_evidence_lane._strategy_pool_entries(pool)
         ):
             raise ValueError("Pool binding is not the requested nonempty current Pool")
         revision = pool["revision"]
@@ -1822,8 +1950,9 @@ def _strategy_pool_materialize_plan_slots(
         "expected_design_hash": design_hash,
     }
 
+
 def _strategy_pool_validation_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
@@ -1843,34 +1972,32 @@ def _strategy_pool_validation_plan_slots(
         "pricing",
         "segmentation",
     }:
-        raise StrategySetupError(
-            "独立样本回放验证 strategy_type 不受支持。"
-        )
+        raise StrategySetupError("独立样本回放验证 strategy_type 不受支持。")
     if partition not in {"validation", "oot"}:
         raise StrategySetupError(
             "独立样本回放验证 partition 只能是 validation 或 oot。"
         )
 
-    read_runtime = _strategy_v2_read_runtime(runtime)
+    read_runtime = strategy_evidence_lane._strategy_v2_read_runtime(runtime)
     try:
-        pool = _strategy_report_current_pool_binding(
+        pool = strategy_evidence_lane._strategy_report_current_pool_binding(
             read_runtime,
             task_id=task.id,
             requested_type=strategy_type,
         )
-    except _StrategyV2EvidenceSetupError as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except strategy_contracts_lane._StrategyV2EvidenceSetupError as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_pool_validation_pool_invalid",
             f"当前 {strategy_type} Strategy Pool 未通过非空 head、artifact、"
             "revision/hash 或完整 candidate lineage 认证。",
         ) from exc
     try:
-        sample = _strategy_report_latest_sample_binding(
+        sample = strategy_evidence_lane._strategy_report_latest_sample_binding(
             read_runtime,
             task_id=task.id,
         )
-    except _StrategyV2EvidenceSetupError as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except strategy_contracts_lane._StrategyV2EvidenceSetupError as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_pool_validation_sample_invalid",
             "独立样本回放验证需要最新且完整认证的 StrategySampleDesign V2 "
             "membership/bundle；平台不会回退到旧样本。",
@@ -1881,14 +2008,10 @@ def _strategy_pool_validation_plan_slots(
         target = design["target_selector"]
         scope = design["sample_semantics"]["scope"]
         risk_populations = [
-            item
-            for item in sample.bundle["populations"]
-            if item.get("role") == "risk"
+            item for item in sample.bundle["populations"] if item.get("role") == "risk"
         ]
         maturity = risk_populations[0]["maturity_evidence"]["status"]
-        partition_count = sample.membership["header"]["counts"]["risk"][
-            partition
-        ]
+        partition_count = sample.membership["header"]["counts"]["risk"][partition]
         source = sample.source_binding
         dataset_id = source.dataset_id
         dataset_hash = source.dataset_content_hash
@@ -1896,7 +2019,7 @@ def _strategy_pool_validation_plan_slots(
         workspace_generation = source.workspace_generation
         semantic_hash = source.semantic_mapping_hash
     except (AttributeError, IndexError, KeyError, TypeError) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_pool_validation_sample_invalid",
             "StrategySampleDesign V2 缺少 risk 总体、成熟度、独立分区、"
             "dataset/workspace/target 或语义绑定。",
@@ -1949,7 +2072,7 @@ def _strategy_pool_validation_plan_slots(
             sample_design=sample,
         )
     except StrategyError as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_pool_validation_requirement_invalid",
             "当前 Strategy Pool 的模型评分要求无法绑定到精确 "
             "StrategySampleDesign V2；请重新生成评分证据或候选。",
@@ -1965,9 +2088,9 @@ def _strategy_pool_validation_plan_slots(
             "expected_revision_id": snapshot["revision_id"],
             "expected_snapshot_hash": snapshot["snapshot_hash"],
         }
-        sample_ref = _strategy_report_sample_ref(sample)
+        sample_ref = strategy_evidence_lane._strategy_report_sample_ref(sample)
     except (AttributeError, KeyError, TypeError) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_pool_validation_binding_invalid",
             "Strategy Pool 或 StrategySampleDesign V2 精确引用不完整。",
         ) from exc
@@ -1980,8 +2103,9 @@ def _strategy_pool_validation_plan_slots(
         "comparison_mode": "absolute",
     }
 
+
 def _strategy_pool_stability_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict[str, object]:
@@ -2011,11 +2135,9 @@ def _strategy_pool_stability_plan_slots(
     if (
         not isinstance(partitions, list)
         or "development" not in partitions
-        or not any(
-            partition in partitions for partition in ("validation", "oot")
-        )
+        or not any(partition in partitions for partition in ("validation", "oot"))
     ):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_pool_stability_comparison_required",
             "Pool 跨分区稳定性需要非空 development 基线，并至少具备一个"
             "非空 validation 或 OOT 比较分区；请先完善样本设计。",
@@ -2027,8 +2149,9 @@ def _strategy_pool_stability_plan_slots(
         "partitions": partitions,
     }
 
+
 def _strategy_impact_cube_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
     *,
@@ -2039,9 +2162,7 @@ def _strategy_impact_cube_plan_slots(
     """Bind one ImpactCube plan to a single authenticated evidence snapshot."""
 
     if draft.workflow != "strategy_impact_cube":
-        raise StrategySetupError(
-            "Strategy ImpactCube slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Strategy ImpactCube slots 收到了错误的 Workflow。")
     inputs = draft.to_dict()["workflow_inputs"]
     strategy_type = inputs.get("strategy_type")
     if strategy_type not in {
@@ -2051,33 +2172,35 @@ def _strategy_impact_cube_plan_slots(
         "pricing",
         "segmentation",
     }:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_type_invalid",
             "统一影响测算需要明确 approval、reject、limit、pricing 或 "
             "segmentation Strategy Pool。",
         )
 
-    read_runtime = _strategy_v2_read_runtime(runtime)
+    read_runtime = strategy_evidence_lane._strategy_v2_read_runtime(runtime)
     try:
         artifacts = tuple(read_runtime.task_artifacts.list_for_task(task.id))
-    except _STRATEGY_V2_ARTIFACT_ERRORS as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_registry_unavailable",
             "无法读取当前任务的 ImpactCube source artifact registry。",
         ) from exc
     try:
-        sample = _latest_verified_strategy_sample_design_v2_binding(
-            read_runtime,
-            task_id=task.id,
-            artifacts=artifacts,
+        sample = (
+            strategy_sample_lane._latest_verified_strategy_sample_design_v2_binding(
+                read_runtime,
+                task_id=task.id,
+                artifacts=artifacts,
+            )
         )
-    except _StrategyV2EvidenceSetupError as exc:
+    except strategy_contracts_lane._StrategyV2EvidenceSetupError as exc:
         code = (
             "strategy_impact_cube_sample_required"
             if exc.code.endswith("_sample_required")
             else "strategy_impact_cube_sample_invalid"
         )
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             code,
             "ImpactCube 需要最新且完整认证的 StrategySampleDesign V2 "
             "双总体样本证据；平台不会回退到旧样本。",
@@ -2085,7 +2208,7 @@ def _strategy_impact_cube_plan_slots(
 
     actual_sample_binding = {
         "kind": "strategy_sample_design_v2",
-        "sample_design_ref": _strategy_report_sample_ref(sample),
+        "sample_design_ref": strategy_evidence_lane._strategy_report_sample_ref(sample),
         "dataset_id": sample.source_binding.dataset_id,
         "dataset_content_hash": sample.source_binding.dataset_content_hash,
     }
@@ -2093,7 +2216,7 @@ def _strategy_impact_cube_plan_slots(
         expected_sample_binding is not None
         and dict(expected_sample_binding) != actual_sample_binding
     ):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_sample_changed",
             "StrategySampleDesign V2 在请求编译与计划创建之间发生变化；"
             "本次未创建计划，请基于最新样本重新描述。",
@@ -2103,12 +2226,14 @@ def _strategy_impact_cube_plan_slots(
     try:
         current_pool = pool_repository.get_current(task.id, strategy_type)
     except Exception as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_pool_invalid",
             f"当前 {strategy_type} Strategy Pool head/revision 无法通过完整性复核。",
         ) from exc
-    if current_pool is None or not _strategy_pool_entries(current_pool):
-        raise _StrategyV2EvidenceSetupError(
+    if current_pool is None or not strategy_evidence_lane._strategy_pool_entries(
+        current_pool
+    ):
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_pool_required",
             f"当前任务没有非空 {strategy_type} Strategy Pool；"
             "请先用自然语言把候选加入该 Pool。",
@@ -2123,8 +2248,11 @@ def _strategy_impact_cube_plan_slots(
             expected_pool_revision=pool_revision,
             expected_pool_snapshot_hash=pool_snapshot_hash,
         )
-    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except (
+        StrategyError,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_pool_invalid",
             f"当前 {strategy_type} Strategy Pool 的 artifact、来源、编译结果"
             "或 lineage 未通过完整认证。",
@@ -2138,27 +2266,27 @@ def _strategy_impact_cube_plan_slots(
                 sample_design=sample,
             )
         except StrategyError as exc:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_impact_cube_pool_requirement_invalid",
                 "当前 Strategy Pool 的模型评分要求无法绑定到最新 "
                 "StrategySampleDesign V2；请重新生成评分证据或候选。",
             ) from exc
-    if pool.artifact_id not in {
-        item.get("id") for item in artifacts
-    }:
-        raise _StrategyV2EvidenceSetupError(
+    if pool.artifact_id not in {item.get("id") for item in artifacts}:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_registry_changed",
             "Strategy Pool artifact 在证据选择期间发生变化；请重试本次测算。",
         )
 
-    partitions = _strategy_impact_cube_partitions(inputs, sample=sample)
+    partitions = strategy_evidence_lane._strategy_impact_cube_partitions(
+        inputs, sample=sample
+    )
     dimensions = (
-        _strategy_impact_cube_dimensions(inputs, sample=sample)
+        strategy_evidence_lane._strategy_impact_cube_dimensions(inputs, sample=sample)
         if fixed_dimension_bindings is None
         else dict(fixed_dimension_bindings)
     )
     economics_inputs = (
-        _strategy_impact_cube_economics(
+        strategy_evidence_lane._strategy_impact_cube_economics(
             inputs.get("economics_inputs"),
             sample=sample,
         )
@@ -2166,7 +2294,7 @@ def _strategy_impact_cube_plan_slots(
         else None
     )
     current_strategy_ref = (
-        _strategy_impact_cube_current_strategy_ref(
+        strategy_evidence_lane._strategy_impact_cube_current_strategy_ref(
             runtime,
             task_id=task.id,
             strategy_type=strategy_type,
@@ -2181,23 +2309,21 @@ def _strategy_impact_cube_plan_slots(
         sample.membership_artifact_id,
         sample.bundle_artifact_id,
     }
-    registry_token = _strategy_impact_cube_registry_token(
+    registry_token = strategy_evidence_lane._strategy_impact_cube_registry_token(
         artifacts,
         selected_artifact_ids=selected_artifact_ids,
     )
     try:
-        refreshed_artifacts = tuple(
-            read_runtime.task_artifacts.list_for_task(task.id)
-        )
+        refreshed_artifacts = tuple(read_runtime.task_artifacts.list_for_task(task.id))
         refreshed_pool = pool_repository.get_current(task.id, strategy_type)
     except Exception as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_registry_changed",
             "ImpactCube source registry 或 Strategy Pool head 在计划创建前"
             "无法再次核对；本次未创建计划。",
         ) from exc
     if (
-        _strategy_impact_cube_registry_token(
+        strategy_evidence_lane._strategy_impact_cube_registry_token(
             refreshed_artifacts,
             selected_artifact_ids=selected_artifact_ids,
         )
@@ -2206,20 +2332,22 @@ def _strategy_impact_cube_plan_slots(
         or refreshed_pool.get("revision") != pool_revision
         or strategy_pool_snapshot_hash(refreshed_pool) != pool_snapshot_hash
     ):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_impact_cube_registry_changed",
             "StrategySampleDesign V2、Strategy Pool 或 artifact registry "
             "在计划创建前发生变化；请基于最新证据重试。",
         )
     if current_strategy_ref is not None:
-        refreshed_current = _strategy_impact_cube_current_strategy_ref(
-            runtime,
-            task_id=task.id,
-            strategy_type=strategy_type,
-            requested_id=current_strategy_ref["strategy_id"],
+        refreshed_current = (
+            strategy_evidence_lane._strategy_impact_cube_current_strategy_ref(
+                runtime,
+                task_id=task.id,
+                strategy_type=strategy_type,
+                requested_id=current_strategy_ref["strategy_id"],
+            )
         )
         if refreshed_current != current_strategy_ref:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_impact_cube_current_strategy_changed",
                 "当前策略的 canonical StrategySpec 在计划创建前发生变化；"
                 "本次未创建计划。",
@@ -2235,7 +2363,7 @@ def _strategy_impact_cube_plan_slots(
             "expected_revision_id": pool.pool["revision_id"],
             "expected_snapshot_hash": pool.pool["snapshot_hash"],
         },
-        "sample_design_ref": _strategy_report_sample_ref(sample),
+        "sample_design_ref": strategy_evidence_lane._strategy_report_sample_ref(sample),
         "partitions": partitions,
         # ImpactCube owns both approval and risk denominators internally; this
         # retained v1 selector states which observed-outcome population supplies
@@ -2246,8 +2374,9 @@ def _strategy_impact_cube_plan_slots(
         "economics_inputs": economics_inputs,
     }
 
+
 def _strategy_dsl_delivery_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
     *,
@@ -2256,9 +2385,7 @@ def _strategy_dsl_delivery_plan_slots(
     """Bind one offline delivery to exact strategy and dataset snapshots."""
 
     if draft.workflow != "strategy_dsl_delivery":
-        raise StrategySetupError(
-            "Strategy DSL delivery slots 收到了错误的 Workflow。"
-        )
+        raise StrategySetupError("Strategy DSL delivery slots 收到了错误的 Workflow。")
     requested_id = draft.to_dict()["workflow_inputs"].get("strategy_id")
     repository = StrategyRepository(runtime.settings.db_path)
 
@@ -2270,7 +2397,7 @@ def _strategy_dsl_delivery_plan_slots(
                 if isinstance(meta.get("id"), str)
             ]
         except Exception as exc:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_dsl_delivery_registry_unavailable",
                 "无法读取当前任务的策略注册表，未创建交付计划。",
             ) from exc
@@ -2278,26 +2405,28 @@ def _strategy_dsl_delivery_plan_slots(
         for strategy_id in candidate_ids:
             try:
                 snapshot = repository.get_strategy_snapshot(strategy_id)
-                strategy_ref = _strategy_dsl_delivery_strategy_ref(
-                    snapshot,
-                    task_id=task.id,
+                strategy_ref = (
+                    strategy_evidence_lane._strategy_dsl_delivery_strategy_ref(
+                        snapshot,
+                        task_id=task.id,
+                    )
                 )
             except (
                 StrategyError,
                 sqlite3.Error,
                 TypeError,
                 ValueError,
-                _StrategyV2EvidenceSetupError,
+                strategy_contracts_lane._StrategyV2EvidenceSetupError,
             ):
                 continue
             eligible.append((strategy_id, snapshot, strategy_ref))
         if not eligible:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_dsl_delivery_strategy_required",
                 "当前任务没有可交付的 canonical Strategy；请先完成策略构建。",
             )
         if len(eligible) != 1:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_dsl_delivery_strategy_ambiguous",
                 "当前任务有多个可交付策略，请在导出命令中明确完整 strategy_id。",
             )
@@ -2307,11 +2436,11 @@ def _strategy_dsl_delivery_plan_slots(
         try:
             snapshot = repository.get_strategy_snapshot(strategy_id)
         except Exception as exc:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_dsl_delivery_strategy_invalid",
                 "指定策略无法通过当前任务的完整性复核。",
             ) from exc
-        strategy_ref = _strategy_dsl_delivery_strategy_ref(
+        strategy_ref = strategy_evidence_lane._strategy_dsl_delivery_strategy_ref(
             snapshot,
             task_id=task.id,
         )
@@ -2335,14 +2464,14 @@ def _strategy_dsl_delivery_plan_slots(
         or not isinstance(semantic_mapping_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", semantic_mapping_hash) is None
     ):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_dsl_delivery_dataset_invalid",
             "当前策略样本缺少可认证 dataset/workspace identity。",
         )
     try:
-        workspace = DataWorkspaceRepository(
-            runtime.settings.db_path
-        ).get_or_default(task.id)
+        workspace = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task.id
+        )
     except (
         DataWorkspaceDataError,
         KeyError,
@@ -2350,7 +2479,7 @@ def _strategy_dsl_delivery_plan_slots(
         TypeError,
         ValueError,
     ) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_dsl_delivery_dataset_invalid",
             "当前 DataWorkspace 无法通过完整性复核。",
         ) from exc
@@ -2367,7 +2496,7 @@ def _strategy_dsl_delivery_plan_slots(
             )
         )
     ):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_dsl_delivery_dataset_invalid",
             "当前活动 DataWorkspace 与已确认的数据上下文不一致。",
         )
@@ -2376,11 +2505,9 @@ def _strategy_dsl_delivery_plan_slots(
         "analysis_generation": workspace_generation,
         "semantic_mapping_hash": semantic_mapping_hash,
         "active_dataset_id": workspace.active_dataset_id,
-        "active_dataset_content_hash": (
-            workspace.active_dataset_content_hash
-        ),
+        "active_dataset_content_hash": (workspace.active_dataset_content_hash),
     }
-    _backend, registry = _modeling_data_runtime(runtime.settings)
+    _backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     try:
         dataset = registry.get(dataset_id)
         registry.resolve_verified_path(dataset_id)
@@ -2392,15 +2519,12 @@ def _strategy_dsl_delivery_plan_slots(
         TypeError,
         ValueError,
     ) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_dsl_delivery_dataset_invalid",
             "当前策略样本未通过 task ownership、registry 或文件 hash 复核。",
         ) from exc
-    if (
-        str(dataset.task_id) != task.id
-        or dataset.content_hash != dataset_hash
-    ):
-        raise _StrategyV2EvidenceSetupError(
+    if str(dataset.task_id) != task.id or dataset.content_hash != dataset_hash:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_dsl_delivery_dataset_invalid",
             "当前策略样本不属于本任务或 content hash 已变化。",
         )
@@ -2413,7 +2537,7 @@ def _strategy_dsl_delivery_plan_slots(
     # same exact-ref checks under its publication transaction.
     try:
         refreshed_snapshot = repository.get_strategy_snapshot(strategy_id)
-        refreshed_ref = _strategy_dsl_delivery_strategy_ref(
+        refreshed_ref = strategy_evidence_lane._strategy_dsl_delivery_strategy_ref(
             refreshed_snapshot,
             task_id=task.id,
         )
@@ -2424,19 +2548,19 @@ def _strategy_dsl_delivery_plan_slots(
                 if not isinstance(candidate_id, str):
                     continue
                 try:
-                    candidate_snapshot = repository.get_strategy_snapshot(
-                        candidate_id
-                    )
-                    candidate_ref = _strategy_dsl_delivery_strategy_ref(
-                        candidate_snapshot,
-                        task_id=task.id,
+                    candidate_snapshot = repository.get_strategy_snapshot(candidate_id)
+                    candidate_ref = (
+                        strategy_evidence_lane._strategy_dsl_delivery_strategy_ref(
+                            candidate_snapshot,
+                            task_id=task.id,
+                        )
                     )
                 except (
                     StrategyError,
                     sqlite3.Error,
                     TypeError,
                     ValueError,
-                    _StrategyV2EvidenceSetupError,
+                    strategy_contracts_lane._StrategyV2EvidenceSetupError,
                 ):
                     continue
                 refreshed_eligible.append((candidate_id, candidate_ref))
@@ -2453,17 +2577,16 @@ def _strategy_dsl_delivery_plan_slots(
         sqlite3.Error,
         TypeError,
         ValueError,
-        _StrategyV2EvidenceSetupError,
+        strategy_contracts_lane._StrategyV2EvidenceSetupError,
     ) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_dsl_delivery_binding_changed",
             "策略或活动数据集在计划创建前发生变化；本次未创建交付计划。",
         ) from exc
     if (
         refreshed_ref != strategy_ref
         or (
-            requested_id is None
-            and refreshed_eligible != [(strategy_id, strategy_ref)]
+            requested_id is None and refreshed_eligible != [(strategy_id, strategy_ref)]
         )
         or refreshed_workspace.revision != workspace_revision
         or refreshed_workspace.analysis_generation != workspace_generation
@@ -2473,14 +2596,13 @@ def _strategy_dsl_delivery_plan_slots(
             refreshed_workspace.active_dataset_id is not None
             and (
                 refreshed_workspace.active_dataset_id != dataset_id
-                or refreshed_workspace.active_dataset_content_hash
-                != dataset_hash
+                or refreshed_workspace.active_dataset_content_hash != dataset_hash
             )
         )
         or str(refreshed_dataset.task_id) != task.id
         or refreshed_dataset.content_hash != dataset_hash
     ):
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_dsl_delivery_binding_changed",
             "策略或活动数据集在计划创建前发生变化；本次未创建交付计划。",
         )
@@ -2492,8 +2614,9 @@ def _strategy_dsl_delivery_plan_slots(
         "maximum_equivalence_rows": MAX_EQUIVALENCE_ROWS,
     }
 
+
 def _strategy_project_context_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
     *,
@@ -2522,7 +2645,11 @@ def _strategy_project_context_plan_slots(
         )
     message_id = source_message.get("id")
     content = source_message.get("content")
-    if not isinstance(message_id, str) or not message_id or not isinstance(content, str):
+    if (
+        not isinstance(message_id, str)
+        or not message_id
+        or not isinstance(content, str)
+    ):
         raise StrategySetupError("项目上下文无法绑定有效的用户消息证据。")
 
     inputs = draft.to_dict()["workflow_inputs"]
@@ -2535,25 +2662,19 @@ def _strategy_project_context_plan_slots(
     structured_request_sha256 = (source_message.get("metadata") or {}).get(
         "structured_request_sha256"
     )
-    if (
-        (source_message.get("metadata") or {}).get("request_source") == "manual_ui"
-        and not isinstance(structured_request_sha256, str)
-    ):
+    if (source_message.get("metadata") or {}).get(
+        "request_source"
+    ) == "manual_ui" and not isinstance(structured_request_sha256, str):
         raise StrategySetupError(
             "Candidate Lab 项目上下文缺少结构化用户请求绑定，请重新提交表单。"
         )
     if isinstance(structured_request_sha256, str):
-        expected_structured_sha256 = (
-            strategy_project_context_structured_request_sha256(
-                as_of=inputs["as_of"],
-                scope=inputs.get("scope"),
-                business_context=inputs.get("business_context") or {},
-                explicit_unavailable=inputs.get("explicit_unavailable") or [],
-                external_report_filenames=inputs.get(
-                    "external_report_filenames"
-                )
-                or [],
-            )
+        expected_structured_sha256 = strategy_project_context_structured_request_sha256(
+            as_of=inputs["as_of"],
+            scope=inputs.get("scope"),
+            business_context=inputs.get("business_context") or {},
+            explicit_unavailable=inputs.get("explicit_unavailable") or [],
+            external_report_filenames=inputs.get("external_report_filenames") or [],
         )
         if not hmac.compare_digest(
             structured_request_sha256,
@@ -2562,14 +2683,10 @@ def _strategy_project_context_plan_slots(
             raise StrategySetupError(
                 "Candidate Lab 项目上下文结构化请求绑定已变化，请重新提交表单。"
             )
-        user_message_ref["structured_request_sha256"] = (
-            structured_request_sha256
-        )
+        user_message_ref["structured_request_sha256"] = structured_request_sha256
     return {
         "expected_revision": 0 if current is None else current["revision"],
-        "expected_revision_id": (
-            None if current is None else current["revision_id"]
-        ),
+        "expected_revision_id": (None if current is None else current["revision_id"]),
         "expected_state_hash": None if current is None else current["state_hash"],
         "user_message_ref": user_message_ref,
         "as_of": inputs["as_of"],
@@ -2581,8 +2698,9 @@ def _strategy_project_context_plan_slots(
         ),
     }
 
+
 def _model_score_comparison_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     *,
     population: str,
@@ -2595,28 +2713,28 @@ def _model_score_comparison_plan_slots(
     the newest selected publication must authenticate or the request fails.
     """
 
-    read_runtime = _strategy_report_read_runtime(runtime)
-    artifacts = _strategy_v2_artifact_snapshot(
+    read_runtime = strategy_evidence_lane._strategy_report_read_runtime(runtime)
+    artifacts = strategy_evidence_lane._strategy_v2_artifact_snapshot(
         read_runtime,
         task_id=task.id,
     )
     try:
-        registry_token = model_score_comparison_registry_snapshot_token(
-            artifacts
-        )
+        registry_token = model_score_comparison_registry_snapshot_token(artifacts)
     except StrategyError as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_registry_unavailable",
             "模型评分比较的 artifact registry snapshot 无法规范化。",
         ) from exc
     try:
-        sample = _latest_verified_strategy_sample_design_v2_binding(
-            read_runtime,
-            task_id=task.id,
-            artifacts=artifacts,
+        sample = (
+            strategy_sample_lane._latest_verified_strategy_sample_design_v2_binding(
+                read_runtime,
+                task_id=task.id,
+                artifacts=artifacts,
+            )
         )
-    except _StrategyV2EvidenceSetupError as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except strategy_contracts_lane._StrategyV2EvidenceSetupError as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_sample_invalid",
             "模型评分比较需要最新且完整认证的 StrategySampleDesign V2；"
             "平台不会回退到旧样本。",
@@ -2629,12 +2747,12 @@ def _model_score_comparison_plan_slots(
         == MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL
     ]
     if not score_records:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_candidates_required",
             "当前任务至少需要两个基于最新样本、互不相同且完整认证的模型评分证据。",
         )
     if len(score_records) > MAX_MODEL_EVIDENCE:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_candidate_budget_exceeded",
             f"当前任务的评分证据数量超过单次认证上限（{MAX_MODEL_EVIDENCE}）。",
         )
@@ -2643,18 +2761,14 @@ def _model_score_comparison_plan_slots(
     for artifact in score_records:
         provenance = artifact.get("provenance")
         if not isinstance(provenance, Mapping):
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_model_score_comparison_evidence_invalid",
                 "一份模型评分证据缺少完整 provenance；平台不会猜测其来源。",
             )
         request = {
             "evidence_artifact_id": artifact.get("id"),
-            "expected_evidence_artifact_content_hash": artifact.get(
-                "content_hash"
-            ),
-            "score_vector_artifact_id": provenance.get(
-                "score_vector_artifact_id"
-            ),
+            "expected_evidence_artifact_content_hash": artifact.get("content_hash"),
+            "score_vector_artifact_id": provenance.get("score_vector_artifact_id"),
             "expected_score_vector_artifact_content_hash": provenance.get(
                 "score_vector_artifact_content_hash"
             ),
@@ -2671,9 +2785,9 @@ def _model_score_comparison_plan_slots(
             KeyError,
             TypeError,
             ValueError,
-            *_STRATEGY_V2_ARTIFACT_ERRORS,
+            *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
         ) as exc:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_model_score_comparison_evidence_invalid",
                 "最新兼容模型评分证据未通过文件、hash、registry、模型或"
                 "分数向量完整认证；平台不会回退到旧版本。",
@@ -2683,7 +2797,7 @@ def _model_score_comparison_plan_slots(
             or binding.training.task_id != task.id
             or binding.training.sample.task_id != task.id
         ):
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_model_score_comparison_evidence_incompatible",
                 "模型评分证据不属于当前任务。",
             )
@@ -2691,14 +2805,14 @@ def _model_score_comparison_plan_slots(
             continue
         model_id = binding.training.model_artifact.id
         if not isinstance(model_id, str) or not model_id:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_model_score_comparison_evidence_invalid",
                 "一份兼容评分证据缺少完整认证的 model identity。",
             )
         newest_by_model[model_id] = binding
 
     if len(newest_by_model) < 2:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_candidates_required",
             "当前任务至少需要两个基于最新样本、互不相同且完整认证的模型评分证据。",
         )
@@ -2722,82 +2836,86 @@ def _model_score_comparison_plan_slots(
         comparison = build_model_score_comparison(
             sample_design_bundle=sample.bundle,
             model_evidence=[
-                binding.envelope["single_model_evidence"]
-                for binding in bindings
+                binding.envelope["single_model_evidence"] for binding in bindings
             ],
             population=population,
             partition=partition,
         )
-    except (ModelScoreEvidenceComparisonError, StrategyError, TypeError, ValueError) as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except (
+        ModelScoreEvidenceComparisonError,
+        StrategyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_candidates_incompatible",
             "已认证模型评分证据无法在所选总体和分区形成同样本可比指标；"
             "本次未创建计划。",
         ) from exc
     if comparison.get("selection", {}).get("status") != "no_selection":
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_selection_forbidden",
             "模型评分比较预检产生了选择结果；平台已拒绝创建计划。",
         )
 
-    refreshed = _strategy_v2_artifact_snapshot(
+    refreshed = strategy_evidence_lane._strategy_v2_artifact_snapshot(
         read_runtime,
         task_id=task.id,
     )
     try:
-        refreshed_token = model_score_comparison_registry_snapshot_token(
-            refreshed
-        )
+        refreshed_token = model_score_comparison_registry_snapshot_token(refreshed)
     except StrategyError as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_registry_unavailable",
             "模型评分比较的 artifact registry snapshot 无法规范化。",
         ) from exc
     if refreshed_token != registry_token:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_score_comparison_registry_changed",
             "模型评分证据或 StrategySampleDesign registry 在计划创建前发生变化；"
             "请基于最新证据重试。",
         )
     return {
-        "sample_design_ref": _strategy_report_sample_ref(sample),
+        "sample_design_ref": strategy_evidence_lane._strategy_report_sample_ref(sample),
         "model_score_evidence_refs": refs,
         "expected_registry_token": registry_token,
     }
 
+
 def _strategy_model_evidence_v2_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     *,
     verify_current: bool = False,
 ) -> dict[str, object]:
     """Discover and live-authenticate task-owned V2 sample/candidate evidence."""
 
-    read_runtime = _strategy_v2_read_runtime(runtime)
-    artifacts = _strategy_v2_artifact_snapshot(
+    read_runtime = strategy_evidence_lane._strategy_v2_read_runtime(runtime)
+    artifacts = strategy_evidence_lane._strategy_v2_artifact_snapshot(
         read_runtime,
         task_id=task.id,
     )
-    registry_token = _strategy_v2_registry_token(artifacts)
-    sample_binding = _latest_verified_strategy_sample_design_v2_binding(
-        read_runtime,
-        task_id=task.id,
-        artifacts=artifacts,
+    registry_token = strategy_evidence_lane._strategy_v2_registry_token(artifacts)
+    sample_binding = (
+        strategy_sample_lane._latest_verified_strategy_sample_design_v2_binding(
+            read_runtime,
+            task_id=task.id,
+            artifacts=artifacts,
+        )
     )
     design = sample_binding.bundle["sample_design"]
     identity = design["identity"]
     dataset_ref = identity["dataset_ref"]
     workspace_ref = identity["workspace_ref"]
-    expected_candidate_ref = (
-        derive_strategy_model_evidence_candidate_execution_ref(sample_binding)
+    expected_candidate_ref = derive_strategy_model_evidence_candidate_execution_ref(
+        sample_binding
     )
     candidate_requests: list[dict[str, str]] = []
     for artifact in artifacts:
         provenance = artifact.get("provenance")
         if (
             artifact.get("kind") != "strategy_candidate_json"
-            or artifact.get("origin_tool")
-            != "strategy.analyze_univariate_candidates"
+            or artifact.get("origin_tool") != "strategy.analyze_univariate_candidates"
             or not isinstance(provenance, Mapping)
         ):
             continue
@@ -2812,7 +2930,7 @@ def _strategy_model_evidence_v2_plan_slots(
         ):
             continue
         if not isinstance(generation, Mapping):
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_model_evidence_v2_candidate_invalid",
                 "一份属于最新 StrategySampleDesign V2 快照的单变量候选"
                 "缺少完整 generation provenance；本次未创建计划。",
@@ -2822,7 +2940,7 @@ def _strategy_model_evidence_v2_plan_slots(
                 generation.get("sample_design_ref")
             ).to_ref_dict()
         except StrategyError as exc:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_model_evidence_v2_candidate_invalid",
                 "一份属于最新 StrategySampleDesign V2 快照的单变量候选"
                 "包含损坏或不完整的 sample_design_ref；本次未创建计划。",
@@ -2836,7 +2954,7 @@ def _strategy_model_evidence_v2_plan_slots(
             "expected_evidence_hash": provenance.get("evidence_hash"),
         }
         if not all(isinstance(value, str) and value for value in request.values()):
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_model_evidence_v2_candidate_invalid",
                 "一份属于最新 StrategySampleDesign V2 快照的单变量候选"
                 "缺少 artifact、candidate 或 evidence 身份；本次未创建计划。",
@@ -2844,7 +2962,7 @@ def _strategy_model_evidence_v2_plan_slots(
         candidate_requests.append(request)
 
     if not candidate_requests:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_evidence_v2_candidate_required",
             "当前任务没有与最新 StrategySampleDesign V2 严格兼容且通过"
             " live loader 认证的单变量候选证据；请先运行单变量分析。",
@@ -2854,16 +2972,16 @@ def _strategy_model_evidence_v2_plan_slots(
     )
     candidate_ids = [item["expected_candidate_id"] for item in candidate_requests]
     artifact_ids = [item["artifact_id"] for item in candidate_requests]
-    if len(set(candidate_ids)) != len(candidate_ids) or len(
-        set(artifact_ids)
-    ) != len(artifact_ids):
-        raise _StrategyV2EvidenceSetupError(
+    if len(set(candidate_ids)) != len(candidate_ids) or len(set(artifact_ids)) != len(
+        artifact_ids
+    ):
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_evidence_v2_duplicate_sources",
             "兼容的单变量证据存在重复 candidate 或 artifact 身份；"
             "平台不会猜测或重复归集。",
         )
     if len(candidate_requests) > _MAX_UNIVARIATE_SOURCES:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_evidence_v2_candidate_budget_exceeded",
             "与最新 StrategySampleDesign V2 兼容的单变量候选数量超过"
             f"单次全局来源上限（{_MAX_UNIVARIATE_SOURCES}）；"
@@ -2895,23 +3013,29 @@ def _strategy_model_evidence_v2_plan_slots(
             requests=candidate_requests,
             sample_binding=sample_binding,
         )
-    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
+    except (
+        StrategyError,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
         # Validate and authenticate the entire source set in one batch.  This
         # preserves global count/duplicate/JSON and cumulative file-byte
         # budgets instead of resetting a budget for every candidate.
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_model_evidence_v2_candidate_invalid",
             "一份或多份声称与最新 StrategySampleDesign V2 兼容的单变量候选"
             "未通过全局来源预算、文件、hash、路径、provenance 或 task "
             "所有权复核；本次未创建计划。",
         ) from exc
     if verify_current:
-        current_artifacts = _strategy_v2_artifact_snapshot(
+        current_artifacts = strategy_evidence_lane._strategy_v2_artifact_snapshot(
             read_runtime,
             task_id=task.id,
         )
-        if _strategy_v2_registry_token(current_artifacts) != registry_token:
-            raise _StrategyV2EvidenceSetupError(
+        if (
+            strategy_evidence_lane._strategy_v2_registry_token(current_artifacts)
+            != registry_token
+        ):
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_model_evidence_v2_registry_changed",
                 "StrategySampleDesign V2 或单变量候选 registry 在计划创建前"
                 "发生变化；平台已冻结本次计划创建，请基于最新证据重试。",
@@ -2922,8 +3046,9 @@ def _strategy_model_evidence_v2_plan_slots(
         "expected_registry_token": registry_token,
     }
 
+
 def _strategy_report_bundle_v2_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
     *,
@@ -2932,7 +3057,7 @@ def _strategy_report_bundle_v2_plan_slots(
     """Bind one report plan to immutable, fully authenticated source refs."""
 
     inputs = draft.to_dict()["workflow_inputs"]
-    read_runtime = _strategy_report_read_runtime(runtime)
+    read_runtime = strategy_evidence_lane._strategy_report_read_runtime(runtime)
 
     try:
         project_context = load_current_strategy_project_context_artifact(
@@ -2942,26 +3067,28 @@ def _strategy_report_bundle_v2_plan_slots(
     except (
         StrategyError,
         StrategyProjectContextDataError,
-        *_STRATEGY_V2_ARTIFACT_ERRORS,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
     ) as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_project_context_invalid",
             "当前 Strategy ProjectContext 未通过 head、artifact、来源或文件完整性复核；"
             "请先重新整理项目上下文。",
         ) from exc
     if project_context is None:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_project_context_required",
             "生成策略报告前必须先固化当前 Strategy ProjectContext。",
         )
 
-    sample = _strategy_report_latest_sample_binding(
+    sample = strategy_evidence_lane._strategy_report_latest_sample_binding(
         read_runtime,
         task_id=task.id,
     )
-    sample_ref = _strategy_report_sample_ref(sample)
-    requested_pool_type = _strategy_report_requested_pool_type(source_message)
-    pool = _strategy_report_current_pool_binding(
+    sample_ref = strategy_evidence_lane._strategy_report_sample_ref(sample)
+    requested_pool_type = strategy_evidence_lane._strategy_report_requested_pool_type(
+        source_message
+    )
+    pool = strategy_evidence_lane._strategy_report_current_pool_binding(
         read_runtime,
         task_id=task.id,
         requested_type=requested_pool_type,
@@ -2974,7 +3101,7 @@ def _strategy_report_bundle_v2_plan_slots(
         "expected_artifact_content_hash": pool.artifact_content_hash,
     }
     candidate_stability = (
-        _strategy_report_latest_candidate_stability_binding(
+        strategy_evidence_lane._strategy_report_latest_candidate_stability_binding(
             read_runtime,
             task_id=task.id,
             sample=sample,
@@ -2989,20 +3116,20 @@ def _strategy_report_bundle_v2_plan_slots(
             "expected_artifact_content_hash": (
                 candidate_stability.artifact_content_hash
             ),
-            "expected_stability_id": candidate_stability.stability[
-                "stability_id"
-            ],
+            "expected_stability_id": candidate_stability.stability["stability_id"],
             "expected_stability_content_hash": (
                 candidate_stability.stability["content_hash"]
             ),
         }
     )
-    voting_candidate_search = _strategy_report_latest_voting_search_binding(
-        read_runtime,
-        task_id=task.id,
-        sample=sample,
-        sample_ref=sample_ref,
-        pool=pool,
+    voting_candidate_search = (
+        strategy_evidence_lane._strategy_report_latest_voting_search_binding(
+            read_runtime,
+            task_id=task.id,
+            sample=sample,
+            sample_ref=sample_ref,
+            pool=pool,
+        )
     )
     voting_candidate_search_ref = (
         None
@@ -3018,10 +3145,12 @@ def _strategy_report_bundle_v2_plan_slots(
             ),
         }
     )
-    cross_candidate_search = _strategy_report_latest_cross_search_binding(
-        read_runtime,
-        task_id=task.id,
-        sample=sample,
+    cross_candidate_search = (
+        strategy_evidence_lane._strategy_report_latest_cross_search_binding(
+            read_runtime,
+            task_id=task.id,
+            sample=sample,
+        )
     )
     cross_candidate_search_ref = (
         None
@@ -3037,26 +3166,24 @@ def _strategy_report_bundle_v2_plan_slots(
             ),
         }
     )
-    cross_rule_search = _strategy_report_latest_cross_rule_search_binding(
-        read_runtime,
-        task_id=task.id,
-        sample=sample,
+    cross_rule_search = (
+        strategy_evidence_lane._strategy_report_latest_cross_rule_search_binding(
+            read_runtime,
+            task_id=task.id,
+            sample=sample,
+        )
     )
     cross_rule_search_ref = (
         None
         if cross_rule_search is None
         else {
             "artifact_id": cross_rule_search.artifact_id,
-            "expected_artifact_content_hash": (
-                cross_rule_search.artifact_content_hash
-            ),
+            "expected_artifact_content_hash": (cross_rule_search.artifact_content_hash),
             "expected_search_id": cross_rule_search.result["search_id"],
-            "expected_search_content_hash": (
-                cross_rule_search.result["content_hash"]
-            ),
+            "expected_search_content_hash": (cross_rule_search.result["content_hash"]),
         }
     )
-    impact_cube = _strategy_report_latest_impact_cube_binding(
+    impact_cube = strategy_evidence_lane._strategy_report_latest_impact_cube_binding(
         read_runtime,
         task_id=task.id,
         pool=pool,
@@ -3067,9 +3194,7 @@ def _strategy_report_bundle_v2_plan_slots(
         if impact_cube is None
         else {
             "artifact_id": impact_cube.artifact_id,
-            "expected_artifact_content_hash": (
-                impact_cube.artifact_content_hash
-            ),
+            "expected_artifact_content_hash": (impact_cube.artifact_content_hash),
             "expected_cube_id": impact_cube.cube["cube_id"],
             "expected_cube_content_hash": impact_cube.cube["content_hash"],
         }
@@ -3077,7 +3202,7 @@ def _strategy_report_bundle_v2_plan_slots(
     pool_stability = (
         None
         if impact_cube_ref is None
-        else _strategy_report_latest_pool_stability_binding(
+        else strategy_evidence_lane._strategy_report_latest_pool_stability_binding(
             read_runtime,
             task_id=task.id,
             impact_cube_ref=impact_cube_ref,
@@ -3088,9 +3213,7 @@ def _strategy_report_bundle_v2_plan_slots(
         if pool_stability is None
         else {
             "artifact_id": pool_stability.artifact_id,
-            "expected_artifact_content_hash": (
-                pool_stability.artifact_content_hash
-            ),
+            "expected_artifact_content_hash": (pool_stability.artifact_content_hash),
             "expected_stability_id": pool_stability.stability["stability_id"],
             "expected_stability_content_hash": (
                 pool_stability.stability["content_hash"]
@@ -3101,13 +3224,13 @@ def _strategy_report_bundle_v2_plan_slots(
     pool_impact_ref = None
     if impact_cube is None:
         if pool.strategy_type not in {"approval", "reject"}:
-            raise _StrategyV2EvidenceSetupError(
+            raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
                 "strategy_report_bundle_v2_impact_cube_required",
                 f"当前 {pool.strategy_type} Strategy Pool 没有同 revision、"
                 "snapshot 和 SampleDesign 的 ImpactCube；该策略类型不允许"
                 "回退到旧 PoolImpact，请先单独完成 ImpactCube 测算。",
             )
-        impact = _strategy_report_latest_pool_impact_binding(
+        impact = strategy_evidence_lane._strategy_report_latest_pool_impact_binding(
             read_runtime,
             task_id=task.id,
             pool=pool,
@@ -3116,19 +3239,15 @@ def _strategy_report_bundle_v2_plan_slots(
             "artifact_id": impact.artifact_id,
             "expected_artifact_content_hash": impact.artifact_content_hash,
             "expected_assessment_id": impact.assessment["assessment_id"],
-            "expected_assessment_content_hash": impact.assessment[
-                "content_hash"
-            ],
+            "expected_assessment_content_hash": impact.assessment["content_hash"],
         }
 
     try:
-        pool_validation_refs = (
-            select_latest_strategy_pool_validation_refs(
-                read_runtime,
-                task_id=task.id,
-                candidate_pool=pool,
-                sample_design=sample,
-            )
+        pool_validation_refs = select_latest_strategy_pool_validation_refs(
+            read_runtime,
+            task_id=task.id,
+            candidate_pool=pool,
+            sample_design=sample,
         )
         pool_validations = load_strategy_pool_validation_artifacts(
             read_runtime,
@@ -3137,35 +3256,40 @@ def _strategy_report_bundle_v2_plan_slots(
             candidate_pool=pool,
             sample_design=sample,
         )
-    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except (
+        StrategyError,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_pool_validation_invalid",
             "当前 Strategy Pool 的独立样本回放证据未通过 exact ref、"
             "来源或文件完整性复核；本次未创建计划。",
         ) from exc
 
     model_evidence, model_evidence_ref = (
-        _strategy_report_optional_model_evidence(
+        strategy_evidence_lane._strategy_report_optional_model_evidence(
             read_runtime,
             task_id=task.id,
             sample_ref=sample_ref,
         )
     )
     training_evidence, training_evidence_ref = (
-        _strategy_report_optional_training_evidence(
+        strategy_evidence_lane._strategy_report_optional_training_evidence(
             read_runtime,
             task_id=task.id,
             sample_ref=sample_ref,
         )
     )
-    score_evidence, score_evidence_ref = _strategy_report_optional_score_evidence(
-        read_runtime,
-        task_id=task.id,
-        sample_ref=sample_ref,
-        training_ref=training_evidence_ref,
+    score_evidence, score_evidence_ref = (
+        strategy_evidence_lane._strategy_report_optional_score_evidence(
+            read_runtime,
+            task_id=task.id,
+            sample_ref=sample_ref,
+            training_ref=training_evidence_ref,
+        )
     )
 
-    strategy_identity = _strategy_report_identity(
+    strategy_identity = strategy_evidence_lane._strategy_report_identity(
         runtime,
         task_id=task.id,
         candidate_pool=pool,
@@ -3179,7 +3303,7 @@ def _strategy_report_bundle_v2_plan_slots(
             strategy_id=strategy_id,
         )
     except Exception as exc:
-        raise _StrategyV2EvidenceSetupError(
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_head_invalid",
             "当前策略报告 head/CAS 无法通过完整性复核；本次未创建计划。",
         ) from exc
@@ -3205,8 +3329,12 @@ def _strategy_report_bundle_v2_plan_slots(
             training_evidence=training_evidence,
             score_evidence=score_evidence,
         )
-    except (ModelingError, StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
-        raise _StrategyV2EvidenceSetupError(
+    except (
+        ModelingError,
+        StrategyError,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise strategy_contracts_lane._StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_source_incompatible",
             "当前 ProjectContext、SampleDesign V2、Strategy Pool、"
             "ImpactCube/兼容 PoolImpact 或可选模型证据不属于同一条"
@@ -3218,9 +3346,7 @@ def _strategy_report_bundle_v2_plan_slots(
         "status": inputs["status"],
         "project_context_ref": {
             "artifact_id": project_context.artifact_id,
-            "expected_artifact_content_hash": (
-                project_context.artifact_content_hash
-            ),
+            "expected_artifact_content_hash": (project_context.artifact_content_hash),
             "expected_revision": project_context.revision["revision"],
             "expected_revision_id": project_context.revision["revision_id"],
             "expected_state_hash": project_context.revision["state_hash"],
@@ -3245,8 +3371,9 @@ def _strategy_report_bundle_v2_plan_slots(
         "score_evidence_ref": score_evidence_ref,
     }
 
+
 def _strategy_pool_impact_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
     *,
@@ -3258,22 +3385,25 @@ def _strategy_pool_impact_plan_slots(
 
     inputs = draft.to_dict()["workflow_inputs"]
     strategy_type = str(inputs.get("strategy_type") or "")
-    pool, pool_binding = _strategy_pool_impact_pool_binding(
+    pool, pool_binding = strategy_evidence_lane._strategy_pool_impact_pool_binding(
         runtime,
         task,
         strategy_type,
     )
-    if expected_pool_binding is not None and dict(expected_pool_binding) != pool_binding:
+    if (
+        expected_pool_binding is not None
+        and dict(expected_pool_binding) != pool_binding
+    ):
         raise StrategySetupError(
             "Strategy Pool 在用户确认期间已变化；旧确认不会绑定新的 Pool revision，"
             "请基于当前 Pool 重新发起影响测算。"
         )
-    entries = _strategy_pool_entries(pool)
+    entries = strategy_evidence_lane._strategy_pool_entries(pool)
 
     try:
-        workspace = DataWorkspaceRepository(
-            runtime.settings.db_path
-        ).get_or_default(task.id)
+        workspace = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task.id
+        )
     except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
         raise StrategySetupError(
             "Strategy Pool 影响测算需要有效的活动 DataWorkspace。"
@@ -3309,9 +3439,7 @@ def _strategy_pool_impact_plan_slots(
     for entry in entries:
         source = entry.get("source")
         evidence_identity = (
-            source.get("evidence_identity")
-            if isinstance(source, Mapping)
-            else None
+            source.get("evidence_identity") if isinstance(source, Mapping) else None
         )
         if not isinstance(evidence_identity, Mapping):
             raise StrategySetupError(
@@ -3342,9 +3470,7 @@ def _strategy_pool_impact_plan_slots(
     slots: dict[str, object] = {
         "strategy_type": strategy_type,
         "expected_pool_revision": pool_binding["expected_pool_revision"],
-        "expected_pool_snapshot_hash": pool_binding[
-            "expected_pool_snapshot_hash"
-        ],
+        "expected_pool_snapshot_hash": pool_binding["expected_pool_snapshot_hash"],
         "dataset_id": workspace.active_dataset_id,
         "expected_dataset_content_hash": content_hash,
         "workspace_revision": workspace.revision,
@@ -3359,7 +3485,7 @@ def _strategy_pool_impact_plan_slots(
         ("loan_amount_col", "loan_amount"),
         ("overdue_amount_col", "overdue_amount"),
     ):
-        column = _strategy_pool_impact_column(
+        column = strategy_evidence_lane._strategy_pool_impact_column(
             inputs,
             field=field,
             role=role,
@@ -3369,15 +3495,17 @@ def _strategy_pool_impact_plan_slots(
         if column is not None:
             slots[field] = column
 
-    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
-        runtime,
-        task,
-        context=context,
-        drop_nan_labels=bool(drop_nan_labels),
-        allow_native_risk_development=True,
-        month_col=slots.get("month_col"),
-        loan_amount_col=slots.get("loan_amount_col"),
-        overdue_amount_col=slots.get("overdue_amount_col"),
+    slots["sample_design_ref"] = (
+        strategy_sample_lane._latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=bool(drop_nan_labels),
+            allow_native_risk_development=True,
+            month_col=slots.get("month_col"),
+            loan_amount_col=slots.get("loan_amount_col"),
+            overdue_amount_col=slots.get("overdue_amount_col"),
+        )
     )
 
     baseline_strategy_id = inputs.get("baseline_strategy_id")
@@ -3418,8 +3546,9 @@ def _strategy_pool_impact_plan_slots(
         raise StrategySetupError("absolute 影响测算禁止绑定 baseline_strategy_id。")
     return slots
 
+
 def _strategy_pool_plan_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> dict:
@@ -3428,9 +3557,9 @@ def _strategy_pool_plan_slots(
     inputs = draft.to_dict()["workflow_inputs"]
     strategy_type = str(inputs["strategy_type"])
     try:
-        current = StrategyCandidatePoolRepository(
-            runtime.settings.db_path
-        ).get_current(task.id, strategy_type)
+        current = StrategyCandidatePoolRepository(runtime.settings.db_path).get_current(
+            task.id, strategy_type
+        )
     except Exception as exc:
         raise StrategySetupError(
             "当前 Strategy Pool 状态无法通过完整性校验，请先检查任务数据。"
@@ -3503,14 +3632,17 @@ def _strategy_pool_plan_slots(
             slots["placement_mode"] = "append"
         slots["default_action"] = inputs["default_action"]
         slots["action"] = inputs["action"]
-        if current is not None and current.get("default_action") != inputs["default_action"]:
+        if (
+            current is not None
+            and current.get("default_action") != inputs["default_action"]
+        ):
             raise StrategySetupError(
                 "请求中的 default_action 与当前 Strategy Pool 不一致；"
                 "不能在添加条目时静默改写 Pool 默认动作。"
             )
         asset_id = slots["expected_asset_id"]
         if current is not None:
-            entries = _strategy_pool_entries(current)
+            entries = strategy_evidence_lane._strategy_pool_entries(current)
             if fragment_id is None and any(
                 isinstance(entry.get("source"), Mapping)
                 and entry["source"].get("asset_id") == asset_id
@@ -3541,28 +3673,35 @@ def _strategy_pool_plan_slots(
             )
         return slots
     if current is None:
-        raise StrategySetupError("当前任务还没有该类型的 Strategy Pool，无法执行此操作。")
+        raise StrategySetupError(
+            "当前任务还没有该类型的 Strategy Pool，无法执行此操作。"
+        )
 
     if draft.workflow in {
         "strategy_pool_remove_entry",
         "strategy_pool_set_action",
     }:
         identifier = inputs.get("rule_id") or inputs.get("entry_id")
-        slots["rule_id"] = _strategy_pool_rule_id(current, str(identifier))
+        slots["rule_id"] = strategy_evidence_lane._strategy_pool_rule_id(
+            current, str(identifier)
+        )
         if draft.workflow == "strategy_pool_set_action":
             slots["action"] = inputs["action"]
         return slots
 
     if draft.workflow == "strategy_pool_reorder":
-        slots["ordered_rule_ids"] = _strategy_pool_complete_rule_order(
-            current,
-            inputs["ordered_ids"],
+        slots["ordered_rule_ids"] = (
+            strategy_evidence_lane._strategy_pool_complete_rule_order(
+                current,
+                inputs["ordered_ids"],
+            )
         )
         return slots
     raise StrategySetupError(f"未接线的 Strategy Pool Workflow：{draft.workflow}")
 
+
 def _candidate_asset_artifact_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     asset_id: str,
@@ -3652,8 +3791,7 @@ def _candidate_asset_artifact_slots(
                 )
         except Exception as exc:
             raise StrategySetupError(
-                f"Voting 候选资产 {asset_id} 无法通过 artifact 完整性校验，"
-                "请重新生成。"
+                f"Voting 候选资产 {asset_id} 无法通过 artifact 完整性校验，请重新生成。"
             ) from exc
         return {
             "source_artifact_id": verified.artifact_id,
@@ -3696,17 +3834,19 @@ def _candidate_asset_artifact_slots(
         "_candidate_asset_type": "univariate_refinement",
     }
 
+
 def _automatic_tree_leaf_selection_artifact_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     selection_id: str,
 ) -> tuple[dict[str, str], str]:
     """Bind one exact selection ID to four verified Pool Tool slots."""
 
-    if re.fullmatch(
-        r"automatic-tree-leaf-selection-[0-9a-f]{32}", selection_id
-    ) is None:
+    if (
+        re.fullmatch(r"automatic-tree-leaf-selection-[0-9a-f]{32}", selection_id)
+        is None
+    ):
         raise StrategySetupError(
             "automatic-tree leaf selection ID 格式无效；请复制完整 selection ID。"
         )
@@ -3804,51 +3944,61 @@ def _automatic_tree_leaf_selection_artifact_slots(
         fragment_id,
     )
 
+
 def _candidate_selection_artifact_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     selection_id: str,
 ) -> tuple[dict[str, str], str]:
     """Dispatch only between explicitly versioned governed selection types."""
 
-    if re.fullmatch(
-        r"automatic-tree-leaf-selection-[0-9a-f]{32}", selection_id
-    ) is not None:
+    if (
+        re.fullmatch(r"automatic-tree-leaf-selection-[0-9a-f]{32}", selection_id)
+        is not None
+    ):
         return _automatic_tree_leaf_selection_artifact_slots(
             runtime,
             task_id=task_id,
             selection_id=selection_id,
         )
-    if re.fullmatch(
-        r"interactive-tree-frontier-group-selection-[0-9a-f]{32}",
-        selection_id,
-    ) is not None:
+    if (
+        re.fullmatch(
+            r"interactive-tree-frontier-group-selection-[0-9a-f]{32}",
+            selection_id,
+        )
+        is not None
+    ):
         return _interactive_tree_frontier_group_selection_artifact_slots(
             runtime,
             task_id=task_id,
             selection_id=selection_id,
         )
-    if re.fullmatch(
-        r"interactive-tree-frontier-selection-[0-9a-f]{32}",
-        selection_id,
-    ) is not None:
+    if (
+        re.fullmatch(
+            r"interactive-tree-frontier-selection-[0-9a-f]{32}",
+            selection_id,
+        )
+        is not None
+    ):
         return _interactive_tree_frontier_selection_artifact_slots(
             runtime,
             task_id=task_id,
             selection_id=selection_id,
         )
-    if re.fullmatch(
-        r"cross-matrix-cell-selection-[0-9a-f]{32}", selection_id
-    ) is not None:
+    if (
+        re.fullmatch(r"cross-matrix-cell-selection-[0-9a-f]{32}", selection_id)
+        is not None
+    ):
         return _cross_matrix_cell_selection_artifact_slots(
             runtime,
             task_id=task_id,
             selection_id=selection_id,
         )
-    if re.fullmatch(
-        r"scorecard-cutoff-selection-[0-9a-f]{32}", selection_id
-    ) is not None:
+    if (
+        re.fullmatch(r"scorecard-cutoff-selection-[0-9a-f]{32}", selection_id)
+        is not None
+    ):
         return _scorecard_cutoff_selection_artifact_slots(
             runtime,
             task_id=task_id,
@@ -3861,18 +4011,22 @@ def _candidate_selection_artifact_slots(
         "或 Scorecard cutoff selection ID。"
     )
 
+
 def _interactive_tree_frontier_group_selection_artifact_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     selection_id: str,
 ) -> tuple[dict[str, str], str]:
     """Resolve one task-local frontier OR group to authenticated Pool slots."""
 
-    if re.fullmatch(
-        r"interactive-tree-frontier-group-selection-[0-9a-f]{32}",
-        selection_id,
-    ) is None:
+    if (
+        re.fullmatch(
+            r"interactive-tree-frontier-group-selection-[0-9a-f]{32}",
+            selection_id,
+        )
+        is None
+    ):
         raise StrategySetupError(
             "interactive-tree frontier group selection ID 格式无效；"
             "请复制完整 selection ID。"
@@ -3931,8 +4085,7 @@ def _interactive_tree_frontier_group_selection_artifact_slots(
                 INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_SCHEMA_VERSION_V2,
             }:
                 raise StrategySetupError(
-                    "interactive-tree frontier group selection artifact "
-                    "schema 无效。"
+                    "interactive-tree frontier group selection artifact schema 无效。"
                 )
             semantic_tree_id = provenance.get("semantic_tree_id")
             tree_hash = provenance.get("tree_hash")
@@ -3952,19 +4105,17 @@ def _interactive_tree_frontier_group_selection_artifact_slots(
                     "interactive-tree frontier group selection artifact "
                     "完整性绑定不完整。"
                 )
-            verified = (
-                load_verified_interactive_tree_frontier_group_selection_artifact_on_connection(
-                    conn,
-                    runtime=SimpleNamespace(
-                        settings=runtime.settings,
-                        task_artifacts=repository,
-                    ),
-                    task_id=task_id,
-                    artifact_id=artifact_id,
-                    expected_content_hash=content_hash,
-                    expected_asset_id=semantic_tree_id,
-                    expected_asset_hash=tree_hash,
-                )
+            verified = load_verified_interactive_tree_frontier_group_selection_artifact_on_connection(
+                conn,
+                runtime=SimpleNamespace(
+                    settings=runtime.settings,
+                    task_artifacts=repository,
+                ),
+                task_id=task_id,
+                artifact_id=artifact_id,
+                expected_content_hash=content_hash,
+                expected_asset_id=semantic_tree_id,
+                expected_asset_hash=tree_hash,
             )
     except StrategySetupError:
         raise
@@ -3977,8 +4128,7 @@ def _interactive_tree_frontier_group_selection_artifact_slots(
 
     if verified.selection.get("selection_id") != selection_id:
         raise StrategySetupError(
-            "interactive-tree frontier group selection ID 与认证 artifact "
-            "不一致。"
+            "interactive-tree frontier group selection ID 与认证 artifact 不一致。"
         )
     revision = verified.revision
     ancestry = revision.ancestor_revisions
@@ -3994,9 +4144,7 @@ def _interactive_tree_frontier_group_selection_artifact_slots(
                 ancestor_revisions=ancestry[1:],
             )
         )
-        pool_source, _rule_id, _execution = verified_fragment_pool_parts(
-            fragment
-        )
+        pool_source, _rule_id, _execution = verified_fragment_pool_parts(fragment)
     except (StrategyError, TypeError, ValueError) as exc:
         raise StrategySetupError(
             "interactive-tree frontier group selection 未能从 live revision "
@@ -4025,21 +4173,24 @@ def _interactive_tree_frontier_group_selection_artifact_slots(
         fragment_id,
     )
 
+
 def _interactive_tree_frontier_selection_artifact_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     selection_id: str,
 ) -> tuple[dict[str, str], str]:
     """Resolve one task-local frontier pointer to authenticated Pool slots."""
 
-    if re.fullmatch(
-        r"interactive-tree-frontier-selection-[0-9a-f]{32}",
-        selection_id,
-    ) is None:
+    if (
+        re.fullmatch(
+            r"interactive-tree-frontier-selection-[0-9a-f]{32}",
+            selection_id,
+        )
+        is None
+    ):
         raise StrategySetupError(
-            "interactive-tree frontier selection ID 格式无效；"
-            "请复制完整 selection ID。"
+            "interactive-tree frontier selection ID 格式无效；请复制完整 selection ID。"
         )
     repository = TaskArtifactRepository(runtime.settings.db_path)
     try:
@@ -4081,8 +4232,7 @@ def _interactive_tree_frontier_selection_artifact_slots(
                     matches.append((row, provenance))
             if not matches:
                 raise StrategySetupError(
-                    "当前任务没有 interactive-tree frontier selection "
-                    f"{selection_id}。"
+                    f"当前任务没有 interactive-tree frontier selection {selection_id}。"
                 )
             if len(matches) != 1:
                 raise StrategySetupError(
@@ -4112,22 +4262,19 @@ def _interactive_tree_frontier_selection_artifact_slots(
                 or re.fullmatch(r"[0-9a-f]{64}", tree_hash) is None
             ):
                 raise StrategySetupError(
-                    "interactive-tree frontier selection artifact "
-                    "完整性绑定不完整。"
+                    "interactive-tree frontier selection artifact 完整性绑定不完整。"
                 )
-            verified = (
-                load_verified_interactive_tree_frontier_selection_artifact_on_connection(
-                    conn,
-                    runtime=SimpleNamespace(
-                        settings=runtime.settings,
-                        task_artifacts=repository,
-                    ),
-                    task_id=task_id,
-                    artifact_id=artifact_id,
-                    expected_content_hash=content_hash,
-                    expected_asset_id=semantic_tree_id,
-                    expected_asset_hash=tree_hash,
-                )
+            verified = load_verified_interactive_tree_frontier_selection_artifact_on_connection(
+                conn,
+                runtime=SimpleNamespace(
+                    settings=runtime.settings,
+                    task_artifacts=repository,
+                ),
+                task_id=task_id,
+                artifact_id=artifact_id,
+                expected_content_hash=content_hash,
+                expected_asset_id=semantic_tree_id,
+                expected_asset_hash=tree_hash,
             )
     except StrategySetupError:
         raise
@@ -4169,25 +4316,24 @@ def _interactive_tree_frontier_selection_artifact_slots(
         fragment_id,
     )
 
+
 def _scorecard_cutoff_selection_artifact_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     selection_id: str,
 ) -> tuple[dict[str, str], str]:
     """Replay one authenticated Scorecard pointer back to its full band."""
 
-    read_runtime = _strategy_report_read_runtime(runtime)
+    read_runtime = strategy_evidence_lane._strategy_report_read_runtime(runtime)
     artifacts = _scorecard_artifact_snapshot(read_runtime, task_id=task_id)
     registry_token = _scorecard_registry_token(artifacts)
     matches = []
     for artifact in artifacts:
         provenance = artifact.get("provenance")
         if (
-            artifact.get("kind")
-            == SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND
-            and artifact.get("origin_tool")
-            == SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL
+            artifact.get("kind") == SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND
+            and artifact.get("origin_tool") == SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL
             and isinstance(provenance, Mapping)
             and provenance.get("schema_version")
             == SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION
@@ -4234,16 +4380,14 @@ def _scorecard_cutoff_selection_artifact_slots(
             selection_artifact_binding=verified.to_domain_binding(),
             source_artifact_binding=source.to_domain_binding(),
         )
-        pool_source, _rule_id, _execution = verified_fragment_pool_parts(
-            fragment
-        )
+        pool_source, _rule_id, _execution = verified_fragment_pool_parts(fragment)
     except (
         StrategyError,
         OSError,
         KeyError,
         TypeError,
         ValueError,
-        *_STRATEGY_V2_ARTIFACT_ERRORS,
+        *strategy_contracts_lane._STRATEGY_V2_ARTIFACT_ERRORS,
     ) as exc:
         raise StrategySetupError(
             f"Scorecard cutoff selection {selection_id} 未通过 selection、"
@@ -4256,8 +4400,7 @@ def _scorecard_cutoff_selection_artifact_slots(
     if (
         verified.selection.get("selection_id") != selection_id
         or not isinstance(asset_id, str)
-        or re.fullmatch(r"scorecard-band-asset-[0-9a-f]{32}", asset_id)
-        is None
+        or re.fullmatch(r"scorecard-band-asset-[0-9a-f]{32}", asset_id) is None
         or not isinstance(asset_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", asset_hash) is None
         or not isinstance(fragment_id, str)
@@ -4284,8 +4427,9 @@ def _scorecard_cutoff_selection_artifact_slots(
         fragment_id,
     )
 
+
 def _cross_matrix_cell_selection_artifact_slots(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     *,
     task_id: str,
     selection_id: str,
@@ -4308,8 +4452,7 @@ def _cross_matrix_cell_selection_artifact_slots(
         provenance = artifact.get("provenance")
         if (
             artifact.get("kind") == CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND
-            and artifact.get("origin_tool")
-            == CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL
+            and artifact.get("origin_tool") == CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL
             and isinstance(provenance, Mapping)
             and provenance.get("schema_version")
             == CROSS_MATRIX_CELL_SELECTION_ARTIFACT_SCHEMA_VERSION
@@ -4342,16 +4485,14 @@ def _cross_matrix_cell_selection_artifact_slots(
         )
     try:
         with repository.transaction() as conn:
-            verified = (
-                load_verified_cross_matrix_cell_selection_artifact_on_connection(
-                    conn,
-                    tasks_dir=runtime.settings.tasks_dir,
-                    task_id=task_id,
-                    artifact_id=artifact_id,
-                    expected_content_hash=content_hash,
-                    expected_asset_id=asset_id,
-                    expected_asset_hash=asset_hash,
-                )
+            verified = load_verified_cross_matrix_cell_selection_artifact_on_connection(
+                conn,
+                tasks_dir=runtime.settings.tasks_dir,
+                task_id=task_id,
+                artifact_id=artifact_id,
+                expected_content_hash=content_hash,
+                expected_asset_id=asset_id,
+                expected_asset_hash=asset_hash,
             )
     except Exception as exc:
         raise StrategySetupError(
@@ -4387,6 +4528,7 @@ def _cross_matrix_cell_selection_artifact_slots(
         str(group_id),
     )
 
+
 def _is_automatic_tree_build_draft(
     draft: CompiledStrategyRequestDraft,
 ) -> bool:
@@ -4395,8 +4537,9 @@ def _is_automatic_tree_build_draft(
         and draft.workflow == "automatic_tree_candidate_build"
     )
 
+
 def _ensure_automatic_tree_active_workspace(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     *,
     preview,
@@ -4431,7 +4574,7 @@ def _ensure_automatic_tree_active_workspace(
             )
         return preview, context
 
-    _backend, registry = _modeling_data_runtime(runtime.settings)
+    _backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     owned = [
         dataset
         for dataset in registry.list_for_task(task.id)
@@ -4485,9 +4628,12 @@ def _ensure_automatic_tree_active_workspace(
             "自动树数据工作区在计划创建前发生变化，请重新确认活动样本。"
         ) from exc
 
-    refreshed_preview = _strategy_dataset_preview(runtime, task)
-    refreshed_context = _strategy_dataset_context(runtime, task, require_target=True)
+    refreshed_preview = strategy_evidence_lane._strategy_dataset_preview(runtime, task)
+    refreshed_context = strategy_evidence_lane._strategy_dataset_context(
+        runtime, task, require_target=True
+    )
     return refreshed_preview, refreshed_context
+
 
 def _typed_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
     slots = {
@@ -4506,6 +4652,7 @@ def _typed_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
         slots["economics_inputs"] = dict(draft.economics_inputs)
     return slots
 
+
 def _is_auto_candidate_draft(draft: CompiledStrategyRequestDraft) -> bool:
     return (
         isinstance(draft, StrategyRequestDraft)
@@ -4513,6 +4660,7 @@ def _is_auto_candidate_draft(draft: CompiledStrategyRequestDraft) -> bool:
         and draft.strategy_type in {"limit", "pricing", "segmentation"}
         and draft.candidate_design is not None
     )
+
 
 def _candidate_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
     slots = {
@@ -4529,6 +4677,7 @@ def _candidate_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
     if draft.baseline_strategy_id:
         slots["baseline_strategy_id"] = draft.baseline_strategy_id
     return slots
+
 
 def _stored_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
     slots = {

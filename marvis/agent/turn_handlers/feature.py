@@ -1,30 +1,31 @@
-"""feature driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Feature for governed Agent turns."""
+
 from __future__ import annotations
-from marvis.agent.feature_setup import FeatureSetupError, FeatureTargetChoiceRequired, build_feature_proposal, infer_meaning_directions
-from marvis.agent.join_setup import AuthenticatedJoinSelection, C1TargetValidationError, JoinSetupError, authenticate_join_selection
-from marvis.agent.plan_driver import CONFIRMATION_SOURCE_AUTO, CONFIRMATION_SOURCE_HUMAN
-from marvis.repositories.tasks import TaskRepository
+
+from marvis.agent.feature_setup import FeatureSetupError
+from marvis.agent.feature_setup import FeatureTargetChoiceRequired
+from marvis.agent.feature_setup import build_feature_proposal
+from marvis.agent.feature_setup import infer_meaning_directions
+from marvis.agent.join_setup import AuthenticatedJoinSelection
+from marvis.agent.join_setup import C1TargetValidationError
+from marvis.agent.join_setup import JoinSetupError
+from marvis.agent.join_setup import authenticate_join_selection
+from marvis.agent.plan_driver import CONFIRMATION_SOURCE_AUTO
+from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
 from marvis.domain import TaskRecord
+from marvis.repositories.tasks import TaskRepository
+from . import c1 as c1_lane
+from . import c1_state as c1_state_lane
+from . import contracts as contracts_lane
+from . import data_context as data_context_lane
+from . import responses as responses_lane
+from . import shared as shared_lane
+from . import turn_runner as turn_runner_lane
+from . import typed_ui as typed_ui_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _TurnHandlerSpec
-    from . import _c1_expected_content_hashes
-    from . import _c1_semantic_snapshot_matches
-    from . import _has_c1_semantic_authorization
-    from . import _identity_display_text
-    from . import _ingest_notice_text
-    from . import _modeling_data_runtime
-    from . import _parse_c1_reply
-    from . import _run_driver_turn
-    from . import _validated_authenticated_c1_target
-    from . import append_join_error
-    from . import join_turn_response
 
 def run_feature_driver_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -41,7 +42,7 @@ def run_feature_driver_turn(
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
-    return _run_driver_turn(
+    return turn_runner_lane._run_driver_turn(
         _FEATURE_SPEC,
         runtime,
         repo,
@@ -60,14 +61,15 @@ def run_feature_driver_turn(
         ui_action=ui_action,
     )
 
+
 def _run_feature_setup(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     user_text: str | None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict | tuple:
-    backend, registry = _modeling_data_runtime(runtime.settings)
+    backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     target_state = _latest_feature_target_state(repo.list_agent_messages(task.id))
     configured_target = str(getattr(task, "target_col", "") or "").strip()
     target_candidates = [
@@ -83,7 +85,7 @@ def _run_feature_setup(
     target_assignment: dict | None = None
     feature_c1_selection: AuthenticatedJoinSelection | None = None
     if target_state is not None:
-        target_assignment = _parse_c1_reply(
+        target_assignment = c1_lane._parse_c1_reply(
             user_text,
             target_state,
             llm_client=runtime.llm_client,
@@ -114,8 +116,8 @@ def _run_feature_setup(
                     },
                 },
             )
-            return join_turn_response(repo, task.id)
-        if _has_c1_semantic_authorization(target_assignment):
+            return responses_lane.join_turn_response(repo, task.id)
+        if c1_state_lane._has_c1_semantic_authorization(target_assignment):
             current_dataset = registry.get(str(target_assignment["anchor_id"]))
             current_state = {
                 **target_state,
@@ -128,7 +130,9 @@ def _run_feature_setup(
                     if isinstance(item, dict)
                 ],
             }
-            if not _c1_semantic_snapshot_matches(target_assignment, current_state):
+            if not c1_state_lane._c1_semantic_snapshot_matches(
+                target_assignment, current_state
+            ):
                 raise FeatureSetupError(
                     "目标列复核期间数据快照已变化，请刷新后重新选择。"
                 )
@@ -137,19 +141,24 @@ def _run_feature_setup(
             task.id,
             anchor_id=str(target_assignment["anchor_id"]),
             feature_ids=[],
-            expected_content_hashes=_c1_expected_content_hashes(target_state),
+            expected_content_hashes=c1_state_lane._c1_expected_content_hashes(
+                target_state
+            ),
         )
         try:
-            configured_target = _validated_authenticated_c1_target(
-                registry,
-                feature_c1_selection,
-                configured_target,
-            ) or ""
+            configured_target = (
+                typed_ui_lane._validated_authenticated_c1_target(
+                    registry,
+                    feature_c1_selection,
+                    configured_target,
+                )
+                or ""
+            )
             target_assignment["target_col"] = configured_target or None
         except C1TargetValidationError as exc:
             if runtime.ui_action == "confirm_roles":
                 raise
-            return append_join_error(repo, task.id, str(exc))
+            return responses_lane.append_join_error(repo, task.id, str(exc))
     try:
         proposal = build_feature_proposal(
             registry,
@@ -180,7 +189,7 @@ def _run_feature_setup(
                 "feature_target_choice": {"candidates": exc.candidates},
             },
         )
-        return join_turn_response(repo, task.id)
+        return responses_lane.join_turn_response(repo, task.id)
     persist_target_col = (
         configured_target
         if configured_target
@@ -201,7 +210,7 @@ def _run_feature_setup(
         "content": (
             f"分析数据集 `{proposal.dataset_name}`（目标列 `{proposal.target_col}`，"
             f"{len(proposal.features)} 个候选特征）:"
-            f"{_ingest_notice_text(notices)}"
+            f"{shared_lane._ingest_notice_text(notices)}"
         ),
         "metadata": {"intent": "feature_analysis", "ingest_notices": notices},
     }
@@ -211,7 +220,7 @@ def _run_feature_setup(
         {
             **(
                 {"_post_start_c1_assignment": target_assignment}
-                if _has_c1_semantic_authorization(target_assignment)
+                if c1_state_lane._has_c1_semantic_authorization(target_assignment)
                 else {}
             ),
             **(
@@ -234,13 +243,15 @@ def _run_feature_setup(
         },
     )
 
-_FEATURE_SPEC = _TurnHandlerSpec(
+
+_FEATURE_SPEC = contracts_lane._TurnHandlerSpec(
     intent="feature_analysis",
     setup_error_types=(FeatureSetupError, JoinSetupError),
     error_label="特征分析出错",
     run_setup=_run_feature_setup,
-    format_user_display=_identity_display_text,
+    format_user_display=typed_ui_lane._identity_display_text,
 )
+
 
 def _feature_metrics(task: TaskRecord) -> list[str] | None:
     raw = getattr(task, "metrics", None)
@@ -248,12 +259,16 @@ def _feature_metrics(task: TaskRecord) -> list[str] | None:
         return None
     return [str(item).strip() for item in raw if str(item).strip()]
 
+
 def _latest_feature_target_state(conversation: list[dict]) -> dict | None:
     for message in reversed(conversation):
         metadata = message.get("metadata") or {}
-        if metadata.get("feature_target_choice") and isinstance(metadata.get("join_c1"), dict):
+        if metadata.get("feature_target_choice") and isinstance(
+            metadata.get("join_c1"), dict
+        ):
             return dict(metadata["join_c1"])
     return None
+
 
 def _feature_target_choice_state(
     exc: FeatureTargetChoiceRequired,
@@ -261,18 +276,20 @@ def _feature_target_choice_state(
     content_hash: str,
 ) -> dict:
     return {
-        "files": [{
-            "dataset_id": exc.dataset_id,
-            "content_hash": content_hash,
-            "name": exc.dataset_name,
-            "row_count": "",
-            "n_cols": "",
-            "has_target": True,
-            "candidate_target": None,
-            "proposed_role": "anchor",
-            "columns": list(exc.candidates),
-            "target_candidates": list(exc.candidates),
-        }],
+        "files": [
+            {
+                "dataset_id": exc.dataset_id,
+                "content_hash": content_hash,
+                "name": exc.dataset_name,
+                "row_count": "",
+                "n_cols": "",
+                "has_target": True,
+                "candidate_target": None,
+                "proposed_role": "anchor",
+                "columns": list(exc.candidates),
+                "target_candidates": list(exc.candidates),
+            }
+        ],
         "anchor_id": exc.dataset_id,
         "feature_ids": [],
         "target_col": None,

@@ -8,6 +8,7 @@ import pytest
 
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent import turn_handlers
+from marvis.agent.turn_handlers import strategy_candidates
 
 
 def _draft(workflow: str, workflow_inputs: dict[str, object]):
@@ -116,16 +117,8 @@ def test_legacy_fresh_univariate_plan_shape_is_characterized(
 ) -> None:
     started: dict[str, object] = {}
     sample_ref = {"artifact_id": "sample-artifact", "content_hash": "a" * 64}
-    monkeypatch.setattr(
-        turn_handlers,
-        "_latest_matching_strategy_sample_design_ref",
-        lambda *_args, **_kwargs: dict(sample_ref),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_start_confirmed_strategy_plan",
-        lambda _runtime, _repo, _task, **kwargs: started.update(kwargs) or started,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._latest_matching_strategy_sample_design_ref', lambda *_args, **_kwargs: dict(sample_ref))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', lambda _runtime, _repo, _task, **kwargs: started.update(kwargs) or started)
     context = SimpleNamespace(
         dataset_id="dataset-1",
         dataset_content_hash="b" * 64,
@@ -181,16 +174,8 @@ def test_legacy_existing_refinement_plan_shape_is_characterized(
         "selection": {"source_bin_ids": ["regular:1"]},
         "selection_reason": "人工确认",
     }
-    monkeypatch.setattr(
-        turn_handlers,
-        "_bind_candidate_source_artifact_evidence",
-        lambda *_args, **_kwargs: dict(source_ref),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_start_confirmed_strategy_plan",
-        lambda _runtime, _repo, _task, **kwargs: started.update(kwargs) or started,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates._bind_candidate_source_artifact_evidence', lambda *_args, **_kwargs: dict(source_ref))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', lambda _runtime, _repo, _task, **kwargs: started.update(kwargs) or started)
 
     turn_handlers._run_validated_strategy_request(
         SimpleNamespace(),
@@ -313,15 +298,11 @@ def test_legacy_evidence_bound_plan_shapes_are_characterized(
 ) -> None:
     started: dict[str, object] = {}
     monkeypatch.setattr(
-        turn_handlers,
+        strategy_candidates,
         helper_name,
         lambda *_args, **_kwargs: dict(evidence_slots),
     )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_start_confirmed_strategy_plan",
-        lambda _runtime, _repo, _task, **kwargs: started.update(kwargs) or started,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', lambda _runtime, _repo, _task, **kwargs: started.update(kwargs) or started)
 
     turn_handlers._run_validated_strategy_request(
         SimpleNamespace(),

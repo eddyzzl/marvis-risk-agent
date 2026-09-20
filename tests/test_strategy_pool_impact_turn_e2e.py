@@ -85,26 +85,22 @@ def _context(*columns: str):
 
 
 def _install_state(monkeypatch, mapping: DataSemanticMapping) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda db_path: _PoolRepository(),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.DataWorkspaceRepository",
-        lambda db_path: _WorkspaceRepository(mapping),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda pool: POOL_HASH,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.data_semantic_mapping_hash",
-        lambda mapping: SEMANTIC_HASH,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._latest_matching_strategy_sample_design_ref",
-        lambda *args, **kwargs: dict(SAMPLE_DESIGN_REF),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository())
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository())
+    monkeypatch.setattr('marvis.agent.turn_handlers.dataset_turns.DataWorkspaceRepository', lambda db_path: _WorkspaceRepository(mapping))
+    monkeypatch.setattr('marvis.agent.turn_handlers.join.DataWorkspaceRepository', lambda db_path: _WorkspaceRepository(mapping))
+    monkeypatch.setattr('marvis.agent.turn_handlers.labeling.DataWorkspaceRepository', lambda db_path: _WorkspaceRepository(mapping))
+    monkeypatch.setattr('marvis.agent.turn_handlers.semantic.DataWorkspaceRepository', lambda db_path: _WorkspaceRepository(mapping))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.DataWorkspaceRepository', lambda db_path: _WorkspaceRepository(mapping))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request.DataWorkspaceRepository', lambda db_path: _WorkspaceRepository(mapping))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample.DataWorkspaceRepository', lambda db_path: _WorkspaceRepository(mapping))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda pool: POOL_HASH)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda pool: POOL_HASH)
+    monkeypatch.setattr('marvis.agent.turn_handlers.dataset_turns.data_semantic_mapping_hash', lambda mapping: SEMANTIC_HASH)
+    monkeypatch.setattr('marvis.agent.turn_handlers.semantic.data_semantic_mapping_hash', lambda mapping: SEMANTIC_HASH)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.data_semantic_mapping_hash', lambda mapping: SEMANTIC_HASH)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample.data_semantic_mapping_hash', lambda mapping: SEMANTIC_HASH)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._latest_matching_strategy_sample_design_ref', lambda *args, **kwargs: dict(SAMPLE_DESIGN_REF))
 
 
 @pytest.mark.parametrize(
@@ -223,10 +219,7 @@ def test_nan_confirmation_binds_pool_revision_and_refuses_new_revision(
         target_col="bad",
         identity={"dataset_content_hash": DATASET_HASH},
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_pool_impact_dataset_preview",
-        lambda runtime, task: preview,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._strategy_pool_impact_dataset_preview', lambda runtime, task: preview)
 
     def _pool_binding(runtime, task, strategy_type):
         assert strategy_type == "approval"
@@ -239,14 +232,8 @@ def test_nan_confirmation_binds_pool_revision_and_refuses_new_revision(
             },
         )
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_pool_impact_pool_binding",
-        _pool_binding,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._prepare_and_run_validated_strategy_request",
-        lambda *args, **kwargs: pytest.fail("changed Pool must not create a plan"),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_pool_impact_pool_binding', _pool_binding)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._prepare_and_run_validated_strategy_request', lambda *args, **kwargs: pytest.fail('changed Pool must not create a plan'))
     runtime = SimpleNamespace(
         settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
         plan_repo=SimpleNamespace(list_plans_for_task=lambda task_id: []),
@@ -357,10 +344,9 @@ def test_turn_verifies_same_task_same_type_canonical_baseline_and_passes_only_id
         def get_strategy_spec_hash(self, strategy_id: str):
             return "d" * 64
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyRepository",
-        lambda db_path: _StrategyRepository(),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyRepository', lambda db_path: _StrategyRepository())
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyRepository', lambda db_path: _StrategyRepository())
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request.StrategyRepository', lambda db_path: _StrategyRepository())
     draft = StandardWorkflowRequestDraft(
         workflow="strategy_pool_impact",
         workflow_inputs={
@@ -390,10 +376,10 @@ def test_turn_rejects_active_workspace_that_differs_from_pool_sample(
         monkeypatch,
         DataSemanticMapping(target_col="bad", field_roles={"bad": "target"}),
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.data_semantic_mapping_hash",
-        lambda mapping: "e" * 64,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.dataset_turns.data_semantic_mapping_hash', lambda mapping: 'e' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.semantic.data_semantic_mapping_hash', lambda mapping: 'e' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.data_semantic_mapping_hash', lambda mapping: 'e' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample.data_semantic_mapping_hash', lambda mapping: 'e' * 64)
     draft = StandardWorkflowRequestDraft(
         workflow="strategy_pool_impact",
         workflow_inputs={"strategy_type": "approval", "comparison_mode": "absolute"},

@@ -118,11 +118,7 @@ def binding_fixture(
             },
         )
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers."
-        "load_verified_interactive_tree_frontier_selection_artifact_on_connection",
-        fake_loader,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_verified_interactive_tree_frontier_selection_artifact_on_connection', fake_loader)
     return SimpleNamespace(
         settings=settings,
         runtime=SimpleNamespace(settings=settings),

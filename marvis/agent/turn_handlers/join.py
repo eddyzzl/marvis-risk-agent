@@ -1,40 +1,39 @@
-"""join driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Join for governed Agent turns."""
+
 from __future__ import annotations
+
+from marvis.agent.join_setup import C1TargetValidationError
+from marvis.agent.join_setup import JoinSetupError
+from marvis.agent.join_setup import authenticate_join_selection
+from marvis.agent.join_setup import build_join_proposal
+from marvis.agent.plan_driver import CONFIRMATION_SOURCE_AUTO
+from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
+from marvis.data.errors import DatasetContentDriftError
+from marvis.data.registry import AuthenticatedDatasetBinding
+from marvis.data.registry import DatasetRegistry
+from marvis.data.workspace import DataSemanticMapping
+from marvis.data.workspace import DataWorkspaceDraft
+from marvis.data.workspace import data_semantic_mapping_from_dict
+from marvis.domain import TaskRecord
+from marvis.repositories.data_workspace import DataWorkspaceDataError
+from marvis.repositories.data_workspace import DataWorkspaceDatasetNotFound
+from marvis.repositories.data_workspace import DataWorkspaceRepository
+from marvis.repositories.data_workspace import DataWorkspaceRevisionConflict
+from marvis.repositories.tasks import TaskRepository
+from typing import Callable
 import json
 import sqlite3
-from typing import Callable
-from marvis.agent.join_setup import C1TargetValidationError, JoinSetupError, authenticate_join_selection, build_join_proposal
-from marvis.agent.plan_driver import CONFIRMATION_SOURCE_AUTO, CONFIRMATION_SOURCE_HUMAN
-from marvis.data.errors import DatasetContentDriftError
-from marvis.data.registry import AuthenticatedDatasetBinding, DatasetRegistry
-from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft, data_semantic_mapping_from_dict
-from marvis.repositories.tasks import TaskRepository
-from marvis.domain import TaskRecord
-from marvis.repositories.data_workspace import DataWorkspaceDataError, DataWorkspaceDatasetNotFound, DataWorkspaceRepository, DataWorkspaceRevisionConflict
+from . import c1 as c1_lane
+from . import c1_state as c1_state_lane
+from . import contracts as contracts_lane
+from . import data_context as data_context_lane
+from . import responses as responses_lane
+from . import turn_runner as turn_runner_lane
+from . import typed_ui as typed_ui_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _TurnHandlerSpec
-    from . import _append_c1_message
-    from . import _append_successful_ui_action_messages
-    from . import _c1_display_text
-    from . import _c1_expected_content_hashes
-    from . import _c1_semantic_snapshot_matches
-    from . import _c1_snapshot
-    from . import _c1_state_from_proposal
-    from . import _c1_table
-    from . import _has_c1_semantic_authorization
-    from . import _latest_c1_state
-    from . import _modeling_data_runtime
-    from . import _parse_c1_reply
-    from . import _record_c1_semantic_authorization
-    from . import _run_driver_turn
-    from . import _validated_authenticated_c1_target
 
 def run_join_driver_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -51,7 +50,7 @@ def run_join_driver_turn(
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
-    return _run_driver_turn(
+    return turn_runner_lane._run_driver_turn(
         _JOIN_SPEC,
         runtime,
         repo,
@@ -70,31 +69,34 @@ def run_join_driver_turn(
         ui_action=ui_action,
     )
 
+
 def _run_join_setup(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     user_text: str | None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict | tuple:
     conversation = repo.list_agent_messages(task.id)
-    c1_state = _latest_c1_state(conversation)
-    _, registry = _modeling_data_runtime(runtime.settings)
+    c1_state = c1_state_lane._latest_c1_state(conversation)
+    _, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     proposal = build_join_proposal(registry, task.id, task.source_dir)
-    fresh_c1_state = _c1_state_from_proposal(proposal)
+    fresh_c1_state = c1_state_lane._c1_state_from_proposal(proposal)
     c1_was_already_applied = any(
         bool((message.get("metadata") or {}).get("join_skip"))
         for message in conversation
     )
-    if c1_state is None or _c1_snapshot(c1_state) != _c1_snapshot(fresh_c1_state):
+    if c1_state is None or c1_state_lane._c1_snapshot(
+        c1_state
+    ) != c1_state_lane._c1_snapshot(fresh_c1_state):
         if c1_state is not None and c1_was_already_applied:
             raise JoinSetupError(
                 "文件角色、数据内容或 DataWorkspace 语义映射在上次确认后已变化，"
                 "拒绝重复确认；请新建任务或恢复一致的语义绑定。"
             )
-        _append_c1_message(repo, task.id, proposal)
-        return join_turn_response(repo, task.id)
-    assignment = _parse_c1_reply(
+        c1_lane._append_c1_message(repo, task.id, proposal)
+        return responses_lane.join_turn_response(repo, task.id)
+    assignment = c1_lane._parse_c1_reply(
         user_text,
         c1_state,
         llm_client=runtime.llm_client,
@@ -102,9 +104,7 @@ def _run_join_setup(
             runtime.ui_action == "confirm_roles"
             or confirmation_source == CONFIRMATION_SOURCE_AUTO
         ),
-        require_semantic_authorization=(
-            runtime.require_semantic_text_authorization
-        ),
+        require_semantic_authorization=(runtime.require_semantic_text_authorization),
     )
     if assignment is None:
         repo.add_agent_message(
@@ -112,17 +112,19 @@ def _run_join_setup(
             role="assistant",
             stage="chat",
             content="请确认文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
-            metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
+            metadata={"join_c1": c1_state, "tables": c1_state_lane._c1_table(c1_state)},
         )
-        return join_turn_response(repo, task.id)
-    if _has_c1_semantic_authorization(assignment):
+        return responses_lane.join_turn_response(repo, task.id)
+    if c1_state_lane._has_c1_semantic_authorization(assignment):
         current_proposal = build_join_proposal(registry, task.id, task.source_dir)
-        current_c1_state = _c1_state_from_proposal(current_proposal)
-        if not _c1_semantic_snapshot_matches(assignment, current_c1_state):
-            _append_c1_message(repo, task.id, current_proposal)
-            return join_turn_response(repo, task.id)
+        current_c1_state = c1_state_lane._c1_state_from_proposal(current_proposal)
+        if not c1_state_lane._c1_semantic_snapshot_matches(
+            assignment, current_c1_state
+        ):
+            c1_lane._append_c1_message(repo, task.id, current_proposal)
+            return responses_lane.join_turn_response(repo, task.id)
     if not assignment["anchor_id"]:
-        return append_join_error(
+        return responses_lane.append_join_error(
             repo, task.id, "请先指定样本锚表（通常是含目标列的那张），再确认。"
         )
     authenticated_selection = authenticate_join_selection(
@@ -130,10 +132,10 @@ def _run_join_setup(
         task.id,
         anchor_id=assignment["anchor_id"],
         feature_ids=assignment["feature_ids"],
-        expected_content_hashes=_c1_expected_content_hashes(c1_state),
+        expected_content_hashes=c1_state_lane._c1_expected_content_hashes(c1_state),
     )
     try:
-        assignment["target_col"] = _validated_authenticated_c1_target(
+        assignment["target_col"] = typed_ui_lane._validated_authenticated_c1_target(
             registry,
             authenticated_selection,
             assignment.get("target_col"),
@@ -141,8 +143,9 @@ def _run_join_setup(
     except C1TargetValidationError as exc:
         if runtime.ui_action == "confirm_roles":
             raise
-        return append_join_error(repo, task.id, str(exc))
+        return responses_lane.append_join_error(repo, task.id, str(exc))
     if not assignment["feature_ids"]:
+
         def persist_single_table_confirmation(conn: sqlite3.Connection) -> None:
             registry.persist_authenticated_target_on_connection(
                 conn,
@@ -154,7 +157,7 @@ def _run_join_setup(
                 task.id,
                 assignment.get("target_col"),
             )
-            _append_successful_ui_action_messages(
+            typed_ui_lane._append_successful_ui_action_messages(
                 _JOIN_SPEC,
                 repo,
                 task,
@@ -164,7 +167,7 @@ def _run_join_setup(
                 expected_step_id=None,
                 conn=conn,
             )
-            _record_c1_semantic_authorization(
+            c1_state_lane._record_c1_semantic_authorization(
                 repo,
                 task.id,
                 assignment,
@@ -176,8 +179,7 @@ def _run_join_setup(
                 role="assistant",
                 stage="chat",
                 content=(
-                    "已确认样本表与目标列。只有一张表，无需拼接"
-                    "（数据拼接阶段已跳过）。"
+                    "已确认样本表与目标列。只有一张表，无需拼接（数据拼接阶段已跳过）。"
                 ),
                 metadata={"join_skip": True},
             )
@@ -192,7 +194,7 @@ def _run_join_setup(
             on_connection=persist_single_table_confirmation,
             confirmation_already_persisted=c1_was_already_applied,
         )
-        return join_turn_response(repo, task.id)
+        return responses_lane.join_turn_response(repo, task.id)
     start_kwargs = {
         "_post_start_c1_target_binding": (
             registry,
@@ -201,7 +203,7 @@ def _run_join_setup(
         ),
         **(
             {"_post_start_c1_assignment": assignment}
-            if _has_c1_semantic_authorization(assignment)
+            if c1_state_lane._has_c1_semantic_authorization(assignment)
             else {}
         ),
     }
@@ -214,8 +216,9 @@ def _run_join_setup(
         start_kwargs,
     )
 
+
 def _bind_single_join_dataset(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     task: TaskRecord,
     *,
     registry: DatasetRegistry,
@@ -248,9 +251,7 @@ def _bind_single_join_dataset(
         confirmed_mapping = DataSemanticMapping(
             target_col=normalized_target,
             field_roles=(
-                {normalized_target: "target"}
-                if normalized_target is not None
-                else {}
+                {normalized_target: "target"} if normalized_target is not None else {}
             ),
             business_names={},
         )
@@ -301,9 +302,7 @@ def _bind_single_join_dataset(
                     registry.verify_authenticated_binding_snapshot(binding)
             return
         if confirmation_already_persisted:
-            raise JoinSetupError(
-                "当前 DataWorkspace 绑定已变化，请刷新并重新确认。"
-            )
+            raise JoinSetupError("当前 DataWorkspace 绑定已变化，请刷新并重新确认。")
         repository.save_initial_binding(
             task.id,
             DataWorkspaceDraft(
@@ -344,31 +343,11 @@ def _bind_single_join_dataset(
             "单表确认期间数据或 DataWorkspace 已变化，请刷新后重新确认。"
         ) from exc
 
-_JOIN_SPEC = _TurnHandlerSpec(
+
+_JOIN_SPEC = contracts_lane._TurnHandlerSpec(
     intent="data_join",
     setup_error_types=(JoinSetupError,),
     error_label="数据拼接出错",
     run_setup=_run_join_setup,
-    format_user_display=_c1_display_text,
+    format_user_display=c1_state_lane._c1_display_text,
 )
-
-def join_turn_response(repo: TaskRepository, task_id: str) -> dict:
-    return {
-        "task_id": task_id,
-        "status": "ok",
-        "messages": repo.list_agent_messages(task_id),
-    }
-
-def append_join_error(repo: TaskRepository, task_id: str, detail: str) -> dict:
-    repo.add_agent_message(
-        task_id,
-        role="assistant",
-        stage="chat",
-        content=detail,
-        metadata={"error": True},
-    )
-    return {
-        "task_id": task_id,
-        "status": "error",
-        "messages": repo.list_agent_messages(task_id),
-    }

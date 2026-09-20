@@ -231,11 +231,7 @@ def test_confirmation_binding_rejects_workspace_semantic_drift(monkeypatch):
             "semantic_mapping_hash": "c" * 64,
         },
     )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_dataset_preview",
-        lambda runtime, task: refreshed,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_preview', lambda runtime, task: refreshed)
 
     assert not turn_handlers._strategy_dataset_binding_matches(
         SimpleNamespace(),

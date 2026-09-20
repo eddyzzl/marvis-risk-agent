@@ -1,25 +1,25 @@
-"""vintage driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Vintage for governed Agent turns."""
+
 from __future__ import annotations
+
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
-from marvis.agent.semantic_intent import INTENT_RISK_PROFITABILITY, INTENT_RISK_STANDARD_VINTAGE, INTENT_RISK_VTG_TERMINAL
 from marvis.agent.risk_analysis_setup import advance_risk_analysis_setup
+from marvis.agent.semantic_intent import INTENT_RISK_PROFITABILITY
+from marvis.agent.semantic_intent import INTENT_RISK_STANDARD_VINTAGE
+from marvis.agent.semantic_intent import INTENT_RISK_VTG_TERMINAL
 from marvis.agent.vintage_setup import VintageSetupError
-from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TaskRecord
+from marvis.repositories.tasks import TaskRepository
+from . import contracts as contracts_lane
+from . import data_context as data_context_lane
+from . import responses as responses_lane
+from . import shared as shared_lane
+from . import turn_runner as turn_runner_lane
+from . import typed_ui as typed_ui_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _TurnHandlerSpec
-    from . import _identity_display_text
-    from . import _ingest_notice_text
-    from . import _modeling_data_runtime
-    from . import _run_driver_turn
-    from . import join_turn_response
 
 def run_vintage_driver_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -36,7 +36,7 @@ def run_vintage_driver_turn(
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
-    return _run_driver_turn(
+    return turn_runner_lane._run_driver_turn(
         _VINTAGE_SPEC,
         runtime,
         repo,
@@ -55,14 +55,15 @@ def run_vintage_driver_turn(
         ui_action=ui_action,
     )
 
+
 def _run_vintage_setup(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     user_text: str | None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict | tuple:
-    backend, registry = _modeling_data_runtime(runtime.settings)
+    backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     semantic_analysis_kind = {
         INTENT_RISK_PROFITABILITY: "profitability",
         INTENT_RISK_VTG_TERMINAL: "vtg_terminal",
@@ -86,17 +87,18 @@ def _run_vintage_setup(
         task.id,
         role="assistant",
         stage="chat",
-        content=f"{decision.content}{_ingest_notice_text(notices)}",
+        content=f"{decision.content}{shared_lane._ingest_notice_text(notices)}",
         metadata=metadata,
     )
     if decision.template_id is None:
-        return join_turn_response(repo, task.id)
+        return responses_lane.join_turn_response(repo, task.id)
     return (decision.template_id, dict(decision.slots or {}), {})
 
-_VINTAGE_SPEC = _TurnHandlerSpec(
+
+_VINTAGE_SPEC = contracts_lane._TurnHandlerSpec(
     intent="vintage",
     setup_error_types=(VintageSetupError,),
     error_label="Vintage 风险分析出错",
     run_setup=_run_vintage_setup,
-    format_user_display=_identity_display_text,
+    format_user_display=typed_ui_lane._identity_display_text,
 )

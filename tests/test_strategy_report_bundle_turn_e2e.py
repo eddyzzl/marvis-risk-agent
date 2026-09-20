@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from marvis.packs.strategy.pool_impact_tools import POOL_IMPACT_ARTIFACT_KIND
+from marvis.packs.strategy.report_bundle_adapters import build_strategy_report_bundle_source_inputs
+from marvis.packs.strategy.sample_design_v2_tools import SAMPLE_DESIGN_V2_ORIGIN_TOOL
+
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -525,23 +529,15 @@ def test_report_turn_passes_exact_selected_voting_search_to_preflight(
     )
     observed = {}
     original_adapter = (
-        turn_handlers.build_strategy_report_bundle_source_inputs
+        build_strategy_report_bundle_source_inputs
     )
 
     def capture_preflight(**kwargs):
         observed["search"] = kwargs.pop("voting_candidate_search")
         return original_adapter(**kwargs)
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_latest_voting_search_binding",
-        lambda *args, **kwargs: search,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_strategy_report_bundle_source_inputs",
-        capture_preflight,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_latest_voting_search_binding', lambda *args, **kwargs: search)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_strategy_report_bundle_source_inputs', capture_preflight)
 
     slots = _strategy_report_bundle_v2_plan_slots(
         _runtime(fixture),
@@ -574,23 +570,15 @@ def test_report_turn_passes_exact_selected_cross_search_to_preflight(
     )
     observed = {}
     original_adapter = (
-        turn_handlers.build_strategy_report_bundle_source_inputs
+        build_strategy_report_bundle_source_inputs
     )
 
     def capture_preflight(**kwargs):
         observed["search"] = kwargs.pop("cross_candidate_search")
         return original_adapter(**kwargs)
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_latest_cross_search_binding",
-        lambda *args, **kwargs: search,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_strategy_report_bundle_source_inputs",
-        capture_preflight,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_latest_cross_search_binding', lambda *args, **kwargs: search)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_strategy_report_bundle_source_inputs', capture_preflight)
 
     slots = _strategy_report_bundle_v2_plan_slots(
         _runtime(fixture),
@@ -623,23 +611,15 @@ def test_report_turn_passes_exact_selected_cross_rule_search_to_preflight(
     )
     observed = {}
     original_adapter = (
-        turn_handlers.build_strategy_report_bundle_source_inputs
+        build_strategy_report_bundle_source_inputs
     )
 
     def capture_preflight(**kwargs):
         observed["search"] = kwargs.pop("cross_rule_search")
         return original_adapter(**kwargs)
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_latest_cross_rule_search_binding",
-        lambda *args, **kwargs: search,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_strategy_report_bundle_source_inputs",
-        capture_preflight,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_latest_cross_rule_search_binding', lambda *args, **kwargs: search)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_strategy_report_bundle_source_inputs', capture_preflight)
 
     slots = _strategy_report_bundle_v2_plan_slots(
         _runtime(fixture),
@@ -723,16 +703,8 @@ def test_report_cross_search_window_skips_authenticated_unrelated_evidence(
             else compatible
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_cross_candidate_search_artifact",
-        load_search,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_cross_search_matches",
-        lambda binding, **kwargs: binding is compatible,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_cross_candidate_search_artifact', load_search)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_cross_search_matches', lambda binding, **kwargs: binding is compatible)
 
     selected = _strategy_report_latest_cross_search_binding(
         _window_runtime(newest, older),
@@ -775,11 +747,7 @@ def test_report_cross_search_window_corruption_fails_without_fallback(
             raise StrategyError("Cross search artifact bytes changed")
         pytest.fail("corrupt newest Cross search must stop selection")
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_cross_candidate_search_artifact",
-        corrupt_newest,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_cross_candidate_search_artifact', corrupt_newest)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_latest_cross_search_binding(
@@ -807,16 +775,8 @@ def test_report_cross_search_window_exhaustion_fails_closed(
         }
         for index in range(replay_limit)
     )
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_cross_candidate_search_artifact",
-        lambda runtime, **kwargs: SimpleNamespace(marker=kwargs["artifact_id"]),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_cross_search_matches",
-        lambda *args, **kwargs: False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_cross_candidate_search_artifact', lambda runtime, **kwargs: SimpleNamespace(marker=kwargs['artifact_id']))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_cross_search_matches', lambda *args, **kwargs: False)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_latest_cross_search_binding(
@@ -845,7 +805,7 @@ def test_report_turn_binds_exact_pool_validation_refs_and_preflights_bindings(
     validation_binding = object()
     observed: dict[str, object] = {}
     original_adapter = (
-        turn_handlers.build_strategy_report_bundle_source_inputs
+        build_strategy_report_bundle_source_inputs
     )
 
     def select_refs(runtime, *, task_id, candidate_pool, sample_design):
@@ -878,21 +838,9 @@ def test_report_turn_binds_exact_pool_validation_refs_and_preflights_bindings(
         observed["preflight"] = kwargs.pop("pool_validations")
         return original_adapter(**kwargs)
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "select_latest_strategy_pool_validation_refs",
-        select_refs,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_strategy_pool_validation_artifacts",
-        load_refs,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_strategy_report_bundle_source_inputs",
-        capture_preflight,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.select_latest_strategy_pool_validation_refs', select_refs)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_strategy_pool_validation_artifacts', load_refs)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_strategy_report_bundle_source_inputs', capture_preflight)
 
     slots = _strategy_report_bundle_v2_plan_slots(
         _runtime(fixture),
@@ -923,16 +871,8 @@ def test_report_turn_pool_validation_selection_is_frozen_in_each_plan(
     later_oot_ref = _pool_validation_ref("4", partition="oot")
     selected = [(validation_ref,), (validation_ref, later_oot_ref)]
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "select_latest_strategy_pool_validation_refs",
-        lambda *args, **kwargs: selected.pop(0),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_strategy_pool_validation_artifacts",
-        lambda *args, **kwargs: (),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.select_latest_strategy_pool_validation_refs', lambda *args, **kwargs: selected.pop(0))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_strategy_pool_validation_artifacts', lambda *args, **kwargs: ())
 
     planned = _strategy_report_bundle_v2_plan_slots(
         _runtime(fixture),
@@ -961,26 +901,14 @@ def test_report_turn_pool_validation_adapter_incompatibility_fails_closed(
     validation_ref = _pool_validation_ref("1")
     validation_binding = object()
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "select_latest_strategy_pool_validation_refs",
-        lambda *args, **kwargs: (validation_ref,),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_strategy_pool_validation_artifacts",
-        lambda *args, **kwargs: (validation_binding,),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.select_latest_strategy_pool_validation_refs', lambda *args, **kwargs: (validation_ref,))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_strategy_pool_validation_artifacts', lambda *args, **kwargs: (validation_binding,))
 
     def reject_incompatible(**kwargs):
         assert kwargs["pool_validations"] == (validation_binding,)
         raise StrategyError("incompatible Pool validation evidence")
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_strategy_report_bundle_source_inputs",
-        reject_incompatible,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_strategy_report_bundle_source_inputs', reject_incompatible)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_bundle_v2_plan_slots(
@@ -1160,10 +1088,8 @@ def test_report_turn_clarifies_when_both_nonempty_pool_types_exist(
         def get_current(self, task_id: str, strategy_type: str) -> dict:
             return {"entries": [{"entry_id": strategy_type}]}
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        _DualPoolRepository,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', _DualPoolRepository)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', _DualPoolRepository)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_current_pool_binding(
@@ -1196,18 +1122,12 @@ def test_report_turn_explicit_pool_type_ignores_unrelated_corrupt_pool(
                 return selected
             raise RuntimeError(f"unrelated corrupt {strategy_type} pool")
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        _Repository,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda pool: "a" * 64,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_current_strategy_candidate_pool_artifact",
-        lambda *args, **kwargs: binding,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', _Repository)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', _Repository)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda pool: 'a' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda pool: 'a' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_current_strategy_candidate_pool_artifact', lambda *args, **kwargs: binding)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_current_strategy_candidate_pool_artifact', lambda *args, **kwargs: binding)
 
     result = _strategy_report_current_pool_binding(
         SimpleNamespace(
@@ -1229,10 +1149,7 @@ def test_report_turn_clarifies_for_missing_context_sample_pool_or_impact(
     runtime = _runtime(fixture)
     read_runtime = _strategy_report_read_runtime(runtime)
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_current_strategy_project_context_artifact",
-        lambda *args, **kwargs: None,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_current_strategy_project_context_artifact', lambda *args, **kwargs: None)
     with pytest.raises(_StrategyV2EvidenceSetupError) as missing_context:
         _strategy_report_bundle_v2_plan_slots(
             runtime,
@@ -1258,10 +1175,8 @@ def test_report_turn_clarifies_for_missing_context_sample_pool_or_impact(
         def get_current(self, task_id: str, strategy_type: str):
             return None
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        _EmptyPoolRepository,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', _EmptyPoolRepository)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', _EmptyPoolRepository)
     with pytest.raises(_StrategyV2EvidenceSetupError) as missing_pool:
         _strategy_report_current_pool_binding(
             read_runtime,
@@ -1306,7 +1221,7 @@ def test_report_turn_corrupt_latest_native_sample_never_falls_back(
     }
     older = {
         "kind": kind,
-        "origin_tool": turn_handlers.SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        "origin_tool": SAMPLE_DESIGN_V2_ORIGIN_TOOL,
         "id": "8" * 64,
         "content_hash": "9" * 64,
         "provenance": {
@@ -1323,11 +1238,8 @@ def test_report_turn_corrupt_latest_native_sample_never_falls_back(
         calls.append(kwargs["bundle_artifact_id"])
         raise StrategyError("native membership bytes changed")
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_any_strategy_sample_design_v2_artifacts",
-        reject_latest,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_any_strategy_sample_design_v2_artifacts', reject_latest)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample.load_any_strategy_sample_design_v2_artifacts', reject_latest)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_latest_sample_binding(
@@ -1356,7 +1268,7 @@ def test_report_turn_authenticates_newest_pool_impact_before_binding_match(
         },
     )
     newest = {
-        "kind": turn_handlers.POOL_IMPACT_ARTIFACT_KIND,
+        "kind": POOL_IMPACT_ARTIFACT_KIND,
         "id": "6" * 64,
         "content_hash": "7" * 64,
         "provenance": {
@@ -1368,7 +1280,7 @@ def test_report_turn_authenticates_newest_pool_impact_before_binding_match(
         },
     }
     older = {
-        "kind": turn_handlers.POOL_IMPACT_ARTIFACT_KIND,
+        "kind": POOL_IMPACT_ARTIFACT_KIND,
         "id": "b" * 64,
         "content_hash": "c" * 64,
         "provenance": {
@@ -1394,10 +1306,7 @@ def test_report_turn_authenticates_newest_pool_impact_before_binding_match(
             ),
         )
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_historical_strategy_pool_impact_artifact",
-        authenticate,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_historical_strategy_pool_impact_artifact', authenticate)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_latest_pool_impact_binding(
@@ -1425,7 +1334,7 @@ def test_report_turn_skips_authenticated_unrelated_pool_impact(
         },
     )
     newest = {
-        "kind": turn_handlers.POOL_IMPACT_ARTIFACT_KIND,
+        "kind": POOL_IMPACT_ARTIFACT_KIND,
         "id": "6" * 64,
         "content_hash": "7" * 64,
         "provenance": {
@@ -1434,7 +1343,7 @@ def test_report_turn_skips_authenticated_unrelated_pool_impact(
         },
     }
     older = {
-        "kind": turn_handlers.POOL_IMPACT_ARTIFACT_KIND,
+        "kind": POOL_IMPACT_ARTIFACT_KIND,
         "id": "9" * 64,
         "content_hash": "a" * 64,
         "provenance": {
@@ -1469,10 +1378,7 @@ def test_report_turn_skips_authenticated_unrelated_pool_impact(
         calls.append(artifact_id)
         return unrelated if artifact_id == newest["id"] else exact
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_historical_strategy_pool_impact_artifact",
-        authenticate,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_historical_strategy_pool_impact_artifact', authenticate)
 
     selected = _strategy_report_latest_pool_impact_binding(
         _window_runtime(newest, older),
@@ -1616,10 +1522,7 @@ def test_report_turn_selects_latest_exact_cube_not_latest_other_cube(
         calls.append(kwargs)
         return bindings[kwargs["artifact_id"]]
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_strategy_impact_cube_artifact",
-        _load,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_strategy_impact_cube_artifact', _load)
 
     binding = _strategy_report_latest_impact_cube_binding(
         _window_runtime(latest_other, older_exact),
@@ -1745,11 +1648,7 @@ def test_report_turn_impact_cube_selection_window_exhaustion_fails_closed(
             },
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_strategy_impact_cube_artifact",
-        load_unrelated,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_strategy_impact_cube_artifact', load_unrelated)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_latest_impact_cube_binding(
@@ -1781,10 +1680,7 @@ def test_nonlegacy_report_type_without_exact_cube_never_uses_pool_impact(
         artifact_id=approval_pool.artifact_id,
         artifact_content_hash=approval_pool.artifact_content_hash,
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_current_pool_binding",
-        lambda *args, **kwargs: limit_pool,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_current_pool_binding', lambda *args, **kwargs: limit_pool)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_bundle_v2_plan_slots(
@@ -1938,10 +1834,7 @@ def test_report_turn_latest_optional_evidence_is_compatible_or_omitted(
         bundle={"bundle_id": "model-bundle", "content_hash": "a" * 64},
         sample_design_binding=_sample_binding(sample_ref),
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_strategy_model_evidence_v2_artifact",
-        lambda *args, **kwargs: model_binding,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_strategy_model_evidence_v2_artifact', lambda *args, **kwargs: model_binding)
     records = (
         {
             "kind": MODEL_EVIDENCE_V2_ARTIFACT_KIND,
@@ -1987,18 +1880,14 @@ def test_report_turn_compatible_score_can_supply_its_own_training_chain(
         evidence_record={"id": "a" * 64, "content_hash": "b" * 64},
         vector_record={"id": "c" * 64, "content_hash": "d" * 64},
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_model_score_evidence_artifacts",
-        lambda *args, **kwargs: score_binding,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_model_score_evidence_artifacts', lambda *args, **kwargs: score_binding)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_model_score_evidence_artifacts', lambda *args, **kwargs: score_binding)
     score_training_ref = {
         "sample_design_ref": sample_ref,
         "expected_experiment_id": "experiment-1",
     }
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.build_training_evidence_ref",
-        lambda binding: score_training_ref,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_training_evidence_ref', lambda binding: score_training_ref)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.build_training_evidence_ref', lambda binding: score_training_ref)
     records = (
         {
             "kind": "model_score_evidence_json",
@@ -2048,10 +1937,7 @@ def test_report_turn_corrupt_latest_same_kind_never_falls_back(
     def _must_not_fallback(*args, **kwargs):
         pytest.fail("corrupt newest same-kind evidence must stop selection")
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_strategy_model_evidence_v2_artifact",
-        _must_not_fallback,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_strategy_model_evidence_v2_artifact', _must_not_fallback)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_optional_model_evidence(
@@ -2140,12 +2026,12 @@ def test_report_command_autostarts_exact_one_step_without_dataset_preview(
     def _unexpected_preview(*args, **kwargs):
         pytest.fail("report workflow must not require an active dataset preview")
 
-    for name in (
-        "_strategy_dataset_preview",
-        "_strategy_sample_design_dataset_preview",
-        "_strategy_pool_impact_dataset_preview",
+    for target in (
+        "marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_preview",
+        "marvis.agent.turn_handlers.strategy_sample._strategy_sample_design_dataset_preview",
+        "marvis.agent.turn_handlers.strategy_sample._strategy_pool_impact_dataset_preview",
     ):
-        monkeypatch.setattr(f"marvis.agent.turn_handlers.{name}", _unexpected_preview)
+        monkeypatch.setattr(target, _unexpected_preview)
 
     response = client.post(
         f"/api/tasks/{fixture['task'].id}/agent/messages",

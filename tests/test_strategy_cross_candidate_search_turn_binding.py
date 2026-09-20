@@ -61,10 +61,7 @@ def test_cross_search_plan_binds_latest_source_but_not_axis_methods(
         calls.append((actual_runtime, task_id))
         return resolved
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._latest_cross_candidate_search_source_slots",
-        bind,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates._latest_cross_candidate_search_source_slots', bind)
 
     slots = _strategy_cross_candidate_search_plan_slots(
         runtime,
@@ -108,16 +105,8 @@ def test_cross_search_build_preflights_but_plan_keeps_only_user_pointers(
         )
         return (SimpleNamespace(), {"rank": 7, "x_method": "tree"})
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_cross_candidate_search_pair",
-        resolve,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_read_runtime",
-        lambda actual_runtime: (
-            read_runtime if actual_runtime is runtime else None
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_cross_candidate_search_pair', resolve)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda actual_runtime: read_runtime if actual_runtime is runtime else None)
 
     slots = _strategy_cross_candidate_build_from_search_plan_slots(
         runtime,
@@ -140,16 +129,8 @@ def test_cross_search_build_preflights_but_plan_keeps_only_user_pointers(
 def test_cross_search_build_reports_preflight_failure_as_setup_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_cross_candidate_search_pair",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            StrategyError("Cross search pair no longer authenticates")
-        ),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_read_runtime",
-        lambda _runtime: SimpleNamespace(),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_cross_candidate_search_pair', lambda *_args, **_kwargs: (_ for _ in ()).throw(StrategyError('Cross search pair no longer authenticates')))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: SimpleNamespace())
 
     with pytest.raises(StrategySetupError, match="no longer authenticates"):
         _strategy_cross_candidate_build_from_search_plan_slots(

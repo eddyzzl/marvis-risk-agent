@@ -78,14 +78,8 @@ def test_voting_search_turn_uses_governed_resolver_without_dataset_pointer(
         )
         return _resolved()
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_voting_candidate_search_inputs",
-        resolve,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_read_runtime",
-        lambda actual_runtime: read_runtime if actual_runtime is runtime else None,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_voting_candidate_search_inputs', resolve)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda actual_runtime: read_runtime if actual_runtime is runtime else None)
 
     slots = _strategy_voting_candidate_search_plan_slots(runtime, task, _draft())
 
@@ -108,14 +102,8 @@ def test_voting_search_turn_reports_resolver_failure_as_setup_error(
     def reject(*_args, **_kwargs):
         raise StrategyError("Voting search current Pool changed")
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_voting_candidate_search_inputs",
-        reject,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_read_runtime",
-        lambda _runtime: SimpleNamespace(kind="governed-read-runtime"),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_voting_candidate_search_inputs', reject)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: SimpleNamespace(kind='governed-read-runtime'))
 
     with pytest.raises(
         StrategySetupError,

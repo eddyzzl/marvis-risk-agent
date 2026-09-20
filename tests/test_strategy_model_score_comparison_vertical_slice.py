@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from marvis.packs.modeling.errors import ModelingError
+
 from types import MappingProxyType, SimpleNamespace
 import json
 
@@ -237,22 +239,9 @@ def test_turn_binding_uses_latest_compatible_authenticated_candidate_per_model(
     sample = _sample_binding()
     load_calls: list[str] = []
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_read_runtime",
-        lambda _runtime: read_runtime,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_latest_verified_strategy_sample_design_v2_binding",
-        lambda *_args, **_kwargs: sample,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "model_score_comparison_registry_snapshot_token",
-        lambda _records: "9" * 64,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: read_runtime)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._latest_verified_strategy_sample_design_v2_binding', lambda *_args, **_kwargs: sample)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.model_score_comparison_registry_snapshot_token', lambda _records: '9' * 64, raising=False)
 
     def load_score(_runtime, **kwargs):
         evidence_id = kwargs["evidence_artifact_id"]
@@ -292,23 +281,14 @@ def test_turn_binding_uses_latest_compatible_authenticated_candidate_per_model(
             envelope={"single_model_evidence": {"model": evidence_id}},
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_model_score_evidence_artifacts",
-        load_score,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_historical_model_score_evidence_artifacts', load_score)
     comparison_calls: list[dict[str, object]] = []
 
     def compare(**kwargs):
         comparison_calls.append(kwargs)
         return {"selection": {"status": "no_selection"}}
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_model_score_comparison",
-        compare,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_model_score_comparison', compare, raising=False)
 
     slots = turn_handlers._model_score_comparison_plan_slots(
         SimpleNamespace(),
@@ -348,16 +328,8 @@ def test_turn_binding_fails_closed_when_registry_changes_before_plan(
     artifacts = _Artifacts([first, changed])
     read_runtime = SimpleNamespace(task_artifacts=artifacts)
     sample = _sample_binding()
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_read_runtime",
-        lambda _runtime: read_runtime,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_latest_verified_strategy_sample_design_v2_binding",
-        lambda *_args, **_kwargs: sample,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: read_runtime)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._latest_verified_strategy_sample_design_v2_binding', lambda *_args, **_kwargs: sample)
 
     def load_score(_runtime, **kwargs):
         record = next(
@@ -383,17 +355,8 @@ def test_turn_binding_fails_closed_when_registry_changes_before_plan(
             envelope={"single_model_evidence": {"model": record["id"]}},
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_model_score_evidence_artifacts",
-        load_score,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_model_score_comparison",
-        lambda **_kwargs: {"selection": {"status": "no_selection"}},
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_historical_model_score_evidence_artifacts', load_score)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_model_score_comparison', lambda **_kwargs: {'selection': {'status': 'no_selection'}}, raising=False)
 
     with pytest.raises(StrategySetupError, match="发生变化"):
         turn_handlers._model_score_comparison_plan_slots(
@@ -413,23 +376,15 @@ def test_turn_binding_does_not_fall_back_from_drifted_latest_model_evidence(
     records = [old_model_a, newest_model_a, model_b]
     artifacts = _Artifacts([records])
     sample = _sample_binding()
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_read_runtime",
-        lambda _runtime: SimpleNamespace(task_artifacts=artifacts),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_latest_verified_strategy_sample_design_v2_binding",
-        lambda *_args, **_kwargs: sample,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: SimpleNamespace(task_artifacts=artifacts))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._latest_verified_strategy_sample_design_v2_binding', lambda *_args, **_kwargs: sample)
     load_calls: list[str] = []
 
     def reject_latest(_runtime, **kwargs):
         evidence_id = kwargs["evidence_artifact_id"]
         load_calls.append(evidence_id)
         if evidence_id == newest_model_a["id"]:
-            raise turn_handlers.ModelingError("evidence bytes drifted")
+            raise ModelingError("evidence bytes drifted")
         record = next(item for item in records if item["id"] == evidence_id)
         provenance = record["provenance"]
         return SimpleNamespace(
@@ -451,11 +406,7 @@ def test_turn_binding_does_not_fall_back_from_drifted_latest_model_evidence(
             envelope={"single_model_evidence": {"model": evidence_id}},
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_model_score_evidence_artifacts",
-        reject_latest,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_historical_model_score_evidence_artifacts', reject_latest)
 
     with pytest.raises(StrategySetupError, match="不会回退"):
         turn_handlers._model_score_comparison_plan_slots(

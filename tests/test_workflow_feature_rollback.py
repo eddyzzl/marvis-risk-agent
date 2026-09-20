@@ -589,7 +589,7 @@ def test_real_ui_sentence_uses_same_plan_rollback_before_plain_retry(
             raise AssertionError("typed rollback must take precedence over plain retry")
 
     driver = _Driver()
-    monkeypatch.setattr("marvis.agent.turn_handlers._driver", lambda runtime: driver)
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda runtime: driver)
     messages = _MessageRepo(
         [
             {
@@ -677,7 +677,7 @@ def test_real_ui_tuning_budget_sentence_reopens_configuration_not_plain_retry(
             raise AssertionError("typed budget revision must not use plain retry")
 
     driver = _Driver()
-    monkeypatch.setattr("marvis.agent.turn_handlers._driver", lambda runtime: driver)
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda runtime: driver)
     messages = _MessageRepo(
         [
             {
@@ -786,7 +786,7 @@ def test_real_ui_skip_refit_sentence_retries_select_with_explicit_inputs(
             return DriverTurn(plan_id, PlanStatus.AWAITING_CONFIRM.value, [])
 
     driver = _Driver()
-    monkeypatch.setattr("marvis.agent.turn_handlers._driver", lambda runtime: driver)
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda runtime: driver)
     messages = _MessageRepo(
         [
             {

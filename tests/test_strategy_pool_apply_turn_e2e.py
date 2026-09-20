@@ -62,14 +62,10 @@ def test_turn_binds_only_current_nonempty_pool_cas_and_user_prefix(
         "entries": [{"rule_id": "candidate-rule-1"}],
     }
     repository = _PoolRepository(pool)
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda db_path: repository,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda current: POOL_HASH,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda db_path: repository)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda db_path: repository)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda current: POOL_HASH)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda current: POOL_HASH)
 
     slots = _strategy_pool_apply_plan_slots(
         _runtime(tmp_path),
@@ -122,14 +118,10 @@ def test_turn_fails_closed_for_missing_empty_or_invalid_pool(
     current,
     message: str,
 ) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda db_path: _PoolRepository(current),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda pool: POOL_HASH,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(current))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(current))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda pool: POOL_HASH)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda pool: POOL_HASH)
 
     with pytest.raises(StrategySetupError, match=message):
         _strategy_pool_apply_plan_slots(
@@ -145,23 +137,13 @@ def test_turn_routes_without_dataset_or_target_and_binds_pool_once_at_plan_creat
 ) -> None:
     draft = _draft("pricing")
     captured: dict = {}
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_pool_apply_plan_slots",
-        lambda runtime, task, candidate: {
-            "strategy_type": "pricing",
-            "expected_pool_revision": 3,
-            "expected_pool_snapshot_hash": POOL_HASH,
-        },
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates._strategy_pool_apply_plan_slots', lambda runtime, task, candidate: {'strategy_type': 'pricing', 'expected_pool_revision': 3, 'expected_pool_snapshot_hash': POOL_HASH})
 
     def _start(runtime, repo, task, **kwargs):
         captured.update(kwargs)
         return {"status": "started"}
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._start_confirmed_strategy_plan",
-        _start,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', _start)
 
     assert _strategy_request_requires_dataset(draft) is False
     assert _strategy_request_requires_target(draft) is False

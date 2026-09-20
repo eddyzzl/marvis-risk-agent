@@ -63,14 +63,9 @@ def test_turn_deeply_authenticates_and_freezes_all_six_tool_inputs(
         calls.append(kwargs)
         return _binding()
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_current_strategy_candidate_pool_artifact",
-        _load,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_v2_read_runtime",
-        lambda runtime: SimpleNamespace(kind="real-local-read-runtime"),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_current_strategy_candidate_pool_artifact', _load)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_current_strategy_candidate_pool_artifact', _load)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_v2_read_runtime', lambda runtime: SimpleNamespace(kind='real-local-read-runtime'))
 
     slots = _strategy_pool_materialize_plan_slots(
         _runtime(tmp_path),
@@ -111,14 +106,9 @@ def test_turn_rejects_empty_or_incomplete_authenticated_binding(
     monkeypatch,
     binding,
 ) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_current_strategy_candidate_pool_artifact",
-        lambda runtime, **kwargs: binding,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_v2_read_runtime",
-        lambda runtime: SimpleNamespace(),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_current_strategy_candidate_pool_artifact', lambda runtime, **kwargs: binding)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_current_strategy_candidate_pool_artifact', lambda runtime, **kwargs: binding)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_v2_read_runtime', lambda runtime: SimpleNamespace())
 
     with pytest.raises(StrategySetupError, match="完整认证|非空"):
         _strategy_pool_materialize_plan_slots(
@@ -135,14 +125,9 @@ def test_turn_converts_deep_binding_failure_to_setup_error(
     def _fail(runtime, **kwargs):
         raise StrategyError("artifact lineage changed")
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_current_strategy_candidate_pool_artifact",
-        _fail,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_v2_read_runtime",
-        lambda runtime: SimpleNamespace(),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_current_strategy_candidate_pool_artifact', _fail)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_current_strategy_candidate_pool_artifact', _fail)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_v2_read_runtime', lambda runtime: SimpleNamespace())
 
     with pytest.raises(StrategySetupError, match="完整认证"):
         _strategy_pool_materialize_plan_slots(
@@ -158,26 +143,13 @@ def test_turn_routes_without_dataset_target_or_confirmation(
 ) -> None:
     draft = _draft("pricing")
     captured: dict = {}
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_pool_materialize_plan_slots",
-        lambda runtime, task, candidate: {
-            "strategy_type": "pricing",
-            "expected_pool_revision": 3,
-            "expected_pool_snapshot_hash": "a" * 64,
-            "expected_pool_artifact_id": "b" * 64,
-            "expected_pool_artifact_content_hash": "c" * 64,
-            "expected_design_hash": "d" * 64,
-        },
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates._strategy_pool_materialize_plan_slots', lambda runtime, task, candidate: {'strategy_type': 'pricing', 'expected_pool_revision': 3, 'expected_pool_snapshot_hash': 'a' * 64, 'expected_pool_artifact_id': 'b' * 64, 'expected_pool_artifact_content_hash': 'c' * 64, 'expected_design_hash': 'd' * 64})
 
     def _start(runtime, repo, task, **kwargs):
         captured.update(kwargs)
         return {"status": "started"}
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._start_confirmed_strategy_plan",
-        _start,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', _start)
 
     assert _is_strategy_request_intent(
         "把当前定价策略池物化为 draft Strategy"

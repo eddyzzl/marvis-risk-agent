@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from marvis.agent.strategy_setup import StrategySetupError
+
 import json
 from pathlib import Path
 
@@ -100,11 +102,7 @@ def test_manual_and_natural_language_requests_have_canonical_execution_parity(
         canonical_drafts.append(draft.to_dict())
         return original_prepare(runtime, repo, task, draft, **kwargs)
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_prepare_and_run_validated_strategy_request",
-        capture_prepare,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._prepare_and_run_validated_strategy_request', capture_prepare)
 
     manual = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -246,11 +244,7 @@ def test_manual_and_natural_language_refinement_share_the_same_cutpoint_kernel(
         canonical_drafts.append(draft.to_dict())
         return original_prepare(runtime, repo, task, draft, **kwargs)
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_prepare_and_run_validated_strategy_request",
-        capture_prepare,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._prepare_and_run_validated_strategy_request', capture_prepare)
 
     manual = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -357,24 +351,12 @@ def test_manual_and_natural_language_refinement_share_the_same_cutpoint_kernel(
 
     def unavailable_current_dataset(*args, **kwargs):
         del args, kwargs
-        raise turn_handlers.StrategySetupError(
+        raise StrategySetupError(
             "existing refinement must not require the current DataWorkspace"
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_dataset_preview",
-        unavailable_current_dataset,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_dataset_context",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError(
-                "existing refinement must resolve its immutable source artifact"
-            )
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_preview', unavailable_current_dataset)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_context', lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('existing refinement must resolve its immutable source artifact')))
 
     existing_manual = client.post(
         f"/api/tasks/{task_id}/agent/messages",

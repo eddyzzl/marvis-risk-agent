@@ -87,26 +87,13 @@ def test_add_turn_binds_asset_and_absent_pool_hash_from_platform_state(
         "origin_tool": "strategy.refine_univariate_candidate",
         "provenance": {"asset_id": ASSET_ID, "asset_hash": ASSET_HASH},
     }
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda db_path: _PoolRepository(None),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.TaskArtifactRepository",
-        lambda db_path: _ArtifactRepository(artifact),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.validate_candidate_asset", lambda value: value
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.canonical_candidate_asset_json",
-        lambda value: json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(None))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(None))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.TaskArtifactRepository', lambda db_path: _ArtifactRepository(artifact))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.TaskArtifactRepository', lambda db_path: _ArtifactRepository(artifact))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample.TaskArtifactRepository', lambda db_path: _ArtifactRepository(artifact))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.validate_candidate_asset', lambda value: value)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.canonical_candidate_asset_json', lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
     draft = StandardWorkflowRequestDraft(
         workflow="strategy_pool_add_candidate",
         workflow_inputs={
@@ -142,14 +129,10 @@ def test_reorder_turn_resolves_entry_ids_and_requires_the_complete_current_set(
             {"entry_id": ENTRY_2, "rule_id": RULE_2},
         ],
     }
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda db_path: _PoolRepository(current),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda snapshot: "c" * 64,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(current))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(current))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda snapshot: 'c' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda snapshot: 'c' * 64)
     complete = StandardWorkflowRequestDraft(
         workflow="strategy_pool_reorder",
         workflow_inputs={
@@ -184,10 +167,8 @@ def test_reorder_turn_resolves_entry_ids_and_requires_the_complete_current_set(
 
 
 def test_compile_turn_requires_an_existing_pool(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda db_path: _PoolRepository(None),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(None))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda db_path: _PoolRepository(None))
     draft = StandardWorkflowRequestDraft(
         workflow="strategy_pool_compile",
         workflow_inputs={"strategy_type": "approval"},

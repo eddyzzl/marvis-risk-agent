@@ -136,36 +136,18 @@ def test_scorecard_build_binds_only_latest_score_and_sample_refs(
     artifacts = _Artifacts([old, newest])
     read_runtime = SimpleNamespace(task_artifacts=artifacts)
     load_calls: list[dict] = []
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_read_runtime",
-        lambda _runtime: read_runtime,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_latest_verified_strategy_sample_design_v2_binding",
-        lambda *_args, **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_sample_ref",
-        lambda _sample: dict(SAMPLE_REF),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: read_runtime)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._latest_verified_strategy_sample_design_v2_binding', lambda *_args, **_kwargs: object())
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_sample_ref', lambda _sample: dict(SAMPLE_REF))
 
     def load_score(_runtime, **kwargs):
         load_calls.append(dict(kwargs))
         return _score_binding("scorecard")
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_model_score_evidence_artifacts",
-        load_score,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_training_evidence_ref",
-        lambda _training: {"sample_design_ref": dict(SAMPLE_REF)},
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_model_score_evidence_artifacts', load_score)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_model_score_evidence_artifacts', load_score)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_training_evidence_ref', lambda _training: {'sample_design_ref': dict(SAMPLE_REF)})
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.build_training_evidence_ref', lambda _training: {'sample_design_ref': dict(SAMPLE_REF)})
     slots = _bind_scorecard_band_evidence(_runtime(), _task())
 
     assert load_calls == [
@@ -219,21 +201,9 @@ def test_scorecard_build_skips_authenticated_newer_non_scorecard_evidence(
     artifacts = _Artifacts([scorecard, newer_lgb])
     read_runtime = SimpleNamespace(task_artifacts=artifacts)
     load_calls: list[str] = []
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_read_runtime",
-        lambda _runtime: read_runtime,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_latest_verified_strategy_sample_design_v2_binding",
-        lambda *_args, **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_sample_ref",
-        lambda _sample: dict(SAMPLE_REF),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: read_runtime)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._latest_verified_strategy_sample_design_v2_binding', lambda *_args, **_kwargs: object())
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_sample_ref', lambda _sample: dict(SAMPLE_REF))
 
     def load_score(_runtime, **kwargs):
         evidence_id = kwargs["evidence_artifact_id"]
@@ -242,16 +212,10 @@ def test_scorecard_build_skips_authenticated_newer_non_scorecard_evidence(
             "lightgbm" if evidence_id == newer_lgb["id"] else "scorecard"
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_model_score_evidence_artifacts",
-        load_score,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_training_evidence_ref",
-        lambda _training: {"sample_design_ref": dict(SAMPLE_REF)},
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_model_score_evidence_artifacts', load_score)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_model_score_evidence_artifacts', load_score)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_training_evidence_ref', lambda _training: {'sample_design_ref': dict(SAMPLE_REF)})
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.build_training_evidence_ref', lambda _training: {'sample_design_ref': dict(SAMPLE_REF)})
 
     slots = _bind_scorecard_band_evidence(
         _runtime(),
@@ -279,31 +243,16 @@ def test_scorecard_build_does_not_fallback_when_newest_score_is_damaged(
     )
     read_runtime = SimpleNamespace(task_artifacts=_Artifacts([old, newest]))
     load_calls: list[str] = []
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_read_runtime",
-        lambda _runtime: read_runtime,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_latest_verified_strategy_sample_design_v2_binding",
-        lambda *_args, **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_sample_ref",
-        lambda _sample: dict(SAMPLE_REF),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: read_runtime)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample._latest_verified_strategy_sample_design_v2_binding', lambda *_args, **_kwargs: object())
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_sample_ref', lambda _sample: dict(SAMPLE_REF))
 
     def damaged(_runtime, **kwargs):
         load_calls.append(kwargs["evidence_artifact_id"])
         raise ModelingError("damaged newest score evidence")
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_model_score_evidence_artifacts",
-        damaged,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_model_score_evidence_artifacts', damaged)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_model_score_evidence_artifacts', damaged)
 
     with pytest.raises(
         StrategySetupError,
@@ -335,11 +284,7 @@ def test_scorecard_cutoff_selection_binds_exact_full_band_source(
     artifacts = _Artifacts([record])
     read_runtime = SimpleNamespace(task_artifacts=artifacts)
     loader_calls: list[dict] = []
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_read_runtime",
-        lambda _runtime: read_runtime,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: read_runtime)
 
     def load_band(_runtime, **kwargs):
         loader_calls.append(dict(kwargs))
@@ -353,11 +298,7 @@ def test_scorecard_cutoff_selection_binds_exact_full_band_source(
             },
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_scorecard_band_asset_artifact",
-        load_band,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_scorecard_band_asset_artifact', load_band)
     draft = StandardWorkflowRequestDraft(
         workflow="scorecard_cutoff_selection",
         workflow_inputs={
@@ -422,39 +363,15 @@ def test_pool_selection_strictly_replays_scorecard_pointer_to_full_band(
         to_domain_binding=lambda: {"selection": "verified"},
     )
     load_calls: list[dict] = []
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_read_runtime",
-        lambda _runtime: read_runtime,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: read_runtime)
 
     def load_selection(_runtime, **kwargs):
         load_calls.append(dict(kwargs))
         return verified
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_scorecard_cutoff_selection_artifact",
-        load_selection,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "scorecard_cutoff_selection_to_verified_candidate_fragment",
-        lambda *_args, **_kwargs: {"verified": True},
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "verified_fragment_pool_parts",
-        lambda _fragment: (
-            {
-                "asset_id": ASSET_ID,
-                "asset_hash": ASSET_HASH,
-                "fragment_id": "scorecard-fragment-" + "f" * 32,
-            },
-            "scorecard-rule-" + "a" * 32,
-            {"condition": {}},
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_scorecard_cutoff_selection_artifact', load_selection)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.scorecard_cutoff_selection_to_verified_candidate_fragment', lambda *_args, **_kwargs: {'verified': True})
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.verified_fragment_pool_parts', lambda _fragment: ({'asset_id': ASSET_ID, 'asset_hash': ASSET_HASH, 'fragment_id': 'scorecard-fragment-' + 'f' * 32}, 'scorecard-rule-' + 'a' * 32, {'condition': {}}))
 
     slots, fragment_id = _candidate_selection_artifact_slots(
         _runtime(),
@@ -501,13 +418,7 @@ def test_llm_free_scorecard_request_enters_the_same_slot_resolver(
     )
     resolver_calls: list[dict] = []
     plan_calls: list[dict] = []
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_dataset_preview",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            StrategySetupError("no generic dataset preview")
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_preview', lambda *_args, **_kwargs: (_ for _ in ()).throw(StrategySetupError('no generic dataset preview')))
 
     def resolve(_runtime, task):
         resolver_calls.append({"task_id": task.id})
@@ -516,21 +427,13 @@ def test_llm_free_scorecard_request_enters_the_same_slot_resolver(
             "sample_design_ref": {"server": "sample"},
         }
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_bind_scorecard_band_evidence",
-        resolve,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates._bind_scorecard_band_evidence', resolve)
 
     def start(_runtime, _repo, _task, **kwargs):
         plan_calls.append(dict(kwargs))
         return {"status": "started", **kwargs}
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_start_confirmed_strategy_plan",
-        start,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', start)
 
     response = turn_handlers._handle_structured_strategy_request_turn(
         runtime,

@@ -162,10 +162,7 @@ def test_turn_evidence_adapter_injects_only_platform_resolved_tool_inputs(
             "entry_id": ENTRY_ID,
         }
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_v2_read_runtime",
-        lambda runtime: "read-runtime",
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_v2_read_runtime', lambda runtime: 'read-runtime')
 
     def resolve(runtime, *, task_id: str, user_pointer):
         captured.update(
@@ -177,10 +174,7 @@ def test_turn_evidence_adapter_injects_only_platform_resolved_tool_inputs(
         )
         return resolved
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_candidate_monthly_stability_inputs",
-        resolve,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_candidate_monthly_stability_inputs', resolve)
 
     evidence = _bind_candidate_monthly_stability_evidence(
         SimpleNamespace(),
@@ -203,19 +197,8 @@ def test_turn_evidence_adapter_injects_only_platform_resolved_tool_inputs(
 def test_canonical_evidence_binding_owns_missing_month_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_v2_read_runtime",
-        lambda runtime: "read-runtime",
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_candidate_monthly_stability_inputs",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            StrategyError(
-                "candidate monthly stability requires a month field in the "
-                "governed StrategySampleDesign"
-            )
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_v2_read_runtime', lambda runtime: 'read-runtime')
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_candidate_monthly_stability_inputs', lambda *args, **kwargs: (_ for _ in ()).throw(StrategyError('candidate monthly stability requires a month field in the governed StrategySampleDesign')))
     runtime = SimpleNamespace()
     task = SimpleNamespace(id="task-1")
     draft = _draft(asset_id=ASSET_ID)
@@ -268,15 +251,7 @@ def test_natural_language_missing_month_never_creates_a_plan(
         "marvis.agent.validation_app_service.driver_llm_client",
         lambda request, task: llm,
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_candidate_monthly_stability_inputs",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            StrategyError(
-                "candidate monthly stability requires a month field in the "
-                "governed StrategySampleDesign"
-            )
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_candidate_monthly_stability_inputs', lambda *args, **kwargs: (_ for _ in ()).throw(StrategyError('candidate monthly stability requires a month field in the governed StrategySampleDesign')))
 
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",

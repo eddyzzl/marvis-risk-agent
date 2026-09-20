@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from marvis.packs.strategy.report_bundle_adapters import build_strategy_report_bundle_source_inputs
+
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-import marvis.agent.turn_handlers as turn_handlers
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent.turn_handlers import (
     _StrategyV2EvidenceSetupError,
@@ -62,18 +63,14 @@ def test_report_turn_freezes_exact_matching_pool_stability_ref(
     )
     observed: dict[str, object] = {}
     original_preflight = (
-        turn_handlers.build_strategy_report_bundle_source_inputs
+        build_strategy_report_bundle_source_inputs
     )
 
     def capture_preflight(**kwargs):
         observed["pool_stability"] = kwargs["pool_stability"]
         return original_preflight(**kwargs)
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "build_strategy_report_bundle_source_inputs",
-        capture_preflight,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.build_strategy_report_bundle_source_inputs', capture_preflight)
 
     slots = _strategy_report_bundle_v2_plan_slots(
         _runtime(fixture),
@@ -241,11 +238,7 @@ def test_report_turn_pool_stability_selection_window_exhaustion_fails_closed(
         "list_recent_for_task_kind_with_count",
         bounded_recent,
     )
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_strategy_pool_stability_artifact",
-        authenticate,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_strategy_pool_stability_artifact', authenticate)
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_bundle_v2_plan_slots(
@@ -273,11 +266,7 @@ def test_report_turn_legacy_pool_impact_never_selects_pool_stability(
             "legacy PoolImpact report must not select PoolStability"
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_report_latest_pool_stability_binding",
-        reject_selection,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_latest_pool_stability_binding', reject_selection)
 
     slots = _strategy_report_bundle_v2_plan_slots(
         _runtime(fixture),

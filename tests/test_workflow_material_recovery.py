@@ -700,10 +700,7 @@ def test_real_failed_step_retry_command_routes_to_driver_not_recovery_chat(
         "marvis.routers.validation_agent.resolve_driver_agent_client",
         lambda request, task, payload: _GateLLM(),
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._driver",
-        lambda runtime: retry_driver,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda runtime: retry_driver)
     monkeypatch.setattr(
         "marvis.agent.validation_app_service._driver_recovery_responder",
         lambda *args, **kwargs: forbidden_recovery_response,
@@ -818,7 +815,7 @@ def test_cancelled_plan_continue_resumes_same_step_without_rebuilding_setup(
         "marvis.routers.validation_agent.resolve_driver_agent_client",
         lambda request, task, payload: _GateLLM(),
     )
-    monkeypatch.setattr("marvis.agent.turn_handlers._driver", lambda runtime: retry_driver)
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda runtime: retry_driver)
 
     question = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -953,10 +950,7 @@ def test_legacy_restart_notice_routes_explicit_retry_to_failed_plan(
         "marvis.routers.validation_agent.resolve_driver_agent_client",
         lambda request, task, payload: _GateLLM(),
     )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._driver",
-        lambda runtime: retry_driver,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda runtime: retry_driver)
     monkeypatch.setattr(
         "marvis.agent.validation_app_service._driver_recovery_responder",
         lambda *args, **kwargs: (

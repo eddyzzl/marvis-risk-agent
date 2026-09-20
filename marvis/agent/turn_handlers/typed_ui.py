@@ -1,24 +1,27 @@
-"""typed_ui driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Typed ui for governed Agent turns."""
+
 from __future__ import annotations
-import sqlite3
-from marvis.agent.join_setup import AuthenticatedJoinSelection, C1TargetValidationError
-from marvis.agent.plan_driver import DriverError, confirmation_is_explicitly_withheld
+
+from marvis.agent.join_setup import AuthenticatedJoinSelection
+from marvis.agent.join_setup import C1TargetValidationError
+from marvis.agent.plan_driver import DriverError
+from marvis.agent.plan_driver import confirmation_is_explicitly_withheld
 from marvis.agent.strategy_workflows import MANUAL_STANDARD_STRATEGY_WORKFLOWS
 from marvis.data.registry import DatasetRegistry
-from marvis.repositories.tasks import TaskRepository
 from marvis.domain import TaskRecord
-from marvis.orchestrator.contracts import Plan, PlanStatus, StepStatus, plan_fingerprint, plan_step_confirmation_fingerprint
+from marvis.orchestrator.contracts import Plan
+from marvis.orchestrator.contracts import PlanStatus
+from marvis.orchestrator.contracts import StepStatus
+from marvis.orchestrator.contracts import plan_fingerprint
+from marvis.orchestrator.contracts import plan_step_confirmation_fingerprint
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.repositories.tasks import TaskRepository
+import sqlite3
+from . import contracts as contracts_lane
+from . import shared as shared_lane
+from . import strategy_contracts as strategy_contracts_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _STRATEGY_SAMPLE_BOUND_TOOLS
-    from . import _TERMINAL_PLAN_STATUS_VALUES
-    from . import _TurnHandlerSpec
-    from . import append_driver_messages
 
 def _validate_typed_ui_action_target(
     plan: Plan | None,
@@ -132,8 +135,9 @@ def _validate_typed_ui_action_target(
     if ui_action in action_matches_gate and not action_matches_gate[ui_action]:
         raise DriverError("该界面操作与当前待确认步骤不匹配，请刷新页面后重试。")
 
+
 def _append_successful_ui_action_messages(
-    spec: _TurnHandlerSpec,
+    spec: contracts_lane._TurnHandlerSpec,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -156,11 +160,13 @@ def _append_successful_ui_action_messages(
         message_metadata["expected_plan_id"] = expected_plan_id
     if expected_step_id:
         message_metadata["expected_step_id"] = expected_step_id
+
     def add_message(**kwargs) -> None:
         if conn is None:
             repo.add_agent_message(task.id, **kwargs)
         else:
             repo.add_agent_message_on_connection(conn, task.id, **kwargs)
+
     add_message(
         role="user",
         stage="chat",
@@ -195,9 +201,10 @@ def _append_successful_ui_action_messages(
         metadata=acknowledgement_metadata,
     )
 
+
 def _terminate_stale_strategy_sample_plan(
-    spec: _TurnHandlerSpec,
-    runtime: DriverTurnRuntime,
+    spec: contracts_lane._TurnHandlerSpec,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     plan: Plan,
@@ -286,9 +293,10 @@ def _terminate_stale_strategy_sample_plan(
         "messages": repo.list_agent_messages(task.id),
     }
 
+
 def _stale_strategy_sample_steps(plan: Plan) -> list:
     status = getattr(plan.status, "value", plan.status)
-    if status in _TERMINAL_PLAN_STATUS_VALUES:
+    if status in contracts_lane._TERMINAL_PLAN_STATUS_VALUES:
         return []
     stale_steps = []
     for step in plan.steps:
@@ -297,27 +305,29 @@ def _stale_strategy_sample_steps(plan: Plan) -> list:
             continue
         if (
             step.tool_ref.plugin != "strategy"
-            or step.tool_ref.tool not in _STRATEGY_SAMPLE_BOUND_TOOLS
+            or step.tool_ref.tool
+            not in strategy_contracts_lane._STRATEGY_SAMPLE_BOUND_TOOLS
         ):
             continue
         try:
-            StrategySampleDesignRef.from_value(
-                step.inputs.get("sample_design_ref")
-            )
+            StrategySampleDesignRef.from_value(step.inputs.get("sample_design_ref"))
         except StrategyError:
             stale_steps.append(step)
     return stale_steps
+
 
 def _append_spec_messages(
     repo: TaskRepository,
     task: TaskRecord,
     turn,
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
 ) -> None:
-    append_driver_messages(repo, task, turn, runtime=runtime)
+    shared_lane.append_driver_messages(repo, task, turn, runtime=runtime)
+
 
 def _identity_display_text(user_text: str) -> str:
     return user_text
+
 
 def _validated_authenticated_c1_target(
     registry: DatasetRegistry,
@@ -329,14 +339,11 @@ def _validated_authenticated_c1_target(
     normalized = str(target_col or "").strip() or None
     if normalized is None:
         return None
-    anchor_columns = set(
-        registry.authenticated_binding_column_names(selection.anchor)
-    )
+    anchor_columns = set(registry.authenticated_binding_column_names(selection.anchor))
     if normalized in anchor_columns:
         return normalized
     feature_only = any(
-        normalized
-        in set(registry.authenticated_binding_column_names(binding))
+        normalized in set(registry.authenticated_binding_column_names(binding))
         for binding in selection.features
     )
     if feature_only:
@@ -347,11 +354,13 @@ def _validated_authenticated_c1_target(
         f"目标列 `{normalized}` 不存在于当前样本主表；请重新选择。"
     )
 
+
 _TYPED_EVALUATION_OPERATIONS = frozenset({"analyze", "backtest"})
 
 _STORED_EVALUATION_OPERATIONS = frozenset({"analyze", "backtest", "compare"})
 
 _MANUAL_STRATEGY_WORKFLOWS = frozenset(MANUAL_STANDARD_STRATEGY_WORKFLOWS)
+
 
 def _auto_decision_content(decision: dict) -> str:
     reason = str(decision.get("reason") or "").strip() or "自动决策已生成。"

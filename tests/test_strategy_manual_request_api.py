@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from marvis.agent.strategy_setup import StrategySetupError
+
 from pathlib import Path
 
 import pandas as pd
@@ -9,7 +11,6 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from marvis.agent import turn_handlers
 from marvis.api_schemas import ManualStrategyRequest
 from marvis.app import create_app
 from marvis.db import StrategyRepository, TaskRepository
@@ -276,11 +277,7 @@ def test_public_manual_workbench_spine_reaches_governed_preflight_without_llm(
         reached.append(draft.workflow)
         return ("test_preflight_reached", "governed preflight reached")
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_request_preflight",
-        stop_at_preflight,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._strategy_request_preflight', stop_at_preflight)
     monkeypatch.setattr(
         "marvis.agent.validation_app_service.driver_llm_client",
         lambda request, task: _BombLLM(),
@@ -1118,24 +1115,12 @@ def test_typed_refinement_runs_fresh_cutpoints_and_an_exact_existing_candidate(
 
     def unavailable_current_dataset(*args, **kwargs):
         del args, kwargs
-        raise turn_handlers.StrategySetupError(
+        raise StrategySetupError(
             "existing refinement must not require the current DataWorkspace"
         )
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_dataset_preview",
-        unavailable_current_dataset,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_strategy_dataset_context",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError(
-                "existing refinement must resolve its immutable source artifact"
-            )
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_preview', unavailable_current_dataset)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_context', lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('existing refinement must resolve its immutable source artifact')))
 
     existing = client.post(
         f"/api/tasks/{task_id}/agent/messages",

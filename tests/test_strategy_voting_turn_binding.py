@@ -85,14 +85,10 @@ def _pool(*, nested: bool = False):
 def test_voting_turn_binds_current_cas_and_canonical_entry_order(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda _db_path: _PoolRepository(_pool()),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda _snapshot: "f" * 64,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda _db_path: _PoolRepository(_pool()))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda _db_path: _PoolRepository(_pool()))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda _snapshot: 'f' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda _snapshot: 'f' * 64)
 
     slots = _strategy_voting_candidate_plan_slots(
         _runtime(tmp_path),
@@ -110,23 +106,17 @@ def test_voting_turn_binds_current_cas_and_canonical_entry_order(
 
 
 def test_voting_turn_requires_existing_exact_current_rules(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda _db_path: _PoolRepository(None),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda _db_path: _PoolRepository(None))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda _db_path: _PoolRepository(None))
     with pytest.raises(StrategySetupError, match="没有 approval Strategy Pool"):
         _strategy_voting_candidate_plan_slots(
             _runtime(tmp_path), SimpleNamespace(id="task-1"), _draft()
         )
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda _db_path: _PoolRepository(_pool()),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda _snapshot: "f" * 64,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda _db_path: _PoolRepository(_pool()))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda _db_path: _PoolRepository(_pool()))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda _snapshot: 'f' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda _snapshot: 'f' * 64)
     with pytest.raises(StrategySetupError, match="没有唯一匹配"):
         _strategy_voting_candidate_plan_slots(
             _runtime(tmp_path),
@@ -136,14 +126,10 @@ def test_voting_turn_requires_existing_exact_current_rules(tmp_path, monkeypatch
 
 
 def test_voting_turn_rejects_nested_voting_source(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
-        lambda _db_path: _PoolRepository(_pool(nested=True)),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
-        lambda _snapshot: "f" * 64,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.StrategyCandidatePoolRepository', lambda _db_path: _PoolRepository(_pool(nested=True)))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.StrategyCandidatePoolRepository', lambda _db_path: _PoolRepository(_pool(nested=True)))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.strategy_pool_snapshot_hash', lambda _snapshot: 'f' * 64)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.strategy_pool_snapshot_hash', lambda _snapshot: 'f' * 64)
 
     with pytest.raises(StrategySetupError, match="拒绝嵌套 Voting"):
         _strategy_voting_candidate_plan_slots(
@@ -178,10 +164,9 @@ class _ArtifactRepository:
 def test_pool_add_turn_binds_verified_voting_artifact(tmp_path, monkeypatch) -> None:
     artifact = _voting_artifact(tmp_path)
     repository = _ArtifactRepository(artifact)
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.TaskArtifactRepository",
-        lambda _db_path: repository,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.TaskArtifactRepository', lambda _db_path: repository)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.TaskArtifactRepository', lambda _db_path: repository)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample.TaskArtifactRepository', lambda _db_path: repository)
     calls = []
 
     def load(conn, **kwargs):
@@ -192,10 +177,7 @@ def test_pool_add_turn_binds_verified_voting_artifact(tmp_path, monkeypatch) -> 
             asset={"asset_id": ASSET_ID, "asset_hash": ASSET_HASH},
         )
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_verified_voting_candidate_artifact_on_connection",
-        load,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_verified_voting_candidate_artifact_on_connection', load)
 
     slots = _candidate_asset_artifact_slots(
         _runtime(tmp_path), task_id="task-1", asset_id=ASSET_ID
@@ -222,18 +204,14 @@ def test_pool_add_turn_rejects_unverified_voting_artifact(
     tmp_path, monkeypatch
 ) -> None:
     artifact = _voting_artifact(tmp_path)
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.TaskArtifactRepository",
-        lambda _db_path: _ArtifactRepository(artifact),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.TaskArtifactRepository', lambda _db_path: _ArtifactRepository(artifact))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.TaskArtifactRepository', lambda _db_path: _ArtifactRepository(artifact))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_sample.TaskArtifactRepository', lambda _db_path: _ArtifactRepository(artifact))
 
     def reject(*_args, **_kwargs):
         raise ValueError("tampered")
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.load_verified_voting_candidate_artifact_on_connection",
-        reject,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_verified_voting_candidate_artifact_on_connection', reject)
 
     with pytest.raises(StrategySetupError, match="Voting 候选资产.*完整性校验"):
         _candidate_asset_artifact_slots(

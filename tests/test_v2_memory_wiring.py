@@ -1213,10 +1213,8 @@ def test_agent_autodrive_fails_closed_when_memory_use_audit_fails(
         raise OSError("audit store unavailable")
 
     monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.audit_agent_memory_use_from_store",
-        fail_audit,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.dispatch.audit_agent_memory_use_from_store', fail_audit)
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared.audit_agent_memory_use_from_store', fail_audit)
     repo = _TokenRepo()
     task = _task_record(
         id="task-current",

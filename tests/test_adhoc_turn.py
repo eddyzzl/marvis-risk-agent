@@ -233,11 +233,7 @@ def test_confirm_rejects_bytes_replaced_after_pending_reauthentication(
         path.write_bytes(b"replacement after pending reauthentication")
         return real_run(runtime, repo, task, tool_inputs, **kwargs)
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "_run_adhoc_slice_plan",
-        replace_bytes_then_run,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.adhoc._run_adhoc_slice_plan', replace_bytes_then_run)
 
     response = _post(client, task_id, "确认")
 
@@ -397,11 +393,7 @@ def test_agent_semantics_routes_query_and_natural_confirmation_without_magic_wor
         "marvis.agent.validation_app_service.OpenAICompatibleLLMClient",
         SemanticLLM,
     )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_specialized_workflow_intake_is_pending",
-        lambda *_args, **_kwargs: False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._specialized_workflow_intake_is_pending', lambda *_args, **_kwargs: False)
     _configure_agent_model(client)
     task_id = _make_agent_task_with_ready_dataset(client, tmp_path)
 
@@ -512,11 +504,7 @@ def test_agent_semantics_revises_then_rejects_pending_query(
         "marvis.agent.validation_app_service.OpenAICompatibleLLMClient",
         SemanticLLM,
     )
-    monkeypatch.setattr(
-        turn_handlers,
-        "_specialized_workflow_intake_is_pending",
-        lambda *_args, **_kwargs: False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._specialized_workflow_intake_is_pending', lambda *_args, **_kwargs: False)
     _configure_agent_model(client)
     task_id = _make_agent_task_with_ready_dataset(client, tmp_path)
     assert client.post(

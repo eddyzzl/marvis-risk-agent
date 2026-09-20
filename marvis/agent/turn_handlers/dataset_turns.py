@@ -1,33 +1,35 @@
-"""dataset_turns driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Dataset turns for governed Agent turns."""
+
 from __future__ import annotations
-from marvis.agent.dataset_analysis import build_dataset_analysis_request, detect_dataset_analysis_intent
-from marvis.agent.dataset_export import build_dataset_export_request, detect_dataset_export_intent
-from marvis.agent.dataset_transform import build_dataset_transform_request, detect_dataset_transform_intent
-from marvis.agent.plan_driver import DriverError, is_confirm
+
+from marvis.agent.dataset_analysis import build_dataset_analysis_request
+from marvis.agent.dataset_analysis import detect_dataset_analysis_intent
+from marvis.agent.dataset_export import build_dataset_export_request
+from marvis.agent.dataset_export import detect_dataset_export_intent
+from marvis.agent.dataset_transform import build_dataset_transform_request
+from marvis.agent.dataset_transform import detect_dataset_transform_intent
+from marvis.agent.plan_driver import DriverError
+from marvis.agent.plan_driver import is_confirm
 from marvis.agent.risk_analysis_setup import latest_risk_analysis_intake
 from marvis.data.transform_semantics import effective_transform_semantic_mapping
 from marvis.data.workspace import data_semantic_mapping_hash
+from marvis.domain import TASK_TYPE_VINTAGE
+from marvis.domain import TaskRecord
+from marvis.repositories.data_workspace import DataWorkspaceDataError
+from marvis.repositories.data_workspace import DataWorkspaceDatasetNotFound
+from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.tasks import TaskRepository
-from marvis.domain import TASK_TYPE_VINTAGE, TaskRecord
-from marvis.repositories.data_workspace import DataWorkspaceDataError, DataWorkspaceDatasetNotFound, DataWorkspaceRepository
+from . import contracts as contracts_lane
+from . import data_context as data_context_lane
+from . import responses as responses_lane
+from . import shared as shared_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _active_plan
-    from . import _driver
-    from . import _modeling_data_runtime
-    from . import _resume_new_routed_plan
-    from . import append_driver_messages
-    from . import append_join_error
-    from . import join_turn_response
-    from . import latest_open_gate
 
 _DATASET_TRANSFORM_PROTECTED_DROP_META_KEY = "pending_protected_drop"
 
+
 def _maybe_handle_dataset_transform_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -49,9 +51,9 @@ def _maybe_handle_dataset_transform_turn(
         risk_intake = latest_risk_analysis_intake(conversation)
         if risk_intake is not None and risk_intake.get("phase") != "ready":
             return None
-    if _active_plan(runtime.plan_repo, task.id) is not None:
+    if shared_lane._active_plan(runtime.plan_repo, task.id) is not None:
         return None
-    if latest_open_gate(conversation) is not None:
+    if shared_lane.latest_open_gate(conversation) is not None:
         return None
 
     pending = _latest_pending_transform_protected_drop(conversation)
@@ -92,7 +94,7 @@ def _maybe_handle_dataset_transform_turn(
             message="请先在数据工作区选择并保存本次要加工的样本。",
         )
 
-    backend, registry = _modeling_data_runtime(runtime.settings)
+    backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     try:
         dataset = registry.get(snapshot.active_dataset_id)
         if dataset.task_id != task.id:
@@ -187,7 +189,7 @@ def _maybe_handle_dataset_transform_turn(
         "operations": operations,
         "confirm_protected_drop": confirm_protected_drop,
     }
-    driver = _driver(runtime)
+    driver = shared_lane._driver(runtime)
     try:
         started = driver.start(
             task_id=task.id,
@@ -198,7 +200,7 @@ def _maybe_handle_dataset_transform_turn(
         # A normal transform is reversible by selecting the immutable parent;
         # protected drops reached this point only after the explicit dialogue
         # acknowledgement above, so no second generic gate is needed.
-        turn = _resume_new_routed_plan(
+        turn = shared_lane._resume_new_routed_plan(
             runtime,
             driver,
             plan_id=started.plan_id,
@@ -207,9 +209,10 @@ def _maybe_handle_dataset_transform_turn(
     except DriverError:
         raise
     except Exception as exc:
-        return append_join_error(repo, task.id, f"数据加工出错：{exc}")
-    append_driver_messages(repo, task, turn, runtime=runtime)
-    return join_turn_response(repo, task.id)
+        return responses_lane.append_join_error(repo, task.id, f"数据加工出错：{exc}")
+    shared_lane.append_driver_messages(repo, task, turn, runtime=runtime)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _latest_pending_transform_protected_drop(
     conversation: list[dict],
@@ -229,6 +232,7 @@ def _latest_pending_transform_protected_drop(
     )
     return pending if isinstance(pending, dict) else None
 
+
 def _pending_transform_matches_workspace(
     pending: dict,
     *,
@@ -246,6 +250,7 @@ def _pending_transform_matches_workspace(
         and pending.get("analysis_generation") == analysis_generation
         and pending.get("semantic_mapping_hash") == semantic_mapping_hash
     )
+
 
 def _dataset_transform_clarification(
     repo: TaskRepository,
@@ -267,10 +272,11 @@ def _dataset_transform_clarification(
             **dict(extra_metadata or {}),
         },
     )
-    return join_turn_response(repo, task_id)
+    return responses_lane.join_turn_response(repo, task_id)
+
 
 def _maybe_handle_dataset_export_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -282,9 +288,9 @@ def _maybe_handle_dataset_export_turn(
     if not force_intent and not detect_dataset_export_intent(user_text):
         return None
     conversation = repo.list_agent_messages(task.id)
-    if _active_plan(runtime.plan_repo, task.id) is not None:
+    if shared_lane._active_plan(runtime.plan_repo, task.id) is not None:
         return None
-    if latest_open_gate(conversation) is not None:
+    if shared_lane.latest_open_gate(conversation) is not None:
         return None
 
     repo.add_agent_message(
@@ -313,7 +319,7 @@ def _maybe_handle_dataset_export_turn(
             message="请先在数据工作区选择并保存本次要导出的样本。",
         )
 
-    backend, registry = _modeling_data_runtime(runtime.settings)
+    backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     try:
         dataset = registry.get(snapshot.active_dataset_id)
         if dataset.task_id != task.id:
@@ -350,7 +356,7 @@ def _maybe_handle_dataset_export_turn(
         "format": request.format,
         "text_columns": list(request.text_columns),
     }
-    driver = _driver(runtime)
+    driver = shared_lane._driver(runtime)
     try:
         started = driver.start(
             task_id=task.id,
@@ -358,7 +364,7 @@ def _maybe_handle_dataset_export_turn(
             slots=slots,
             tier=runtime.tier,
         )
-        turn = _resume_new_routed_plan(
+        turn = shared_lane._resume_new_routed_plan(
             runtime,
             driver,
             plan_id=started.plan_id,
@@ -367,9 +373,10 @@ def _maybe_handle_dataset_export_turn(
     except DriverError:
         raise
     except Exception as exc:
-        return append_join_error(repo, task.id, f"数据导出出错：{exc}")
-    append_driver_messages(repo, task, turn, runtime=runtime)
-    return join_turn_response(repo, task.id)
+        return responses_lane.append_join_error(repo, task.id, f"数据导出出错：{exc}")
+    shared_lane.append_driver_messages(repo, task, turn, runtime=runtime)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _dataset_export_clarification(
     repo: TaskRepository,
@@ -389,10 +396,11 @@ def _dataset_export_clarification(
             "code": code,
         },
     )
-    return join_turn_response(repo, task_id)
+    return responses_lane.join_turn_response(repo, task_id)
+
 
 def _maybe_handle_dataset_analysis_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -413,9 +421,9 @@ def _maybe_handle_dataset_analysis_turn(
         risk_intake = latest_risk_analysis_intake(conversation)
         if risk_intake is not None and risk_intake.get("phase") != "ready":
             return None
-    if _active_plan(runtime.plan_repo, task.id) is not None:
+    if shared_lane._active_plan(runtime.plan_repo, task.id) is not None:
         return None
-    if latest_open_gate(conversation) is not None:
+    if shared_lane.latest_open_gate(conversation) is not None:
         return None
 
     repo.add_agent_message(
@@ -444,7 +452,7 @@ def _maybe_handle_dataset_analysis_turn(
             message="请先在数据工作区选择并保存本次要分析的样本，再让我开始分析。",
         )
 
-    backend, registry = _modeling_data_runtime(runtime.settings)
+    backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     try:
         dataset = registry.get(snapshot.active_dataset_id)
         if dataset.task_id != task.id:
@@ -487,7 +495,7 @@ def _maybe_handle_dataset_analysis_turn(
     if request.target_col is not None:
         slots["target_col"] = request.target_col
 
-    driver = _driver(runtime)
+    driver = shared_lane._driver(runtime)
     try:
         started = driver.start(
             task_id=task.id,
@@ -495,7 +503,7 @@ def _maybe_handle_dataset_analysis_turn(
             slots=slots,
             tier=runtime.tier,
         )
-        turn = _resume_new_routed_plan(
+        turn = shared_lane._resume_new_routed_plan(
             runtime,
             driver,
             plan_id=started.plan_id,
@@ -504,9 +512,12 @@ def _maybe_handle_dataset_analysis_turn(
     except DriverError:
         raise
     except Exception as exc:
-        return append_join_error(repo, task.id, f"样本描述分析出错：{exc}")
-    append_driver_messages(repo, task, turn, runtime=runtime)
-    return join_turn_response(repo, task.id)
+        return responses_lane.append_join_error(
+            repo, task.id, f"样本描述分析出错：{exc}"
+        )
+    shared_lane.append_driver_messages(repo, task, turn, runtime=runtime)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _dataset_analysis_clarification(
     repo: TaskRepository,
@@ -526,4 +537,4 @@ def _dataset_analysis_clarification(
             "code": code,
         },
     )
-    return join_turn_response(repo, task_id)
+    return responses_lane.join_turn_response(repo, task_id)

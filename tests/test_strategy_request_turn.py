@@ -662,10 +662,7 @@ def test_legacy_confirmation_releases_claim_after_driver_start_failure(
             raise DriverError("simulated start failure")
         return original_start(*args, **kwargs)
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._start_confirmed_strategy_plan",
-        fail_once,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', fail_once)
 
     first = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -700,14 +697,8 @@ def test_target_guard_is_explicitly_safe_when_preview_is_none(
         }
     )
     _install_llm(monkeypatch, llm)
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_dataset_preview",
-        lambda runtime, task: None,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_request_requires_dataset",
-        lambda draft: False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_preview', lambda runtime, task: None)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_request_requires_dataset', lambda draft: False)
 
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -925,10 +916,7 @@ def test_legacy_pending_same_schema_replacement_during_binding_is_not_consumed(
             mutated = True
         return original_context(runtime, task, require_target=require_target)
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_dataset_context",
-        replace_same_schema,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_dataset_context', replace_same_schema)
 
     confirmed = client.post(
         f"/api/tasks/{task_id}/agent/messages",

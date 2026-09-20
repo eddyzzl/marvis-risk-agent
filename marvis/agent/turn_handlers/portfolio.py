@@ -1,29 +1,33 @@
-"""portfolio driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Portfolio for governed Agent turns."""
+
 from __future__ import annotations
+
 from collections.abc import Mapping
-from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN, DriverError, is_confirm
-from marvis.agent.portfolio_setup import PortfolioProposal, PortfolioSetupError, build_portfolio_proposal, build_states_gate_state, parse_states_reply, verify_portfolio_dataset_binding
-from marvis.repositories.tasks import TaskRepository
-from marvis.domain import TASK_TYPE_PORTFOLIO, TaskRecord
+from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
+from marvis.agent.plan_driver import DriverError
+from marvis.agent.plan_driver import is_confirm
+from marvis.agent.portfolio_setup import PortfolioProposal
+from marvis.agent.portfolio_setup import PortfolioSetupError
+from marvis.agent.portfolio_setup import build_portfolio_proposal
+from marvis.agent.portfolio_setup import build_states_gate_state
+from marvis.agent.portfolio_setup import parse_states_reply
+from marvis.agent.portfolio_setup import verify_portfolio_dataset_binding
+from marvis.domain import TASK_TYPE_PORTFOLIO
+from marvis.domain import TaskRecord
 from marvis.orchestrator.contracts import PlanStatus
 from marvis.repositories.plans import PlanRepository
+from marvis.repositories.tasks import TaskRepository
+from . import contracts as contracts_lane
+from . import data_context as data_context_lane
+from . import responses as responses_lane
+from . import semantic_authorization as semantic_authorization_lane
+from . import shared as shared_lane
+from . import turn_runner as turn_runner_lane
+from . import typed_ui as typed_ui_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _TurnHandlerSpec
-    from . import _active_plan
-    from . import _identity_display_text
-    from . import _ingest_notice_text
-    from . import _modeling_data_runtime
-    from . import _run_driver_turn
-    from . import _semantic_exact_gate_authorization
-    from . import append_workflow_error
-    from . import join_turn_response
 
 def run_portfolio_driver_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -40,7 +44,7 @@ def run_portfolio_driver_turn(
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
 ) -> dict:
-    return _run_driver_turn(
+    return turn_runner_lane._run_driver_turn(
         _PORTFOLIO_SPEC,
         runtime,
         repo,
@@ -59,6 +63,7 @@ def run_portfolio_driver_turn(
         ui_action=ui_action,
     )
 
+
 def _portfolio_success_criteria(task: TaskRecord) -> list[dict] | None:
     """S3: optional deterministic criterion mirroring _strategy_success_criteria.
     task's optional portfolio_el_max (getattr-based -- no schema migration backs
@@ -69,6 +74,7 @@ def _portfolio_success_criteria(task: TaskRecord) -> list[dict] | None:
         return None
     return [{"metric": "total_el", "max": float(el_max)}]
 
+
 def _latest_portfolio_states(conversation: list[dict]) -> dict | None:
     for message in reversed(conversation):
         if message.get("role") != "assistant":
@@ -77,6 +83,7 @@ def _latest_portfolio_states(conversation: list[dict]) -> dict | None:
         if "portfolio_states" in meta:
             return meta["portfolio_states"]
     return None
+
 
 def _request_portfolio_setup(
     repo: TaskRepository,
@@ -106,15 +113,16 @@ def _request_portfolio_setup(
             ],
         },
     )
-    return join_turn_response(repo, task.id)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _begin_portfolio_setup(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     request: Mapping[str, object],
 ) -> dict:
-    backend, registry = _modeling_data_runtime(runtime.settings)
+    backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     proposal = build_portfolio_proposal(
         registry,
         backend,
@@ -146,7 +154,7 @@ def _begin_portfolio_setup(
             f"我按恶化程度排的桶顺序（由好到坏）：{states_text}。\n"
             "**桶的语义顺序机器不可猜，必须你确认**：无误时可以直接说明认可当前"
             "顺序；要改就按由好到坏顺序重列所有桶（逗号分隔）。"
-            f"{_ingest_notice_text(notices)}"
+            f"{shared_lane._ingest_notice_text(notices)}"
         ),
         metadata={
             "portfolio_states": build_states_gate_state(proposal),
@@ -155,10 +163,11 @@ def _begin_portfolio_setup(
             "ingest_notices": notices,
         },
     )
-    return join_turn_response(repo, task.id)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _run_portfolio_setup(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     user_text: str | None,
@@ -172,25 +181,24 @@ def _run_portfolio_setup(
     text = str(user_text or "").strip()
     states = parse_states_reply(text, gate_state)
     semantic_authorization = None
-    if (
-        states is None
-        and runtime.require_semantic_text_authorization
-    ):
+    if states is None and runtime.require_semantic_text_authorization:
         proposed_states = [
             str(state) for state in gate_state.get("proposed_states") or []
         ]
-        semantic_authorization = _semantic_exact_gate_authorization(
-            runtime,
-            text,
-            gate_context=(
-                "组合分析逾期桶顺序授权：用户已查看由好到坏的完整桶顺序；"
-                "confirm 只表示明确、即时、无条件地接受当前完整顺序。任何重排"
-                "仍必须逐字提交全部桶，LLM 不得猜测或改写顺序。"
-            ),
-            proposed_params={
-                "dataset_content_hash": gate_state.get("dataset_content_hash"),
-                "proposed_states": proposed_states,
-            },
+        semantic_authorization = (
+            semantic_authorization_lane._semantic_exact_gate_authorization(
+                runtime,
+                text,
+                gate_context=(
+                    "组合分析逾期桶顺序授权：用户已查看由好到坏的完整桶顺序；"
+                    "confirm 只表示明确、即时、无条件地接受当前完整顺序。任何重排"
+                    "仍必须逐字提交全部桶，LLM 不得猜测或改写顺序。"
+                ),
+                proposed_params={
+                    "dataset_content_hash": gate_state.get("dataset_content_hash"),
+                    "proposed_states": proposed_states,
+                },
+            )
         )
         if semantic_authorization is not None:
             states = proposed_states
@@ -208,9 +216,9 @@ def _run_portfolio_setup(
             ),
             metadata={"portfolio_states": gate_state, "kind": "gate"},
         )
-        return join_turn_response(repo, task.id)
+        return responses_lane.join_turn_response(repo, task.id)
 
-    _, registry = _modeling_data_runtime(runtime.settings)
+    _, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     verify_portfolio_dataset_binding(
         registry,
         task_id=task.id,
@@ -244,9 +252,7 @@ def _run_portfolio_setup(
                 "metadata": {
                     "intent": "portfolio_semantic_authorization",
                     "display_in_timeline": False,
-                    "dataset_content_hash": gate_state.get(
-                        "dataset_content_hash"
-                    ),
+                    "dataset_content_hash": gate_state.get("dataset_content_hash"),
                     "proposed_states": list(states),
                     "semantic_authorization": semantic_authorization,
                 },
@@ -270,14 +276,16 @@ def _run_portfolio_setup(
         {"_post_start_messages": post_start_messages},
     )
 
-_PORTFOLIO_SPEC = _TurnHandlerSpec(
+
+_PORTFOLIO_SPEC = contracts_lane._TurnHandlerSpec(
     intent="portfolio",
     setup_error_types=(PortfolioSetupError,),
     error_label="组合分析出错",
     run_setup=_run_portfolio_setup,
-    format_user_display=_identity_display_text,
+    format_user_display=typed_ui_lane._identity_display_text,
     success_criteria=_portfolio_success_criteria,
 )
+
 
 def is_portfolio_deterministic_turn(
     repo: TaskRepository,
@@ -313,7 +321,7 @@ def is_portfolio_deterministic_turn(
     if metadata.get("kind") == "portfolio_setup_required":
         return is_confirm(str(user_text or ""))
 
-    active = _active_plan(plan_repo, task.id)
+    active = shared_lane._active_plan(plan_repo, task.id)
     if active is None or metadata.get("kind") not in {"gate", "plan_overview"}:
         return False
     status = PlanStatus(getattr(active.status, "value", active.status))
@@ -321,8 +329,9 @@ def is_portfolio_deterministic_turn(
         str(user_text or "")
     )
 
+
 def _handle_structured_portfolio_request_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -333,7 +342,7 @@ def _handle_structured_portfolio_request_turn(
 
     if task.task_type != TASK_TYPE_PORTFOLIO:
         raise DriverError("portfolio_request 只能用于 portfolio 类型任务。")
-    if _active_plan(runtime.plan_repo, task.id) is not None:
+    if shared_lane._active_plan(runtime.plan_repo, task.id) is not None:
         raise DriverError("当前组合分析任务已有进行中的计划，不能修改业务口径。")
     repo.add_agent_message(
         task.id,
@@ -354,7 +363,7 @@ def _handle_structured_portfolio_request_turn(
             portfolio_request,
         )
     except PortfolioSetupError as exc:
-        return append_workflow_error(
+        return shared_lane.append_workflow_error(
             repo,
             task,
             _PORTFOLIO_SPEC,

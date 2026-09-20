@@ -1,28 +1,31 @@
-"""labeling driver-turn handlers (executed into the package namespace by __init__.py)."""
+"""Labeling for governed Agent turns."""
+
 from __future__ import annotations
+
 from collections.abc import Mapping
+from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
+from marvis.agent.plan_driver import DriverError
+from marvis.agent.plan_driver import is_confirm
+from marvis.data.errors import DatasetContentDriftError
+from marvis.domain import TASK_TYPE_DATA_JOIN
+from marvis.domain import TaskRecord
+from marvis.packs.labeling.contracts import LabelingContractError
+from marvis.packs.labeling.contracts import LabelingRequest
+from marvis.packs.labeling.contracts import build_labeling_proposal
+from marvis.repositories.data_workspace import DataWorkspaceRepository
+from marvis.repositories.plans import PlanRepository
+from marvis.repositories.tasks import TaskRepository
 import hmac
 import sqlite3
-from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN, DriverError, is_confirm
-from marvis.data.errors import DatasetContentDriftError
-from marvis.repositories.tasks import TaskRepository
-from marvis.domain import TASK_TYPE_DATA_JOIN, TaskRecord
-from marvis.packs.labeling.contracts import LabelingContractError, LabelingRequest, build_labeling_proposal
-from marvis.repositories.plans import PlanRepository
-from marvis.repositories.data_workspace import DataWorkspaceRepository
+from . import contracts as contracts_lane
+from . import data_context as data_context_lane
+from . import responses as responses_lane
+from . import semantic_authorization as semantic_authorization_lane
+from . import shared as shared_lane
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import DriverTurnRuntime
-    from . import _active_plan
-    from . import _driver
-    from . import _modeling_data_runtime
-    from . import _semantic_exact_gate_authorization
-    from . import join_turn_response
 
 def _handle_structured_labeling_request_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -33,7 +36,7 @@ def _handle_structured_labeling_request_turn(
 
     if task.task_type != TASK_TYPE_DATA_JOIN:
         raise DriverError("labeling_request 只能用于 data_join 类型任务。")
-    if _active_plan(runtime.plan_repo, task.id) is not None:
+    if shared_lane._active_plan(runtime.plan_repo, task.id) is not None:
         raise DriverError("当前数据处理任务已有进行中的计划，不能修改标签构造口径。")
     try:
         contract = LabelingRequest(**dict(labeling_request))
@@ -57,7 +60,7 @@ def _handle_structured_labeling_request_turn(
             "fields": sorted(labeling_request),
         },
     )
-    backend, registry = _modeling_data_runtime(runtime.settings)
+    backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
     workspace = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
         task.id
     )
@@ -110,10 +113,11 @@ def _handle_structured_labeling_request_turn(
             "labeling_proposal": proposal.to_gate_state(),
         },
     )
-    return join_turn_response(repo, task.id)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _maybe_handle_labeling_preplan_confirmation_turn(
-    runtime: DriverTurnRuntime,
+    runtime: contracts_lane.DriverTurnRuntime,
     repo: TaskRepository,
     task: TaskRecord,
     *,
@@ -124,11 +128,9 @@ def _maybe_handle_labeling_preplan_confirmation_turn(
 
     if task.task_type != TASK_TYPE_DATA_JOIN:
         return None
-    if _active_plan(runtime.plan_repo, task.id) is not None:
+    if shared_lane._active_plan(runtime.plan_repo, task.id) is not None:
         return None
-    proposal_state = _latest_open_labeling_proposal(
-        repo.list_agent_messages(task.id)
-    )
+    proposal_state = _latest_open_labeling_proposal(repo.list_agent_messages(task.id))
     if proposal_state is None:
         return None
 
@@ -143,15 +145,17 @@ def _maybe_handle_labeling_preplan_confirmation_turn(
         and confirmation_source == CONFIRMATION_SOURCE_HUMAN
         and runtime.require_semantic_text_authorization
     ):
-        semantic_authorization = _semantic_exact_gate_authorization(
-            runtime,
-            text,
-            gate_context=(
-                "标签构造计划创建授权：用户已查看当前完整标签口径、成熟度处理和"
-                "提案内容；confirm 只表示用户明确、即时、无条件地授权按该完整"
-                "提案创建计划，不允许从普通文本修改任何字段。"
-            ),
-            proposed_params={"proposal_hash": proposal_hash},
+        semantic_authorization = (
+            semantic_authorization_lane._semantic_exact_gate_authorization(
+                runtime,
+                text,
+                gate_context=(
+                    "标签构造计划创建授权：用户已查看当前完整标签口径、成熟度处理和"
+                    "提案内容；confirm 只表示用户明确、即时、无条件地授权按该完整"
+                    "提案创建计划，不允许从普通文本修改任何字段。"
+                ),
+                proposed_params={"proposal_hash": proposal_hash},
+            )
         )
     if not deterministically_confirmed and semantic_authorization is None:
         repo.add_agent_message(
@@ -184,10 +188,10 @@ def _maybe_handle_labeling_preplan_confirmation_turn(
         contract = LabelingRequest(**request_payload)
         if not hmac.compare_digest(contract.contract_hash, proposal_hash):
             raise LabelingContractError("persisted proposal hash is inconsistent")
-        backend, registry = _modeling_data_runtime(runtime.settings)
-        workspace = DataWorkspaceRepository(
-            runtime.settings.db_path
-        ).get_or_default(task.id)
+        backend, registry = data_context_lane._modeling_data_runtime(runtime.settings)
+        workspace = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task.id
+        )
         proposal = build_labeling_proposal(
             registry,
             backend,
@@ -261,18 +265,17 @@ def _maybe_handle_labeling_preplan_confirmation_turn(
                 metadata=dict(message.metadata),
             )
 
-    _driver(runtime).start(
+    shared_lane._driver(runtime).start(
         task_id=task.id,
         template_id="label_construction",
         slots=proposal.to_template_slots(
-            confirm_immature_cohorts=bool(
-                proposal.maturity["immature_cohorts"]
-            ),
+            confirm_immature_cohorts=bool(proposal.maturity["immature_cohorts"]),
         ),
         tier=runtime.tier,
         _persist_start_turn=persist_confirmation_and_overview,
     )
-    return join_turn_response(repo, task.id)
+    return responses_lane.join_turn_response(repo, task.id)
+
 
 def _latest_open_labeling_proposal(
     conversation: list[dict],
@@ -282,12 +285,12 @@ def _latest_open_labeling_proposal(
         if metadata.get("labeling_proposal_resolution"):
             return None
         proposal = metadata.get("labeling_proposal")
-        if (
-            metadata.get("kind") == "labeling_preplan_confirmation"
-            and isinstance(proposal, dict)
+        if metadata.get("kind") == "labeling_preplan_confirmation" and isinstance(
+            proposal, dict
         ):
             return proposal
     return None
+
 
 def is_labeling_deterministic_turn(
     repo: TaskRepository,
@@ -305,6 +308,7 @@ def is_labeling_deterministic_turn(
     # semantic route/review as every other live plan gate.  Browser controls
     # remain deterministic through their typed, snapshot-bound ``ui_action``.
     return False
+
 
 def _labeling_clarification_response(
     repo: TaskRepository,

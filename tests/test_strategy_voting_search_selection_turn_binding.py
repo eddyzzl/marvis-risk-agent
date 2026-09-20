@@ -70,14 +70,8 @@ def test_voting_search_selection_preflights_but_plan_keeps_only_user_pointers(
             ),
         )
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_voting_candidate_search_selection",
-        resolve,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_read_runtime",
-        lambda actual_runtime: read_runtime if actual_runtime is runtime else None,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_voting_candidate_search_selection', resolve)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda actual_runtime: read_runtime if actual_runtime is runtime else None)
 
     slots = _strategy_voting_candidate_build_from_search_plan_slots(
         runtime,
@@ -110,14 +104,8 @@ def test_voting_search_selection_preflights_but_plan_keeps_only_user_pointers(
 def test_voting_search_selection_preserves_only_explicit_optional_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_voting_candidate_search_selection",
-        lambda *_args, **_kwargs: SimpleNamespace(eligible=True),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_read_runtime",
-        lambda _runtime: SimpleNamespace(kind="governed-read-runtime"),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_voting_candidate_search_selection', lambda *_args, **_kwargs: SimpleNamespace(eligible=True))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: SimpleNamespace(kind='governed-read-runtime'))
 
     slots = _strategy_voting_candidate_build_from_search_plan_slots(
         SimpleNamespace(),
@@ -138,14 +126,8 @@ def test_voting_search_selection_turn_reports_resolver_failure_as_setup_error(
     def reject(*_args, **_kwargs):
         raise StrategyError("Voting search selection no longer matches current Pool")
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_voting_candidate_search_selection",
-        reject,
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_read_runtime",
-        lambda _runtime: SimpleNamespace(kind="governed-read-runtime"),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_voting_candidate_search_selection', reject)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_read_runtime', lambda _runtime: SimpleNamespace(kind='governed-read-runtime'))
 
     with pytest.raises(
         StrategySetupError,

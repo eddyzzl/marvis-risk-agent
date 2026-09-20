@@ -287,7 +287,7 @@ def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch)
             from marvis.agent.driver_turn import DriverMessage, DriverTurn
             return DriverTurn(plan_id, "confirmed", [DriverMessage("chat", "已重规划。", {})])
 
-    monkeypatch.setattr("marvis.agent.turn_handlers._driver", lambda runtime: _FakeDriver())
+    monkeypatch.setattr('marvis.agent.turn_handlers.shared._driver', lambda runtime: _FakeDriver())
 
     def fake_turn(runtime, repo, task, **kwargs):
         raise AssertionError("replan must not fall back to text-loopback turn_fn")

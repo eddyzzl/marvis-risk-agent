@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from marvis.packs.strategy.pool_tools import load_current_strategy_candidate_pool_artifact
+
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -13,7 +15,6 @@ from fastapi.testclient import TestClient
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent.strategy_setup import StrategySetupError
 from marvis.agent.turn_handlers import _strategy_impact_cube_plan_slots
-import marvis.agent.turn_handlers as turn_handlers
 from marvis.app import create_app
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.pool import compile_strategy_pool
@@ -148,7 +149,7 @@ def test_impact_cube_turn_allows_pool_with_resolvable_score_requirement(
 ) -> None:
     fx = _setup(tmp_path)
     original_load = (
-        turn_handlers.load_current_strategy_candidate_pool_artifact
+        load_current_strategy_candidate_pool_artifact
     )
     binding = original_load(
         fx["runtime"],
@@ -177,18 +178,10 @@ def test_impact_cube_turn_allows_pool_with_resolvable_score_requirement(
             "requirements": [requirement],
         },
     )
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_current_strategy_candidate_pool_artifact",
-        lambda *args, **kwargs: controlled,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "resolve_pool_requirements",
-        lambda *args, **kwargs: SimpleNamespace(
-            requirements=tuple(controlled.compiled_design["requirements"])
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.load_current_strategy_candidate_pool_artifact', lambda *args, **kwargs: controlled)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_current_strategy_candidate_pool_artifact', lambda *args, **kwargs: controlled)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_pool_requirements', lambda *args, **kwargs: SimpleNamespace(requirements=tuple(controlled.compiled_design['requirements'])))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.resolve_pool_requirements', lambda *args, **kwargs: SimpleNamespace(requirements=tuple(controlled.compiled_design['requirements'])))
     draft = StandardWorkflowRequestDraft(
         workflow="strategy_impact_cube",
         workflow_inputs={"strategy_type": "approval"},

@@ -18,11 +18,8 @@ from marvis.packs.strategy.voting_candidate_search_tools import (
 def _derive_stub_execution_ref(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        turn_handlers,
-        "derive_strategy_model_evidence_candidate_execution_ref",
-        lambda binding: dict(binding.execution_ref),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.derive_strategy_model_evidence_candidate_execution_ref', lambda binding: dict(binding.execution_ref))
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.derive_strategy_model_evidence_candidate_execution_ref', lambda binding: dict(binding.execution_ref))
 
 
 class _ArtifactWindow:
@@ -315,23 +312,13 @@ def test_report_voting_search_selects_first_exact_after_newer_valid_unrelated(
         unrelated.artifact_id: unrelated,
     }
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "bind_strategy_pool_development_execution",
-        lambda runtime, actual_pool: development,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.bind_strategy_pool_development_execution', lambda runtime, actual_pool: development, raising=False)
 
     def load_historical(runtime, **kwargs):
         calls.append(kwargs["artifact_id"])
         return by_id[kwargs["artifact_id"]]
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_voting_candidate_search_artifact",
-        load_historical,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_historical_voting_candidate_search_artifact', load_historical, raising=False)
     runtime, window = _runtime(_record(unrelated), _record(exact))
 
     selected = turn_handlers._strategy_report_latest_voting_search_binding(
@@ -357,18 +344,8 @@ def test_report_voting_search_selects_exact_native_execution_without_legacy_pair
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sample, sample_ref, pool, development, exact = _native_sources()
-    monkeypatch.setattr(
-        turn_handlers,
-        "bind_strategy_pool_development_execution",
-        lambda runtime, actual_pool: development,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_voting_candidate_search_artifact",
-        lambda runtime, **kwargs: exact,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.bind_strategy_pool_development_execution', lambda runtime, actual_pool: development, raising=False)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_historical_voting_candidate_search_artifact', lambda runtime, **kwargs: exact, raising=False)
     runtime, _window = _runtime(_record(exact))
 
     selected = turn_handlers._strategy_report_latest_voting_search_binding(
@@ -391,24 +368,14 @@ def test_report_voting_search_corrupt_newest_fails_closed_without_fallback(
         "kind": VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND,
         "content_hash": "9" * 64,
     }
-    monkeypatch.setattr(
-        turn_handlers,
-        "bind_strategy_pool_development_execution",
-        lambda runtime, actual_pool: development,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.bind_strategy_pool_development_execution', lambda runtime, actual_pool: development, raising=False)
 
     def load_historical(runtime, **kwargs):
         if kwargs["artifact_id"] == corrupt["id"]:
             raise StrategyError("corrupt search artifact")
         return exact
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_voting_candidate_search_artifact",
-        load_historical,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_historical_voting_candidate_search_artifact', load_historical, raising=False)
     runtime, _window = _runtime(corrupt, _record(exact))
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
@@ -430,18 +397,8 @@ def test_report_voting_search_returns_none_when_no_authenticated_match(
 ) -> None:
     sample, sample_ref, pool, development, exact = _sources()
     unrelated = _unrelated(exact)
-    monkeypatch.setattr(
-        turn_handlers,
-        "bind_strategy_pool_development_execution",
-        lambda runtime, actual_pool: development,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_voting_candidate_search_artifact",
-        lambda runtime, **kwargs: unrelated,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.bind_strategy_pool_development_execution', lambda runtime, actual_pool: development, raising=False)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_historical_voting_candidate_search_artifact', lambda runtime, **kwargs: unrelated, raising=False)
     runtime, _window = _runtime(_record(unrelated))
 
     selected = turn_handlers._strategy_report_latest_voting_search_binding(
@@ -463,12 +420,7 @@ def test_report_voting_search_absent_returns_none_without_source_resolution(
     def unexpected(*args, **kwargs):
         raise AssertionError("no source binding should be loaded")
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "bind_strategy_pool_development_execution",
-        unexpected,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.bind_strategy_pool_development_execution', unexpected, raising=False)
     runtime, window = _runtime()
 
     selected = turn_handlers._strategy_report_latest_voting_search_binding(
@@ -495,24 +447,14 @@ def test_report_voting_search_selection_window_exhaustion_fails_closed(
     sample, sample_ref, pool, development, exact = _sources()
     unrelated = _unrelated(exact)
     calls: list[str] = []
-    monkeypatch.setattr(
-        turn_handlers,
-        "bind_strategy_pool_development_execution",
-        lambda runtime, actual_pool: development,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.bind_strategy_pool_development_execution', lambda runtime, actual_pool: development, raising=False)
 
     def load_historical(runtime, **kwargs):
         artifact_id = kwargs["artifact_id"]
         calls.append(artifact_id)
         return unrelated
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_voting_candidate_search_artifact",
-        load_historical,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_historical_voting_candidate_search_artifact', load_historical, raising=False)
     replay_limit = turn_handlers._STRATEGY_REPORT_VOTING_SEARCH_REPLAY_LIMIT
     recent_records = tuple(
         {
@@ -567,24 +509,14 @@ def test_report_voting_search_returns_exact_inside_truncated_window(
         exact.artifact_id: exact,
     }
     calls: list[str] = []
-    monkeypatch.setattr(
-        turn_handlers,
-        "bind_strategy_pool_development_execution",
-        lambda runtime, actual_pool: development,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.bind_strategy_pool_development_execution', lambda runtime, actual_pool: development, raising=False)
 
     def load_historical(runtime, **kwargs):
         artifact_id = kwargs["artifact_id"]
         calls.append(artifact_id)
         return by_id[artifact_id]
 
-    monkeypatch.setattr(
-        turn_handlers,
-        "load_historical_voting_candidate_search_artifact",
-        load_historical,
-        raising=False,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.load_historical_voting_candidate_search_artifact', load_historical, raising=False)
     runtime, _window = _runtime(
         *recent_records,
         exact_record,

@@ -118,43 +118,11 @@ def test_turn_binds_exact_pool_sample_and_fixed_replay_contract(
     pool = _pool_binding()
     sample = _sample_binding()
     calls: dict[str, object] = {}
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_v2_read_runtime",
-        lambda runtime: "read-runtime",
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_current_pool_binding",
-        lambda read_runtime, *, task_id, requested_type: (
-            calls.update(
-                {
-                    "pool": (read_runtime, task_id, requested_type),
-                }
-            )
-            or pool
-        ),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_latest_sample_binding",
-        lambda read_runtime, *, task_id: (
-            calls.update({"sample": (read_runtime, task_id)}) or sample
-        ),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers.resolve_pool_requirements",
-        lambda runtime, *, task_id, compiled_design, sample_design: (
-            calls.update(
-                {
-                    "requirements": (
-                        runtime,
-                        task_id,
-                        compiled_design,
-                        sample_design,
-                    )
-                }
-            )
-            or SimpleNamespace()
-        ),
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_v2_read_runtime', lambda runtime: 'read-runtime')
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_current_pool_binding', lambda read_runtime, *, task_id, requested_type: calls.update({'pool': (read_runtime, task_id, requested_type)}) or pool)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_latest_sample_binding', lambda read_runtime, *, task_id: calls.update({'sample': (read_runtime, task_id)}) or sample)
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates.resolve_pool_requirements', lambda runtime, *, task_id, compiled_design, sample_design: calls.update({'requirements': (runtime, task_id, compiled_design, sample_design)}) or SimpleNamespace())
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence.resolve_pool_requirements', lambda runtime, *, task_id, compiled_design, sample_design: calls.update({'requirements': (runtime, task_id, compiled_design, sample_design)}) or SimpleNamespace())
 
     slots = _strategy_pool_validation_plan_slots(
         _runtime(tmp_path),
@@ -210,18 +178,9 @@ def test_turn_rejects_immature_or_empty_independent_partition(
     partition: str,
     message: str,
 ) -> None:
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_v2_read_runtime",
-        lambda runtime: "read-runtime",
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_current_pool_binding",
-        lambda *args, **kwargs: _pool_binding(),
-    )
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_report_latest_sample_binding",
-        lambda *args, **kwargs: sample,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_v2_read_runtime', lambda runtime: 'read-runtime')
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_current_pool_binding', lambda *args, **kwargs: _pool_binding())
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_evidence._strategy_report_latest_sample_binding', lambda *args, **kwargs: sample)
 
     with pytest.raises(StrategySetupError, match=message):
         _strategy_pool_validation_plan_slots(
@@ -237,41 +196,13 @@ def test_turn_routes_without_dataset_or_target_and_starts_typed_template(
 ) -> None:
     draft = _draft("reject", "oot")
     captured: dict = {}
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._strategy_pool_validation_plan_slots",
-        lambda runtime, task, candidate: {
-            "strategy_type": "reject",
-            "partition": "oot",
-            "pool_ref": {
-                "artifact_id": "1" * 64,
-                "expected_artifact_content_hash": "2" * 64,
-                "expected_pool_id": "strategy-pool-1",
-                "expected_revision": 1,
-                "expected_revision_id": "strategy-pool-revision-1",
-                "expected_snapshot_hash": "3" * 64,
-            },
-            "sample_design_ref": {
-                "membership_artifact_id": "4" * 64,
-                "expected_membership_artifact_content_hash": "5" * 64,
-                "bundle_artifact_id": "6" * 64,
-                "expected_bundle_artifact_content_hash": "7" * 64,
-                "expected_bundle_id": "sample-bundle-1",
-                "expected_sample_design_id": "sample-design-1",
-                "expected_sample_design_content_hash": "8" * 64,
-            },
-            "population": "risk",
-            "comparison_mode": "absolute",
-        },
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_candidates._strategy_pool_validation_plan_slots', lambda runtime, task, candidate: {'strategy_type': 'reject', 'partition': 'oot', 'pool_ref': {'artifact_id': '1' * 64, 'expected_artifact_content_hash': '2' * 64, 'expected_pool_id': 'strategy-pool-1', 'expected_revision': 1, 'expected_revision_id': 'strategy-pool-revision-1', 'expected_snapshot_hash': '3' * 64}, 'sample_design_ref': {'membership_artifact_id': '4' * 64, 'expected_membership_artifact_content_hash': '5' * 64, 'bundle_artifact_id': '6' * 64, 'expected_bundle_artifact_content_hash': '7' * 64, 'expected_bundle_id': 'sample-bundle-1', 'expected_sample_design_id': 'sample-design-1', 'expected_sample_design_content_hash': '8' * 64}, 'population': 'risk', 'comparison_mode': 'absolute'})
 
     def _start(runtime, repo, task, **kwargs):
         captured.update(kwargs)
         return {"status": "started"}
 
-    monkeypatch.setattr(
-        "marvis.agent.turn_handlers._start_confirmed_strategy_plan",
-        _start,
-    )
+    monkeypatch.setattr('marvis.agent.turn_handlers.strategy_request._start_confirmed_strategy_plan', _start)
 
     assert _strategy_request_requires_dataset(draft) is False
     assert _strategy_request_requires_target(draft) is False
