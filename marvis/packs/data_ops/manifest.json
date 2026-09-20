@@ -1,6 +1,6 @@
 {
   "name": "data_ops",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "display_name": "Data Operations Pack",
   "description": "Deterministic dataset ingestion, profiling, governed transformation and safe export, alignment, and guarded join tools.",
   "module": "marvis.packs.data_ops.tools",
@@ -1034,7 +1034,10 @@
             "type": "object"
           },
           "ack_dtype_mismatch": {
-            "type": ["boolean", "array"],
+            "type": [
+              "boolean",
+              "array"
+            ],
             "items": {
               "type": "string"
             }
@@ -1455,6 +1458,695 @@
         "read:dataset"
       ],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "asof_join",
+      "summary": "Materialize an authenticated point-in-time join from user-declared temporal source evidence. Explicit verified/exploration mode; missing historical availability remains unknown. Does not activate training data.",
+      "input_schema": {
+        "$defs": {
+          "DecisionInput": {
+            "additionalProperties": false,
+            "properties": {
+              "schema_version": {
+                "const": "dataset-time.v1",
+                "default": "dataset-time.v1",
+                "title": "Schema Version",
+                "type": "string"
+              },
+              "dataset_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "\\S",
+                "title": "Dataset Id",
+                "type": "string"
+              },
+              "content_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Content Hash",
+                "type": "string"
+              },
+              "role": {
+                "const": "decision",
+                "title": "Role",
+                "type": "string"
+              },
+              "row_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "\\S",
+                "title": "Row Id",
+                "type": "string"
+              },
+              "entity_columns": {
+                "items": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "title": "Entity Columns",
+                "type": "array"
+              },
+              "decision_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "event_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "available_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "version_column": {
+                "anyOf": [
+                  {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Version Column"
+              },
+              "effective_from": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "effective_to": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "window_start": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "window_end": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "dataset_id",
+              "content_hash",
+              "role",
+              "row_id",
+              "entity_columns"
+            ],
+            "title": "DecisionInput",
+            "type": "object"
+          },
+          "FeatureInput": {
+            "additionalProperties": false,
+            "properties": {
+              "schema_version": {
+                "const": "dataset-time.v1",
+                "default": "dataset-time.v1",
+                "title": "Schema Version",
+                "type": "string"
+              },
+              "dataset_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "\\S",
+                "title": "Dataset Id",
+                "type": "string"
+              },
+              "content_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Content Hash",
+                "type": "string"
+              },
+              "role": {
+                "const": "feature_snapshot",
+                "title": "Role",
+                "type": "string"
+              },
+              "row_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "\\S",
+                "title": "Row Id",
+                "type": "string"
+              },
+              "entity_columns": {
+                "items": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "title": "Entity Columns",
+                "type": "array"
+              },
+              "decision_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "event_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "available_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "version_column": {
+                "anyOf": [
+                  {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Version Column"
+              },
+              "effective_from": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "effective_to": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "window_start": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "window_end": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeColumn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "dataset_id",
+              "content_hash",
+              "role",
+              "row_id",
+              "entity_columns",
+              "available_at"
+            ],
+            "title": "FeatureInput",
+            "type": "object"
+          },
+          "SelectionInput": {
+            "additionalProperties": false,
+            "properties": {
+              "schema_version": {
+                "const": "asof-selection.v1",
+                "default": "asof-selection.v1",
+                "title": "Schema Version",
+                "type": "string"
+              },
+              "as_of": {
+                "format": "date-time",
+                "title": "As Of",
+                "type": "string"
+              },
+              "feature_columns": {
+                "items": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "title": "Feature Columns",
+                "type": "array"
+              },
+              "feature_prefix": {
+                "default": "asof__",
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "\\S",
+                "title": "Feature Prefix",
+                "type": "string"
+              },
+              "mode": {
+                "enum": [
+                  "verified",
+                  "exploration"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
+              "lookback_seconds": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Lookback Seconds"
+              },
+              "partition_pairs": {
+                "default": [],
+                "items": {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "pattern": "\\S",
+                      "type": "string"
+                    },
+                    {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "pattern": "\\S",
+                      "type": "string"
+                    }
+                  ],
+                  "type": "array"
+                },
+                "title": "Partition Pairs",
+                "type": "array"
+              },
+              "require_match": {
+                "default": true,
+                "title": "Require Match",
+                "type": "boolean"
+              },
+              "max_source_rows": {
+                "default": 200000,
+                "maximum": 200000,
+                "minimum": 1,
+                "title": "Max Source Rows",
+                "type": "integer"
+              },
+              "max_candidate_checks": {
+                "default": 2000000,
+                "maximum": 10000000,
+                "minimum": 1,
+                "title": "Max Candidate Checks",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "as_of",
+              "feature_columns",
+              "mode"
+            ],
+            "title": "SelectionInput",
+            "type": "object"
+          },
+          "TimeColumn": {
+            "additionalProperties": false,
+            "properties": {
+              "column": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "\\S",
+                "title": "Column",
+                "type": "string"
+              },
+              "timezone": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "\\S",
+                "title": "Timezone",
+                "type": "string"
+              },
+              "evidence": {
+                "$ref": "#/$defs/TimestampEvidence"
+              }
+            },
+            "required": [
+              "column",
+              "timezone",
+              "evidence"
+            ],
+            "title": "TimeColumn",
+            "type": "object"
+          },
+          "TimestampEvidence": {
+            "additionalProperties": false,
+            "description": "A source claim, not an independent attestation of source authenticity.",
+            "properties": {
+              "basis": {
+                "enum": [
+                  "recorded",
+                  "inferred",
+                  "unknown"
+                ],
+                "title": "Basis",
+                "type": "string"
+              },
+              "source_ref": {
+                "anyOf": [
+                  {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source Ref"
+              },
+              "source_sha256": {
+                "anyOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source Sha256"
+              },
+              "rule_version": {
+                "anyOf": [
+                  {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Rule Version"
+              }
+            },
+            "required": [
+              "basis"
+            ],
+            "title": "TimestampEvidence",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "decision_contract": {
+            "$ref": "#/$defs/DecisionInput"
+          },
+          "feature_contract": {
+            "$ref": "#/$defs/FeatureInput"
+          },
+          "spec": {
+            "$ref": "#/$defs/SelectionInput"
+          }
+        },
+        "required": [
+          "decision_contract",
+          "feature_contract",
+          "spec"
+        ],
+        "title": "AsOfToolInput",
+        "type": "object"
+      },
+      "output_schema": {
+        "$defs": {
+          "EvidenceIdentity": {
+            "additionalProperties": false,
+            "properties": {
+              "artifact_id": {
+                "title": "Artifact Id",
+                "type": "string"
+              },
+              "content_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Content Hash",
+                "type": "string"
+              },
+              "kind": {
+                "const": "dataset_point_in_time",
+                "default": "dataset_point_in_time",
+                "title": "Kind",
+                "type": "string"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "content_hash"
+            ],
+            "title": "EvidenceIdentity",
+            "type": "object"
+          },
+          "ParentIdentity": {
+            "additionalProperties": false,
+            "properties": {
+              "dataset_id": {
+                "title": "Dataset Id",
+                "type": "string"
+              },
+              "content_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Content Hash",
+                "type": "string"
+              },
+              "contract_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Contract Sha256",
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "decision",
+                  "feature_snapshot"
+                ],
+                "title": "Role",
+                "type": "string"
+              }
+            },
+            "required": [
+              "dataset_id",
+              "content_hash",
+              "contract_sha256",
+              "role"
+            ],
+            "title": "ParentIdentity",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": "dataset-asof-tool-result.v1",
+            "default": "dataset-asof-tool-result.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "result_dataset_id": {
+            "title": "Result Dataset Id",
+            "type": "string"
+          },
+          "result_content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Result Content Hash",
+            "type": "string"
+          },
+          "row_count": {
+            "minimum": 1,
+            "title": "Row Count",
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "verified",
+              "exploration"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "assurance": {
+            "enum": [
+              "verified",
+              "inferred",
+              "unknown"
+            ],
+            "title": "Assurance",
+            "type": "string"
+          },
+          "assurance_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Assurance Reasons",
+            "type": "array"
+          },
+          "verification_scope": {
+            "const": "recorded_temporal_constraints",
+            "default": "recorded_temporal_constraints",
+            "title": "Verification Scope",
+            "type": "string"
+          },
+          "external_source_attestation": {
+            "const": "not_independently_verified",
+            "default": "not_independently_verified",
+            "title": "External Source Attestation",
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/$defs/EvidenceIdentity"
+          },
+          "membership_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Membership Sha256",
+            "type": "string"
+          },
+          "parents": {
+            "items": {
+              "$ref": "#/$defs/ParentIdentity"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Parents",
+            "type": "array"
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "result_content_hash",
+          "row_count",
+          "mode",
+          "assurance",
+          "assurance_reasons",
+          "evidence",
+          "membership_sha256",
+          "parents"
+        ],
+        "title": "AsOfToolOutput",
+        "type": "object"
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_asof_join",
+      "side_effects": [
+        "read:task",
+        "read:dataset",
+        "write:dataset",
+        "write:artifact"
+      ],
+      "memory_limit_mb": 4096,
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      }
     }
   ],
   "hooks": [],

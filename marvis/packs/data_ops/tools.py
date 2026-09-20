@@ -46,6 +46,7 @@ from marvis.provenance import NumberProvenance
 from marvis.reconcile import EXACT_ABS_TOL, EXACT_REL_TOL, ReconcileReport, reconcile
 from marvis.db_schema import connect
 from marvis.plugins.sdk import PackRuntime
+from marvis.packs.data_ops.asof_tool import tool_asof_join as tool_asof_join
 from marvis.repositories.strategy import _write_audit_row
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.data_transform import (
