@@ -903,11 +903,12 @@ class PlanExecutor:
         }
         review = self._reviewer.final_review(plan, outputs, plan.goal)
         summary_ref = self._repo.store_plan_summary(plan.id, review)
-        if review.goal_doubt:
+        if review.execution_completed is None and review.goal_doubt:
             self._set_plan_status(plan, PlanStatus.REVIEW)
             return ExecutionResult(plan.id, PlanStatus.REVIEW, summary_ref, review)
         if (
-            not review.goal_met
+            review.execution_completed is None
+            and not review.goal_met
             and _final_review_failure_replannable(review)
             and self._try_final_review_replan(plan, review, tier)
         ):

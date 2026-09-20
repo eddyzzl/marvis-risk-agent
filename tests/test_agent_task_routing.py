@@ -443,6 +443,7 @@ def test_strategy_clarification_preserves_partial_business_contract(client, tmp_
         "min_approval_rate": None,
         "baseline_strategy_id": None,
         "profit": None,
+        "business_objective": None,
     }
     clarification = started.json()["clarification"]
     assert clarification["missing_fields"] == ["max_bad_rate_or_min_approval_rate"]

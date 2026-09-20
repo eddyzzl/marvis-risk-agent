@@ -403,7 +403,7 @@ def test_plan_executor_runs_linear_plan_resolves_refs_and_finalizes(tmp_path):
     assert loaded.status == PlanStatus.DONE
     assert [step.status for step in loaded.steps] == [StepStatus.DONE, StepStatus.DONE]
     assert runner.calls[1][1] == {"message": "hi"}
-    assert repo.load_plan_summary(result.summary_ref)["goal_met"] is True
+    assert repo.load_plan_summary(result.summary_ref)["execution_completed"] is True
     assert [call[0] for call in hooks.calls] == [
         "step.completed",
         "step.completed",
@@ -984,7 +984,7 @@ def test_plan_executor_evidence_records_tool_manifest_and_artifacts(tmp_path):
     assert evidence["random_seed"] == 7
 
 
-def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
+def test_plan_executor_finishes_execution_despite_llm_doubt(tmp_path):
     plan = _plan(_step("step-1"))
     repo = _repo(tmp_path, plan)
     runner = FakeRunner([_ok({"echoed": "hi"})])
@@ -1007,22 +1007,14 @@ def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
     ).run("plan-1")
 
     loaded = repo.load_plan("plan-1")
-    assert result.status == PlanStatus.REVIEW
-    assert loaded.status == PlanStatus.REVIEW
+    assert result.status == PlanStatus.DONE
+    assert loaded.status == PlanStatus.DONE
     assert result.summary_ref is not None
-    assert repo.load_plan_summary(result.summary_ref)["goal_doubt"] is True
-    assert [call[0] for call in hooks.calls] == ["step.completed"]
-
-    resumed = _executor(repo, FakeRunner([])).run("plan-1")
-    assert resumed.status == PlanStatus.REVIEW
-    assert resumed.summary_ref == result.summary_ref
+    assert repo.load_plan_summary(result.summary_ref)["goal_doubt"] is False
+    assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
 
 
-def test_plan_executor_routes_to_review_when_llm_alone_marks_goal_unmet(tmp_path):
-    # AGT-3: with the step DONE and no configured/failed success_criteria, a bare
-    # llm_goal_met=false is doubt, not a veto — the plan routes to REVIEW (human
-    # re-check) instead of FAILED, and workflow.completed does NOT fire (that
-    # event is reserved for a plan reaching a genuine terminal DONE/FAILED state).
+def test_plan_executor_llm_opinion_cannot_pause_completed_execution(tmp_path):
     plan = _plan(_step("step-1"))
     repo = _repo(tmp_path, plan)
     runner = FakeRunner([_ok({"echoed": "hi"})])
@@ -1047,19 +1039,16 @@ def test_plan_executor_routes_to_review_when_llm_alone_marks_goal_unmet(tmp_path
 
     loaded = repo.load_plan("plan-1")
     summary = repo.load_plan_summary(result.summary_ref)
-    assert result.status == PlanStatus.REVIEW
-    assert loaded.status == PlanStatus.REVIEW
+    assert result.status == PlanStatus.DONE
+    assert loaded.status == PlanStatus.DONE
     assert summary["goal_met"] is False
     assert summary["llm_goal_met"] is False
-    assert summary["goal_doubt"] is True
-    assert summary["open_items"] == ["select production model"]
-    assert [call[0] for call in hooks.calls] == ["step.completed"]
+    assert summary["goal_doubt"] is False
+    assert summary["explanation_items"] == ["select production model"]
+    assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
 
 
-def test_plan_executor_still_fails_when_success_criteria_fail_alongside_llm_doubt(tmp_path):
-    # The narrowed LLM authority (AGT-3) does not touch the deterministic path:
-    # a real success_criteria failure still fails the plan even if the LLM also
-    # (redundantly) says goal_met=false.
+def test_plan_executor_legacy_business_criteria_and_llm_doubt_are_not_execution_failure(tmp_path):
     plan = _plan(
         _step("step-1"),
         success_criteria=[
@@ -1095,10 +1084,10 @@ def test_plan_executor_still_fails_when_success_criteria_fail_alongside_llm_doub
 
     loaded = repo.load_plan("plan-1")
     summary = repo.load_plan_summary(result.summary_ref)
-    assert result.status == PlanStatus.FAILED
-    assert loaded.status == PlanStatus.FAILED
+    assert result.status == PlanStatus.DONE
+    assert loaded.status == PlanStatus.DONE
     assert summary["goal_doubt"] is False
-    assert "OOT KS=0.2 < 0.3331" in summary["open_items"]
+    assert summary["business_acceptance"]["status"] == "insufficient_evidence"
     assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
 
 
@@ -1182,7 +1171,7 @@ def test_plan_executor_critiques_plain_steps_whose_output_carries_metrics(tmp_pa
     assert llm.calls
 
 
-def test_plan_executor_fails_final_review_when_success_criteria_fail(tmp_path):
+def test_plan_executor_legacy_business_criteria_require_more_evidence(tmp_path):
     plan = _plan(
         _step("step-1"),
         success_criteria=[
@@ -1203,13 +1192,13 @@ def test_plan_executor_fails_final_review_when_success_criteria_fail(tmp_path):
 
     loaded = repo.load_plan("plan-1")
     summary = repo.load_plan_summary(result.summary_ref)
-    assert result.status == PlanStatus.FAILED
-    assert loaded.status == PlanStatus.FAILED
+    assert result.status == PlanStatus.DONE
+    assert loaded.status == PlanStatus.DONE
     assert summary["goal_met"] is False
-    assert "OOT KS=0.2 < 0.3331" in summary["open_items"]
+    assert summary["business_acceptance"]["status"] == "insufficient_evidence"
 
 
-def test_plan_executor_replans_after_failed_success_criteria_and_continues(tmp_path):
+def test_plan_executor_does_not_rerun_tools_to_chase_business_thresholds(tmp_path):
     plan = _plan(
         _step("step-1"),
         success_criteria=[
@@ -1236,17 +1225,11 @@ def test_plan_executor_replans_after_failed_success_criteria_and_continues(tmp_p
     loaded = repo.load_plan("plan-1")
     assert result.status == PlanStatus.DONE
     assert loaded.status == PlanStatus.DONE
-    assert [step.id for step in loaded.steps] == ["step-1", "step-2"]
-    assert loaded.replan_count == 1
-    assert loaded.loop_events[0].reason == "final_review"
-    assert planner.replan_calls[0][3] == "final_review"
-    assert planner.replan_calls[0][2]["open_items"] == ["OOT KS=0.2 < 0.3331"]
-    assert [call[0] for call in hooks.calls] == [
-        "step.completed",
-        "plan.replanned",
-        "step.completed",
-        "workflow.completed",
-    ]
+    assert [step.id for step in loaded.steps] == ["step-1"]
+    assert loaded.replan_count == 0
+    assert planner.replan_calls == []
+    assert len(runner.calls) == 1
+    assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
 
 
 def test_plan_executor_does_not_final_review_replan_roll_rate_template(tmp_path):
@@ -1286,7 +1269,7 @@ def test_plan_executor_does_not_final_review_replan_roll_rate_template(tmp_path)
     result = _adaptive_executor(repo, runner, planner).run("plan-1")
 
     loaded = repo.load_plan("plan-1")
-    assert result.status == PlanStatus.FAILED
+    assert result.status == PlanStatus.DONE
     assert loaded.replan_count == 0
     assert [step.tool_ref.label() for step in loaded.steps] == [
         "strategy.roll_rate_matrix"
@@ -1308,9 +1291,9 @@ def test_plan_executor_does_not_replan_invalid_success_criterion_threshold(tmp_p
     result = _adaptive_executor(repo, runner, planner, hooks=hooks).run("plan-1")
 
     summary = repo.load_plan_summary(result.summary_ref)
-    assert result.status == PlanStatus.FAILED
+    assert result.status == PlanStatus.DONE
     assert planner.replan_calls == []
-    assert "OOT KS invalid min threshold: 'bad'" in summary["open_items"]
+    assert summary["business_acceptance"]["status"] == "insufficient_evidence"
 
 
 def test_plan_executor_dispatches_feature_computed_for_feature_pack_step(tmp_path):

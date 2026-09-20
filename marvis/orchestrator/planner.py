@@ -181,10 +181,20 @@ class ContextBudgetExhaustedError(ReplanError):
 
 
 class Planner:
-    def __init__(self, tool_registry, llm_factory, validator):
+    def __init__(self, tool_registry, llm_factory, validator, *, business_objective_loader=None):
         self._tools = tool_registry
         self._llm_factory = llm_factory
         self._validator = validator
+        self._business_objective_loader = business_objective_loader
+
+    def _business_criteria(self, task_id, legacy_criteria):
+        from marvis.business_acceptance import OBJECTIVE_VERSION
+
+        # The task owner configures the objective. Generated prose cannot relax
+        # thresholds, claim an exemption or substitute a candidate binding.
+        objective = self._business_objective_loader(task_id) if self._business_objective_loader else None
+        legacy = [dict(item) for item in legacy_criteria if item.get("schema_version") != OBJECTIVE_VERSION]
+        return [objective.to_dict()] if objective is not None else legacy
 
     def from_template(
         self,
@@ -259,7 +269,7 @@ class Planner:
             template_id=template.id,
             steps=steps,
             autonomy_level=autonomy if autonomy is not None else template.default_autonomy,
-            success_criteria=[dict(item) for item in template.success_criteria],
+            success_criteria=self._business_criteria(task_id, template.success_criteria),
         )
 
     def generate(
@@ -647,11 +657,11 @@ class Planner:
                 autonomy_level=int(data.get("autonomy_level", tier.default_autonomy_level)),
                 novel_mode=novel_mode,
                 tier=tier.name,
-                success_criteria=_optional_object_list_field(
+                success_criteria=self._business_criteria(task_id, _optional_object_list_field(
                     data,
                     "success_criteria",
                     "plan JSON",
-                ),
+                )),
             )
         except (TypeError, ValueError, ManifestError) as exc:
             raise PlanningError(f"invalid plan fields: {exc}") from exc

@@ -256,6 +256,7 @@ def _task_create_contract(
 
 
 def _strategy_task_input(payload: CreateTaskRequest) -> StrategyTaskInput | None:
+    from marvis.business_acceptance import BusinessObjective
     contract = payload.strategy_input
     if contract is None:
         return None
@@ -272,6 +273,7 @@ def _strategy_task_input(payload: CreateTaskRequest) -> StrategyTaskInput | None
         min_approval_rate=contract.min_approval_rate,
         baseline_strategy_id=contract.baseline_strategy_id,
         profit=profit,
+        business_objective=BusinessObjective.from_dict(contract.business_objective) if contract.business_objective is not None else None,
     )
 
 

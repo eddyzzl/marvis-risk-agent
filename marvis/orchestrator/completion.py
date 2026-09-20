@@ -219,7 +219,10 @@ def prepare_workflow_completion(
     snapshot = {
         "summary_ref": summary_ref,
         "final_status": (
-            PlanStatus.DONE if review.goal_met else PlanStatus.FAILED
+            PlanStatus.DONE if (
+                review.goal_met if review.execution_completed is None
+                else review.execution_completed
+            ) else PlanStatus.FAILED
         ).value,
         "review": asdict(review),
         "outputs": [

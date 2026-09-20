@@ -42,6 +42,26 @@ from marvis.state_machine import ConflictError
 
 router = APIRouter(prefix="/api", tags=["plans"])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/plans/{plan_id}/business-acceptance/{format}")
+def export_business_acceptance(request: Request, plan_id: str, format: Literal["xlsx", "docx"]):
+    from fastapi.responses import Response
+    from marvis.orchestrator.business_acceptance import stored_business_review
+    from marvis.output.business_acceptance import render_business_acceptance
+
+    plan = _load_plan(request, plan_id)
+    review = stored_business_review(request.app.state.plan_repo, plan.id)
+    if not review:
+        raise not_found("business acceptance is not available for this plan")
+    suffix = {"xlsx": "spreadsheetml.sheet", "docx": "wordprocessingml.document"}[format]
+    return Response(
+        render_business_acceptance(review, format),
+        media_type=f"application/vnd.openxmlformats-officedocument.{suffix}",
+        headers={"Content-Disposition": f'attachment; filename="business-acceptance.{format}"'},
+    )
+
+
 PLAN_JOB_KIND = "plan"
 ACTIVE_JOB_DETAIL = "task already has an active job"
 _TRUSTED_GENERIC_STRATEGY_TEMPLATE_IDS = frozenset(
@@ -65,6 +85,7 @@ class CreatePlanRequest(BaseModel):
     slots: dict = Field(default_factory=dict)
     task_context: dict = Field(default_factory=dict)
     memory_context: dict = Field(default_factory=dict)
+    business_objective: dict | None = None
 
 
 class RetryStepRequest(BaseModel):
@@ -103,6 +124,16 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
         raise conflict(ACTIVE_JOB_DETAIL)
 
     try:
+        from marvis.business_acceptance import BusinessObjective, OBJECTIVE_VERSION
+
+        explicit_objective = (
+            None if body.business_objective is None
+            else BusinessObjective.from_dict(body.business_objective)
+        )
+        task = task_repo.get_task(task_id)
+        task_objective = None if task.strategy_input is None else task.strategy_input.business_objective
+        if explicit_objective is not None and task_objective is not None and explicit_objective != task_objective:
+            raise ValueError("plan objective conflicts with the persisted task contract")
         task_context = _task_context(task_id, body)
         tier = _requested_tier(request, body.tier)
         intent = intent_router.route(body.goal, task_context)
@@ -123,6 +154,12 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
                 tier=tier,
                 novel_mode=body.novel_mode,
             )
+        bound_objective = task_objective or explicit_objective
+        if bound_objective is not None:
+            existing = [item for item in plan.success_criteria if item.get("schema_version") == OBJECTIVE_VERSION]
+            if existing and existing != [bound_objective.to_dict()]:
+                raise ValueError("plan objective conflicts with the persisted task contract")
+            plan.success_criteria = [bound_objective.to_dict()]
         entry_error = _strategy_plan_entry_error(plan)
         if entry_error is not None:
             raise unprocessable(entry_error)
@@ -504,6 +541,9 @@ def _load_plan(request: Request, plan_id: str):
 
 def _plan_payload(request: Request, plan) -> dict:
     payload = plan_to_dict(plan)
+    from marvis.orchestrator.business_acceptance import stored_business_review
+
+    payload.update(stored_business_review(request.app.state.plan_repo, plan.id))
     snapshot = {
         "expected_plan_status": plan.status.value,
         "expected_plan_revision": int(plan.replan_count),

@@ -121,19 +121,12 @@ def _plan_message_composer(request: Request) -> PlanMessageComposer:
 def _domain_strategy_input(
     contract: StrategyTaskInputRequest | None,
 ) -> StrategyTaskInput | None:
+    from marvis.business_acceptance import BusinessObjective
     if contract is None:
         return None
     profit = contract.profit
     domain_profit = (
-        StrategyProfitInput(
-            ead_col=profit.ead_col,
-            pd_col=profit.pd_col,
-            annual_rate=profit.annual_rate,
-            funding_rate=profit.funding_rate,
-            lgd=profit.lgd,
-            operating_cost_per_loan=profit.operating_cost_per_loan,
-            term_months=profit.term_months,
-        )
+        StrategyProfitInput(**profit.model_dump())
         if profit is not None
         else None
     )
@@ -145,6 +138,7 @@ def _domain_strategy_input(
         min_approval_rate=contract.min_approval_rate,
         baseline_strategy_id=contract.baseline_strategy_id,
         profit=domain_profit,
+        business_objective=BusinessObjective.from_dict(contract.business_objective) if contract.business_objective is not None else None,
     )
 
 

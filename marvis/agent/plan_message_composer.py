@@ -78,6 +78,7 @@ class PlanMessageComposer:
             else inferred_binding_loader
         )
         self._step_presentation_bindings: dict[tuple[str, str, str], dict] = {}
+        self._business_review_repository = output_repository
         self._load_task_artifact = load_task_artifact
         self._load_dataset = load_dataset
         self._resolve_verified_dataset_path = resolve_verified_dataset_path
@@ -270,6 +271,20 @@ class PlanMessageComposer:
                 if text:
                     parts.append(text)
         meta = {"plan_id": plan.id, "run_seq": run_seq, "tables": tables}
+        repository = self._business_review_repository
+        if callable(getattr(repository, "latest_plan_summary_ref", None)):
+            from marvis.orchestrator.business_acceptance import stored_business_review
+            from marvis.business_acceptance import acceptance_display_rows
+
+            business_review = stored_business_review(repository, plan.id)
+            meta.update(business_review)
+            if business_review:
+                acceptance = business_review["business_acceptance"]
+                labels = {"passed": "业务验收达标", "failed": "业务验收未达标",
+                          "insufficient_evidence": "业务验收证据不足", "not_configured": "未配置业务验收标准",
+                          "not_applicable": "按验收合同本次不适用"}
+                parts.insert(1, labels[acceptance["status"]] + "。")
+                meta["business_acceptance_rows"] = acceptance_display_rows(acceptance)
         result_dataset = self.latest_result_dataset_metadata(plan)
         if result_dataset is not None:
             meta["result_dataset"] = result_dataset

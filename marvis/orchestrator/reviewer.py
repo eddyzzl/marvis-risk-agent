@@ -18,6 +18,7 @@ from marvis.orchestrator.contracts import (
     StepStatus,
 )
 from marvis.orchestrator.validator import METRIC_FIELDS
+from marvis.orchestrator.business_acceptance import business_review_binding, review_business_acceptance
 from marvis.plugins.errors import SchemaValidationError
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.schema_validation import validate_against_schema
@@ -35,11 +36,17 @@ class FinalReview:
     open_items: list[str]
     goal_doubt: bool = False
     llm_goal_met: bool | None = None
+    # None identifies pre-contract summaries and keeps their recovery semantics.
+    execution_completed: bool | None = None
+    business_acceptance: dict | None = None
+    explanation_status: str = "unavailable"
+    explanation_items: list[str] | None = None
 
 
 class Reviewer:
-    def __init__(self, llm_factory):
+    def __init__(self, llm_factory, *, plan_repository=None):
         self._llm_factory = llm_factory
+        self._plan_repository = plan_repository
 
     def deterministic_check(self, step: PlanStep, output: dict) -> ReviewVerdict:
         reasons = []
@@ -122,29 +129,19 @@ class Reviewer:
             for step in plan.steps
             if step.status not in {StepStatus.DONE, StepStatus.SKIPPED}
         ]
-        criteria_failures = _evaluate_success_criteria(plan.success_criteria, outputs)
-        summary, llm_items, goal_doubt, llm_goal_met = self._llm_summarize(goal, plan, outputs)
-        if criteria_failures:
-            summary = f"{summary} 成功标准未达成: {'; '.join(criteria_failures)}"
-        if llm_goal_met is False and not llm_items:
-            llm_items = ["LLM final review marked goal_met=false"]
-        # AGT-3: narrow the LLM's authority. A weak model saying goal_met=false on a
-        # plan where every step passed its deterministic post_checks (no incomplete
-        # steps) and no configured success_criteria failed is treated as *doubt*, not
-        # a veto — it routes to REVIEW (human re-check, executor.py already has this
-        # channel) instead of FAILED or an automatic "fill in remaining steps" replan.
-        # Only deterministic success_criteria failures — or genuinely incomplete
-        # steps — may still trigger FAILED / replan; the LLM's opinion can pause a
-        # plan but never fail one outright (INV-1: the platform, not the LLM,
-        # computes truth).
-        if llm_goal_met is False and not incomplete and not criteria_failures:
-            goal_doubt = True
+        business = review_business_acceptance(plan, self._plan_repository)
+        business["execution_binding"] = business_review_binding(plan)
+        summary, llm_items, _goal_doubt, llm_goal_met = self._llm_summarize(goal, plan, outputs, business)
         return FinalReview(
-            goal_met=not incomplete and not criteria_failures and not goal_doubt and llm_goal_met is not False,
+            goal_met=not incomplete and business["status"] == "passed",
             summary=summary,
-            open_items=incomplete + criteria_failures + llm_items,
-            goal_doubt=goal_doubt,
+            open_items=incomplete + business["reasons"],
+            goal_doubt=False,
             llm_goal_met=llm_goal_met,
+            execution_completed=not incomplete,
+            business_acceptance=business,
+            explanation_status="available" if summary != "Plan execution reviewed." else "unavailable",
+            explanation_items=llm_items,
         )
 
     def _llm_summarize(
@@ -152,6 +149,7 @@ class Reviewer:
         goal: str,
         plan: Plan,
         outputs: dict[str, dict],
+        business_acceptance: dict,
     ) -> tuple[str, list[str], bool, bool | None]:
         try:
             prompt = json.dumps(
@@ -160,6 +158,11 @@ class Reviewer:
                     "plan_id": plan.id,
                     "step_count": len(plan.steps),
                     "outputs": _summarize_output(outputs),
+                    "business_acceptance": _business_acceptance_prompt(business_acceptance),
+                    "acceptance_authority": (
+                        "业务验收由平台确定性判定。解释必须遵守此status、objective_hash和采用对象，"
+                        "不得用候选指标改写结论；流程完成不代表业务达标。"
+                    ),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -206,6 +209,20 @@ def _is_reviewable_empty_screen_check(step: PlanStep, post_check: PostCheck) -> 
         and post_check.kind == "nonempty"
         and str(post_check.spec.get("field") or "") == "selected"
     )
+
+
+def _business_acceptance_prompt(result: dict) -> dict:
+    """Bound the explanatory context; never send the full business contract."""
+    target = result.get("target") or {}
+    evidence = result.get("evidence") or {}
+    return {
+        "status": result["status"], "objective_hash": result.get("objective_hash"),
+        "target": {key: str(value)[:200] for key, value in target.items()},
+        "evidence": {key: str(evidence[key])[:200] for key in ("source_ref", "source_hash", "effect_stage", "period_start", "period_end", "labels_mature") if key in evidence},
+        "criteria_count": len(result["criteria"]),
+        "criteria": [{"metric": str(item["metric"])[:100], "value": item.get("value"), "status": item["status"]} for item in result["criteria"][:20]],
+        "reasons": [str(reason)[:300] for reason in result["reasons"][:6]],
+    }
 
 
 def _run_post_check(pc: PostCheck, output: dict, step: PlanStep) -> tuple[bool, str]:
@@ -441,87 +458,6 @@ def _bounded_metric_summary(value: dict, depth: int) -> dict:
 
 def _bounded_keys_summary(value: dict) -> dict:
     return {"type": "object", "keys": sorted(value)[:10]}
-
-
-def _evaluate_success_criteria(
-    criteria: list[dict[str, Any]],
-    outputs: dict[str, dict],
-) -> list[str]:
-    failures: list[str] = []
-    observed_target_type = _first_metric_value(outputs, "target_type")
-    for criterion in criteria or []:
-        if not isinstance(criterion, dict):
-            continue
-        target_type = str(criterion.get("target_type") or "").strip()
-        if (
-            target_type
-            and observed_target_type is not None
-            and str(observed_target_type) != target_type
-        ):
-            continue
-        metric = str(criterion.get("metric") or criterion.get("field") or "").strip()
-        if not metric:
-            continue
-        values = _numeric_metric_values(outputs, metric)
-        label = str(criterion.get("label") or metric)
-        if not values:
-            failures.append(f"{label} missing for success criterion")
-            continue
-        aggregate = str(criterion.get("aggregate") or "max").lower()
-        value = min(values) if aggregate == "min" else max(values)
-        minimum, min_error = _coerce_threshold(criterion.get("min"), label, "min")
-        maximum, max_error = _coerce_threshold(criterion.get("max"), label, "max")
-        if min_error or max_error:
-            failures.extend(item for item in (min_error, max_error) if item)
-            continue
-        if minimum is not None and value < minimum:
-            failures.append(f"{label}={value:.4g} < {minimum:.4g}")
-        if maximum is not None and value > maximum:
-            failures.append(f"{label}={value:.4g} > {maximum:.4g}")
-    return failures
-
-
-def _coerce_threshold(
-    raw_value: Any,
-    label: str,
-    threshold_name: str,
-) -> tuple[float | None, str | None]:
-    if raw_value is None:
-        return None, None
-    try:
-        return float(raw_value), None
-    except (TypeError, ValueError):
-        return None, f"{label} invalid {threshold_name} threshold: {raw_value!r}"
-
-
-def _numeric_metric_values(value, metric: str) -> list[float]:
-    values: list[float] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key == metric and isinstance(item, (int, float)) and not isinstance(item, bool):
-                values.append(float(item))
-            else:
-                values.extend(_numeric_metric_values(item, metric))
-    elif isinstance(value, list | tuple):
-        for item in value:
-            values.extend(_numeric_metric_values(item, metric))
-    return values
-
-
-def _first_metric_value(value, metric: str):
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key == metric:
-                return item
-            found = _first_metric_value(item, metric)
-            if found is not None:
-                return found
-    elif isinstance(value, list | tuple):
-        for item in value:
-            found = _first_metric_value(item, metric)
-            if found is not None:
-                return found
-    return None
 
 
 def _now_iso() -> str:

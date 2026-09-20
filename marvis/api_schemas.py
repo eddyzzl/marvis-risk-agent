@@ -16,6 +16,7 @@ from pydantic import (
 )
 
 from marvis.domain import TASK_TYPE_VALIDATION
+from marvis.business_acceptance import BusinessObjective
 from marvis.agent.strategy_workflows import MANUAL_STANDARD_STRATEGY_WORKFLOWS
 from marvis.packs.labeling.contracts import LabelingRequest as LabelingContractRequest
 
@@ -118,6 +119,13 @@ class StrategyProfitInputRequest(BaseModel):
     lgd: StrictRatio
     operating_cost_per_loan: StrictNonNegativeNumber
     term_months: StrictInt = Field(ge=1)
+    currency: StrictNonEmptyStr | None = None
+    exposure_unit: Literal["currency_units", "currency_thousands", "currency_millions"] = "currency_units"
+    assumption_sources: dict[StrictNonEmptyStr, StrictNonEmptyStr] = Field(default_factory=dict)
+    exposure_basis: Literal["drawn_ead", "offered_limit"] = "drawn_ead"
+    conversion_rate: StrictRatio | None = None
+    utilization_rate: StrictRatio | None = None
+    behavior_response_ref: StrictNonEmptyStr | None = None
 
 
 class StrategyTaskInputRequest(BaseModel):
@@ -132,6 +140,13 @@ class StrategyTaskInputRequest(BaseModel):
     min_approval_rate: StrictRatio | None = None
     baseline_strategy_id: StrictNonEmptyStr | None = None
     profit: StrategyProfitInputRequest | None = None
+    business_objective: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_business_objective(self):
+        if self.business_objective is not None:
+            BusinessObjective.from_dict(self.business_objective)
+        return self
 
 
 class CreateTaskRequest(BaseModel):

@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 from marvis.compat import StrEnum
+from marvis.business_acceptance import BusinessObjective
 
 
 class TaskStatus(StrEnum):
@@ -73,6 +74,13 @@ class StrategyProfitInput:
     lgd: float
     operating_cost_per_loan: float
     term_months: int
+    currency: str | None = None
+    exposure_unit: str = "currency_units"
+    assumption_sources: dict[str, str] = field(default_factory=dict)
+    exposure_basis: str = "drawn_ead"
+    conversion_rate: float | None = None
+    utilization_rate: float | None = None
+    behavior_response_ref: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ead_col", _required_contract_string("ead_col", self.ead_col))
@@ -98,6 +106,19 @@ class StrategyProfitInput:
             or self.term_months < 1
         ):
             raise ValueError("term_months must be an integer greater than or equal to 1")
+        if self.currency is not None:
+            object.__setattr__(self, "currency", _required_contract_string("currency", self.currency))
+        if self.exposure_unit not in {"currency_units", "currency_thousands", "currency_millions"}:
+            raise ValueError("unsupported exposure unit")
+        if self.exposure_basis not in {"drawn_ead", "offered_limit"}:
+            raise ValueError("unsupported exposure basis")
+        for name in ("conversion_rate", "utilization_rate"):
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, _bounded_contract_number(name, getattr(self, name), minimum=0.0, maximum=1.0))
+        if not isinstance(self.assumption_sources, dict) or any(not isinstance(key, str) or not isinstance(value, str) or not value.strip() for key, value in self.assumption_sources.items()):
+            raise ValueError("assumption_sources must map names to explicit source references")
+        if self.behavior_response_ref is not None:
+            object.__setattr__(self, "behavior_response_ref", _required_contract_string("behavior_response_ref", self.behavior_response_ref))
 
 
 @dataclass(frozen=True)
@@ -117,6 +138,7 @@ class StrategyTaskInput:
     min_approval_rate: float | None = None
     baseline_strategy_id: str | None = None
     profit: StrategyProfitInput | None = None
+    business_objective: BusinessObjective | None = None
 
     def __post_init__(self) -> None:
         if self.entry_mode not in STRATEGY_ENTRY_MODES:
@@ -155,6 +177,8 @@ class StrategyTaskInput:
             )
         if self.profit is not None and not isinstance(self.profit, StrategyProfitInput):
             raise ValueError("profit must be a StrategyProfitInput or None")
+        if self.business_objective is not None and not isinstance(self.business_objective, BusinessObjective):
+            raise ValueError("business_objective must be a BusinessObjective or None")
 
 
 def _required_contract_string(name: str, value: object) -> str:

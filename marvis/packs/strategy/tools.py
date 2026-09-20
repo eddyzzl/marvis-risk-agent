@@ -549,6 +549,18 @@ def tool_profit_calc(inputs: dict, ctx) -> dict:
             "- EAD*funding_rate*term/12 - operating_cost_per_loan"
         ),
     }
+    from marvis.packs.strategy.economic_assumptions import assess_profit_assumptions
+    from marvis.repositories.tasks import TaskRepository
+
+    task_contract = TaskRepository(runtime.settings.db_path).get_task(task_id).strategy_input
+    profit_contract = None if task_contract is None else task_contract.profit
+    if profit_contract is not None and (
+        profit_contract.ead_col != str(inputs["ead_col"])
+        or profit_contract.pd_col != str(inputs["pd_col"])
+        or any(getattr(profit_contract, name) != value for name, value in _jsonable(params).items())
+    ):
+        profit_contract = None
+    assumptions["assessment"] = assess_profit_assumptions(frame, profit_contract)
     csv_text = pd.DataFrame(result_rows).to_csv(index=False)
     markdown_text = _profit_markdown(
         result_rows=result_rows,

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from marvis.db_schema import connect
+from marvis.business_acceptance import BusinessObjective
 from marvis.domain import (
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
@@ -2239,6 +2240,7 @@ def _load_strategy_input(raw: str | None) -> StrategyTaskInput | None:
         "min_approval_rate",
         "baseline_strategy_id",
         "profit",
+        "business_objective",
     }
     unknown_keys = sorted(set(value) - allowed_keys)
     if unknown_keys:
@@ -2258,6 +2260,7 @@ def _load_strategy_input(raw: str | None) -> StrategyTaskInput | None:
             min_approval_rate=value.get("min_approval_rate"),
             baseline_strategy_id=value.get("baseline_strategy_id"),
             profit=profit,
+            business_objective=(BusinessObjective.from_dict(value["business_objective"]) if value.get("business_objective") is not None else None),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid strategy_input_json: {exc}") from exc

@@ -102,6 +102,7 @@ def test_strategy_clarification_can_resume_with_structured_business_contract(
         "min_approval_rate": None,
         "baseline_strategy_id": None,
         "profit": None,
+        "business_objective": None,
     }
     assert loaded.json()["updated_at"] != created["updated_at"]
 

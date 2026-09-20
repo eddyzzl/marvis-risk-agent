@@ -178,6 +178,70 @@ def test_reviewer_llm_critique_prompt_carries_real_metric_values():
     assert "0.77" in prompt
 
 
+def test_final_review_llm_opinion_is_explanation_only():
+    done = _step([])
+    done.status = StepStatus.DONE
+    results = []
+    for reply in (
+        {"summary": "done", "goal_met": True},
+        {"summary": "failed", "goal_met": False, "goal_doubt": True, "open_items": ["LLM concern"]},
+        {},
+    ):
+        review = Reviewer(lambda: FakeLLM(json.dumps(reply))).final_review(_plan(done), {done.id: {"ok": True}}, "finish")
+        assert review.execution_completed is True
+        assert review.goal_met is False
+        assert review.goal_doubt is False
+        assert "LLM concern" not in review.open_items
+        results.append(review.business_acceptance)
+    assert results[0] == results[1] == results[2]
+    assert results[0]["status"] == "not_configured"
+
+
+def test_final_review_unavailable_llm_does_not_block_execution():
+    done = _step([])
+    done.status = StepStatus.DONE
+    def unavailable():
+        raise LLMSettingsError("no model")
+    review = Reviewer(unavailable).final_review(_plan(done), {}, "finish")
+    assert review.execution_completed is True
+    assert review.explanation_status == "unavailable"
+    assert review.business_acceptance["status"] == "not_configured"
+
+
+def test_final_review_retries_narrative_without_changing_business_status():
+    done = _step([])
+    done.status = StepStatus.DONE
+    llm = SequencedLLM(["not json", json.dumps({"summary": "Retried summary.", "goal_met": True})])
+    review = Reviewer(lambda: llm).final_review(_plan(done), {}, "finish")
+    assert review.summary == "Retried summary."
+    assert review.execution_completed is True
+    assert review.business_acceptance["status"] == "not_configured"
+    assert len(llm.calls) == 2
+
+
+def test_final_review_incomplete_step_remains_execution_failure():
+    review = Reviewer(lambda: FakeLLM("{}")).final_review(_plan(_step([])), {}, "finish")
+    assert review.execution_completed is False
+    assert "Metrics" in review.open_items
+
+
+def test_legacy_criteria_cannot_use_candidate_max_or_implicit_not_applicable():
+    done = _step([])
+    done.status = StepStatus.DONE
+    for target, metric in (("binary", .9), ("binary", .2), ("continuous", None)):
+        plan = _plan(done, success_criteria=[{"metric": "oot_ks", "min": .3331, "target_type": "binary", "aggregate": "max"}])
+        review = Reviewer(lambda: FakeLLM("{}")).final_review(plan, {done.id: {"target_type": target, "experiments": [{"metrics": {"oot_ks": metric}}]}}, "finish")
+        assert review.execution_completed is True
+        assert review.goal_met is False
+        assert review.business_acceptance["status"] == "insufficient_evidence"
+
+
+def test_old_final_review_deserialization_keeps_compatibility_marker():
+    review = FinalReview(**{"goal_met": True, "summary": "old", "open_items": []})
+    assert review.execution_completed is None
+    assert review.business_acceptance is None
+
+
 def test_reviewer_final_review_prompt_carries_real_metric_values():
     done = _step([])
     done.status = StepStatus.DONE
@@ -232,234 +296,3 @@ def test_reviewer_llm_critique_retries_after_unparseable_reply():
     assert verdict.reasons == []
     assert len(llm.calls) == 2
     assert "Previous reply was not parseable JSON" in llm.calls[1]["user_prompt"]
-
-
-def test_reviewer_final_review_goal_doubt_blocks_goal_met():
-    done = _step([])
-    done.status = StepStatus.DONE
-    skipped = _step([])
-    skipped.id = "step-2"
-    skipped.status = StepStatus.SKIPPED
-    llm = FakeLLM(json.dumps({
-        "summary": "Structurally complete.",
-        "open_items": ["review business wording"],
-        "goal_doubt": True,
-    }))
-
-    review = Reviewer(lambda: llm).final_review(
-        _plan(done, skipped),
-        {"step-1": {"ok": True}},
-        "finish",
-    )
-
-    assert isinstance(review, FinalReview)
-    assert review.goal_met is False
-    assert review.goal_doubt is True
-    assert review.open_items == ["review business wording"]
-
-
-def test_reviewer_final_review_llm_goal_met_false_blocks_goal_met_via_doubt():
-    # AGT-3: with every step DONE and no deterministic success_criteria failure,
-    # a bare llm_goal_met=false is *doubt*, not a veto — goal_doubt is forced True
-    # so the executor routes to REVIEW (human re-check) rather than FAILED or an
-    # automatic replan. The LLM's opinion can pause a plan but never fail one.
-    done = _step([])
-    done.status = StepStatus.DONE
-    llm = FakeLLM(json.dumps({
-        "summary": "Outputs exist but do not satisfy the business goal.",
-        "open_items": ["choose final production model"],
-        "goal_doubt": False,
-        "goal_met": False,
-    }))
-
-    review = Reviewer(lambda: llm).final_review(
-        _plan(done),
-        {"step-1": {"ok": True}},
-        "finish",
-    )
-
-    assert review.goal_met is False
-    assert review.goal_doubt is True
-    assert review.llm_goal_met is False
-    assert review.open_items == ["choose final production model"]
-
-
-def test_reviewer_final_review_llm_goal_met_false_adds_default_open_item():
-    done = _step([])
-    done.status = StepStatus.DONE
-    llm = FakeLLM(json.dumps({
-        "summary": "Not done.",
-        "open_items": [],
-        "goal_doubt": False,
-        "goal_met": False,
-    }))
-
-    review = Reviewer(lambda: llm).final_review(_plan(done), {"step-1": {"ok": True}}, "finish")
-
-    assert review.goal_met is False
-    assert review.goal_doubt is True
-    assert review.open_items == ["LLM final review marked goal_met=false"]
-
-
-def test_reviewer_final_review_llm_goal_met_false_stays_veto_when_criteria_fail():
-    # When a deterministic success_criteria failure is *also* present, the LLM's
-    # goal_met=false does not need the doubt escape hatch — the deterministic
-    # failure alone already justifies FAILED/replan, and goal_doubt stays as the
-    # LLM reported it (False here), matching the pre-AGT-3 behavior for the case
-    # the fix does NOT touch: real deterministic failures.
-    done = _step([])
-    done.status = StepStatus.DONE
-    plan = _plan(
-        done,
-        success_criteria=[
-            {"metric": "oot_ks", "min": 0.3331, "label": "OOT KS", "target_type": "binary"}
-        ],
-    )
-    llm = FakeLLM(json.dumps({
-        "summary": "Metrics look weak.",
-        "open_items": [],
-        "goal_doubt": False,
-        "goal_met": False,
-    }))
-
-    review = Reviewer(lambda: llm).final_review(
-        plan,
-        {"step-1": {"target_type": "binary", "metrics": {"oot_ks": 0.2}}},
-        "finish",
-    )
-
-    assert review.goal_met is False
-    assert review.goal_doubt is False
-    assert "OOT KS=0.2 < 0.3331" in review.open_items
-
-
-def test_reviewer_final_review_retries_summary_after_unparseable_reply():
-    done = _step([])
-    done.status = StepStatus.DONE
-    llm = SequencedLLM([
-        "not json",
-        json.dumps({"summary": "Retried summary.", "open_items": [], "goal_doubt": False}),
-    ])
-
-    review = Reviewer(lambda: llm).final_review(_plan(done), {"step-1": {"ok": True}}, "finish")
-
-    assert review.summary == "Retried summary."
-    assert review.goal_met is True
-    assert len(llm.calls) == 2
-
-
-def test_reviewer_final_review_marks_incomplete_steps_as_open_items():
-    pending = _step([])
-    pending.status = StepStatus.PENDING
-
-    review = Reviewer(lambda: FakeLLM("{}")).final_review(_plan(pending), {}, "finish")
-
-    assert review.goal_met is False
-    assert "Metrics" in review.open_items
-
-
-def test_reviewer_final_review_passes_when_success_criteria_are_met():
-    done = _step([])
-    done.status = StepStatus.DONE
-    plan = _plan(
-        done,
-        success_criteria=[
-            {
-                "metric": "oot_ks",
-                "min": 0.3331,
-                "aggregate": "max",
-                "label": "OOT KS",
-                "target_type": "binary",
-            }
-        ],
-    )
-
-    review = Reviewer(lambda: FakeLLM("{}")).final_review(
-        plan,
-        {
-            "step-1": {
-                "target_type": "binary",
-                "experiments": [{"metrics": {"oot_ks": 0.41}}],
-            }
-        },
-        "finish",
-    )
-
-    assert review.goal_met is True
-    assert review.open_items == []
-
-
-def test_reviewer_final_review_fails_when_success_criteria_are_not_met():
-    done = _step([])
-    done.status = StepStatus.DONE
-    plan = _plan(
-        done,
-        success_criteria=[
-            {
-                "metric": "oot_ks",
-                "min": 0.3331,
-                "aggregate": "max",
-                "label": "OOT KS",
-                "target_type": "binary",
-            }
-        ],
-    )
-
-    review = Reviewer(lambda: FakeLLM("{}")).final_review(
-        plan,
-        {"step-1": {"target_type": "binary", "metrics": {"oot_ks": 0.2}}},
-        "finish",
-    )
-
-    assert review.goal_met is False
-    assert "OOT KS=0.2 < 0.3331" in review.open_items
-    assert "成功标准未达成" in review.summary
-
-
-def test_reviewer_final_review_reports_invalid_success_thresholds():
-    done = _step([])
-    done.status = StepStatus.DONE
-    plan = _plan(
-        done,
-        success_criteria=[
-            {
-                "metric": "oot_ks",
-                "min": "not-a-number",
-                "label": "OOT KS",
-            }
-        ],
-    )
-
-    review = Reviewer(lambda: FakeLLM("{}")).final_review(
-        plan,
-        {"step-1": {"metrics": {"oot_ks": 0.41}}},
-        "finish",
-    )
-
-    assert review.goal_met is False
-    assert "OOT KS invalid min threshold: 'not-a-number'" in review.open_items
-
-
-def test_reviewer_final_review_skips_binary_success_criteria_for_continuous_targets():
-    done = _step([])
-    done.status = StepStatus.DONE
-    plan = _plan(
-        done,
-        success_criteria=[
-            {
-                "metric": "oot_ks",
-                "min": 0.3331,
-                "label": "OOT KS",
-                "target_type": "binary",
-            }
-        ],
-    )
-
-    review = Reviewer(lambda: FakeLLM("{}")).final_review(
-        plan,
-        {"step-1": {"target_type": "continuous", "metrics": {"oot_rmse": 1.4}}},
-        "finish",
-    )
-
-    assert review.goal_met is True
-    assert review.open_items == []

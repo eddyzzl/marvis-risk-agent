@@ -814,8 +814,14 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
     reviewer_llm_factory = _llm_factory(settings, role="critic")
     router_llm_factory = _llm_factory(settings, role="router_intent")
     intent_router = IntentRouter(router_llm_factory, app.state.tool_registry)
-    planner = Planner(app.state.tool_registry, planner_llm_factory, plan_validator)
-    reviewer = Reviewer(reviewer_llm_factory)
+    def business_objective_loader(task_id):
+        task = TaskRepository(settings.db_path).get_task(task_id)
+        strategy_input = task.strategy_input
+        return None if strategy_input is None else strategy_input.business_objective
+
+    planner = Planner(app.state.tool_registry, planner_llm_factory, plan_validator,
+                      business_objective_loader=business_objective_loader)
+    reviewer = Reviewer(reviewer_llm_factory, plan_repository=plan_repo)
     harness_state = HarnessState(plan_repo)
 
     def executor_factory(restricted_registry):
