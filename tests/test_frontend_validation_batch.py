@@ -586,7 +586,8 @@ def test_validation_batch_server_busy_state_has_independent_copy_and_blocks_dele
             "const selectedTaskId = 'parent-1';",
             "const selectedTask = { id: 'parent-1', status: 'running', active_job_kind: 'validation_batch' };",
             "const globalBusyAction = null;",
-            "const taskBusyActions = new Map();",
+            f"import {{ createTaskActivityOwner }} from {json.dumps((STATIC_DIR / 'js/task-activity.js').as_uri())};",
+            "const taskActivities = createTaskActivityOwner();",
             "function taskStopped() { return false; }",
             "function taskPlanWorkflowStatusSnapshot() { return null; }",
             "function usesPmmlScoringWorkflow() { return false; }",
@@ -1017,7 +1018,8 @@ def test_agent_batch_uses_compact_switcher_instead_of_old_overview():
     apply_start = app_js.index("async function applyProjectedValidationChild")
     apply_end = app_js.index("function selectedTaskIsRiskAnalysisAgent", apply_start)
     apply_body = app_js[apply_start:apply_end]
-    assert "agentMessages = [];" not in apply_body
+    # Messages are cleared only when model identity changes; race tests assert
+    # that a late child response cannot restore the previous model.
     assert "const childChanged = projectedValidationChildTaskId !== normalizedChildId;" in apply_body
     assert "resetAgentTypingState();" in apply_body
     assert "beginTaskContentLoad(normalizedChildId);" in apply_body

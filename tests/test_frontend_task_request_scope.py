@@ -195,7 +195,8 @@ def test_action_failure_and_finally_cannot_repaint_a_later_visit():
     run_node('''
 const busy = [];
 let release;
-const setBusy = (action, _message, taskId) => busy.push([action, taskId]);
+const claimBusy = (action, _message, taskId) => { busy.push([action, taskId]); return {taskId}; };
+const releaseBusy = lease => { if (lease) busy.push([null, lease.taskId]); };
 const renderAll = () => painted.push("render");
 const setActionStatus = () => painted.push("status");
 const setCreateStatus = () => painted.push("create-error");
@@ -212,3 +213,20 @@ assert.deepEqual(busy, [["metrics", "a"], [null, "a"]]);
 await runAction(async () => {});
 assert.deepEqual(painted, ["render"]);
 ''', *IDENTITY, "async function runAction(")
+
+
+def test_task_list_is_global_but_only_latest_response_updates_cache():
+    run_node('''
+let taskCache=[];
+const syncSelectedTaskFromCache=()=>painted.push(taskCache[0].id);
+const ensureActiveTaskProgressPolling=()=>{};
+setSelectedTask({id:"a"});
+const old=refreshTasks();
+setSelectedTask({id:"b"});
+assert.equal(pending[0].options.signal.aborted,false);
+const fresh=refreshTasks();
+pending[1].resolve([{id:"latest"}]); await fresh;
+pending[0].resolve([{id:"stale"}]); await old;
+assert.deepEqual(taskCache,[{id:"latest"}]);
+assert.deepEqual(painted,["latest"]);
+''', *IDENTITY, "async function refreshTasks(")

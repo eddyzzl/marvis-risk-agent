@@ -27,6 +27,7 @@ def _with_workbench_context(script: str, app_js: str) -> str:
     batch_js = _read_static("js/validation-batch.js")
     states = {
         "selectedTask": "null",
+        "agentMessages": "[]",
         "projectedValidationChildTask": "null",
         "projectedValidationChildTaskId": "''",
         "agentBatchAutoRunGeneration": "0",
@@ -44,6 +45,16 @@ def _with_workbench_context(script: str, app_js: str) -> str:
     if not re.search(r"\b(?:let|const|var)\s+taskRequests\b", script):
         prefix.insert(0, f"import {{ createTaskRequestScope }} from {json.dumps(scope_url)};")
         prefix.append("const taskRequests = createTaskRequestScope();")
+    activity_url = (STATIC_DIR / "js/task-activity.js").as_uri()
+    prefix.insert(0, f"import {{ createTaskActivityOwner }} from {json.dumps(activity_url)};")
+    if not re.search(r"\b(?:let|const|var)\s+taskActivities\b", script):
+        prefix.append("const taskActivities = createTaskActivityOwner();")
+    for name in ("renderBusyActivity", "claimBusy", "releaseBusy"):
+        if not re.search(rf"\bfunction\s+{name}\b", script):
+            prefix.append(_slice_function(app_js, f"function {name}("))
+    for name in ("renderWorkflowStepper", "renderPetState", "updateAgentSendDisabled"):
+        if not re.search(rf"\bfunction\s+{name}\b", script):
+            prefix.append(f"function {name}() {{}}")
     for source, names in (
         (
             app_js,
@@ -1367,8 +1378,8 @@ def test_selected_running_task_auto_polls_progress_after_refresh_or_reselect():
     assert "const claim = claimProgressPoll(progressPolls, taskId, { background });" in poll_body
     assert "if (!claim.claimed) return claim.existing.promise;" in poll_body
     assert "releaseProgressPoll(progressPolls, taskId, pollState)" in poll_body
-    assert "if (isWorkbenchTaskId(taskId) && !background)" in poll_body
-    assert "if (isWorkbenchTaskId(taskId) && !background) {" in poll_body
+    assert "if (taskRequests.current(selection) && isWorkbenchTaskId(taskId) && !background)" in poll_body
+    assert "if (taskRequests.current(selection) && isWorkbenchTaskId(taskId) && !background) {" in poll_body
 
 
 def test_create_dialog_enter_does_not_submit_textareas():
@@ -4205,7 +4216,7 @@ def test_running_indicators_stop_animating_when_motion_is_reduced():
 def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     app_js = _read_static("app.js")
 
-    assert "const taskBusyActions = new Map();" in app_js
+    assert "const taskActivities = createTaskActivityOwner();" in app_js
     assert "let isBusy" not in app_js
     assert "let busyAction" not in app_js
     assert "function taskBusyAction" in app_js
@@ -4243,13 +4254,13 @@ def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     action_runner = app_js[action_start:action_end]
     assert "const taskScoped = options.taskScoped !== false;" in action_runner
     assert 'Object.prototype.hasOwnProperty.call(options, "taskId")' in action_runner
-    assert 'if (actionId && taskScoped) setBusy(actionId, options.busyText || "正在处理...", taskId);' in action_runner
-    assert 'if (actionId && taskScoped) setBusy(null, "", taskId);' in action_runner
+    assert 'claimBusy(actionId, options.busyText || "正在处理...", taskId, options.operation || actionId)' in action_runner
+    assert "releaseBusy(busy);" in action_runner
 
 
 def test_global_settings_actions_do_not_mark_selected_task_busy():
     app_js = _read_static("app.js")
-    set_busy_start = app_js.index("function setBusy")
+    set_busy_start = app_js.index("function renderBusyActivity")
     set_busy_end = app_js.index("function setAgentMemoryStatus", set_busy_start)
     run_action_start = app_js.index("async function runAction")
     run_action_end = app_js.index("function handleTaskListKeydown", run_action_start)
@@ -4273,18 +4284,18 @@ def test_global_settings_actions_do_not_mark_selected_task_busy():
             "async function refreshTasks() { events.push(['refresh']); }",
             app_js[set_busy_start:set_busy_end],
             app_js[run_action_start:run_action_end],
-            "await runAction(async () => { events.push(['global-action', taskBusyActions.size]); }, {",
+            "await runAction(async () => { events.push(['global-action', taskActivities.action('task-done')]); }, {",
             "  actionId: 'executionEnvironment',",
             "  taskScoped: false,",
             "});",
             "let taskScopedSizeDuringAction = null;",
             "await runAction(async () => {",
-            "  taskScopedSizeDuringAction = taskBusyActions.get('task-done');",
+            "  taskScopedSizeDuringAction = taskActivities.action('task-done');",
             "}, { actionId: 'scan' });",
             "process.stdout.write(JSON.stringify({",
-            "  globalActionDidNotMarkTask: events.some((event) => event[0] === 'global-action' && event[1] === 0),",
+            "  globalActionDidNotMarkTask: events.some((event) => event[0] === 'global-action' && event[1] === null),",
             "  taskScopedSizeDuringAction,",
-            "  finalTaskBusySize: taskBusyActions.size,",
+            "  finalTaskBusySize: taskActivities.action('task-done'),",
             "  statusEvents: events.filter((event) => event[0] === 'status').length,",
             "}));",
         ]
@@ -4301,7 +4312,7 @@ def test_global_settings_actions_do_not_mark_selected_task_busy():
     assert json.loads(result.stdout) == {
         "globalActionDidNotMarkTask": True,
         "taskScopedSizeDuringAction": "scan",
-        "finalTaskBusySize": 0,
+        "finalTaskBusySize": None,
         "statusEvents": 1,
     }
 
@@ -7165,7 +7176,7 @@ def test_agent_mode_creation_routes_non_validation_tasks_to_conversation_compose
     create_scan_end = app_js.index("async function pollValidationProgress", create_scan_start)
     create_scan_body = app_js[create_scan_start:create_scan_end]
     agent_branch_start = create_scan_body.index('if (task.run_mode === "agent")')
-    agent_branch_end = create_scan_body.index('setBusy(null, "", null);', agent_branch_start)
+    agent_branch_end = create_scan_body.index('const busy = claimBusy("scan"', agent_branch_start)
     agent_branch = create_scan_body[agent_branch_start:agent_branch_end]
 
     assert 'const isValidationTask = (task.task_type || createTaskDialog.activeTaskType() || defaultTaskType) === "validation";' in create_scan_body
@@ -7699,12 +7710,12 @@ process.stdout.write("ok");
     assert result.stdout == "ok"
 
 
-def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
+def test_delete_task_cannot_clear_a_pending_local_operation_from_server_idle():
     app_js = _read_static("app.js")
 
     busy_start = app_js.index("function taskBusyAction")
     busy_end = app_js.index("function selectedTaskIsBusy", busy_start)
-    set_busy_start = app_js.index("function setBusy")
+    set_busy_start = app_js.index("function renderBusyActivity")
     set_busy_end = app_js.index("function setAgentMemoryStatus", set_busy_start)
     refresh_start = app_js.index("async function refreshTasks")
     refresh_end = app_js.index("async function scanCurrentTask", refresh_start)
@@ -7756,8 +7767,9 @@ def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
             app_js[refresh_start:refresh_end],
             app_js[reconcile_start:reconcile_end],
             app_js[delete_start:delete_end],
+            "const lease = taskActivities.claim('task-1', 'agent');",
             "await deleteTask(selectedTask);",
-            "process.stdout.write(JSON.stringify({ refreshed, apiCalls, hasBusy: taskBusyActions.has('task-1'), statuses }));",
+            "process.stdout.write(JSON.stringify({ refreshed, apiCalls, hasBusy: Boolean(taskActivities.action('task-1')), statuses }));",
         ]
     )
     script = _with_workbench_context(script, app_js)
@@ -7769,10 +7781,10 @@ def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
     )
     payload = json.loads(result.stdout)
 
-    assert payload["refreshed"] is True
-    assert payload["hasBusy"] is False
-    assert {"endpoint": "api/tasks/task-1", "method": "DELETE"} in payload["apiCalls"]
-    assert payload["statuses"][-1]["message"] == "任务已删除。"
+    assert payload["refreshed"] is False
+    assert payload["hasBusy"] is True
+    assert payload["apiCalls"] == []
+    assert "正在处理" in payload["statuses"][-1]["message"]
 
 
 def test_agent_stop_response_polls_until_active_agent_job_finishes():
@@ -7793,8 +7805,8 @@ def test_agent_stop_response_polls_until_active_agent_job_finishes():
     assert "{ stopping, settleWhenServerIdle: true }" in wait_body
     assert "agentValidationStopped(finalTask" in wait_body
     assert "finally" in wait_body
-    assert 'taskBusyAction(taskId) === "agent"' in wait_body
-    assert 'setBusy(null, "", taskId)' in wait_body
+    assert 'const busy = claimBusy("agent"' in wait_body
+    assert 'releaseBusy(busy)' in wait_body
 
     poll_start = app_js.index("async function pollValidationProgress")
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
@@ -7852,6 +7864,7 @@ def test_agent_wait_settles_when_failed_job_leaves_task_in_created_state():
             "process.stdout.write(JSON.stringify({ result, refreshCount, statuses }));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -11282,6 +11295,7 @@ def test_modeling_and_join_controller_contexts_expose_the_same_behavior():
             "}));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11320,16 +11334,17 @@ def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally()
             " screenGateControllerContext,"
             " driverConfirmControllerContext,"
             "})) {",
-            "  selectedTaskId = 'task-A';",
+            "  selectedTaskId = 'task-A'; taskRequests.select('task-A');",
             "  agentMessages = ['seed'];",
             "  const ctx = factory();",
-            "  selectedTaskId = 'task-B';",
+            "  selectedTaskId = 'task-B'; taskRequests.select('task-B');",
             "  ctx.setAgentMessages(['A-turn-finished-late']);",
             "  results[name] = agentMessages.slice();",
             "}",
             "process.stdout.write(JSON.stringify(results));",
         ]
     )
+    script = _with_workbench_context(script, app_js)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,

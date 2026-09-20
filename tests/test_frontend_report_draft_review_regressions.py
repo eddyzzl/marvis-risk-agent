@@ -9,12 +9,16 @@ def test_agent_message_waits_for_draft_save_and_retains_prompt_on_failure():
     script = r'''
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createTaskActivityOwner } from './marvis/static/js/task-activity.js';
+import { createTaskRequestScope } from './marvis/static/js/task-request-scope.js';
 const app=fs.readFileSync('./marvis/static/app.js','utf8');
 const source=app.slice(app.indexOf('async function startAgentValidation()'),app.indexOf('async function uploadRiskAnalysisMaterials('));
 function setup(save) {
   const input={value:'请只修订结论'};
   const calls=[];
-  const context={workbenchTaskId:()=> 'a',$:(id)=>id==='agentComposerInput'?input:{value:'model'},
+  const activity=createTaskActivityOwner();
+  const taskRequests=createTaskRequestScope(); taskRequests.select('a');
+  const context={taskRequests,claimBusy:(action,_message,taskId,operation)=>activity.claim(taskId,action,operation),releaseBusy:activity.release,workbenchTaskId:()=> 'a',$:(id)=>id==='agentComposerInput'?input:{value:'model'},
     selectedTaskNeedsManualRiskIntake:()=>false,selectedTaskNeedsDeterministicPortfolioTurn:()=>false,
     agentModelUnavailableMessage:()=>'',showAgentModelGuidance:()=>false,setAgentComposerNotice:()=>{},
     autoGrowComposerInput:()=>{},updateAgentSendDisabled:()=>{},appendOptimisticAgentUserMessage:()=>({id:'user'}),
@@ -23,7 +27,7 @@ function setup(save) {
     api:async(url,options)=>{calls.push([url,JSON.parse(options.body)]);return {messages:[],status:'done'};},
     pollAgentMessagesUntilSettled:async()=>{},removeOptimisticAgentMessage:()=>{},agentModelConfigurationErrorMessage:()=>'',
     agentMessages:[],renderAgentConversation:()=>{},setActionStatus:()=>{}};
-  return {input,calls,start:new Function('ctx',`with(ctx){${source};return startAgentValidation;}`)(context)};
+  return {input,calls,context,start:new Function('ctx',`with(ctx){${source};return startAgentValidation;}`)(context)};
 }
 let finishSave;
 const success=setup(()=>new Promise(resolve=>{finishSave=resolve;}));
@@ -36,6 +40,21 @@ const failure=setup(async()=>{throw new Error('保存失败');});
 await assert.rejects(failure.start(),/保存失败/);
 assert.equal(failure.calls.length,0);
 assert.equal(failure.input.value,'请只修订结论');
+let finishOldSave;
+const changed=setup(()=>new Promise(resolve=>{finishOldSave=resolve;}));
+const oldRequest=changed.start();
+changed.context.taskRequests.select('b');
+changed.input.value='新任务指令';
+changed.context.agentEffort=()=> 'low';
+changed.context.api=async(url,options)=>{
+  changed.calls.push([url,JSON.parse(options.body)]);
+  return {messages:[{id:'old-task-response'}],status:'done'};
+};
+finishOldSave();await oldRequest;
+assert.equal(changed.calls[0][0],'api/tasks/a/agent/messages');
+assert.equal(changed.calls[0][1].effort,'high');
+assert.equal(changed.input.value,'新任务指令');
+assert.deepEqual(changed.context.agentMessages,[]);
 '''
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], cwd=ROOT,
@@ -48,6 +67,8 @@ def test_report_draft_switch_poll_and_confirmation_boundaries():
     script = r'''
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createTaskActivityOwner } from './marvis/static/js/task-activity.js';
+import { createTaskRequestScope } from './marvis/static/js/task-request-scope.js';
 import { createReportDraftState } from './marvis/static/js/report-draft-state.js';
 import { latestPendingReportDraftMessageId, hasReportDraftValues, reportDraftTableHtml } from './marvis/static/js/report-draft-table.js';
 const app = fs.readFileSync('./marvis/static/app.js', 'utf8');
@@ -70,7 +91,9 @@ function setup(api) {
     if (selector.includes('confirm')) return confirm;
     return null;
   }, querySelectorAll(selector) {return selector === '[data-report-draft-key]' ? fields : [];}};
-  const context = {workbenchTask:()=>({task_type:'validation',model_name:'A'}),selectedTaskIsAgentMode:()=>true,$:()=>panel,
+  const activity=createTaskActivityOwner();
+  const taskRequests=createTaskRequestScope(); taskRequests.select('a');
+  const context = {taskRequests,claimBusy:(action,_message,taskId,operation)=>activity.claim(taskId,action,operation),releaseBusy:activity.release,workbenchTask:()=>({task_type:'validation',model_name:'A'}),selectedTaskIsAgentMode:()=>true,$:()=>panel,
     workbenchTaskId:()=> 'a',agentMessages:[message('a')],latestPendingReportDraftMessageId,hasReportDraftValues,
     renderedReportDraftSignature:'',escapeHtml:(x)=>x,reportDraftTableHtml,reportDraftFeedbackHtml:()=>'',
     activeValidationViewTaskId:'a',activeValidationView:'report',validationViewState:new Map(),selectValidationView:()=>{},

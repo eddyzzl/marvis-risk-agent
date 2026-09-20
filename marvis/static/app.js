@@ -1,5 +1,6 @@
 import { api, sleep } from "./js/api.js";
 import { createTaskRequestScope } from "./js/task-request-scope.js";
+import { createTaskActivityOwner } from "./js/task-activity.js";
 import {
   createAgentMemoryPanelController,
   formatMemoryConfidence,
@@ -238,12 +239,11 @@ const initialTaskDeepLink = parseTaskDeepLink(window.location.search);
 let lastMetricValues = {};
 let lastMetricValuesTaskId = null;
 let lastMetricTableSections = [];
-const taskBusyActions = new Map();
+const taskActivities = createTaskActivityOwner();
 let createTaskInFlight = false;
 const agentRequestAbortControllers = new Map();
 const progressPolls = createProgressPollRegistry();
 const resultScrollPositionsByTask = new Map();
-let globalBusyAction = null;
 let actionStatusOverride = null;
 const themeController = createThemeController({
   onChange: () => renderSettingsState(),
@@ -476,15 +476,17 @@ const draftToolsPanel = createDraftToolsPanelController({
 });
 const planRailController = createPlanRailController({
   $,
+  captureView: () => taskRequests.capture(),
+  isCurrentView: (view) => taskRequests.current(view),
+  beginActivity: (operation, taskId, message) => claimBusy(
+    "driver_execute", message || "正在执行下一步…", taskId, operation,
+  ),
+  endActivity: releaseBusy,
   stepCheckerHtml,
   getSelectedTask: () => selectedTask,
   getSelectedTaskId: () => selectedTaskId,
   getTaskBusyAction: () => taskBusyAction(selectedTaskId),
-  setDriverExecutionBusy: (active, taskId) => setBusy(
-    active ? "driver_execute" : null,
-    active ? "正在执行下一步…" : "",
-    taskId,
-  ),
+  setDriverExecutionBusy: taskActivities.channel("driver_execute", renderBusyActivity),
   getAgentMessages: () => agentMessages,
   isAgentMode: selectedTaskIsAgentMode,
   renderWorkflowStepper,
@@ -496,12 +498,8 @@ const planRailController = createPlanRailController({
 });
 const driverGateApi = createDriverGateApi({
   api,
-  getLocalBusyAction: (taskId) => taskBusyActions.get(taskId) || "",
-  setDriverExecutionBusy: (active, taskId) => setBusy(
-    active ? "driver_execute" : null,
-    active ? "正在执行下一步…" : "",
-    taskId,
-  ),
+  getLocalBusyAction: (taskId) => taskActivities.action(taskId) || "",
+  setDriverExecutionBusy: taskActivities.channel("driver_execute", renderBusyActivity),
   onSubmissionStateChange: (binding) => {
     if (selectedTaskId !== binding.taskId) return;
     renderAgentConversation();
@@ -593,8 +591,8 @@ function taskStopped(task = selectedTask) {
 }
 
 function taskBusyAction(taskId = selectedTaskId) {
-  if (!taskId) return globalBusyAction;
-  const localBusyAction = taskBusyActions.get(taskId);
+  if (!taskId) return taskActivities.action(null);
+  const localBusyAction = taskActivities.action(taskId);
   if (localBusyAction) return localBusyAction;
   if (taskId === selectedTaskId) return taskServerBusyAction();
   if (taskId === projectedValidationChildTaskId) {
@@ -2025,19 +2023,27 @@ function canRunStepAction(actionId) {
   }
 }
 
-function setBusy(actionId, message = "", taskId = selectedTaskId) {
-  if (taskId) {
-    if (actionId) taskBusyActions.set(taskId, actionId);
-    else taskBusyActions.delete(taskId);
-  } else {
-    globalBusyAction = actionId;
-  }
-  if (actionId && (!taskId || isWorkbenchTaskId(taskId))) {
-    setActionStatus(message || "正在处理...", "busy");
+function renderBusyActivity(lease, active) {
+  if (active && (!lease.taskId || isWorkbenchTaskId(lease.taskId))) {
+    setActionStatus("正在执行下一步…", "busy");
   }
   renderWorkflowStepper();
   renderPetState();
   updateAgentSendDisabled();
+}
+
+function claimBusy(actionId, message = "", taskId = selectedTaskId, operation = actionId) {
+  const lease = taskActivities.claim(taskId, actionId, operation);
+  if (!lease) return null;
+  if (!taskId || isWorkbenchTaskId(taskId)) {
+    setActionStatus(message || "正在处理...", "busy");
+  }
+  renderBusyActivity(lease, false);
+  return lease;
+}
+
+function releaseBusy(lease) {
+  if (taskActivities.release(lease)) renderBusyActivity(lease, false);
 }
 
 function setAgentMemoryStatus(message = "", kind = "") {
@@ -2919,6 +2925,7 @@ function selectedTaskIsValidationBatch(task = selectedTask) {
 
 function setSelectedTask(task, taskId = task?.id || null) {
   if (selectedTaskId !== taskId) {
+    agentMessages = [];
     projectedValidationChildTaskId = "";
     projectedValidationChildTask = null;
   }
@@ -2973,7 +2980,10 @@ async function applyProjectedValidationChild(childTaskId, { force = false } = {}
     if (scrollContent) scrollContent.scrollTop = 0;
   }
   projectedValidationChildTaskId = normalizedChildId;
-  if (childChanged) projectedValidationChildTask = null;
+  if (childChanged) {
+    projectedValidationChildTask = null;
+    agentMessages = [];
+  }
   taskRequests.select(selectedTaskId, normalizedChildId);
   const request = taskRequests.begin("projected-child");
   try {
@@ -6098,7 +6108,7 @@ function driverGateMessageInteractionState(message) {
   const taskId = selectedTaskId || "";
   const planId = String(metadata.plan_id || "");
   const stepId = String(metadata.step_id || "");
-  const localBusyAction = String(taskBusyActions.get(taskId) || "");
+  const localBusyAction = String(taskActivities.action(taskId) || "");
   const localBusy = ["driver_execute", "agent"].includes(localBusyAction);
   const currentTask = findTaskInCache(taskId) || selectedTask;
   const serverBusy = Boolean(currentTask?.active_job_kind);
@@ -6590,14 +6600,14 @@ function handleModelingWeightAdjustClick(event) {
 }
 
 function agentAcceptanceControllerContext() {
-  const capturedTaskId = selectedTaskId;
+  const selection = taskRequests.capture();
   return {
     getSelectedTaskId: () => selectedTaskId,
     api: typeof driverGateApi === "function" ? driverGateApi : api,
     agentAcceptanceModeValue,
-    setActionStatus,
+    setActionStatus: (...args) => { if (taskRequests.current(selection)) setActionStatus(...args); },
     setAgentMessages: (messages) => {
-      if (selectedTaskId !== capturedTaskId) return;
+      if (!taskRequests.current(selection)) return;
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
@@ -6610,11 +6620,7 @@ function agentAcceptanceControllerContext() {
       : async () => {},
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
-    setDriverExecutionBusy: (active, taskId) => setBusy(
-      active ? "driver_execute" : null,
-      active ? "正在执行下一步…" : "",
-      taskId,
-    ),
+    setDriverExecutionBusy: taskActivities.channel("driver_execute", renderBusyActivity),
   };
 }
 
@@ -6685,7 +6691,7 @@ function handleScreenConfirmClick(event) {
 }
 
 function screenGateControllerContext() {
-  const capturedTaskId = selectedTaskId;
+  const selection = taskRequests.capture();
   return {
     getSelectedTaskId: () => selectedTaskId,
     // UX-4: the search/sort/chip/page/bulk handlers re-render a gate message's
@@ -6694,9 +6700,9 @@ function screenGateControllerContext() {
     getAgentMessages: () => agentMessages,
     api: typeof driverGateApi === "function" ? driverGateApi : api,
     agentAcceptanceModeValue,
-    setActionStatus,
+    setActionStatus: (...args) => { if (taskRequests.current(selection)) setActionStatus(...args); },
     setAgentMessages: (messages) => {
-      if (selectedTaskId !== capturedTaskId) return;
+      if (!taskRequests.current(selection)) return;
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
@@ -6709,11 +6715,7 @@ function screenGateControllerContext() {
       : async () => {},
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
-    setDriverExecutionBusy: (active, taskId) => setBusy(
-      active ? "driver_execute" : null,
-      active ? "正在执行下一步…" : "",
-      taskId,
-    ),
+    setDriverExecutionBusy: taskActivities.channel("driver_execute", renderBusyActivity),
   };
 }
 function handleScreenSearchInput(event) {
@@ -6809,13 +6811,13 @@ function handleDriverConfirmClick(event) {
 }
 
 function driverConfirmControllerContext() {
-  const capturedTaskId = selectedTaskId;
+  const selection = taskRequests.capture();
   return {
     getSelectedTaskId: () => selectedTaskId,
     api: typeof driverGateApi === "function" ? driverGateApi : api,
-    setActionStatus,
+    setActionStatus: (...args) => { if (taskRequests.current(selection)) setActionStatus(...args); },
     setAgentMessages: (messages) => {
-      if (selectedTaskId !== capturedTaskId) return;
+      if (!taskRequests.current(selection)) return;
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
@@ -6828,11 +6830,7 @@ function driverConfirmControllerContext() {
       : async () => {},
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
-    setDriverExecutionBusy: (active, taskId) => setBusy(
-      active ? "driver_execute" : null,
-      active ? "正在执行下一步…" : "",
-      taskId,
-    ),
+    setDriverExecutionBusy: taskActivities.channel("driver_execute", renderBusyActivity),
   };
 }
 if (typeof document !== "undefined") {
@@ -6894,7 +6892,8 @@ async function submitVisibleReportDraft(button) {
   button.disabled = true;
   button.textContent = "正在生成报告…";
   reportDraftState.setConfirming([taskId], true);
-  setBusy("report_confirm", "正在生成报告…", taskId);
+  const busy = claimBusy("report_confirm", "正在生成报告…", taskId);
+  const selection = taskRequests.capture();
   try {
     await reportDraftState.save(taskId);
     const draftPayload = reportDraftState.payload(taskId);
@@ -6904,18 +6903,20 @@ async function submitVisibleReportDraft(button) {
       body: JSON.stringify(draftPayload),
     });
     reportDraftState.discard(taskId);
-    if (taskId === workbenchTaskId() && Array.isArray(result?.messages)) agentMessages = result.messages;
+    if (!taskRequests.current(selection)) return;
+    if (Array.isArray(result?.messages)) agentMessages = result.messages;
     renderAgentConversation();
     await pollAgentMessagesUntilSettled(taskId, Promise.resolve());
     await refreshTasks();
-    setActionStatus("报告结论已确认，正在生成 Word 和 Excel…", "busy");
+    if (taskRequests.current(selection)) setActionStatus("报告结论已确认，正在生成 Word 和 Excel…", "busy");
   } catch (error) {
+    if (!taskRequests.current(selection)) return;
     button.disabled = false;
     button.textContent = originalLabel || "确认并生成报告";
     setActionStatus("确认报告失败", "error", error?.message || "");
   } finally {
     reportDraftState.setConfirming([taskId], false);
-    setBusy(null, "", taskId);
+    releaseBusy(busy);
   }
 }
 
@@ -6924,7 +6925,9 @@ async function confirmAllValidationBatchReportDrafts({ parentTaskId } = {}) {
   if (!parentId) return;
   const overrides = {};
   let confirmationTaskIds = [];
-  setBusy("report_confirm_all", "正在生成全部报告…", parentId);
+  const busy = claimBusy("report_confirm_all", "正在生成全部报告…", parentId);
+  if (!busy) return;
+  const selection = taskRequests.capture({ includeModel: false });
   try {
     const detail = normalizeValidationBatchPayload(await api(`api/validation-batches/${encodeURIComponent(parentId)}`));
     const pendingIds = detail.items.filter((item) => item.pendingReportDraft && !["failed", "cancelled"].includes(item.status)).map((item) => item.childTaskId);
@@ -6943,6 +6946,7 @@ async function confirmAllValidationBatchReportDrafts({ parentTaskId } = {}) {
       body: JSON.stringify({ overrides }),
     });
     pendingIds.forEach((id) => reportDraftState.discard(id));
+    if (!taskRequests.current(selection)) return;
     setActionStatus("已确认全部报告草稿，正在生成 Word、Excel 和汇总文档…", "busy");
     const currentChildId = workbenchTaskId();
     if (currentChildId) {
@@ -6951,11 +6955,11 @@ async function confirmAllValidationBatchReportDrafts({ parentTaskId } = {}) {
     }
     await refreshTasks();
   } catch (error) {
-    setActionStatus("全部确认失败", "error", error?.message || "");
+    if (taskRequests.current(selection)) setActionStatus("全部确认失败", "error", error?.message || "");
     throw error;
   } finally {
     reportDraftState.setConfirming(confirmationTaskIds, false);
-    setBusy(null, "", parentId);
+    releaseBusy(busy);
   }
 }
 
@@ -7347,7 +7351,7 @@ async function loadAgentMessages(taskId = workbenchTaskId(), { preserveOptimisti
   const useIncremental = agentMessageCanPollIncrementally({ preserveOptimistic });
   const lastMessageId = useIncremental ? agentMessages[agentMessages.length - 1]?.id : "";
   const suffix = lastMessageId ? `?after_id=${encodeURIComponent(lastMessageId)}` : "";
-  const request = taskRequests.begin("messages");
+  const request = taskRequests.begin("messages", { operation: "agent" });
   try {
     const payload = await api(`api/tasks/${taskId}/agent/messages${suffix}`, { signal: request.signal });
     if (!taskRequests.accepts(request) || !isWorkbenchTaskId(taskId)) return;
@@ -7399,6 +7403,7 @@ function agentStreamPollDelay(unchangedForMs = 0) {
 }
 
 async function pollAgentMessagesUntilSettled(taskId, pendingPromise, { preserveOptimistic = false } = {}) {
+  const selection = taskRequests.capture({ operation: "agent" });
   let settled = false;
   let unchangedForMs = 0;
   let messageSignature = agentMessagePollSignature();
@@ -7410,13 +7415,13 @@ async function pollAgentMessagesUntilSettled(taskId, pendingPromise, { preserveO
     () => { settled = true; resolveSettlement("settled"); },
     () => { settled = true; resolveSettlement("settled"); },
   );
-  while (!settled && isWorkbenchTaskId(taskId)) {
+  while (!settled && taskRequests.current(selection) && isWorkbenchTaskId(taskId)) {
     const delay = agentStreamPollDelay(unchangedForMs);
     const wakeReason = await Promise.race([
       sleep(delay).then(() => "poll"),
       settlementSignal,
     ]);
-    if (wakeReason === "settled" || settled || !isWorkbenchTaskId(taskId)) break;
+    if (wakeReason === "settled" || settled || !taskRequests.current(selection) || !isWorkbenchTaskId(taskId)) break;
     try {
       await loadAgentMessages(taskId, { preserveOptimistic });
       const nextSignature = agentMessagePollSignature();
@@ -7431,16 +7436,18 @@ async function pollAgentMessagesUntilSettled(taskId, pendingPromise, { preserveO
       unchangedForMs += delay;
     }
   }
-  await reloadDataWorkspace(taskId, { silent: true });
+  if (taskRequests.current(selection)) await reloadDataWorkspace(taskId, { silent: true });
 }
 
 async function handleAgentMaterialSelectionRequest(taskId) {
+  const selection = taskRequests.capture();
   const task = findTaskInCache(taskId) || (selectedTaskId === taskId ? selectedTask : null);
   if (!task) {
     setActionStatus("无法打开材料选择。", "error", "请刷新任务后重试。");
     return false;
   }
   const selectedMaterialsTask = await materialBindingDialog.ensureMaterialSelection(task, { force: true });
+  if (!taskRequests.current(selection)) return false;
   if (!selectedMaterialsTask) {
     setActionStatus("等待选择验证材料。", "info", "完成材料选择后请重新扫描材料。");
     return false;
@@ -7478,72 +7485,82 @@ async function startAgentValidation() {
     const unavailableModelMessage = agentModelUnavailableMessage();
     if (showAgentModelGuidance(unavailableModelMessage)) return;
   }
-  setAgentComposerNotice("");
-  const modelId = deterministicTurn ? "" : ($("agentModelSelect")?.value || "");
-  input.value = "";
-  autoGrowComposerInput();
-  updateAgentSendDisabled();
-  const optimisticMessage = appendOptimisticAgentUserMessage(content, modelId);
-  const optimisticThinkingMessage = appendOptimisticAgentThinkingMessage(modelId);
-  const controller = new AbortController();
-  agentRequestAbortControllers.set(taskId, controller);
-  let result;
+  const busy = claimBusy("agent", "Agent 正在处理...", taskId, "agent:request");
+  if (!busy) return;
   try {
-    // A revision or chat confirmation must see the latest local edits, even
-    // when sent before the autosave delay or after a previous save failed.
-    if (reportDraftState.get(taskId)) await reportDraftState.save(taskId);
+    const selection = taskRequests.advance("agent");
+    setAgentComposerNotice("");
+    const modelId = deterministicTurn ? "" : ($("agentModelSelect")?.value || "");
+    input.value = "";
+    autoGrowComposerInput();
+    updateAgentSendDisabled();
+    const optimisticMessage = appendOptimisticAgentUserMessage(content, modelId);
+    const optimisticThinkingMessage = appendOptimisticAgentThinkingMessage(modelId);
+    const controller = new AbortController();
+    agentRequestAbortControllers.set(taskId, controller);
     const requestBody = { content };
     if (!deterministicTurn) {
       requestBody.model_id = modelId || null;
       requestBody.effort = agentEffort();
       requestBody.acceptance_mode = agentAcceptanceModeValue();
     }
-    const requestPromise = api(`api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      signal: controller.signal,
-      body: JSON.stringify(requestBody),
-    });
-    const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
-    result = await requestPromise;
-    await streamPollPromise;
-  } catch (error) {
-    removeOptimisticAgentMessage(optimisticMessage.id);
-    removeOptimisticAgentMessage(optimisticThinkingMessage.id);
-    if (error?.name === "AbortError") {
+    let result;
+    try {
+      // A revision or chat confirmation must see the latest local edits, even
+      // when sent before the autosave delay or after a previous save failed.
+      if (reportDraftState.get(taskId)) await reportDraftState.save(taskId);
+      const requestPromise = api(`api/tasks/${taskId}/agent/messages`, {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify(requestBody),
+      });
+      const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
+      result = await requestPromise;
+      await streamPollPromise;
+    } catch (error) {
+      if (!taskRequests.current(selection)) return;
+      removeOptimisticAgentMessage(optimisticMessage.id);
+      removeOptimisticAgentMessage(optimisticThinkingMessage.id);
+      if (error?.name === "AbortError") {
+        autoGrowComposerInput();
+        updateAgentSendDisabled();
+        setActionStatus("已停止当前动作，请问有什么指示？", "success");
+        return;
+      }
+      input.value = originalValue;
       autoGrowComposerInput();
       updateAgentSendDisabled();
-      setActionStatus("已停止当前动作，请问有什么指示？", "success");
+      if (showAgentModelGuidance(agentModelConfigurationErrorMessage(error))) return;
+      throw error;
+    } finally {
+      if (agentRequestAbortControllers.get(taskId) === controller) {
+        agentRequestAbortControllers.delete(taskId);
+      }
+    }
+    if (!taskRequests.current(selection)) return result;
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+    if (result.status === "cancel_requested") {
+      await waitForAgentValidation(taskId, { stopping: true });
       return;
     }
-    input.value = originalValue;
-    autoGrowComposerInput();
-    updateAgentSendDisabled();
-    if (showAgentModelGuidance(agentModelConfigurationErrorMessage(error))) return;
-    throw error;
-  } finally {
-    if (agentRequestAbortControllers.get(taskId) === controller) {
-      agentRequestAbortControllers.delete(taskId);
+    if (
+      result.status === "awaiting_material_selection"
+      || result.ui_action?.type === "select_validation_materials"
+    ) {
+      await handleAgentMaterialSelectionRequest(taskId);
+      return;
     }
+    if (result.status !== "accepted") return;
+    await waitForAgentValidation(taskId);
+  } finally {
+    releaseBusy(busy);
   }
-  agentMessages = result.messages || agentMessages;
-  renderAgentConversation();
-  if (result.status === "cancel_requested") {
-    await waitForAgentValidation(taskId, { stopping: true });
-    return;
-  }
-  if (
-    result.status === "awaiting_material_selection"
-    || result.ui_action?.type === "select_validation_materials"
-  ) {
-    await handleAgentMaterialSelectionRequest(taskId);
-    return;
-  }
-  if (result.status !== "accepted") return;
-  await waitForAgentValidation(taskId);
 }
 
 async function uploadRiskAnalysisMaterials(files) {
   const taskId = requireTaskId(selectedTaskId, "上传风险分析材料");
+  const selection = taskRequests.capture();
   if (
     !selectedTaskIsRiskAnalysisAgent()
     && !selectedTaskNeedsManualRiskIntake()
@@ -7560,6 +7577,7 @@ async function uploadRiskAnalysisMaterials(files) {
       await uploadDataset(taskId, file, { role: "sample" });
     }
     await reloadDataWorkspace(taskId, { silent: true });
+    if (!taskRequests.current(selection)) return;
     const names = selectedFiles.map((file) => file.name).join("、");
     const input = $("agentComposerInput");
     input.value = `已上传材料：${names}。请检查表结构和字段是否满足要求，并继续分析。`;
@@ -7568,80 +7586,108 @@ async function uploadRiskAnalysisMaterials(files) {
     setAgentComposerNotice(`已上传 ${selectedFiles.length} 个文件，正在校验字段...`);
     await startAgentValidation();
   } finally {
-    if (uploadButton) uploadButton.disabled = false;
-    const picker = $("riskMaterialUploadInput");
-    if (picker) picker.value = "";
+    if (taskRequests.current(selection)) {
+      if (uploadButton) uploadButton.disabled = false;
+      const picker = $("riskMaterialUploadInput");
+      if (picker) picker.value = "";
+    }
   }
 }
 
 async function dispatchAgentValidation(taskId = selectedTaskId) {
   const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "Agent 初始化");
-  const modelId = $("agentModelSelect").value || "";
-  const result = await api(`/api/tasks/${normalizedTaskId}/agent/start`, {
-    method: "POST",
-    body: JSON.stringify({
-      model_id: modelId || null,
-      effort: agentEffort(),
-      acceptance_mode: agentAcceptanceModeValue(),
-    }),
-  });
-  agentMessages = result.messages || agentMessages;
-  renderAgentConversation();
-  if (result.status !== "accepted") return result;
-  await waitForAgentValidation(normalizedTaskId);
-  return result;
+  const busy = claimBusy("agent", "Agent 正在初始化...", normalizedTaskId, "agent:request");
+  if (!busy) return;
+  try {
+    const selection = taskRequests.advance("agent");
+    const modelId = $("agentModelSelect").value || "";
+    const result = await api(`/api/tasks/${normalizedTaskId}/agent/start`, {
+      method: "POST",
+      body: JSON.stringify({
+        model_id: modelId || null,
+        effort: agentEffort(),
+        acceptance_mode: agentAcceptanceModeValue(),
+      }),
+    });
+    if (!taskRequests.current(selection) || !isWorkbenchTaskId(normalizedTaskId)) return result;
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+    if (result.status !== "accepted") return result;
+    await waitForAgentValidation(normalizedTaskId);
+    return result;
+  } finally {
+    releaseBusy(busy);
+  }
 }
 
 async function stopAgentValidation(taskId = workbenchTaskId()) {
   invalidateAgentBatchAutoRun();
   const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "Agent 停止");
-  const controller = agentRequestAbortControllers.get(normalizedTaskId);
-  if (controller) controller.abort();
-  const result = await api(`api/tasks/${normalizedTaskId}/agent/stop`, {
-    method: "POST",
-  });
-  agentMessages = result.messages || agentMessages;
-  renderAgentConversation();
-  updateAgentSendDisabled();
-  if (result.status === "cancel_requested") {
-    await waitForAgentValidation(normalizedTaskId, { stopping: true });
-    return;
+  const busy = claimBusy("agent", "Agent 正在停止...", normalizedTaskId, "agent:stop-request");
+  if (!busy) return;
+  try {
+    const selection = taskRequests.advance("agent");
+    setAgentComposerNotice("");
+    const controller = agentRequestAbortControllers.get(normalizedTaskId);
+    if (controller) controller.abort();
+    const result = await api(`api/tasks/${normalizedTaskId}/agent/stop`, {
+      method: "POST",
+    });
+    if (!taskRequests.current(selection) || !isWorkbenchTaskId(normalizedTaskId)) return result;
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+    updateAgentSendDisabled();
+    if (result.status === "cancel_requested") {
+      await waitForAgentValidation(normalizedTaskId, { stopping: true });
+      return;
+    }
+    setActionStatus(result.message || "已停止当前动作，请问有什么指示？", "success");
+  } finally {
+    releaseBusy(busy);
   }
-  setActionStatus(result.message || "已停止当前动作，请问有什么指示？", "success");
 }
 
 async function stopAgentValidationByMessage(content, taskId = workbenchTaskId()) {
   invalidateAgentBatchAutoRun();
   const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "Agent 停止");
-  const text = String(content || "").trim();
-  if (!agentComposerStopIntent(text)) {
-    setAgentComposerNotice("请输入明确的停止指令，例如“停止当前动作”。", "info");
-    return;
-  }
-  const input = $("agentComposerInput");
-  if (input) {
-    input.value = "";
-    autoGrowComposerInput();
+  const busy = claimBusy("agent", "Agent 正在停止...", normalizedTaskId, "agent:stop-request");
+  if (!busy) return;
+  try {
+    const selection = taskRequests.advance("agent");
+    const text = String(content || "").trim();
+    if (!agentComposerStopIntent(text)) {
+      setAgentComposerNotice("请输入明确的停止指令，例如“停止当前动作”。", "info");
+      return;
+    }
+    const input = $("agentComposerInput");
+    if (input) {
+      input.value = "";
+      autoGrowComposerInput();
+      updateAgentSendDisabled();
+    }
+    const result = await api(`api/tasks/${normalizedTaskId}/agent/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: text }),
+    });
+    if (!taskRequests.current(selection) || !isWorkbenchTaskId(normalizedTaskId)) return result;
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
     updateAgentSendDisabled();
+    if (result.status === "cancel_requested") {
+      await waitForAgentValidation(normalizedTaskId, { stopping: true });
+      return;
+    }
+    setActionStatus(result.message || "当前没有可停止的 Agent 动作。", "info");
+  } finally {
+    releaseBusy(busy);
   }
-  const result = await api(`api/tasks/${normalizedTaskId}/agent/messages`, {
-    method: "POST",
-    body: JSON.stringify({ content: text }),
-  });
-  agentMessages = result.messages || agentMessages;
-  renderAgentConversation();
-  updateAgentSendDisabled();
-  if (result.status === "cancel_requested") {
-    await waitForAgentValidation(normalizedTaskId, { stopping: true });
-    return;
-  }
-  setActionStatus(result.message || "当前没有可停止的 Agent 动作。", "info");
 }
 
 async function waitForAgentValidation(taskId, { stopping = false } = {}) {
+  const selection = taskRequests.capture({ operation: "agent" });
   const busyText = stopping ? "Agent 正在停止..." : "Agent 正在执行验证...";
-  setBusy("agent", busyText, taskId);
-  setActionStatus(busyText, "busy");
+  const busy = claimBusy("agent", busyText, taskId, stopping ? "agent:stop-poll" : "agent:poll");
+  if (isWorkbenchTaskId(taskId)) setActionStatus(busyText, "busy");
   try {
     const progressPromise = pollValidationProgress(
       new Set(["scanned", "executed", "writing_artifacts", "failed", "succeeded", "review_required"]),
@@ -7651,9 +7697,11 @@ async function waitForAgentValidation(taskId, { stopping = false } = {}) {
     const streamPollPromise = pollAgentMessagesUntilSettled(taskId, progressPromise);
     const finalTask = await progressPromise;
     await streamPollPromise;
-    if (isWorkbenchTaskId(taskId)) {
+    if (taskRequests.current(selection) && isWorkbenchTaskId(taskId)) {
       await loadAgentMessages(taskId);
+      if (!taskRequests.current(selection)) return finalTask;
       await loadReportFields(taskId);
+      if (!taskRequests.current(selection)) return finalTask;
       if (stopping || agentValidationStopped(finalTask || workbenchTask())) {
         setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
         return finalTask;
@@ -7670,12 +7718,7 @@ async function waitForAgentValidation(taskId, { stopping = false } = {}) {
     }
     return finalTask;
   } finally {
-    // Contract auto-continue nests startAgentValidation inside a parent-scoped
-    // runAction. That outer finally only clears the parent, so the child busy
-    // flag set here must be released or the composer stays in stop mode.
-    if (taskBusyAction(taskId) === "agent") {
-      setBusy(null, "", taskId);
-    }
+    releaseBusy(busy);
   }
 }
 
@@ -7800,6 +7843,7 @@ async function runContinueAgentValidationBatch({ resumeChildId = "" } = {}) {
       await waitForAgentValidation(childId);
     } else {
       const result = await dispatchAgentValidation(childId);
+      if (generation !== agentBatchAutoRunGeneration || selectedTaskId !== parentId) return;
       if (result?.status === "awaiting_confirmation") {
         setActionStatus(
           `${modelLabel}字段有歧义，请确认后再继续自动审查。`,
@@ -7879,16 +7923,25 @@ async function createTask() {
 }
 
 async function refreshTasks() {
-  taskCache = await api("api/tasks");
-  syncSelectedTaskFromCache();
-  for (const task of taskCache) {
-    if (typeof reconcileDriverGateSubmissions === "function") {
-      reconcileDriverGateSubmissions(task?.id, {
-        serverBusy: Boolean(task?.active_job_kind),
-      });
+  const request = taskRequests.begin("task-list", { includeSelection: false });
+  try {
+    const tasks = await api("api/tasks", { signal: request.signal });
+    if (!taskRequests.accepts(request)) return;
+    taskCache = tasks;
+    syncSelectedTaskFromCache();
+    for (const task of taskCache) {
+      if (typeof reconcileDriverGateSubmissions === "function") {
+        reconcileDriverGateSubmissions(task?.id, {
+          serverBusy: Boolean(task?.active_job_kind),
+        });
+      }
     }
+    ensureActiveTaskProgressPolling();
+  } catch (error) {
+    if (taskRequests.accepts(request)) throw error;
+  } finally {
+    taskRequests.finish(request);
   }
-  ensureActiveTaskProgressPolling();
 }
 
 async function ensureValidationMaterialSelection(task) {
@@ -7957,7 +8010,6 @@ async function createTaskAndScan() {
       const taskId = task.id || selectedTaskId;
       const activeDialogTaskType = createTaskDialog.activeTaskType();
       const definition = taskTypeDefinition(task.task_type || activeDialogTaskType);
-      setBusy(null, "", taskId);
       await loadAgentMessages(taskId);
       renderAll();
       if (!isValidationTask && task.task_type === "vintage") {
@@ -7986,20 +8038,18 @@ async function createTaskAndScan() {
     // deterministic, control-driven flow (no LLM). Validation manual still scans.
     if (taskUsesPlanRail(task)) {
       const taskId = task.id || selectedTaskId;
-      setBusy(null, "", taskId);
       await dispatchDriverStart(taskId);
       renderAll();
       setActionStatus(`${taskTypeDefinition(task.task_type).label}任务已创建，请在下方逐步确认。`, "success");
       return;
     }
-    setBusy(null, "", null);
-    setBusy("scan", "任务已创建，正在自动扫描材料...", task.id);
+    const busy = claimBusy("scan", "任务已创建，正在自动扫描材料...", task.id);
     setActionStatus("任务已创建，正在自动扫描材料...", "busy");
     try {
       await scanCurrentTask();
       await loadTaskEvidence(task.id);
     } finally {
-      setBusy(null, "", task.id);
+      releaseBusy(busy);
     }
   } finally {
     createTaskInFlight = false;
@@ -8011,13 +8061,21 @@ async function createTaskAndScan() {
 // agent-start endpoint, which routes to the plan-conversation driver.
 async function dispatchDriverStart(taskId = selectedTaskId) {
   const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "启动");
-  const result = await api(`/api/tasks/${normalizedTaskId}/agent/start`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-  agentMessages = result.messages || agentMessages;
-  renderAgentConversation();
-  await reloadDataWorkspace(normalizedTaskId, { silent: true });
+  const busy = claimBusy("agent", "正在初始化任务...", normalizedTaskId, "agent:request");
+  if (!busy) return;
+  try {
+    const selection = taskRequests.advance("agent");
+    const result = await api(`/api/tasks/${normalizedTaskId}/agent/start`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (!taskRequests.current(selection) || !isWorkbenchTaskId(normalizedTaskId)) return result;
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+    await reloadDataWorkspace(normalizedTaskId, { silent: true });
+  } finally {
+    releaseBusy(busy);
+  }
 }
 
 async function refreshStrategyCandidateLabAfterSettled(taskId, task) {
@@ -8051,6 +8109,7 @@ async function pollValidationProgress(
       if (pollState.cancelled) return null;
       await sleep(1000);
       if (pollState.cancelled) return null;
+      const selection = taskRequests.capture({ operation: "agent" });
       await refreshTasks();
       let polledTask = findTaskInCache(taskId);
       if (!polledTask && isWorkbenchTaskId(taskId) && taskId !== selectedTaskId) {
@@ -8061,18 +8120,20 @@ async function pollValidationProgress(
         }
       }
       if (!polledTask) return null;
-      if (taskId === projectedValidationChildTaskId) {
+      if (taskRequests.current(selection) && taskId === projectedValidationChildTaskId) {
         projectedValidationChildTask = polledTask;
       }
-      if (isWorkbenchTaskId(taskId)) {
+      if (taskRequests.current(selection) && isWorkbenchTaskId(taskId)) {
         await loadTaskEvidence(taskId);
+        if (!taskRequests.current(selection)) continue;
         if (metricOverviewComplete(polledTask) && !currentMetricPreviewHasValues(taskId)) {
           await loadReportFields(taskId);
+          if (!taskRequests.current(selection)) continue;
         }
         if (selectedTaskIsAgentMode(polledTask) || usesAgentValidationWorkbench(selectedTask)) {
           await loadAgentMessages(taskId);
         }
-        renderChangedValidationViews();
+        if (taskRequests.current(selection)) renderChangedValidationViews();
       } else {
         renderTaskList();
       }
@@ -8083,7 +8144,7 @@ async function pollValidationProgress(
       const settledOnServerIdle = settleWhenServerIdle && !serverBusyAction;
       const reachedTerminalStatus = doneStatuses.has(status) && !serverBusyAction;
       if (stopping && !serverBusyAction) {
-        if (isWorkbenchTaskId(taskId) && !background) {
+        if (taskRequests.current(selection) && isWorkbenchTaskId(taskId) && !background) {
           setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
         }
       }
@@ -8093,7 +8154,7 @@ async function pollValidationProgress(
       // it is gone, return control to the composer instead of polling the stale
       // pre-stage status for an hour.
       if (!stopped && !settledOnServerIdle && reachedTerminalStatus) {
-        if (isWorkbenchTaskId(taskId) && !background) {
+        if (taskRequests.current(selection) && isWorkbenchTaskId(taskId) && !background) {
           if (status === "failed" || status === "review_required") {
             setTaskFailureActionStatus(polledTask);
           } else {
@@ -8116,7 +8177,7 @@ async function pollValidationProgress(
       // between two sources every second.
 
       if (Date.now() - startedAt > timeoutMs) {
-        if (isWorkbenchTaskId(taskId) && !background) {
+        if (taskRequests.current(selection) && isWorkbenchTaskId(taskId) && !background) {
           setActionStatus("验证仍在后台运行，请稍后刷新查看结果。", "error");
         }
         return polledTask;
@@ -8357,24 +8418,9 @@ async function loadTaskPurgeSummary(task) {
 }
 
 async function reconcileTaskBeforeDelete(task) {
-  if (!task?.id) return null;
-  if (taskBusyActions.get(task.id) !== "agent" || taskServerBusyAction(task)) {
-    return task;
-  }
-  try {
-    await refreshTasks();
-  } catch (_) {
-    return task;
-  }
-  const latestTask = findTaskInCache(task.id);
-  if (!latestTask) {
-    setBusy(null, "", task.id);
-    return null;
-  }
-  if (!taskServerBusyAction(latestTask)) {
-    setBusy(null, "", task.id);
-  }
-  return latestTask;
+  // Local ownership cannot be disproved by a server read: a POST may still be
+  // waiting to dispatch or return. Its own finally releases the lease.
+  return task;
 }
 
 async function deleteTask(task) {
@@ -8434,8 +8480,9 @@ async function deleteTask(task) {
     return;
   }
 
+  const busy = claimBusy("delete", "正在删除任务...", targetTask.id);
+  if (!busy) return;
   try {
-    setBusy("delete", "正在删除任务...", targetTask.id);
     setActionStatus("正在删除任务...", "busy");
     renderAll();
     await api(taskPurgeApiBase(targetTask), { method: "DELETE" });
@@ -8452,7 +8499,7 @@ async function deleteTask(task) {
   } catch (error) {
     setActionStatus(error.message || "删除任务失败。", "error");
   } finally {
-    setBusy(null, "", targetTask.id);
+    releaseBusy(busy);
     renderAll();
   }
 }
@@ -8465,8 +8512,11 @@ async function runAction(action, options = {}) {
     : selectedTaskId;
   const selection = taskRequests.capture();
   let shouldRenderAfter = options.renderAfter !== false;
+  const busy = actionId && taskScoped
+    ? claimBusy(actionId, options.busyText || "正在处理...", taskId, options.operation || actionId)
+    : null;
+  if (actionId && taskScoped && !busy) return;
   try {
-    if (actionId && taskScoped) setBusy(actionId, options.busyText || "正在处理...", taskId);
     await action();
   } catch (error) {
     if (taskScoped && !taskRequests.current(selection)) return;
@@ -8490,7 +8540,7 @@ async function runAction(action, options = {}) {
     if (actionId && taskScoped) setActionStatus(actionFailureStatusTitle(actionId), "error", message);
     else if (!actionId) setCreateStatus(message, "error");
   } finally {
-    if (actionId && taskScoped) setBusy(null, "", taskId);
+    releaseBusy(busy);
     if (shouldRenderAfter && (!taskScoped || taskRequests.current(selection))) renderAll();
   }
 }
@@ -8801,6 +8851,7 @@ $("riskMaterialUploadInput").addEventListener("change", (event) => {
 $("sendAgentMessageButton").onclick = () => {
   if (agentSendIsStopMode()) {
     runAction(stopAgentValidation, {
+      operation: "agent:stop",
       actionId: "agent",
       busyText: "Agent 正在停止...",
       taskId: workbenchTaskId(),
@@ -8824,7 +8875,7 @@ $("agentComposerInput").addEventListener("keydown", (event) => {
     }
     runAction(
       () => stopAgentValidationByMessage(content),
-      { actionId: "agent", busyText: "Agent 正在停止..." },
+      { actionId: "agent", operation: "agent:stop", busyText: "Agent 正在停止...", taskId: workbenchTaskId() },
     );
     return;
   }
@@ -8849,7 +8900,7 @@ function autoGrowComposerInput() {
 }
 
 function agentSendIsStopMode() {
-  return Boolean(selectedTaskIsAgentMode() && (
+  return Boolean((selectedTaskIsAgentMode() || selectedTaskNeedsManualRiskIntake()) && (
     taskBusyAction(selectedTaskId) === "agent"
     || taskBusyAction(workbenchTaskId()) === "agent"
   ));
