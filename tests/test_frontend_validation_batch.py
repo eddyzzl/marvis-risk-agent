@@ -879,7 +879,8 @@ def test_batch_contract_submission_is_explicitly_bound_to_child_and_refreshes_pa
         '      if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;'
         in app_js
     )
-    assert 'if (loadVersion !== validationInputContractLoadVersion) return null;' in app_js
+    # Contract read ordering and task/model revisit isolation are behavior-tested
+    # in test_frontend_task_request_scope.py.
     assert 'if (latestValidationInputContractTaskId === taskId) {' in app_js
     assert "await continueAgentValidationBatch({ resumeChildId: taskId })" in app_js
     assert "都按这个" in app_js

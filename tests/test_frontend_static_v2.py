@@ -40,10 +40,14 @@ def _with_workbench_context(script: str, app_js: str) -> str:
         for name, value in states.items()
         if not re.search(rf"\b(?:let|const|var)\s+{name}\b", script)
     ]
+    scope_url = (STATIC_DIR / "js/task-request-scope.js").as_uri()
+    if not re.search(r"\b(?:let|const|var)\s+taskRequests\b", script):
+        prefix.insert(0, f"import {{ createTaskRequestScope }} from {json.dumps(scope_url)};")
+        prefix.append("const taskRequests = createTaskRequestScope();")
     for source, names in (
         (
             app_js,
-            ("workbenchTask", "workbenchTaskId", "isWorkbenchTaskId", "invalidateAgentBatchAutoRun"),
+            ("setSelectedTask", "workbenchTask", "workbenchTaskId", "isWorkbenchTaskId", "invalidateAgentBatchAutoRun"),
         ),
         (batch_js, ("textValue", "isValidationBatchTask", "usesAgentValidationWorkbench")),
     ):
@@ -3137,8 +3141,8 @@ def test_refresh_restores_selected_task_before_async_detail_loads():
 
     restore_body = _slice_function(app_js, "function restoreSelectedTaskPlaceholder")
     assert "const storedTaskId = storedSelectedTaskId();" in restore_body
-    assert "selectedTaskId = storedTaskId;" in restore_body
-    assert "selectedTask = null;" in restore_body
+    # Placeholder identity and previous-visit invalidation have behavior coverage
+    # in test_frontend_task_request_scope.py.
 
     current_body = _slice_function(app_js, "function renderCurrentTask")
     workspace_view_js = _read_static("js/task-workspace-view.js")
@@ -4748,7 +4752,7 @@ def test_result_workspace_preserves_scroll_position_per_task_switch():
     run_action = _slice_function(app_js, "async function runAction")
     assert "let shouldRenderAfter = options.renderAfter !== false;" in run_action
     assert "shouldRenderAfter = true;" in run_action
-    assert "if (shouldRenderAfter) renderAll();" in run_action
+    # Late action failures/finalizers are exercised with real visit identities.
 
     assert ".validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .report-draft-workspace, .agent-composer, .progress-rail)" in styles_css
     assert ".validation-workspace.is-task-content-loading :is(.result-workspace, .progress-rail)" not in styles_css

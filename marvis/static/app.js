@@ -1,4 +1,5 @@
 import { api, sleep } from "./js/api.js";
+import { createTaskRequestScope } from "./js/task-request-scope.js";
 import {
   createAgentMemoryPanelController,
   formatMemoryConfidence,
@@ -227,6 +228,7 @@ import {
   signatureFromParts,
 } from "./js/ui-utils.js";
 
+const taskRequests = createTaskRequestScope();
 let selectedTaskId = null;
 let selectedTask = null;
 let projectedValidationChildTaskId = "";
@@ -2849,8 +2851,7 @@ function restoreSelectedTaskPlaceholder() {
   if (selectedTaskId) return;
   const storedTaskId = storedSelectedTaskId();
   if (!storedTaskId) return;
-  selectedTaskId = storedTaskId;
-  selectedTask = null;
+  setSelectedTask(null, storedTaskId);
 }
 
 function syncSelectedTaskFromCache() {
@@ -2859,8 +2860,7 @@ function syncSelectedTaskFromCache() {
     if (storedTaskId) {
       const restored = taskCache.find((task) => task.id === storedTaskId);
       if (restored) {
-        selectedTaskId = restored.id;
-        selectedTask = restored;
+        setSelectedTask(restored);
         applyAgentTaskComposerPreferences(restored.id);
         prepareResultScrollRestoreForTask(restored.id);
         return;
@@ -2881,8 +2881,7 @@ function syncSelectedTaskFromCache() {
     }
     return;
   }
-  selectedTaskId = null;
-  selectedTask = null;
+  setSelectedTask(null);
   rememberSelectedTaskId(null);
 }
 
@@ -2916,6 +2915,16 @@ function selectedTaskIsAgentMode(task = selectedTask) {
 
 function selectedTaskIsValidationBatch(task = selectedTask) {
   return isValidationBatchTask(task);
+}
+
+function setSelectedTask(task, taskId = task?.id || null) {
+  if (selectedTaskId !== taskId) {
+    projectedValidationChildTaskId = "";
+    projectedValidationChildTask = null;
+  }
+  selectedTaskId = taskId;
+  selectedTask = task;
+  taskRequests.select(selectedTaskId, projectedValidationChildTaskId);
 }
 
 function workbenchTask() {
@@ -2964,35 +2973,43 @@ async function applyProjectedValidationChild(childTaskId, { force = false } = {}
     if (scrollContent) scrollContent.scrollTop = 0;
   }
   projectedValidationChildTaskId = normalizedChildId;
+  if (childChanged) projectedValidationChildTask = null;
+  taskRequests.select(selectedTaskId, normalizedChildId);
+  const request = taskRequests.begin("projected-child");
   try {
+    let childTask;
     try {
-      projectedValidationChildTask = await api(`api/tasks/${encodeURIComponent(normalizedChildId)}`);
+      childTask = await api(`api/tasks/${encodeURIComponent(normalizedChildId)}`, { signal: request.signal });
     } catch (_error) {
-      projectedValidationChildTask = {
+      if (!taskRequests.accepts(request)) return false;
+      childTask = {
         id: normalizedChildId,
         task_type: "validation",
         run_mode: "agent",
         validation_workflow_version: 2,
       };
     }
-    if (!isWorkbenchTaskId(normalizedChildId)) return false;
-    if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
+    if (!taskRequests.accepts(request) || !isWorkbenchTaskId(normalizedChildId)) return false;
+    projectedValidationChildTask = childTask;
     rememberSelectedTaskId(selectedTaskId);
     await loadTaskEvidence(normalizedChildId);
-    if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
+    if (!taskRequests.accepts(request) || !isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
     await loadAgentMessages(normalizedChildId);
-    if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
+    if (!taskRequests.accepts(request) || !isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
     await loadReportFields(normalizedChildId);
-    if (!isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
+    if (!taskRequests.accepts(request) || !isCurrentProjectedChildLoad(loadVersion, childChanged)) return false;
     renderAll();
     if (childChanged) {
       await nextAnimationFrame();
       await nextAnimationFrame();
+      if (!taskRequests.accepts(request)) return false;
       selectValidationView(activeValidationView, { remember: false });
     }
     return true;
   } finally {
-    if (childChanged && loadVersion === projectedChildContentLoadVersion) {
+    const ownsCompletion = taskRequests.accepts(request);
+    taskRequests.finish(request);
+    if (ownsCompletion && loadVersion === projectedChildContentLoadVersion) {
       if (suppressAgentAutoScrollTaskId === selectedTaskId) {
         suppressAgentAutoScrollTaskId = null;
       }
@@ -4387,8 +4404,7 @@ function selectTask(task) {
     projectedValidationChildTaskId = "";
     projectedValidationChildTask = null;
   }
-  selectedTaskId = task.id;
-  selectedTask = task;
+  setSelectedTask(task);
   rememberSelectedTaskId(task.id);
   applyAgentTaskComposerPreferences(task.id);
   beginTaskContentLoad(task.id);
@@ -4396,25 +4412,32 @@ function selectTask(task) {
   ensureActiveTaskProgressPolling(task);
   renderMetricPreview({});
   renderStoredStateSummaries();
+  const selection = taskRequests.capture({ includeModel: false });
   const validationBatchLoadPromise = validationBatchPanelController.selectTask(task);
   const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   runAction(async () => {
     try {
       renderTaskList();
       if (!usesAgentValidationWorkbench(task)) {
-        await loadTaskEvidence();
-        await loadReportFields();
+        await loadTaskEvidence(task.id);
+        if (!taskRequests.current(selection)) return;
+        await loadReportFields(task.id);
+        if (!taskRequests.current(selection)) return;
         await loadAgentMessages(task.id);
       }
       await validationBatchLoadPromise;
       await candidateLabLoadPromise;
     } finally {
-      renderAll();
-      await restoreResultScrollPositionAfterRender(task.id);
-      validationBatchPanelController.focusRequestedItem();
-      finishTaskContentLoad(task.id);
+      if (taskRequests.current(selection)) {
+        renderAll();
+        await restoreResultScrollPositionAfterRender(task.id);
+        if (taskRequests.current(selection)) {
+          validationBatchPanelController.focusRequestedItem();
+          finishTaskContentLoad(task.id);
+        }
+      }
     }
-    maybeResumeAgentValidationBatch();
+    if (taskRequests.current(selection)) maybeResumeAgentValidationBatch();
   }, { renderAfter: false });
 }
 
@@ -4422,8 +4445,7 @@ function deselectCurrentTask() {
   invalidateAgentBatchAutoRun();
   rememberResultScrollPosition();
   clearTaskContentLoad();
-  selectedTaskId = null;
-  selectedTask = null;
+  setSelectedTask(null);
   projectedValidationChildTaskId = "";
   projectedValidationChildTask = null;
   rememberSelectedTaskId(null);
@@ -4730,6 +4752,7 @@ async function loadValidationInputContract(taskId = workbenchTaskId(), options =
   const batchMode = Boolean(parentTaskId);
   if (!taskId || (!batchMode && !usesPmmlScoringWorkflow())) return null;
   const loadVersion = ++validationInputContractLoadVersion;
+  const request = taskRequests.begin("validation-contract");
   const renderOptions = { ...options, taskId, parentTaskId };
   if (batchMode && selectedTaskId === parentTaskId) {
     const panel = $("batchValidationContractPanel");
@@ -4737,8 +4760,8 @@ async function loadValidationInputContract(taskId = workbenchTaskId(), options =
     if (panel) panel.innerHTML = '<div class="validation-batch-loading" role="status">正在读取此模型的验证字段合同…</div>';
   }
   try {
-    const record = await api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`);
-    if (loadVersion !== validationInputContractLoadVersion) return null;
+    const record = await api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`, { signal: request.signal });
+    if (!taskRequests.accepts(request) || loadVersion !== validationInputContractLoadVersion) return null;
     if (batchMode) {
       if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return null;
       renderValidationInputContract(record, renderOptions);
@@ -4747,7 +4770,7 @@ async function loadValidationInputContract(taskId = workbenchTaskId(), options =
     }
     return record;
   } catch (error) {
-    if (loadVersion !== validationInputContractLoadVersion) return null;
+    if (!taskRequests.accepts(request) || loadVersion !== validationInputContractLoadVersion) return null;
     if (batchMode && selectedTaskId === parentTaskId) {
       const panel = $("batchValidationContractPanel");
       panel?.classList.remove("hidden");
@@ -4758,6 +4781,8 @@ async function loadValidationInputContract(taskId = workbenchTaskId(), options =
     if (options.throwOnError) throw error;
     // The scan result remains the fallback until a contract record exists.
     return null;
+  } finally {
+    taskRequests.finish(request);
   }
 }
 
@@ -5224,19 +5249,23 @@ function renderEvidence(evidence = {}) {
 }
 
 async function loadTaskEvidence(taskId = workbenchTaskId()) {
+  if (taskId && !isWorkbenchTaskId(taskId)) return;
   if (!taskId || (usesAgentValidationWorkbench(selectedTask) && taskId === selectedTaskId)) {
     resetEvidenceSummaries();
     return;
   }
+  const request = taskRequests.begin("evidence");
   try {
-    const evidence = await api(`/api/tasks/${taskId}/evidence`);
-    if (!isWorkbenchTaskId(taskId)) return;
+    const evidence = await api(`/api/tasks/${taskId}/evidence`, { signal: request.signal });
+    if (!taskRequests.accepts(request) || !isWorkbenchTaskId(taskId)) return;
     renderEvidence(evidence || {});
     await loadValidationInputContract(taskId);
   } catch (_) {
-    if (isWorkbenchTaskId(taskId) && !notebookReproducibilityComplete(workbenchTask())) {
+    if (taskRequests.accepts(request) && !notebookReproducibilityComplete(workbenchTask())) {
       resetEvidenceSummaries();
     }
+  } finally {
+    taskRequests.finish(request);
   }
 }
 
@@ -7302,6 +7331,7 @@ function mergeIncrementalAgentMessages(nextMessages = []) {
 }
 
 async function loadAgentMessages(taskId = workbenchTaskId(), { preserveOptimistic = false } = {}) {
+  if (taskId && !isWorkbenchTaskId(taskId)) return;
   const messageTask = (
     (taskId === projectedValidationChildTaskId && projectedValidationChildTask)
     || findTaskInCache(taskId)
@@ -7317,16 +7347,23 @@ async function loadAgentMessages(taskId = workbenchTaskId(), { preserveOptimisti
   const useIncremental = agentMessageCanPollIncrementally({ preserveOptimistic });
   const lastMessageId = useIncremental ? agentMessages[agentMessages.length - 1]?.id : "";
   const suffix = lastMessageId ? `?after_id=${encodeURIComponent(lastMessageId)}` : "";
-  const payload = await api(`api/tasks/${taskId}/agent/messages${suffix}`);
-  if (!isWorkbenchTaskId(taskId)) return;
-  const nextMessages = payload.messages || [];
-  if (payload.incremental) {
-    if (mergeIncrementalAgentMessages(nextMessages)) renderAgentConversation();
-    return;
+  const request = taskRequests.begin("messages");
+  try {
+    const payload = await api(`api/tasks/${taskId}/agent/messages${suffix}`, { signal: request.signal });
+    if (!taskRequests.accepts(request) || !isWorkbenchTaskId(taskId)) return;
+    const nextMessages = payload.messages || [];
+    if (payload.incremental) {
+      if (mergeIncrementalAgentMessages(nextMessages)) renderAgentConversation();
+      return;
+    }
+    if (preserveOptimistic && shouldPreserveOptimisticAgentMessages(nextMessages)) return;
+    agentMessages = nextMessages;
+    renderAgentConversation();
+  } catch (error) {
+    if (taskRequests.accepts(request)) throw error;
+  } finally {
+    taskRequests.finish(request);
   }
-  if (preserveOptimistic && shouldPreserveOptimisticAgentMessages(nextMessages)) return;
-  agentMessages = nextMessages;
-  renderAgentConversation();
 }
 
 // Small, stable polling fingerprint: streamed prose changes its length/tail;
@@ -7408,8 +7445,7 @@ async function handleAgentMaterialSelectionRequest(taskId) {
     setActionStatus("等待选择验证材料。", "info", "完成材料选择后请重新扫描材料。");
     return false;
   }
-  selectedTaskId = selectedMaterialsTask.id;
-  selectedTask = selectedMaterialsTask;
+  setSelectedTask(selectedMaterialsTask);
   rememberSelectedTaskId(selectedMaterialsTask.id);
   await refreshTasks();
   await reloadDataWorkspace(taskId, { silent: true });
@@ -7828,8 +7864,7 @@ function setCreateTaskSubmitting(isSubmitting) {
 async function createTask() {
   const task = await createTaskDialog.createTask();
   if (!task) return null;
-  selectedTaskId = task.id;
-  selectedTask = task;
+  setSelectedTask(task);
   rememberSelectedTaskId(task.id);
   renderStoredStateSummaries();
   const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
@@ -7863,8 +7898,7 @@ async function ensureValidationMaterialSelection(task) {
     setActionStatus("等待选择验证材料。", "info");
     return null;
   }
-  selectedTaskId = selectedMaterialsTask.id;
-  selectedTask = selectedMaterialsTask;
+  setSelectedTask(selectedMaterialsTask);
   rememberSelectedTaskId(selectedMaterialsTask.id);
   await refreshTasks();
   return selectedTask || selectedMaterialsTask;
@@ -8196,17 +8230,25 @@ async function generateMetrics() {
 }
 
 async function loadReportFields(taskId = workbenchTaskId()) {
+  if (taskId && !isWorkbenchTaskId(taskId)) return;
   if (!taskId || (usesAgentValidationWorkbench(selectedTask) && taskId === selectedTaskId)) {
     renderMetricPreview({});
     return;
   }
-  const payload = await api(`api/tasks/${taskId}/report-fields`);
-  if (!isWorkbenchTaskId(taskId)) return;
-  renderMetricPreview(
-    payload.metric_values || {},
-    payload.workbook_source,
-    payload.metric_table_sections || [],
-  );
+  const request = taskRequests.begin("report-fields");
+  try {
+    const payload = await api(`api/tasks/${taskId}/report-fields`, { signal: request.signal });
+    if (!taskRequests.accepts(request) || !isWorkbenchTaskId(taskId)) return;
+    renderMetricPreview(
+      payload.metric_values || {},
+      payload.workbook_source,
+      payload.metric_table_sections || [],
+    );
+  } catch (error) {
+    if (taskRequests.accepts(request)) throw error;
+  } finally {
+    taskRequests.finish(request);
+  }
 }
 
 async function generateReport() {
@@ -8398,8 +8440,7 @@ async function deleteTask(task) {
     renderAll();
     await api(taskPurgeApiBase(targetTask), { method: "DELETE" });
     if (selectedTaskId === targetTask.id) {
-      selectedTaskId = null;
-      selectedTask = null;
+      setSelectedTask(null);
       rememberSelectedTaskId(null);
     }
     resultScrollPositionsByTask.delete(targetTask.id);
@@ -8422,11 +8463,13 @@ async function runAction(action, options = {}) {
   const taskId = Object.prototype.hasOwnProperty.call(options, "taskId")
     ? options.taskId
     : selectedTaskId;
+  const selection = taskRequests.capture();
   let shouldRenderAfter = options.renderAfter !== false;
   try {
     if (actionId && taskScoped) setBusy(actionId, options.busyText || "正在处理...", taskId);
     await action();
   } catch (error) {
+    if (taskScoped && !taskRequests.current(selection)) return;
     shouldRenderAfter = true;
     if (error?.name === "AbortError") {
       if (actionId && taskScoped) setActionStatus(actionCancelledStatusTitle(actionId), "success");
@@ -8439,6 +8482,7 @@ async function runAction(action, options = {}) {
         // Keep the original action error visible when status refresh also fails.
       }
     }
+    if (taskScoped && !taskRequests.current(selection)) return;
     const message = error.message || "操作失败";
     if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");
     if (actionId === "draftTools") setDraftToolsStatus(message, "error");
@@ -8447,7 +8491,7 @@ async function runAction(action, options = {}) {
     else if (!actionId) setCreateStatus(message, "error");
   } finally {
     if (actionId && taskScoped) setBusy(null, "", taskId);
-    if (shouldRenderAfter) renderAll();
+    if (shouldRenderAfter && (!taskScoped || taskRequests.current(selection))) renderAll();
   }
 }
 
@@ -8934,6 +8978,7 @@ selectedTaskId = preferredStartupTaskId(
   initialTaskDeepLink,
   storedSelectedTaskId(),
 ) || null;
+taskRequests.select(selectedTaskId);
 restoreSelectedTaskPlaceholder();
 if (selectedTaskId) rememberSelectedTaskId(selectedTaskId);
 else rememberSelectedTaskId(null);
