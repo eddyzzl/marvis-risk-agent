@@ -48,14 +48,12 @@ def prepare_modeling_frame(
         )
     if not feature_cols:
         raise ModelingError("未找到可用候选特征列;请检查拼接结果或指定特征列。")
-    # Anti-leakage grouping is best-effort: keep only group columns that exist in the
-    # dataset (the JOIN identity key is often dropped before modeling). Missing group
-    # columns fall back to per-row assignment rather than erroring.
-    existing_columns = {profile.name for profile in dataset.columns}
-    group_cols = split_config.get("group_cols")
-    if group_cols:
-        group_cols = group_cols if isinstance(group_cols, list) else [group_cols]
-        split_config["group_cols"] = [str(col) for col in group_cols if str(col) in existing_columns]
+    # A declared isolation key is a requirement. Dropping a missing key silently
+    # changes the requested evaluation population and can leak entities across splits.
+    if split_config.get("group_cols") is not None:
+        split_config["group_cols"] = _require_group_columns(
+            {profile.name for profile in dataset.columns}, split_config["group_cols"]
+        )
     passthrough = [str(col) for col in (passthrough_cols or []) if str(col).strip()]
     requested = _requested_columns(feature_cols, target_col, split_col, split_config, passthrough)
     _assert_columns_exist(dataset, requested)
@@ -171,7 +169,8 @@ def _make_split(df: pd.DataFrame, split_config: dict[str, Any] | None, seed: int
     out = df.copy()
     out[SPLIT_COLUMN] = "train"
     rng = np.random.RandomState(int(seed))
-    groups = _group_ids(out, _valid_group_cols(out, config.get("group_cols")))
+    group_cols = _valid_group_cols(out, config.get("group_cols"))
+    groups = _group_ids(out, group_cols)
 
     # 0) Rule set (optional). Any-condition rules (e.g. channel A → train, channel B
     #    before a cutoff → test, channel C → oot) are applied first, in order: the first
@@ -217,6 +216,8 @@ def _make_split(df: pd.DataFrame, split_config: dict[str, Any] | None, seed: int
         out.loc[np.isin(groups, list(chosen)) & free, SPLIT_COLUMN] = "test"
 
     expect_test = bool(test_size > 0 or (rule_mask.any() and (out.loc[rule_mask, SPLIT_COLUMN] == "test").any()))
+    if group_cols:
+        _guard_group_disjoint(out, groups)
     _guard_non_empty(out, expect_test=expect_test, expect_oot=expect_oot)
     return out
 
@@ -293,18 +294,45 @@ def _condition_values(series: pd.Series, op: str, val) -> np.ndarray:
 
 
 def _valid_group_cols(out: pd.DataFrame, group_cols) -> list[str]:
-    if not group_cols:
+    return _require_group_columns(out.columns, group_cols)
+
+
+def _require_group_columns(columns, group_cols) -> list[str]:
+    if group_cols is None:
         return []
-    cols = group_cols if isinstance(group_cols, list) else [group_cols]
-    return [str(col) for col in cols if str(col) in out.columns]
+    cols = [group_cols] if isinstance(group_cols, str) else group_cols
+    if not isinstance(cols, list) or any(
+        not isinstance(col, str) or not col.strip() for col in cols
+    ):
+        raise ModelingError("分组列必须是非空字段名或字段名列表。")
+    missing = [col for col in cols if col not in columns]
+    if missing:
+        raise ModelingError(f"分组列缺失: {', '.join(missing)}；请补充隔离键后重新切分。")
+    return list(dict.fromkeys(cols))
 
 
 def _group_ids(out: pd.DataFrame, group_cols: list[str]) -> np.ndarray:
     """A group id per row. With group_cols, rows sharing those values form one group
     (so they never split across sets); without, each row is its own group."""
     if group_cols:
-        return out.groupby(group_cols, sort=False).ngroup().to_numpy()
+        for column in group_cols:
+            values = out[column]
+            if values.isna().any() or values.map(
+                lambda value: isinstance(value, str) and not value.strip()
+            ).any():
+                raise ModelingError(f"分组列 {column} 存在缺失身份，无法验证主体隔离。")
+        return out.groupby(group_cols, sort=False, observed=True, dropna=False).ngroup().to_numpy()
     return np.arange(len(out))
+
+
+def _guard_group_disjoint(out: pd.DataFrame, groups: np.ndarray) -> None:
+    assignment = pd.DataFrame({"group": groups, "split": out[SPLIT_COLUMN].to_numpy()})
+    conflicting = int(assignment.groupby("group")["split"].nunique().gt(1).sum())
+    if conflicting:
+        raise ModelingError(
+            f"所选分组有 {conflicting} 个跨分区；时间切分或规则与主体隔离冲突，"
+            "请调整隔离键或切分规则后重试。"
+        )
 
 
 def _sample_groups_by_rows(groups: np.ndarray, mask: np.ndarray, target_rows: int, rng) -> set:
