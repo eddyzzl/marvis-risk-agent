@@ -888,3 +888,42 @@ def test_gateway_caps_explicit_output_requests_and_rejects_model_switch(tmp_path
         item["event"] == "transport_rejected" and item["reason"] == "model_not_found"
         for item in events
     )
+
+
+@pytest.mark.parametrize("settle_after", [40.0, None])
+def test_slow_workflow_polling_preserves_http_budget_and_wall_deadline(monkeypatch, settle_after):
+    import httpx
+    from types import SimpleNamespace
+    from marvis.orchestrator.eval import runtime_runner
+
+    clock = [0.0]
+    waits = []
+
+    def sleep(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    def serve(request):
+        done = settle_after is not None and clock[0] >= settle_after
+        if request.url.path.endswith("/plans"):
+            return httpx.Response(200, json={"plans": [{
+                "id": "p", "status": "done" if done else "running",
+                "steps": [{"id": "s", "status": "done" if done else "running"}],
+            }]})
+        return httpx.Response(200, json={"job": {"status": "succeeded" if done else "running"}})
+
+    monkeypatch.setattr(runtime_runner.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runtime_runner.time, "sleep", sleep)
+    case = SimpleNamespace(budget=SimpleNamespace(max_http_requests=120))
+    with httpx.Client(base_url="http://local", transport=httpx.MockTransport(serve)) as client:
+        journey = runtime_runner.Journey(client, case, 60.0)
+        journey.task_id = "t"
+        if settle_after is None:
+            with pytest.raises(runtime_runner.RuntimeBudgetExceeded):
+                journey.wait_idle()
+            assert clock[0] == 60.0
+        else:
+            assert journey.wait_idle()[0]["status"] == "done"
+            assert settle_after <= clock[0] <= settle_after + 2
+        assert journey.count < 45
+        assert waits and max(waits) <= 2.0

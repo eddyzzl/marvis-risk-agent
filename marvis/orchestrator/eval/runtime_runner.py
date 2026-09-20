@@ -649,8 +649,19 @@ class Journey:
         )["plans"]
 
     def wait_idle(self, changed_step=None):
+        previous_state = None
+        delay = 0.25
         while True:
             plans = self.plans()
+            state = [
+                (p["id"], p["status"], [
+                    (s["id"], s["status"], s.get("output_ref"))
+                    for s in p["steps"]
+                ])
+                for p in plans
+            ]
+            delay = min(delay * 2, 2.0) if state == previous_state else 0.25
+            previous_state = state
             statuses = {p["status"] for p in plans}
             moving = bool(statuses & {"running", "confirmed"})
             if changed_step:
@@ -665,7 +676,13 @@ class Journey:
                 ).get("job")
                 if not job or job.get("status") not in {"queued", "running"}:
                     return plans
-            time.sleep(0.05)
+            # Real model calls take seconds. A 50 ms loop exhausted the entire
+            # HTTP budget while a healthy workflow was still computing. Pace
+            # unchanged state without raising any case budget or hiding failure.
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeBudgetExceeded("runtime wall budget exhausted")
+            time.sleep(min(delay, remaining))
 
     def run(self, dataset_root: Path, workspace: Path):
         source = workspace / "source"
