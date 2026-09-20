@@ -14,6 +14,7 @@ from marvis.db_schema import connect
 from marvis.governance.outcome_verifiers import OutcomeProof
 from marvis.orchestrator.contracts import PlanStatus, StepStatus, ReviewVerdict
 from marvis.orchestrator.evidence import payload_hash
+from marvis.orchestrator.reviewer import FinalReview
 from marvis.repositories.hook_deliveries import HookDeliveryRepository
 from marvis.routers.plans import router
 from marvis.state_machine import ConflictError
@@ -160,6 +161,32 @@ def test_fenced_negative_allows_exactly_one_new_hook_generation(tmp_path):
             ]
             == 1
         )
+
+
+@pytest.mark.parametrize(
+    "execution_completed,expected",
+    [(True, PlanStatus.DONE), (False, PlanStatus.FAILED), (None, PlanStatus.REVIEW)],
+)
+def test_reconciliation_keeps_execution_and_business_verdict_separate(
+    tmp_path, execution_completed, expected
+):
+    class Reviewer(CountingReviewer):
+        def final_review(self, _plan, _outputs, _goal):
+            return FinalReview(
+                False, "Business criterion failed", [], goal_doubt=True,
+                execution_completed=execution_completed,
+                business_acceptance={"status": "failed"},
+            )
+
+    repo, executor, runner, _, calls, target, _ = scenario(
+        tmp_path, reviewer=Reviewer()
+    )
+    before = repo.list_step_runs("step-1")
+    result = executor.reconcile_execution("plan-1", target.id)
+    assert result["outcome"] == "applied"
+    assert repo.load_plan("plan-1").status == expected
+    assert repo.list_step_runs("step-1") == before
+    assert len(runner.calls) == 1 and calls == [1]
 
 
 def test_missing_adapter_stays_blocked_and_cannot_retry_or_rollback(tmp_path):

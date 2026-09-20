@@ -684,7 +684,7 @@ class ExecutionReconciler:
                         plan, outputs, plan.goal
                     )
                     summary_ref = self.repo.store_plan_summary(plan.id, review)
-                if review.goal_doubt:
+                if review.execution_completed is None and review.goal_doubt:
                     if plan.status != PlanStatus.REVIEW:
                         self.repo.set_plan_status(plan.id, PlanStatus.REVIEW)
                     return
