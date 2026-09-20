@@ -1,30 +1,27 @@
-"""pool request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Pool request grammar and grounding rules."""
 from __future__ import annotations
-from collections.abc import Mapping, Sequence
-from decimal import Decimal, InvalidOperation
+
 import json
 import re
-from typing import Any
 import unicodedata
+from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
-from typing import TYPE_CHECKING
+from . import contracts as _contracts
+from . import grounding as _grounding
+from . import identifiers as _identifiers
+from . import scorecard as _scorecard
 
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE
-    from . import _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE
-    from . import _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE
-    from . import _INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE
-    from . import _INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE
-    from . import _SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE
-    from . import _STRATEGY_POOL_WORKFLOWS
-    from . import _clarification
-    from . import _impact_cube_strategy_type_mentions
-    from . import _ungrounded_pool_actions
-    from . import _utterance_contains_token
-    from . import _voting_strategy_type_mentions
-    from . import utterance_targets_candidate_monthly_stability
+_STRATEGY_POOL_WORKFLOWS = frozenset(
+    {
+        "strategy_pool_add_candidate",
+        "strategy_pool_remove_entry",
+        "strategy_pool_set_action",
+        "strategy_pool_reorder",
+        "strategy_pool_compile",
+    }
+)
 
 _POOL_SOURCE_LIKE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection|"
@@ -102,29 +99,6 @@ _POOL_ACTION_GROUNDING = {
     ),
     "segment": re.compile(
         r"(?:分群|分层)|(?<![A-Za-z0-9_])segment(?![A-Za-z0-9_])",
-        re.IGNORECASE,
-    ),
-}
-
-_POOL_STRATEGY_TYPE_GROUNDING = {
-    "approval": re.compile(
-        r"(?:审批|准入|approval(?=.{0,12}(?:策略池|pool|strategy)))",
-        re.IGNORECASE,
-    ),
-    "reject": re.compile(
-        r"(?:拒绝(?:策略|规则)?池|拒绝策略|reject(?=.{0,12}(?:策略池|pool|strategy)))",
-        re.IGNORECASE,
-    ),
-    "limit": re.compile(
-        r"(?:额度|授信|limit(?=.{0,12}(?:策略池|pool|strategy)))",
-        re.IGNORECASE,
-    ),
-    "pricing": re.compile(
-        r"(?:定价|利率|pricing(?=.{0,12}(?:策略池|pool|strategy)))",
-        re.IGNORECASE,
-    ),
-    "segmentation": re.compile(
-        r"(?:分群|分层|segment(?:ation)?(?=.{0,12}(?:策略池|pool|strategy)))",
         re.IGNORECASE,
     ),
 }
@@ -831,7 +805,7 @@ _POOL_ADD_STRATEGY_TYPE_NOUN_PATTERNS = {
 def utterance_targets_strategy_pool_stability(utterance: str) -> bool:
     """Reserve a positive current-Pool distribution-stability command."""
 
-    if utterance_targets_candidate_monthly_stability(utterance):
+    if _scorecard.utterance_targets_candidate_monthly_stability(utterance):
         return False
     if _POOL_VALIDATION_TARGET_RE.search(utterance) is not None:
         return False
@@ -906,19 +880,19 @@ def _utterance_targets_strategy_pool_impact(utterance: str) -> bool:
 
 def _ground_strategy_pool_apply_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Prove the one Pool type and optional output prefix came from this command."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if (
         _POOL_APPLY_NONCURRENT_RE.search(utterance) is not None
         or _POOL_APPLY_POSITIVE_INTENT_RE.search(utterance) is None
         or _POOL_APPLY_TARGET_RE.search(utterance) is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式的单一命令明确要求把一个指定类型的当前 "
             "Strategy Pool 应用或写回当前样本；否定、问句、历史/未来或假设"
             "描述不会创建派生数据集。",
@@ -926,7 +900,7 @@ def _ground_strategy_pool_apply_request(
             fields=("apply_intent",),
         )
     if _POOL_APPLY_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Pool revision/hash、artifact、数据集、SampleDesign、requirements、"
             "StrategySpec 和生命周期状态只能由平台恢复；请求中只能提供 Pool "
             "类型与可选 output_prefix。",
@@ -934,7 +908,7 @@ def _ground_strategy_pool_apply_request(
             fields=("platform_binding",),
         )
     if _POOL_APPLY_SECOND_OPERATION_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 应用必须是当前轮唯一操作；Pool 修改、采纳、激活、"
             "部署、上线、导出或报告必须拆成后续请求。派生数据集默认不激活。",
             code="strategy_pool_apply_single_operation_required",
@@ -944,9 +918,9 @@ def _ground_strategy_pool_apply_request(
     missing_controls: list[str] = []
     strategy_type = str(inputs.get("strategy_type") or "")
     mentioned_types = {
-        item[0] for item in _voting_strategy_type_mentions(utterance)
+        item[0] for item in _grounding._voting_strategy_type_mentions(utterance)
     }
-    pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
     if (
         pattern is None
         or pattern.search(utterance) is None
@@ -968,7 +942,7 @@ def _ground_strategy_pool_apply_request(
 
     if missing_controls:
         missing_controls = list(dict.fromkeys(missing_controls))
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 应用只能采用原话中唯一明确的 Pool 类型与可选 ASCII "
             "输出前缀；当前无法核对："
             + "、".join(missing_controls)
@@ -980,12 +954,12 @@ def _ground_strategy_pool_apply_request(
 
 def _ground_strategy_pool_materialize_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Prove one current Pool type and a draft-only materialization command."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     intent_text = _POOL_MATERIALIZE_NEGATED_LIFECYCLE_DISCLAIMER_RE.sub(
         "",
@@ -996,7 +970,7 @@ def _ground_strategy_pool_materialize_request(
         or _POOL_MATERIALIZE_POSITIVE_INTENT_RE.search(intent_text) is None
         or _POOL_MATERIALIZE_TARGET_RE.search(intent_text) is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式的单一命令明确要求把一个指定类型的当前 "
             "Strategy Pool 物化为 draft Strategy；否定、问句、历史/未来或"
             "假设描述不会创建策略。",
@@ -1004,14 +978,14 @@ def _ground_strategy_pool_materialize_request(
             fields=("materialize_intent",),
         )
     if _POOL_MATERIALIZE_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Pool revision/hash、artifact、design hash、StrategySpec、"
             "requirements 和指标只能由平台恢复；请求中只能提供 Pool 类型。",
             code="strategy_pool_materialize_platform_binding_forbidden",
             fields=("platform_binding",),
         )
     if _POOL_MATERIALIZE_SECOND_OPERATION_RE.search(intent_text) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 物化必须是当前轮唯一操作；采纳、部署、回测、应用、"
             "报告、监控和 DSL 导出必须拆成后续请求。本步骤只创建 draft Strategy。",
             code="strategy_pool_materialize_single_operation_required",
@@ -1020,15 +994,15 @@ def _ground_strategy_pool_materialize_request(
 
     strategy_type = str(inputs.get("strategy_type") or "")
     mentioned_types = {
-        item[0] for item in _voting_strategy_type_mentions(utterance)
+        item[0] for item in _grounding._voting_strategy_type_mentions(utterance)
     }
-    pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
     if (
         pattern is None
         or pattern.search(utterance) is None
         or mentioned_types != {strategy_type}
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 物化只能采用原话中唯一明确的 Pool 类型；平台不会"
             "替用户猜测 Pool、hash、StrategySpec、requirements 或指标。",
             code="strategy_pool_materialize_controls_not_grounded",
@@ -1038,19 +1012,19 @@ def _ground_strategy_pool_materialize_request(
 
 def _ground_strategy_pool_validation_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Prove Pool type and one independent partition came from this command."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if (
         _POOL_VALIDATION_NONCURRENT_RE.search(utterance) is not None
         or _POOL_VALIDATION_POSITIVE_INTENT_RE.search(utterance) is None
         or _POOL_VALIDATION_TARGET_RE.search(utterance) is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式的单一命令明确要求对一个 approval/reject "
             "Strategy Pool 执行 validation 或 OOT 独立样本回放验证；"
             "否定、问句、历史/未来或假设描述不会执行。",
@@ -1058,7 +1032,7 @@ def _ground_strategy_pool_validation_request(
             fields=("validation_intent",),
         )
     if _POOL_VALIDATION_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Pool/SampleDesign artifact、revision/hash、dataset/workspace、"
             "target、requirements、population、comparison_mode、指标与状态"
             "只能由平台恢复；请求中只能提供 Pool 类型和 validation/OOT 分区。",
@@ -1066,7 +1040,7 @@ def _ground_strategy_pool_validation_request(
             fields=("platform_binding",),
         )
     if _POOL_VALIDATION_EVIDENCE_SCOPE_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "独立样本回放验证只发布实际 validation/OOT 动作、风险、金额和逐月"
             "回放证据，不计算或声称 PSI、稳定性或漂移；这些必须使用单独的"
             "稳定性 Workflow。",
@@ -1074,7 +1048,7 @@ def _ground_strategy_pool_validation_request(
             fields=("evidence_scope",),
         )
     if _POOL_VALIDATION_SECOND_OPERATION_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 独立样本回放验证必须是当前轮唯一操作；改 Pool、"
             "应用写回、报告、晋级、采纳或部署必须拆成后续请求。",
             code="strategy_pool_validation_single_operation_required",
@@ -1084,9 +1058,9 @@ def _ground_strategy_pool_validation_request(
     missing_controls: list[str] = []
     strategy_type = str(inputs.get("strategy_type") or "")
     mentioned_types = {
-        item[0] for item in _voting_strategy_type_mentions(utterance)
+        item[0] for item in _grounding._voting_strategy_type_mentions(utterance)
     }
-    type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    type_pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
     if (
         type_pattern is None
         or type_pattern.search(utterance) is None
@@ -1109,7 +1083,7 @@ def _ground_strategy_pool_validation_request(
         missing_controls.append(f"partition {partition or 'unknown'}")
 
     if missing_controls:
-        return _clarification(
+        return _contracts._clarification(
             "独立样本回放验证只能采用原话中唯一明确的 approval/reject Pool "
             "类型和一个 validation/OOT 分区；当前无法核对："
             + "、".join(dict.fromkeys(missing_controls))
@@ -1121,12 +1095,12 @@ def _ground_strategy_pool_validation_request(
 
 def _ground_strategy_pool_stability_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Prove the one current Pool type came from this stability command."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if (
         _POOL_STABILITY_NONCURRENT_RE.search(utterance) is not None
@@ -1134,7 +1108,7 @@ def _ground_strategy_pool_stability_request(
         or _POOL_STABILITY_TARGET_RE.search(utterance) is None
         or _POOL_IMPACT_REPORT_ONLY_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式的单一命令明确要求测量一个当前 Strategy Pool "
             "的跨分区 PSI 稳定性；否定、问句、历史/未来、假设或仅生成报告"
             "不会执行测量。",
@@ -1142,7 +1116,7 @@ def _ground_strategy_pool_stability_request(
             fields=("stability_intent",),
         )
     if _POOL_STABILITY_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "ImpactCube/Pool/SampleDesign artifact、revision/hash、dataset、"
             "阈值、指标与结果只能由平台冻结或计算；请求中只能提供五类 Pool "
             "之一的 strategy_type。",
@@ -1150,7 +1124,7 @@ def _ground_strategy_pool_stability_request(
             fields=("platform_binding",),
         )
     if _POOL_STABILITY_SECOND_OPERATION_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 跨分区稳定性测量必须是当前轮唯一操作；Pool 修改、"
             "应用写回、报告、创建、采纳、晋级或部署必须拆成后续请求。",
             code="strategy_pool_stability_single_operation_required",
@@ -1159,15 +1133,15 @@ def _ground_strategy_pool_stability_request(
 
     strategy_type = str(inputs.get("strategy_type") or "")
     mentioned_types = {
-        item[0] for item in _impact_cube_strategy_type_mentions(utterance)
+        item[0] for item in _grounding._impact_cube_strategy_type_mentions(utterance)
     }
-    type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    type_pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
     if (
         type_pattern is None
         or type_pattern.search(utterance) is None
         or mentioned_types != {strategy_type}
     ):
-        return _clarification(
+        return _contracts._clarification(
             "跨分区稳定性只能采用原话中唯一明确的 approval、reject、limit、"
             "pricing 或 segmentation Pool 类型；平台不会从动作、指标或历史"
             "证据猜测类型。",
@@ -1178,35 +1152,35 @@ def _ground_strategy_pool_stability_request(
 
 def _ground_strategy_pool_impact_request(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Prove every executable measurement control came from this utterance."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if (
         _POOL_IMPACT_NEGATED_RE.search(utterance)
         or _POOL_IMPACT_NONCOMMAND_RE.search(utterance)
         or _POOL_IMPACT_REPORT_ONLY_RE.search(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式的单一命令明确要求 Strategy Pool 影响测算；"
             "否定、问句、历史/未来描述或仅生成报告不会执行测算。",
             code="strategy_pool_impact_positive_command_required",
             fields=("measurement_intent",),
         )
     if _POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None:
-        return _clarification(
+        return _contracts._clarification(
             "原话没有明确授权执行 Strategy Pool 影响测算。请明确说出要测算的"
             " approval 或 reject Pool；本 Workflow 只生成只读证据。",
             code="strategy_pool_impact_positive_command_required",
             fields=("measurement_intent",),
         )
     if _POOL_IMPACT_SECOND_OPERATION_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 影响测算必须是当前轮唯一操作；入池、删除、改动作、重排、"
             "编译、创建策略、写回、采纳或部署必须拆成后续请求。",
             code="strategy_pool_impact_single_operation_required",
@@ -1215,8 +1189,8 @@ def _ground_strategy_pool_impact_request(
 
     missing_controls: list[str] = []
     strategy_type = str(inputs.get("strategy_type") or "")
-    strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
-    strategy_type_mentions = _voting_strategy_type_mentions(utterance)
+    strategy_type_pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    strategy_type_mentions = _grounding._voting_strategy_type_mentions(utterance)
     mentioned_strategy_types = {item[0] for item in strategy_type_mentions}
     selected_type_is_negated = any(
         item[0] == strategy_type
@@ -1256,7 +1230,7 @@ def _ground_strategy_pool_impact_request(
         selected_id = baseline_strategy_id.casefold()
         if (
             not baseline_strategy_id
-            or not _utterance_contains_token(utterance, baseline_strategy_id)
+            or not _grounding._utterance_contains_token(utterance, baseline_strategy_id)
             or positively_mentioned_ids != {selected_id}
             or selected_id in negated_ids
         ):
@@ -1269,7 +1243,7 @@ def _ground_strategy_pool_impact_request(
         missing_controls.append("comparison_mode vs_baseline")
 
     mentioned_columns = tuple(
-        column for column in whitelist if _utterance_contains_token(utterance, column)
+        column for column in whitelist if _grounding._utterance_contains_token(utterance, column)
     )
     explicit_column_bindings = _pool_impact_explicit_column_bindings(
         utterance,
@@ -1284,7 +1258,7 @@ def _ground_strategy_pool_impact_request(
         value = inputs.get(field)
         if isinstance(value, str):
             if (
-                not _utterance_contains_token(utterance, value)
+                not _grounding._utterance_contains_token(utterance, value)
                 or _pool_impact_token_is_negated(utterance, value)
                 or any(
                     other != value
@@ -1302,7 +1276,7 @@ def _ground_strategy_pool_impact_request(
         missing_controls.append("drop_nan_labels=true")
     if missing_controls:
         rendered = "、".join(dict.fromkeys(missing_controls))
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 影响测算只能使用用户原话中的 Pool 类型、基线模式/完整 ID、"
             "精确列名和空标签授权；当前无法核对："
             f"{rendered}。平台不会采用 LLM 猜测的数据绑定、列、hash、指标或策略。",
@@ -1562,7 +1536,7 @@ def _pool_mutation_unconsumed_text(
     for identifier in identifiers:
         spans.extend(match.span() for match in re.finditer(re.escape(identifier), utterance))
     strategy_type = str(inputs.get("strategy_type") or "")
-    strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    strategy_type_pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
     if strategy_type_pattern is not None:
         spans.extend(
             match.span() for match in strategy_type_pattern.finditer(utterance)
@@ -1585,12 +1559,12 @@ def _pool_add_unconsumed_text(utterance: str) -> str:
     spans.extend(
         match.span()
         for pattern in (
-            _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE,
-            _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
-            _INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE,
-            _INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE,
-            _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
-            _SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE,
+            _identifiers._AUTOMATIC_TREE_ASSET_ID_TOKEN_RE,
+            _identifiers._AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
+            _identifiers._INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE,
+            _identifiers._INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE,
+            _identifiers._CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
+            _identifiers._SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE,
         )
         for match in pattern.finditer(utterance)
     )
@@ -2213,16 +2187,16 @@ def _pool_add_explicit_reasons(utterance: str) -> tuple[str, ...]:
 
 def _ground_strategy_pool_add_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Bind one explicit selection/asset and three independently labeled controls."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
 
     if len(utterance) > _POOL_MAX_UTTERANCE_CHARS:
-        return _clarification(
+        return _contracts._clarification(
             "单次 Strategy Pool 入池指令过长；请只保留一个 source ID、"
             "策略池类型、默认动作、命中动作和可选理由。",
             code="strategy_pool_add_request_too_large",
@@ -2236,29 +2210,29 @@ def _ground_strategy_pool_add_request(
             if has_intent
             else "strategy_pool_add_intent_required"
         )
-        return _clarification(
+        return _contracts._clarification(
             "原话没有明确授权一次正向的 Strategy Pool 入池；否定式请求不会"
             "创建 Pool revision。请明确说出要加入的完整 source ID。",
             code=code,
             fields=("pool_add_intent",),
         )
     if _pool_add_has_positive_lifecycle_follow_up(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只能把一个明确候选写入可逆 draft Strategy Pool；采纳、部署、"
             "上线或投产必须在后续请求中单独发起。",
             code="strategy_pool_add_single_step_required",
             fields=("next_action",),
         )
 
-    candidate_matches = tuple(_AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance))
+    candidate_matches = tuple(_identifiers._AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance))
     selection_matches = tuple(
         match
         for pattern in (
-            _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
-            _INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE,
-            _INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE,
-            _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
-            _SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE,
+            _identifiers._AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
+            _identifiers._INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE,
+            _identifiers._INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE,
+            _identifiers._CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
+            _identifiers._SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE,
         )
         for match in pattern.finditer(utterance)
     )
@@ -2320,14 +2294,14 @@ def _ground_strategy_pool_add_request(
             and source_prefix_count == 0
             and isinstance(legacy_asset_id, str)
         ):
-            return _clarification(
+            return _contracts._clarification(
                 "请在原话中明确提供 Strategy Pool 的策略类型、完整 ID 和 typed "
                 f"action；当前无法核对：{legacy_asset_id}。平台不会采用 LLM "
                 "猜测的 ID、动作、顺序、hash 或指标。",
                 code="strategy_pool_controls_not_grounded",
                 fields=(legacy_asset_id,),
             )
-        return _clarification(
+        return _contracts._clarification(
             "请逐字提供且只提供一个完整 candidate_asset_id 或 selection_id；"
             "selection_id 必须是 automatic-tree-leaf-selection-、"
             "interactive-tree-frontier-selection-、cross-matrix-cell-selection- "
@@ -2344,7 +2318,7 @@ def _ground_strategy_pool_add_request(
         set(inputs) & {"candidate_asset_id", "selection_id"} != {expected_source_field}
         or inputs.get(expected_source_field) != observed_source_id
     ):
-        return _clarification(
+        return _contracts._clarification(
             "模型草案中的入池来源与用户原话不一致；平台不会替换、补全或"
             "猜测 candidate_asset_id/selection_id。",
             code="strategy_pool_add_source_not_grounded",
@@ -2407,7 +2381,7 @@ def _ground_strategy_pool_add_request(
         if payload_controls:
             missing_controls.append(field)
     if missing_controls:
-        return _clarification(
+        return _contracts._clarification(
             "请分别显式标注策略池类型、Pool 默认动作和命中动作；三者是"
             "独立控制，平台不会从动作词推断 Pool 类型，也不会对调两个动作。"
             "当前无法核对：" + "、".join(dict.fromkeys(missing_controls)) + "。",
@@ -2426,7 +2400,7 @@ def _ground_strategy_pool_add_request(
             or observed_placement_modes != {placement_mode}
         )
     ) or (placement_mode is None and placement_is_explicit):
-        return _clarification(
+        return _contracts._clarification(
             "可选 placement_mode 只能由“放置方式: "
             "before_selected_members/replace_selected_members”或清晰中文"
             "“保留成员作为回退并放在成员前/由 Voting 替代成员”落地；"
@@ -2442,21 +2416,21 @@ def _ground_strategy_pool_add_request(
         or not isinstance(reason, str)
         or reason != explicit_reasons[0]
     ):
-        return _clarification(
+        return _contracts._clarification(
             "可选 reason 必须与用户以“入池理由/理由/reason”显式标注的"
             "唯一文本逐字一致；未显式给出时模型必须省略。",
             code="strategy_pool_add_reason_not_grounded",
             fields=("reason",),
         )
     if isinstance(reason, str) and _pool_reason_has_active_language(reason):
-        return _clarification(
+        return _contracts._clarification(
             "reason 只能说明被动业务依据，不能承载入池、删除、改动作、"
             "重排、撤销或其他操作指令。",
             code="strategy_pool_reason_not_passive",
             fields=("reason",),
         )
     if residual := _pool_add_unconsumed_text(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 入池只能包含一个明确命令子句和已知的显式控制标签；"
             "历史叙述、转述、考虑中描述、撤销语句或其他未消费操作不会执行。",
             code="strategy_pool_add_command_not_explicit",
@@ -2466,12 +2440,12 @@ def _ground_strategy_pool_add_request(
 
 def _ground_strategy_pool_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Prove that every executable Pool control came from the user text."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     workflow = draft.workflow
 
@@ -2482,7 +2456,7 @@ def _ground_strategy_pool_request(
         _POOL_PARTIAL_REORDER_RE.search(utterance)
         or _POOL_HEURISTIC_REORDER_RE.search(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Strategy Pool 重排必须提供当前池全部 rule_id/entry_id 的完整、无重复顺序；"
             "不能只说把某条放前面，也不能按效果、坏率或推荐自动排序。",
             code="strategy_pool_full_order_required",
@@ -2491,13 +2465,13 @@ def _ground_strategy_pool_request(
 
     missing_controls: list[str] = []
     strategy_type = str(inputs.get("strategy_type") or "")
-    strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    strategy_type_pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
     if strategy_type_pattern is None or strategy_type_pattern.search(utterance) is None:
         missing_controls.append(f"strategy_type {strategy_type or 'unknown'}")
     if workflow in {"strategy_pool_remove_entry", "strategy_pool_set_action"}:
         identifier_name = "rule_id" if "rule_id" in inputs else "entry_id"
         identifier = inputs[identifier_name]
-        if not _utterance_contains_token(utterance, identifier):
+        if not _grounding._utterance_contains_token(utterance, identifier):
             missing_controls.append(identifier)
         if workflow == "strategy_pool_set_action":
             missing_controls.extend(
@@ -2523,14 +2497,14 @@ def _ground_strategy_pool_request(
 
     if missing_controls:
         rendered = "、".join(dict.fromkeys(missing_controls))
-        return _clarification(
+        return _contracts._clarification(
             "请在原话中明确提供 Strategy Pool 的策略类型、完整 ID 和 typed action；"
             f"当前无法核对：{rendered}。平台不会采用 LLM 猜测的 ID、动作、顺序、hash 或指标。",
             code="strategy_pool_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
         )
     if isinstance(reason, str) and _pool_reason_has_active_language(reason):
-        return _clarification(
+        return _contracts._clarification(
             "reason 只能说明被动业务依据，不能承载入池、删除、改动作、"
             "重排、撤销或其他操作指令。",
             code="strategy_pool_reason_not_passive",
@@ -2539,10 +2513,65 @@ def _ground_strategy_pool_request(
     if workflow in _POOL_MUTATION_INTENT_PATTERNS and not (
         _pool_mutation_has_positive_intent(utterance, workflow, inputs)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话没有明确授权当前轮执行一次正向 Strategy Pool 修改；否定、"
             "问句、历史描述、失败态、撤销或其他未消费操作不会创建新的 Pool revision。",
             code="strategy_pool_mutation_intent_required",
             fields=("pool_mutation_intent",),
         )
     return result
+
+_STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
+
+_STRATEGY_POOL_APPLY_WORKFLOWS = frozenset({"strategy_pool_apply"})
+
+_STRATEGY_POOL_MATERIALIZE_WORKFLOWS = frozenset(
+    {"strategy_pool_materialize"}
+)
+
+_STRATEGY_POOL_VALIDATION_WORKFLOWS = frozenset(
+    {"strategy_pool_validation"}
+)
+
+def _ungrounded_pool_actions(
+    utterance: str,
+    *actions: Mapping[str, Any],
+) -> list[str]:
+    missing: list[str] = []
+    for action in actions:
+        action_type = str(action.get("type") or "")
+        pattern = _POOL_ACTION_GROUNDING.get(action_type)
+        if pattern is None or pattern.search(utterance) is None:
+            missing.append(f"typed action {action_type or 'unknown'}")
+        reason_code = action.get("reason_code")
+        if isinstance(reason_code, str) and not _grounding._utterance_contains_token(
+            utterance, reason_code
+        ):
+            missing.append(reason_code)
+        if action_type in {"limit", "pricing", "segment"} and not (
+            _utterance_contains_pool_action_value(utterance, action.get("value"))
+        ):
+            missing.append(f"typed action value {action.get('value')}")
+        output_value = action.get("output_value")
+        if output_value is not None and not _utterance_contains_pool_action_value(
+            utterance, output_value
+        ):
+            missing.append(f"typed action output_value {output_value}")
+    return missing
+
+def _utterance_contains_pool_action_value(utterance: str, value: object) -> bool:
+    candidates = {str(value)}
+    try:
+        candidates.add(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+    except (TypeError, ValueError):
+        return False
+    folded = utterance.casefold()
+    return any(candidate.casefold() in folded for candidate in candidates)

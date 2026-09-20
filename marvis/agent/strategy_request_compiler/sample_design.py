@@ -1,22 +1,16 @@
-"""sample_design request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Sample design request grammar and grounding rules."""
 from __future__ import annotations
-from collections.abc import Mapping, Sequence
+
 import re
+from collections.abc import Mapping, Sequence
 from typing import Any
-from marvis.agent.strategy_workflows._foundation_delivery import is_sample_design_v2_fresh_partition_selector
 
-from typing import TYPE_CHECKING
+from marvis.agent.strategy_workflows._foundation_delivery import (
+    is_sample_design_v2_fresh_partition_selector,
+)
 
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _DraftValidationError
-    from . import _ROLL_RATE_COLUMN_ROLE_LABELS
-    from . import _automatic_tree_column_mention_resolution
-    from . import _clarification
-    from . import _has_positive_chained_operation
-    from . import _simple_partition_equality
-    from . import _utterance_contains_token
+from . import contracts as _contracts
+from . import grounding as _grounding
 
 _SAMPLE_DESIGN_SUBJECT_RE = re.compile(
     r"(?:策略)?样本(?:设计|边界|方案)|sample(?:\s|-|_)*design|"
@@ -494,7 +488,7 @@ def _roll_rate_explicit_column_bindings(
             )
         )
     )
-    mentions, ambiguous = _automatic_tree_column_mention_resolution(
+    mentions, ambiguous = _grounding._automatic_tree_column_mention_resolution(
         utterance,
         known_columns,
     )
@@ -525,14 +519,14 @@ def _roll_rate_explicit_column_bindings(
 
 def _ground_roll_rate_column_bindings(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
     target_col: str | None,
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
     if not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "roll_rate_matrix"
     ):
         return result
@@ -542,7 +536,7 @@ def _ground_roll_rate_column_bindings(
         target_col=target_col,
     )
     if ambiguous:
-        return _clarification(
+        return _contracts._clarification(
             "滚动率请求中的显式列名存在重叠歧义；请为 ID、时间、状态和余额权重"
             "分别提供一个完整且唯一的现有列名。",
             code="roll_rate_column_binding_not_grounded",
@@ -555,7 +549,7 @@ def _ground_roll_rate_column_bindings(
         if len(values) != 1 or inputs.get(role) not in values
     )
     if mismatched:
-        return _clarification(
+        return _contracts._clarification(
             "滚动率草案必须逐字保留原话中明确的 ID、时间、状态和余额权重列绑定；"
             "不得替换为另一个同样存在的数据列。",
             code="roll_rate_column_binding_not_grounded",
@@ -609,7 +603,7 @@ def utterance_targets_strategy_sample_design(utterance: str) -> bool:
         r"(?:已|已经|曾|曾经|此前|历史|already|previously)\s*$",
         re.I,
     )
-    for clause in _sample_design_clauses(utterance):
+    for clause in _grounding._sample_design_clauses(utterance):
         subjects = tuple(_SAMPLE_DESIGN_SUBJECT_RE.finditer(clause))
         actions = tuple(_SAMPLE_DESIGN_ACTION_RE.finditer(clause))
         for subject in subjects:
@@ -662,17 +656,17 @@ def _sample_design_build_intent_negated(utterance: str) -> bool:
 
 def _ground_strategy_sample_design_v2_request(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Ground every user-owned V2 control before a compatibility plan exists."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if _sample_design_build_intent_negated(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "原话否定或取消了 V2 样本设计固化，本轮不会创建计划。",
             code="strategy_sample_design_v2_intent_negated",
             fields=("build_intent",),
@@ -681,21 +675,21 @@ def _ground_strategy_sample_design_v2_request(
         not utterance_targets_strategy_sample_design(utterance)
         or _SAMPLE_DESIGN_NONCOMMAND_RE.search(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用一条当前、肯定式命令说明要固化 V2 策略样本设计；"
             "问句、假设、历史或未来描述不会被当成立即执行授权。",
             code="strategy_sample_design_v2_positive_command_required",
             fields=("build_intent",),
         )
     if _sample_design_v2_has_chained_operation(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只能生成兼容锚点并固化 V2 双总体样本证据；建模、比较、报告、"
             "Strategy Pool、采纳和部署必须拆成后续请求。",
             code="strategy_sample_design_v2_single_step_required",
             fields=("next_action",),
         )
     if _SAMPLE_DESIGN_V2_PLATFORM_CONTROL_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "legacy ref、scope、policy、数据身份、workspace 和所有"
             " artifact/id/hash 均由当前 task 绑定，不能由自然语言注入。",
             code="strategy_sample_design_v2_platform_binding_forbidden",
@@ -818,7 +812,7 @@ def _ground_strategy_sample_design_v2_request(
                     selectors[partition],
                     name=f"partitioning.selectors.{partition}",
                 )
-            except _DraftValidationError:
+            except _contracts._DraftValidationError:
                 simple = {}
                 break
         simple_columns = {column for column, _value in simple.values()}
@@ -884,7 +878,7 @@ def _ground_strategy_sample_design_v2_request(
         missing.append("historical_score")
     if missing:
         fields = tuple(dict.fromkeys(missing))
-        return _clarification(
+        return _contracts._clarification(
             "V2 样本设计草案存在无法逐字与原话核对的控制项："
             + "、".join(fields)
             + "。平台不会猜测、补写或静默降级。",
@@ -894,14 +888,14 @@ def _ground_strategy_sample_design_v2_request(
     return result
 
 def _sample_design_v2_has_chained_operation(utterance: str) -> bool:
-    return _has_positive_chained_operation(
+    return _grounding._has_positive_chained_operation(
         utterance,
         operation_re=_SAMPLE_DESIGN_V2_CHAIN_RE,
     )
 
 def _sample_v2_value_grounded(utterance: str, value: object) -> bool:
     if isinstance(value, str):
-        return _utterance_contains_token(utterance, value) or value in utterance
+        return _grounding._utterance_contains_token(utterance, value) or value in utterance
     return re.search(rf"(?<![0-9.]){re.escape(str(value))}(?![0-9.])", utterance) is not None
 
 def _sample_v2_drop_policy_grounded(utterance: str, expected: bool) -> bool:
@@ -929,7 +923,7 @@ def _sample_v2_relationship_grounded(
     if relationship not in {"nested_same_cohort", "parallel_time_cohorts"}:
         return False
     observed: set[str] = set()
-    for clause in _sample_design_clauses(utterance):
+    for clause in _grounding._sample_design_clauses(utterance):
         has_both_roles = (
             re.search(r"(?:审批总体|审批样本|approval\s+population)", clause, re.I)
             is not None
@@ -1040,7 +1034,7 @@ def _sample_v2_role_owned_segments(
         re.I,
     )
     segments: list[str] = []
-    for clause in _sample_design_clauses(utterance):
+    for clause in _grounding._sample_design_clauses(utterance):
         roles = tuple(_SAMPLE_V2_POPULATION_ROLE_RE.finditer(clause))
         for index, role in enumerate(roles):
             if expected.search(role.group(0)) is None:
@@ -1179,7 +1173,7 @@ def _sample_v2_maturity_days_grounded(
         return False
     contexts = tuple(
         clause
-        for clause in _sample_design_clauses(utterance)
+        for clause in _grounding._sample_design_clauses(utterance)
         if re.search(
             r"(?:成熟(?:度)?(?:表现)?窗|成熟表现期|"
             r"maturity.{0,12}performance\s+window)",
@@ -1209,7 +1203,7 @@ def _sample_v2_maturity_cutoff_grounded(
     cutoff_label = r"(?:截止日|截止日期|cutoff(?:\s+date)?)"
     contexts = tuple(
         clause
-        for clause in _sample_design_clauses(utterance)
+        for clause in _grounding._sample_design_clauses(utterance)
         if re.search(
             rf"{maturity_label}.{{0,16}}{cutoff_label}|"
             rf"{cutoff_label}.{{0,16}}{maturity_label}",
@@ -1234,7 +1228,7 @@ def _sample_v2_maturity_reason_grounded(
         re.search(r"(?:成熟(?:度)?(?:原因|理由)|maturity\s+reason)", clause, re.I)
         is not None
         and _sample_v2_value_grounded(clause, reason)
-        for clause in _sample_design_clauses(utterance)
+        for clause in _grounding._sample_design_clauses(utterance)
     )
 
 def _sample_v2_partition_equality_grounded(
@@ -1248,7 +1242,7 @@ def _sample_v2_partition_equality_grounded(
     )
     matches = [
         match
-        for clause in _sample_design_clauses(utterance)
+        for clause in _grounding._sample_design_clauses(utterance)
         if (match := re.search(rf"(?:{label_pattern})", clause, re.I))
     ]
     if len(matches) != 1:
@@ -1287,7 +1281,7 @@ def _sample_v2_partition_predicate_grounded(
     )
     clauses = tuple(
         clause
-        for clause in _sample_design_clauses(utterance)
+        for clause in _grounding._sample_design_clauses(utterance)
         if re.search(
             rf"(?:{role}).{{0,10}}(?:条件|谓词|selector|predicate)",
             clause,
@@ -1374,7 +1368,7 @@ def _sample_v2_historical_score_grounded(
         direction = historical["direction"]
         owned_clauses = tuple(
             clause
-            for clause in _sample_design_clauses(utterance)
+            for clause in _grounding._sample_design_clauses(utterance)
             if re.search(subject, clause, re.I)
             and _sample_v2_value_grounded(clause, column)
         )
@@ -1414,14 +1408,7 @@ def _sample_v2_historical_score_grounded(
             re.I,
         )
         and _sample_v2_value_grounded(clause, historical["reason"])
-        for clause in _sample_design_clauses(utterance)
-    )
-
-def _sample_design_clauses(utterance: str) -> tuple[str, ...]:
-    return tuple(
-        clause.strip()
-        for clause in re.split(r"[；;。.!?？\n]+", utterance)
-        if clause.strip()
+        for clause in _grounding._sample_design_clauses(utterance)
     )
 
 def _sample_design_control_segments(utterance: str) -> tuple[str, ...]:
@@ -1447,7 +1434,7 @@ def _sample_design_performance_grounded(
     )
     clauses = tuple(
         clause
-        for clause in _sample_design_clauses(utterance)
+        for clause in _grounding._sample_design_clauses(utterance)
         if labels.search(clause) and maturity_labels.search(clause) is None
     )
     if not clauses:
@@ -1494,7 +1481,7 @@ def _sample_design_observation_grounded(
     label = r"(?:观察(?:窗|期)|observation\s+window)"
     clauses = tuple(
         clause
-        for clause in _sample_design_clauses(utterance)
+        for clause in _grounding._sample_design_clauses(utterance)
         if re.search(label, clause, re.I)
     )
     if not clauses:
@@ -1633,7 +1620,7 @@ def _sample_design_split_values_grounded(
         re.escape(label) for label in sorted(labels, key=len, reverse=True)
     )
     matches: list[tuple[str, re.Match[str]]] = []
-    for clause in _sample_design_clauses(utterance):
+    for clause in _grounding._sample_design_clauses(utterance):
         match = re.search(rf"(?:{label_pattern})", clause, re.I)
         if match is not None:
             matches.append((clause, match))
@@ -1677,3 +1664,50 @@ def _sample_design_scalar_text(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+def _simple_partition_equality(
+    predicate: Mapping[str, Any],
+    *,
+    name: str,
+) -> tuple[str, object]:
+    if (
+        set(predicate) != {"op", "left", "right"}
+        or predicate.get("op") != "eq"
+        or not isinstance(predicate.get("left"), Mapping)
+        or set(predicate["left"]) != {"column"}
+        or not isinstance(predicate.get("right"), Mapping)
+        or set(predicate["right"]) != {"literal"}
+    ):
+        raise _contracts._DraftValidationError(
+            f"{name} 当前必须是 column == literal 的简单等值 predicate。",
+            code="strategy_sample_design_v2_native_bootstrap_required",
+            fields=(name,),
+        )
+    literal = predicate["right"]["literal"]
+    if literal is None or isinstance(
+        literal, Mapping | Sequence
+    ) and not isinstance(literal, str):
+        raise _contracts._DraftValidationError(
+            f"{name} literal 必须是非空标量。",
+            fields=(name,),
+        )
+    return str(predicate["left"]["column"]), literal
+
+_ROLL_RATE_COLUMN_ROLE_LABELS = {
+    "id_col": (
+        r"(?:(?:客户|账户|借据)\s*(?:ID|id|编号)\s*(?:字段|列)?|"
+        r"(?<![A-Za-z0-9_])id_col(?![A-Za-z0-9_]))"
+    ),
+    "time_col": (
+        r"(?:(?:时间|日期|月份|月龄|MOB|mob)\s*(?:字段|列)?|"
+        r"(?<![A-Za-z0-9_])time_col(?![A-Za-z0-9_]))"
+    ),
+    "status_col": (
+        r"(?:(?:迁徙)?状态\s*(?:字段|列)?|"
+        r"(?<![A-Za-z0-9_])status_col(?![A-Za-z0-9_]))"
+    ),
+    "balance_col": (
+        r"(?:(?:余额(?:权重)?|金额权重)\s*(?:字段|列)?|"
+        r"(?<![A-Za-z0-9_])balance_col(?![A-Za-z0-9_]))"
+    ),
+}

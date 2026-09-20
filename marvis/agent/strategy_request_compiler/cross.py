@@ -1,39 +1,18 @@
-"""cross request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Cross request grammar and grounding rules."""
 from __future__ import annotations
-from collections.abc import Mapping, Sequence
+
 import json
 import math
 import re
-from typing import Any
 import unicodedata
+from collections.abc import Mapping, Sequence
+from typing import Any
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE
-    from . import _AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE
-    from . import _AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE
-    from . import _AUTOMATIC_TREE_LEAF_NEGATED_REASON_CLAUSE_RE
-    from . import _AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE
-    from . import _AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE
-    from . import _AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE
-    from . import _AUTOMATIC_TREE_LEAF_REASON_FORBIDDEN_OPERATION_RE
-    from . import _AUTOMATIC_TREE_LEAF_REASON_RE
-    from . import _AUTOMATIC_TREE_LEAF_REASON_REPLACEMENT_RE
-    from . import _AUTOMATIC_TREE_LEAF_REQUEST_PUNCTUATION_RE
-    from . import _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE
-    from . import _automatic_tree_column_mention_resolution
-    from . import _automatic_tree_column_mentions
-    from . import _automatic_tree_follow_up_action_is_negated
-    from . import _automatic_tree_follow_up_clauses
-    from . import _automatic_tree_leaf_all_reason_values
-    from . import _automatic_tree_leaf_explicit_reasons
-    from . import _automatic_tree_leaf_rationale_is_allowed
-    from . import _automatic_tree_span_is_negated
-    from . import _clarification
-    from . import _explicit_manual_breakpoint_bindings
+from . import contracts as _contracts
+from . import grounding as _grounding
+from . import identifiers as _identifiers
+from . import scorecard as _scorecard
+from . import tree as _tree
 
 _CROSS_MATRIX_TARGET_RE = re.compile(
     r"(?:二维|2\s*[dD])[^，,；;。\n]{0,24}(?:交叉|cross)|"
@@ -361,11 +340,6 @@ _CROSS_METHOD_GROUNDING = {
     ),
 }
 
-_CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])cross-matrix-cell-selection-[0-9a-f]{32}"
-    r"(?![A-Za-z0-9_-])"
-)
-
 _CROSS_MATRIX_CELL_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])cross-cell-[0-9a-f]{32}(?![A-Za-z0-9_-])"
 )
@@ -522,18 +496,18 @@ def _utterance_targets_cross_matrix(utterance: str) -> bool:
         or _utterance_targets_cross_rule_selection(utterance)
     ):
         return False
-    without_selection_ids = _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE.sub(
+    without_selection_ids = _identifiers._CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE.sub(
         " ", utterance
     )
     return _CROSS_MATRIX_TARGET_RE.search(without_selection_ids) is not None
 
 def _utterance_targets_cross_matrix_cell_selection(utterance: str) -> bool:
     has_pointer_ids = (
-        _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.search(utterance) is not None
+        _identifiers._AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.search(utterance) is not None
         and _CROSS_MATRIX_CELL_ID_TOKEN_RE.search(utterance) is not None
     )
     if (
-        _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE.search(utterance) is not None
+        _identifiers._CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE.search(utterance) is not None
         and not has_pointer_ids
     ):
         return False
@@ -560,13 +534,6 @@ def _cross_positive_command_clause_spans(
         ):
             spans.append(clause_match.span())
     return tuple(spans)
-
-def _cross_mention_is_within(
-    start: int,
-    end: int,
-    command_span: tuple[int, int],
-) -> bool:
-    return command_span[0] <= start and end <= command_span[1]
 
 def _cross_spans_are_near(
     utterance: str,
@@ -616,13 +583,13 @@ def _cross_axis_method_is_grounded(
 ) -> bool:
     feature_spans = [
         (start, end)
-        for start, end, column in _automatic_tree_column_mentions(
+        for start, end, column in _grounding._automatic_tree_column_mentions(
             utterance,
             whitelist,
         )
         if column == feature
-        and _cross_mention_is_within(start, end, command_span)
-        and not _automatic_tree_span_is_negated(
+        and _grounding._cross_mention_is_within(start, end, command_span)
+        and not _grounding._automatic_tree_span_is_negated(
             utterance,
             start=start,
             end=end,
@@ -632,8 +599,8 @@ def _cross_axis_method_is_grounded(
         (start, end)
         for observed_method, start, end in _cross_method_mentions(utterance)
         if observed_method == method
-        and _cross_mention_is_within(start, end, command_span)
-        and not _automatic_tree_span_is_negated(
+        and _grounding._cross_mention_is_within(start, end, command_span)
+        and not _grounding._automatic_tree_span_is_negated(
             utterance,
             start=start,
             end=end,
@@ -666,16 +633,16 @@ def _cross_amount_column_is_grounded(
     )
     column_spans = [
         (start, end)
-        for start, end, observed in _automatic_tree_column_mentions(
+        for start, end, observed in _grounding._automatic_tree_column_mentions(
             utterance,
             whitelist,
         )
-        if observed == column and _cross_mention_is_within(start, end, command_span)
+        if observed == column and _grounding._cross_mention_is_within(start, end, command_span)
     ]
     label_spans = [
         match.span()
         for match in label_pattern.finditer(utterance)
-        if _cross_mention_is_within(match.start(), match.end(), command_span)
+        if _grounding._cross_mention_is_within(match.start(), match.end(), command_span)
     ]
     return any(
         _cross_spans_are_near(utterance, column_span, label_span, maximum_gap=48)
@@ -782,7 +749,7 @@ def _cross_analysis_controls_not_grounded(
     missing: list[str] = []
     bin_mentions = tuple(_CROSS_MATRIX_BIN_COUNT_RE.finditer(utterance))
     if any(
-        not _cross_mention_is_within(match.start(), match.end(), command_span)
+        not _grounding._cross_mention_is_within(match.start(), match.end(), command_span)
         for match in bin_mentions
     ):
         missing.append("bin_count")
@@ -795,7 +762,7 @@ def _cross_analysis_controls_not_grounded(
 
     min_pct_mentions = tuple(_CROSS_MATRIX_MIN_BIN_PCT_RE.finditer(utterance))
     if any(
-        not _cross_mention_is_within(match.start(), match.end(), command_span)
+        not _grounding._cross_mention_is_within(match.start(), match.end(), command_span)
         for match in min_pct_mentions
     ):
         missing.append("min_bin_pct")
@@ -858,7 +825,7 @@ def _cross_analysis_controls_not_grounded(
         if sentinel_syntax_ambiguous or observed_identities != expected_identities:
             missing.append("sentinel_values")
     observed_breakpoints, breakpoint_syntax_ambiguous = (
-        _explicit_manual_breakpoint_bindings(
+        _scorecard._explicit_manual_breakpoint_bindings(
             utterance,
             whitelist=whitelist,
             command_span=command_span,
@@ -874,17 +841,17 @@ def _cross_analysis_controls_not_grounded(
 
 def _ground_cross_matrix_analysis(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Require an explicit positive 2D matrix command and two grounded axes."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if _CROSS_MATRIX_NEGATED_BUILD_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "原话否定了二维 Cross Matrix 构建，因此本次不会执行。",
             code="cross_matrix_build_intent_negated",
             fields=("build_intent",),
@@ -893,7 +860,7 @@ def _ground_cross_matrix_analysis(
         _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
         or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "当前原话是问句、假设/未来/历史描述、演示性文本或已在句尾撤销，"
             "不能视为立即执行二维 Cross Matrix 的唯一正向命令。请单独重述本次"
             "要构建的两个有序轴、各自分箱方法和明确分析参数。",
@@ -902,14 +869,14 @@ def _ground_cross_matrix_analysis(
         )
     command_spans = _cross_positive_command_clause_spans(utterance)
     if not command_spans:
-        return _clarification(
+        return _contracts._clarification(
             "请明确发出一次正向的二维 Cross Matrix 构建命令；查看、说明或"
             "假设性请求不会创建候选资产。",
             code="cross_matrix_build_intent_required",
             fields=("build_intent",),
         )
     if len(command_spans) != 1:
-        return _clarification(
+        return _contracts._clarification(
             "一次请求只能包含一个立即执行的二维 Cross Matrix 构建子句；"
             "请把不同轴组合拆成独立请求。",
             code="cross_matrix_single_command_required",
@@ -926,56 +893,56 @@ def _ground_cross_matrix_analysis(
         )
         != 1
     ):
-        return _clarification(
+        return _contracts._clarification(
             "一次请求只能构建一个二维 Cross Matrix；请把多个矩阵拆开。",
             code="cross_matrix_single_command_required",
             fields=("build_intent",),
         )
     if _CROSS_MATRIX_FOLLOW_UP_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "本轮只能生成二维 Cross Matrix 及 development evidence。"
             "选格、入池、代码、写回、采纳或部署必须拆成后续请求。",
             code="cross_matrix_single_step_required",
             fields=("next_action",),
         )
     if _CROSS_MATRIX_CONTROL_REWRITE_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "原话包含被否定或随后改写的轴/分箱控制。请只保留最终的一组"
             "有序轴和分箱方法后重新发送，平台不会替你选择新旧值。",
             code="cross_matrix_controls_rewritten",
             fields=("x_feature", "x_method", "y_feature", "y_method"),
         )
 
-    mentions, ambiguous = _automatic_tree_column_mention_resolution(
+    mentions, ambiguous = _grounding._automatic_tree_column_mention_resolution(
         utterance,
         whitelist,
     )
     if ambiguous:
-        return _clarification(
+        return _contracts._clarification(
             "交叉轴字段在原话中存在重叠或大小写歧义，请用分隔符写出两个"
             "准确列名：" + "、".join(ambiguous) + "。",
             code="cross_matrix_axes_ambiguous",
             fields=ambiguous,
         )
     if any(
-        not _cross_mention_is_within(start, end, command_span)
+        not _grounding._cross_mention_is_within(start, end, command_span)
         for start, end, _column in mentions
     ):
-        return _clarification(
+        return _contracts._clarification(
             "二维 Cross Matrix 的字段和分析列必须全部位于唯一正向构建子句中；"
             "历史、引用、否定或其他子句中的列不会被消费。",
             code="cross_matrix_controls_outside_command",
             fields=("x_feature", "y_feature"),
         )
     if any(
-        _automatic_tree_span_is_negated(
+        _grounding._automatic_tree_span_is_negated(
             utterance,
             start=start,
             end=end,
         )
         for start, end, _column in mentions
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话包含被否定的字段控制。请只保留最终要使用的两个有序轴。",
             code="cross_matrix_controls_rewritten",
             fields=("x_feature", "y_feature"),
@@ -993,14 +960,14 @@ def _ground_cross_matrix_analysis(
     )
     observed_columns = {column for _start, _end, column in positive_mentions}
     if not {inputs["x_feature"], inputs["y_feature"]} <= observed_columns:
-        return _clarification(
+        return _contracts._clarification(
             "请在原话中明确写出两个不同的交叉轴字段；平台不会从列白名单"
             "补齐或猜测第二个轴。",
             code="cross_matrix_axes_not_grounded",
             fields=("x_feature", "y_feature"),
         )
     if observed_columns != expected_columns:
-        return _clarification(
+        return _contracts._clarification(
             "请在唯一构建子句中只写出一个明确轴对及已声明的金额列；"
             "平台不会从额外字段中挑选两个轴，也不会遗漏用户点名的字段。",
             code="cross_matrix_axes_not_unique",
@@ -1015,7 +982,7 @@ def _ground_cross_matrix_analysis(
         ):
             axis_order.append(column)
     if axis_order != [inputs["x_feature"], inputs["y_feature"]]:
-        return _clarification(
+        return _contracts._clarification(
             "矩阵 X/Y 方向必须与原话中两个轴的首次出现顺序一致；"
             "平台不会让模型任意转置后生成不同 asset hash。",
             code="cross_matrix_axis_order_not_grounded",
@@ -1024,23 +991,23 @@ def _ground_cross_matrix_analysis(
 
     method_mentions = _cross_method_mentions(utterance)
     if any(
-        not _cross_mention_is_within(start, end, command_span)
+        not _grounding._cross_mention_is_within(start, end, command_span)
         for _method, start, end in method_mentions
     ):
-        return _clarification(
+        return _contracts._clarification(
             "两个轴的分箱方法必须全部位于唯一正向构建子句中。",
             code="cross_matrix_controls_outside_command",
             fields=("x_method", "y_method"),
         )
     if any(
-        _automatic_tree_span_is_negated(
+        _grounding._automatic_tree_span_is_negated(
             utterance,
             start=start,
             end=end,
         )
         for _method, start, end in method_mentions
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话包含被否定的分箱方法。请只保留最终使用的方法。",
             code="cross_matrix_controls_rewritten",
             fields=("x_method", "y_method"),
@@ -1049,7 +1016,7 @@ def _ground_cross_matrix_analysis(
         inputs["x_method"],
         inputs["y_method"],
     }:
-        return _clarification(
+        return _contracts._clarification(
             "原话中的分箱方法与结构化草案不唯一或不一致；"
             "平台不会补全、替换或遗漏方法。",
             code="cross_matrix_methods_not_grounded",
@@ -1073,7 +1040,7 @@ def _ground_cross_matrix_analysis(
         )
     ]
     if missing_methods:
-        return _clarification(
+        return _contracts._clarification(
             "请明确两个轴各自使用的分箱方法；相同方法可说明一次，混合方法"
             "必须分别紧邻对应字段。平台不会替你选择方法。",
             code="cross_matrix_methods_not_grounded",
@@ -1086,7 +1053,7 @@ def _ground_cross_matrix_analysis(
         command_span=command_span,
     )
     if missing_analysis_controls:
-        return _clarification(
+        return _contracts._clarification(
             "目标箱数、最小箱占比、金额列和哨兵值只能采用原话明确值；"
             "未写明时只能使用平台默认值，不能由模型另选。",
             code="cross_matrix_analysis_controls_not_grounded",
@@ -1096,17 +1063,17 @@ def _ground_cross_matrix_analysis(
 
 def _ground_cross_rule_search(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Ground every bounded rule-search control in the current command."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if not _utterance_targets_cross_rule_search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "请明确要求搜索 2D/3D Cross 阈值规则，并在当前请求中提供 "
             "features、dimension、四项 constraints 与 max_trials。",
             code="cross_rule_search_intent_required",
@@ -1125,7 +1092,7 @@ def _ground_cross_rule_search(
         or _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
         or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Cross 阈值规则搜索必须是当前轮立即执行的肯定式命令。",
             code="cross_rule_search_positive_command_required",
             fields=("search_intent",),
@@ -1134,14 +1101,14 @@ def _ground_cross_rule_search(
         utterance,
         _CROSS_SEARCH_FOLLOW_UP_RE,
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只搜索 Cross 阈值规则；构建候选、入池、应用、采纳和"
             "部署必须另发请求。",
             code="cross_rule_search_single_step_required",
             fields=("next_action",),
         )
     if _CROSS_RULE_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Cross 阈值规则搜索只接受字段、维度、四项业务约束和试验预算；"
             "阈值、方向、artifact/hash、rule/rank/winner 均由平台恢复或计算。",
             code="cross_rule_search_platform_binding_forbidden",
@@ -1150,7 +1117,7 @@ def _ground_cross_rule_search(
 
     bindings = tuple(_CROSS_SEARCH_FEATURES_RE.finditer(utterance))
     if len(bindings) != 1:
-        return _clarification(
+        return _contracts._clarification(
             "请且只请用 features=[字段1, 字段2, ...] 给出 2 到 12 个"
             "候选字段。",
             code="cross_rule_search_controls_not_grounded",
@@ -1166,7 +1133,7 @@ def _ground_cross_rule_search(
         or len(set(observed_features)) != len(observed_features)
         or any(feature not in whitelist for feature in observed_features)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "features 必须逐字等于当前命令中的唯一白名单字段列表；"
             "模型不得补写、删减或改序。",
             code="cross_rule_search_controls_not_grounded",
@@ -1210,7 +1177,7 @@ def _ground_cross_rule_search(
         or amount_lifts != {constraints["min_amount_lift"]}
         or max_trials != {inputs["max_trials"]}
     ):
-        return _clarification(
+        return _contracts._clarification(
             "dimension、min_lift、min_bad_count、max_hit_share、"
             "min_amount_lift 与 max_trials 必须在当前命令中逐项明确且唯一；"
             "模型不得补默认值或改写约束。",
@@ -1225,22 +1192,22 @@ def _ground_cross_rule_search(
 
 def _ground_cross_rule_candidate_build(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Ground one exact search/rule pointer without heuristic selection."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if not _utterance_targets_cross_rule_selection(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "请在独立请求中提供一个完整 cross-rule-search ID、一个完整"
             " cross-rule ID，并明确要求构建候选。",
             code="cross_rule_selection_intent_required",
             fields=("build_intent", "search_id", "rule_id"),
         )
     if _CROSS_RULE_SELECTION_HEURISTIC_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "请逐字点名完整 search_id 与 rule_id；平台不会消费第一名、"
             "最好、冠军、Top N、排名或‘刚才那个’。",
             code="cross_rule_selection_explicit_ids_required",
@@ -1251,7 +1218,7 @@ def _ground_cross_rule_candidate_build(
         or _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
         or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Cross 规则候选构建必须是当前轮立即执行的肯定式单步命令。",
             code="cross_rule_selection_positive_command_required",
             fields=("build_intent",),
@@ -1260,7 +1227,7 @@ def _ground_cross_rule_candidate_build(
         utterance,
         _CROSS_SEARCH_SELECTION_FOLLOW_UP_RE,
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只能构建一个精确 Cross 规则候选；入池、设置动作、应用、"
             "采纳和部署必须另发请求。",
             code="cross_rule_selection_single_step_required",
@@ -1278,7 +1245,7 @@ def _ground_cross_rule_candidate_build(
         search_ids != (inputs["search_id"],)
         or rule_ids != (inputs["rule_id"],)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Cross 规则候选构建必须逐字提供且只提供一个完整 search_id "
             "与一个完整 rule_id。",
             code="cross_rule_selection_ids_not_grounded",
@@ -1295,7 +1262,7 @@ def _ground_cross_rule_candidate_build(
         if labeled is None or " ".join(
             unicodedata.normalize("NFC", labeled.group("reason")).split()
         ) != reason:
-            return _clarification(
+            return _contracts._clarification(
                 "selection_reason 仅在当前命令显式标注时逐字抄录。",
                 code="cross_rule_selection_reason_not_grounded",
                 fields=("selection_reason",),
@@ -1304,17 +1271,17 @@ def _ground_cross_rule_candidate_build(
 
 def _ground_cross_matrix_candidate_search(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Prove the bounded feature universe and pair budget came from this turn."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if not _utterance_targets_cross_candidate_search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "请明确要求搜索 Cross Matrix 特征组合，并在当前请求中提供 "
             "features=[...] 与 max_pairs。",
             code="cross_search_intent_required",
@@ -1333,21 +1300,21 @@ def _ground_cross_matrix_candidate_search(
         or _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
         or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Cross Matrix 自动组合搜索必须是当前轮立即执行的肯定式命令；"
             "问句、否定、假设、历史/未来描述或句尾撤销不会启动搜索。",
             code="cross_search_positive_command_required",
             fields=("search_intent",),
         )
     if _cross_search_has_positive_follow_up(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只搜索 Cross Matrix 特征组合；构建或选择候选、入池、"
             "应用、采纳和部署必须另发请求。",
             code="cross_search_single_step_required",
             fields=("next_action",),
         )
     if _CROSS_SEARCH_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Cross 自动搜索只接受 features 与 max_pairs；轴方法、候选资产、"
             "artifact/hash、pair/rank/winner 均由平台恢复或计算，不能注入。",
             code="cross_search_platform_binding_forbidden",
@@ -1356,7 +1323,7 @@ def _ground_cross_matrix_candidate_search(
 
     bindings = tuple(_CROSS_SEARCH_FEATURES_RE.finditer(utterance))
     if len(bindings) != 1:
-        return _clarification(
+        return _contracts._clarification(
             "请且只请用 features=[字段1, 字段2, ...] 明确给出 2 到 20 个"
             "候选字段；平台不会从上下文补全或替你选字段。",
             code="cross_search_controls_not_grounded",
@@ -1375,7 +1342,7 @@ def _ground_cross_matrix_candidate_search(
         or len(set(observed_features)) != len(observed_features)
         or any(feature not in whitelist for feature in observed_features)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "features 必须逐字等于当前命令中唯一列表里的 2 到 20 个互不重复"
             "白名单字段；模型不得补写、删减、改序或使用目标列。",
             code="cross_search_controls_not_grounded",
@@ -1387,7 +1354,7 @@ def _ground_cross_matrix_candidate_search(
         for match in _CROSS_SEARCH_MAX_PAIRS_RE.finditer(utterance)
     }
     if observed_max != {int(inputs["max_pairs"])}:
-        return _clarification(
+        return _contracts._clarification(
             "max_pairs 必须在当前命令中明确且唯一写为 1 到 190 的整数；"
             "平台不会让模型补默认预算。",
             code="cross_search_controls_not_grounded",
@@ -1397,15 +1364,15 @@ def _ground_cross_matrix_candidate_search(
 
 def _ground_cross_matrix_candidate_build_from_search(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Ground one exact search/pair pointer pair in an independent turn."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if not _utterance_targets_cross_search_selection(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "请在后续独立请求中提供一个完整 Cross search_id 和一个完整 "
             "pair_id，并明确要求构建候选。",
             code="cross_search_selection_intent_required",
@@ -1416,7 +1383,7 @@ def _ground_cross_matrix_candidate_build_from_search(
         or _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
         or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Cross 搜索结果构建必须是当前轮立即执行的肯定式单步命令；"
             "问句、否定、假设、历史/未来描述或句尾撤销不会构建候选。",
             code="cross_search_selection_positive_command_required",
@@ -1429,21 +1396,21 @@ def _ground_cross_matrix_candidate_build_from_search(
             _CROSS_SEARCH_SELECTION_FOLLOW_UP_RE,
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只能从精确 search_id/pair_id 构建一个 Cross 候选；"
             "重新搜索、入池、设置动作、应用、采纳、部署或写回必须另发请求。",
             code="cross_search_selection_single_step_required",
             fields=("next_action",),
         )
     if _CROSS_SEARCH_SELECTION_HEURISTIC_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "请逐字点名完整 search_id 与 pair_id；即使同时提供 pointer，"
             "平台也不会消费第一名、最好、冠军、Top N、排名或‘刚才那个’。",
             code="cross_search_selection_explicit_ids_required",
             fields=("search_id", "pair_id"),
         )
     if _CROSS_SEARCH_SELECTION_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Cross 搜索结果构建只接受 search_id 与 pair_id；artifact/hash、"
             "轴字段和方法、asset、rank/winner 均由平台重新认证和恢复。",
             code="cross_search_selection_platform_binding_forbidden",
@@ -1458,7 +1425,7 @@ def _ground_cross_matrix_candidate_build_from_search(
         for match in _CROSS_PAIR_ID_TOKEN_RE.finditer(utterance)
     )
     if search_ids != (inputs["search_id"],) or pair_ids != (inputs["pair_id"],):
-        return _clarification(
+        return _contracts._clarification(
             "Cross 搜索结果构建必须逐字提供且只提供一个完整 search_id 与"
             "一个完整 pair_id；平台不会补全、替换、按排名选择或消费代词。",
             code="cross_search_selection_controls_not_grounded",
@@ -1474,17 +1441,17 @@ def _cross_matrix_cell_rationale_is_allowed(reason: str) -> bool:
         reason,
         flags=re.IGNORECASE,
     )
-    return _automatic_tree_leaf_rationale_is_allowed(without_cell_terms)
+    return _tree._automatic_tree_leaf_rationale_is_allowed(without_cell_terms)
 
 def _cross_matrix_cell_has_positive_selection_intent(utterance: str) -> bool:
-    operation_text = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", utterance)
+    operation_text = _tree._AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", utterance)
     operation_text = _CROSS_MATRIX_CELL_NEGATED_FOLLOW_UP_RE.sub(" ", operation_text)
-    for clause in _automatic_tree_follow_up_clauses(operation_text):
+    for clause in _tree._automatic_tree_follow_up_clauses(operation_text):
         for match in _CROSS_MATRIX_CELL_SELECTION_VERB_RE.finditer(clause):
             prefix = clause[: match.start()]
             if re.search(r"(?:不|未|没(?:有)?)\s*$", prefix):
                 continue
-            if not _automatic_tree_follow_up_action_is_negated(
+            if not _tree._automatic_tree_follow_up_action_is_negated(
                 clause,
                 action_start=match.start(),
             ):
@@ -1493,28 +1460,28 @@ def _cross_matrix_cell_has_positive_selection_intent(utterance: str) -> bool:
 
 def _cross_matrix_cell_unconsumed_request_text(utterance: str) -> str:
     remaining = unicodedata.normalize("NFC", utterance)
-    remaining = _AUTOMATIC_TREE_LEAF_NEGATED_REASON_CLAUSE_RE.sub(" ", remaining)
-    remaining = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", remaining)
+    remaining = _tree._AUTOMATIC_TREE_LEAF_NEGATED_REASON_CLAUSE_RE.sub(" ", remaining)
+    remaining = _tree._AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", remaining)
     remaining = _CROSS_MATRIX_CELL_NEGATED_FOLLOW_UP_RE.sub(" ", remaining)
-    remaining = _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.sub(" ", remaining)
+    remaining = _identifiers._AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.sub(" ", remaining)
     remaining = _CROSS_MATRIX_CELL_ID_TOKEN_RE.sub(" ", remaining)
     remaining = _CROSS_MATRIX_CELL_ALLOWED_REQUEST_TOKEN_RE.sub(" ", remaining)
-    remaining = _AUTOMATIC_TREE_LEAF_REQUEST_PUNCTUATION_RE.sub(" ", remaining)
+    remaining = _tree._AUTOMATIC_TREE_LEAF_REQUEST_PUNCTUATION_RE.sub(" ", remaining)
     return " ".join(remaining.split())
 
 def _ground_cross_matrix_cell_selection(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Bind an exact Cross asset and explicit cell set to one pointer operation."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     positive_operation_text = _CROSS_MATRIX_CELL_NEGATED_FOLLOW_UP_RE.sub(
         " ", utterance
     )
-    positive_operation_text = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(
+    positive_operation_text = _tree._AUTOMATIC_TREE_LEAF_REASON_RE.sub(
         " ", positive_operation_text
     )
 
@@ -1524,7 +1491,7 @@ def _ground_cross_matrix_cell_selection(
         or _CROSS_MATRIX_CELL_HEURISTIC_CONTROL_RE.search(positive_operation_text)
         is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请从完整 Cross Matrix 结果中复制明确的 cell ID；不能按排名、"
             "极值、风险描述或指标阈值替你选择格子。",
             code="cross_matrix_cell_selection_ambiguous",
@@ -1535,7 +1502,7 @@ def _ground_cross_matrix_cell_selection(
         is not None
         or not _cross_matrix_cell_has_positive_selection_intent(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话没有明确授权一次正向的 Cross Matrix 单元格选择；否定式或仅"
             "描述 ID 的请求不会创建 pointer。请明确说出完整 Cross asset ID 和"
             "要选择的全部 cell ID。",
@@ -1543,34 +1510,34 @@ def _ground_cross_matrix_cell_selection(
             fields=("selection_intent",),
         )
 
-    reason_values = _automatic_tree_leaf_all_reason_values(utterance)
-    explicit_reasons = _automatic_tree_leaf_explicit_reasons(utterance)
+    reason_values = _tree._automatic_tree_leaf_all_reason_values(utterance)
+    explicit_reasons = _tree._automatic_tree_leaf_explicit_reasons(utterance)
     if any(
-        _AUTOMATIC_TREE_LEAF_REASON_REPLACEMENT_RE.search(reason) is not None
+        _tree._AUTOMATIC_TREE_LEAF_REASON_REPLACEMENT_RE.search(reason) is not None
         for reason in reason_values
     ):
-        return _clarification(
+        return _contracts._clarification(
             "一条请求只能给出一个最终 selection_reason；理由中不能嵌套理由"
             "字段或替换指令。",
             code="cross_matrix_cell_reason_not_grounded",
             fields=("selection_reason",),
         )
     if any(
-        _AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE.search(reason) is not None
+        _tree._AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE.search(reason) is not None
         or _CROSS_MATRIX_CELL_HEURISTIC_CONTROL_RE.search(reason) is not None
         for reason in reason_values
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 不能包含指标极值、排名或阈值选格语义。请只保留"
             "人工明确选择依据。",
             code="cross_matrix_cell_selection_ambiguous",
             fields=("cell_ids", "selection_reason"),
         )
     if any(
-        _AUTOMATIC_TREE_LEAF_REASON_FORBIDDEN_OPERATION_RE.search(reason) is not None
+        _tree._AUTOMATIC_TREE_LEAF_REASON_FORBIDDEN_OPERATION_RE.search(reason) is not None
         for reason in reason_values
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 不能藏入 Strategy Pool、业务动作、采纳、部署或"
             "写回请求；这些操作必须拆成后续请求。",
             code="cross_matrix_cell_single_step_required",
@@ -1578,11 +1545,11 @@ def _ground_cross_matrix_cell_selection(
         )
     if any(
         not _cross_matrix_cell_rationale_is_allowed(reason)
-        or _AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE.search(reason)
+        or _tree._AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE.search(reason)
         is not None
         for reason in explicit_reasons
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 必须是人工/业务/风险/合规/样本评审依据类短说明，"
             "不能包含命中客户、业务动作、策略池或生产操作。",
             code="cross_matrix_cell_reason_not_grounded",
@@ -1595,20 +1562,20 @@ def _ground_cross_matrix_cell_selection(
     if any(
         pattern.search(active_follow_up_text) is not None
         for pattern in (
-            _AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE,
-            _AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE,
-            _AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE,
-            _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
+            _tree._AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE,
+            _tree._AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE,
+            _tree._AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE,
+            _tree._AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只创建 Cross Matrix 单元格选择 pointer；加入 Strategy Pool、"
             "设置业务动作、采纳、部署或写回必须分别发起后续请求。",
             code="cross_matrix_cell_single_step_required",
             fields=("next_action",),
         )
 
-    asset_matches = tuple(_AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance))
+    asset_matches = tuple(_identifiers._AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance))
     cell_matches = tuple(_CROSS_MATRIX_CELL_ID_TOKEN_RE.finditer(utterance))
     asset_ids = frozenset(match.group(0) for match in asset_matches)
     cell_ids = frozenset(match.group(0) for match in cell_matches)
@@ -1621,7 +1588,7 @@ def _ground_cross_matrix_cell_selection(
     ):
         ambiguous_fields.append("cell_ids")
     if ambiguous_fields:
-        return _clarification(
+        return _contracts._clarification(
             "请在同一条请求中逐字提供且只提供一个完整 Cross candidate asset ID"
             "（candidate-asset- 后接 32 位小写十六进制），以及 1 到 400 个"
             "互不重复的完整 cell ID（cross-cell- 后接 32 位小写十六进制）；"
@@ -1636,7 +1603,7 @@ def _ground_cross_matrix_cell_selection(
     if cell_ids != set(inputs["cell_ids"]):
         ungrounded.append("cell_ids")
     if ungrounded:
-        return _clarification(
+        return _contracts._clarification(
             "模型草案中的 Cross asset 或 cell ID 与用户原话不一致。平台不会"
             "替换、补全、排序选择或猜测 ID。",
             code="cross_matrix_cell_controls_not_grounded",
@@ -1649,7 +1616,7 @@ def _ground_cross_matrix_cell_selection(
         or not isinstance(selection_reason, str)
         or selection_reason != explicit_reasons[0]
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 必须与用户以‘选择理由/理由/原因/说明’显式给出的"
             "唯一理由完全一致；未给理由时模型必须省略。",
             code="cross_matrix_cell_reason_not_grounded",
@@ -1657,7 +1624,7 @@ def _ground_cross_matrix_cell_selection(
         )
 
     if _cross_matrix_cell_unconsumed_request_text(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只接受一次明确的 Cross Matrix 单元格 pointer 选择；请求中还有"
             "无法按该单步契约解释的内容。请把入池、动作、采纳、部署或写回拆成"
             "后续请求。",

@@ -1,70 +1,46 @@
-"""core request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Core request grammar and grounding rules."""
 from __future__ import annotations
 
-# imports for names re-exported by the original module __all__
-from marvis.agent.strategy_workflows import LEGACY_REPLAY_STANDARD_STRATEGY_WORKFLOWS  # noqa: F401, F811
-from marvis.agent.strategy_workflows._univariate_scorecard import UNIVARIATE_BINNING_METHODS  # noqa: F401, F811
-from marvis.agent.strategy_workflows._univariate_scorecard import UNIVARIATE_REFINEMENT_METHODS  # noqa: F401, F811
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
 import json
 import logging
 import math
 import re
-from types import MappingProxyType
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
+
 from marvis.agent.json_reply import load_json_object
-from marvis.agent.strategy_workflows import FRESH_STANDARD_STRATEGY_WORKFLOWS, REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS, StrategyWorkflowResolutionContext, StrategyWorkflowResolutionMode, StrategyWorkflowValidationError, migrated_workflow_confirmation, resolve_strategy_request as resolve_standard_strategy_workflow
-from marvis.llm_prompts import SAMPLE_DESIGN_V2_CORRECTION_SYS, STRATEGY_REQUEST_COMPILER_SYS
-from marvis.packs.strategy.candidate_design import CANDIDATE_DESIGN_SCHEMA_VERSION, CandidateDesignError, normalize_candidate_design, normalize_candidate_economics_inputs
+from marvis.agent.strategy_workflows import (
+    FRESH_STANDARD_STRATEGY_WORKFLOWS,
+    REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS,
+    StrategyWorkflowResolutionContext,
+    StrategyWorkflowResolutionMode,
+    StrategyWorkflowValidationError,
+    migrated_workflow_confirmation,
+)
+from marvis.agent.strategy_workflows import (
+    resolve_strategy_request as resolve_standard_strategy_workflow,
+)
+from marvis.llm_prompts import (
+    SAMPLE_DESIGN_V2_CORRECTION_SYS,
+    STRATEGY_REQUEST_COMPILER_SYS,
+)
+from marvis.packs.strategy.candidate_design import (
+    CANDIDATE_DESIGN_SCHEMA_VERSION,
+    CandidateDesignError,
+    normalize_candidate_design,
+    normalize_candidate_economics_inputs,
+)
 from marvis.packs.strategy.dsl import parse_strategy_spec
 from marvis.packs.strategy.errors import StrategyError
 from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import SAMPLE_DESIGN_V2_CORRECTION_JSON_SCHEMA
-    from . import _AUTOMATIC_TREE_APPLY_TARGET_RE
-    from . import _AUTOMATIC_TREE_BEST_LEAF_RE
-    from . import _AUTOMATIC_TREE_COLUMN_ROLE_LABELS
-    from . import _AUTOMATIC_TREE_DECISION_ARTIFACT_RE
-    from . import _AUTOMATIC_TREE_DECISION_EFFECT_RE
-    from . import _AUTOMATIC_TREE_DIRECTION_GROUNDING
-    from . import _AUTOMATIC_TREE_FOLLOW_UP_ACTION_ANCHOR_RE
-    from . import _AUTOMATIC_TREE_HEURISTIC_LEAF_FOLLOW_UP_RE
-    from . import _AUTOMATIC_TREE_LEAF_DECISION_FOLLOW_UP_RE
-    from . import _AUTOMATIC_TREE_LEAF_FOLLOW_UP_RE
-    from . import _AUTOMATIC_TREE_LEAF_ID_WRITEBACK_RE
-    from . import _AUTOMATIC_TREE_LEAF_TOKEN_RE
-    from . import _AUTOMATIC_TREE_LIFECYCLE_FOLLOW_UP_RE
-    from . import _AUTOMATIC_TREE_MULTI_STEP_RE
-    from . import _AUTOMATIC_TREE_NODE_EXTRACT_FOLLOW_UP_RE
-    from . import _AUTOMATIC_TREE_NODE_RANK_FOLLOW_UP_RE
-    from . import _AUTOMATIC_TREE_NODE_SELECT_FOLLOW_UP_RE
-    from . import _AUTOMATIC_TREE_NUMBER_LABELS
-    from . import _AUTOMATIC_TREE_POOL_FOLLOW_UP_RE
-    from . import _AUTOMATIC_TREE_REVERSED_BEST_LEAF_RE
-    from . import _POOL_ACTION_GROUNDING
-    from . import _VOTING_COMMAND_CLAUSE_RE
-    from . import _VOTING_SEARCH_INTENT_RE
-    from . import _VOTING_SUBJECT_RE
-    from . import _automatic_tree_column_mentions
-    from . import _automatic_tree_feature_span_is_negated
-    from . import _automatic_tree_follow_up_action_is_negated
-    from . import _automatic_tree_follow_up_clauses
-    from . import _automatic_tree_number_values
-    from . import _automatic_tree_segment
-    from . import _automatic_tree_span_is_negated
-    from . import _automatic_tree_span_overlaps_columns
-    from . import _automatic_tree_value_is_replaced
-    from . import _ground_refinement_request
-    from . import _voting_search_text_has_positive_follow_up
-    from . import utterance_targets_strategy_sample_design
+from . import contracts as _contracts
+from . import refinement_report as _refinement_report
+from . import sample_design as _sample_design
 
 _SYSTEM = STRATEGY_REQUEST_COMPILER_SYS.text
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("marvis.agent.strategy_request_compiler")
 
 STRATEGY_OPERATIONS = (
     "develop",
@@ -93,125 +69,11 @@ STRATEGY_REQUEST_KINDS = (
 
 STANDARD_STRATEGY_WORKFLOWS = FRESH_STANDARD_STRATEGY_WORKFLOWS
 
-AUTOMATIC_TREE_DIRECTIONS = (
-    "increasing",
-    "decreasing",
-    "unordered",
-)
-
-_CANDIDATE_STABILITY_ASSET_ID_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}(?![A-Za-z0-9_-])"
-)
-
-_CANDIDATE_STABILITY_POOL_ENTRY_ID_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])pool-entry-[0-9a-f]{32}(?![A-Za-z0-9_-])"
-)
-
-_CANDIDATE_STABILITY_SUBJECT_RE = re.compile(
-    r"(?:候选(?:资产|规则)?|策略池(?:条目|规则)|Pool\s*(?:entry|条目)|"
-    r"candidate(?:\s+asset)?|candidate-asset-|pool-entry-)",
-    re.IGNORECASE,
-)
-
-_CANDIDATE_STABILITY_MEASUREMENT_RE = re.compile(
-    r"(?:逐月|按月|月度|跨月)[^；;。.!?？\n]{0,40}"
-    r"(?:稳定性|分布稳定|PSI)|"
-    r"(?:稳定性|分布稳定|PSI)[^；;。.!?？\n]{0,40}"
-    r"(?:逐月|按月|月度|跨月)|"
-    r"(?<![A-Za-z0-9_])monthly[^;.!?\n]{0,40}"
-    r"(?:stability|PSI)|"
-    r"(?<![A-Za-z0-9_])(?:stability|PSI)[^;.!?\n]{0,40}"
-    r"monthly(?![A-Za-z0-9_])",
-    re.IGNORECASE,
-)
-
-_CANDIDATE_STABILITY_ACTION_RE = re.compile(
-    r"(?:做|计算|测算|分析|评估|检查|生成|查看)|"
-    r"(?<![A-Za-z0-9_])(?:compute|calculate|measure|analy[sz]e|"
-    r"assess|evaluate|check|build|show)(?![A-Za-z0-9_])",
-    re.IGNORECASE,
-)
-
-_CANDIDATE_STABILITY_NOT_AUTHORIZED_RE = re.compile(
-    r"[?？]|(?:不要|不用|无需|别|禁止|取消|先不|暂不|"
-    r"能否|可否|是否|可以吗|能不能|如何|怎么|怎样|假设|假如|如果|"
-    r"以后|未来|将来|稍后|明天|下周|下月|之前|此前|过去|上次)|"
-    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+you|"
-    r"could\s+you|would\s+you|how\s+to|what\s+if|later|tomorrow|"
-    r"previously|in\s+the\s+future)(?![A-Za-z0-9_])",
-    re.IGNORECASE,
-)
-
-_CANDIDATE_STABILITY_SECOND_OPERATION_RE = re.compile(
-    r"(?:入池|加入(?:策略)?池|删除|移除|改动作|重排|编译|"
-    r"写回|回写|生成报告|形成报告|出报告|采纳|采用|部署|上线|投产)|"
-    r"(?<![A-Za-z0-9_])(?:add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|"
-    r"remove|delete|reorder|compile|write[-\s]*back|"
-    r"generate\s+(?:a\s+)?report|adopt|deploy|go[-\s]?live)"
-    r"(?![A-Za-z0-9_])",
-    re.IGNORECASE,
-)
-
-_CANDIDATE_STABILITY_PLATFORM_CONTROL_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:source_kind|source_artifact_id|"
-    r"expected_(?:artifact_)?content_hash|expected_asset_(?:id|hash)|"
-    r"expected_pool_(?:revision|snapshot_hash)|dataset_id|"
-    r"expected_dataset_content_hash|workspace_(?:revision|generation)|"
-    r"analysis_generation|semantic_mapping_hash|sample_design_ref|"
-    r"target_col|month_col)(?![A-Za-z0-9_])|"
-    r"(?:artifact|数据集|workspace|工作区|样本设计|月份列)"
-    r"\s*(?:ID|id|hash|哈希|revision|版本|字段|列)\s*(?:=|:|：)",
-    re.IGNORECASE,
-)
-
 _STRATEGY_REPLY_MAX_CHARS = 100_000
 
 _STRATEGY_REPLY_MAX_DEPTH = 64
 
 _STRATEGY_REPLY_MAX_NODES = 10_000
-
-_STRATEGY_POOL_WORKFLOWS = frozenset(
-    {
-        "strategy_pool_add_candidate",
-        "strategy_pool_remove_entry",
-        "strategy_pool_set_action",
-        "strategy_pool_reorder",
-        "strategy_pool_compile",
-    }
-)
-
-_STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
-
-_STRATEGY_POOL_APPLY_WORKFLOWS = frozenset({"strategy_pool_apply"})
-
-_STRATEGY_POOL_MATERIALIZE_WORKFLOWS = frozenset(
-    {"strategy_pool_materialize"}
-)
-
-_STRATEGY_POOL_VALIDATION_WORKFLOWS = frozenset(
-    {"strategy_pool_validation"}
-)
-
-_REFINEMENT_SELECTION_ACTION_RE = re.compile(
-    r"(?:选择|选中|保留|筛选|作为|select|keep|retain)", re.IGNORECASE
-)
-
-_REFINEMENT_MERGE_ACTION_RE = re.compile(r"(?:合并|并箱|merge|combine)", re.IGNORECASE)
-
-_RISK_THRESHOLD_EXPRESSION_RE = re.compile(
-    r"(?:观测)?(?:坏率|坏账率|风险率|bad\s*rate|risk\s*rate)"
-    r"\s*(?:为|是|需|需要|应|must\s+be|is)?\s*"
-    r"(?P<operator>大于等于|不低于|至少|不少于|达到|>=|≥|"
-    r"小于等于|不高于|至多|最多|<=|≤|"
-    r"大于|高于|超过|>|小于|低于|少于|<|"
-    r"greater\s+than\s+or\s+equal(?:\s+to)?|at\s+least|"
-    r"less\s+than\s+or\s+equal(?:\s+to)?|at\s+most|"
-    r"more\s+than|greater\s+than|less\s+than)"
-    r"\s*(?P<value>百分之\s*[0-9]+(?:\.[0-9]+)?|"
-    r"[0-9]+(?:\.[0-9]+)?\s*%|"
-    r"(?:0(?:\.\d+)?|1(?:\.0+)?))",
-    re.IGNORECASE,
-)
 
 _OPTIONAL_DRAFT_FIELDS = {
     "objective",
@@ -557,160 +419,6 @@ STRATEGY_REQUEST_JSON_SCHEMA = {
     },
 }
 
-@dataclass(frozen=True)
-class StrategyRequestDraft(Mapping[str, Any]):
-    """Canonical, platform-validated strategy request draft."""
-
-    operation: str
-    strategy_type: str
-    objective: str | None = None
-    max_bad_rate: float | None = None
-    min_approval_rate: float | None = None
-    baseline_strategy_id: str | None = None
-    strategy_id: str | None = None
-    adoption_reason: str | None = None
-    profit: Mapping[str, Any] | None = None
-    economics_inputs: Mapping[str, Any] | None = None
-    candidate_design: Mapping[str, Any] | None = None
-    strategy_spec: Mapping[str, Any] | None = None
-
-    @property
-    def request_kind(self) -> str:
-        return "strategy_lifecycle"
-
-    def __post_init__(self) -> None:
-        if self.profit is not None:
-            object.__setattr__(self, "profit", _deep_freeze(self.profit))
-        if self.economics_inputs is not None:
-            object.__setattr__(
-                self,
-                "economics_inputs",
-                _deep_freeze(self.economics_inputs),
-            )
-        if self.candidate_design is not None:
-            object.__setattr__(
-                self,
-                "candidate_design",
-                _deep_freeze(self.candidate_design),
-            )
-        if self.strategy_spec is not None:
-            object.__setattr__(
-                self,
-                "strategy_spec",
-                _deep_freeze(self.strategy_spec),
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "operation": self.operation,
-            "strategy_type": self.strategy_type,
-        }
-        for field_name in (
-            "objective",
-            "max_bad_rate",
-            "min_approval_rate",
-            "baseline_strategy_id",
-            "strategy_id",
-            "adoption_reason",
-            "profit",
-            "economics_inputs",
-            "candidate_design",
-            "strategy_spec",
-        ):
-            value = getattr(self, field_name)
-            if value is not None:
-                payload[field_name] = _deep_thaw(value)
-        return payload
-
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.to_dict())
-
-    def __len__(self) -> int:
-        return len(self.to_dict())
-
-@dataclass(frozen=True)
-class StandardWorkflowRequestDraft(Mapping[str, Any]):
-    """Canonical request for a built-in, deterministic strategy analysis."""
-
-    workflow: str
-    workflow_inputs: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "workflow_inputs",
-            _deep_freeze(self.workflow_inputs),
-        )
-
-    @property
-    def request_kind(self) -> str:
-        return "standard_workflow"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "request_kind": self.request_kind,
-            "workflow": self.workflow,
-            "workflow_inputs": _deep_thaw(self.workflow_inputs),
-        }
-
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.to_dict())
-
-    def __len__(self) -> int:
-        return len(self.to_dict())
-
-CompiledStrategyRequestDraft = StrategyRequestDraft | StandardWorkflowRequestDraft
-
-@dataclass(frozen=True)
-class StrategyRequestCompilation:
-    """A validated draft awaiting confirmation, or a Chinese clarification."""
-
-    draft: CompiledStrategyRequestDraft | None
-    clarification: str | None
-    confirmation: str | None
-    clarification_code: str | None = None
-    clarification_fields: tuple[str, ...] = ()
-
-    @property
-    def validated_draft(self) -> CompiledStrategyRequestDraft | None:
-        return self.draft
-
-    @property
-    def clarify(self) -> str | None:
-        return self.clarification
-
-    @property
-    def confirmation_text(self) -> str | None:
-        return self.confirmation
-
-    @property
-    def needs_clarification(self) -> bool:
-        return self.draft is None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = {
-            "draft": None if self.draft is None else self.draft.to_dict(),
-            "clarification": self.clarification,
-            "confirmation": self.confirmation,
-        }
-        if self.clarification_code is not None:
-            payload["clarification_code"] = self.clarification_code
-        if self.clarification_fields:
-            payload["clarification_fields"] = list(self.clarification_fields)
-        return payload
-
-@dataclass(frozen=True)
-class _ValidationOutcome:
-    result: StrategyRequestCompilation
-    accepted: bool
-    error: str | None = None
-
 def compile_strategy_request(
     utterance: str,
     *,
@@ -718,14 +426,14 @@ def compile_strategy_request(
     target_col: str | None = None,
     llm,
     caller: str = "strategy_request_compiler",
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Compile one utterance with bounded semantic and format correction."""
 
     if not isinstance(utterance, str) or not utterance.strip():
-        return _clarification("请说明希望执行的策略操作和策略类型。")
+        return _contracts._clarification("请说明希望执行的策略操作和策略类型。")
     normalized_utterance = utterance.strip()
     if _COLLECTION_STRATEGY_RE.search(normalized_utterance):
-        return _clarification(
+        return _contracts._clarification(
             "催收动作策略尚无已评审的动作、成本、产能和回收口径，"
             "当前不能映射为审批、拒绝或分群策略。请说明是否只需要风险分层分析。",
             code="collection_strategy_unsupported",
@@ -737,7 +445,7 @@ def compile_strategy_request(
     try:
         raw = _complete(llm, prompt=prompt, caller=caller)
     except Exception:
-        return _clarification(
+        return _contracts._clarification(
             "当前暂时无法解析策略请求，请稍后重试或直接说明操作、策略类型和策略对象。"
         )
     outcome = _validate_reply(
@@ -748,7 +456,7 @@ def compile_strategy_request(
         attempt_kind="initial",
     )
     if outcome.accepted:
-        grounded = _ground_refinement_request(
+        grounded = _refinement_report._ground_refinement_request(
             normalized_utterance,
             outcome.result,
             whitelist=whitelist,
@@ -779,12 +487,12 @@ def compile_strategy_request(
                 repaired_outcome.accepted
                 and isinstance(
                     repaired_outcome.result.draft,
-                    StandardWorkflowRequestDraft,
+                    _contracts.StandardWorkflowRequestDraft,
                 )
                 and repaired_outcome.result.draft.workflow == "roll_rate_matrix"
             ):
                 return grounded
-            return _ground_refinement_request(
+            return _refinement_report._ground_refinement_request(
                 normalized_utterance,
                 repaired_outcome.result,
                 whitelist=whitelist,
@@ -805,7 +513,7 @@ def compile_strategy_request(
                 caller=caller,
             )
         return grounded
-    if utterance_targets_strategy_sample_design(normalized_utterance):
+    if _sample_design.utterance_targets_strategy_sample_design(normalized_utterance):
         return _correct_sample_design_v2_request(
             llm,
             utterance=normalized_utterance,
@@ -837,7 +545,7 @@ def compile_strategy_request(
         attempt_kind="generic_repair",
     )
     if repaired_outcome.accepted:
-        return _ground_refinement_request(
+        return _refinement_report._ground_refinement_request(
             normalized_utterance,
             repaired_outcome.result,
             whitelist=whitelist,
@@ -851,7 +559,7 @@ def validate_strategy_request(
     allowed_columns: Iterable[str] | None,
     target_col: str | None = None,
     allow_legacy_replay: bool = False,
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Validate an already parsed request without invoking an LLM.
 
     Fresh callers intentionally cannot emit the retired V1 sample workflow.
@@ -866,11 +574,11 @@ def validate_strategy_request(
     ).result
 
 def strategy_request_confirmation_text(
-    draft: CompiledStrategyRequestDraft,
+    draft: _contracts.CompiledStrategyRequestDraft,
 ) -> str:
     """Render a plain-Chinese echo of the request before any workflow runs."""
 
-    if isinstance(draft, StandardWorkflowRequestDraft):
+    if isinstance(draft, _contracts.StandardWorkflowRequestDraft):
         return _standard_workflow_confirmation_text(draft)
 
     operation = _OPERATION_LABELS[draft.operation]
@@ -938,7 +646,7 @@ def _strategy_spec_confirmation(strategy_spec: Mapping[str, Any]) -> str:
 
 def _compact_json(value: object) -> str:
     return json.dumps(
-        _deep_thaw(value),
+        _contracts._deep_thaw(value),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -1033,7 +741,7 @@ def _complete_sample_design_v2_correction(
         user_prompt=prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
-        json_schema=SAMPLE_DESIGN_V2_CORRECTION_JSON_SCHEMA,
+        json_schema=_sample_design.SAMPLE_DESIGN_V2_CORRECTION_JSON_SCHEMA,
         max_tokens=8192,
         stream=False,
         caller=caller,
@@ -1049,7 +757,7 @@ def _correct_sample_design_v2_request(
     target_col: str | None,
     error: str,
     caller: str,
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     repair_prompt = _sample_design_v2_correction_prompt(
         utterance,
         whitelist=whitelist,
@@ -1064,7 +772,7 @@ def _correct_sample_design_v2_request(
             caller=caller,
         )
     except Exception:
-        return _clarification(
+        return _contracts._clarification(
             "当前暂时无法纠正 SampleDesign V2 请求，请稍后重试或补充完整样本口径。"
         )
     repaired_outcome = _validate_reply(
@@ -1077,7 +785,7 @@ def _correct_sample_design_v2_request(
     if repaired_outcome.accepted:
         if repaired_outcome.result.draft is None:
             return repaired_outcome.result
-        return _ground_refinement_request(
+        return _refinement_report._ground_refinement_request(
             utterance,
             repaired_outcome.result,
             whitelist=whitelist,
@@ -1118,7 +826,7 @@ def _correct_sample_design_v2_request(
     if format_repaired_outcome.accepted:
         if format_repaired_outcome.result.draft is None:
             return format_repaired_outcome.result
-        return _ground_refinement_request(
+        return _refinement_report._ground_refinement_request(
             utterance,
             format_repaired_outcome.result,
             whitelist=whitelist,
@@ -1239,9 +947,9 @@ def _validate_reply(
     target_col: str | None,
     caller: str,
     attempt_kind: str,
-) -> _ValidationOutcome:
+) -> _contracts._ValidationOutcome:
     if isinstance(raw, str) and len(raw) > _STRATEGY_REPLY_MAX_CHARS:
-        return _invalid(
+        return _contracts._invalid(
             "模型返回的策略草案过长，请缩小为一个明确的策略操作。",
             code="strategy_request_too_complex",
             fields=("reply",),
@@ -1254,7 +962,7 @@ def _validate_reply(
             attempt_kind=attempt_kind,
         )
         message = "模型返回的策略草案不是有效 JSON 对象，请重新说明策略请求。"
-        return _ValidationOutcome(_clarification(message), False, error or message)
+        return _contracts._ValidationOutcome(_contracts._clarification(message), False, error or message)
     return _validate_payload(
         payload,
         whitelist,
@@ -1268,40 +976,40 @@ def _validate_payload(
     *,
     target_col: str | None,
     allow_legacy_replay: bool,
-) -> _ValidationOutcome:
+) -> _contracts._ValidationOutcome:
     if not isinstance(payload, Mapping):
         message = "策略请求必须是 JSON 对象，请重新说明。"
-        return _invalid(message)
+        return _contracts._invalid(message)
     if not _strategy_payload_within_limits(payload):
-        return _invalid(
+        return _contracts._invalid(
             "策略草案嵌套过深或字段过多，请缩小为一个明确的策略操作。",
             code="strategy_request_too_complex",
             fields=("payload",),
         )
     if any(not isinstance(key, str) for key in payload):
-        return _invalid("策略请求的字段名必须是文本，请重新说明。")
+        return _contracts._invalid("策略请求的字段名必须是文本，请重新说明。")
 
     if "clarification" in payload:
         if set(payload) != {"clarification"}:
-            return _invalid("澄清问题不能和策略草案字段同时出现，请重新选择一种输出。")
+            return _contracts._invalid("澄清问题不能和策略草案字段同时出现，请重新选择一种输出。")
         value = payload["clarification"]
         if not isinstance(value, str) or not value.strip():
-            return _invalid("澄清问题必须是非空文本。")
-        return _ValidationOutcome(
-            _clarification(_chinese_clarification(value)),
+            return _contracts._invalid("澄清问题必须是非空文本。")
+        return _contracts._ValidationOutcome(
+            _contracts._clarification(_chinese_clarification(value)),
             True,
         )
 
     request_kind = payload.get("request_kind", "strategy_lifecycle")
     if not isinstance(request_kind, str) or request_kind not in STRATEGY_REQUEST_KINDS:
-        return _invalid(
+        return _contracts._invalid(
             "不支持的 request_kind；只能是 strategy_lifecycle 或 standard_workflow。"
         )
     if request_kind == "standard_workflow":
         unexpected = sorted(set(payload) - _STANDARD_WORKFLOW_DRAFT_FIELDS)
         if unexpected:
             rendered = "、".join(f"「{field}」" for field in unexpected)
-            return _invalid(
+            return _contracts._invalid(
                 f"标准 Workflow 请求包含不支持的字段 {rendered}，请删除后重新说明。"
             )
         return _validate_standard_workflow_payload(
@@ -1314,24 +1022,24 @@ def _validate_payload(
     unexpected = sorted(set(payload) - _LIFECYCLE_DRAFT_FIELDS)
     if unexpected:
         rendered = "、".join(f"「{field}」" for field in unexpected)
-        return _invalid(f"策略请求包含不支持的字段 {rendered}，请删除后重新说明。")
+        return _contracts._invalid(f"策略请求包含不支持的字段 {rendered}，请删除后重新说明。")
     if payload.get("request_kind") not in (None, "strategy_lifecycle"):
-        return _invalid("策略生命周期请求的 request_kind 必须是 strategy_lifecycle。")
+        return _contracts._invalid("策略生命周期请求的 request_kind 必须是 strategy_lifecycle。")
     missing = [
         field for field in ("operation", "strategy_type") if field not in payload
     ]
     if missing:
         rendered = "、".join(missing)
-        return _invalid(f"没有识别到必需字段 {rendered}，请补充策略操作和策略类型。")
+        return _contracts._invalid(f"没有识别到必需字段 {rendered}，请补充策略操作和策略类型。")
 
     operation = payload["operation"]
     if not isinstance(operation, str) or operation not in STRATEGY_OPERATIONS:
-        return _invalid(
+        return _contracts._invalid(
             "不支持的策略操作；可选操作为：" + "、".join(STRATEGY_OPERATIONS) + "。"
         )
     strategy_type = payload["strategy_type"]
     if not isinstance(strategy_type, str) or strategy_type not in STRATEGY_TYPES:
-        return _invalid(
+        return _contracts._invalid(
             "不支持的策略类型；可选类型为：" + "、".join(STRATEGY_TYPES) + "。"
         )
 
@@ -1368,7 +1076,7 @@ def _validate_payload(
                     allowed_columns=whitelist,
                 )
             except CandidateDesignError as exc:
-                raise _DraftValidationError(
+                raise _contracts._DraftValidationError(
                     str(exc),
                     code=exc.code,
                     fields=exc.fields,
@@ -1378,10 +1086,10 @@ def _validate_payload(
             strategy_type=strategy_type,
             whitelist=whitelist,
         )
-    except _DraftValidationError as exc:
-        return _invalid(str(exc), code=exc.code, fields=exc.fields)
+    except _contracts._DraftValidationError as exc:
+        return _contracts._invalid(str(exc), code=exc.code, fields=exc.fields)
 
-    draft = StrategyRequestDraft(
+    draft = _contracts.StrategyRequestDraft(
         operation=operation,
         strategy_type=strategy_type,
         objective=objective,
@@ -1395,12 +1103,12 @@ def _validate_payload(
         candidate_design=candidate_design,
         strategy_spec=strategy_spec,
     )
-    result = StrategyRequestCompilation(
+    result = _contracts.StrategyRequestCompilation(
         draft=draft,
         clarification=None,
         confirmation=strategy_request_confirmation_text(draft),
     )
-    return _ValidationOutcome(result, True)
+    return _contracts._ValidationOutcome(result, True)
 
 def _validate_standard_workflow_payload(
     payload: Mapping[str, Any],
@@ -1408,12 +1116,12 @@ def _validate_standard_workflow_payload(
     *,
     target_col: str | None,
     allow_legacy_replay: bool,
-) -> _ValidationOutcome:
+) -> _contracts._ValidationOutcome:
     missing = [
         field for field in ("workflow", "workflow_inputs") if field not in payload
     ]
     if missing:
-        return _invalid("标准 Workflow 请求缺少字段：" + "、".join(missing) + "。")
+        return _contracts._invalid("标准 Workflow 请求缺少字段：" + "、".join(missing) + "。")
     workflow = payload["workflow"]
     allowed_workflows = (
         REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS
@@ -1421,16 +1129,16 @@ def _validate_standard_workflow_payload(
         else FRESH_STANDARD_STRATEGY_WORKFLOWS
     )
     if not isinstance(workflow, str) or workflow not in allowed_workflows:
-        return _invalid(
+        return _contracts._invalid(
             "不支持的标准 Workflow；可选值为："
             + "、".join(allowed_workflows)
             + "。"
         )
     raw_inputs = payload["workflow_inputs"]
     if not isinstance(raw_inputs, Mapping):
-        return _invalid("workflow_inputs 必须是一个对象。")
+        return _contracts._invalid("workflow_inputs 必须是一个对象。")
     if any(not isinstance(key, str) for key in raw_inputs):
-        return _invalid("workflow_inputs 的字段名必须是文本。")
+        return _contracts._invalid("workflow_inputs 的字段名必须是文本。")
     try:
         resolved = resolve_standard_strategy_workflow(
             workflow,
@@ -1446,14 +1154,14 @@ def _validate_standard_workflow_payload(
             ),
         )
     except StrategyWorkflowValidationError as exc:
-        return _invalid(str(exc), code=exc.code, fields=exc.fields)
+        return _contracts._invalid(str(exc), code=exc.code, fields=exc.fields)
 
-    draft = StandardWorkflowRequestDraft(
+    draft = _contracts.StandardWorkflowRequestDraft(
         workflow=resolved.workflow_id,
         workflow_inputs=resolved.workflow_inputs,
     )
-    return _ValidationOutcome(
-        StrategyRequestCompilation(
+    return _contracts._ValidationOutcome(
+        _contracts.StrategyRequestCompilation(
             draft=draft,
             clarification=None,
             confirmation=resolved.confirmation,
@@ -1461,459 +1169,8 @@ def _validate_standard_workflow_payload(
         True,
     )
 
-def _simple_partition_equality(
-    predicate: Mapping[str, Any],
-    *,
-    name: str,
-) -> tuple[str, object]:
-    if (
-        set(predicate) != {"op", "left", "right"}
-        or predicate.get("op") != "eq"
-        or not isinstance(predicate.get("left"), Mapping)
-        or set(predicate["left"]) != {"column"}
-        or not isinstance(predicate.get("right"), Mapping)
-        or set(predicate["right"]) != {"literal"}
-    ):
-        raise _DraftValidationError(
-            f"{name} 当前必须是 column == literal 的简单等值 predicate。",
-            code="strategy_sample_design_v2_native_bootstrap_required",
-            fields=(name,),
-        )
-    literal = predicate["right"]["literal"]
-    if literal is None or isinstance(
-        literal, Mapping | Sequence
-    ) and not isinstance(literal, str):
-        raise _DraftValidationError(
-            f"{name} literal 必须是非空标量。",
-            fields=(name,),
-        )
-    return str(predicate["left"]["column"]), literal
-
-def _utterance_chains_voting_search_operation(utterance: str) -> bool:
-    """Detect a positive lifecycle follow-up even without a connector word."""
-
-    search_seen = False
-    for clause_match in _VOTING_COMMAND_CLAUSE_RE.finditer(utterance):
-        clause = clause_match.group(0)
-        if not search_seen:
-            search_match = _VOTING_SEARCH_INTENT_RE.search(clause)
-            search_seen = (
-                _VOTING_SUBJECT_RE.search(clause) is not None
-                and search_match is not None
-            )
-            if search_seen and search_match is not None:
-                if _voting_search_text_has_positive_follow_up(
-                    clause[: search_match.start()]
-                ) or _voting_search_text_has_positive_follow_up(
-                    clause[search_match.end() :]
-                ):
-                    return True
-            continue
-        if _voting_search_text_has_positive_follow_up(clause):
-            return True
-    return False
-
-def _is_canonical_stored_strategy_report_request(
-    draft: CompiledStrategyRequestDraft | None,
-) -> bool:
-    """Keep a fully identified stored-strategy report on its legacy route."""
-
-    return bool(
-        isinstance(draft, StrategyRequestDraft)
-        and draft.operation == "report"
-        and draft.strategy_spec is None
-        and draft.strategy_id
-    )
-
-_ROLL_RATE_COLUMN_ROLE_LABELS = {
-    "id_col": (
-        r"(?:(?:客户|账户|借据)\s*(?:ID|id|编号)\s*(?:字段|列)?|"
-        r"(?<![A-Za-z0-9_])id_col(?![A-Za-z0-9_]))"
-    ),
-    "time_col": (
-        r"(?:(?:时间|日期|月份|月龄|MOB|mob)\s*(?:字段|列)?|"
-        r"(?<![A-Za-z0-9_])time_col(?![A-Za-z0-9_]))"
-    ),
-    "status_col": (
-        r"(?:(?:迁徙)?状态\s*(?:字段|列)?|"
-        r"(?<![A-Za-z0-9_])status_col(?![A-Za-z0-9_]))"
-    ),
-    "balance_col": (
-        r"(?:(?:余额(?:权重)?|金额权重)\s*(?:字段|列)?|"
-        r"(?<![A-Za-z0-9_])balance_col(?![A-Za-z0-9_]))"
-    ),
-}
-
-def _utterance_targets_automatic_tree_apply(utterance: str) -> bool:
-    """Recognize full-tree dataset writeback without stealing build/leaf turns."""
-
-    return _AUTOMATIC_TREE_APPLY_TARGET_RE.search(utterance) is not None
-
-def _utterance_requests_automatic_tree_follow_up(utterance: str) -> bool:
-    follow_up_patterns = (
-        _AUTOMATIC_TREE_MULTI_STEP_RE,
-        _AUTOMATIC_TREE_BEST_LEAF_RE,
-        _AUTOMATIC_TREE_REVERSED_BEST_LEAF_RE,
-        _AUTOMATIC_TREE_LEAF_FOLLOW_UP_RE,
-        _AUTOMATIC_TREE_POOL_FOLLOW_UP_RE,
-        _AUTOMATIC_TREE_LEAF_DECISION_FOLLOW_UP_RE,
-        _AUTOMATIC_TREE_HEURISTIC_LEAF_FOLLOW_UP_RE,
-        _AUTOMATIC_TREE_NODE_RANK_FOLLOW_UP_RE,
-        _AUTOMATIC_TREE_NODE_SELECT_FOLLOW_UP_RE,
-        _AUTOMATIC_TREE_NODE_EXTRACT_FOLLOW_UP_RE,
-        _AUTOMATIC_TREE_LIFECYCLE_FOLLOW_UP_RE,
-        _AUTOMATIC_TREE_LEAF_ID_WRITEBACK_RE,
-        _AUTOMATIC_TREE_DECISION_ARTIFACT_RE,
-    )
-    for clause in _automatic_tree_follow_up_clauses(utterance):
-        leaf_matches = tuple(_AUTOMATIC_TREE_LEAF_TOKEN_RE.finditer(clause))
-        effect_matches = tuple(_AUTOMATIC_TREE_DECISION_EFFECT_RE.finditer(clause))
-        if leaf_matches:
-            for effect_match in effect_matches:
-                if not _automatic_tree_follow_up_action_is_negated(
-                    clause,
-                    action_start=effect_match.start(),
-                ):
-                    return True
-        for pattern in follow_up_patterns:
-            for match in pattern.finditer(clause):
-                anchor = _AUTOMATIC_TREE_FOLLOW_UP_ACTION_ANCHOR_RE.search(
-                    clause,
-                    match.start(),
-                    match.end(),
-                )
-                action_start = anchor.start() if anchor is not None else match.start()
-                if not _automatic_tree_follow_up_action_is_negated(
-                    clause,
-                    action_start=action_start,
-                ):
-                    return True
-    return False
-
-def _utterance_supports_automatic_tree_feature(
-    utterance: str,
-    feature: str,
-    *,
-    whitelist: Sequence[str],
-) -> bool:
-    if any(
-        _utterance_supports_automatic_tree_column_role(
-            utterance,
-            field=field,
-            column=feature,
-            whitelist=whitelist,
-        )
-        for field in _AUTOMATIC_TREE_COLUMN_ROLE_LABELS
-    ):
-        return False
-    mentions = tuple(
-        (start, end)
-        for start, end, column in _automatic_tree_column_mentions(
-            utterance,
-            whitelist,
-        )
-        if column == feature
-    )
-    cue_pattern = re.compile(
-        r"特征|候选变量|入模变量|自变量|features?|构建|"
-        r"建(?:一棵)?(?:自动)?(?:决策)?树|build|tree",
-        re.IGNORECASE,
-    )
-    blocker_pattern = re.compile(
-        "|".join(
-            f"(?:{pattern})"
-            for pattern in (
-                *_AUTOMATIC_TREE_COLUMN_ROLE_LABELS.values(),
-                *_AUTOMATIC_TREE_NUMBER_LABELS.values(),
-            )
-        ),
-        re.IGNORECASE,
-    )
-    for start, end in mentions:
-        if _automatic_tree_feature_span_is_negated(
-            utterance,
-            start=start,
-            end=end,
-        ):
-            continue
-        segment, _, _ = _automatic_tree_segment(
-            utterance,
-            start=start,
-            end=end,
-            separators=("，", ",", "；", ";", "。", "\n"),
-        )
-        if cue_pattern.search(segment) is not None:
-            return True
-        sentence, sentence_left, _ = _automatic_tree_segment(
-            utterance,
-            start=start,
-            end=end,
-            separators=("；", ";", "。", "\n"),
-        )
-        feature_start = start - sentence_left
-        feature_end = end - sentence_left
-        for cue in cue_pattern.finditer(sentence):
-            between = (
-                sentence[cue.end() : feature_start]
-                if cue.end() <= feature_start
-                else sentence[feature_end : cue.start()]
-            )
-            if blocker_pattern.search(between) is None:
-                return True
-    return False
-
-def _utterance_supports_automatic_tree_column_role(
-    utterance: str,
-    *,
-    field: str,
-    column: str,
-    whitelist: Sequence[str],
-) -> bool:
-    label = _AUTOMATIC_TREE_COLUMN_ROLE_LABELS[field]
-    resolved_mentions = tuple(
-        (start, end)
-        for start, end, resolved_column in _automatic_tree_column_mentions(
-            utterance,
-            whitelist,
-        )
-        if resolved_column == column
-    )
-    if not resolved_mentions:
-        return False
-    column_pattern = rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])"
-    paired = re.compile(
-        rf"(?:(?:{label})\s*(?:[:：=]|为|是|使用|用|取|设为)?\s*"
-        rf"{column_pattern}|"
-        rf"{column_pattern}\s*(?:作为|是|为|用作|设为)\s*(?:{label}))",
-        re.IGNORECASE,
-    )
-    for match in paired.finditer(utterance):
-        if not any(
-            match.start() <= start and end <= match.end()
-            for start, end in resolved_mentions
-        ):
-            continue
-        if not _automatic_tree_span_is_negated(
-            utterance,
-            start=match.start(),
-            end=match.end(),
-        ) and not _automatic_tree_value_is_replaced(utterance, end=match.end()):
-            return True
-    replacement = re.compile(
-        rf"(?:{label})\s*(?:[:：=]|为|是|使用|用|取|设为)?\s*"
-        r"(?:从|由)?\s*[^\s，,；;。]+\s*"
-        r"(?:改为|改成|调整为|替换为|而非|不是而是)\s*"
-        rf"{column_pattern}",
-        re.IGNORECASE,
-    )
-    return any(
-        any(
-            match.start() <= start and end <= match.end()
-            for start, end in resolved_mentions
-        )
-        and not _automatic_tree_span_is_negated(
-            utterance,
-            start=match.start(),
-            end=match.end(),
-        )
-        for match in replacement.finditer(utterance)
-    )
-
-def _utterance_supports_automatic_tree_direction(
-    utterance: str,
-    *,
-    feature: str,
-    direction: str,
-    column_spans: Sequence[tuple[int, int]],
-    whitelist: Sequence[str],
-) -> bool:
-    feature_mentions = tuple(
-        (start, end)
-        for start, end, column in _automatic_tree_column_mentions(
-            utterance,
-            whitelist,
-        )
-        if column == feature
-    )
-    for feature_start, feature_end in feature_mentions:
-        segment, left, _ = _automatic_tree_segment(
-            utterance,
-            start=feature_start,
-            end=feature_end,
-            separators=("，", ",", "、", "；", ";", "。", "\n"),
-        )
-        feature_center = (feature_start + feature_end) / 2 - left
-        candidates: list[tuple[float, str]] = []
-        for candidate_direction, pattern in _AUTOMATIC_TREE_DIRECTION_GROUNDING.items():
-            for direction_match in re.finditer(pattern, segment, re.IGNORECASE):
-                absolute_start = left + direction_match.start()
-                absolute_end = left + direction_match.end()
-                if _automatic_tree_span_overlaps_columns(
-                    absolute_start,
-                    absolute_end,
-                    column_spans,
-                ) or _automatic_tree_span_is_negated(
-                    utterance,
-                    start=absolute_start,
-                    end=absolute_end,
-                ):
-                    continue
-                replacement = segment[
-                    direction_match.end() : direction_match.end() + 16
-                ]
-                if re.match(r"\s*(?:改为|改成|调整为|而非|不是而是)", replacement):
-                    continue
-                direction_center = (direction_match.start() + direction_match.end()) / 2
-                candidates.append(
-                    (abs(direction_center - feature_center), candidate_direction)
-                )
-        if not candidates:
-            continue
-        nearest_distance = min(distance for distance, _ in candidates)
-        nearest = {
-            candidate_direction
-            for distance, candidate_direction in candidates
-            if math.isclose(
-                distance,
-                nearest_distance,
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            )
-        }
-        if nearest == {direction}:
-            return True
-    return False
-
-def _utterance_supports_automatic_tree_number(
-    utterance: str,
-    *,
-    field: str,
-    value: object,
-    column_spans: Sequence[tuple[int, int]],
-) -> bool:
-    expected = float(value)
-    return any(
-        math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-12)
-        for observed in _automatic_tree_number_values(
-            utterance,
-            field=field,
-            column_spans=column_spans,
-        )
-    )
-
-def _ungrounded_pool_actions(
-    utterance: str,
-    *actions: Mapping[str, Any],
-) -> list[str]:
-    missing: list[str] = []
-    for action in actions:
-        action_type = str(action.get("type") or "")
-        pattern = _POOL_ACTION_GROUNDING.get(action_type)
-        if pattern is None or pattern.search(utterance) is None:
-            missing.append(f"typed action {action_type or 'unknown'}")
-        reason_code = action.get("reason_code")
-        if isinstance(reason_code, str) and not _utterance_contains_token(
-            utterance, reason_code
-        ):
-            missing.append(reason_code)
-        if action_type in {"limit", "pricing", "segment"} and not (
-            _utterance_contains_pool_action_value(utterance, action.get("value"))
-        ):
-            missing.append(f"typed action value {action.get('value')}")
-        output_value = action.get("output_value")
-        if output_value is not None and not _utterance_contains_pool_action_value(
-            utterance, output_value
-        ):
-            missing.append(f"typed action output_value {output_value}")
-    return missing
-
-def _utterance_contains_pool_action_value(utterance: str, value: object) -> bool:
-    candidates = {str(value)}
-    try:
-        candidates.add(
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-        )
-    except (TypeError, ValueError):
-        return False
-    folded = utterance.casefold()
-    return any(candidate.casefold() in folded for candidate in candidates)
-
-def _utterance_supports_risk_threshold(
-    utterance: str,
-    *,
-    operator: str,
-    value: float,
-) -> bool:
-    return any(
-        candidate_operator == operator
-        and math.isclose(candidate_value, value, rel_tol=0.0, abs_tol=1e-12)
-        for candidate_operator, candidate_value in _risk_threshold_expressions(
-            utterance
-        )
-    )
-
-def _utterance_contains_token(utterance: str, token: str) -> bool:
-    pattern = rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])"
-    return re.search(pattern, utterance) is not None
-
-def _risk_threshold_expressions(utterance: str) -> tuple[tuple[str, float], ...]:
-    expressions: list[tuple[str, float]] = []
-    for match in _RISK_THRESHOLD_EXPRESSION_RE.finditer(utterance):
-        expressions.append(
-            (
-                _normalized_threshold_operator(match.group("operator")),
-                _ratio_token_value(match.group("value")),
-            )
-        )
-    return tuple(expressions)
-
-def _normalized_threshold_operator(value: str) -> str:
-    normalized = re.sub(r"\s+", " ", value.strip().lower())
-    if normalized in {
-        "大于等于",
-        "不低于",
-        "至少",
-        "不少于",
-        "达到",
-        ">=",
-        "≥",
-        "greater than or equal",
-        "greater than or equal to",
-        "at least",
-    }:
-        return ">="
-    if normalized in {
-        "小于等于",
-        "不高于",
-        "至多",
-        "最多",
-        "<=",
-        "≤",
-        "less than or equal",
-        "less than or equal to",
-        "at most",
-    }:
-        return "<="
-    if normalized in {"大于", "高于", "超过", ">", "more than", "greater than"}:
-        return ">"
-    return "<"
-
-def _ratio_token_value(value: str) -> float:
-    normalized = re.sub(r"\s+", "", value)
-    if normalized.startswith("百分之"):
-        return float(normalized[len("百分之") :]) / 100.0
-    if normalized.endswith("%"):
-        return float(normalized[:-1]) / 100.0
-    return float(normalized)
-
 def _standard_workflow_confirmation_text(
-    draft: StandardWorkflowRequestDraft,
+    draft: _contracts.StandardWorkflowRequestDraft,
 ) -> str:
     confirmation = migrated_workflow_confirmation(
         draft.workflow,
@@ -1923,24 +1180,12 @@ def _standard_workflow_confirmation_text(
         raise ValueError(f"unsupported standard workflow {draft.workflow}")
     return confirmation
 
-class _DraftValidationError(ValueError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str = "invalid_strategy_request",
-        fields: Iterable[str] = (),
-    ) -> None:
-        super().__init__(message)
-        self.code = code
-        self.fields = tuple(dict.fromkeys(str(field) for field in fields))
-
 def _optional_text(payload: Mapping[str, Any], key: str) -> str | None:
     if key not in payload:
         return None
     value = payload[key]
     if not isinstance(value, str) or not value.strip():
-        raise _DraftValidationError(f"{key} 必须是非空文本，请重新说明。")
+        raise _contracts._DraftValidationError(f"{key} 必须是非空文本，请重新说明。")
     return value.strip()
 
 def _optional_ratio(payload: Mapping[str, Any], key: str) -> float | None:
@@ -1948,10 +1193,10 @@ def _optional_ratio(payload: Mapping[str, Any], key: str) -> float | None:
         return None
     value = payload[key]
     if isinstance(value, bool) or not isinstance(value, int | float):
-        raise _DraftValidationError(f"{key} 必须是 0 到 1 之间的有限数字。")
+        raise _contracts._DraftValidationError(f"{key} 必须是 0 到 1 之间的有限数字。")
     number = float(value)
     if not math.isfinite(number) or not 0 <= number <= 1:
-        raise _DraftValidationError(f"{key} 必须是 0 到 1 之间的有限数字。")
+        raise _contracts._DraftValidationError(f"{key} 必须是 0 到 1 之间的有限数字。")
     return number
 
 def _optional_adoption_reason(payload: Mapping[str, Any]) -> str | None:
@@ -1960,7 +1205,7 @@ def _optional_adoption_reason(payload: Mapping[str, Any]) -> str | None:
     try:
         return normalize_adoption_reason(payload["adoption_reason"])
     except AdoptionReasonError as exc:
-        raise _DraftValidationError(str(exc)) from exc
+        raise _contracts._DraftValidationError(str(exc)) from exc
 
 def _optional_profit(
     payload: Mapping[str, Any], whitelist: tuple[str, ...]
@@ -1969,22 +1214,22 @@ def _optional_profit(
         return None
     profit = payload["profit"]
     if not isinstance(profit, Mapping):
-        raise _DraftValidationError("利润参数 profit 必须是一个对象。")
+        raise _contracts._DraftValidationError("利润参数 profit 必须是一个对象。")
     if any(not isinstance(key, str) for key in profit):
-        raise _DraftValidationError("利润参数字段名必须是文本。")
+        raise _contracts._DraftValidationError("利润参数字段名必须是文本。")
     missing = sorted(_PROFIT_FIELDS - set(profit))
     unexpected = sorted(set(profit) - _PROFIT_FIELDS)
     if missing:
-        raise _DraftValidationError("利润参数缺少字段：" + "、".join(missing) + "。")
+        raise _contracts._DraftValidationError("利润参数缺少字段：" + "、".join(missing) + "。")
     if unexpected:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "利润参数包含不支持的字段：" + "、".join(unexpected) + "。"
         )
     ead_col = _required_text(profit["ead_col"], name="利润 EAD 列 ead_col")
     pd_col = _required_text(profit["pd_col"], name="利润 PD 列 pd_col")
     for name, column in (("ead_col", ead_col), ("pd_col", pd_col)):
         if column not in whitelist:
-            raise _DraftValidationError(
+            raise _contracts._DraftValidationError(
                 f"利润参数 {name} 使用了数据集中不存在的列「{column}」，请从列白名单选择。"
             )
     annual_rate = _bounded_number(
@@ -2004,7 +1249,7 @@ def _optional_profit(
         or not isinstance(term_months, int)
         or term_months < 1
     ):
-        raise _DraftValidationError("利润 term_months 必须是大于等于 1 的整数。")
+        raise _contracts._DraftValidationError("利润 term_months 必须是大于等于 1 的整数。")
     return {
         "ead_col": ead_col,
         "pd_col": pd_col,
@@ -2019,12 +1264,12 @@ def _validate_economics_field_ownership(
     payload: Mapping[str, Any], *, strategy_type: str
 ) -> None:
     if "profit" in payload and strategy_type not in {"approval", "reject"}:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "profit 只适用于审批或拒绝策略；额度和定价策略请使用 economics_inputs，"
             "分群策略不接受经济参数。"
         )
     if "economics_inputs" in payload and strategy_type not in {"limit", "pricing"}:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "economics_inputs 只适用于额度或定价策略；审批和拒绝策略请使用 profit，"
             "分群策略不接受经济参数。"
         )
@@ -2038,7 +1283,7 @@ def _validate_candidate_field_ownership(
     has_candidate = "candidate_design" in payload
     has_spec = "strategy_spec" in payload
     if has_candidate and has_spec:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "candidate_design 与 strategy_spec 必须二选一；LLM 不得同时提交候选输入和规则结果。",
             code="candidate_spec_mutually_exclusive",
             fields=("candidate_design", "strategy_spec"),
@@ -2047,13 +1292,13 @@ def _validate_candidate_field_ownership(
         operation != "develop"
         or strategy_type not in {"limit", "pricing", "segmentation"}
     ):
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "candidate_design 只适用于 limit、pricing、segmentation 的 develop 请求。",
             code="candidate_design_not_allowed",
             fields=("candidate_design",),
         )
     if has_spec and strategy_type in {"limit", "pricing", "segmentation"}:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "非审批策略的 Strategy DSL 必须由平台候选设计工具确定性生成；"
             "LLM 不得提交 strategy_spec、动作值或推荐结果。",
             code="llm_strategy_spec_forbidden",
@@ -2064,7 +1309,7 @@ def _validate_candidate_field_ownership(
         and strategy_type in {"limit", "pricing", "segmentation"}
         and not has_candidate
     ):
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             f"开发{_TYPE_LABELS[strategy_type]}需要 candidate_design；"
             "请补充候选列、候选网格和必要业务约束，平台再确定性生成规则。",
             code="candidate_design_required",
@@ -2081,9 +1326,9 @@ def _optional_economics_inputs(
         return None
     raw_inputs = payload["economics_inputs"]
     if not isinstance(raw_inputs, Mapping):
-        raise _DraftValidationError("经济参数 economics_inputs 必须是一个对象。")
+        raise _contracts._DraftValidationError("经济参数 economics_inputs 必须是一个对象。")
     if any(not isinstance(key, str) for key in raw_inputs):
-        raise _DraftValidationError("经济参数 economics_inputs 的字段名必须是文本。")
+        raise _contracts._DraftValidationError("经济参数 economics_inputs 的字段名必须是文本。")
 
     names = (
         _LIMIT_ECONOMICS_NAMES if strategy_type == "limit" else _PRICING_ECONOMICS_NAMES
@@ -2091,7 +1336,7 @@ def _optional_economics_inputs(
     allowed_fields = {key for name in names for key in (f"{name}_col", f"{name}_value")}
     unexpected = sorted(set(raw_inputs) - allowed_fields)
     if unexpected:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             f"{_TYPE_LABELS[strategy_type]}经济参数包含不支持的字段："
             + "、".join(unexpected)
             + "。"
@@ -2105,7 +1350,7 @@ def _optional_economics_inputs(
         has_column = column_key in raw_inputs
         has_value = value_key in raw_inputs
         if has_column and has_value:
-            raise _DraftValidationError(
+            raise _contracts._DraftValidationError(
                 f"经济参数 {name} 必须在 {column_key} 和 {value_key} 中二选一，不能同时提供。",
                 code="candidate_economics_ambiguous",
                 fields=(column_key, value_key),
@@ -2119,7 +1364,7 @@ def _optional_economics_inputs(
                 name=f"经济参数 {column_key}",
             )
             if column not in whitelist:
-                raise _DraftValidationError(
+                raise _contracts._DraftValidationError(
                     f"经济参数 {column_key} 使用了数据集中不存在或不可用于策略的列"
                     f"「{column}」，请从列白名单选择。"
                 )
@@ -2128,7 +1373,7 @@ def _optional_economics_inputs(
         normalized[value_key] = _economics_value(name, raw_inputs[value_key])
 
     if missing:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             f"{_TYPE_LABELS[strategy_type]}经济参数不完整，缺少："
             + "、".join(missing)
             + "。",
@@ -2142,7 +1387,7 @@ def _economics_value(name: str, value: object) -> float:
     if name == "term_months":
         number = _bounded_number(value, name=f"经济参数 {label}")
         if number <= 0:
-            raise _DraftValidationError(f"经济参数 {label} 必须是大于 0 的有限数字。")
+            raise _contracts._DraftValidationError(f"经济参数 {label} 必须是大于 0 的有限数字。")
         return number
     return _bounded_number(
         value,
@@ -2150,7 +1395,7 @@ def _economics_value(name: str, value: object) -> float:
         maximum=_ECONOMICS_VALUE_MAXIMUMS.get(name),
     )
 
-def _economics_confirmation(draft: StrategyRequestDraft) -> str:
+def _economics_confirmation(draft: _contracts.StrategyRequestDraft) -> str:
     assert draft.economics_inputs is not None
     names = (
         _LIMIT_ECONOMICS_NAMES
@@ -2174,7 +1419,7 @@ def _economics_confirmation(draft: StrategyRequestDraft) -> str:
                 items.append(f"{label} 取固定值 {value:g}")
     return f"{_TYPE_LABELS[draft.strategy_type]}经济参数：" + "，".join(items)
 
-def _candidate_design_confirmation(draft: StrategyRequestDraft) -> str:
+def _candidate_design_confirmation(draft: _contracts.StrategyRequestDraft) -> str:
     assert draft.candidate_design is not None
     design = draft.candidate_design
     if draft.strategy_type == "limit":
@@ -2212,7 +1457,7 @@ def _optional_candidate_design(
     if "candidate_design" not in payload:
         return None
     if operation != "develop":
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "candidate_design 只适用于 develop 请求。",
             code="candidate_design_not_allowed",
             fields=("candidate_design",),
@@ -2224,7 +1469,7 @@ def _optional_candidate_design(
             allowed_columns=whitelist,
         )
     except CandidateDesignError as exc:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             str(exc),
             code=exc.code,
             fields=exc.fields,
@@ -2239,27 +1484,27 @@ def _optional_strategy_spec(
     if "strategy_spec" not in payload:
         return None
     if strategy_type not in {"approval", "reject"}:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "非审批策略的 strategy_spec 必须由平台确定性生成，LLM 不得提交。",
             code="llm_strategy_spec_forbidden",
             fields=("strategy_spec",),
         )
     raw_spec = payload["strategy_spec"]
     if not isinstance(raw_spec, Mapping):
-        raise _DraftValidationError("策略规则草案 strategy_spec 必须是一个对象。")
+        raise _contracts._DraftValidationError("策略规则草案 strategy_spec 必须是一个对象。")
     raw_metadata = raw_spec.get("metadata", {})
     if raw_metadata not in ({}, {"lineage": {}}):
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "策略规则草案 metadata 由平台生成，LLM 不得写入指标结果或其他元数据。"
         )
     try:
         parsed = parse_strategy_spec(raw_spec)
     except (StrategyError, TypeError, ValueError) as exc:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "策略规则草案格式或取值无效，请检查规则条件、优先级和动作。"
         ) from exc
     if parsed.strategy_type != strategy_type:
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             "strategy_spec 的 strategy_type 必须与请求中的策略类型一致。"
         )
     unknown_columns = sorted(
@@ -2272,7 +1517,7 @@ def _optional_strategy_spec(
     )
     if unknown_columns:
         rendered = "、".join(f"「{column}」" for column in unknown_columns)
-        raise _DraftValidationError(
+        raise _contracts._DraftValidationError(
             f"策略条件使用了数据集中不存在的列 {rendered}，请从列白名单选择。"
         )
     return parsed.to_dict()
@@ -2291,27 +1536,9 @@ def _condition_fields(condition: Mapping[str, Any]) -> tuple[str, ...]:
         return _condition_fields(condition["arg"])
     return ()
 
-def _deep_freeze(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _deep_freeze(item) for key, item in value.items()}
-        )
-    if isinstance(value, Sequence) and not isinstance(
-        value, str | bytes | bytearray
-    ):
-        return tuple(_deep_freeze(item) for item in value)
-    return value
-
-def _deep_thaw(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _deep_thaw(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_deep_thaw(item) for item in value]
-    return value
-
 def _required_text(value: object, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise _DraftValidationError(f"{name} 必须是非空文本。")
+        raise _contracts._DraftValidationError(f"{name} 必须是非空文本。")
     return value.strip()
 
 def _bounded_number(
@@ -2321,7 +1548,7 @@ def _bounded_number(
     maximum: float | None = None,
 ) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
-        raise _DraftValidationError(f"{name} 必须是有限数字。")
+        raise _contracts._DraftValidationError(f"{name} 必须是有限数字。")
     number = float(value)
     if (
         not math.isfinite(number)
@@ -2329,8 +1556,8 @@ def _bounded_number(
         or (maximum is not None and number > maximum)
     ):
         if maximum is None:
-            raise _DraftValidationError(f"{name} 必须是大于等于 0 的有限数字。")
-        raise _DraftValidationError(f"{name} 必须是 0 到 {maximum:g} 之间的有限数字。")
+            raise _contracts._DraftValidationError(f"{name} 必须是大于等于 0 的有限数字。")
+        raise _contracts._DraftValidationError(f"{name} 必须是 0 到 {maximum:g} 之间的有限数字。")
     return number
 
 def _column_whitelist(
@@ -2648,32 +1875,6 @@ def _repair_prompt(prompt: str, *, raw: object, error: str) -> str:
         f"上一次输出：{raw_text}\n"
         "这是唯一一次修复机会。请删除未知字段、修正类型/范围/列名；"
         "不能确定时只返回中文 clarification。仍然禁止输出任何指标结果。"
-    )
-
-def _invalid(
-    message: str,
-    *,
-    code: str = "invalid_strategy_request",
-    fields: Iterable[str] = (),
-) -> _ValidationOutcome:
-    return _ValidationOutcome(
-        _clarification(message, code=code, fields=fields),
-        False,
-        message,
-    )
-
-def _clarification(
-    message: str,
-    *,
-    code: str = "clarification_required",
-    fields: Iterable[str] = (),
-) -> StrategyRequestCompilation:
-    return StrategyRequestCompilation(
-        draft=None,
-        clarification=message,
-        confirmation=None,
-        clarification_code=code,
-        clarification_fields=tuple(dict.fromkeys(str(field) for field in fields)),
     )
 
 def _chinese_clarification(message: str) -> str:

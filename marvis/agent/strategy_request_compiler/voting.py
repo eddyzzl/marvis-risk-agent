@@ -1,15 +1,10 @@
-"""voting request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Voting request grammar and grounding rules."""
 from __future__ import annotations
+
 import re
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _POOL_STRATEGY_TYPE_GROUNDING
-    from . import _clarification
-    from . import _utterance_chains_voting_search_operation
+from . import contracts as _contracts
+from . import grounding as _grounding
 
 _VOTING_RULE_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])candidate-rule-[0-9a-f]{32}(?![A-Za-z0-9_-])"
@@ -599,15 +594,6 @@ def _voting_positive_command_clause_spans(
             )
     return tuple(spans)
 
-def _voting_strategy_type_mentions(
-    utterance: str,
-) -> tuple[tuple[str, int, int], ...]:
-    return tuple(
-        (strategy_type, match.start(), match.end())
-        for strategy_type, pattern in _POOL_STRATEGY_TYPE_GROUNDING.items()
-        for match in pattern.finditer(utterance)
-    )
-
 def _voting_n_mentions(
     utterance: str,
 ) -> tuple[tuple[int, int | None, int, int], ...]:
@@ -637,15 +623,15 @@ def _voting_mention_is_within(
 
 def _ground_voting_candidate_search(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Prove every search control came from this immediate user request."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if not _utterance_targets_voting_candidate_search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "请明确要求搜索、查找或优化当前 Strategy Pool 的 Voting / n-of-k 组合。",
             code="voting_search_intent_required",
             fields=("search_intent",),
@@ -655,21 +641,21 @@ def _ground_voting_candidate_search(
         or _VOTING_NONCOMMAND_RE.search(utterance) is not None
         or _VOTING_POSTPOSED_CANCELLATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Voting 组合搜索必须是当前轮立即执行的肯定式命令；问句、"
             "否定、假设、历史/未来描述或句尾撤销不会启动搜索。",
             code="voting_search_positive_command_required",
             fields=("search_intent",),
         )
     if _utterance_chains_voting_search_operation(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只搜索 Voting 组合；构建候选、选择组合、修改或加入 "
             "Strategy Pool、应用、采纳和部署必须另发请求。",
             code="voting_search_single_step_required",
             fields=("next_action",),
         )
     if _VOTING_SEARCH_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Voting 搜索的 Pool ref、dataset/target、逐行命中矩阵、权重、"
             "金额向量和 artifact 身份只能由平台绑定，请删除这些控制。",
             code="voting_search_platform_binding_forbidden",
@@ -678,10 +664,10 @@ def _ground_voting_candidate_search(
 
     expected_type = str(inputs["strategy_type"])
     observed_types = {
-        value for value, _start, _end in _voting_strategy_type_mentions(utterance)
+        value for value, _start, _end in _grounding._voting_strategy_type_mentions(utterance)
     }
     if observed_types != {expected_type}:
-        return _clarification(
+        return _contracts._clarification(
             "请在当前搜索命令中明确且唯一标注 Strategy Pool 类型；"
             "平台不会替用户选择策略类型。",
             code="voting_search_strategy_type_not_grounded",
@@ -691,7 +677,7 @@ def _ground_voting_candidate_search(
     expected_member_count = int(inputs["member_count"])
     observed_member_counts = _voting_search_member_counts(utterance)
     if observed_member_counts != {expected_member_count}:
-        return _clarification(
+        return _contracts._clarification(
             "请明确且唯一给出每个 Voting 组合的 K/member_count（2 到 50）。",
             code="voting_search_member_count_not_grounded",
             fields=("member_count",),
@@ -704,7 +690,7 @@ def _ground_voting_candidate_search(
     if observed_ns != {expected_n} or (
         explicit_ks and explicit_ks != {expected_member_count}
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请明确且唯一给出 n，并保证显式 n-of-k/“K 选 n”中的 K "
             "与 member_count 一致。",
             code="voting_search_n_not_grounded",
@@ -717,7 +703,7 @@ def _ground_voting_candidate_search(
         str(inputs["objective"]["direction"]),
     )
     if observed_objectives != {expected_objective}:
-        return _clarification(
+        return _contracts._clarification(
             "请在“目标”标签后明确且唯一写出 objective metric 与 "
             "maximize/minimize 方向。",
             code="voting_search_objective_not_grounded",
@@ -734,7 +720,7 @@ def _ground_voting_candidate_search(
         for item in inputs["constraints"]
     }
     if observed_constraints != expected_constraints:
-        return _clarification(
+        return _contracts._clarification(
             "Voting 搜索 constraints 只能逐项采用当前原话明确的 "
             "metric、gte/lte 与数值；未提供时固定为空。",
             code="voting_search_constraints_not_grounded",
@@ -752,7 +738,7 @@ def _ground_voting_candidate_search(
         or exclude_ids != expected_exclude
         or all_rule_ids != all_labeled_ids
     ):
-        return _clarification(
+        return _contracts._clarification(
             "include/exclude 只接受当前请求在对应标签后逐字给出的完整 "
             "candidate-rule ID；代词、未标注 ID、遗漏或补写均不会消费。",
             code="voting_search_rule_controls_not_grounded",
@@ -767,7 +753,7 @@ def _ground_voting_candidate_search(
     if (observed_max and observed_max != {expected_max}) or (
         not observed_max and expected_max != 10_000
     ):
-        return _clarification(
+        return _contracts._clarification(
             "max_combinations 只能采用当前原话唯一明确的 1..10000 整数；"
             "未提供时固定为 10000。",
             code="voting_search_budget_not_grounded",
@@ -900,15 +886,15 @@ def _voting_search_rule_controls(
 
 def _ground_voting_candidate_build_from_search(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Ground one exact search/combo pointer pair in the current command."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if not _utterance_targets_voting_search_selection(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "请明确要求从一个完整 Voting search_id 和一个完整 combo_id "
             "构建或物化候选。",
             code="voting_search_selection_intent_required",
@@ -919,7 +905,7 @@ def _ground_voting_candidate_build_from_search(
         or _VOTING_NONCOMMAND_RE.search(utterance) is not None
         or _VOTING_POSTPOSED_CANCELLATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Voting 搜索结果构建必须是当前轮立即执行的肯定式单步命令；问句、"
             "否定、假设、历史/未来描述或句尾撤销不会构建候选。",
             code="voting_search_selection_positive_command_required",
@@ -929,14 +915,14 @@ def _ground_voting_candidate_build_from_search(
         _voting_search_selection_has_positive_research(utterance)
         or _voting_search_selection_has_positive_follow_up(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只从精确 search_id/combo_id 构建 Voting 候选；加入或修改 "
             "Strategy Pool、设置动作、应用、采纳、部署和写回必须另发请求。",
             code="voting_search_selection_single_step_required",
             fields=("next_action",),
         )
     if _VOTING_SEARCH_SELECTION_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Voting 搜索结果构建只接受 search_id、combo_id 与可选 strategy_type；"
             "artifact/hash、rule/entry/member IDs、n 和 rank 均由平台重新恢复，"
             "不能由自然语言注入。",
@@ -944,7 +930,7 @@ def _ground_voting_candidate_build_from_search(
             fields=("platform_binding",),
         )
     if _VOTING_SEARCH_SELECTION_HEURISTIC_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "请逐字点名完整 search_id 与 combo_id；即使同时提供 pointer，平台也"
             "不会消费第一名、最好、冠军、Top N、排名或‘刚才那个’等启发式选择。",
             code="voting_search_selection_explicit_ids_required",
@@ -957,21 +943,21 @@ def _ground_voting_candidate_build_from_search(
         match.group(0) for match in _VOTING_COMBO_ID_TOKEN_RE.finditer(utterance)
     )
     if search_ids != (inputs["search_id"],) or combo_ids != (inputs["combo_id"],):
-        return _clarification(
+        return _contracts._clarification(
             "Voting 搜索结果构建必须逐字提供且只提供一个完整 search_id 与一个"
             "完整 combo_id；平台不会补全、替换、按排名选择或消费代词。",
             code="voting_search_selection_controls_not_grounded",
             fields=("search_id", "combo_id"),
         )
     observed_types = {
-        value for value, _start, _end in _voting_strategy_type_mentions(utterance)
+        value for value, _start, _end in _grounding._voting_strategy_type_mentions(utterance)
     }
     expected_type = inputs.get("strategy_type")
     if (
         expected_type is not None
         and observed_types != {expected_type}
     ) or (expected_type is None and observed_types):
-        return _clarification(
+        return _contracts._clarification(
             "可选 strategy_type 只能逐字采用当前请求中唯一明确的 Strategy Pool "
             "类型；未明确时模型必须省略并由平台唯一解析。",
             code="voting_search_selection_strategy_type_not_grounded",
@@ -981,15 +967,15 @@ def _ground_voting_candidate_build_from_search(
 
 def _ground_voting_candidate_build(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Prove the exact rule set and n came from one positive user command."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if _VOTING_NEGATED_BUILD_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "原话否定了 Voting 候选构建，本轮不会生成候选。"
             "如需继续，请重新给出一条明确的正向构建请求。",
             code="voting_candidate_build_intent_negated",
@@ -999,7 +985,7 @@ def _ground_voting_candidate_build(
         _VOTING_NONCOMMAND_RE.search(utterance) is not None
         or _VOTING_POSTPOSED_CANCELLATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "当前原话是问句、假设/未来/历史描述、演示性文本或已在句尾撤销，"
             "不能视为立即执行 Voting 构建的唯一正向命令。请单独重述本次要构建的"
             "策略池类型、完整 rule_id 列表和唯一 n-of-k 阈值。",
@@ -1008,14 +994,14 @@ def _ground_voting_candidate_build(
         )
     command_spans = _voting_positive_command_clause_spans(utterance)
     if not command_spans:
-        return _clarification(
+        return _contracts._clarification(
             "请明确说出要构建或测算一个 Voting / n-of-k 候选，并在同一条"
             "请求中给出策略池类型、完整 rule_id 列表和 n。",
             code="voting_candidate_build_intent_required",
             fields=("build_intent",),
         )
     if len(command_spans) != 1:
-        return _clarification(
+        return _contracts._clarification(
             "一次请求只能包含一个立即执行的 Voting 构建/评估子句；"
             "请把每组 rule_id 与 n-of-k 控制拆成独立请求。",
             code="voting_candidate_single_command_required",
@@ -1023,7 +1009,7 @@ def _ground_voting_candidate_build(
         )
     command_span = command_spans[0]
     if _VOTING_HEURISTIC_SELECTION_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "Voting 构建必须逐字点名当前 Strategy Pool 中的完整 rule_id；"
             "不能让模型按最好、风险最高、刚才那些等表述自动选择规则。",
             code="voting_candidate_explicit_rules_required",
@@ -1033,14 +1019,14 @@ def _ground_voting_candidate_build(
         _VOTING_FOLLOW_UP_RE.search(utterance) is not None
         or _VOTING_OTHER_POOL_OPERATION_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只生成并测算 Voting 候选；删除、重排、编译、加入 "
             "Strategy Pool、设置业务动作、采纳、部署或写回必须另发请求。",
             code="voting_candidate_single_step_required",
             fields=("next_action",),
         )
     if _VOTING_NEGATED_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "本轮 Voting 控制中含有被否定、排除或随后改写的 rule_id/n；"
             "请重新给出不含历史值和否定值的一组完整 rule_id 与唯一 n。",
             code="voting_candidate_negated_control",
@@ -1048,7 +1034,7 @@ def _ground_voting_candidate_build(
         )
 
     rule_matches = tuple(_VOTING_RULE_ID_TOKEN_RE.finditer(utterance))
-    strategy_type_mentions = _voting_strategy_type_mentions(utterance)
+    strategy_type_mentions = _grounding._voting_strategy_type_mentions(utterance)
     n_mentions = _voting_n_mentions(utterance)
     if (
         any(
@@ -1064,7 +1050,7 @@ def _ground_voting_candidate_build(
             for _n, _k, start, end in n_mentions
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Voting 的策略池类型、完整 rule_id 与 n-of-k 必须全部位于唯一"
             "正向构建子句中；历史、引用、否定或其他子句中的控制不会被消费。",
             code="voting_candidate_controls_outside_command",
@@ -1078,7 +1064,7 @@ def _ground_voting_candidate_build(
         or set(observed_rule_ids) != set(expected_rule_ids)
         or len(observed_rule_ids) != len(expected_rule_ids)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请逐字提供 2 到 50 个互不重复的完整 candidate-rule ID；"
             "模型不能补全、替换、遗漏或从代词推断规则。",
             code="voting_candidate_rules_not_grounded",
@@ -1090,7 +1076,7 @@ def _ground_voting_candidate_build(
         candidate for candidate, _start, _end in strategy_type_mentions
     }
     if observed_strategy_types != {strategy_type}:
-        return _clarification(
+        return _contracts._clarification(
             "请显式且唯一标注 Voting 来源 Strategy Pool 的类型；存在缺失、多个"
             "类型或与结构化草案不一致时，平台不会替用户选择 approval/reject/"
             "limit/pricing/segmentation。",
@@ -1109,7 +1095,7 @@ def _ground_voting_candidate_build(
             for _value, supplied_k in n_bindings
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请明确且唯一给出与规则数量一致的 n-of-k 命中阈值，例如“n=2”"
             "或“3 选 2”；多个阈值、错误的 k 或草案不一致时平台不会替用户选择。",
             code="voting_candidate_n_not_grounded",
@@ -1124,3 +1110,27 @@ def _voting_n_bindings(utterance: str) -> tuple[tuple[int, int | None], ...]:
         if binding not in bindings:
             bindings.append(binding)
     return tuple(bindings)
+
+def _utterance_chains_voting_search_operation(utterance: str) -> bool:
+    """Detect a positive lifecycle follow-up even without a connector word."""
+
+    search_seen = False
+    for clause_match in _VOTING_COMMAND_CLAUSE_RE.finditer(utterance):
+        clause = clause_match.group(0)
+        if not search_seen:
+            search_match = _VOTING_SEARCH_INTENT_RE.search(clause)
+            search_seen = (
+                _VOTING_SUBJECT_RE.search(clause) is not None
+                and search_match is not None
+            )
+            if search_seen and search_match is not None:
+                if _voting_search_text_has_positive_follow_up(
+                    clause[: search_match.start()]
+                ) or _voting_search_text_has_positive_follow_up(
+                    clause[search_match.end() :]
+                ):
+                    return True
+            continue
+        if _voting_search_text_has_positive_follow_up(clause):
+            return True
+    return False

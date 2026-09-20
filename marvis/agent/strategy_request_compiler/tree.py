@@ -1,44 +1,14 @@
-"""tree request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Tree request grammar and grounding rules."""
 from __future__ import annotations
-from collections.abc import Sequence
+
 import math
 import re
 import unicodedata
+from collections.abc import Sequence
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import AUTOMATIC_TREE_DIRECTIONS
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _SCORECARD_SECOND_OPERATION_RE
-    from . import _clarification
-    from . import _ratio_token_value
-    from . import _utterance_requests_automatic_tree_follow_up
-    from . import _utterance_supports_automatic_tree_column_role
-    from . import _utterance_supports_automatic_tree_direction
-    from . import _utterance_supports_automatic_tree_feature
-    from . import _utterance_supports_automatic_tree_number
-
-_AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])automatic-tree-leaf-selection-[0-9a-f]{32}"
-    r"(?![A-Za-z0-9_-])"
-)
-
-_INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])interactive-tree-frontier-selection-[0-9a-f]{32}"
-    r"(?![A-Za-z0-9_-])"
-)
-
-_INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])"
-    r"interactive-tree-frontier-group-selection-[0-9a-f]{32}"
-    r"(?![A-Za-z0-9_-])"
-)
-
-_AUTOMATIC_TREE_ASSET_ID_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}(?![A-Za-z0-9_-])"
-)
+from . import contracts as _contracts
+from . import grounding as _grounding
+from . import identifiers as _identifiers
 
 _INTERACTIVE_TREE_SOURCE_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])"
@@ -808,30 +778,30 @@ _AUTOMATIC_TREE_COLUMN_ROLE_LABELS = {
 
 def _automatic_tree_platform_control_clarification(
     utterance: str,
-) -> StrategyRequestCompilation | None:
+) -> _contracts.StrategyRequestCompilation | None:
     if _AUTOMATIC_TREE_DATASET_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "自动树绑定当前任务的 dataset 与 workspace，本请求不能切换样本。"
             "请先切换 workspace 或创建使用目标样本的新任务，再发起建树。",
             code="automatic_tree_build_dataset_context_required",
             fields=("dataset_id", "workspace_id"),
         )
     if _AUTOMATIC_TREE_TARGET_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "自动树目标列由当前任务上下文绑定，本请求不能覆盖 target_col。"
             "请先在任务中确认或切换标签列，再发起建树。",
             code="automatic_tree_build_target_context_required",
             fields=("target_col",),
         )
     if _AUTOMATIC_TREE_LABEL_POLICY_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "空标签处理策略由平台任务契约绑定，不能在本次自动树请求中覆盖。"
             "请先确认任务的标签清洗口径。",
             code="automatic_tree_build_label_policy_not_overridable",
             fields=("drop_nan_labels",),
         )
     if _AUTOMATIC_TREE_BUDGET_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "自动树执行预算及其默认值由平台治理，不能在本次请求中覆盖；"
             "询问预算默认值也不会创建 build。请使用当前平台预算，或先调整治理配置。",
             code="automatic_tree_build_platform_budget_not_overridable",
@@ -907,7 +877,7 @@ def _automatic_tree_leaf_unconsumed_request_text(utterance: str) -> str:
     remaining = _AUTOMATIC_TREE_LEAF_NEGATED_REASON_CLAUSE_RE.sub(" ", remaining)
     remaining = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", remaining)
     remaining = _AUTOMATIC_TREE_LEAF_NEGATED_CLAUSE_RE.sub(" ", remaining)
-    remaining = _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.sub(" ", remaining)
+    remaining = _identifiers._AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.sub(" ", remaining)
     remaining = _AUTOMATIC_TREE_LEAF_ID_TOKEN_RE.sub(" ", remaining)
     remaining = _AUTOMATIC_TREE_LEAF_ALLOWED_REQUEST_TOKEN_RE.sub(" ", remaining)
     remaining = _AUTOMATIC_TREE_LEAF_REQUEST_PUNCTUATION_RE.sub(" ", remaining)
@@ -915,8 +885,8 @@ def _automatic_tree_leaf_unconsumed_request_text(utterance: str) -> str:
 
 def _ground_automatic_tree_leaf_materialization(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Fail closed unless one exact full-tree asset and leaf were named.
 
     This stage creates only an immutable pointer. It cannot rank/select on
@@ -925,7 +895,7 @@ def _ground_automatic_tree_leaf_materialization(
     """
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     positive_operation_text = _AUTOMATIC_TREE_LEAF_NEGATED_CLAUSE_RE.sub(
         "",
@@ -936,14 +906,14 @@ def _ground_automatic_tree_leaf_materialization(
         _AUTOMATIC_TREE_LEAF_AMBIGUOUS_SELECTION_RE.search(positive_operation_text)
         is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请从完整候选树结果中复制一个明确的 leaf ID；不能按“最好”或"
             "“风险最高”等指标描述替你选择叶节点。",
             code="automatic_tree_leaf_selection_ambiguous",
             fields=("leaf_id",),
         )
     if not _automatic_tree_leaf_has_positive_materialization_intent(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "原话没有明确授权一次正向的叶节点物化；否定式或仅描述 ID 的请求"
             "不会创建 pointer。如需继续，请重新明确说出要物化的完整资产 ID 和"
             "叶节点 ID。",
@@ -956,7 +926,7 @@ def _ground_automatic_tree_leaf_materialization(
         _AUTOMATIC_TREE_LEAF_REASON_REPLACEMENT_RE.search(reason) is not None
         for reason in reason_values
     ):
-        return _clarification(
+        return _contracts._clarification(
             "一条请求只能给出一个最终 selection_reason；理由内容中不能再次嵌套"
             "理由字段或改为/替换指令。请只保留最终理由后重新确认。",
             code="automatic_tree_leaf_reason_not_grounded",
@@ -966,7 +936,7 @@ def _ground_automatic_tree_leaf_materialization(
         _AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE.search(reason) is not None
         for reason in reason_values
     ):
-        return _clarification(
+        return _contracts._clarification(
             "选择理由也不能包含按指标极值、排名或“最好/最差”替用户选择叶节点"
             "的语义。请从完整候选树结果中复制一个人工明确确认的 leaf ID。",
             code="automatic_tree_leaf_selection_ambiguous",
@@ -976,7 +946,7 @@ def _ground_automatic_tree_leaf_materialization(
         _AUTOMATIC_TREE_LEAF_REASON_FORBIDDEN_OPERATION_RE.search(reason) is not None
         for reason in reason_values
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 只能记录本次人工选择说明，不能藏入随后入池、"
             "业务动作、采纳、部署、投产或写回请求。请把这些操作拆成后续请求。",
             code="automatic_tree_leaf_single_step_required",
@@ -987,7 +957,7 @@ def _ground_automatic_tree_leaf_materialization(
         or _AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE.search(reason) is not None
         for reason in explicit_reasons
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 必须是人工/业务/风险/合规/样本评审依据类短说明，"
             "不能包含命中客户、业务动作、策略池或生产操作。请只保留本次人工"
             "选择依据，其他动作另发请求。",
@@ -1003,7 +973,7 @@ def _ground_automatic_tree_leaf_materialization(
             _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只创建叶节点指针；加入 Strategy Pool、设置业务动作、采纳、"
             "部署或把叶 ID 写回数据集必须分别发起后续请求。",
             code="automatic_tree_leaf_single_step_required",
@@ -1012,7 +982,7 @@ def _ground_automatic_tree_leaf_materialization(
 
     asset_ids = frozenset(
         match.group(0)
-        for match in _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance)
+        for match in _identifiers._AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance)
     )
     leaf_ids = frozenset(
         match.group(0) for match in _AUTOMATIC_TREE_LEAF_ID_TOKEN_RE.finditer(utterance)
@@ -1023,7 +993,7 @@ def _ground_automatic_tree_leaf_materialization(
     if len(leaf_ids) != 1:
         ambiguous_fields.append("leaf_id")
     if ambiguous_fields:
-        return _clarification(
+        return _contracts._clarification(
             "请在同一条请求中逐字提供且只提供一个完整自动树 candidate asset ID"
             "（candidate-asset- 后接 32 位小写十六进制）和一个完整 leaf ID"
             "（leaf- 后接 20 位小写十六进制）；不能使用“刚才那棵树”或"
@@ -1038,7 +1008,7 @@ def _ground_automatic_tree_leaf_materialization(
     if leaf_ids != {inputs["leaf_id"]}:
         ungrounded.append("leaf_id")
     if ungrounded:
-        return _clarification(
+        return _contracts._clarification(
             "模型草案中的自动树资产或叶节点 ID 与用户原话不一致。请重新复制"
             "完整 tree asset ID 和 leaf ID；平台不会替换、补全或猜测 ID。",
             code="automatic_tree_leaf_controls_not_grounded",
@@ -1052,7 +1022,7 @@ def _ground_automatic_tree_leaf_materialization(
         or selection_reason != explicit_reasons[0]
     )
     if reason_mismatch:
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 必须与用户以“选择理由/理由/原因/说明”"
             "显式给出的唯一理由完全一致；用户未给理由时模型也必须"
             "省略该字段。平台不会改写、补充或推断选择理由。",
@@ -1061,7 +1031,7 @@ def _ground_automatic_tree_leaf_materialization(
         )
 
     if _automatic_tree_leaf_unconsumed_request_text(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只接受一次明确的叶节点 pointer 物化；请求中还有无法按该"
             "单步契约解释的内容。请把加入规则/策略池、业务动作、采纳、投产或"
             "写回等操作拆成后续请求。",
@@ -1072,12 +1042,12 @@ def _ground_automatic_tree_leaf_materialization(
 
 def _ground_interactive_tree_split_search(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Ground one aggregate-only node search without authorizing a tree edit."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if re.search(
         r"(?:不要|别|无需|仅讨论|以后|将来|曾经|是否|能否|可否|"
@@ -1085,7 +1055,7 @@ def _ground_interactive_tree_split_search(
         utterance,
         re.IGNORECASE,
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话必须是当前、肯定的一次节点候选搜索命令；否定、问句、"
             "历史、假设或未来描述不会启动搜索。",
             code="interactive_tree_split_search_intent_negated",
@@ -1104,7 +1074,7 @@ def _ground_interactive_tree_split_search(
             re.IGNORECASE,
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请明确要求对一个交互树节点搜索或分析分裂候选。",
             code="interactive_tree_split_search_explicit_intent_required",
             fields=("search_intent",),
@@ -1118,7 +1088,7 @@ def _ground_interactive_tree_split_search(
         utterance,
         re.IGNORECASE,
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只生成节点分裂候选证据；选定候选、修改树、自动续建、"
             "入池、应用、报告、采纳或部署必须拆成后续明确请求。",
             code="interactive_tree_split_search_single_step_required",
@@ -1131,7 +1101,7 @@ def _ground_interactive_tree_split_search(
         utterance,
         re.IGNORECASE,
     ):
-        return _clarification(
+        return _contracts._clarification(
             "artifact、hash、数据集、workspace、样本与树父链由平台恢复，"
             "不能由本次自然语言搜索覆盖。",
             code="interactive_tree_split_search_platform_controls_forbidden",
@@ -1149,7 +1119,7 @@ def _ground_interactive_tree_split_search(
         or len(node_matches) != 1
         or len(node_ids) != 1
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请逐字提供且只提供一个完整 automatic-tree/revision ID 和一个"
             "完整 node ID；平台不会用“那棵树”“最差节点”等代词或排名"
             "替你选择。",
@@ -1189,7 +1159,7 @@ def _ground_interactive_tree_split_search(
         ) is None:
             ungrounded.append(field)
     if ungrounded:
-        return _clarification(
+        return _contracts._clarification(
             "搜索范围和预算必须与用户原话完全一致：明确全特征或逐字给出"
             "特征子集，并给出每特征阈值数与总行评估预算；平台不会补默认值"
             "或猜测。",
@@ -1200,12 +1170,12 @@ def _ground_interactive_tree_split_search(
 
 def _ground_interactive_tree_auto_continuation(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Ground one explicitly seeded and fully bounded subtree continuation."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if re.search(
         r"(?:不要|别|无需|仅讨论|以后|将来|是否|能否|可否|"
@@ -1218,7 +1188,7 @@ def _ground_interactive_tree_auto_continuation(
         utterance,
         re.IGNORECASE,
     ) is None:
-        return _clarification(
+        return _contracts._clarification(
             "请用当前、肯定的单步命令明确要求自动续建交互树子树。",
             code="interactive_tree_auto_continuation_intent_required",
             fields=("continuation_intent",),
@@ -1230,7 +1200,7 @@ def _ground_interactive_tree_auto_continuation(
         utterance,
         re.IGNORECASE,
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只允许从已明确选择的候选续建子树；入池、应用、报告、"
             "采纳、部署或另一项树编辑必须拆成后续请求。",
             code="interactive_tree_auto_continuation_single_step_required",
@@ -1243,7 +1213,7 @@ def _ground_interactive_tree_auto_continuation(
         utterance,
         re.IGNORECASE,
     ):
-        return _clarification(
+        return _contracts._clarification(
             "artifact、hash、数据集、workspace、样本与父链由平台恢复，"
             "不能由续建请求覆盖。",
             code="interactive_tree_auto_continuation_platform_controls_forbidden",
@@ -1263,7 +1233,7 @@ def _ground_interactive_tree_auto_continuation(
         or len(candidate_matches) != 1
         or len(candidate_ids) != 1
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请逐字提供且只提供一个完整 split search ID 和一个完整"
             " eligible candidate ID；平台不会按排名、最佳或“第一个”"
             "替你选择种子候选。",
@@ -1302,7 +1272,7 @@ def _ground_interactive_tree_auto_continuation(
     if reason is not None and reason not in utterance:
         ungrounded.append("reason")
     if ungrounded:
-        return _clarification(
+        return _contracts._clarification(
             "续建必须逐字给出 search/candidate ID、追加深度、最小 Gini "
             "增益、节点上限、每特征阈值上限、总行评估预算，以及固定的 "
             "objective 和 tie_break；平台不会补默认值或代选候选。",
@@ -1313,12 +1283,12 @@ def _ground_interactive_tree_auto_continuation(
 
 def _ground_interactive_tree_revision(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Ground one current edit over exact tree, split and threshold controls."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     threshold_action = (
         _INTERACTIVE_TREE_THRESHOLD_ACTION_RE.search(utterance) is not None
@@ -1328,7 +1298,7 @@ def _ground_interactive_tree_revision(
     )
     prune_action = _INTERACTIVE_TREE_PRUNE_ACTION_RE.search(utterance) is not None
     if _INTERACTIVE_TREE_AMBIGUOUS_NODE_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "请从认证树拓扑中明确复制一个当前可见的完整 split node ID；平台不会"
             "按“最好”“风险最高”“不稳定”或代词替你选择节点。",
             code="interactive_tree_revision_node_selection_ambiguous",
@@ -1344,7 +1314,7 @@ def _ground_interactive_tree_revision(
             )
             else ("threshold",)
         )
-        return _clarification(
+        return _contracts._clarification(
             "阈值调整必须点名一个当前可见 split node 并给出一个有限的新阈值；"
             "平台不会按“调好一点”“最佳阈值”“自动优化”或“全部节点”"
             "替用户搜索、推荐或批量修改。",
@@ -1352,7 +1322,7 @@ def _ground_interactive_tree_revision(
             fields=fields,
         )
     if _INTERACTIVE_TREE_FEATURE_AMBIGUOUS_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "换分裂特征必须点名一个当前可见 split node、一个认证特征和一个"
             "有限阈值；平台不会按“最佳特征”“自动推荐”或“全部特征”直接"
             "替用户修改树。请先单独运行节点候选分析，再精确选择。",
@@ -1363,14 +1333,14 @@ def _ground_interactive_tree_revision(
         _INTERACTIVE_TREE_NEGATED_OR_NONCURRENT_RE.search(utterance) is not None
         or not (prune_action or threshold_action or feature_action)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话必须是当前、肯定的一次修剪或阈值调整命令；问句、否定、假设、未来或"
             "历史描述不会创建交互树修订。",
             code="interactive_tree_revision_intent_negated",
             fields=("edit_intent",),
         )
     if _INTERACTIVE_TREE_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "树制品、hash、frontier、condition、metrics、数据集与样本绑定由"
             "平台恢复，不能由本次自然语言请求覆盖。",
             code="interactive_tree_revision_platform_controls_forbidden",
@@ -1399,7 +1369,7 @@ def _ground_interactive_tree_revision(
         re.IGNORECASE,
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只允许一次 prune_subtree 或 adjust_split_threshold；"
             "前沿物化、入池、业务动作、整树应用、继续分裂、报告、采纳、"
             "部署或写回必须拆成后续请求。",
@@ -1419,7 +1389,7 @@ def _ground_interactive_tree_revision(
     if len(node_matches) != 1 or len(node_ids) != 1:
         missing_or_ambiguous.append("node_id")
     if missing_or_ambiguous:
-        return _clarification(
+        return _contracts._clarification(
             "请在同一条命令中逐字提供且只提供一个完整 automatic-tree asset "
             "或 interactive-tree revision ID，以及一个完整 split node ID；"
             "不能使用“刚才那棵树”“那个节点”等代词。",
@@ -1440,7 +1410,7 @@ def _ground_interactive_tree_revision(
         "adjust_split_threshold",
         "replace_split_feature",
     } and len(threshold_values) != 1:
-        return _clarification(
+        return _contracts._clarification(
             "分裂调整必须在同一条命令中明确且只给出一个有限的新 threshold "
             "数值；平台不会从描述、指标或历史树中推断。",
             code="interactive_tree_revision_explicit_threshold_required",
@@ -1451,7 +1421,7 @@ def _ground_interactive_tree_revision(
         expected_operation == "replace_split_feature"
         and len(feature_values) != 1
     ):
-        return _clarification(
+        return _contracts._clarification(
             "换分裂特征必须在同一条命令中逐字给出且只给出一个新 feature；"
             "平台不会从排名或树结构中推断。",
             code="interactive_tree_revision_explicit_feature_required",
@@ -1484,7 +1454,7 @@ def _ground_interactive_tree_revision(
     elif "feature" in inputs:
         ungrounded.append("feature")
     if ungrounded:
-        return _clarification(
+        return _contracts._clarification(
             "模型草案中的来源树、节点、操作或新阈值与用户原话不一致；"
             "平台不会替换、补全、猜测、优化或改选控制值。",
             code="interactive_tree_revision_controls_not_grounded",
@@ -1498,7 +1468,7 @@ def _ground_interactive_tree_revision(
         or not isinstance(supplied_reason, str)
         or supplied_reason != explicit_reasons[0]
     ):
-        return _clarification(
+        return _contracts._clarification(
             "reason 只有在用户以“理由/原因/说明/reason”显式标注时才能逐字"
             "抄录；未提供时模型必须省略，平台不会代写。",
             code="interactive_tree_revision_reason_not_grounded",
@@ -1551,12 +1521,12 @@ def utterance_targets_interactive_tree_frontier_group_materialization(
 
 def _ground_interactive_tree_frontier_group_materialization(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Require one explicit 2..50-member OR pointer over one exact revision."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if (
         _INTERACTIVE_TREE_FRONTIER_GROUP_AMBIGUOUS_SELECTION_RE.search(utterance)
@@ -1565,7 +1535,7 @@ def _ground_interactive_tree_frontier_group_materialization(
         or _INTERACTIVE_TREE_FRONTIER_GROUP_SEMANTICS_RE.search(utterance)
         is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请从交互树 revision 的完整 frontier 清单中复制 2 到 50 个"
             "明确 node/leaf ID，并明确它们按 OR 组合；平台不会按全部、最好、"
             "最差、风险或指标排名替你选节点。",
@@ -1577,7 +1547,7 @@ def _ground_interactive_tree_frontier_group_materialization(
         is not None
         or _INTERACTIVE_TREE_FRONTIER_ACTION_RE.search(utterance) is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话必须是当前、肯定的一次交互树前沿 OR 分组物化命令；"
             "问句、否定、假设、历史或未来描述不会创建 group pointer。",
             code="interactive_tree_frontier_group_intent_negated",
@@ -1589,7 +1559,7 @@ def _ground_interactive_tree_frontier_group_materialization(
         or _INTERACTIVE_TREE_FRONTIER_GROUP_PLATFORM_CONTROL_RE.search(utterance)
         is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection/group/revision artifact、hash、tree、fragment、condition、"
             "metrics、数据集与 workspace 绑定由平台恢复，不能由自然语言指定"
             "或覆盖。",
@@ -1603,10 +1573,10 @@ def _ground_interactive_tree_frontier_group_materialization(
             _AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE,
             _AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE,
             _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
-            _SCORECARD_SECOND_OPERATION_RE,
+            _grounding._SCORECARD_SECOND_OPERATION_RE,
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只创建一个交互树 frontier OR group pointer；加入 Strategy "
             "Pool、设置业务动作、应用、采纳、部署或写回必须分别发起后续请求。",
             code="interactive_tree_frontier_group_single_step_required",
@@ -1631,7 +1601,7 @@ def _ground_interactive_tree_frontier_group_materialization(
     ):
         missing_or_ambiguous.append("source_node_ids")
     if missing_or_ambiguous:
-        return _clarification(
+        return _contracts._clarification(
             "请在同一条命令中逐字提供且只提供一个完整 interactive-tree "
             "revision ID，以及 2 到 50 个互不重复的完整 frontier node/leaf "
             "ID；不能使用代词、截断 ID 或重复 ID。",
@@ -1650,7 +1620,7 @@ def _ground_interactive_tree_frontier_group_materialization(
     ):
         ungrounded.append("source_node_ids")
     if ungrounded:
-        return _clarification(
+        return _contracts._clarification(
             "模型草案中的 revision 或 frontier node/leaf ID 集合与用户原话"
             "不一致；平台不会替换、补全、猜测、新增或删除节点。成员输入顺序"
             "不具有语义，最终顺序由 revision frontier 规范化。",
@@ -1665,7 +1635,7 @@ def _ground_interactive_tree_frontier_group_materialization(
         or not isinstance(supplied_reason, str)
         or supplied_reason != explicit_reasons[0]
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 只有在用户以“选择理由/理由/原因/说明/reason”"
             "显式标注时才能逐字抄录；未提供时模型必须省略。",
             code="interactive_tree_frontier_group_reason_not_grounded",
@@ -1698,19 +1668,19 @@ def utterance_targets_interactive_tree_frontier_materialization(
 
 def _ground_interactive_tree_frontier_materialization(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     """Require one current singleton pointer over an exact revision frontier."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if (
         _INTERACTIVE_TREE_FRONTIER_AMBIGUOUS_SELECTION_RE.search(utterance)
         is not None
         or _AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请从交互树 revision 的完整 frontier 清单中复制一个明确的 node/leaf "
             "ID；平台不会按最好、最差、风险或指标排名替你选择。",
             code="interactive_tree_frontier_selection_ambiguous",
@@ -1721,14 +1691,14 @@ def _ground_interactive_tree_frontier_materialization(
         is not None
         or _INTERACTIVE_TREE_FRONTIER_ACTION_RE.search(utterance) is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话必须是当前、肯定的一次交互树前沿物化命令；问句、否定、"
             "假设、历史或未来描述不会创建 selection pointer。",
             code="interactive_tree_frontier_intent_negated",
             fields=("materialization_intent",),
         )
     if _INTERACTIVE_TREE_FRONTIER_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "selection/revision artifact、hash、tree、fragment、condition、metrics、"
             "数据集与 workspace 绑定由平台恢复，不能由自然语言指定或覆盖。",
             code="interactive_tree_frontier_platform_controls_forbidden",
@@ -1743,7 +1713,7 @@ def _ground_interactive_tree_frontier_materialization(
             _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只创建一个交互树 frontier pointer；加入 Strategy Pool、"
             "设置业务动作、采纳、部署或写回必须分别发起后续请求。",
             code="interactive_tree_frontier_single_step_required",
@@ -1764,7 +1734,7 @@ def _ground_interactive_tree_frontier_materialization(
     if len(node_matches) != 1 or len(node_ids) != 1:
         missing_or_ambiguous.append("source_node_id")
     if missing_or_ambiguous:
-        return _clarification(
+        return _contracts._clarification(
             "请在同一条命令中逐字提供且只提供一个完整 interactive-tree "
             "revision ID，以及一个完整 frontier node/leaf ID；不能使用"
             "“刚才的修订”“这个前沿节点”等代词。",
@@ -1778,7 +1748,7 @@ def _ground_interactive_tree_frontier_materialization(
     if node_ids != {inputs["source_node_id"]}:
         ungrounded.append("source_node_id")
     if ungrounded:
-        return _clarification(
+        return _contracts._clarification(
             "模型草案中的 revision 或 frontier node/leaf ID 与用户原话不一致；"
             "平台不会替换、补全、猜测或改选节点。",
             code="interactive_tree_frontier_controls_not_grounded",
@@ -1792,7 +1762,7 @@ def _ground_interactive_tree_frontier_materialization(
         or not isinstance(supplied_reason, str)
         or supplied_reason != explicit_reasons[0]
     ):
-        return _clarification(
+        return _contracts._clarification(
             "selection_reason 只有在用户以“选择理由/理由/原因/说明/reason”"
             "显式标注时才能逐字抄录；未提供时模型必须省略。",
             code="interactive_tree_frontier_reason_not_grounded",
@@ -1840,21 +1810,21 @@ def _automatic_tree_apply_has_unlabeled_output_column(
 
 def _ground_automatic_tree_apply(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Bind one affirmative command to one exact tree and optional columns."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
 
     if (
         _AUTOMATIC_TREE_APPLY_ACTION_RE.search(utterance) is None
         or _AUTOMATIC_TREE_APPLY_NOT_AUTHORIZED_RE.search(utterance) is not None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话没有授权一次立即、肯定的自动树全量写回。否定、问句、"
             "假设、历史或未来描述都不会创建派生数据集；请重新发出单独的"
             "执行命令。",
@@ -1862,14 +1832,14 @@ def _ground_automatic_tree_apply(
             fields=("apply_intent",),
         )
     if _AUTOMATIC_TREE_APPLY_PLATFORM_CONTROL_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "自动树 artifact/hash、数据集与 workspace lineage 必须由平台从"
             "当前任务重新校验并绑定，不能接受自然语言指定或覆盖。",
             code="automatic_tree_apply_platform_binding_forbidden",
             fields=("platform_binding",),
         )
     if _AUTOMATIC_TREE_APPLY_FOLLOW_UP_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "本轮只把一棵完整自动树确定性写入一个不可变派生数据集；入池、"
             "叶节点选择、业务动作、报告、采纳和部署必须拆成后续请求。",
             code="automatic_tree_apply_single_step_required",
@@ -1878,10 +1848,10 @@ def _ground_automatic_tree_apply(
 
     asset_mentions = tuple(
         match.group(0)
-        for match in _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance)
+        for match in _identifiers._AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance)
     )
     if len(asset_mentions) != 1:
-        return _clarification(
+        return _contracts._clarification(
             "请在同一条写回命令中逐字提供且只提供一个完整自动树 asset ID"
             "（candidate-asset- 后接 32 位小写十六进制）；不能使用“刚才"
             "那棵树”等代词。",
@@ -1889,7 +1859,7 @@ def _ground_automatic_tree_apply(
             fields=("tree_asset_id",),
         )
     if asset_mentions[0] != inputs["tree_asset_id"]:
-        return _clarification(
+        return _contracts._clarification(
             "模型草案中的自动树 asset ID 与用户原话不一致；平台不会替换、"
             "补全或猜测完整 tree asset ID。",
             code="automatic_tree_apply_controls_not_grounded",
@@ -1903,7 +1873,7 @@ def _ground_automatic_tree_apply(
         utterance,
         labeled_spans,
     ) or any(len(values) > 1 for values in explicit_columns.values()):
-        return _clarification(
+        return _contracts._clarification(
             "输出列必须明确标注为叶节点列或规则列，且每种角色最多一个最终"
             "列名；仅说“输出列”不能判断要覆盖哪一种结果。",
             code="automatic_tree_apply_output_column_ambiguous",
@@ -1916,7 +1886,7 @@ def _ground_automatic_tree_apply(
         if inputs.get(field) != explicit:
             ungrounded.append(field)
     if ungrounded:
-        return _clarification(
+        return _contracts._clarification(
             "模型草案中的叶节点/规则输出列必须与用户显式标注的列名逐字"
             "一致；用户未提供时必须省略并由 Tool 使用受控默认值。",
             code="automatic_tree_apply_controls_not_grounded",
@@ -1931,7 +1901,7 @@ def _ground_automatic_tree_apply(
         and inputs[field].casefold() in source_columns
     ]
     if collisions:
-        return _clarification(
+        return _contracts._clarification(
             "自动树写回输出列不能覆盖当前样本已有字段，请为叶节点列和规则列"
             "选择新的列名。",
             code="automatic_tree_apply_output_column_conflict",
@@ -1941,17 +1911,17 @@ def _ground_automatic_tree_apply(
 
 def _ground_automatic_tree_candidate_build(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Prove every tree-build control came from the user's original text."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if _AUTOMATIC_TREE_NEGATED_BUILD_RE.search(utterance) is not None:
-        return _clarification(
+        return _contracts._clarification(
             "原话明确否定了自动树构建，因此本次不会创建或执行 build。"
             "如需建树，请重新给出一条明确的正向构建请求。",
             code="automatic_tree_build_intent_negated",
@@ -1963,7 +1933,7 @@ def _ground_automatic_tree_candidate_build(
     if platform_control_clarification is not None:
         return platform_control_clarification
     if _utterance_requests_automatic_tree_follow_up(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "自动树需要按可审计步骤逐次确认：本次只能单独完成候选树构建。"
             "构建完成后，请查看平台叶子证据并在下一条请求中引用明确的 leaf；"
             "平台不会让 LLM 自动选择“最好叶子”或直接写入 Strategy Pool。",
@@ -1971,12 +1941,12 @@ def _ground_automatic_tree_candidate_build(
             fields=("workflow_step", "leaf_id"),
         )
 
-    column_mentions, ambiguous_columns = _automatic_tree_column_mention_resolution(
+    column_mentions, ambiguous_columns = _grounding._automatic_tree_column_mention_resolution(
         utterance,
         whitelist,
     )
     if ambiguous_columns:
-        return _clarification(
+        return _contracts._clarification(
             "自动树字段名在原话中存在交叉重叠或大小写歧义，请用分隔符逐个写出"
             "准确列名："
             + "、".join(ambiguous_columns)
@@ -2102,7 +2072,7 @@ def _ground_automatic_tree_candidate_build(
     if not missing_controls:
         return result
     unique_missing = tuple(dict.fromkeys(missing_controls))
-    return _clarification(
+    return _contracts._clarification(
         "请在原话中明确列出自动树候选的全部特征，以及实际需要覆盖的权重列、"
         "金额列、方向或树参数；当前无法核对："
         + "、".join(unique_missing)
@@ -2142,132 +2112,6 @@ def _automatic_tree_follow_up_action_is_negated(
     between = clause[closest.end() : action_start]
     return _AUTOMATIC_TREE_NEGATED_FOLLOW_UP_PREFIX_RE.fullmatch(between) is not None
 
-def _automatic_tree_segment(
-    utterance: str,
-    *,
-    start: int,
-    end: int,
-    separators: Sequence[str],
-) -> tuple[str, int, int]:
-    left = max(utterance.rfind(separator, 0, start) for separator in separators) + 1
-    right_candidates = [
-        position
-        for separator in separators
-        if (position := utterance.find(separator, end)) >= 0
-    ]
-    right = min(right_candidates, default=len(utterance))
-    return utterance[left:right], left, right
-
-def _automatic_tree_column_mentions(
-    utterance: str,
-    whitelist: Sequence[str],
-) -> tuple[tuple[int, int, str], ...]:
-    mentions, _ = _automatic_tree_column_mention_resolution(utterance, whitelist)
-    return mentions
-
-def _automatic_tree_column_mention_resolution(
-    utterance: str,
-    whitelist: Sequence[str],
-) -> tuple[tuple[tuple[int, int, str], ...], tuple[str, ...]]:
-    """Resolve contained names and fail closed on genuinely ambiguous overlaps."""
-
-    candidates: list[tuple[int, int, str, int, bool]] = []
-    for order, column in enumerate(whitelist):
-        pattern = re.compile(
-            rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])",
-            re.IGNORECASE,
-        )
-        candidates.extend(
-            (
-                match.start(),
-                match.end(),
-                column,
-                order,
-                match.group(0) == column,
-            )
-            for match in pattern.finditer(utterance)
-        )
-
-    components: list[list[tuple[int, int, str, int, bool]]] = []
-    component_end = -1
-    for candidate in sorted(candidates, key=lambda item: (item[0], item[1], item[3])):
-        if not components or candidate[0] >= component_end:
-            components.append([candidate])
-            component_end = candidate[1]
-            continue
-        components[-1].append(candidate)
-        component_end = max(component_end, candidate[1])
-
-    accepted: list[tuple[int, int, str]] = []
-    ambiguous: set[str] = set()
-    for component in components:
-        spans = {(start, end) for start, end, *_ in component}
-        if len(spans) == 1:
-            chosen_span = next(iter(spans))
-        else:
-            containers = [
-                (start, end)
-                for start, end in spans
-                if all(
-                    start <= other_start and other_end <= end
-                    for other_start, other_end in spans
-                )
-            ]
-            if len(containers) != 1:
-                ambiguous.update(candidate[2] for candidate in component)
-                continue
-            chosen_span = containers[0]
-
-        choices = [candidate for candidate in component if candidate[:2] == chosen_span]
-        exact_choices = [candidate for candidate in choices if candidate[4]]
-        if len(exact_choices) == 1:
-            chosen = exact_choices[0]
-        elif len(choices) == 1:
-            chosen = choices[0]
-        else:
-            ambiguous.update(candidate[2] for candidate in choices)
-            continue
-        accepted.append((chosen[0], chosen[1], chosen[2]))
-
-    ordered_ambiguities = tuple(column for column in whitelist if column in ambiguous)
-    return (
-        tuple(sorted(accepted, key=lambda item: (item[0], item[1], item[2]))),
-        ordered_ambiguities,
-    )
-
-def _automatic_tree_span_is_negated(
-    utterance: str,
-    *,
-    start: int,
-    end: int,
-) -> bool:
-    segment, left, right = _automatic_tree_segment(
-        utterance,
-        start=start,
-        end=end,
-        separators=("，", ",", "、", "；", ";", "。", "\n"),
-    )
-    local_start = start - left
-    local_end = end - left
-    prefix = segment[max(0, local_start - 24) : local_start]
-    suffix = segment[local_end : min(len(segment), local_end + 24)]
-    negative_prefix = re.compile(
-        r"(?:不要|无需|不用|不使用|不选|别|禁止|排除|剔除|去掉|"
-        r"不是|并非|而非|不)\s*"
-        r"(?:再|用|使用|选择|选|包含|加入|设置|设为|作为)?\s*$",
-        re.IGNORECASE,
-    )
-    negative_suffix = re.compile(
-        r"^\s*(?:不要|无需|不用|不使用|不选|不作为|别|禁止|排除|"
-        r"剔除|去掉|不是|并非|而非)",
-        re.IGNORECASE,
-    )
-    return (
-        negative_prefix.search(prefix) is not None
-        or negative_suffix.search(suffix) is not None
-        or right < end
-    )
-
 def _automatic_tree_feature_span_is_negated(
     utterance: str,
     *,
@@ -2276,9 +2120,9 @@ def _automatic_tree_feature_span_is_negated(
 ) -> bool:
     """Extend local negation across an explicitly excluded feature list."""
 
-    if _automatic_tree_span_is_negated(utterance, start=start, end=end):
+    if _grounding._automatic_tree_span_is_negated(utterance, start=start, end=end):
         return True
-    segment, left, _ = _automatic_tree_segment(
+    segment, left, _ = _grounding._automatic_tree_segment(
         utterance,
         start=start,
         end=end,
@@ -2353,7 +2197,7 @@ def _automatic_tree_number_values(
             match.start(),
             match.end(),
             column_spans,
-        ) or _automatic_tree_span_is_negated(
+        ) or _grounding._automatic_tree_span_is_negated(
             utterance,
             start=match.start(),
             end=match.end(),
@@ -2389,7 +2233,7 @@ def _automatic_tree_number_values(
 
 def _automatic_tree_number_token_value(field: str, token: str) -> float | None:
     if field == "min_weight_fraction_leaf":
-        return _ratio_token_value(token)
+        return _grounding._ratio_token_value(token)
     if "百分之" in token or "%" in token:
         return None
     return float(token)
@@ -2398,3 +2242,266 @@ def _automatic_tree_number_text(field: str, value: float) -> str:
     if field in {"max_depth", "min_leaf_count", "seed"}:
         return str(int(value))
     return format(value, ".15g")
+
+AUTOMATIC_TREE_DIRECTIONS = (
+    "increasing",
+    "decreasing",
+    "unordered",
+)
+
+def _utterance_targets_automatic_tree_apply(utterance: str) -> bool:
+    """Recognize full-tree dataset writeback without stealing build/leaf turns."""
+
+    return _AUTOMATIC_TREE_APPLY_TARGET_RE.search(utterance) is not None
+
+def _utterance_requests_automatic_tree_follow_up(utterance: str) -> bool:
+    follow_up_patterns = (
+        _AUTOMATIC_TREE_MULTI_STEP_RE,
+        _AUTOMATIC_TREE_BEST_LEAF_RE,
+        _AUTOMATIC_TREE_REVERSED_BEST_LEAF_RE,
+        _AUTOMATIC_TREE_LEAF_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_POOL_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_LEAF_DECISION_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_HEURISTIC_LEAF_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_NODE_RANK_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_NODE_SELECT_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_NODE_EXTRACT_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_LIFECYCLE_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_LEAF_ID_WRITEBACK_RE,
+        _AUTOMATIC_TREE_DECISION_ARTIFACT_RE,
+    )
+    for clause in _automatic_tree_follow_up_clauses(utterance):
+        leaf_matches = tuple(_AUTOMATIC_TREE_LEAF_TOKEN_RE.finditer(clause))
+        effect_matches = tuple(_AUTOMATIC_TREE_DECISION_EFFECT_RE.finditer(clause))
+        if leaf_matches:
+            for effect_match in effect_matches:
+                if not _automatic_tree_follow_up_action_is_negated(
+                    clause,
+                    action_start=effect_match.start(),
+                ):
+                    return True
+        for pattern in follow_up_patterns:
+            for match in pattern.finditer(clause):
+                anchor = _AUTOMATIC_TREE_FOLLOW_UP_ACTION_ANCHOR_RE.search(
+                    clause,
+                    match.start(),
+                    match.end(),
+                )
+                action_start = anchor.start() if anchor is not None else match.start()
+                if not _automatic_tree_follow_up_action_is_negated(
+                    clause,
+                    action_start=action_start,
+                ):
+                    return True
+    return False
+
+def _utterance_supports_automatic_tree_feature(
+    utterance: str,
+    feature: str,
+    *,
+    whitelist: Sequence[str],
+) -> bool:
+    if any(
+        _utterance_supports_automatic_tree_column_role(
+            utterance,
+            field=field,
+            column=feature,
+            whitelist=whitelist,
+        )
+        for field in _AUTOMATIC_TREE_COLUMN_ROLE_LABELS
+    ):
+        return False
+    mentions = tuple(
+        (start, end)
+        for start, end, column in _grounding._automatic_tree_column_mentions(
+            utterance,
+            whitelist,
+        )
+        if column == feature
+    )
+    cue_pattern = re.compile(
+        r"特征|候选变量|入模变量|自变量|features?|构建|"
+        r"建(?:一棵)?(?:自动)?(?:决策)?树|build|tree",
+        re.IGNORECASE,
+    )
+    blocker_pattern = re.compile(
+        "|".join(
+            f"(?:{pattern})"
+            for pattern in (
+                *_AUTOMATIC_TREE_COLUMN_ROLE_LABELS.values(),
+                *_AUTOMATIC_TREE_NUMBER_LABELS.values(),
+            )
+        ),
+        re.IGNORECASE,
+    )
+    for start, end in mentions:
+        if _automatic_tree_feature_span_is_negated(
+            utterance,
+            start=start,
+            end=end,
+        ):
+            continue
+        segment, _, _ = _grounding._automatic_tree_segment(
+            utterance,
+            start=start,
+            end=end,
+            separators=("，", ",", "；", ";", "。", "\n"),
+        )
+        if cue_pattern.search(segment) is not None:
+            return True
+        sentence, sentence_left, _ = _grounding._automatic_tree_segment(
+            utterance,
+            start=start,
+            end=end,
+            separators=("；", ";", "。", "\n"),
+        )
+        feature_start = start - sentence_left
+        feature_end = end - sentence_left
+        for cue in cue_pattern.finditer(sentence):
+            between = (
+                sentence[cue.end() : feature_start]
+                if cue.end() <= feature_start
+                else sentence[feature_end : cue.start()]
+            )
+            if blocker_pattern.search(between) is None:
+                return True
+    return False
+
+def _utterance_supports_automatic_tree_column_role(
+    utterance: str,
+    *,
+    field: str,
+    column: str,
+    whitelist: Sequence[str],
+) -> bool:
+    label = _AUTOMATIC_TREE_COLUMN_ROLE_LABELS[field]
+    resolved_mentions = tuple(
+        (start, end)
+        for start, end, resolved_column in _grounding._automatic_tree_column_mentions(
+            utterance,
+            whitelist,
+        )
+        if resolved_column == column
+    )
+    if not resolved_mentions:
+        return False
+    column_pattern = rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])"
+    paired = re.compile(
+        rf"(?:(?:{label})\s*(?:[:：=]|为|是|使用|用|取|设为)?\s*"
+        rf"{column_pattern}|"
+        rf"{column_pattern}\s*(?:作为|是|为|用作|设为)\s*(?:{label}))",
+        re.IGNORECASE,
+    )
+    for match in paired.finditer(utterance):
+        if not any(
+            match.start() <= start and end <= match.end()
+            for start, end in resolved_mentions
+        ):
+            continue
+        if not _grounding._automatic_tree_span_is_negated(
+            utterance,
+            start=match.start(),
+            end=match.end(),
+        ) and not _automatic_tree_value_is_replaced(utterance, end=match.end()):
+            return True
+    replacement = re.compile(
+        rf"(?:{label})\s*(?:[:：=]|为|是|使用|用|取|设为)?\s*"
+        r"(?:从|由)?\s*[^\s，,；;。]+\s*"
+        r"(?:改为|改成|调整为|替换为|而非|不是而是)\s*"
+        rf"{column_pattern}",
+        re.IGNORECASE,
+    )
+    return any(
+        any(
+            match.start() <= start and end <= match.end()
+            for start, end in resolved_mentions
+        )
+        and not _grounding._automatic_tree_span_is_negated(
+            utterance,
+            start=match.start(),
+            end=match.end(),
+        )
+        for match in replacement.finditer(utterance)
+    )
+
+def _utterance_supports_automatic_tree_direction(
+    utterance: str,
+    *,
+    feature: str,
+    direction: str,
+    column_spans: Sequence[tuple[int, int]],
+    whitelist: Sequence[str],
+) -> bool:
+    feature_mentions = tuple(
+        (start, end)
+        for start, end, column in _grounding._automatic_tree_column_mentions(
+            utterance,
+            whitelist,
+        )
+        if column == feature
+    )
+    for feature_start, feature_end in feature_mentions:
+        segment, left, _ = _grounding._automatic_tree_segment(
+            utterance,
+            start=feature_start,
+            end=feature_end,
+            separators=("，", ",", "、", "；", ";", "。", "\n"),
+        )
+        feature_center = (feature_start + feature_end) / 2 - left
+        candidates: list[tuple[float, str]] = []
+        for candidate_direction, pattern in _AUTOMATIC_TREE_DIRECTION_GROUNDING.items():
+            for direction_match in re.finditer(pattern, segment, re.IGNORECASE):
+                absolute_start = left + direction_match.start()
+                absolute_end = left + direction_match.end()
+                if _automatic_tree_span_overlaps_columns(
+                    absolute_start,
+                    absolute_end,
+                    column_spans,
+                ) or _grounding._automatic_tree_span_is_negated(
+                    utterance,
+                    start=absolute_start,
+                    end=absolute_end,
+                ):
+                    continue
+                replacement = segment[
+                    direction_match.end() : direction_match.end() + 16
+                ]
+                if re.match(r"\s*(?:改为|改成|调整为|而非|不是而是)", replacement):
+                    continue
+                direction_center = (direction_match.start() + direction_match.end()) / 2
+                candidates.append(
+                    (abs(direction_center - feature_center), candidate_direction)
+                )
+        if not candidates:
+            continue
+        nearest_distance = min(distance for distance, _ in candidates)
+        nearest = {
+            candidate_direction
+            for distance, candidate_direction in candidates
+            if math.isclose(
+                distance,
+                nearest_distance,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        }
+        if nearest == {direction}:
+            return True
+    return False
+
+def _utterance_supports_automatic_tree_number(
+    utterance: str,
+    *,
+    field: str,
+    value: object,
+    column_spans: Sequence[tuple[int, int]],
+) -> bool:
+    expected = float(value)
+    return any(
+        math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-12)
+        for observed in _automatic_tree_number_values(
+            utterance,
+            field=field,
+            column_spans=column_spans,
+        )
+    )

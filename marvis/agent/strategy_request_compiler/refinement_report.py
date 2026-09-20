@@ -1,82 +1,20 @@
-"""refinement_report request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Refinement report request grammar and grounding rules."""
 from __future__ import annotations
-from collections.abc import Sequence
+
+import math
 import re
+from collections.abc import Sequence
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _POOL_MUTATION_WORKFLOWS
-    from . import _REFINEMENT_MERGE_ACTION_RE
-    from . import _REFINEMENT_SELECTION_ACTION_RE
-    from . import _STRATEGY_POOL_APPLY_WORKFLOWS
-    from . import _STRATEGY_POOL_MATERIALIZE_WORKFLOWS
-    from . import _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
-    from . import _STRATEGY_POOL_VALIDATION_WORKFLOWS
-    from . import _STRATEGY_POOL_WORKFLOWS
-    from . import _clarification
-    from . import _explicit_manual_breakpoint_bindings
-    from . import _ground_automatic_tree_apply
-    from . import _ground_automatic_tree_candidate_build
-    from . import _ground_automatic_tree_leaf_materialization
-    from . import _ground_candidate_monthly_stability_request
-    from . import _ground_cross_matrix_analysis
-    from . import _ground_cross_matrix_candidate_build_from_search
-    from . import _ground_cross_matrix_candidate_search
-    from . import _ground_cross_matrix_cell_selection
-    from . import _ground_cross_rule_candidate_build
-    from . import _ground_cross_rule_search
-    from . import _ground_interactive_tree_auto_continuation
-    from . import _ground_interactive_tree_frontier_group_materialization
-    from . import _ground_interactive_tree_frontier_materialization
-    from . import _ground_interactive_tree_revision
-    from . import _ground_interactive_tree_split_search
-    from . import _ground_model_score_comparison_v2_request
-    from . import _ground_roll_rate_column_bindings
-    from . import _ground_scorecard_band_build
-    from . import _ground_scorecard_cutoff_selection
-    from . import _ground_strategy_impact_cube_request
-    from . import _ground_strategy_model_evidence_v2_request
-    from . import _ground_strategy_pool_apply_request
-    from . import _ground_strategy_pool_impact_request
-    from . import _ground_strategy_pool_materialize_request
-    from . import _ground_strategy_pool_request
-    from . import _ground_strategy_pool_stability_request
-    from . import _ground_strategy_pool_validation_request
-    from . import _ground_strategy_sample_design_v2_request
-    from . import _ground_univariate_candidate_analysis
-    from . import _ground_voting_candidate_build
-    from . import _ground_voting_candidate_build_from_search
-    from . import _ground_voting_candidate_search
-    from . import _is_canonical_stored_strategy_report_request
-    from . import _utterance_contains_token
-    from . import _utterance_supports_risk_threshold
-    from . import _utterance_targets_automatic_tree_apply
-    from . import _utterance_targets_cross_candidate_search
-    from . import _utterance_targets_cross_matrix
-    from . import _utterance_targets_cross_matrix_cell_selection
-    from . import _utterance_targets_cross_rule_search
-    from . import _utterance_targets_cross_rule_selection
-    from . import _utterance_targets_cross_search_selection
-    from . import _utterance_targets_strategy_model_evidence_v2
-    from . import _utterance_targets_strategy_pool_apply
-    from . import _utterance_targets_strategy_pool_impact
-    from . import _utterance_targets_strategy_pool_validation
-    from . import _utterance_targets_voting_candidate
-    from . import _utterance_targets_voting_candidate_search
-    from . import _utterance_targets_voting_search_selection
-    from . import utterance_targets_candidate_monthly_stability
-    from . import utterance_targets_interactive_tree_frontier_group_materialization
-    from . import utterance_targets_interactive_tree_frontier_materialization
-    from . import utterance_targets_model_score_comparison_v2
-    from . import utterance_targets_scorecard_band_build
-    from . import utterance_targets_scorecard_cutoff_selection
-    from . import utterance_targets_strategy_impact_cube
-    from . import utterance_targets_strategy_pool_materialize
-    from . import utterance_targets_strategy_pool_stability
-    from . import utterance_targets_strategy_sample_design
+from . import contracts as _contracts
+from . import cross as _cross
+from . import grounding as _grounding
+from . import impact as _impact
+from . import model_evidence as _model_evidence
+from . import pool as _pool
+from . import sample_design as _sample_design
+from . import scorecard as _scorecard
+from . import tree as _tree
+from . import voting as _voting
 
 _PROJECT_CONTEXT_SUBJECT_RE = re.compile(
     r"(?:策略)?项目(?:上下文|现状|背景|情况)|当前项目(?:现状|情况)|"
@@ -400,30 +338,30 @@ _STRATEGY_DSL_DELIVERY_STRATEGY_ID_RE = re.compile(
 
 def _ground_refinement_request(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
     target_col: str | None,
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
-    if _utterance_targets_voting_search_selection(utterance):
+    if _voting._utterance_targets_voting_search_selection(utterance):
         if not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow == "voting_candidate_build_from_search"
         ):
-            return _clarification(
+            return _contracts._clarification(
                 "原话明确要求从一个 Voting 搜索结果的完整 search_id 与 combo_id "
                 "构建候选，只能编译为 voting_candidate_build_from_search；不能改路由为"
                 "重新搜索、自由 rule ID 构建、通用策略生命周期或其他 Workflow。",
                 code="voting_search_selection_workflow_required",
                 fields=("workflow",),
             )
-        return _ground_voting_candidate_build_from_search(utterance, result)
+        return _voting._ground_voting_candidate_build_from_search(utterance, result)
     if utterance_targets_strategy_dsl_delivery(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_dsl_delivery"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求导出离线策略代码和等价证据，只能编译为 "
             "strategy_dsl_delivery；不能改路由到通用策略应用、报告、"
             "采纳或部署。",
@@ -433,12 +371,12 @@ def _ground_refinement_request(
     if (
         utterance_targets_strategy_report_bundle_v2(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow == "strategy_report_bundle_v2"
         )
         and not _is_canonical_stored_strategy_report_request(draft)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求生成受治理策略评审报告，只能编译为 "
             "strategy_report_bundle_v2；不能改路由到通用策略报告、训练、"
             "评分、候选、影响测算、采纳或部署。",
@@ -446,51 +384,51 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if utterance_targets_strategy_project_context(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_project_context"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求整理当前项目现状或历史策略，只能编译为 "
             "strategy_project_context；不能改路由到样本、候选分析、报告或通用策略生命周期。",
             code="strategy_project_context_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_strategy_sample_design(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _sample_design.utterance_targets_strategy_sample_design(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_sample_design_v2"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求固化策略样本设计，只能编译为 strategy_sample_design_v2；"
             "不能改路由到建模、建树、Strategy Pool、报告或通用策略生命周期。",
             code="strategy_sample_design_v2_workflow_required",
             fields=("workflow",),
         )
-    if _utterance_targets_strategy_model_evidence_v2(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _model_evidence._utterance_targets_strategy_model_evidence_v2(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_model_evidence_v2"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求归集已有认证单变量证据，只能编译为 "
             "strategy_model_evidence_v2；不能改路由到训练、模型比较、报告或部署。",
             code="strategy_model_evidence_v2_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_model_score_comparison_v2(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _model_evidence.utterance_targets_model_score_comparison_v2(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_model_score_comparison_v2"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求物化模型评分比较证据，只能编译为 "
             "strategy_model_score_comparison_v2；不能改路由到训练、"
             "冠军选择、采纳或部署。",
             code="strategy_model_score_comparison_v2_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_candidate_monthly_stability(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _scorecard.utterance_targets_candidate_monthly_stability(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "candidate_monthly_stability"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求候选资产或 Strategy Pool 条目的逐月稳定性/PSI，"
             "只能编译为 candidate_monthly_stability；不能改路由到通用监控、"
             "Pool 影响测算或其他 Workflow。",
@@ -498,39 +436,39 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if (
-        utterance_targets_scorecard_cutoff_selection(utterance)
+        _scorecard.utterance_targets_scorecard_cutoff_selection(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow
             in {"scorecard_band_build", "scorecard_cutoff_selection"}
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求从完整 Scorecard 分数带中精确选择一个 cutoff，"
             "只能编译为 scorecard_cutoff_selection；不能改路由到分数带构建、"
             "自动推荐、Strategy Pool、采纳或部署。",
             code="scorecard_cutoff_selection_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_scorecard_band_build(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _scorecard.utterance_targets_scorecard_band_build(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "scorecard_band_build"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求构建完整 Scorecard 分数带，只能编译为 "
             "scorecard_band_build；不能改路由到 cutoff 选择、自动推荐、"
             "Strategy Pool、采纳或部署。",
             code="scorecard_band_build_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_interactive_tree_frontier_group_materialization(
+    if _tree.utterance_targets_interactive_tree_frontier_group_materialization(
         utterance
     ) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow
         == "interactive_tree_frontier_group_materialization"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求从一个交互树 revision 精确物化多个 frontier "
             "node/leaf 的 OR 分组，只能编译为 "
             "interactive_tree_frontier_group_materialization；不能改路由到"
@@ -538,36 +476,36 @@ def _ground_refinement_request(
             code="interactive_tree_frontier_group_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_interactive_tree_frontier_materialization(
+    if _tree.utterance_targets_interactive_tree_frontier_materialization(
         utterance
     ) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "interactive_tree_frontier_materialization"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求从一个交互树 revision 精确物化 frontier node/leaf，"
             "只能编译为 interactive_tree_frontier_materialization；不能改路由"
             "到修剪、自动树叶选择、Strategy Pool 或其他 Workflow。",
             code="interactive_tree_frontier_workflow_required",
             fields=("workflow",),
         )
-    if _utterance_targets_automatic_tree_apply(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _tree._utterance_targets_automatic_tree_apply(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow in {"automatic_tree_apply", "interactive_tree_revision"}
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求把完整自动树写回当前样本，只能编译为 "
             "automatic_tree_apply；不能改路由到通用策略应用、建树、叶节点"
             "物化、入池或其他 Workflow。",
             code="automatic_tree_apply_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_strategy_pool_materialize(utterance):
+    if _pool.utterance_targets_strategy_pool_materialize(utterance):
         if not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow == "strategy_pool_materialize"
         ):
-            return _clarification(
+            return _contracts._clarification(
                 "原话明确要求把当前 Strategy Pool 物化为持久化 draft Strategy，"
                 "只能编译为 strategy_pool_materialize；不能改路由到 Pool 编译预览、"
                 "已有策略 build、采纳、部署或其他 Workflow。",
@@ -578,80 +516,80 @@ def _ground_refinement_request(
         # words such as "backtest/report" in a chained follow-up cannot be
         # mistaken for a different Pool workflow before the single-operation
         # guard reports the precise materialization error.
-        return _ground_strategy_pool_materialize_request(utterance, result)
-    if _utterance_targets_strategy_pool_apply(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+        return _pool._ground_strategy_pool_materialize_request(utterance, result)
+    if _pool._utterance_targets_strategy_pool_apply(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and (
             draft.workflow == "strategy_pool_apply"
             or draft.workflow == "automatic_tree_apply"
-            or draft.workflow in _POOL_MUTATION_WORKFLOWS
+            or draft.workflow in _pool._POOL_MUTATION_WORKFLOWS
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求把当前 Strategy Pool 应用或写回当前样本，只能编译为 "
             "strategy_pool_apply；不能改路由到 Pool 编译预览、通用已有策略应用、"
             "影响测算、采纳、部署或其他 Workflow。",
             code="strategy_pool_apply_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_strategy_pool_stability(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _pool.utterance_targets_strategy_pool_stability(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_pool_stability"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求测量当前 Strategy Pool 的跨分区分布稳定性，只能编译为 "
             "strategy_pool_stability；不能改路由到 ImpactCube、独立效果验证、"
             "报告或生命周期操作。",
             code="strategy_pool_stability_workflow_required",
             fields=("workflow",),
         )
-    if _utterance_targets_strategy_pool_validation(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _pool._utterance_targets_strategy_pool_validation(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_pool_validation"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求对当前 Strategy Pool 执行 validation/OOT 独立样本"
             "回放验证，只能编译为 strategy_pool_validation；不能改路由到"
             " Pool 影响、逐月稳定性、编译、应用、报告或生命周期操作。",
             code="strategy_pool_validation_workflow_required",
             fields=("workflow",),
         )
-    if utterance_targets_strategy_impact_cube(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _impact.utterance_targets_strategy_impact_cube(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_impact_cube"
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求五类统一 Strategy ImpactCube，只能编译为 "
             "strategy_impact_cube；不能降级到 approval/reject 旧影响口径、"
             "Pool 修改、报告、采纳或部署。",
             code="strategy_impact_cube_workflow_required",
             fields=("workflow",),
         )
-    if _utterance_targets_strategy_pool_impact(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
+    if _pool._utterance_targets_strategy_pool_impact(utterance) and not (
+        isinstance(draft, _contracts.StandardWorkflowRequestDraft)
         and (
             draft.workflow in {"strategy_pool_impact", "strategy_impact_cube"}
             or (
                 draft.workflow == "candidate_monthly_stability"
-                and utterance_targets_candidate_monthly_stability(utterance)
+                and _scorecard.utterance_targets_candidate_monthly_stability(utterance)
             )
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求 Strategy Pool 影响测算，只能编译为 strategy_pool_impact；"
             "不能改路由到 Pool 修改、通用策略生命周期、报告或其他 Workflow。",
             code="strategy_pool_impact_workflow_required",
             fields=("workflow",),
         )
     if (
-        _utterance_targets_cross_rule_selection(utterance)
+        _cross._utterance_targets_cross_rule_selection(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow
             == "cross_rule_candidate_build_from_search"
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确提供 Cross rule search_id 与 rule_id 并要求精确构建"
             "候选，只能编译为 cross_rule_candidate_build_from_search；"
             "不能按排名选择、重新搜索或改路由到 Cross Matrix。",
@@ -659,13 +597,13 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if (
-        _utterance_targets_cross_rule_search(utterance)
+        _cross._utterance_targets_cross_rule_search(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow == "cross_rule_search"
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求搜索 2D/3D Cross 阈值规则，只能编译为 "
             "cross_rule_search；不能改路由到 Cross Matrix 字段对搜索、"
             "显式双轴构建或通用策略生命周期。",
@@ -673,14 +611,14 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if (
-        _utterance_targets_cross_search_selection(utterance)
+        _cross._utterance_targets_cross_search_selection(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow
             == "cross_matrix_candidate_build_from_search"
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确提供 Cross search_id 与 pair_id 并要求精确构建候选，"
             "只能编译为 cross_matrix_candidate_build_from_search；"
             "不能重新搜索、按排名选择或改路由到其他 Workflow。",
@@ -688,13 +626,13 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if (
-        _utterance_targets_cross_candidate_search(utterance)
+        _cross._utterance_targets_cross_candidate_search(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow == "cross_matrix_candidate_search"
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求搜索 Cross Matrix 特征组合，只能编译为 "
             "cross_matrix_candidate_search；不能改路由为显式双轴构建、"
             "通用策略生命周期或其他 Workflow。",
@@ -702,13 +640,13 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if (
-        _utterance_targets_cross_matrix_cell_selection(utterance)
+        _cross._utterance_targets_cross_matrix_cell_selection(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow == "cross_matrix_cell_selection"
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求从 Cross Matrix 精确选择单元格，只能编译为 "
             "cross_matrix_cell_selection；不能改路由到矩阵构建、通用策略生命周期"
             "或其他 Workflow。",
@@ -716,9 +654,9 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if (
-        _utterance_targets_cross_matrix(utterance)
+        _cross._utterance_targets_cross_matrix(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow
             in {
                 "cross_matrix_analysis",
@@ -728,7 +666,7 @@ def _ground_refinement_request(
             }
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求二维 Cross Matrix，只能编译为 cross_matrix_analysis；"
             "通用策略生命周期或其他 Workflow 不能消费这两个交叉轴。",
             code="cross_matrix_workflow_required",
@@ -736,13 +674,13 @@ def _ground_refinement_request(
         )
     if (
         draft is not None
-        and _utterance_targets_voting_candidate_search(utterance)
+        and _voting._utterance_targets_voting_candidate_search(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow == "voting_candidate_search"
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确要求搜索、查找或优化 Voting 组合，只能编译为 "
             "voting_candidate_search；不能改路由为显式成员构建、通用策略"
             "生命周期或其他 Workflow。",
@@ -751,23 +689,23 @@ def _ground_refinement_request(
         )
     if (
         draft is not None
-        and _utterance_targets_voting_candidate(utterance)
+        and _voting._utterance_targets_voting_candidate(utterance)
         and not (
-            isinstance(draft, StandardWorkflowRequestDraft)
+            isinstance(draft, _contracts.StandardWorkflowRequestDraft)
             and draft.workflow in {"voting_candidate_search", "voting_candidate_build"}
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "原话明确点名 Voting / n-of-k 和多个完整 candidate-rule ID，"
             "只能编译为 voting_candidate_build；通用策略生命周期或其他 "
             "Workflow 不能消费这些控制。",
             code="voting_candidate_workflow_required",
             fields=("workflow",),
         )
-    if not isinstance(draft, StandardWorkflowRequestDraft):
+    if not isinstance(draft, _contracts.StandardWorkflowRequestDraft):
         return result
     if draft.workflow == "roll_rate_matrix":
-        return _ground_roll_rate_column_bindings(
+        return _sample_design._ground_roll_rate_column_bindings(
             utterance,
             result,
             whitelist=whitelist,
@@ -776,112 +714,112 @@ def _ground_refinement_request(
     if draft.workflow == "strategy_project_context":
         return _ground_strategy_project_context_request(utterance, result)
     if draft.workflow == "strategy_sample_design_v2":
-        return _ground_strategy_sample_design_v2_request(
+        return _sample_design._ground_strategy_sample_design_v2_request(
             utterance,
             result,
             whitelist=whitelist,
         )
     if draft.workflow == "strategy_model_evidence_v2":
-        return _ground_strategy_model_evidence_v2_request(utterance, result)
+        return _model_evidence._ground_strategy_model_evidence_v2_request(utterance, result)
     if draft.workflow == "strategy_model_score_comparison_v2":
-        return _ground_model_score_comparison_v2_request(utterance, result)
+        return _model_evidence._ground_model_score_comparison_v2_request(utterance, result)
     if draft.workflow == "candidate_monthly_stability":
-        return _ground_candidate_monthly_stability_request(utterance, result)
+        return _scorecard._ground_candidate_monthly_stability_request(utterance, result)
     if draft.workflow == "scorecard_band_build":
-        return _ground_scorecard_band_build(utterance, result)
+        return _scorecard._ground_scorecard_band_build(utterance, result)
     if draft.workflow == "scorecard_cutoff_selection":
-        return _ground_scorecard_cutoff_selection(utterance, result)
+        return _scorecard._ground_scorecard_cutoff_selection(utterance, result)
     if draft.workflow == "strategy_dsl_delivery":
         return _ground_strategy_dsl_delivery_request(utterance, result)
     if draft.workflow == "strategy_report_bundle_v2":
         return _ground_strategy_report_bundle_v2_request(utterance, result)
     if draft.workflow == "strategy_pool_stability":
-        return _ground_strategy_pool_stability_request(utterance, result)
+        return _pool._ground_strategy_pool_stability_request(utterance, result)
     if draft.workflow == "strategy_impact_cube":
-        return _ground_strategy_impact_cube_request(
+        return _impact._ground_strategy_impact_cube_request(
             utterance,
             result,
             whitelist=whitelist,
         )
-    if draft.workflow in _STRATEGY_POOL_APPLY_WORKFLOWS:
-        return _ground_strategy_pool_apply_request(utterance, result)
-    if draft.workflow in _STRATEGY_POOL_MATERIALIZE_WORKFLOWS:
-        return _ground_strategy_pool_materialize_request(utterance, result)
-    if draft.workflow in _STRATEGY_POOL_VALIDATION_WORKFLOWS:
-        return _ground_strategy_pool_validation_request(utterance, result)
-    if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
-        return _ground_strategy_pool_impact_request(
+    if draft.workflow in _pool._STRATEGY_POOL_APPLY_WORKFLOWS:
+        return _pool._ground_strategy_pool_apply_request(utterance, result)
+    if draft.workflow in _pool._STRATEGY_POOL_MATERIALIZE_WORKFLOWS:
+        return _pool._ground_strategy_pool_materialize_request(utterance, result)
+    if draft.workflow in _pool._STRATEGY_POOL_VALIDATION_WORKFLOWS:
+        return _pool._ground_strategy_pool_validation_request(utterance, result)
+    if draft.workflow in _pool._STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
+        return _pool._ground_strategy_pool_impact_request(
             utterance,
             result,
             whitelist=whitelist,
         )
-    if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
-        return _ground_strategy_pool_request(utterance, result)
+    if draft.workflow in _pool._STRATEGY_POOL_WORKFLOWS:
+        return _pool._ground_strategy_pool_request(utterance, result)
     if draft.workflow == "automatic_tree_candidate_build":
-        return _ground_automatic_tree_candidate_build(
+        return _tree._ground_automatic_tree_candidate_build(
             utterance,
             result,
             whitelist=whitelist,
         )
     if draft.workflow == "automatic_tree_apply":
-        return _ground_automatic_tree_apply(
+        return _tree._ground_automatic_tree_apply(
             utterance,
             result,
             whitelist=whitelist,
         )
     if draft.workflow == "automatic_tree_leaf_materialization":
-        return _ground_automatic_tree_leaf_materialization(utterance, result)
+        return _tree._ground_automatic_tree_leaf_materialization(utterance, result)
     if draft.workflow == "interactive_tree_split_search":
-        return _ground_interactive_tree_split_search(utterance, result)
+        return _tree._ground_interactive_tree_split_search(utterance, result)
     if draft.workflow == "interactive_tree_auto_continuation":
-        return _ground_interactive_tree_auto_continuation(utterance, result)
+        return _tree._ground_interactive_tree_auto_continuation(utterance, result)
     if draft.workflow == "interactive_tree_revision":
-        return _ground_interactive_tree_revision(utterance, result)
+        return _tree._ground_interactive_tree_revision(utterance, result)
     if draft.workflow == "interactive_tree_frontier_group_materialization":
-        return _ground_interactive_tree_frontier_group_materialization(
+        return _tree._ground_interactive_tree_frontier_group_materialization(
             utterance,
             result,
         )
     if draft.workflow == "interactive_tree_frontier_materialization":
-        return _ground_interactive_tree_frontier_materialization(
+        return _tree._ground_interactive_tree_frontier_materialization(
             utterance,
             result,
         )
     if draft.workflow == "voting_candidate_search":
-        return _ground_voting_candidate_search(utterance, result)
+        return _voting._ground_voting_candidate_search(utterance, result)
     if draft.workflow == "voting_candidate_build_from_search":
-        return _ground_voting_candidate_build_from_search(utterance, result)
+        return _voting._ground_voting_candidate_build_from_search(utterance, result)
     if draft.workflow == "voting_candidate_build":
-        return _ground_voting_candidate_build(utterance, result)
+        return _voting._ground_voting_candidate_build(utterance, result)
     if draft.workflow == "cross_rule_search":
-        return _ground_cross_rule_search(
+        return _cross._ground_cross_rule_search(
             utterance,
             result,
             whitelist=whitelist,
         )
     if draft.workflow == "cross_rule_candidate_build_from_search":
-        return _ground_cross_rule_candidate_build(utterance, result)
+        return _cross._ground_cross_rule_candidate_build(utterance, result)
     if draft.workflow == "cross_matrix_candidate_search":
-        return _ground_cross_matrix_candidate_search(
+        return _cross._ground_cross_matrix_candidate_search(
             utterance,
             result,
             whitelist=whitelist,
         )
     if draft.workflow == "cross_matrix_candidate_build_from_search":
-        return _ground_cross_matrix_candidate_build_from_search(
+        return _cross._ground_cross_matrix_candidate_build_from_search(
             utterance,
             result,
         )
     if draft.workflow == "cross_matrix_cell_selection":
-        return _ground_cross_matrix_cell_selection(utterance, result)
+        return _cross._ground_cross_matrix_cell_selection(utterance, result)
     if draft.workflow == "cross_matrix_analysis":
-        return _ground_cross_matrix_analysis(
+        return _cross._ground_cross_matrix_analysis(
             utterance,
             result,
             whitelist=whitelist,
         )
     if draft.workflow == "univariate_candidate_analysis":
-        return _ground_univariate_candidate_analysis(
+        return _scorecard._ground_univariate_candidate_analysis(
             utterance,
             result,
             whitelist=whitelist,
@@ -891,13 +829,13 @@ def _ground_refinement_request(
     inputs = draft.to_dict()["workflow_inputs"]
     missing_controls: list[str] = []
     source_candidate_id = inputs.get("source_candidate_id")
-    if source_candidate_id is not None and not _utterance_contains_token(
+    if source_candidate_id is not None and not _grounding._utterance_contains_token(
         utterance, source_candidate_id
     ):
         missing_controls.append("source_candidate_id")
     if source_candidate_id is None:
         observed_breakpoints, breakpoint_syntax_ambiguous = (
-            _explicit_manual_breakpoint_bindings(
+            _scorecard._explicit_manual_breakpoint_bindings(
                 utterance,
                 whitelist=whitelist,
             )
@@ -915,7 +853,7 @@ def _ground_refinement_request(
         missing_controls.extend(
             bin_id
             for bin_id in selection["source_bin_ids"]
-            if not _utterance_contains_token(utterance, bin_id)
+            if not _grounding._utterance_contains_token(utterance, bin_id)
         )
     else:
         threshold = selection["risk_threshold"]
@@ -934,11 +872,11 @@ def _ground_refinement_request(
             bin_id
             for group in merge_groups
             for bin_id in group
-            if not _utterance_contains_token(utterance, bin_id)
+            if not _grounding._utterance_contains_token(utterance, bin_id)
         )
     if not missing_controls:
         return result
-    return _clarification(
+    return _contracts._clarification(
         "请明确提供要选择的 source bin id，或给出可核对的观测坏率门槛；"
         "合并/选择已有箱时还需引用分析结果中展示的完整 candidate ID。"
         "我不会根据“最好”等模糊表述自行生成门槛或重绑分箱。",
@@ -948,23 +886,23 @@ def _ground_refinement_request(
 
 def _ground_strategy_project_context_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if (
         not utterance_targets_strategy_project_context(utterance)
         or _PROJECT_CONTEXT_NONCOMMAND_RE.search(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请单独发出一次立即整理项目现状/历史策略上下文的肯定命令；"
             "问句、否定、假设或未来描述不会刷新项目证据。",
             code="strategy_project_context_positive_command_required",
             fields=("materialize_intent",),
         )
     if _PROJECT_CONTEXT_CHAINED_ACTION_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只固化项目现状和历史证据；样本设计、候选分析、影响测算、"
             "报告、采纳或部署必须在后续受治理步骤中执行。",
             code="strategy_project_context_single_step_required",
@@ -993,7 +931,7 @@ def _ground_strategy_project_context_request(
         if filename not in utterance:
             missing.append(f"external_report_filenames.{filename}")
     if missing:
-        return _clarification(
+        return _contracts._clarification(
             "截止日期、项目文字、明确不可用字段和外部报告文件名只能采用用户原话；"
             "平台不会让模型补写背景、缺失状态或证据文件。请补充或删除不在原话中的字段。",
             code="strategy_project_context_controls_not_grounded",
@@ -1064,14 +1002,14 @@ def utterance_targets_strategy_dsl_delivery(utterance: str) -> bool:
 
 def _ground_strategy_dsl_delivery_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
 
     if _STRATEGY_DSL_DELIVERY_NEGATED_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "否定的策略代码导出请求不会创建或执行交付计划；"
             "请在需要执行时单独发出肯定命令。",
             code="strategy_dsl_delivery_intent_negated",
@@ -1085,21 +1023,21 @@ def _ground_strategy_dsl_delivery_request(
             and _STRATEGY_DSL_DELIVERY_CURRENT_RE.search(utterance) is None
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请单独发出一次立即导出当前策略 Python、SQL、JSON 与等价证据的"
             "肯定命令；问句、假设、演示或仅历史描述不会创建交付。",
             code="strategy_dsl_delivery_positive_command_required",
             fields=("delivery_intent",),
         )
     if _strategy_dsl_delivery_has_positive_chained_operation(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只能导出离线策略代码与等价证据；应用、写回、报告、影响测算、"
             "训练、评分、采纳、晋级或部署必须作为后续独立受治理请求。",
             code="strategy_dsl_delivery_single_operation_required",
             fields=("next_action",),
         )
     if _STRATEGY_DSL_DELIVERY_PLATFORM_CONTROL_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "策略交付只允许用户提供 strategy_id；策略类型、version/spec hash、"
             "活动数据集及 hash、等价样本预算、artifact id/hash 和结果均由平台绑定。",
             code="strategy_dsl_delivery_platform_binding_forbidden",
@@ -1117,14 +1055,14 @@ def _ground_strategy_dsl_delivery_request(
     selected_id = inputs.get("strategy_id")
     if selected_id is None:
         if mentioned_ids:
-            return _clarification(
+            return _contracts._clarification(
                 "原话中的完整 strategy_id 必须逐字进入交付请求；平台不会忽略"
                 "已点名策略并改用其他策略。",
                 code="strategy_dsl_delivery_controls_not_grounded",
                 fields=("strategy_id",),
             )
     elif mentioned_ids != (selected_id,):
-        return _clarification(
+        return _contracts._clarification(
             "策略交付只能逐字使用原话中唯一完整的 strategy_id；多个 ID、"
             "遗漏或模型替换都不会执行。",
             code="strategy_dsl_delivery_controls_not_grounded",
@@ -1157,14 +1095,14 @@ def utterance_targets_strategy_report_bundle_v2(utterance: str) -> bool:
 
 def _ground_strategy_report_bundle_v2_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
 
     if _STRATEGY_REPORT_NEGATED_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "否定的报告请求不会创建或执行报告计划；请在需要执行时单独发出肯定命令。",
             code="strategy_report_bundle_v2_intent_negated",
             fields=("report_intent",),
@@ -1177,21 +1115,21 @@ def _ground_strategy_report_bundle_v2_request(
             and not _STRATEGY_REPORT_CURRENT_RE.search(utterance)
         )
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请单独发出一次立即生成受治理策略评审报告的肯定命令；"
             "问句、假设、演示或仅历史描述不会创建报告。",
             code="strategy_report_bundle_v2_positive_command_required",
             fields=("report_intent",),
         )
     if _strategy_report_has_positive_chained_operation(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "本轮只能生成报告；训练、评分、候选构建/分析、影响测算、"
             "采纳、部署或上线必须作为后续独立受治理请求。",
             code="strategy_report_bundle_v2_single_operation_required",
             fields=("next_action",),
         )
     if _STRATEGY_REPORT_PLATFORM_CONTROL_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "报告只允许用户提供 title/status；ProjectContext、SampleDesign、"
             "Pool、ImpactCube/兼容 PoolImpact、模型证据、策略身份、"
             "revision/CAS、generated_at、artifact id/hash 和指标均由平台绑定。",
@@ -1225,7 +1163,7 @@ def _ground_strategy_report_bundle_v2_request(
         missing.append("status")
 
     if missing:
-        return _clarification(
+        return _contracts._clarification(
             "报告标题和状态只能逐字采用用户原话；未提供时平台固定使用"
             "「策略迭代评审报告」与 partial，不允许模型补写或覆盖。",
             code="strategy_report_bundle_v2_controls_not_grounded",
@@ -1379,3 +1317,92 @@ def _strategy_report_status_span_is_negated(
 ) -> bool:
     prefix = utterance[max(0, start - 32) : start]
     return _STRATEGY_REPORT_STATUS_NEGATION_RE.search(prefix) is not None
+
+_REFINEMENT_SELECTION_ACTION_RE = re.compile(
+    r"(?:选择|选中|保留|筛选|作为|select|keep|retain)", re.IGNORECASE
+)
+
+_REFINEMENT_MERGE_ACTION_RE = re.compile(r"(?:合并|并箱|merge|combine)", re.IGNORECASE)
+
+_RISK_THRESHOLD_EXPRESSION_RE = re.compile(
+    r"(?:观测)?(?:坏率|坏账率|风险率|bad\s*rate|risk\s*rate)"
+    r"\s*(?:为|是|需|需要|应|must\s+be|is)?\s*"
+    r"(?P<operator>大于等于|不低于|至少|不少于|达到|>=|≥|"
+    r"小于等于|不高于|至多|最多|<=|≤|"
+    r"大于|高于|超过|>|小于|低于|少于|<|"
+    r"greater\s+than\s+or\s+equal(?:\s+to)?|at\s+least|"
+    r"less\s+than\s+or\s+equal(?:\s+to)?|at\s+most|"
+    r"more\s+than|greater\s+than|less\s+than)"
+    r"\s*(?P<value>百分之\s*[0-9]+(?:\.[0-9]+)?|"
+    r"[0-9]+(?:\.[0-9]+)?\s*%|"
+    r"(?:0(?:\.\d+)?|1(?:\.0+)?))",
+    re.IGNORECASE,
+)
+
+def _is_canonical_stored_strategy_report_request(
+    draft: _contracts.CompiledStrategyRequestDraft | None,
+) -> bool:
+    """Keep a fully identified stored-strategy report on its legacy route."""
+
+    return bool(
+        isinstance(draft, _contracts.StrategyRequestDraft)
+        and draft.operation == "report"
+        and draft.strategy_spec is None
+        and draft.strategy_id
+    )
+
+def _utterance_supports_risk_threshold(
+    utterance: str,
+    *,
+    operator: str,
+    value: float,
+) -> bool:
+    return any(
+        candidate_operator == operator
+        and math.isclose(candidate_value, value, rel_tol=0.0, abs_tol=1e-12)
+        for candidate_operator, candidate_value in _risk_threshold_expressions(
+            utterance
+        )
+    )
+
+def _risk_threshold_expressions(utterance: str) -> tuple[tuple[str, float], ...]:
+    expressions: list[tuple[str, float]] = []
+    for match in _RISK_THRESHOLD_EXPRESSION_RE.finditer(utterance):
+        expressions.append(
+            (
+                _normalized_threshold_operator(match.group("operator")),
+                _grounding._ratio_token_value(match.group("value")),
+            )
+        )
+    return tuple(expressions)
+
+def _normalized_threshold_operator(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value.strip().lower())
+    if normalized in {
+        "大于等于",
+        "不低于",
+        "至少",
+        "不少于",
+        "达到",
+        ">=",
+        "≥",
+        "greater than or equal",
+        "greater than or equal to",
+        "at least",
+    }:
+        return ">="
+    if normalized in {
+        "小于等于",
+        "不高于",
+        "至多",
+        "最多",
+        "<=",
+        "≤",
+        "less than or equal",
+        "less than or equal to",
+        "at most",
+    }:
+        return "<="
+    if normalized in {"大于", "高于", "超过", ">", "more than", "greater than"}:
+        return ">"
+    return "<"

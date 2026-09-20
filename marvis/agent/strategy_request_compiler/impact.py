@@ -1,29 +1,13 @@
-"""impact request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Impact request grammar and grounding rules."""
 from __future__ import annotations
-from collections.abc import Mapping
+
 import math
 import re
+from collections.abc import Mapping
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _POOL_IMPACT_NEGATED_RE
-    from . import _POOL_IMPACT_NONCOMMAND_RE
-    from . import _POOL_IMPACT_POSITIVE_INTENT_RE
-    from . import _POOL_IMPACT_REPORT_ONLY_RE
-    from . import _POOL_IMPACT_SECOND_OPERATION_RE
-    from . import _POOL_IMPACT_STRATEGY_ID_RE
-    from . import _POOL_IMPACT_TARGET_RE
-    from . import _POOL_STRATEGY_TYPE_GROUNDING
-    from . import _clarification
-    from . import _pool_impact_span_is_negated
-    from . import _pool_impact_token_is_negated
-    from . import _pool_impact_tokens_are_alternatives
-    from . import _utterance_contains_token
-    from . import _voting_strategy_type_mentions
-    from . import utterance_targets_strategy_pool_stability
+from . import contracts as _contracts
+from . import grounding as _grounding
+from . import pool as _pool
 
 _IMPACT_CUBE_EXPLICIT_TARGET_RE = re.compile(
     r"(?<![A-Za-z0-9_])impact(?:\s|-|_)*cube(?![A-Za-z0-9_])|"
@@ -98,86 +82,64 @@ _IMPACT_CUBE_ECONOMICS_GROUNDING = {
     ),
 }
 
-def _impact_cube_strategy_type_mentions(
-    utterance: str,
-) -> tuple[tuple[str, int, int], ...]:
-    """Ignore dimension words such as ``分群列`` when selecting Pool type."""
-
-    mentions = []
-    for strategy_type, start, end in _voting_strategy_type_mentions(
-        utterance
-    ):
-        matched = utterance[start:end]
-        suffix = utterance[end : end + 24]
-        if (
-            re.search(r"(?:池|pool|strategy)", matched, re.IGNORECASE)
-            or re.match(
-                r"\s*(?:策略池|策略|strategy(?:\s|-|_)*pool|\bpool\b)",
-                suffix,
-                re.IGNORECASE,
-            )
-        ):
-            mentions.append((strategy_type, start, end))
-    return tuple(mentions)
-
 def utterance_targets_strategy_impact_cube(utterance: str) -> bool:
     """Reserve only a positive, executable unified/non-binary impact clause."""
 
-    if utterance_targets_strategy_pool_stability(utterance):
+    if _pool.utterance_targets_strategy_pool_stability(utterance):
         return False
-    if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
+    if _pool._POOL_IMPACT_TARGET_RE.search(utterance) is None:
         return False
     if (
-        _POOL_IMPACT_REPORT_ONLY_RE.search(utterance) is not None
-        or _POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None
+        _pool._POOL_IMPACT_REPORT_ONLY_RE.search(utterance) is not None
+        or _pool._POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None
     ):
         return False
     explicit = tuple(_IMPACT_CUBE_EXPLICIT_TARGET_RE.finditer(utterance))
     if any(
-        not _pool_impact_span_is_negated(utterance, start=match.start())
+        not _pool._pool_impact_span_is_negated(utterance, start=match.start())
         for match in explicit
     ):
         return True
     mentioned_types = {
         strategy_type
-        for strategy_type, start, _end in _impact_cube_strategy_type_mentions(
+        for strategy_type, start, _end in _grounding._impact_cube_strategy_type_mentions(
             utterance
         )
-        if not _pool_impact_span_is_negated(utterance, start=start)
+        if not _pool._pool_impact_span_is_negated(utterance, start=start)
     }
     return bool(mentioned_types & {"limit", "pricing", "segmentation"})
 
 def _ground_strategy_impact_cube_request(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Prove every unified ImpactCube control came from this utterance."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if (
-        _POOL_IMPACT_NEGATED_RE.search(utterance)
-        or _POOL_IMPACT_NONCOMMAND_RE.search(utterance)
-        or _POOL_IMPACT_REPORT_ONLY_RE.search(utterance)
+        _pool._POOL_IMPACT_NEGATED_RE.search(utterance)
+        or _pool._POOL_IMPACT_NONCOMMAND_RE.search(utterance)
+        or _pool._POOL_IMPACT_REPORT_ONLY_RE.search(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式的单一命令明确要求统一 Strategy ImpactCube；"
             "否定、问句、历史/未来描述或仅报告不会执行测算。",
             code="strategy_impact_cube_positive_command_required",
             fields=("measurement_intent",),
         )
-    if _POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None:
-        return _clarification(
+    if _pool._POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None:
+        return _contracts._clarification(
             "原话没有明确授权执行统一 Strategy ImpactCube。请明确说出要测算的"
             " Pool 类型；本 Workflow 只生成可逆的只读证据。",
             code="strategy_impact_cube_positive_command_required",
             fields=("measurement_intent",),
         )
-    if _POOL_IMPACT_SECOND_OPERATION_RE.search(utterance):
-        return _clarification(
+    if _pool._POOL_IMPACT_SECOND_OPERATION_RE.search(utterance):
+        return _contracts._clarification(
             "统一 Strategy ImpactCube 必须是当前轮唯一操作；Pool 修改、"
             "创建策略、写回、报告、采纳、晋级或部署必须拆成后续请求。",
             code="strategy_impact_cube_single_operation_required",
@@ -186,12 +148,12 @@ def _ground_strategy_impact_cube_request(
 
     missing_controls: list[str] = []
     strategy_type = str(inputs.get("strategy_type") or "")
-    strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
-    strategy_type_mentions = _impact_cube_strategy_type_mentions(utterance)
+    strategy_type_pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    strategy_type_mentions = _grounding._impact_cube_strategy_type_mentions(utterance)
     mentioned_strategy_types = {item[0] for item in strategy_type_mentions}
     selected_type_is_negated = any(
         item[0] == strategy_type
-        and _pool_impact_span_is_negated(utterance, start=item[1])
+        and _pool._pool_impact_span_is_negated(utterance, start=item[1])
         for item in strategy_type_mentions
     )
     if (
@@ -221,7 +183,7 @@ def _ground_strategy_impact_cube_request(
     mentioned_columns = tuple(
         column
         for column in whitelist
-        if _utterance_contains_token(utterance, column)
+        if _grounding._utterance_contains_token(utterance, column)
     )
     for field in ("month_col", "group_col", "segment_col"):
         selected = inputs.get(field)
@@ -234,11 +196,11 @@ def _ground_strategy_impact_cube_request(
             continue
         if (
             values != {selected}
-            or not _utterance_contains_token(utterance, str(selected))
-            or _pool_impact_token_is_negated(utterance, str(selected))
+            or not _grounding._utterance_contains_token(utterance, str(selected))
+            or _pool._pool_impact_token_is_negated(utterance, str(selected))
             or any(
                 other != selected
-                and _pool_impact_tokens_are_alternatives(
+                and _pool._pool_impact_tokens_are_alternatives(
                     utterance,
                     str(selected),
                     other,
@@ -250,12 +212,12 @@ def _ground_strategy_impact_cube_request(
 
     current_strategy_id = inputs.get("current_strategy_id")
     strategy_id_matches = tuple(
-        _POOL_IMPACT_STRATEGY_ID_RE.finditer(utterance)
+        _pool._POOL_IMPACT_STRATEGY_ID_RE.finditer(utterance)
     )
     positive_strategy_ids = {
         match.group(0).casefold()
         for match in strategy_id_matches
-        if not _pool_impact_span_is_negated(
+        if not _pool._pool_impact_span_is_negated(
             utterance,
             start=match.start(),
         )
@@ -264,7 +226,7 @@ def _ground_strategy_impact_cube_request(
         selected_id = str(current_strategy_id).casefold()
         if (
             positive_strategy_ids != {selected_id}
-            or not _utterance_contains_token(
+            or not _grounding._utterance_contains_token(
                 utterance,
                 str(current_strategy_id),
             )
@@ -304,7 +266,7 @@ def _ground_strategy_impact_cube_request(
 
     if missing_controls:
         rendered = "、".join(dict.fromkeys(missing_controls))
-        return _clarification(
+        return _contracts._clarification(
             "统一 Strategy ImpactCube 只能使用用户原话中的 Pool 类型、分区、"
             "精确维度列、当前策略 ID 和 typed economics_inputs；当前无法核对："
             f"{rendered}。平台不会采用 LLM 猜测的引用、列、数字或指标。",
@@ -316,7 +278,7 @@ def _ground_strategy_impact_cube_request(
 def _impact_cube_partition_mentions(utterance: str) -> set[str]:
     negated = _impact_cube_negated_partition_mentions(utterance)
     if any(
-        not _pool_impact_span_is_negated(
+        not _pool._pool_impact_span_is_negated(
             utterance,
             start=match.start(),
         )
@@ -327,7 +289,7 @@ def _impact_cube_partition_mentions(utterance: str) -> set[str]:
         partition
         for partition, pattern in _IMPACT_CUBE_PARTITION_GROUNDING.items()
         if any(
-            not _pool_impact_span_is_negated(
+            not _pool._pool_impact_span_is_negated(
                 utterance,
                 start=match.start(),
             )
@@ -340,7 +302,7 @@ def _impact_cube_negated_partition_mentions(utterance: str) -> set[str]:
         partition
         for partition, pattern in _IMPACT_CUBE_PARTITION_GROUNDING.items()
         if any(
-            _pool_impact_span_is_negated(
+            _pool._pool_impact_span_is_negated(
                 utterance,
                 start=match.start(),
             )
@@ -348,7 +310,7 @@ def _impact_cube_negated_partition_mentions(utterance: str) -> set[str]:
         )
     }
     if any(
-        _pool_impact_span_is_negated(
+        _pool._pool_impact_span_is_negated(
             utterance,
             start=match.start(),
         )
@@ -424,7 +386,7 @@ def _impact_cube_economics_value_is_grounded(
             re.IGNORECASE,
         )
         return any(
-            not _pool_impact_span_is_negated(
+            not _pool._pool_impact_span_is_negated(
                 utterance,
                 start=match.start(),
             )
@@ -452,7 +414,7 @@ def _impact_cube_economics_value_is_grounded(
         (match.start(), match.end())
         for pattern in value_patterns
         for match in pattern.finditer(utterance)
-        if not _pool_impact_span_is_negated(
+        if not _pool._pool_impact_span_is_negated(
             utterance,
             start=match.start(),
         )
@@ -463,7 +425,7 @@ def _impact_cube_economics_value_is_grounded(
         (name, match.start(), match.end())
         for name, pattern in _IMPACT_CUBE_ECONOMICS_GROUNDING.items()
         for match in pattern.finditer(utterance)
-        if not _pool_impact_span_is_negated(
+        if not _pool._pool_impact_span_is_negated(
             utterance,
             start=match.start(),
         )
@@ -523,7 +485,7 @@ def _impact_cube_explicit_economics_components(
             re.IGNORECASE,
         )
         if any(
-            not _pool_impact_span_is_negated(
+            not _pool._pool_impact_span_is_negated(
                 utterance,
                 start=match.start(),
             )

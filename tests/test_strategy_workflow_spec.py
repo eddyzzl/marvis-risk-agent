@@ -14,8 +14,8 @@ from marvis.agent.strategy_workflows import (
     MANUAL_STANDARD_STRATEGY_WORKFLOWS,
     REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS,
     StrategyWorkflowPreparationContext,
-    StrategyWorkflowResolutionMode,
     StrategyWorkflowResolutionContext,
+    StrategyWorkflowResolutionMode,
     StrategyWorkflowValidationError,
     prepare_strategy_plan,
     resolve_strategy_request,
@@ -371,9 +371,8 @@ def test_migrated_specs_declare_exact_template_presenter_refs() -> None:
 
 
 def test_compiler_has_no_family_validator_or_confirmation_shadows() -> None:
-    # The compiler is physically split across lane files executed into the
-    # package namespace (exec-merge design); parse the merged lane sources so
-    # the invariant still covers the whole module surface.
+    # Inspect every grammar module so a new family cannot bypass the shared
+    # workflow validation and confirmation contracts.
     compiler_pkg = Path(inspect.getfile(strategy_request_compiler)).parent
     merged_src = "\n".join(
         p.read_text(encoding="utf-8")

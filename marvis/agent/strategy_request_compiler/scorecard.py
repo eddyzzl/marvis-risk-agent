@@ -1,29 +1,15 @@
-"""scorecard request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Scorecard request grammar and grounding rules."""
 from __future__ import annotations
-from collections.abc import Sequence
-from decimal import Decimal, InvalidOperation
+
 import json
 import math
 import re
+from collections.abc import Sequence
+from decimal import Decimal, InvalidOperation
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _CANDIDATE_STABILITY_ACTION_RE
-    from . import _CANDIDATE_STABILITY_ASSET_ID_TOKEN_RE
-    from . import _CANDIDATE_STABILITY_MEASUREMENT_RE
-    from . import _CANDIDATE_STABILITY_NOT_AUTHORIZED_RE
-    from . import _CANDIDATE_STABILITY_PLATFORM_CONTROL_RE
-    from . import _CANDIDATE_STABILITY_POOL_ENTRY_ID_TOKEN_RE
-    from . import _CANDIDATE_STABILITY_SECOND_OPERATION_RE
-    from . import _CANDIDATE_STABILITY_SUBJECT_RE
-    from . import _POOL_STRATEGY_TYPE_GROUNDING
-    from . import _automatic_tree_span_is_negated
-    from . import _clarification
-    from . import _cross_mention_is_within
-    from . import _voting_strategy_type_mentions
+from . import contracts as _contracts
+from . import grounding as _grounding
+from . import identifiers as _identifiers
 
 _SCORECARD_SUBJECT_RE = re.compile(
     r"(?:Scorecard|评分卡).{0,20}"
@@ -65,15 +51,6 @@ _SCORECARD_HEURISTIC_SELECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
-_SCORECARD_SECOND_OPERATION_RE = re.compile(
-    r"(?:加入|放入|写入|纳入)[^，,；;。\n]{0,20}(?:策略池|规则池|Pool)|"
-    r"(?:入池|应用|写回|回写|采纳|采用|部署|上线|投产|生成报告|出报告)|"
-    r"(?<![A-Za-z0-9_])(?:add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|"
-    r"apply|write[-\s]*back|adopt|deploy|go[-\s]?live|"
-    r"generate\s+(?:a\s+)?report)(?![A-Za-z0-9_])",
-    re.IGNORECASE,
-)
-
 _SCORECARD_BIN_COUNT_RE = re.compile(
     r"(?:等频\s*)?(?P<count>\d+)\s*(?:档|带|bands?)",
     re.IGNORECASE,
@@ -102,11 +79,6 @@ _SCORECARD_CUTOFF_ID_TOKEN_RE = re.compile(
     r"(?![A-Za-z0-9_-])"
 )
 
-_SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])scorecard-cutoff-selection-[0-9a-f]{32}"
-    r"(?![A-Za-z0-9_-])"
-)
-
 def _explicit_manual_breakpoint_bindings(
     utterance: str,
     *,
@@ -130,14 +102,14 @@ def _explicit_manual_breakpoint_bindings(
             re.IGNORECASE,
         )
         for match in pattern.finditer(utterance):
-            if command_span is not None and not _cross_mention_is_within(
+            if command_span is not None and not _grounding._cross_mention_is_within(
                 match.start(),
                 match.end(),
                 command_span,
             ):
                 ambiguous = True
                 continue
-            if _automatic_tree_span_is_negated(
+            if _grounding._automatic_tree_span_is_negated(
                 utterance,
                 start=match.start(),
                 end=match.end(),
@@ -185,14 +157,14 @@ def _explicit_manual_breakpoint_bindings(
 
 def _ground_univariate_candidate_analysis(
     utterance: str,
-    result: StrategyRequestCompilation,
+    result: _contracts.StrategyRequestCompilation,
     *,
     whitelist: tuple[str, ...],
-) -> StrategyRequestCompilation:
+) -> _contracts.StrategyRequestCompilation:
     """Keep user-owned manual cutpoints byte-for-byte grounded in this turn."""
 
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     observed, ambiguous = _explicit_manual_breakpoint_bindings(
         utterance,
@@ -201,7 +173,7 @@ def _ground_univariate_candidate_analysis(
     expected = inputs.get("manual_breakpoints", {})
     if not ambiguous and observed == expected:
         return result
-    return _clarification(
+    return _contracts._clarification(
         "manual 分箱必须用“字段名 manual 切点 [值1, 值2]”明确写出"
         "每个字段的严格递增切点；平台不会让模型补写、改序或把其他数字当切点。",
         code="univariate_manual_breakpoints_not_grounded",
@@ -265,15 +237,15 @@ def _scorecard_raw_pd_edge_mentions(
 
 def _ground_scorecard_band_build(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if _SCORECARD_HEURISTIC_SELECTION_RE.search(
         utterance
-    ) or _SCORECARD_SECOND_OPERATION_RE.search(utterance):
-        return _clarification(
+    ) or _grounding._SCORECARD_SECOND_OPERATION_RE.search(utterance):
+        return _contracts._clarification(
             "Scorecard 分数带构建必须是单独一步；自动选择/排名 cutoff、"
             "入池、应用、写回、报告、采纳或部署必须拆成后续请求。",
             code="scorecard_band_single_step_required",
@@ -283,7 +255,7 @@ def _ground_scorecard_band_build(
         _SCORECARD_NOT_AUTHORIZED_RE.search(utterance)
         or _SCORECARD_BUILD_ACTION_RE.search(utterance) is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式命令明确要求构建 Scorecard 完整分数带。",
             code="scorecard_band_positive_command_required",
             fields=("build_intent",),
@@ -305,7 +277,7 @@ def _ground_scorecard_band_build(
         )
         or (expected_edges is None and raw_edges)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "bin_count 或 raw_pd_band_edges 只能逐字采用本轮唯一显式值；"
             "两者均未提供时才使用 Tool 默认等频 10 档。",
             code="scorecard_band_controls_not_grounded",
@@ -315,10 +287,10 @@ def _ground_scorecard_band_build(
 
 def _ground_scorecard_cutoff_selection(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     assets = tuple(
         match.group(0)
@@ -329,15 +301,15 @@ def _ground_scorecard_cutoff_selection(
         for match in _SCORECARD_CUTOFF_ID_TOKEN_RE.finditer(utterance)
     )
     if len(assets) != 1 or len(cutoffs) != 1:
-        return _clarification(
+        return _contracts._clarification(
             "Scorecard cutoff 选择必须逐字提供且只提供一个完整 "
             "scorecard-band-asset ID 与一个完整 scorecard-cutoff ID；"
             "不能按最好、坏率、排名或推荐自动挑选。",
             code="scorecard_cutoff_explicit_id_required",
             fields=("asset_id", "cutoff_id"),
         )
-    if _SCORECARD_SECOND_OPERATION_RE.search(utterance):
-        return _clarification(
+    if _grounding._SCORECARD_SECOND_OPERATION_RE.search(utterance):
+        return _contracts._clarification(
             "Scorecard cutoff 选择必须是单独一步；入池、应用、写回、"
             "报告、采纳或部署必须拆成后续请求。",
             code="scorecard_cutoff_single_step_required",
@@ -347,7 +319,7 @@ def _ground_scorecard_cutoff_selection(
         _SCORECARD_NOT_AUTHORIZED_RE.search(utterance)
         or _SCORECARD_SELECTION_ACTION_RE.search(utterance) is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式命令明确选择一个 Scorecard cutoff。",
             code="scorecard_cutoff_positive_command_required",
             fields=("selection_intent",),
@@ -357,7 +329,7 @@ def _ground_scorecard_cutoff_selection(
         or assets != (inputs["asset_id"],)
         or cutoffs != (inputs["cutoff_id"],)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Scorecard asset/cutoff 必须与用户原话中的唯一完整 pointer "
             "逐字一致；平台不会替换、补全、排名或推荐。",
             code="scorecard_cutoff_controls_not_grounded",
@@ -373,7 +345,7 @@ def _ground_scorecard_cutoff_selection(
         or not isinstance(reason, str)
         or reasons[0] != reason
     ):
-        return _clarification(
+        return _contracts._clarification(
             "可选 reason 必须与用户以“选择理由/理由/原因/说明”明确标注的"
             "唯一文本逐字一致；未标注时必须省略。",
             code="scorecard_cutoff_reason_not_grounded",
@@ -383,13 +355,13 @@ def _ground_scorecard_cutoff_selection(
 
 def _ground_candidate_monthly_stability_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     if not utterance_targets_candidate_monthly_stability(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "原话没有同时明确候选/Pool 条目和逐月稳定性或 PSI；"
             "本 Workflow 不会替代 Pool 影响、通用监控或其他候选操作。",
             code="candidate_monthly_stability_measurement_required",
@@ -399,21 +371,21 @@ def _ground_candidate_monthly_stability_request(
         _CANDIDATE_STABILITY_NOT_AUTHORIZED_RE.search(utterance)
         or _CANDIDATE_STABILITY_ACTION_RE.search(utterance) is None
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请用当前轮、肯定式命令明确要求计算一个已有单变量候选资产，"
             "或当前 Strategy Pool 某条目的逐月稳定性/PSI。",
             code="candidate_monthly_stability_positive_command_required",
             fields=("measurement_intent",),
         )
     if _CANDIDATE_STABILITY_SECOND_OPERATION_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "候选逐月稳定性必须是当前轮唯一操作；入池、删改、重排、编译、"
             "写回、报告、采纳或部署请拆成后续请求。",
             code="candidate_monthly_stability_single_operation_required",
             fields=("workflow",),
         )
     if _CANDIDATE_STABILITY_PLATFORM_CONTROL_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "候选逐月稳定性的 artifact/hash、Pool revision、活动 workspace、"
             "SampleDesign 与月份字段只能由平台恢复，请不要在请求中指定。",
             code="candidate_monthly_stability_platform_binding_forbidden",
@@ -422,11 +394,11 @@ def _ground_candidate_monthly_stability_request(
 
     asset_ids = tuple(
         match.group(0)
-        for match in _CANDIDATE_STABILITY_ASSET_ID_TOKEN_RE.finditer(utterance)
+        for match in _identifiers._CANDIDATE_STABILITY_ASSET_ID_TOKEN_RE.finditer(utterance)
     )
     entry_ids = tuple(
         match.group(0)
-        for match in _CANDIDATE_STABILITY_POOL_ENTRY_ID_TOKEN_RE.finditer(
+        for match in _identifiers._CANDIDATE_STABILITY_POOL_ENTRY_ID_TOKEN_RE.finditer(
             utterance
         )
     )
@@ -437,7 +409,7 @@ def _ground_candidate_monthly_stability_request(
             or asset_ids[0] != expected
             or entry_ids
         ):
-            return _clarification(
+            return _contracts._clarification(
                 "请逐字提供且只提供一个完整的单变量 candidate-asset ID；"
                 "代词、缺失、多个 ID 或同时出现 Pool entry 时平台不会猜测。",
                 code="candidate_monthly_stability_source_not_grounded",
@@ -448,9 +420,9 @@ def _ground_candidate_monthly_stability_request(
     expected_entry = str(inputs.get("entry_id") or "")
     strategy_type = str(inputs.get("strategy_type") or "")
     mentioned_types = {
-        item[0] for item in _voting_strategy_type_mentions(utterance)
+        item[0] for item in _grounding._voting_strategy_type_mentions(utterance)
     }
-    type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    type_pattern = _grounding._POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
     if (
         asset_ids
         or len(entry_ids) != 1
@@ -459,10 +431,67 @@ def _ground_candidate_monthly_stability_request(
         or type_pattern.search(utterance) is None
         or mentioned_types != {strategy_type}
     ):
-        return _clarification(
+        return _contracts._clarification(
             "Pool 条目逐月稳定性需要在同一请求中明确且唯一提供 Strategy Pool "
             "类型与一个完整 pool-entry ID；平台不会从动作、历史或其他 Pool 猜测。",
             code="candidate_monthly_stability_source_not_grounded",
             fields=("strategy_type", "entry_id"),
         )
     return result
+
+_CANDIDATE_STABILITY_SUBJECT_RE = re.compile(
+    r"(?:候选(?:资产|规则)?|策略池(?:条目|规则)|Pool\s*(?:entry|条目)|"
+    r"candidate(?:\s+asset)?|candidate-asset-|pool-entry-)",
+    re.IGNORECASE,
+)
+
+_CANDIDATE_STABILITY_MEASUREMENT_RE = re.compile(
+    r"(?:逐月|按月|月度|跨月)[^；;。.!?？\n]{0,40}"
+    r"(?:稳定性|分布稳定|PSI)|"
+    r"(?:稳定性|分布稳定|PSI)[^；;。.!?？\n]{0,40}"
+    r"(?:逐月|按月|月度|跨月)|"
+    r"(?<![A-Za-z0-9_])monthly[^;.!?\n]{0,40}"
+    r"(?:stability|PSI)|"
+    r"(?<![A-Za-z0-9_])(?:stability|PSI)[^;.!?\n]{0,40}"
+    r"monthly(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+_CANDIDATE_STABILITY_ACTION_RE = re.compile(
+    r"(?:做|计算|测算|分析|评估|检查|生成|查看)|"
+    r"(?<![A-Za-z0-9_])(?:compute|calculate|measure|analy[sz]e|"
+    r"assess|evaluate|check|build|show)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+_CANDIDATE_STABILITY_NOT_AUTHORIZED_RE = re.compile(
+    r"[?？]|(?:不要|不用|无需|别|禁止|取消|先不|暂不|"
+    r"能否|可否|是否|可以吗|能不能|如何|怎么|怎样|假设|假如|如果|"
+    r"以后|未来|将来|稍后|明天|下周|下月|之前|此前|过去|上次)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+you|"
+    r"could\s+you|would\s+you|how\s+to|what\s+if|later|tomorrow|"
+    r"previously|in\s+the\s+future)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+_CANDIDATE_STABILITY_SECOND_OPERATION_RE = re.compile(
+    r"(?:入池|加入(?:策略)?池|删除|移除|改动作|重排|编译|"
+    r"写回|回写|生成报告|形成报告|出报告|采纳|采用|部署|上线|投产)|"
+    r"(?<![A-Za-z0-9_])(?:add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|"
+    r"remove|delete|reorder|compile|write[-\s]*back|"
+    r"generate\s+(?:a\s+)?report|adopt|deploy|go[-\s]?live)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+_CANDIDATE_STABILITY_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:source_kind|source_artifact_id|"
+    r"expected_(?:artifact_)?content_hash|expected_asset_(?:id|hash)|"
+    r"expected_pool_(?:revision|snapshot_hash)|dataset_id|"
+    r"expected_dataset_content_hash|workspace_(?:revision|generation)|"
+    r"analysis_generation|semantic_mapping_hash|sample_design_ref|"
+    r"target_col|month_col)(?![A-Za-z0-9_])|"
+    r"(?:artifact|数据集|workspace|工作区|样本设计|月份列)"
+    r"\s*(?:ID|id|hash|哈希|revision|版本|字段|列)\s*(?:=|:|：)",
+    re.IGNORECASE,
+)

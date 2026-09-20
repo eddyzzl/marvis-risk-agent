@@ -1,14 +1,10 @@
-"""model_evidence request-compiler handlers (executed into the package namespace by __init__.py)."""
+"""Model evidence request grammar and grounding rules."""
 from __future__ import annotations
+
 import re
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # names defined by sibling lanes; merged into one namespace at runtime
-    from . import StandardWorkflowRequestDraft
-    from . import StrategyRequestCompilation
-    from . import _clarification
-    from . import _sample_design_clauses
+from . import contracts as _contracts
+from . import grounding as _grounding
 
 _MODEL_EVIDENCE_SUBJECT_RE = re.compile(
     r"(?:Model\s*Evidence|模型证据|单变量(?:候选)?证据(?:包|汇总)?|"
@@ -127,7 +123,7 @@ def _utterance_targets_strategy_model_evidence_v2(utterance: str) -> bool:
         r"do\s+not|don't|never|cancel)\s*$",
         re.I,
     )
-    for clause in _sample_design_clauses(utterance):
+    for clause in _grounding._sample_design_clauses(utterance):
         subjects = tuple(_MODEL_EVIDENCE_SUBJECT_RE.finditer(clause))
         actions = tuple(_MODEL_EVIDENCE_ACTION_RE.finditer(clause))
         for action in actions:
@@ -150,12 +146,12 @@ def _utterance_targets_strategy_model_evidence_v2(utterance: str) -> bool:
 
 def _ground_model_score_comparison_v2_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     draft = result.draft
-    assert isinstance(draft, StandardWorkflowRequestDraft)
+    assert isinstance(draft, _contracts.StandardWorkflowRequestDraft)
     if _MODEL_SCORE_COMPARISON_PLATFORM_CONTROL_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "模型评分比较的 SampleDesign、评分证据、分数向量、artifact id/hash "
             "与 registry CAS 全部由当前 task 自动发现并复核，不能由自然语言注入。",
             code="strategy_model_score_comparison_v2_platform_binding_forbidden",
@@ -165,16 +161,16 @@ def _ground_model_score_comparison_v2_request(
         not utterance_targets_model_score_comparison_v2(utterance)
         or _MODEL_SCORE_COMPARISON_NONCOMMAND_RE.search(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请明确发出一条当前、肯定式的模型评分比较证据物化命令。",
             code="strategy_model_score_comparison_v2_positive_command_required",
             fields=("build_intent",),
         )
-    if _has_positive_chained_operation(
+    if _grounding._has_positive_chained_operation(
         utterance,
         operation_re=_MODEL_SCORE_COMPARISON_SELECTION_RE,
     ):
-        return _clarification(
+        return _contracts._clarification(
             "本 Workflow 只物化比较证据并固定为 no_selection；冠军选择、"
             "采纳和部署必须作为后续独立治理动作。",
             code="strategy_model_score_comparison_v2_selection_forbidden",
@@ -197,7 +193,7 @@ def _ground_model_score_comparison_v2_request(
     if partitions != {inputs["partition"]}:
         missing.append("partition")
     if missing:
-        return _clarification(
+        return _contracts._clarification(
             "模型评分比较必须逐字明确唯一 population 与 partition；"
             "平台不会让模型补默认值或改写业务切片。",
             code="strategy_model_score_comparison_v2_dimensions_not_grounded",
@@ -207,17 +203,17 @@ def _ground_model_score_comparison_v2_request(
 
 def _ground_strategy_model_evidence_v2_request(
     utterance: str,
-    result: StrategyRequestCompilation,
-) -> StrategyRequestCompilation:
+    result: _contracts.StrategyRequestCompilation,
+) -> _contracts.StrategyRequestCompilation:
     if _model_evidence_v2_has_positive_chain(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "当前 ModelEvidence V2 只归集当前 task 中已有的认证单变量候选；"
             "训练、模型比较、月度/OOT/验证模型、报告、采纳和部署必须拆分并等待对应认证证据。",
             code="strategy_model_evidence_v2_univariate_only",
             fields=("requested_evidence",),
         )
     if _MODEL_EVIDENCE_PLATFORM_CONTROL_RE.search(utterance):
-        return _clarification(
+        return _contracts._clarification(
             "ModelEvidence 的 SampleDesign、candidate 与 artifact id/hash 全部由当前 task 发现并复核，"
             "不能由自然语言注入。",
             code="strategy_model_evidence_v2_platform_binding_forbidden",
@@ -227,43 +223,17 @@ def _ground_strategy_model_evidence_v2_request(
         not _utterance_targets_strategy_model_evidence_v2(utterance)
         or _MODEL_EVIDENCE_NONCOMMAND_RE.search(utterance)
     ):
-        return _clarification(
+        return _contracts._clarification(
             "请明确发出一条当前、肯定式命令，只归集已有认证单变量候选为 ModelEvidence V2。",
             code="strategy_model_evidence_v2_positive_command_required",
             fields=("build_intent",),
         )
     return result
 
-def _has_positive_chained_operation(
-    utterance: str,
-    *,
-    operation_re: re.Pattern[str],
-) -> bool:
-    """Return true only when a clause positively requests a chained operation."""
-
-    boundaries = "；;。.!?？\n，,、/"
-    for match in operation_re.finditer(utterance):
-        left = max(utterance.rfind(mark, 0, match.start()) for mark in boundaries) + 1
-        prefix = utterance[left : match.start()]
-        if re.search(
-            r"(?:不需要|不用|暂不|先不|不要|无需|不再|不做|"
-            r"别|禁止|不会|未|没有|并非|而非|不(?!只|仅))"
-            r"\s*(?:再|进行|做|生成|形成|输出|进入|开展|执行|"
-            r"训练|构建|建立|创建|采纳|采用|部署|投产|上线)?\s*$|"
-            r"(?:(?:do\s+not\s+need\s+to|don't\s+need\s+to|"
-            r"do\s+not|don't|never|without|no)\s+)"
-            r"(?:(?:further\s+)?(?:do|generate|create|run)\s+)?$",
-            prefix,
-            re.I,
-        ):
-            continue
-        return True
-    return False
-
 def _model_evidence_v2_has_positive_chain(utterance: str) -> bool:
     """Return true only for a positively requested downstream operation."""
 
-    return _has_positive_chained_operation(
+    return _grounding._has_positive_chained_operation(
         utterance,
         operation_re=_MODEL_EVIDENCE_CHAIN_RE,
     )
