@@ -27,7 +27,8 @@ from marvis.feature.binning import (
 from marvis.feature.correlation import correlation_report
 from marvis.feature.derive import derive_batch, derive_date_features
 from marvis.feature.encode import apply_categorical_woe, categorical_woe_encode, onehot_encode, woe_encode
-from marvis.feature.errors import FeatureError, FitRequiresSplitError
+from marvis.feature.errors import FeatureError
+from marvis.feature.fit_scope import fit_membership
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import (
     feature_psi,
@@ -1175,27 +1176,14 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
 def _woe_fit_frame(
     frame: pd.DataFrame, inputs: dict, dataset_id: str, *, tool: str = "woe_encode"
 ) -> tuple[pd.DataFrame, str]:
-    """Rows used to fit the WOE mapping — excludes holdout (default test+OOT) so the
-    mapping never peeks at evaluation labels (PREP-1). No ``split_col`` means the caller
-    cannot express train-only fitting; that's a typed-error stop unless the caller
-    explicitly confirms a full-pool fit via ``allow_full_fit``."""
-    split_col = inputs.get("split_col")
-    if not split_col:
-        if bool(inputs.get("allow_full_fit")):
-            return frame, "full"
-        raise FitRequiresSplitError(tool=tool, dataset_id=dataset_id)
-    holdout_values = tuple(str(value) for value in (inputs.get("holdout_values") or ("test", "oot")))
-    mask = ~frame[str(split_col)].astype(str).isin(holdout_values)
-    fit_frame = frame.loc[mask]
-    if fit_frame.empty:
-        raise FeatureError("WOE fit frame is empty after excluding holdout rows")
-    return fit_frame, "train"
+    mask, scope = fit_membership(frame, inputs, tool=tool, dataset_id=dataset_id)
+    return frame.loc[mask], scope
 
 
 def tool_woe_encode_categorical(inputs: dict, ctx) -> dict:
     """Category -> WOE encode string/object columns (PREP-3/FS-3) — the categorical
-    analogue of ``woe_encode``. Same train-only fitting contract: fits on the non-
-    holdout rows (default excludes test+OOT) and raises ``FitRequiresSplitError``
+    analogue of ``woe_encode``. Same train-only fitting contract: fits on explicitly
+    identified training rows and raises ``FitRequiresSplitError``
     unless ``split_col`` is given or the caller passes ``allow_full_fit=true``."""
     runtime = _runtime(ctx)
     features = [str(item) for item in inputs["features"]]
@@ -1252,10 +1240,12 @@ def tool_onehot_encode(inputs: dict, ctx) -> dict:
     dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
     columns = [str(item) for item in inputs["columns"]]
     _assert_columns(frame, columns)
+    fit_mask, fit_split = fit_membership(frame, inputs, tool="onehot_encode", dataset_id=dataset.id)
     encoded, mapping = onehot_encode(
         frame,
         columns,
         max_categories=int(inputs.get("max_categories") or 50),
+        fit_frame=frame.loc[fit_mask],
     )
     result = _register_frame(
         runtime,
@@ -1265,7 +1255,8 @@ def tool_onehot_encode(inputs: dict, ctx) -> dict:
         "onehot",
         preprocessing_step={"kind": "onehot", "columns": columns, "params": _jsonable(mapping)},
     )
-    return {"result_dataset_id": result.id, "mapping": _jsonable(mapping)}
+    return {"result_dataset_id": result.id, "mapping": _jsonable(mapping),
+            "fit_rows": int(fit_mask.sum()), "fit_split": fit_split}
 
 
 def tool_normalize(inputs: dict, ctx) -> dict:
@@ -1474,22 +1465,7 @@ def _unique_column_name(candidate: str, existing) -> str:
 
 
 def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str) -> tuple[np.ndarray, str]:
-    """Rows used to fit statistical transforms (impute/normalize/cap) — excludes holdout
-    (default test+OOT) so fill values / scaler params / capping bounds never absorb
-    evaluation-set distribution (PREP-1). No ``split_col`` means the caller cannot
-    express train-only fitting; that's a typed-error stop unless the caller explicitly
-    confirms a full-pool fit via ``allow_full_fit``."""
-    split_col = inputs.get("split_col")
-    if not split_col:
-        if bool(inputs.get("allow_full_fit")):
-            return np.ones(len(frame), dtype=bool), "full"
-        raise FitRequiresSplitError(tool=tool, dataset_id=dataset_id)
-    _assert_columns(frame, [str(split_col)])
-    holdout_values = tuple(str(value) for value in (inputs.get("holdout_values") or ("test", "oot")))
-    mask = (~frame[str(split_col)].astype(str).isin(holdout_values)).to_numpy()
-    if not mask.any():
-        raise FeatureError(f"{tool} fit frame is empty after excluding holdout rows")
-    return mask, "train"
+    return fit_membership(frame, inputs, tool=tool, dataset_id=dataset_id)
 
 
 def tool_cross_features(inputs: dict, ctx) -> dict:

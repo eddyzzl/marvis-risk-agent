@@ -266,7 +266,7 @@ def derive_batch(
 
     An ``agg`` item may carry the same train-only fitting knobs as
     :func:`aggregate_feature` (PREP-10): ``target_col`` (leakage reject),
-    ``split_col``/``holdout_values``/``allow_full_fit`` (train-only fit rows,
+    ``split_col``/``train_values``/``holdout_values``/``allow_full_fit`` (explicit training rows,
     resolved the same way ``tools.py``'s ``_stat_fit_mask`` does for
     impute/cap/normalize -- no ``split_col`` raises :class:`FitRequiresSplitError`
     unless ``allow_full_fit`` is explicitly set), and ``min_group_size``. The
@@ -303,21 +303,9 @@ def derive_batch(
 
 
 def _agg_fit_mask(df: pd.DataFrame, item: dict, *, dataset_id: str) -> tuple[np.ndarray | None, str]:
-    """Rows used to fit an ``agg`` recipe item's group statistic (PREP-10) --
-    excludes holdout (default test+OOT) so the group mapping never absorbs
-    evaluation-set distribution. No ``split_col`` means the caller cannot express
-    train-only fitting; that's a typed-error stop unless ``allow_full_fit=true``."""
-    from marvis.feature.errors import FitRequiresSplitError
+    from marvis.feature.fit_scope import fit_membership
 
-    split_col = item.get("split_col")
-    if not split_col:
-        if bool(item.get("allow_full_fit")):
-            return None, "full"
-        raise FitRequiresSplitError(tool="aggregate_feature", dataset_id=dataset_id)
-    _assert_columns(df, [str(split_col)])
-    holdout_values = tuple(str(value) for value in (item.get("holdout_values") or ("test", "oot")))
-    mask = (~df[str(split_col)].astype(str).isin(holdout_values)).to_numpy()
-    return mask, "train"
+    return fit_membership(df, item, tool="aggregate_feature", dataset_id=dataset_id)
 
 
 def recommend_feature_crosses(

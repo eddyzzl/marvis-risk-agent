@@ -312,6 +312,7 @@
           "max_bins": {"type": "integer", "minimum": 1},
           "breakpoints": {"type": "array", "items": {"type": "number"}},
           "split_col": {"type": "string", "minLength": 1},
+          "train_values": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "allow_full_fit": {"type": "boolean"},
           "seed": {"type": "integer"},
@@ -354,6 +355,7 @@
           "min_count": {"type": "integer", "minimum": 1},
           "smoothing": {"type": "number"},
           "split_col": {"type": "string", "minLength": 1},
+          "train_values": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "allow_full_fit": {"type": "boolean"},
           "drop_nan_labels": {"type": "boolean"}
@@ -389,7 +391,11 @@
         "properties": {
           "dataset_id": {"type": "string", "minLength": 1},
           "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
-          "max_categories": {"type": "integer", "minimum": 1}
+          "max_categories": {"type": "integer", "minimum": 1},
+          "split_col": {"type": "string", "minLength": 1},
+          "train_values": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+          "holdout_values": {"type": "array", "items": {"type": "string"}},
+          "allow_full_fit": {"type": "boolean"}
         },
         "required": ["dataset_id", "columns"],
         "additionalProperties": false
@@ -398,7 +404,9 @@
         "type": "object",
         "properties": {
           "result_dataset_id": {"type": "string"},
-          "mapping": {"type": "object"}
+          "mapping": {"type": "object"},
+          "fit_rows": {"type": "integer", "minimum": 0},
+          "fit_split": {"type": "string", "enum": ["train", "full"]}
         },
         "required": ["result_dataset_id", "mapping"],
         "additionalProperties": false
@@ -421,6 +429,7 @@
           "method": {"type": "string", "enum": ["minmax", "zscore"]},
           "feature_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
           "split_col": {"type": "string", "minLength": 1},
+          "train_values": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "allow_full_fit": {"type": "boolean"},
           "sentinel_values": {"type": ["array", "object"]}
@@ -457,6 +466,7 @@
           "strategy": {"type": "string", "enum": ["mean", "median", "mode", "constant"]},
           "fill_value": {},
           "split_col": {"type": "string", "minLength": 1},
+          "train_values": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "allow_full_fit": {"type": "boolean"},
           "sentinel_values": {"type": ["array", "object"]},
@@ -496,6 +506,7 @@
           "lower_q": {"type": "number", "minimum": 0, "maximum": 1},
           "upper_q": {"type": "number", "minimum": 0, "maximum": 1},
           "split_col": {"type": "string", "minLength": 1},
+          "train_values": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "allow_full_fit": {"type": "boolean"},
           "sentinel_values": {"type": ["array", "object"]}

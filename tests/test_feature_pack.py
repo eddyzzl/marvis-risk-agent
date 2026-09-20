@@ -231,7 +231,7 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     )
     onehot = runner.invoke(
         ToolRef("feature", "onehot_encode"),
-        {"dataset_id": dataset.id, "columns": ["cat"], "max_categories": 3},
+        {"dataset_id": dataset.id, "columns": ["cat"], "max_categories": 3, "allow_full_fit": True},
         task_id="task-feature",
     )
     normalized = runner.invoke(
@@ -304,7 +304,7 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     assert crossed.output["new_columns"] == ["x1_ratio_x2", "amount_by_cat_mean"]
 
 
-def test_woe_encode_fits_on_non_holdout_rows_and_applies_to_all_rows(tmp_path):
+def test_woe_encode_fits_on_training_rows_and_applies_to_all_rows(tmp_path):
     runner, registry, _repo, backend = _runtime(tmp_path)
     frame = pd.DataFrame({
         "x": [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0],
@@ -330,6 +330,7 @@ def test_woe_encode_fits_on_non_holdout_rows_and_applies_to_all_rows(tmp_path):
     )
 
     assert result.ok is True, result.error
+    assert result.output["fit_rows"] == 2  # An explicit OOT list cannot promote test to train.
     woe_map = result.output["woe_maps"]["x"]
     assert woe_map["woe_by_bin"][0] > 1.0
     assert woe_map["woe_by_bin"][1] < -1.0
@@ -1439,7 +1440,7 @@ def test_impute_cap_normalize_onehot_persist_preprocessing_chain_sidecar(tmp_pat
 
     onehot = runner.invoke(
         ToolRef("feature", "onehot_encode"),
-        {"dataset_id": dataset.id, "columns": ["cat"]},
+        {"dataset_id": dataset.id, "columns": ["cat"], "allow_full_fit": True},
         task_id="task-feature",
     )
     assert onehot.ok is True, onehot.error

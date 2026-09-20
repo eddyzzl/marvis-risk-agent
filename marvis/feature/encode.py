@@ -17,21 +17,31 @@ def onehot_encode(
     *,
     max_categories: int = 50,
     handle_unknown: str = "ignore",
+    fit_frame: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, dict[str, list[object]]]:
     if handle_unknown not in {"ignore", "error"}:
         raise FeatureError("handle_unknown must be 'ignore' or 'error'")
     mapping = {}
-    dummy_frames = []
+    fitting = df if fit_frame is None else fit_frame
     for column in columns:
-        categories = _ordered_categories(df[column])
+        categories = _ordered_categories(fitting[column])
         if len(categories) > max_categories:
             raise FeatureError(f"{column} has too many categories")
         mapping[column] = categories
+    return apply_onehot_mapping(df, columns, mapping, handle_unknown=handle_unknown), mapping
+
+
+def apply_onehot_mapping(df, columns, mapping, *, handle_unknown="ignore"):
+    dummy_frames = []
+    for column in columns:
+        categories = mapping.get(column) or []
+        if handle_unknown == "error" and (df[column].notna() & ~df[column].isin(categories)).any():
+            raise FeatureError(f"{column} has categories not seen during fitting")
         dummy_frames.append(_dummy_frame(df[column], column, categories))
     encoded = df.drop(columns=columns)
     if dummy_frames:
         encoded = pd.concat([encoded, *dummy_frames], axis=1)
-    return encoded, mapping
+    return encoded
 
 
 def label_encode(series: pd.Series) -> tuple[pd.Series, dict[object, int]]:

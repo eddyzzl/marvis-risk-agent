@@ -62,7 +62,7 @@ import numpy as np
 import pandas as pd
 
 from marvis.feature.contracts import CategoricalWOECategory, CategoricalWOEResult, WOEResult
-from marvis.feature.encode import apply_categorical_woe, woe_encode
+from marvis.feature.encode import apply_categorical_woe, apply_onehot_mapping, woe_encode
 from marvis.feature.errors import FeatureError
 from marvis.feature.transform import apply_scaler, mask_sentinel_values
 
@@ -234,19 +234,7 @@ def _apply_onehot(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.D
     present = [column for column in columns if column in frame.columns]
     if not present:
         return frame.copy()
-    out = frame.copy()
-    dummy_frames = []
-    for column in present:
-        categories = params.get(column) or []
-        data = {
-            f"{column}_{category}": (out[column] == category).astype(int)
-            for category in categories
-        }
-        dummy_frames.append(pd.DataFrame(data, index=out.index))
-    out = out.drop(columns=present)
-    if dummy_frames:
-        out = pd.concat([out, *dummy_frames], axis=1)
-    return out
+    return apply_onehot_mapping(frame, present, params)
 
 
 def _apply_woe(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
