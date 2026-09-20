@@ -33,7 +33,13 @@ from urllib.parse import urlparse
 import httpx
 import psutil
 
-from .runtime_contracts import ModelConnection, RuntimeCase, RuntimeSuite, digest
+from .runtime_contracts import (
+    ModelConnection,
+    RuntimeCase,
+    RuntimeSuite,
+    RUNTIME_FINISH_REASONS,
+    digest,
+)
 
 
 class RuntimeBudgetExceeded(RuntimeError):
@@ -121,17 +127,141 @@ class AttemptObserver:
 
 
 def _usage_fields(payload):
-    usage = payload.get("usage") or {}
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
 
     def count(value):
         return value if type(value) is int and value >= 0 else None
 
-    details = usage.get("completion_tokens_details") or {}
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        details = {}
     return {
         "prompt_tokens": count(usage.get("prompt_tokens")),
         "completion_tokens": count(usage.get("completion_tokens")),
         "reasoning_tokens": count(details.get("reasoning_tokens")),
     }
+
+
+class _CompletionObservation:
+    """Bounded provider-envelope facts, not application-level success.
+
+    Text is counted transiently and never retained. Content counts describe the
+    first provider choice before any client thinking-tag removal or domain JSON
+    validation. A nonempty answer therefore does not establish semantic success.
+    """
+
+    def __init__(self):
+        self.finish_reason = None
+        self.content_chars = 0
+        self.content_non_whitespace = False
+        self.reasoning_chars = 0
+        self.observed = False
+        self.invalid = False
+        self.missing_content = False
+
+    def read(self, raw, result, *, streaming):
+        try:
+            payload = json.loads(raw)
+        except (ValueError, TypeError):
+            self.invalid = True
+            return
+        if not isinstance(payload, dict):
+            self.invalid = True
+            return
+        # A later usage-only SSE event must not reset prior observed fields.
+        result.update(
+            {
+                key: value
+                for key, value in _usage_fields(payload).items()
+                if value is not None
+            }
+        )
+        choices = payload.get("choices")
+        if streaming and choices in (None, []):
+            return
+        if (
+            not isinstance(choices, list)
+            or not choices
+            or not isinstance(choices[0], dict)
+        ):
+            self.missing_content = True
+            return
+        choice = choices[0]
+        self.observed = True
+        finish = choice.get("finish_reason")
+        if finish is not None:
+            self.finish_reason = (
+                finish
+                if isinstance(finish, str) and finish in RUNTIME_FINISH_REASONS
+                else "other"
+            )
+        container = choice.get("delta") if streaming else None
+        if not isinstance(container, dict):
+            container = choice.get("message")
+        if not isinstance(container, dict):
+            if not streaming:
+                self.missing_content = True
+            return
+        if not streaming and "content" not in container:
+            self.missing_content = True
+        content = container.get("content")
+        if streaming and content is None and isinstance(choice.get("message"), dict):
+            content = choice["message"].get("content")
+        if content is not None and not isinstance(content, str):
+            self.invalid = True
+        elif isinstance(content, str):
+            self.content_chars += len(content)
+            self.content_non_whitespace |= bool(content.strip())
+        reasoning = container.get("reasoning_content")
+        if isinstance(reasoning, str):
+            self.reasoning_chars += len(reasoning)
+
+    def fields(self, result):
+        shape = (
+            "invalid"
+            if self.invalid
+            else "missing_content"
+            if self.missing_content
+            else "observed"
+            if self.observed
+            else "unknown"
+        )
+        if not result["transport_ok"]:
+            outcome = (
+                "http_error"
+                if (result["http_status"] or 0) >= 400
+                else "transport_error"
+            )
+        elif shape == "invalid":
+            outcome = "invalid_response"
+        elif shape == "missing_content":
+            outcome = "missing_content"
+        elif shape == "unknown":
+            outcome = "unknown"
+        elif self.finish_reason == "content_filter":
+            outcome = "content_filtered"
+        elif self.finish_reason == "length":
+            outcome = (
+                "content_at_output_limit"
+                if self.content_non_whitespace
+                else "empty_at_output_limit"
+            )
+        else:
+            outcome = (
+                "content_present" if self.content_non_whitespace else "empty_content"
+            )
+        return {
+            "finish_reason": self.finish_reason,
+            "response_shape": shape,
+            "response_content_chars": self.content_chars if self.observed else None,
+            "response_content_non_whitespace": self.content_non_whitespace
+            if self.observed
+            else None,
+            "response_reasoning_chars": self.reasoning_chars if self.observed else None,
+            "attempt_outcome": outcome,
+        }
 
 
 @contextmanager
@@ -287,6 +417,7 @@ def _model_gateway(
                 "completion_tokens": None,
                 "reasoning_tokens": None,
             }
+            observation = _CompletionObservation()
             response_hash = hashlib.sha256()
             connection = None
             transport_socket = None
@@ -362,17 +493,17 @@ def _model_gateway(
                                 line.startswith(b"data:")
                                 and line[5:].strip() != b"[DONE]"
                             ):
-                                try:
-                                    event = json.loads(line[5:])
-                                    if event.get("usage"):
-                                        result.update(_usage_fields(event))
-                                except (ValueError, TypeError, AttributeError):
-                                    pass
-                if not is_sse:
-                    try:
-                        result.update(_usage_fields(json.loads(buffered)))
-                    except (ValueError, TypeError, AttributeError):
-                        pass
+                                observation.read(line[5:], result, streaming=True)
+                if is_sse:
+                    # The client also consumes a final SSE line without a newline.
+                    # Preserve its usage/finish facts instead of silently dropping it.
+                    if (
+                        buffered.startswith(b"data:")
+                        and buffered[5:].strip() != b"[DONE]"
+                    ):
+                        observation.read(buffered[5:], result, streaming=True)
+                else:
+                    observation.read(buffered, result, streaming=False)
                 result["transport_ok"] = 200 <= status < 300
                 result["output_limit_exceeded"] = (
                     type(result["completion_tokens"]) is int
@@ -393,6 +524,7 @@ def _model_gateway(
                         upstream_sockets.discard(transport_socket)
                 if response is not None:
                     response.close()
+                result.update(observation.fields(result))
                 result["latency_ms"] = int((time.monotonic() - started) * 1000)
                 result["response_sha256"] = response_hash.hexdigest()
                 observer.after_attempt(ticket, result)
@@ -654,10 +786,11 @@ class Journey:
         while True:
             plans = self.plans()
             state = [
-                (p["id"], p["status"], [
-                    (s["id"], s["status"], s.get("output_ref"))
-                    for s in p["steps"]
-                ])
+                (
+                    p["id"],
+                    p["status"],
+                    [(s["id"], s["status"], s.get("output_ref")) for s in p["steps"]],
+                )
                 for p in plans
             ]
             delay = min(delay * 2, 2.0) if state == previous_state else 0.25

@@ -16,6 +16,26 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+RUNTIME_FINISH_REASONS = frozenset(
+    {"stop", "length", "tool_calls", "function_call", "content_filter", "other"}
+)
+RUNTIME_ATTEMPT_OUTCOMES = frozenset(
+    {
+        "transport_error",
+        "http_error",
+        "invalid_response",
+        "missing_content",
+        "content_filtered",
+        "empty_at_output_limit",
+        "content_at_output_limit",
+        "empty_content",
+        "content_present",
+        "unknown",
+        "incomplete",
+    }
+)
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

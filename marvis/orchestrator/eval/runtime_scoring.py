@@ -12,7 +12,12 @@ from typing import Literal
 
 from pydantic import Field
 
-from .runtime_contracts import StrictModel, digest
+from .runtime_contracts import (
+    StrictModel,
+    RUNTIME_ATTEMPT_OUTCOMES,
+    RUNTIME_FINISH_REASONS,
+    digest,
+)
 
 
 class Assertion(StrictModel):
@@ -132,6 +137,18 @@ def usage_summary(
         event["attempt_id"]: event for event in events if event["event"] == "finished"
     }
     attempts = list(started)
+    outcomes: dict[str, int] = {}
+    finish_reasons: dict[str, int] = {}
+    for attempt in attempts:
+        event = finished.get(attempt)
+        outcome = "incomplete" if event is None else event.get("attempt_outcome")
+        if not isinstance(outcome, str) or outcome not in RUNTIME_ATTEMPT_OUTCOMES:
+            outcome = "unknown"
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        reason = event.get("finish_reason") if event else None
+        if not isinstance(reason, str) or reason not in RUNTIME_FINISH_REASONS:
+            reason = "unknown"
+        finish_reasons[reason] = finish_reasons.get(reason, 0) + 1
 
     def known(field):
         return sum(
@@ -153,6 +170,9 @@ def usage_summary(
     completion = known("completion_tokens")
     result = {
         "transport_attempts": len(attempts),
+        "attempt_outcomes": outcomes,
+        "finish_reasons": finish_reasons,
+        "attempt_outcome_scope": "provider_transport_and_envelope_only",
         "logical_calls": len({event["logical_call_id"] for event in started.values()}),
         "retry_attempts": sum(event["attempt"] > 1 for event in started.values()),
         "trace_complete": bool(attempts)
