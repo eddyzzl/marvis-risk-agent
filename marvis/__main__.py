@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> None:
             _print_version()
         elif args.command == "eval-llm":
             _eval_llm(args)
+        elif args.command == "eval-agent":
+            _eval_agent(args)
         elif args.command == "backup":
             _backup(args)
         elif args.command == "restore":
@@ -138,6 +140,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="blind",
         help="Blind planning evaluation (default), or expected-guided contract regression; neither proves real tool execution",
     )
+
+    eval_agent_parser = subparsers.add_parser(
+        "eval-agent",
+        help="Run isolated real HTTP/Agent/tool journeys with separately held expected answers",
+    )
+    for name in ("cases", "expected", "dataset-root", "output-dir"):
+        eval_agent_parser.add_argument(f"--{name}", type=Path, required=True)
+    profile_source = eval_agent_parser.add_mutually_exclusive_group(required=True)
+    profile_source.add_argument("--model-config", type=Path, help="Explicit connection JSON using api_key_env, never an inline key")
+    profile_source.add_argument("--profile-workspace", type=Path, help="Read only the explicitly selected saved model profile; execution uses a new temporary workspace per case")
+    eval_agent_parser.add_argument("--model-id", default=None)
+    eval_agent_parser.add_argument("--model-source", choices=("real_model", "fixture_model"), default="real_model", help="Fixture calls only establish runtime regression evidence")
+    eval_agent_parser.add_argument("--price-book", type=Path, default=None, help="Dated provider/model rates with source; missing usage or rates stay unknown")
+    eval_agent_parser.add_argument("--baseline", type=Path, default=None, help="Previous runtime report; changed corpus/answers or previously passing cases that now fail reject the regression gate")
 
     backup_parser = subparsers.add_parser(
         "backup",
@@ -337,6 +353,17 @@ def _eval_llm(args: argparse.Namespace) -> None:
         print(f"regression_ok={report['regression_ok']}")
         for problem in report.get("regression_problems", []):
             print(f"  - {problem}")
+
+
+def _eval_agent(args: argparse.Namespace) -> None:
+    from marvis.orchestrator.eval.cli import run_eval_agent_cli
+
+    report = run_eval_agent_cli(args)
+    print(f"MARVIS eval-agent report written to {report['report_path']}")
+    summary = report["summary"]
+    print(f"passed={summary['passed']}/{summary['denominator']} model_source={report['model_source']} acceptance=not_established")
+    if not report["regression_gate_passed"]:
+        raise SystemExit(1)
 
 
 def _backup(args: argparse.Namespace) -> None:

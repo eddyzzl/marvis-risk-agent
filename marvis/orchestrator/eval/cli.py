@@ -126,3 +126,34 @@ def _report_path(
 
 
 __all__ = ["EvalCliError", "run_eval_llm_cli"]
+
+
+def run_eval_agent_cli(args) -> dict:
+    """Resolve exactly one explicitly supplied profile; no implicit user scan."""
+    from marvis.orchestrator.eval.runtime_contracts import ModelConnection
+    from marvis.orchestrator.eval.runtime_runner import run_runtime_suite
+
+    secret_env = {}
+    try:
+        if args.model_config is not None:
+            model = ModelConnection.model_validate_json(args.model_config.read_bytes())
+        else:
+            if args.model_source != "real_model":
+                raise ValueError("saved profile source requires real_model mode")
+            profile = resolve_llm_model(args.profile_workspace, args.model_id)
+            fields = set(ModelConnection.model_fields) - {"api_key_env"}
+            public = {key: value for key, value in profile.items() if key in fields}
+            public["api_key_env"] = "MARVIS_RUNTIME_MODEL_KEY"
+            model = ModelConnection.model_validate(public)
+            secret_env["MARVIS_RUNTIME_MODEL_KEY"] = profile["api_key"]
+        return run_runtime_suite(
+            cases_path=args.cases, expected_path=args.expected,
+            dataset_root=args.dataset_root, output_dir=args.output_dir,
+            model=model, model_source=args.model_source,
+            price_book_path=args.price_book, secret_env=secret_env,
+            baseline_path=args.baseline,
+        )
+    except (ValueError, OSError) as exc:
+        # Pydantic errors can echo an input, including an accidentally supplied
+        # inline credential. Keep CLI failures bounded and free of raw bodies.
+        raise EvalCliError(f"eval-agent input/configuration failed ({type(exc).__name__})") from None

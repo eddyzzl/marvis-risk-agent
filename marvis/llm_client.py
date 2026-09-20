@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from http.client import HTTPException
 import json
+import hashlib
+import uuid
 import logging
 import time
 from urllib.error import HTTPError, URLError
@@ -307,6 +309,21 @@ class OpenAICompatibleLLMClient:
         max_retries = _transport_max_retries(self.profile)
         started = time.monotonic()
         retry_count = 0
+        # Runtime evaluation uses a private loopback model gateway. All clients,
+        # including tool-worker clients, carry the same whitelisted trace to it.
+        # No prompt, response body or credential is put in this metadata.
+        trace = None
+        if self.profile.get("_runtime_trace") is True:
+            trace = {
+                "logical_call_id": uuid.uuid4().hex,
+                "caller": caller,
+                "model_id": str(self.profile.get("model_id") or ""),
+                "model_name": model_name,
+                "prompt_name": prompt_name,
+                "prompt_version": prompt_version,
+                "prompt_chars": prompt_chars,
+                "request_sha256": hashlib.sha256(request.data).hexdigest(),
+            }
         while True:
             usage: dict = {}
             delta_fired = {"value": False}
@@ -315,6 +332,11 @@ class OpenAICompatibleLLMClient:
                 def wrapped_on_delta(chunk, _flag=delta_fired, _cb=on_delta):
                     _flag["value"] = True
                     _cb(chunk)
+            if trace is not None:
+                request.add_header(
+                    "X-Marvis-Runtime-Trace",
+                    json.dumps({**trace, "attempt": retry_count + 1}),
+                )
             try:
                 with urlopen(request, timeout=timeout) as response:
                     content = _read_completion_content(
