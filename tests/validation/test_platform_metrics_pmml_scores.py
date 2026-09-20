@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-import marvis.validation.platform_metrics as platform_metrics
+import marvis.validation.pmml_analysis as pmml_analysis
+from marvis.validation_services import metrics as metrics_service
 from marvis.validation.binning import compute_ks
 from marvis.validation.config import ValidationConfig
 from marvis.validation.effectiveness import run_effectiveness
@@ -128,7 +129,7 @@ def test_platform_metrics_uses_verified_pmml_sidecar_not_sample_score(
     contract = _ready_for_sample(ready_contract, sample_path)
     score_path, scoring = _score_sample(tmp_path, contract, sample_path)
 
-    results = platform_metrics.compute_platform_validation_results(
+    results = metrics_service.compute_platform_validation_results(
         task=_task(),
         contract=contract,
         sample_path=sample_path,
@@ -159,7 +160,7 @@ def test_pmml_metrics_match_every_legacy_basic_info_and_effectiveness_field(
     frame.to_parquet(sample_path, index=False, row_group_size=2)
     contract = _ready_for_sample(ready_contract, sample_path)
     score_path, scoring = _score_sample(tmp_path, contract, sample_path)
-    new = platform_metrics.compute_platform_validation_results(
+    new = metrics_service.compute_platform_validation_results(
         task=_task(),
         contract=contract,
         sample_path=sample_path,
@@ -239,14 +240,14 @@ def test_analysis_loads_only_control_transformation_closure(
     )
     score_path, scoring = _score_sample(tmp_path, contract, sample_path)
     selected: list[tuple[str, ...]] = []
-    original = platform_metrics.read_selected_columns
+    original = pmml_analysis.read_selected_columns
 
     def record(path, *, columns, **kwargs):
         selected.append(columns)
         return original(path, columns=columns, **kwargs)
 
-    monkeypatch.setattr(platform_metrics, "read_selected_columns", record)
-    loaded = platform_metrics.load_pmml_analysis_frame(
+    monkeypatch.setattr(pmml_analysis, "read_selected_columns", record)
+    loaded = pmml_analysis.load_pmml_analysis_frame(
         sample_path=sample_path,
         score_path=score_path,
         contract=contract,
@@ -265,7 +266,7 @@ def test_analysis_loads_only_control_transformation_closure(
 def test_split_mapping_is_type_stable_for_bool_int_and_string():
     values = pd.Series([True, 1, "1"], dtype="object")
 
-    result = platform_metrics._canonical_split_series(
+    result = pmml_analysis.canonical_split_series(
         values,
         {"train": True, "test": 1, "oot": "1"},
     )
@@ -294,7 +295,7 @@ def test_non_pmml_metadata_is_excluded_from_importance(
     )
     score_path, scoring = _score_sample(tmp_path, contract, sample_path)
 
-    results = platform_metrics.compute_platform_validation_results(
+    results = metrics_service.compute_platform_validation_results(
         task=_task(),
         contract=contract,
         sample_path=sample_path,
@@ -317,7 +318,7 @@ def test_metrics_rejects_sample_changed_after_scoring(tmp_path: Path, ready_cont
     frame.assign(x1=frame["x1"] + 1).to_parquet(sample_path, index=False)
 
     with pytest.raises(ValueError, match="confirmed SHA-256"):
-        platform_metrics.load_pmml_analysis_frame(
+        pmml_analysis.load_pmml_analysis_frame(
             sample_path=sample_path,
             score_path=score_path,
             contract=contract,
@@ -335,7 +336,7 @@ def test_metrics_rejects_tampered_score_sidecar(tmp_path: Path, ready_contract):
     scores.to_parquet(score_path, index=False)
 
     with pytest.raises(ValueError, match="hash mismatch"):
-        platform_metrics.load_pmml_analysis_frame(
+        pmml_analysis.load_pmml_analysis_frame(
             sample_path=sample_path,
             score_path=score_path,
             contract=contract,
@@ -350,7 +351,7 @@ def test_metrics_rejects_sidecar_replaced_after_verification(
     _sample_frame().to_parquet(sample_path, index=False)
     contract = _ready_for_sample(ready_contract, sample_path)
     score_path, scoring = _score_sample(tmp_path, contract, sample_path)
-    original = platform_metrics.validate_pmml_score_artifact
+    original = pmml_analysis.validate_pmml_score_artifact
 
     def validate_then_replace(*args, **kwargs):
         result = original(*args, **kwargs)
@@ -360,13 +361,13 @@ def test_metrics_rejects_sidecar_replaced_after_verification(
         return result
 
     monkeypatch.setattr(
-        platform_metrics,
+        pmml_analysis,
         "validate_pmml_score_artifact",
         validate_then_replace,
     )
 
     with pytest.raises(ValueError, match="non-finite score"):
-        platform_metrics.load_pmml_analysis_frame(
+        pmml_analysis.load_pmml_analysis_frame(
             sample_path=sample_path,
             score_path=score_path,
             contract=contract,
@@ -381,7 +382,7 @@ def test_metrics_rejects_finite_sidecar_replacement_by_fingerprint(
     _sample_frame().to_parquet(sample_path, index=False)
     contract = _ready_for_sample(ready_contract, sample_path)
     score_path, scoring = _score_sample(tmp_path, contract, sample_path)
-    original = platform_metrics.validate_pmml_score_artifact
+    original = pmml_analysis.validate_pmml_score_artifact
 
     def validate_then_replace(*args, **kwargs):
         result = original(*args, **kwargs)
@@ -391,13 +392,13 @@ def test_metrics_rejects_finite_sidecar_replacement_by_fingerprint(
         return result
 
     monkeypatch.setattr(
-        platform_metrics,
+        pmml_analysis,
         "validate_pmml_score_artifact",
         validate_then_replace,
     )
 
     with pytest.raises(ValueError, match="changed while metrics were loading"):
-        platform_metrics.load_pmml_analysis_frame(
+        pmml_analysis.load_pmml_analysis_frame(
             sample_path=sample_path,
             score_path=score_path,
             contract=contract,
@@ -412,7 +413,7 @@ def test_metrics_hashes_current_sample_once_then_uses_read_fingerprint(
     _sample_frame().to_parquet(sample_path, index=False)
     contract = _ready_for_sample(ready_contract, sample_path)
     score_path, scoring = _score_sample(tmp_path, contract, sample_path)
-    original = platform_metrics.sha256_file_cancellable
+    original = pmml_analysis.sha256_file_cancellable
     sample_hashes = 0
 
     def record(path, *args, **kwargs):
@@ -421,8 +422,8 @@ def test_metrics_hashes_current_sample_once_then_uses_read_fingerprint(
             sample_hashes += 1
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(platform_metrics, "sha256_file_cancellable", record)
-    platform_metrics.load_pmml_analysis_frame(
+    monkeypatch.setattr(pmml_analysis, "sha256_file_cancellable", record)
+    pmml_analysis.load_pmml_analysis_frame(
         sample_path=sample_path,
         score_path=score_path,
         contract=contract,
@@ -449,4 +450,4 @@ def test_existing_effectiveness_rejects_missing_required_split():
     )
 
     with pytest.raises(ValueError, match="oot"):
-        platform_metrics.compute_existing_effectiveness(frame, config)
+        run_effectiveness(sample=frame, config=config)

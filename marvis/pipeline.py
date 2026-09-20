@@ -145,7 +145,7 @@ from marvis.validation.pmml_score_artifacts import (
 from marvis.validation.pmml_scoring import TASK_PMML_SCORERS
 from marvis.validation.pmml_stress import run_pmml_stress
 from marvis.validation.stress_test import require_complete_stress_result
-from marvis.validation.platform_metrics import (
+from marvis.validation_services.metrics import (
     compute_platform_validation_results,
     validation_config_from_input_contract,
     write_platform_validation_metrics,

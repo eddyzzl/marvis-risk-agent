@@ -260,6 +260,12 @@ class ToolSpec:
 class HookSpec:
     event: str
     tool: str
+    required: bool = False
+
+
+# These producers persist the completion protocol and consume required failures.
+# Other historical event producers remain optional until similarly integrated.
+REQUIRED_HOOK_EVENTS = frozenset({"step.completed", "feature.computed", "workflow.completed"})
 
 
 @dataclass(frozen=True)
@@ -390,7 +396,7 @@ def manifest_to_dict(manifest: PluginManifest) -> dict[str, Any]:
             for tool in manifest.tools
         ],
         "hooks": [
-            {"event": hook.event, "tool": hook.tool}
+            {"event": hook.event, "tool": hook.tool, **({"required": True} if hook.required else {})}
             for hook in manifest.hooks
         ],
         "permissions": list(manifest.permissions),
@@ -540,7 +546,14 @@ def _parse_hooks(raw_hooks: Any, tool_names: set[str]) -> list[HookSpec]:
         tool = _required_text(raw, "tool", context=f"hook[{index}]")
         if tool not in tool_names:
             raise ManifestError(f"hook tool not found: {tool}")
-        hooks.append(HookSpec(event=event, tool=tool))
+        required = raw.get("required", False)
+        if not isinstance(required, bool):
+            raise ManifestError(f"hook[{index}].required must be a boolean")
+        if required and event not in REQUIRED_HOOK_EVENTS:
+            raise ManifestError(f"required hook event has no durable completion protocol: {event}")
+        if any(hook.event == event and hook.tool == tool for hook in hooks):
+            raise ManifestError(f"duplicate hook: {event}/{tool}")
+        hooks.append(HookSpec(event=event, tool=tool, required=required))
     return hooks
 
 

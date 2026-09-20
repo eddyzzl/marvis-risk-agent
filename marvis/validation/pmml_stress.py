@@ -42,7 +42,7 @@ from marvis.validation.pmml_score_artifacts import (
     sha256_file_cancellable,
 )
 from marvis.validation.pmml_scoring import PmmlScorer
-from marvis.validation.platform_metrics import load_pmml_analysis_frame
+from marvis.validation.pmml_analysis import load_pmml_analysis_frame
 from marvis.validation.results import (
     PmmlScoringResult,
     StressBaseline,

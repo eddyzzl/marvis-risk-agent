@@ -10,8 +10,9 @@ from marvis.domain import (
     TaskStatus,
 )
 from marvis.orchestrator.contracts import PlanStatus, StepStatus
-from marvis.orchestrator.errors import PlanNotFoundError
+from marvis.orchestrator.errors import PlanNotFoundError, requires_effect_reconciliation
 from marvis.orchestrator.plan_recovery import PlanStepRecovery
+from marvis.orchestrator.completion import complete_workflow, pending_workflow_completion
 from marvis.pipeline import METRICS_STAGE_FAILURE_PREFIX
 from marvis.repositories.tasks import _now
 from marvis.state_machine import ConflictError
@@ -525,8 +526,38 @@ def reclaim_running_plans(
     """
     step_recovery = PlanStepRecovery(plan_repo, reviewer, hook_dispatcher, harness_state)
     reclaimed = 0
-    for plan in plan_repo.list_plans_by_status(PlanStatus.RUNNING):
+    candidates = list(plan_repo.list_plans_by_status(PlanStatus.RUNNING))
+    candidates.extend(plan_repo.list_plans_by_status(PlanStatus.REVIEW))
+    for plan in candidates:
         try:
+            try:
+                completion = pending_workflow_completion(plan_repo, plan)
+            except ConflictError:
+                plan_repo.append_loop_event(plan.id, {
+                    "type": "hook_completion_failed",
+                    "reason": "workflow completion binding changed; explicit reconciliation required",
+                })
+                plan_repo.set_plan_status(plan.id, PlanStatus.FAILED)
+                _add_workflow_completion_restart_notice(task_repo, plan)
+                _fail_orphan_task_jobs(task_repo, plan.task_id)
+                reclaimed += 1
+                continue
+            if completion is not None:
+                try:
+                    complete_workflow(plan_repo, hook_dispatcher, harness_state, plan, completion)
+                except Exception as exc:
+                    plan_repo.append_loop_event(plan.id, {
+                        "type": "hook_completion_failed",
+                        "reason": f"workflow completion interrupted: {type(exc).__name__}; explicit reconciliation required",
+                    })
+                    plan_repo.set_plan_status(plan.id, PlanStatus.FAILED)
+                    _add_workflow_completion_restart_notice(task_repo, plan)
+                _fail_orphan_task_jobs(task_repo, plan.task_id)
+                reclaimed += 1
+                continue
+            if plan.status == PlanStatus.REVIEW:
+                # A human-review pause is not an interrupted completion.
+                continue
             _reclaim_one_running_plan(plan_repo, step_recovery, task_repo, plan)
         except (PlanNotFoundError, ConflictError):
             # Plan was concurrently resumed/finished between the scan and the
@@ -560,6 +591,7 @@ def _reclaim_one_running_plan(plan_repo, step_recovery, task_repo, plan) -> None
         step for step in recovered_plan.steps if step.status == StepStatus.FAILED
     ]
     failed_step = failed_steps[0] if len(failed_steps) == 1 else None
+    unresolved = plan_repo.unreconciled_step_ids([step.id for step in recovered_plan.steps])
     task = task_repo.get_task(plan.task_id)
     with connect(task_repo.db_path) as conn:
         _finalize_interrupted_agent_messages(conn, [plan.task_id])
@@ -572,6 +604,21 @@ def _reclaim_one_running_plan(plan_repo, step_recovery, task_repo, plan) -> None
         run_mode=task.run_mode,
         workflow=task.task_type,
         failed_step=failed_step,
+        reconciliation_error=(
+            "执行或完成动作尚未核对；explicit reconciliation required"
+            if unresolved else None
+        ),
+    )
+
+
+def _add_workflow_completion_restart_notice(task_repo, plan) -> None:
+    task = task_repo.get_task(plan.task_id)
+    with connect(task_repo.db_path) as conn:
+        _finalize_interrupted_agent_messages(conn, [plan.task_id])
+    _add_plan_restart_notice(
+        task_repo, plan.task_id, plan.id,
+        run_mode=task.run_mode, workflow=task.task_type,
+        reconciliation_error="工作流完成动作尚未核对；explicit reconciliation required",
     )
 
 
@@ -614,10 +661,13 @@ def _add_plan_restart_notice(
     run_mode: str = "manual",
     workflow: str = "",
     failed_step=None,
+    reconciliation_error: str | None = None,
 ) -> None:
     stage = "chat" if resumed_at_confirmation else "failure"
     if resumed_at_confirmation:
         content = "服务已重启，执行进度和中间产物已保留；计划已恢复到当前确认节点，等待你的确认后继续。"
+    elif reconciliation_error or requires_effect_reconciliation(getattr(failed_step, "error", None)):
+        content = "服务已重启，执行结果和凭据已保留；执行或完成动作尚未核对，当前流程暂停，不能直接重跑。"
     elif run_mode == "agent":
         step_title = str(getattr(failed_step, "title", "") or "当前")
         content = (
@@ -633,11 +683,12 @@ def _add_plan_restart_notice(
         "plan_id": plan_id,
         "streaming": False,
     }
-    if not resumed_at_confirmation and failed_step is not None:
+    if not resumed_at_confirmation and (failed_step is not None or reconciliation_error):
         diagnostic, failure_envelope = _restart_failure_payload(
             plan_id=plan_id,
             workflow=workflow,
             failed_step=failed_step,
+            reconciliation_error=reconciliation_error,
         )
         metadata.update(
             {
@@ -647,18 +698,26 @@ def _add_plan_restart_notice(
             }
         )
     with connect(task_repo.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             """
-            SELECT 1
+            SELECT metadata_json
               FROM agent_messages
              WHERE task_id = ?
                AND metadata_json LIKE ?
+             ORDER BY created_at DESC, id DESC
              LIMIT 1
             """,
             (task_id, f'%{PLAN_RESTART_NOTICE_MARKER}%"plan_id":"{plan_id}"%'),
         ).fetchone()
         if existing is not None:
-            return
+            previous = _load_metadata(existing["metadata_json"])
+            current_blocked = metadata.get("failure_envelope", {}).get("retryable") is False
+            previous_blocked = previous.get("failure_envelope", {}).get("retryable") is False
+            if not current_blocked or previous_blocked:
+                return
+            # A prior safe restart notice must not hide a newly uncertain
+            # outcome. Keep history and publish the stronger current stop.
         conn.execute(
             """
             INSERT INTO agent_messages
@@ -676,7 +735,9 @@ def _add_plan_restart_notice(
         )
 
 
-def _restart_failure_payload(*, plan_id: str, workflow: str, failed_step) -> tuple[dict, dict]:
+def _restart_failure_payload(
+    *, plan_id: str, workflow: str, failed_step, reconciliation_error: str | None = None,
+) -> tuple[dict, dict]:
     step_title = str(getattr(failed_step, "title", "") or "当前步骤")
     step_id = str(getattr(failed_step, "id", "") or "")
     error = str(getattr(failed_step, "error", "") or "ServerRestart")
@@ -717,4 +778,27 @@ def _restart_failure_payload(*, plan_id: str, workflow: str, failed_step) -> tup
         "downstream_reset": "dependent_steps",
         "downstream_reset_steps": [],
     }
+    if reconciliation_error or requires_effect_reconciliation(error):
+        summary = "已有结果和执行凭据已保留，执行或完成动作尚未核对；当前流程暂停，不能直接重跑。"
+        diagnostic.update({
+            "code": "workflow_reconciliation_required",
+            "title": "执行结果需要核对",
+            "summary": summary,
+            "cause": reconciliation_error or error,
+            "actions": ["核对该动作的实际执行记录和凭据，再恢复当前流程。"],
+            "agent_prompt": "请核对当前动作的执行证据，不要重试或重新规划此动作。",
+            "recovery_actions": [],
+            "retryable": False,
+            "auto_recoverable": False,
+            "error_kind": "completion_reconciliation",
+            "impact": "执行或完成动作可能已经生效；核对前停止重跑以免重复生效。",
+            "technical_detail": reconciliation_error or error,
+        })
+        failure_envelope.update({
+            "error_kind": "completion_reconciliation",
+            "message": summary,
+            "retryable": False,
+            "suggested_actions": ["halt"],
+            "downstream_reset": "none",
+        })
     return diagnostic, failure_envelope

@@ -828,13 +828,21 @@ def test_reclaim_running_plan_converges_after_parent_binding_conflict(
     assert "failed integrity checks during recovery" in recovered.steps[0].error
 
 
-def test_reclaim_running_plans_pauses_plan_and_marks_step_interrupted(tmp_path):
+def test_reclaim_running_plans_pauses_readonly_plan_and_marks_step_interrupted(tmp_path):
+    from tests.test_orch_executor import FakeRunner
+
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
     task_repo = TaskRepository(db_path)
     task = _driver_task(task_repo, tmp_path)
     plan_repo = PlanRepository(db_path)
     plan_repo.create_plan(_running_plan_with_step(task.id, step_status=StepStatus.RUNNING))
+    step = plan_repo.load_plan("plan-1").steps[0]
+    run_id = plan_repo.start_step_run(
+        plan_id="plan-1", step_id=step.id, tool_ref=step.tool_ref.label(), inputs=step.inputs,
+        invocation_contract=FakeRunner().prepare_invocation(step.tool_ref),
+    )
+    plan_repo.mark_step_run_dispatched(run_id)
 
     reclaimed = reclaim_running_plans(
         plan_repo,

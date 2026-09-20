@@ -19,6 +19,15 @@ import { renderModelTuningProgress } from "./model_tuning_progress.js";
 export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage", "portfolio"]);
 const PLAN_RETRY_REFRESH_MAX_ATTEMPTS = 300;
 const PLAN_RETRY_REFRESH_INTERVAL_MS = 1000;
+const PLAN_RECONCILIATION_MESSAGE = "执行结果尚未核对，已暂停重试。请先核对执行记录与实际产物，完成核对后再继续。";
+
+function planStepNeedsReconciliation(step) {
+  return step?.status === "failed" && step?.failure_envelope?.retryable === false;
+}
+
+function planNeedsReconciliation(plan) {
+  return plan?.status === "failed" && plan?.failure_envelope?.retryable === false;
+}
 
 export function taskUsesPlanRail(task) {
   return PLAN_RAIL_TASK_TYPES.has(task?.task_type);
@@ -68,6 +77,17 @@ export function planWorkflowStatus(plan) {
   const findStep = (status) => steps.find((step) => String(step?.status || "") === status);
   const status = String(plan.status || "");
   const failedStep = findStep("failed");
+  const reconciliationStep = steps.find(planStepNeedsReconciliation);
+  if (planNeedsReconciliation(plan) || reconciliationStep) {
+    return {
+      ...workflowStatusSnapshot("failed"),
+      label: "待核对",
+      message: PLAN_RECONCILIATION_MESSAGE,
+      detail: planNeedsReconciliation(plan)
+        ? `计划完成结果待核对。${PLAN_RECONCILIATION_MESSAGE}`
+        : `待核对步骤：${reconciliationStep.title || "未命名步骤"}。${PLAN_RECONCILIATION_MESSAGE}`,
+    };
+  }
   // A failed step is the authoritative execution state even if the plan-level
   // status was moved to `awaiting_confirm` solely to ask whether it should be
   // retried.  The recovery question remains in the middle conversation, but it
@@ -311,6 +331,19 @@ function planRetryReplaceWarningHtml() {
     + "</p>";
 }
 
+function planReconciliationCardHtml(title, { stepId = "", planId = "" } = {}) {
+  const identity = stepId
+    ? `data-plan-reconciliation-step="${escapeHtml(stepId)}"`
+    : `data-plan-reconciliation-id="${escapeHtml(planId)}"`;
+  return `<section class="plan-retry-card" ${identity} role="status">
+    <header class="plan-retry-card-head">
+      <span class="plan-retry-card-pill">执行结果待核对</span>
+      <span class="plan-retry-card-title">${escapeHtml(title)}</span>
+    </header>
+    <div class="plan-retry-card-body"><p>${PLAN_RECONCILIATION_MESSAGE}</p></div>
+  </section>`;
+}
+
 // The full retry form, rendered into the middle workspace panel (not the rail).
 // Markup below the <form> is byte-identical to the previous rail form so the
 // submit path (retryPlanStep / parsePlanRetryInputs, scoped by
@@ -319,6 +352,9 @@ function planRetryReplaceWarningHtml() {
 function planRetryCardHtml(step, realSchema = null) {
   const stepId = String(step?.id || "");
   const stepTitle = String(step?.title || "未命名步骤");
+  if (planStepNeedsReconciliation(step)) {
+    return planReconciliationCardHtml(stepTitle, { stepId });
+  }
   return `<section class="plan-retry-card" data-plan-step-retry="${escapeHtml(stepId)}" data-plan-retry-card="${escapeHtml(stepId)}">
     <header class="plan-retry-card-head">
       <span class="plan-retry-card-pill">编辑参数后重试</span>
@@ -559,6 +595,7 @@ export function createPlanRailController({
       '<span class="plan-substep-copy">',
       `<strong>${escapeHtml(step.title || "未命名步骤")}</strong>`,
       description ? `<small>${escapeHtml(description)}</small>` : "",
+      planStepNeedsReconciliation(step) ? "<small>执行结果待核对 · 已暂停重试</small>" : "",
       tuningProgress,
       "</span>",
       "</div>",
@@ -690,6 +727,20 @@ export function createPlanRailController({
       setActionStatus?.("缺少可重试的计划步骤，请刷新后重试。", "error");
       return;
     }
+    if (planNeedsReconciliation(plan)) {
+      setActionStatus?.(PLAN_RECONCILIATION_MESSAGE, "error");
+      return;
+    }
+    const step = (Array.isArray(plan.steps) ? plan.steps : [])
+      .find((item) => String(item?.id || "") === String(stepId));
+    if (!step || step.status !== "failed") {
+      setActionStatus?.("该步骤已不处于可重试状态，请刷新计划。", "error");
+      return;
+    }
+    if (planStepNeedsReconciliation(step)) {
+      setActionStatus?.(PLAN_RECONCILIATION_MESSAGE, "error");
+      return;
+    }
     let inputs;
     try {
       inputs = parsePlanRetryInputs(button.closest("[data-plan-step-retry]"));
@@ -782,23 +833,32 @@ export function createPlanRailController({
       .sort((left, right) => (Number(left.index) || 0) - (Number(right.index) || 0));
   }
 
-  // Builds the middle-workspace retry panel body: one editable card per failed
-  // step. Returns "" when there is nothing to retry (the caller then hides the
-  // panel entirely). The tool schema for each failed step is fetched lazily via
-  // the same maybeFetchToolSchema() path the rail uses, so enum/required upgrades
-  // apply here too.
+  // Failed steps expose either a retry form or a read-only reconciliation card.
+  // Only retryable steps need tool schemas for editable input controls.
   function planRetryPanelHtml(plan) {
+    if (planNeedsReconciliation(plan)) {
+      return planReconciliationCardHtml("计划完成结果待核对", { planId: String(plan.id || "") });
+    }
     const failed = failedPlanSteps(plan);
     if (!failed.length) return "";
+    const reconciliationCount = failed.filter(planStepNeedsReconciliation).length;
     const cards = failed.map((step) => {
       const ref = step?.tool_ref || {};
-      maybeFetchToolSchema(ref);
+      if (!planStepNeedsReconciliation(step)) maybeFetchToolSchema(ref);
       return planRetryCardHtml(step, toolSchemaFor(ref));
     });
+    const heading = reconciliationCount === failed.length
+      ? "执行结果待核对"
+      : reconciliationCount ? "处理失败步骤" : "编辑参数后重试";
+    const description = reconciliationCount === failed.length
+      ? PLAN_RECONCILIATION_MESSAGE
+      : reconciliationCount
+        ? "待核对步骤已暂停重试。其余可重试步骤可修改输入后重新执行，提交将整体替换该步骤输入（非合并）。"
+        : "修改失败步骤的输入后重新执行。此处提交将整体替换该步骤输入（非合并）。";
     return [
       '<header class="plan-retry-panel-head">',
-      '<h3>编辑参数后重试</h3>',
-      '<p class="plan-retry-panel-sub">修改失败步骤的输入后重新执行。此处提交将整体替换该步骤输入（非合并）。</p>',
+      `<h3>${heading}</h3>`,
+      `<p class="plan-retry-panel-sub">${description}</p>`,
       "</header>",
       `<div class="plan-retry-panel-body">${cards.join("")}</div>`,
     ].join("");
@@ -1290,14 +1350,14 @@ export function createPlanRailController({
   }
 
   // Mounts the retry panel into the middle workspace (#planRetryPanel). Shows it
-  // only when there is at least one failed step to retry; otherwise clears and
+  // only when there is at least one failed step to handle; otherwise clears and
   // hides it so it never occupies the middle region on a healthy plan. Cards are
   // only rebuilt when their content signature changes, so an open panel with an
   // in-progress edit is not wiped on every poll tick.
   function renderRetryPanel(plan) {
     const panel = $("planRetryPanel");
     if (!panel) return;
-    if (isAgentMode?.()) {
+    if (isAgentMode?.() && !planNeedsReconciliation(plan)) {
       clearRetryPanel();
       return;
     }
@@ -1313,10 +1373,22 @@ export function createPlanRailController({
       return;
     }
     const failed = failedPlanSteps(plan);
-    const signature = JSON.stringify(failed.map((step) => {
-      const ref = step?.tool_ref || {};
-      return { id: step?.id, inputs: planRetryInputsText(step), schema: toolSchemaFor(ref) };
-    }));
+    const signature = JSON.stringify({
+      plan_id: plan?.id,
+      plan_reconciliation: planNeedsReconciliation(plan),
+      failed: failed.map((step) => {
+        const ref = step?.tool_ref || {};
+        return {
+          id: step?.id,
+          title: step?.title,
+          inputs: planRetryInputsText(step),
+          retryable: step?.failure_envelope?.retryable !== false,
+          editable_schema: step?.failure_envelope?.editable_input_schema,
+          downstream_reset_steps: step?.failure_envelope?.downstream_reset_steps,
+          schema: toolSchemaFor(ref),
+        };
+      }),
+    });
     if (panel.dataset.planRetrySignature !== signature) {
       panel.dataset.planRetrySignature = signature;
       panel.innerHTML = html;

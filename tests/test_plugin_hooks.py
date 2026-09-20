@@ -1,8 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+import threading
+
+import pytest
+
 from marvis.db import PluginRepository, init_db
 from marvis.plugins.hooks import HookDispatcher
-from marvis.plugins.manifest import ToolRef, parse_manifest
+from marvis.plugins.manifest import HookSpec, ToolRef, parse_manifest
 from marvis.plugins.registry import PluginRegistry
 from marvis.plugins.runner import ToolResult
+from marvis.repositories.hook_deliveries import HookDeliveryRepository
+from marvis.state_machine import ConflictError
 
 
 class FakeRunner:
@@ -262,3 +270,122 @@ def test_hook_dispatcher_unknown_event_is_noop(tmp_path):
 
     assert dispatcher.dispatch("validation.completed", {}, task_id="t1") == []
     assert runner.calls == []
+def _durable_dispatcher(tmp_path, *, required=True, runner=None):
+    db_path = tmp_path / 'hooks.sqlite'
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    registry = PluginRegistry(repo)
+    registry.register(replace(_manifest(), hooks=(HookSpec('step.completed', 'on_task_created', required),)), enabled=True)
+    runner = runner or FakeRunner()
+    dispatcher = HookDispatcher(registry, runner, repo)
+    dispatcher.rebuild_index()
+    return dispatcher, runner, repo, registry
+
+
+def test_durable_hook_receipt_deduplicates_after_reconstructing_dispatcher(tmp_path):
+    dispatcher, runner, repo, registry = _durable_dispatcher(tmp_path)
+    payload = {'event_id': 'event-1', 'output_ref': 'metrics:step:v1'}
+    first = dispatcher.dispatch('step.completed', payload, task_id='task')
+    restored = HookDispatcher(registry, runner, repo)
+    restored.rebuild_index()
+    second = restored.dispatch('step.completed', payload, task_id='task')
+    assert not first.required_failures and not second.required_failures
+    assert len(runner.calls) == 1
+    assert HookDeliveryRepository(repo.db_path).list_deliveries('event-1')[0]['status'] == 'succeeded'
+    with pytest.raises(ConflictError, match='different binding'):
+        restored.dispatch('step.completed', {**payload, 'output_ref': 'metrics:step:v2'}, task_id='task')
+
+
+def test_durable_hook_concurrent_dispatch_executes_one_attempt(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+
+    class BlockingRunner(FakeRunner):
+        def invoke(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return super().invoke(*args, **kwargs)
+
+    dispatcher, runner, repo, registry = _durable_dispatcher(tmp_path, runner=BlockingRunner())
+    other = HookDispatcher(registry, runner, repo)
+    other.rebuild_index()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(dispatcher.dispatch, 'step.completed', {'event_id': 'shared'}, task_id='task')
+        assert entered.wait(5)
+        second = pool.submit(other.dispatch, 'step.completed', {'event_id': 'shared'}, task_id='task').result(timeout=5)
+        assert second.required_failures[0]['error_kind'] == 'unknown'
+        release.set()
+        assert not first.result(timeout=5).required_failures
+    assert len(runner.calls) == 1
+    assert not other.dispatch('step.completed', {'event_id': 'shared'}, task_id='task').required_failures
+
+
+@pytest.mark.parametrize('crash_after_receipt', [False, True])
+def test_hook_crash_window_never_replays_uncertain_effect(tmp_path, monkeypatch, crash_after_receipt):
+    dispatcher, runner, repo, registry = _durable_dispatcher(tmp_path)
+    original = dispatcher._deliveries.finish
+
+    class Crash(BaseException):
+        pass
+
+    def crash(*args, **kwargs):
+        if crash_after_receipt:
+            original(*args, **kwargs)
+        raise Crash()
+
+    monkeypatch.setattr(dispatcher._deliveries, 'finish', crash)
+    with pytest.raises(Crash):
+        dispatcher.dispatch('step.completed', {'event_id': 'crashed'}, task_id='task')
+    recovered = HookDispatcher(registry, runner, repo)
+    recovered.rebuild_index()
+    result = recovered.dispatch('step.completed', {'event_id': 'crashed'}, task_id='task')
+    assert len(runner.calls) == 1
+    assert bool(result.required_failures) is (not crash_after_receipt)
+    if not crash_after_receipt:
+        assert result.required_failures[0]['error_kind'] == 'unknown'
+
+
+def test_required_recipients_cannot_disappear_on_recovery(tmp_path, monkeypatch):
+    dispatcher, runner, repo, registry = _durable_dispatcher(tmp_path)
+    original = dispatcher._deliveries.claim
+
+    class Crash(BaseException):
+        pass
+
+    monkeypatch.setattr(dispatcher._deliveries, 'claim', lambda *_a, **_k: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        dispatcher.dispatch('step.completed', {'event_id': 'frozen'}, task_id='task')
+    monkeypatch.setattr(dispatcher._deliveries, 'claim', original)
+    registry.set_enabled('hook_pack', False)
+    dispatcher.rebuild_index()
+    result = dispatcher.dispatch('step.completed', {'event_id': 'frozen'}, task_id='task')
+    assert result.required_failures[0]['error_kind'] == 'binding'
+    assert runner.calls == []
+
+
+def test_required_hook_failure_and_optional_warning_are_distinct(tmp_path):
+    dispatcher, runner, repo, registry = _durable_dispatcher(tmp_path, required=False)
+    result = dispatcher.dispatch('step.completed', {'event_id': 'optional', 'fail': True}, task_id='task')
+    assert not result.required_failures
+    assert len(result.warnings) == 1
+    assert dispatcher.dispatch('step.completed', {'event_id': 'optional', 'fail': True}, task_id='task').warnings
+    assert len(runner.calls) == 1
+    registry.register(replace(_manifest(), version='0.2.0', hooks=(HookSpec('step.completed', 'on_task_created', True),)), enabled=True)
+    dispatcher.rebuild_index()
+    result = dispatcher.dispatch('step.completed', {'fail': True}, task_id='task')
+    assert result.required_failures[0]['error_kind'] == 'identity'
+    assert len(runner.calls) == 1
+
+
+def test_required_listener_unknown_effect_is_not_retried(tmp_path):
+    dispatcher, runner, repo, registry = _durable_dispatcher(tmp_path)
+    calls = []
+
+    def fail_after_effect(_event, payload):
+        calls.append(payload['event_id'])
+        raise RuntimeError('after external effect')
+
+    dispatcher.register_listener('step.completed', fail_after_effect, required=True)
+    for _ in range(2):
+        result = dispatcher.dispatch('step.completed', {'event_id': 'listener'}, task_id='task')
+        assert result.required_failures[0]['error_kind'] == 'unknown'
+    assert calls == ['listener']

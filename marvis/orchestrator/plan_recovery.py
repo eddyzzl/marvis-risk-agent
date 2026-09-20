@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from marvis.orchestrator.contracts import Plan, PlanStep, StepStatus
-from marvis.plugins.runner import ToolResult
+from marvis.orchestrator.completion import complete_step
+from marvis.plugins.invocation import retry_safe_run
 from marvis.state_machine import ConflictError
 
 
@@ -41,15 +42,15 @@ class PlanStepRecovery:
                     )
                     self._recover_checking_step(plan, step)
                     continue
-                step.error = (
-                    "interrupted during running before output was persisted; "
-                    "explicit retry required"
+                safe = bool(step_runs) and all(retry_safe_run(run) for run in step_runs)
+                step.error = "interrupted during running before output was persisted; " + (
+                    "explicit retry required" if safe else "explicit reconciliation required"
                 )
                 self._recover_step_runs(
                     step_runs,
                     status="interrupted",
                     error=step.error,
-                    error_kind="ServerRestart",
+                    error_kind="ServerRestart" if safe else "unknown_effect",
                 )
                 self._set_step_status(step, StepStatus.FAILED)
             elif step.status == StepStatus.CHECKING:
@@ -72,8 +73,8 @@ class PlanStepRecovery:
                     self._recover_step_runs(
                         step_runs,
                         status="interrupted",
-                        error="interrupted during checking before output was persisted",
-                        error_kind="ServerRestart",
+                        error="interrupted during checking before output was persisted; explicit reconciliation required",
+                        error_kind="unknown_effect",
                     )
                 self._recover_checking_step(plan, step)
 
@@ -133,7 +134,7 @@ class PlanStepRecovery:
     def _recover_checking_step(self, plan: Plan, step: PlanStep) -> None:
         version = _step_output_version(step)
         if version is None:
-            step.error = "interrupted during checking before output was persisted"
+            step.error = "interrupted during checking before output was persisted; explicit reconciliation required"
             self._set_step_status(step, StepStatus.FAILED)
             return
         try:
@@ -150,81 +151,27 @@ class PlanStepRecovery:
         except ConflictError as exc:
             step.error = (
                 "persisted step output failed integrity checks during recovery: "
-                f"{exc}"
+                f"{exc}; explicit reconciliation required"
             )
             self._set_step_status(step, StepStatus.FAILED)
             return
         except (KeyError, TypeError, ValueError):
-            step.error = "interrupted during checking before output was persisted"
+            step.error = "interrupted during checking before output was persisted; explicit reconciliation required"
             self._set_step_status(step, StepStatus.FAILED)
             return
-        deterministic = self._reviewer.deterministic_check(step, output)
-        step.review_verdicts.append(deterministic)
-        if not deterministic.passed:
-            failed = ToolResult(
-                ok=False,
-                output=None,
-                error="; ".join(deterministic.reasons),
-                error_kind="postcheck",
-                duration_ms=0,
-            )
-            self._handle_step_failure(step, failed)
-            return
-        critique = self._reviewer.llm_critique(step, output, plan.goal)
-        step.review_verdicts.append(critique)
-        step.status = StepStatus.DONE
-        self._repo.update_step(step)
-        self._dispatch_step_completed(plan, step, output)
-
-    def _handle_step_failure(self, step: PlanStep, result: ToolResult) -> None:
-        step.error = result.error or "step failed"
-        self._set_step_status(step, StepStatus.FAILED)
-
-    def _dispatch_feature_computed(self, plan: Plan, step: PlanStep, output: dict) -> None:
-        if step.tool_ref.plugin != "feature":
-            return
-        payload = {
-            "plan_id": plan.id,
-            "step_id": step.id,
-            "tool": step.tool_ref.tool,
-            "output_ref": step.output_ref,
-        }
-        for field in (
-            "dataset_id",
-            "derived_dataset_id",
-            "features",
-            "new_columns",
-            "feature",
-            "target_col",
-        ):
-            if field in output:
-                payload[field] = output[field]
-        self._dispatch("feature.computed", payload, task_id=plan.task_id)
-
-    def _dispatch_step_completed(self, plan: Plan, step: PlanStep, output: dict) -> None:
-        self._dispatch_feature_computed(plan, step, output)
-        self._dispatch(
-            "step.completed",
-            {
-                "plan_id": plan.id,
-                "step_id": step.id,
-            },
-            task_id=plan.task_id,
-        )
+        if step.status == StepStatus.RUNNING:
+            self._set_step_status(step, StepStatus.CHECKING)
+        try:
+            complete_step(self._repo, self._reviewer, self._hooks, plan, step, output)
+        except Exception as exc:
+            step.error = f"step completion interrupted: {exc}; explicit reconciliation required"
+            self._set_step_status(step, StepStatus.FAILED)
 
     def _set_step_status(self, step: PlanStep, status: StepStatus) -> None:
         if step.status != status:
             self._state.assert_step_transition(step.status, status)
             step.status = status
         self._repo.update_step(step)
-
-    def _dispatch(self, event: str, payload: dict, *, task_id: str) -> None:
-        if self._hooks is None:
-            return
-        try:
-            self._hooks.dispatch(event, payload, task_id=task_id)
-        except Exception:
-            return
 
 
 def _step_output_version(step: PlanStep) -> int | None:

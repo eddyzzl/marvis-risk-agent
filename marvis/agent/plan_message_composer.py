@@ -28,6 +28,7 @@ from marvis.orchestrator.contracts import (
     plan_step_confirmation_fingerprint,
 )
 from marvis.plugins.manifest import governance_policy_hash
+from marvis.orchestrator.errors import requires_effect_reconciliation
 
 
 _RESULT_DATASET_PRESENTATION_BY_TOOL = {
@@ -604,13 +605,19 @@ class PlanMessageComposer:
             if failed and failed.error
             else "执行中断。"
         )
+        completion_failure = next(
+            (event for event in reversed(plan.loop_events) if event.type == "hook_completion_failed"),
+            None,
+        )
+        if failed is None and completion_failure is not None:
+            detail = f"完成动作尚未核对：{completion_failure.reason}"
         meta = {
             "plan_id": plan.id,
             "step_id": failed.id if failed else None,
             "run_seq": run_seq,
         }
         reset_steps: tuple[str, ...] = ()
-        error_kind = "execution"
+        error_kind = "completion_reconciliation" if completion_failure is not None and failed is None else "execution"
         if failed is not None:
             downstream = downstream_step_ids(plan, [failed.id])
             reset_steps = tuple(
@@ -622,22 +629,49 @@ class PlanMessageComposer:
                 error_kind = (
                     self._latest_failed_step_run_error_kind(failed.id) or error_kind
                 )
+        reconciliation_required = completion_failure is not None or requires_effect_reconciliation(detail, error_kind)
+        for affected in plan.steps:
+            if affected.id not in reset_steps:
+                continue
+            affected_kind = (
+                self._latest_failed_step_run_error_kind(affected.id)
+                if self._latest_failed_step_run_error_kind is not None else None
+            )
+            reconciliation_required |= requires_effect_reconciliation(affected.error, affected_kind)
         meta["failure_envelope"] = build_failure_envelope(
             plan_id=plan.id,
             step_id=failed.id if failed else None,
             run_seq=run_seq,
             message=detail,
-            step_inputs=failed.inputs if failed else None,
-            downstream_reset_steps=reset_steps,
+            step_inputs=failed.inputs if failed and not reconciliation_required else None,
+            downstream_reset_steps=reset_steps if not reconciliation_required else (),
             error_kind=error_kind,
-            retryable=failed is not None,
+            retryable=failed is not None and not reconciliation_required,
         ).to_dict()
+        if reconciliation_required:
+            meta["failure_envelope"]["suggested_actions"] = ["halt"]
         diagnostic = _step_failure_diagnostic(failed, detail, error_kind)
+        if reconciliation_required:
+            diagnostic.update({
+                "code": "workflow_reconciliation_required",
+                "title": "执行结果需要核对",
+                "summary": "已有结果和执行凭据已保留，完成动作尚未核对。",
+                "cause": detail,
+                "actions": ["核对该动作的实际执行记录和凭据，再恢复当前流程。"],
+                "agent_prompt": "请核对当前动作的执行证据，不要重试或重新规划此动作。",
+                "recovery_actions": [],
+                "retryable": False,
+                "auto_recoverable": False,
+            })
         meta["error"] = True
         meta["error_diagnostic"] = diagnostic
         return DriverMessage(
             "error",
-            f"❌ {detail}\n\n已完成步骤和中间结果均已保留。是否由 Agent 从当前失败步骤继续处理？",
+            (
+                f"❌ {detail}\n\n已有结果和执行凭据已保留。请先核对动作的实际结果；当前流程暂停，不能直接重跑。"
+                if reconciliation_required
+                else f"❌ {detail}\n\n已完成步骤和中间结果均已保留。是否由 Agent 从当前失败步骤继续处理？"
+            ),
             meta,
         )
 

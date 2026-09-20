@@ -281,3 +281,55 @@ def test_plugin_error_types_carry_context():
 
     execution_error = ToolExecutionError("boom", "Traceback text")
     assert execution_error.traceback_text == "Traceback text"
+
+
+def test_required_hook_contract_round_trips_and_defaults_to_optional():
+    legacy = parse_manifest(_manifest())
+    assert all(hook.required is False for hook in legacy.hooks)
+    required = parse_manifest(_manifest(hooks=[{'event': 'step.completed', 'tool': 'echo', 'required': True}]))
+    assert required.hooks[0].required is True
+    assert parse_manifest(manifest_to_dict(required)).hooks == required.hooks
+
+
+@pytest.mark.parametrize('required', ['true', 1, None])
+def test_required_hook_rejects_non_boolean_declaration(required):
+    with pytest.raises(ManifestError, match='required must be a boolean'):
+        parse_manifest(_manifest(hooks=[{'event': 'step.completed', 'tool': 'echo', 'required': required}]))
+
+
+def test_required_hook_rejects_producer_without_durable_completion_protocol():
+    with pytest.raises(ManifestError, match='no durable completion protocol'):
+        parse_manifest(_manifest(hooks=[{'event': 'task.created', 'tool': 'echo', 'required': True}]))
+
+
+def test_optional_hook_legacy_canonical_hash_survives_database_upgrade(tmp_path):
+    import hashlib
+    import json
+    from marvis.db import PluginRepository, connect, init_db
+    from marvis.plugins.registry import PluginRegistry
+
+    db_path = tmp_path / 'legacy.sqlite'
+    init_db(db_path)
+    manifest = parse_manifest(_manifest())
+    legacy_wire = manifest_to_dict(manifest)
+    for hook in legacy_wire['hooks']:
+        assert set(hook) == {'event', 'tool'}
+    def canonical(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    before = canonical(legacy_wire)
+    plugins = PluginRepository(db_path)
+    plugins.upsert_plugin(manifest, enabled=True)
+    with connect(db_path) as conn:
+        for table in ('hook_deliveries', 'hook_events', 'hook_completion_checkpoints'):
+            conn.execute(f'DROP TABLE {table}')
+        conn.execute('PRAGMA user_version = 35')
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    registry.load_from_db()
+    restored = registry.list()[0]
+    assert canonical(manifest_to_dict(restored)) == before
+    explicit_false = _manifest(hooks=[{**hook, 'required': False} for hook in legacy_wire['hooks']])
+    assert canonical(manifest_to_dict(parse_manifest(explicit_false))) == before
+    required = parse_manifest(_manifest(hooks=[{'event': 'step.completed', 'tool': 'echo', 'required': True}]))
+    assert manifest_to_dict(required)['hooks'][0]['required'] is True
+    assert canonical(manifest_to_dict(required)) != before

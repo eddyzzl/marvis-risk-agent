@@ -58,7 +58,7 @@ def test_platform_uses_artifact_mapping_instead_of_rebuilding_raw_dictionary(
         dictionary=pd.DataFrame({"特征名": ["BH_A044"], "类别": ["睿智"]}),
         feature_col="特征名",
         category_col="类别",
-        stress_scores_path=artifact,
+        stress_scores_payload=json.loads(artifact.read_text()),
     )
 
     assert resolution.per_category == {"睿智": ["BH_A044_C0580"]}
@@ -87,7 +87,7 @@ def test_platform_rejects_artifact_features_absent_from_model_metadata(tmp_path:
             ),
             feature_col="特征名",
             category_col="类别",
-            stress_scores_path=artifact,
+            stress_scores_payload=json.loads(artifact.read_text()),
         )
 
 
@@ -98,7 +98,7 @@ def test_platform_falls_back_to_sample_columns_when_importance_is_absent():
         dictionary=pd.DataFrame({"特征名": ["income"], "类别": ["内部特征"]}),
         feature_col="特征名",
         category_col="类别",
-        stress_scores_path=None,
+        stress_scores_payload=None,
     )
 
     assert resolution.per_category == {"内部特征": ["income"]}

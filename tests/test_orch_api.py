@@ -1257,3 +1257,24 @@ def _create_task(db_path) -> str:
         )
     )
     return task.id
+
+
+def test_plan_retry_endpoint_rejects_unreconciled_completion_without_running_tool(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    plan = _plan(status=PlanStatus.FAILED, task_id=task_id)
+    plan.steps[0].status = StepStatus.FAILED
+    plan.steps[0].error = 'required hook completion failed; explicit reconciliation required'
+    plan.steps[0].output_ref = 'metrics:step-1:v1'
+    repo.create_plan(plan)
+
+    response = client.post('/api/plans/plan-1/steps/step-1/retry', json={'inputs': {'changed': True}})
+
+    assert response.status_code == 409
+    assert '尚未核对' in response.json()['detail']
+    assert client.app.state.plan_executor.calls == []
+    unchanged = repo.load_plan('plan-1').steps[0]
+    assert unchanged.output_ref == 'metrics:step-1:v1'
+    assert unchanged.status == StepStatus.FAILED
+    assert _job_statuses(repo.db_path) == ['failed']

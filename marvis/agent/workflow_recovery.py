@@ -616,7 +616,9 @@ def deterministic_workflow_recovery_reply(diagnostic: dict) -> str:
     if actions:
         lines.extend(["", "建议按下面的顺序处理："])
         lines.extend(f"{index}. {item}" for index, item in enumerate(actions, start=1))
-    if bool(diagnostic.get("auto_recoverable")):
+    if diagnostic.get("code") == "workflow_reconciliation_required":
+        lines.extend(["", "已有结果和执行凭据已保留。请先核对动作的实际结果；核对前不能重试、调整输入或重新建立计划重跑该动作。"])
+    elif bool(diagnostic.get("auto_recoverable")):
         lines.extend(
             [
                 "",

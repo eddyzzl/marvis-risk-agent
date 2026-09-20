@@ -30,3 +30,10 @@ class RefResolutionError(OrchestratorError):
         super().__init__(f"could not resolve ref {ref}: {reason}")
         self.ref = ref
         self.reason = reason
+
+
+def requires_effect_reconciliation(error: str | None, error_kind: str | None = None) -> bool:
+    """Recognize platform-owned stop markers, not a model's retry suggestion."""
+    return error_kind in {"unknown_effect", "completion_reconciliation"} or (
+        "explicit reconciliation required" in str(error or "").lower()
+    )

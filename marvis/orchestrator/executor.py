@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -29,11 +29,15 @@ from marvis.llm_client import LLMClientError
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.planner import PlanningError, ReplanError
 from marvis.orchestrator.plan_recovery import PlanStepRecovery
+from marvis.orchestrator.completion import (
+    CompletionError, complete_step, complete_workflow,
+    pending_workflow_completion, prepare_workflow_completion,
+)
 from marvis.orchestrator.references import parse_step_output_ref
-from marvis.orchestrator.reviewer import FinalReview, ReviewVerdict
+from marvis.orchestrator.reviewer import FinalReview
 from marvis.orchestrator.safety import is_safety_step
-from marvis.orchestrator.validator import METRIC_FIELDS
 from marvis.plugins.manifest import manifest_to_dict
+from marvis.plugins.invocation import retry_safe_invocation, valid_invocation_contract
 from marvis.plugins.runner import ToolResult
 from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.tasks import TaskRepository
@@ -292,6 +296,18 @@ class PlanExecutor:
         tier = resolve_tier(plan.tier)
         if plan.status in {PlanStatus.DONE, PlanStatus.FAILED, PlanStatus.CANCELLED}:
             return ExecutionResult(plan.id, plan.status, None, None)
+        if plan.status in {PlanStatus.RUNNING, PlanStatus.REVIEW}:
+            try:
+                completion = pending_workflow_completion(self._repo, plan)
+            except ConflictError:
+                self._repo.append_loop_event(plan.id, {
+                    "type": "hook_completion_failed",
+                    "reason": "workflow completion binding changed; explicit reconciliation required",
+                })
+                self._set_plan_status(plan, PlanStatus.FAILED)
+                return ExecutionResult(plan.id, PlanStatus.FAILED, None, None)
+            if completion is not None:
+                return self._complete_workflow(plan, completion)
         if plan.status == PlanStatus.REVIEW:
             return ExecutionResult(
                 plan.id,
@@ -405,15 +421,18 @@ class PlanExecutor:
 
     def _execute_step(self, plan: Plan, step: PlanStep, *, cancellation_check=None) -> None:
         run_id = None
+        result = None
         progress_publisher = None
         try:
             self._set_step_status(step, StepStatus.RUNNING)
             resolved_inputs = self._resolve_refs(step.inputs)
+            invocation_contract = self._prepare_invocation(step)
             run_id = self._repo.start_step_run(
                 plan_id=plan.id,
                 step_id=step.id,
                 tool_ref=step.tool_ref.label(),
                 inputs=resolved_inputs,
+                invocation_contract=invocation_contract,
             )
             progress_publisher = self._step_progress_publisher(plan, step, run_id)
             try:
@@ -422,6 +441,7 @@ class PlanExecutor:
                     step,
                     resolved_inputs,
                     run_id=run_id,
+                    invocation_contract=invocation_contract,
                     progress_callback=(
                         progress_publisher.publish if progress_publisher else None
                     ),
@@ -457,7 +477,7 @@ class PlanExecutor:
                 )
                 if progress_publisher is not None:
                     progress_publisher.finish("failed")
-                self._handle_step_failure(step, result)
+                self._handle_step_failure(step, result, apply_policy=result.error_kind != "unknown_effect")
                 return
 
             output = result.output or {}
@@ -482,29 +502,25 @@ class PlanExecutor:
                 duration_ms=result.duration_ms,
             )
             self._repo.update_step(step)
-            deterministic = self._reviewer.deterministic_check(step, output)
-            step.review_verdicts.append(deterministic)
-            if not deterministic.passed:
-                failed = ToolResult(
-                    ok=False,
-                    output=None,
-                    error="; ".join(deterministic.reasons),
-                    error_kind="postcheck",
-                    duration_ms=result.duration_ms,
-                )
+            try:
+                complete_step(self._repo, self._reviewer, self._hooks, plan, step, output)
+            except Exception as exc:
+                raise CompletionError(
+                    f"step completion interrupted: {exc}; explicit reconciliation required"
+                ) from exc
+            if step.status == StepStatus.FAILED:
                 if progress_publisher is not None:
                     progress_publisher.finish("failed")
-                self._handle_step_failure(step, failed, apply_policy=False)
                 return
-
-            critique = self._critique_step(step, output, plan.goal)
-            if critique is not None:
-                step.review_verdicts.append(critique)
-            step.status = StepStatus.DONE
-            self._repo.update_step(step)
-            self._dispatch_step_completed(plan, step, output)
             if progress_publisher is not None:
                 progress_publisher.finish("succeeded")
+        except CompletionError as exc:
+            # The tool already has an immutable successful receipt. Do not
+            # rewrite its ledger or re-run it to repair a Hook failure.
+            step.error = str(exc)
+            self._set_step_status(step, StepStatus.FAILED)
+            if progress_publisher is not None:
+                progress_publisher.finish("failed")
         except JobCancelled as exc:
             self._finish_cancelled_step(
                 plan,
@@ -525,22 +541,14 @@ class PlanExecutor:
                         error_kind=exc.__class__.__name__,
                     )
                 except Exception as finish_exc:
-                    step.error = f"{exc}; step run finalization failed: {finish_exc}"
+                    step.error = f"{exc}; step run finalization failed: {finish_exc}; explicit reconciliation required"
                     self._set_step_status(step, StepStatus.FAILED)
                     return
+            if run_id is not None and (result is not None and result.ok or not self._repo.step_run_retry_safe(run_id)):
+                exc = CompletionError(
+                    f"tool execution outcome requires checking after {type(exc).__name__}; explicit reconciliation required"
+                )
             self._handle_step_exception(step, exc)
-
-    def _critique_step(self, step: PlanStep, output: dict, goal: str) -> ReviewVerdict | None:
-        # AGT-6: llm_critique used to run unconditionally for every step, adding a
-        # synchronous 5-20s LLM round-trip per step and rendering "skipped: no LLM
-        # configured" noise even where the deterministic checks are all that
-        # matters. Narrow the trigger surface to steps where a soft second opinion
-        # is actually useful: decision points, confirmation gates, and any step
-        # whose output carries metric values worth a sanity check. Plain read/
-        # profile-type steps skip outright — no call, no verdict, no noise.
-        if not (step.decision_point or step.needs_confirmation or _output_has_metrics(output)):
-            return None
-        return self._reviewer.llm_critique(step, output, goal)
 
     def _finish_step_run(self, run_id: str, **kwargs) -> None:
         self._repo.finish_step_run(run_id, **kwargs)
@@ -620,6 +628,7 @@ class PlanExecutor:
         resolved_inputs: dict,
         *,
         run_id: str,
+        invocation_contract: dict | None = None,
         progress_callback=None,
         cancellation_check=None,
     ) -> ToolResult:
@@ -630,7 +639,7 @@ class PlanExecutor:
         )
         attempts = (
             MAX_STEP_RETRIES + 1
-            if policy == "retry" and not protected_execution
+            if policy == "retry" and not protected_execution and retry_safe_invocation(invocation_contract)
             else 1
         )
         execution_context = None
@@ -674,6 +683,9 @@ class PlanExecutor:
                 result = self._subagents.run(sub, goal_inputs=resolved_inputs)
             else:
                 invoke_kwargs = {"task_id": plan.task_id}
+                if invocation_contract is not None:
+                    invoke_kwargs["expected_invocation"] = invocation_contract
+                    invoke_kwargs["on_dispatch"] = lambda: self._repo.mark_step_run_dispatched(run_id)
                 if protected_execution:
                     invoke_kwargs["execution_context"] = execution_context
                 if progress_callback is not None and _accepts_progress_callback(
@@ -702,6 +714,11 @@ class PlanExecutor:
                 return result
             if result.error_kind == "cancelled":
                 return result
+            if not self._repo.step_run_retry_safe(run_id):
+                return replace(
+                    result, error_kind="unknown_effect",
+                    error="tool failure may have left side effects; explicit reconciliation required",
+                )
             last_result = result
         return last_result or ToolResult(
             ok=False,
@@ -710,6 +727,22 @@ class PlanExecutor:
             error_kind="execution",
             duration_ms=0,
         )
+
+    def _prepare_invocation(self, step: PlanStep) -> dict | None:
+        """Only runners enforcing the dispatch handshake can prove safety."""
+        if step.sub_agent_scope:
+            return None
+        prepare = getattr(self._runner, "prepare_invocation", None)
+        if not callable(prepare):
+            return None
+        try:
+            parameters = inspect.signature(self._runner.invoke).parameters
+        except (TypeError, ValueError):
+            return None
+        if not {"expected_invocation", "on_dispatch"}.issubset(parameters):
+            return None
+        contract = prepare(step.tool_ref)
+        return contract if valid_invocation_contract(contract) else None
 
     def _finish_cancelled_step(
         self,
@@ -725,13 +758,16 @@ class PlanExecutor:
             "用户已停止当前动作；已完成步骤、调参检查点和最后进度均已保留，"
             "可重新执行当前步骤。"
         )
+        uncertain = run_id is not None and not self._repo.step_run_retry_safe(run_id)
+        if uncertain:
+            message = "用户已停止当前动作；执行结果尚未核对，不能直接重跑；explicit reconciliation required"
         if run_id is not None:
             try:
                 self._finish_step_run(
                     run_id,
                     status="interrupted",
                     error=error or message,
-                    error_kind="user_cancelled",
+                    error_kind="unknown_effect" if uncertain else "user_cancelled",
                     duration_ms=duration_ms,
                 )
             except KeyError:
@@ -868,15 +904,16 @@ class PlanExecutor:
             and self._try_final_review_replan(plan, review, tier)
         ):
             return ExecutionResult(plan.id, PlanStatus.RUNNING, summary_ref, review)
-        self._set_plan_status(plan, PlanStatus.REVIEW)
-        final_status = PlanStatus.DONE if review.goal_met else PlanStatus.FAILED
-        self._set_plan_status(plan, final_status)
-        self._dispatch(
-            "workflow.completed",
-            {"plan_id": plan.id, "summary_ref": summary_ref},
-            task_id=plan.task_id,
-        )
-        return ExecutionResult(plan.id, final_status, summary_ref, review)
+        snapshot = prepare_workflow_completion(self._repo, plan, summary_ref, review, hooks=self._hooks)
+        return self._complete_workflow(plan, snapshot)
+
+    def _complete_workflow(self, plan: Plan, snapshot: dict) -> ExecutionResult:
+        try:
+            complete_workflow(self._repo, self._hooks, self._state, plan, snapshot)
+        except Exception as exc:
+            self._repo.append_loop_event(plan.id, {"type": "hook_completion_failed", "reason": str(exc)})
+            self._set_plan_status(plan, PlanStatus.FAILED)
+        return ExecutionResult(plan.id, plan.status, snapshot["summary_ref"], FinalReview(**snapshot["review"]))
 
     def _failure_policy(self, step: PlanStep) -> str:
         if self._is_governed_step(step):
@@ -888,39 +925,6 @@ class PlanExecutor:
             return str(tools.resolve(step.tool_ref).failure_policy)
         except Exception:
             return "fail"
-
-    def _dispatch_feature_computed(self, plan: Plan, step: PlanStep, output: dict) -> None:
-        if step.tool_ref.plugin != "feature":
-            return
-        payload = {
-            "plan_id": plan.id,
-            "step_id": step.id,
-            "tool": step.tool_ref.tool,
-            "output_ref": step.output_ref,
-        }
-        for field in (
-            "dataset_id",
-            "derived_dataset_id",
-            "features",
-            "new_columns",
-            "feature",
-            "target_col",
-        ):
-            if field in output:
-                payload[field] = output[field]
-        self._dispatch("feature.computed", payload, task_id=plan.task_id)
-
-    def _dispatch_step_completed(self, plan: Plan, step: PlanStep, output: dict) -> None:
-        self._dispatch_feature_computed(plan, step, output)
-        self._dispatch(
-            "step.completed",
-            {
-                "plan_id": plan.id,
-                "step_id": step.id,
-                **_review_warning_payload(step),
-            },
-            task_id=plan.task_id,
-        )
 
     def _should_failure_replan(
         self,
@@ -1379,31 +1383,6 @@ def _parent_output_refs(repo, step: PlanStep) -> list[str]:
     return refs
 
 
-_METRIC_SCAN_MAX_DEPTH = 3
-
-
-def _output_has_metrics(output: Any, *, _depth: int = 0) -> bool:
-    """True when a tool output carries at least one metric-shaped value (a known
-    METRIC_FIELDS key, a numeric leaf whose name carries a metric token like
-    "oot_ks"/"test_auc", or a plain numeric value nested in the output) — the
-    AGT-6 trigger surface for llm_critique on steps that aren't already a
-    decision_point/needs_confirmation gate. Bounded depth keeps this a cheap
-    pre-check, not a full tree walk."""
-    if _depth > _METRIC_SCAN_MAX_DEPTH:
-        return False
-    if isinstance(output, dict):
-        for key, value in output.items():
-            name = str(key)
-            if name in METRIC_FIELDS or any(part in METRIC_FIELDS for part in name.split("_")):
-                return True
-            if _output_has_metrics(value, _depth=_depth + 1):
-                return True
-        return False
-    if isinstance(output, (list, tuple)):
-        return any(_output_has_metrics(item, _depth=_depth + 1) for item in output)
-    return False
-
-
 def _find_step(plan: Plan, step_id: str) -> PlanStep | None:
     for step in plan.steps:
         if step.id == step_id:
@@ -1418,21 +1397,6 @@ def _last_executed_step(plan: Plan) -> PlanStep | None:
         if step.status in {StepStatus.DONE, StepStatus.SKIPPED}
     ]
     return max(executed, key=lambda step: (step.index, step.id), default=None)
-
-
-def _review_warning_payload(step: PlanStep) -> dict[str, Any]:
-    warnings = [
-        {
-            "reviewer": verdict.reviewer,
-            "reasons": list(verdict.reasons),
-        }
-        for verdict in step.review_verdicts
-        if not verdict.passed
-    ]
-    return {
-        "review_warning_count": len(warnings),
-        "review_warnings": warnings,
-    }
 
 
 def _final_review_failure_replannable(review: FinalReview) -> bool:
@@ -1457,6 +1421,7 @@ def _is_fatal_error(error: str | None) -> bool:
             "schema",
             "contract",
             "explicit retry required",
+            "explicit reconciliation required",
             "interrupted during running",
         )
     )

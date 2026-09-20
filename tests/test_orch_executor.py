@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,7 @@ from marvis.plugins.manifest import (
     ToolSpec,
 )
 from marvis.plugins.runner import ToolResult
+from marvis.plugins.invocation import invocation_contract
 from marvis.state_machine import ConflictError
 
 
@@ -49,7 +51,12 @@ class FakeTools:
         self.policies = policies or {}
 
     def resolve(self, ref):
-        return SimpleNamespace(failure_policy=self.policies.get(ref.tool, "fail"))
+        return SimpleNamespace(failure_policy=self.policies.get(ref.tool, "fail"), side_effects=())
+
+    def resolve_with_manifest(self, ref):
+        base = FakeManifestTools()
+        tool = replace(base.tool, name=ref.tool, failure_policy=self.policies.get(ref.tool, "fail"))
+        return replace(base.manifest, name=ref.plugin, version=ref.version or base.manifest.version, tools=(tool,)), tool
 
 
 class FakeManifestTools:
@@ -89,7 +96,16 @@ class FakeRunner:
         self.calls = []
         self._tools = FakeTools(policies)
 
-    def invoke(self, ref, inputs, *, task_id):
+    def prepare_invocation(self, ref):
+        resolve = getattr(self._tools, "resolve_with_manifest", None)
+        if not callable(resolve):
+            return None
+        manifest, tool = resolve(ref)
+        return invocation_contract(manifest, tool, ref)
+
+    def invoke(self, ref, inputs, *, task_id, expected_invocation=None, on_dispatch=None):
+        if on_dispatch is not None:
+            on_dispatch()
         self.calls.append((ref, inputs, task_id))
         return self.outputs.pop(0)
 
@@ -640,7 +656,8 @@ def test_plan_executor_user_cancellation_interrupts_current_step_and_plan(tmp_pa
     runs = repo.list_step_runs("step-tune")
     assert len(runs) == 1
     assert runs[0]["status"] == "interrupted"
-    assert runs[0]["error_kind"] == "user_cancelled"
+    assert runs[0]["error_kind"] == "unknown_effect"
+    assert "explicit reconciliation required" in plan.steps[0].error
     assert runs[0]["progress"]["checkpoint_saved"] is True
     messages = task_repo.list_agent_messages(task_id)
     assert messages[0]["metadata"]["status"] == "cancelled"
@@ -1309,14 +1326,18 @@ def test_plan_executor_dispatches_feature_computed_for_feature_pack_step(tmp_pat
     result = _executor(repo, runner, hooks=hooks).run("plan-1")
 
     assert result.status == PlanStatus.DONE
+    run = repo.list_step_runs("step-1")[0]
+    binding = {
+        "plan_id": "plan-1", "step_id": "step-1", "output_ref": "metrics:step-1:v1",
+        "execution_id": run["id"], "output_hash": run["output_hash"],
+    }
     assert hooks.calls[:2] == [
         (
             "feature.computed",
             {
-                "plan_id": "plan-1",
-                "step_id": "step-1",
+                **binding,
+                "event_id": payload_hash({"event": "feature.computed", **binding}),
                 "tool": "compute_feature_metrics",
-                "output_ref": "metrics:step-1:v1",
                 "dataset_id": "dataset-1",
                 "features": ["income"],
             },
@@ -1325,8 +1346,8 @@ def test_plan_executor_dispatches_feature_computed_for_feature_pack_step(tmp_pat
         (
             "step.completed",
             {
-                "plan_id": "plan-1",
-                "step_id": "step-1",
+                **binding,
+                "event_id": payload_hash({"event": "step.completed", **binding}),
                 "review_warning_count": 0,
                 "review_warnings": [],
             },
@@ -1879,11 +1900,11 @@ def test_plan_executor_recovers_running_step_without_output_as_failure_not_rerun
     assert result.status == PlanStatus.FAILED
     assert runner.calls == []
     assert loaded.steps[0].status == StepStatus.FAILED
-    assert "explicit retry required" in loaded.steps[0].error
+    assert "explicit reconciliation required" in loaded.steps[0].error
     runs = repo.list_step_runs("step-1")
     assert [run["id"] for run in runs] == [run_id]
     assert runs[0]["status"] == "interrupted"
-    assert runs[0]["error_kind"] == "ServerRestart"
+    assert runs[0]["error_kind"] == "unknown_effect"
 
 
 def test_plan_executor_does_not_replan_recovered_running_failure(tmp_path):
@@ -1903,7 +1924,7 @@ def test_plan_executor_does_not_replan_recovered_running_failure(tmp_path):
     assert planner.replan_calls == []
     assert [step.id for step in loaded.steps] == ["step-1"]
     assert loaded.replan_count == 0
-    assert "explicit retry required" in loaded.steps[0].error
+    assert "explicit reconciliation required" in loaded.steps[0].error
 
 
 def test_plan_executor_recovers_checking_step_without_output_as_failure_not_rerun(tmp_path):

@@ -8,6 +8,7 @@ import pytest
 from marvis.validation.config import ValidationConfig
 from marvis.validation.binning import compute_psi
 from marvis.validation.effectiveness import (
+    EffectivenessComputation,
     _roc_ks_curve,
     _should_reverse_eval_bins,
     build_effectiveness_result,
@@ -438,6 +439,50 @@ def test_effectiveness_can_be_built_from_separate_ks_psi_and_binning_steps():
 
     combined = run_effectiveness(sample=sample, config=config)
     assert separate == combined
+
+    staged = EffectivenessComputation(sample=sample, config=config)
+    staged.compute_ks()
+    staged.compute_psi()
+    assert staged.finish() == separate
+
+
+def test_effectiveness_stages_reject_incomplete_results_and_allow_recalculation():
+    staged = EffectivenessComputation(sample=_build_sample(), config=_config(bin_count=5))
+    with pytest.raises(ValueError, match="before PSI"):
+        staged.compute_psi()
+    with pytest.raises(ValueError, match="before binning"):
+        staged.finish()
+    staged.compute_ks()
+    staged.compute_ks()
+    with pytest.raises(ValueError, match="before binning"):
+        staged.finish()
+    staged.compute_psi()
+    staged.compute_psi()
+    assert staged.finish() == run_effectiveness(sample=_build_sample(), config=_config(bin_count=5))
+
+
+@pytest.mark.parametrize("stage", ["ks", "psi"])
+def test_effectiveness_failed_recalculation_discards_downstream_results(stage, monkeypatch):
+    import marvis.validation.effectiveness as module
+
+    staged = EffectivenessComputation(sample=_build_sample(), config=_config(bin_count=5))
+    staged.compute_ks()
+    staged.compute_psi()
+    expected = staged.finish()
+
+    def fail(**kwargs):
+        raise RuntimeError("recalculation failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, f"compute_overall_{stage}", fail)
+        with pytest.raises(RuntimeError, match="recalculation failed"):
+            getattr(staged, f"compute_{stage}")()
+    with pytest.raises(ValueError, match="before binning"):
+        staged.finish()
+    if stage == "ks":
+        staged.compute_ks()
+    staged.compute_psi()
+    assert staged.finish() == expected
 
 
 def test_head_tail_lift_uses_good_head_bad_tail_for_higher_is_better_score():

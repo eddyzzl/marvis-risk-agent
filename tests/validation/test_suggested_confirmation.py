@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from marvis.db import TaskRepository, init_db
 from marvis.domain import TaskCreate
-from marvis.repositories.validation_contracts import ValidationContractRepository
+from marvis.repositories.validation_contracts import (
+    ValidationContractRepository,
+    ValidationContractRevisionConflict,
+)
 from marvis.validation.input_contracts import FieldCandidate, FieldEvidence
 from marvis.validation.suggested_confirmation import (
-    confirm_unambiguous_contract,
     suggested_confirmation_from_contract,
 )
+from marvis.validation_services.confirmation import confirm_unambiguous_contract
 from tests.validation_builders import make_candidate_contract
 
 
@@ -81,11 +86,11 @@ def test_confirm_unambiguous_contract_true_when_unique(tmp_path, monkeypatch):
     db_path, task_id = _task_with_pending_contract(tmp_path, _unique_contract())
     confirmed: list[str] = []
     monkeypatch.setattr(
-        "marvis.validation.suggested_confirmation.resolve_selected_validation_materials",
+        "marvis.validation_services.confirmation.resolve_selected_validation_materials",
         lambda _child: SimpleNamespace(sample=Path("s"), dictionary=Path("d")),
     )
     monkeypatch.setattr(
-        "marvis.validation.suggested_confirmation.validate_confirmation_against_materials",
+        "marvis.validation_services.confirmation.validate_confirmation_against_materials",
         lambda **kwargs: ValidatedConfirmation(
             values=kwargs["requested"],
             sample_schema=kwargs["contract"].sample_schema,
@@ -100,3 +105,37 @@ def test_confirm_unambiguous_contract_true_when_unique(tmp_path, monkeypatch):
     monkeypatch.setattr(ValidationContractRepository, "confirm", fake_confirm)
     assert confirm_unambiguous_contract(db_path=db_path, task_id=task_id) is True
     assert confirmed == [task_id]
+
+
+def test_confirmation_service_rejects_candidates_changed_during_material_validation(tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from marvis.validation.input_confirmation import ValidatedConfirmation
+
+    contract = _unique_contract()
+    db_path, task_id = _task_with_pending_contract(tmp_path, contract)
+    repository = ValidationContractRepository(db_path)
+    initial_revision = repository.get(task_id).revision
+    monkeypatch.setattr(
+        "marvis.validation_services.confirmation.resolve_selected_validation_materials",
+        lambda _child: SimpleNamespace(sample=Path("s"), dictionary=Path("d")),
+    )
+
+    def validate_and_change_candidates(**kwargs):
+        repository.replace_candidates(task_id, contract)
+        return ValidatedConfirmation(
+            values=kwargs["requested"],
+            sample_schema=kwargs["contract"].sample_schema,
+            feature_metadata=kwargs["contract"].feature_metadata,
+        )
+
+    monkeypatch.setattr(
+        "marvis.validation_services.confirmation.validate_confirmation_against_materials",
+        validate_and_change_candidates,
+    )
+    with pytest.raises(ValidationContractRevisionConflict, match="revision conflict"):
+        confirm_unambiguous_contract(db_path=db_path, task_id=task_id)
+    current = repository.get(task_id)
+    assert current.revision == initial_revision + 1
+    assert current.status == "pending_confirmation"

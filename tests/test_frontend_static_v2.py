@@ -785,7 +785,7 @@ import {{ createPlanRailController }} from {json.dumps(module_url)};
 globalThis.window = {{ setTimeout: () => {{}} }};
 globalThis.fetch = async () => ({{
   ok: true,
-  json: async () => ({{ plans: [{{ id: "plan-1", steps: [] }}] }}),
+  json: async () => ({{ plans: [{{ id: "plan-1", steps: [{{ id: "step-1", status: "failed" }}] }}] }}),
 }});
 const calls = [];
 const controller = createPlanRailController({{
@@ -855,7 +855,7 @@ import {{ createPlanRailController }} from {json.dumps(module_url)};
 globalThis.window = {{ setTimeout: () => {{}} }};
 globalThis.fetch = async () => ({{
   ok: true,
-  json: async () => ({{ plans: [{{ id: "plan-1", steps: [] }}] }}),
+  json: async () => ({{ plans: [{{ id: "plan-1", steps: [{{ id: "step-1", status: "failed" }}] }}] }}),
 }});
 const calls = [];
 const controller = createPlanRailController({{
@@ -7139,7 +7139,8 @@ def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     assert "(?![^>]*\\bdata-gate-passive-control\\b)" in app_js
     plan_rail_js = _read_static("js/v2/plan_rail_controller.js")
     assert "data-plan-retry-open" not in plan_rail_js
-    assert "if (isAgentMode?.())" in plan_rail_js
+    # Actual controller tests cover Agent-mode form hiding and read-only
+    # completion reconciliation in test_frontend_plan_reconciliation.py.
     assert 'if (message?.metadata?.kind !== "gate") return "";' in driver_confirm_js
     assert "if (gateHasStructuredWidget(message)) return" in driver_confirm_js
     assert "startAgentValidation" in app_js

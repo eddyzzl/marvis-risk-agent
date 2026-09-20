@@ -1,12 +1,13 @@
 # 审计整改实施记录：可信评测与代码减法
 
-日期：2026-09-20。用户已授权开始开发。
+开始日期：2026-09-20；续作至 2026-09-21。用户已授权开始开发并继续完成全部开发和检查。
 
 - 分支：`codex/audit-closure-foundation-20260920`。
 - 开始时的代码：`60d4b1b45fd8161b14be6c7a02c740e16343c0b4`。
 - 本记录覆盖 WP00、WP01、WP02 的第一批实现。整套计划、这些工作包及 22 个问题均未整体关闭。
 - 保留开始时存在的临时 Python 文件、`.workbuddy/` 和前端审查产物；未修改业务数据、部署系统或发布版本。
 - 用户当前只能提供脱敏历史数据。已询问数据目录/数据集位置，尚未完成真实数据盘点。
+- 首批可信评测/代码减法已本地提交 `ea100cf6`，未推送或发布；后续 WP03 改动在同一分支继续。
 
 ## 已实现
 
@@ -121,6 +122,33 @@ Chromium 在 1440、1600、1920 × 1000 下均通过：页面身份与非空内�
 
 本批交付不会将整套整改称为完成，也不构成“一个业务人员已经能独立负责完整业务线风控”的能力声明。
 
+## WP03 续作：验证阶段与可靠完成协议
+
+### 计算与应用编排
+
+`EffectivenessComputation` 提供 KS、PSI、分箱阶段，普通调用方与生成 Notebook cell 共用计算，保留 live DataFrame、评分函数和全部八个进度节点。`validation_services/{metrics,confirmation}.py` 接管文件/Excel 产物和仓储确认，`validation/platform_metrics.py` 只接收内存数据和已验证契约；只读 PMML 文件身份/窄列读取放在共享 `validation/pmml_analysis.py`，仍保留原哈希及读后文件身份检查。
+
+两项非等价修复独立留证：
+
+1. Notebook 的 KS、PSI、分箱阶段原先没有收到取消回调，三个中途取消反例先失败、修复后通过。
+2. 首版分阶段对象禁止重复运行 PSI，独立审查在真实 Notebook 内核复现了兼容回归。现允许阶段重算、清除下游失效结果；重复执行 PSI/KS/分箱不重复调用评分函数。取消或失败不能继续使用旧 `_rmc_effectiveness`。
+
+验证侧 232 项集成检查通过；保持错误优先顺序的后续 22 项通过；真实内核重入修复后的 47 项通过。原始记录 `wp03-validation-final/ordering`、`wp03-cancellation-before`、`wp03-reentry-before/final` 均在上述本地验证目录。确认仓储的 revision CAS、PMML 身份、取消和产物回滚仍有实际行为覆盖。
+
+### 执行、恢复和 Hook
+
+正常执行与恢复共用 `orchestrator/completion.py`：相同复核条件、同一持久化复核快照、绑定原执行与输出身份的完成事件。新增数据库 migration 36 保存完成快照、事件义务和 delivery claim。必需 Hook 失败或结果不确定时不能记 DONE；已保存的成功回执可复用，无法确定是否发生的外部动作不自动重发。默认可选 Hook 省略 `required:false` 的 canonical 字段，保持旧 manifest hash；没有修改历史证据哈希。
+
+独立审查实证并修复了复核快照前后、feature/step 义务分开冻结、workflow summary 重建以及 DONE 后写 warning 等窗口。写入、网络、进程或副作用未知的 Tool 失败不再自动 retry/skip/replan；明确只读 Tool 保留原重试行为。
+
+第一轮执行联合检查 894 项通过后，继续审查发现直接 retry 之外的上游 rollback 可以清空未核对状态。当前补齐同事务的重置/修订闭包检查，并统一 Agent 消息、GET plan、启动通知、诊断增强和步骤栏的不可重试状态；对应零写入、并发写锁及真实 Driver/API 负例正在集成。894 项只代表该次快照，不能替代这些后续修改的最终检查。
+
+**WP03 仍未关闭：**真正 unknown 结果还需要可信的只读核对适配器，以及只恢复完成协议、不重跑原 Tool 的应用入口。调用方不能传一个 success 布尔值作为证明，不能手工改 DB 解除状态。该剩余项继续属于本计划范围。
+
+## WP01 联合 runner 续作
+
+已按实际调用路径重新定位：六类 Driver 任务与专门 validation pipeline 分开记录；原 manual E2E 不能作为 Agent 能力成绩。新 runner 在独立分支 `codex/audit-runtime-eval-20260921` 实施，以隔离 workspace 的真实 HTTP → Agent/Driver → Executor → ToolRunner 为执行边界。案例输入与 expected 评分答案分离，fixture 模型只证明 C/R；全部模型构造路径都需由共同 client/transport 观测点记录调用与重试，未知 token/成本不能当 0。当前没有真实模型联合成绩或历史数据验收结果。
+
 ## WP00 源码入口基线
 
 本节由独立只读源码盘点形成，确认注册位置和产物契约，不把库函数或注册项当作 UI/真实业务已验证。
@@ -149,3 +177,24 @@ Chromium 在 1440、1600、1920 × 1000 下均通过：页面身份与非空内�
 3. `api.py:96/127` 的兼容别名和旧 `repo=` 参数转换仍承载扩展导入责任；需要逐项迁移与兼容测试。
 4. `orchestrator/templates/sample.py:173` 的动态注册及 `templates/skills.py:77` 用户模板装载继续使用既有 ToolRegistry/PlanValidator，不能另立 runtime。
 5. `reconcile.naive_ks` 保留独立数值交叉核验责任。消费者的 `_dataset_name`、`_resolve_named_col`、`_amount_metrics` 等导入别名仍被业务调用，是单一实现的引用，不是重复算法。
+
+
+### 执行契约、取消和重启窗口
+
+新增 migration 37：在现有 step-run 账本中保存不可变 `invocation_contract_json` 和只允许首次写入的 `dispatch_started_at`。真实 ToolRunner 在准备阶段解析权限和声明，在任何副作用预约/worker 启动前再次核验声明并持久化派发边界。执行失败、取消和启动恢复共用冻结记录判断；旧记录 NULL 或损坏契约保持未知，不用当前 manifest 倒推历史只读。准备后未派发可证明没有执行，已经派发的写入且无回执继续停在待核对。
+
+独立新增的真实 ToolRunner/worker 故障集 18 项通过，覆盖声明漂移、升级、禁用、写入后失败/取消/进程退出/host 崩溃、可信只读、未派发、数据库不可变约束和 36→37 迁移。上游 rollback、参数修订、reset、replace、append 共用事务内未核对检查，历史说明文字不能覆盖底层执行记录。
+
+主树冻结后的 34 文件联合门：**1748 passed、1 failed / 293.30 秒**。1480 个源码/测试/脚本文件前后 hash 未变；记录为 `wp03-combined.log/xml` 与 `wp03-source-before/after.json`。唯一失败是上传迁移测试只创建一个 upload 表却自称完整 v34，后续 migration 37 无法更新不存在的 step-run 表。修复测试为真实 v34 基线再注入残缺 upload 账本；生产迁移不静默跳过缺失的核心表。修正后的上传 API、DB、step-run 与真实 invocation 迁移联合回归 **192 passed / 68.80 秒**，日志 `wp03-migration-followup.log/xml`；仅修正测试前提，没有改变运行时代码，不改写原始失败结果。全量 Ruff、JS 语法与差异检查通过。
+
+### WP03 浏览器呈现检查
+
+真实独立 HTTP 服务，任务由 API 创建、失败计划由真实 repository 写入明确标注的合成状态；未 mock 网络。Chromium 1440/1600/1920 × 1000 均验证：后端 `retryable:false`、待核对卡片不含输入/重试按钮、步骤栏显示待核对、安全失败仍显示重试表单、切换任务后旧控件移除。API 无 4xx/5xx，console/pageerror 为空。页面动画完成后重新截图，实际查看 1440 待核对与 1920 安全重试页面。
+
+最终检查目录：`/var/folders/z1/yls0t5ds7zj16tk472xr8kpc0000gn/T/marvis-wp03-browser-settled-20260921-glfwqdjc/`，含 `browser-qa.py`、`browser-qa-result.json`、`seed-manifest.json`、`unknown-*.png`、`safe-*.png`，临时服务已停止。首轮动画中间态截图保存在另一个 `marvis-wp03-browser-20260921-diokcv48` 目录，不作为静态呈现证明。
+
+检查同时发现顶部通用状态仍写“验证失败”，与侧栏待核对以及 JOIN 任务类型不一致；归 WP05 状态所有权收敛继续修复。本轮仅证明重试保护和任务切换行为，没有宣称所有状态呈现已统一。
+
+## WP04 独立开发分支
+
+`codex/audit-module-refactor-20260921` 已开始编译器真实模块化。初步去除 shared exec 的版本通过 1635 项编译器回归与 11 项模块身份/类型解析检查；仍有普通 imports 循环，不能以删除 exec 即宣告完成。已根据符号依赖制定 contracts、共享文本规则、标识正则与各语法家族的归属搬迁，继续实现无环依赖并保持公开 facade。此时尚未合入主树，turn handlers 和真实 Agent 全流程验收仍待完成。

@@ -20,7 +20,7 @@ from marvis.orchestrator.contracts import (
     plan_step_payload_confirmation_fingerprint,
     plan_to_dict,
 )
-from marvis.orchestrator.errors import PlanNotFoundError
+from marvis.orchestrator.errors import PlanNotFoundError, requires_effect_reconciliation
 from marvis.orchestrator.evidence import (
     artifact_bindings,
     artifact_refs,
@@ -32,6 +32,7 @@ from marvis.orchestrator.evidence import (
 from marvis.orchestrator.harness_state import assert_plan_transition
 from marvis.plugins.errors import ManifestError
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
+from marvis.plugins.invocation import load_invocation_contract, retry_safe_run
 from marvis.redaction import redact_value
 from marvis.repositories.audit import _list_audit_rows, _write_audit_row
 from marvis.repositories.datasets import DatasetRepository
@@ -40,6 +41,62 @@ from marvis.state_machine import ConflictError
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _unreconciled_step_ids(conn: sqlite3.Connection, step_ids) -> list[str]:
+    """Read the same persisted stop state for presentation and mutation gates."""
+    ids = tuple(dict.fromkeys(str(step_id) for step_id in step_ids))
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""SELECT s.id, s.error, p.loop_events_json, r.error_kind,
+                   r.status AS run_status, r.invocation_contract_json, r.dispatch_started_at
+              FROM plan_steps AS s JOIN plans AS p ON p.id = s.plan_id
+              LEFT JOIN plan_step_runs AS r ON r.id = (
+                  SELECT latest.id FROM plan_step_runs AS latest
+                   WHERE latest.step_id = s.id ORDER BY latest.attempt DESC LIMIT 1
+              )
+             WHERE s.id IN ({placeholders})""",
+        ids,
+    ).fetchall()
+    return [
+        row["id"] for row in rows
+        if requires_effect_reconciliation(row["error"], row["error_kind"])
+        or (row["run_status"] in {"failed", "interrupted", "running"} and not retry_safe_run({
+            "invocation_contract": load_invocation_contract(row["invocation_contract_json"]),
+            "dispatch_started_at": row["dispatch_started_at"],
+        }))
+        or any(
+            event.get("type") == "hook_completion_failed"
+            for event in _load_json_array(row["loop_events_json"])
+            if isinstance(event, dict)
+        )
+    ]
+
+
+def _assert_no_unreconciled_step_effects(
+    conn: sqlite3.Connection, step_ids, *, plan_id: str | None = None,
+) -> None:
+    """Block the whole affected closure before any reset/revision write.
+
+    Callers hold the write lock. Rewriting a display error cannot hide an
+    unknown effect in the latest run or a failed workflow completion.
+    """
+    blocked = _unreconciled_step_ids(conn, step_ids)
+    if plan_id is not None:
+        plan = conn.execute("SELECT loop_events_json FROM plans WHERE id = ?", (plan_id,)).fetchone()
+        if plan is not None and any(
+            event.get("type") == "hook_completion_failed"
+            for event in _load_json_array(plan["loop_events_json"])
+            if isinstance(event, dict)
+        ):
+            blocked.append(plan_id)
+    if blocked:
+        raise ConflictError(
+            "受影响步骤的执行或完成动作结果尚未核对，不能重置、替换或重跑工具；"
+            f"请先核对执行凭据：{', '.join(blocked)}"
+        )
 
 
 def _normalized_workflow_status(
@@ -58,6 +115,11 @@ def _normalized_workflow_status(
 class PlanRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
+
+    def unreconciled_step_ids(self, step_ids) -> list[str]:
+        """Expose retry policy; mutation paths always recheck under write lock."""
+        with connect(self.db_path) as conn:
+            return _unreconciled_step_ids(conn, step_ids)
 
     def create_plan(
         self,
@@ -544,6 +606,8 @@ class PlanRepository:
         parameter override. Used to re-run an analysis step with new parameters when
         the user asks for an adjustment at a gate."""
         with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _assert_no_unreconciled_step_effects(conn, [step_id])
             if inputs is not None:
                 conn.execute(
                     "UPDATE plan_steps SET inputs_json = ? WHERE id = ?",
@@ -636,6 +700,7 @@ class PlanRepository:
             if missing:
                 raise KeyError(missing[0])
 
+            _assert_no_unreconciled_step_effects(conn, normalized_reset_ids, plan_id=plan_id)
             for step_id in normalized_reset_ids:
                 replacement = serialized_inputs.get(step_id)
                 if replacement is None:
@@ -701,6 +766,7 @@ class PlanRepository:
         confirmations are always cleared.
         """
         with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             plan_row = conn.execute(
                 "SELECT status FROM plans WHERE id = ?",
                 (plan_id,),
@@ -716,7 +782,7 @@ class PlanRepository:
 
             step_rows = conn.execute(
                 """
-                SELECT id, idx, depends_on_json, status, confirmed, inputs_json
+                SELECT id, idx, depends_on_json, status, confirmed, inputs_json, error
                   FROM plan_steps
                  WHERE plan_id = ?
                  ORDER BY idx, id
@@ -753,6 +819,7 @@ class PlanRepository:
             ordered_reset_ids = [
                 str(row["id"]) for row in step_rows if str(row["id"]) in reset_ids
             ]
+            _assert_no_unreconciled_step_effects(conn, ordered_reset_ids, plan_id=plan_id)
             for reset_id in ordered_reset_ids:
                 reset_confirmation = int(
                     reset_id == step_id and confirmation_preserved
@@ -958,6 +1025,7 @@ class PlanRepository:
             ordered_reset_ids = [
                 str(row["id"]) for row in step_rows if str(row["id"]) in reset_ids
             ]
+            _assert_no_unreconciled_step_effects(conn, ordered_reset_ids, plan_id=plan_id)
             for reset_id in ordered_reset_ids:
                 if reset_id == root_step_id:
                     conn.execute(
@@ -1050,7 +1118,10 @@ class PlanRepository:
             raise KeyError(step_id)
         return bool(row["confirmed"])
 
-    def start_step_run(self, *, plan_id: str, step_id: str, tool_ref: str, inputs: dict) -> str:
+    def start_step_run(
+        self, *, plan_id: str, step_id: str, tool_ref: str, inputs: dict,
+        invocation_contract: dict | None = None,
+    ) -> str:
         run_id = uuid.uuid4().hex
         now = _now()
         with connect(self.db_path) as conn:
@@ -1097,13 +1168,38 @@ class PlanRepository:
             conn.execute(
                 """
                 INSERT INTO plan_step_runs(
-                    id, plan_id, step_id, attempt, tool_ref, status, input_json, started_at
+                    id, plan_id, step_id, attempt, tool_ref, status, input_json, started_at,
+                    invocation_contract_json
                 )
-                VALUES (?, ?, ?, ?, ?, 'running', ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)
                 """,
-                (run_id, plan_id, step_id, attempt, tool_ref, _dump_json_any(inputs), now),
+                (run_id, plan_id, step_id, attempt, tool_ref, _dump_json_any(inputs), now,
+                 _dump_json_any(invocation_contract) if invocation_contract is not None else None),
             )
         return run_id
+
+    def mark_step_run_dispatched(self, run_id: str) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE plan_step_runs SET dispatch_started_at = COALESCE(dispatch_started_at, ?) "
+                "WHERE id = ? AND status = 'running' AND invocation_contract_json IS NOT NULL",
+                (_now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ConflictError("step invocation cannot be dispatched without its frozen contract")
+
+    def step_run_retry_safe(self, run_id: str) -> bool:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT invocation_contract_json, dispatch_started_at FROM plan_step_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        return retry_safe_run({
+            "invocation_contract": load_invocation_contract(row["invocation_contract_json"]),
+            "dispatch_started_at": row["dispatch_started_at"],
+        })
 
     def finish_step_run(
         self,
@@ -1225,6 +1321,7 @@ class PlanRepository:
             item = dict(row)
             item["input"] = _load_json_object_unchecked(item.pop("input_json", "{}"))
             item["side_effects"] = _load_json_array(item.pop("side_effects_json", "[]"))
+            item["invocation_contract"] = load_invocation_contract(item.pop("invocation_contract_json", None))
             item["progress"] = _load_json_object_unchecked(item.pop("progress_json", "{}"))
             result.append(item)
         return result
@@ -1233,17 +1330,21 @@ class PlanRepository:
         with connect(self.db_path) as conn:
             row = conn.execute(
                 """
-                SELECT error_kind
+                SELECT error_kind, status, invocation_contract_json, dispatch_started_at
                   FROM plan_step_runs
                  WHERE step_id = ?
-                   AND status IN ('failed', 'interrupted')
                  ORDER BY attempt DESC, COALESCE(finished_at, started_at) DESC
                  LIMIT 1
                 """,
                 (step_id,),
             ).fetchone()
-        if row is None:
+        if row is None or row["status"] not in {"failed", "interrupted"}:
             return None
+        if not retry_safe_run({
+            "invocation_contract": load_invocation_contract(row["invocation_contract_json"]),
+            "dispatch_started_at": row["dispatch_started_at"],
+        }):
+            return "unknown_effect"
         return str(row["error_kind"] or "").strip() or None
 
     def list_running_step_runs(self, plan_id: str) -> list[dict]:
@@ -1263,6 +1364,7 @@ class PlanRepository:
             item = dict(row)
             item["input"] = _load_json_object_unchecked(item.pop("input_json", "{}"))
             item["side_effects"] = _load_json_array(item.pop("side_effects_json", "[]"))
+            item["invocation_contract"] = load_invocation_contract(item.pop("invocation_contract_json", None))
             item["progress"] = _load_json_object_unchecked(item.pop("progress_json", "{}"))
             result.append(item)
         return result
@@ -1747,6 +1849,12 @@ class PlanRepository:
     ) -> None:
         payload = plan_to_dict(new_plan)
         with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            affected = conn.execute(
+                "SELECT id FROM plan_steps WHERE plan_id = ? AND status NOT IN ('done', 'skipped')",
+                (plan_id,),
+            ).fetchall()
+            _assert_no_unreconciled_step_effects(conn, [row["id"] for row in affected], plan_id=plan_id)
             loop_events = _load_plan_loop_events(conn, plan_id)
             normalized_loop_event = _normalize_loop_event(loop_event)
             if normalized_loop_event is not None:
@@ -1814,6 +1922,8 @@ class PlanRepository:
         loop_event: dict | None = None,
     ) -> None:
         with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _assert_no_unreconciled_step_effects(conn, (), plan_id=plan_id)
             loop_events = _load_plan_loop_events(conn, plan_id)
             _append_normalized_loop_event(loop_events, loop_event)
             row = conn.execute(

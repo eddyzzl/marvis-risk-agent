@@ -29,7 +29,11 @@ from marvis.orchestrator.contracts import (
     plan_step_confirmation_fingerprint,
     plan_to_dict,
 )
-from marvis.orchestrator.errors import IllegalPlanTransition, PlanNotFoundError
+from marvis.orchestrator.errors import (
+    IllegalPlanTransition,
+    PlanNotFoundError,
+    requires_effect_reconciliation,
+)
 from marvis.orchestrator.planner import PlanningError
 from marvis.orchestrator.templates import get_template
 from marvis.job_heartbeat import heartbeat_job
@@ -474,7 +478,7 @@ def _plan_payload(request: Request, plan) -> dict:
                 confirmed=request.app.state.plan_repo.is_step_confirmed(step.id),
             ),
         }
-    _attach_failure_envelopes(payload)
+    _attach_failure_envelopes(payload, request.app.state.plan_repo)
     _attach_running_step_started_at(request, payload, plan.id)
     payload["sub_agents"] = [
         _sub_agent_payload(sub)
@@ -531,22 +535,43 @@ def _attach_running_step_started_at(request: Request, payload: dict, plan_id: st
             step["progress_updated_at"] = run.get("progress_updated_at")
 
 
-def _attach_failure_envelopes(payload: dict) -> None:
+def _attach_failure_envelopes(payload: dict, repo=None) -> None:
     steps = payload.get("steps") or []
+    if any(
+        event.get("type") == "hook_completion_failed"
+        for event in payload.get("loop_events") or []
+        if isinstance(event, dict)
+    ):
+        payload["failure_envelope"] = build_failure_envelope(
+            plan_id=str(payload.get("id") or ""), step_id=None, run_seq=0,
+            message="工作流完成动作尚未核对；已有结果和执行凭据已保留，当前流程暂停，不能直接重跑。",
+            error_kind="completion_reconciliation", retryable=False,
+        ).to_dict()
+        payload["failure_envelope"]["suggested_actions"] = ["halt"]
+    blocked = {
+        str(step.get("id") or "") for step in steps
+        if requires_effect_reconciliation(step.get("error"))
+    }
+    if repo is not None:
+        blocked.update(repo.unreconciled_step_ids([step.get("id") for step in steps]))
     for step in steps:
         if step.get("status") != StepStatus.FAILED.value:
             continue
         reset_steps = _downstream_step_ids(steps, str(step.get("id") or ""))
+        reconciliation_required = bool(blocked.intersection(reset_steps))
         detail = f"「{step.get('title') or step.get('id') or '步骤'}」失败:{step.get('error') or '执行中断。'}"
         step["failure_envelope"] = build_failure_envelope(
             plan_id=str(payload.get("id") or ""),
             step_id=str(step.get("id") or "") or None,
             run_seq=0,
             message=detail,
-            step_inputs=step.get("inputs") if isinstance(step.get("inputs"), dict) else None,
-            downstream_reset_steps=tuple(reset_steps),
-            retryable=True,
+            step_inputs=step.get("inputs") if not reconciliation_required and isinstance(step.get("inputs"), dict) else None,
+            downstream_reset_steps=tuple(reset_steps) if not reconciliation_required else (),
+            error_kind="completion_reconciliation" if reconciliation_required else "execution",
+            retryable=not reconciliation_required,
         ).to_dict()
+        if reconciliation_required:
+            step["failure_envelope"]["suggested_actions"] = ["halt"]
 
 
 def _downstream_step_ids(steps: list[dict], root_id: str) -> list[str]:

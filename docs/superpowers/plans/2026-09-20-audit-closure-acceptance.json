@@ -129,30 +129,30 @@
     },
     {
       "id": "WP03",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP02",
           "milestone": "S"
         }
       ],
-      "notes": null,
+      "notes": "Shared effectiveness stages, live Notebook cancellation/reentry, validation services and durable required Hook completion implemented. Immutable invocation contract and dispatch marker now gate retries and recovery, including cancellation and upstream resets. Frozen joint regression: 1748 passed, one incomplete historical migration fixture failed; fixture repaired to construct actual v34, then 192 migration/API/DB checks passed. Three desktop widths verified retry guards on a real isolated server; top-bar status mismatch remains WP05 work. Trusted unknown-outcome reconciliation and completion-only application resume remain required.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
       "id": "WP04",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP03",
           "milestone": "S"
         }
       ],
-      "notes": null,
+      "notes": "Compiler module refactor is isolated on codex/audit-module-refactor-20260921. Initial normal-import change passed compiler regression; acyclic symbol ownership is being implemented. Main branch still retains both shared-exec entry points until reviewed integration. Turn handlers and real Agent acceptance remain.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
@@ -771,7 +771,7 @@
     {
       "id": "F15",
       "title": "效果验证流程四处编排",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP03"
       ],
@@ -792,7 +792,7 @@
     {
       "id": "F16",
       "title": "源码exec共享全局命名空间",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP04"
       ],
@@ -833,7 +833,7 @@
     {
       "id": "F18",
       "title": "validation混入任务数据库和产物副作用",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP03"
       ],
@@ -895,7 +895,7 @@
     {
       "id": "F21",
       "title": "正常执行和恢复完成契约分叉",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP03"
       ],

@@ -44,70 +44,114 @@ class EffectivenessContext:
     train_distribution: Any
 
 
+@dataclass(frozen=True)
+class _KsStageResult:
+    context: EffectivenessContext
+    overall: list[OverallRow]
+    monthly: list[MonthlyKsRow]
+    curves: dict[str, RocKsCurve]
+
+
+@dataclass(frozen=True)
+class _PsiStageResult:
+    overall: list[OverallRow]
+    monthly: list[MonthlyPsiRow]
+    stability: list[PsiStabilityRow]
+
+
+class EffectivenessComputation:
+    """One calculation over a caller-owned frame, with separate progress stages.
+
+    Notebook cells retain their live frame and can report each completed stage.
+    Batch callers use ``run_effectiveness`` over these same stages. Results are
+    only exposed once every stage succeeds; cancellation never publishes a
+    partial result. The caller must not mutate the frame between stages.
+    Repeating KS recalculates its context and invalidates PSI. Repeating PSI
+    recalculates that stage; a failed retry leaves it incomplete. Binning is
+    recalculated on every finish call, so no downstream result cache can survive
+    an upstream retry.
+    """
+
+    def __init__(
+        self,
+        *,
+        sample: pd.DataFrame,
+        config: ValidationConfig,
+        cancellation_check: Callable[[], None] | None = None,
+    ) -> None:
+        _check_cancelled(cancellation_check)
+        self._sample = sample
+        self._config = config
+        self._cancellation_check = cancellation_check
+        self._ks: _KsStageResult | None = None
+        self._psi: _PsiStageResult | None = None
+
+    def compute_ks(self) -> None:
+        self._ks = None
+        self._psi = None
+        kwargs = self._inputs()
+        validate_required_splits(
+            self._sample, split_col=self._config.split_col,
+            split_values=self._config.split_values,
+        )
+        context = prepare_effectiveness_context(**kwargs)
+        overall = compute_overall_ks(**kwargs)
+        monthly = compute_monthly_ks(**kwargs)
+        curves = compute_roc_ks_curves(**kwargs)
+        _check_cancelled(self._cancellation_check)
+        self._ks = _KsStageResult(context, overall, monthly, curves)
+
+    def compute_psi(self) -> None:
+        if self._ks is None:
+            raise ValueError("effectiveness KS stage must complete before PSI")
+        self._psi = None
+        kwargs = self._inputs()
+        overall = compute_overall_psi(
+            **kwargs, context=self._ks.context, overall=self._ks.overall,
+        )
+        monthly = compute_monthly_psi(**kwargs, context=self._ks.context)
+        stability = compute_psi_stability_table(**kwargs)
+        _check_cancelled(self._cancellation_check)
+        self._psi = _PsiStageResult(overall, monthly, stability)
+
+    def finish(self) -> EffectivenessResult:
+        if self._ks is None or self._psi is None:
+            raise ValueError("effectiveness KS and PSI stages must complete before binning")
+        kwargs = self._inputs()
+        tables = compute_bin_tables(**kwargs, context=self._ks.context)
+        independent = compute_independent_quantile_bin_tables(**kwargs)
+        _check_cancelled(self._cancellation_check)
+        return build_effectiveness_result(
+            overall=self._psi.overall,
+            bin_tables=tables,
+            monthly_ks=self._ks.monthly,
+            monthly_psi=self._psi.monthly,
+            psi_stability_table=self._psi.stability,
+            roc_ks_curves=self._ks.curves,
+            independent_quantile_bin_tables=independent,
+        )
+
+    def _inputs(self) -> dict[str, Any]:
+        _check_cancelled(self._cancellation_check)
+        return {
+            "sample": self._sample,
+            "config": self._config,
+            "cancellation_check": self._cancellation_check,
+        }
+
+
 def run_effectiveness(
     *,
     sample: pd.DataFrame,
     config: ValidationConfig,
     cancellation_check: Callable[[], None] | None = None,
 ) -> EffectivenessResult:
-    _check_cancelled(cancellation_check)
-    validate_required_splits(
-        sample,
-        split_col=config.split_col,
-        split_values=config.split_values,
+    computation = EffectivenessComputation(
+        sample=sample, config=config, cancellation_check=cancellation_check,
     )
-    context = prepare_effectiveness_context(
-        sample=sample,
-        config=config,
-        cancellation_check=cancellation_check,
-    )
-    overall = compute_overall_ks(
-        sample=sample,
-        config=config,
-        cancellation_check=cancellation_check,
-    )
-    overall = compute_overall_psi(
-        sample=sample,
-        config=config,
-        context=context,
-        overall=overall,
-        cancellation_check=cancellation_check,
-    )
-    return build_effectiveness_result(
-        overall=overall,
-        bin_tables=compute_bin_tables(
-            sample=sample,
-            config=config,
-            context=context,
-            cancellation_check=cancellation_check,
-        ),
-        monthly_ks=compute_monthly_ks(
-            sample=sample,
-            config=config,
-            cancellation_check=cancellation_check,
-        ),
-        monthly_psi=compute_monthly_psi(
-            sample=sample,
-            config=config,
-            context=context,
-            cancellation_check=cancellation_check,
-        ),
-        psi_stability_table=compute_psi_stability_table(
-            sample=sample,
-            config=config,
-            cancellation_check=cancellation_check,
-        ),
-        roc_ks_curves=compute_roc_ks_curves(
-            sample=sample,
-            config=config,
-            cancellation_check=cancellation_check,
-        ),
-        independent_quantile_bin_tables=compute_independent_quantile_bin_tables(
-            sample=sample,
-            config=config,
-            cancellation_check=cancellation_check,
-        ),
-    )
+    computation.compute_ks()
+    computation.compute_psi()
+    return computation.finish()
 
 
 def prepare_effectiveness_context(

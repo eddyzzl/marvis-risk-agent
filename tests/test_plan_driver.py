@@ -48,6 +48,8 @@ from marvis.plugins.manifest import (
 )
 from marvis.plugins.runner import ToolResult
 from marvis.repositories.datasets import DatasetRepository
+from marvis.plugins.invocation import invocation_contract
+from tests.test_orch_executor import FakeTools as InvocationFakeTools
 
 
 class FakeLLM:
@@ -269,9 +271,9 @@ def test_join_reconciliation_row_counts_render_as_integers():
     assert rows[0][1:3] == ["14", "14"]
 
 
-class FakeTools:
+class FakeTools(InvocationFakeTools):
     def resolve(self, ref):
-        return SimpleNamespace(failure_policy="fail")
+        return SimpleNamespace(failure_policy="fail", side_effects=())
 
 
 class FakeRunner:
@@ -280,17 +282,25 @@ class FakeRunner:
         self.calls = []
         self._tools = FakeTools()
 
-    def invoke(self, ref, inputs, *, task_id, execution_context=None):
+    def prepare_invocation(self, ref):
+        manifest, tool = self._tools.resolve_with_manifest(ref)
+        return invocation_contract(manifest, tool, ref)
+
+    def invoke(self, ref, inputs, *, task_id, execution_context=None, expected_invocation=None, on_dispatch=None):
+        if on_dispatch is not None:
+            on_dispatch()
         self.calls.append((ref.tool, inputs))
         return ToolResult(ok=True, output=self.outputs.pop(0), error=None, error_kind=None, duration_ms=1)
 
 
-class FailingRunner:
+class FailingRunner(FakeRunner):
     def __init__(self):
         self.calls = []
         self._tools = FakeTools()
 
-    def invoke(self, ref, inputs, *, task_id, execution_context=None):
+    def invoke(self, ref, inputs, *, task_id, execution_context=None, expected_invocation=None, on_dispatch=None):
+        if on_dispatch is not None:
+            on_dispatch()
         self.calls.append((ref.tool, inputs))
         return ToolResult(
             ok=False,
@@ -2119,11 +2129,13 @@ def test_driver_retry_failed_step_resumes_same_plan_from_failure(tmp_path):
             super().__init__([{"selected": ["x1"]}])
             self.failed = False
 
-        def invoke(self, ref, inputs, *, task_id, execution_context=None):
+        def invoke(self, ref, inputs, *, task_id, execution_context=None, expected_invocation=None, on_dispatch=None):
+            if on_dispatch is not None:
+                on_dispatch()
             if not self.failed:
                 self.failed = True
                 return ToolResult(ok=False, output=None, error="temporary", error_kind="execution", duration_ms=1)
-            return super().invoke(ref, inputs, task_id=task_id, execution_context=execution_context)
+            return super().invoke(ref, inputs, task_id=task_id, execution_context=execution_context, expected_invocation=expected_invocation, on_dispatch=on_dispatch)
 
     runner = FailOnceRunner()
     executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
@@ -2162,11 +2174,13 @@ def test_driver_retry_failed_step_normalizes_persisted_recipe_alias(tmp_path):
             super().__init__([{"recipes": ["lgb", "xgb", "catboost"]}])
             self.failed = False
 
-        def invoke(self, ref, inputs, *, task_id, execution_context=None):
+        def invoke(self, ref, inputs, *, task_id, execution_context=None, expected_invocation=None, on_dispatch=None):
+            if on_dispatch is not None:
+                on_dispatch()
             if not self.failed:
                 self.failed = True
                 return ToolResult(ok=False, output=None, error="invalid cat alias", error_kind="schema", duration_ms=1)
-            return super().invoke(ref, inputs, task_id=task_id, execution_context=execution_context)
+            return super().invoke(ref, inputs, task_id=task_id, execution_context=execution_context, expected_invocation=expected_invocation, on_dispatch=on_dispatch)
 
     runner = FailOnceRunner()
     executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))

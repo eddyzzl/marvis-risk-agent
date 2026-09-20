@@ -238,8 +238,21 @@ def test_batch_upload_request_sweeps_expired_staging_ledger(tmp_path: Path):
 
 def test_schema_35_rebuilds_partial_upload_ledger_without_false_completion(
     tmp_path: Path,
+    monkeypatch,
 ):
+    from marvis import db_schema
+
     db_path = tmp_path / "partial-v34.sqlite"
+    # A v34 database includes all preceding tables. Corrupt only the upload
+    # ledger under test, so later migrations can still upgrade real history.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            db_schema,
+            "_MIGRATIONS",
+            [(version, migration) for version, migration in db_schema._MIGRATIONS
+             if version <= 34],
+        )
+        init_db(db_path)
     with connect(db_path) as conn:
         conn.execute(
             """

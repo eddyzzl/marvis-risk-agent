@@ -31,10 +31,10 @@ from marvis.plugins.manifest import (
     PluginManifest,
     RUNNABLE_EXECUTION_PROFILE_CHOICES,
     ToolRef,
-    manifest_to_dict,
     python_requires_satisfied,
 )
 from marvis.plugins.registry import ToolRegistry
+from marvis.plugins.invocation import invocation_contract, manifest_receipt_hash
 from marvis.plugins.schema_validation import validate_against_schema
 from marvis.plugins.errors import SchemaValidationError
 from marvis.redaction import redact_text
@@ -232,6 +232,11 @@ class ToolRunner:
                 self._worker_python_version_error = f"{type(exc).__name__}: {exc}"
         return self._worker_python_version
 
+    def prepare_invocation(self, ref: ToolRef) -> dict:
+        manifest, tool = self._tools.resolve_with_manifest(ref)
+        _require_tool_permissions(manifest, tool.side_effects)
+        return invocation_contract(manifest, tool, ref)
+
     def invoke(
         self,
         ref: ToolRef,
@@ -243,6 +248,8 @@ class ToolRunner:
         progress_callback: Callable[[dict], None] | None = None,
         cancellation_check: Callable[[], None] | None = None,
         invocation_id: str | None = None,
+        expected_invocation: dict | None = None,
+        on_dispatch: Callable[[], None] | None = None,
     ) -> ToolResult:
         """Invoke a Tool and attach a receipt owned by the trusted runner.
 
@@ -269,6 +276,8 @@ class ToolRunner:
             execution_context=execution_context,
             progress_callback=progress_callback,
             cancellation_check=cancellation_check,
+            expected_invocation=expected_invocation,
+            on_dispatch=on_dispatch,
         )
         if normalized_invocation_id is not None:
             result.invocation_id = normalized_invocation_id
@@ -286,12 +295,17 @@ class ToolRunner:
         execution_context=None,
         progress_callback: Callable[[dict], None] | None = None,
         cancellation_check: Callable[[], None] | None = None,
+        expected_invocation: dict | None = None,
+        on_dispatch: Callable[[], None] | None = None,
     ) -> ToolResult:
         started = time.monotonic()
         target_ref = ref.label()
         logger.debug("tool invoke starting target_ref=%s task_id=%s", target_ref, task_id)
         try:
             manifest, tool = self._tools.resolve_with_manifest(ref)
+            if expected_invocation is not None and invocation_contract(manifest, tool, ref) != expected_invocation:
+                result = _failed_result(started, "invocation_changed", "tool invocation declaration changed before execution")
+                return self._finalize_audited_result(started, target_ref, inputs, result)
             _require_tool_permissions(manifest, tool.side_effects)
             validate_against_schema(inputs, tool.input_schema, label="inputs")
         except SchemaValidationError as exc:
@@ -410,6 +424,10 @@ class ToolRunner:
                     seed=effective_seed,
                 )
 
+        # Persist the boundary before any reservation or worker can act. A
+        # prepared run without this marker is demonstrably not dispatched.
+        if on_dispatch is not None:
+            on_dispatch()
         effect_execution = None
         if protected_execution:
             authorization_phase = "binding"
@@ -2127,10 +2145,7 @@ def _result_payload_hash(output: dict) -> str:
 def _manifest_receipt_hash(manifest: PluginManifest) -> str:
     """Return the exact manifest identity signed into a Tool result receipt."""
 
-    checksum = str(manifest.checksum or "").strip()
-    if checksum:
-        return checksum if checksum.startswith("sha256:") else f"sha256:{checksum}"
-    return _result_payload_hash(manifest_to_dict(manifest))
+    return manifest_receipt_hash(manifest)
 
 
 def _effect_execution_id(effect_execution) -> str:

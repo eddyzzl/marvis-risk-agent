@@ -225,7 +225,7 @@ _MIGRATION_TABLES = frozenset({
 # _migration_034_validation_batch_source_gc adds a narrowly typed cleanup target
 # for platform-owned validation-batch material trees.  The old migration remains
 # immutable; SQLite requires a table rebuild to extend its CHECK constraint.
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 37
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -4419,6 +4419,63 @@ def _migration_035_validation_batch_material_uploads(
             )
         """
     )
+def _migration_036_hook_delivery_completion(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE hook_completion_checkpoints (
+            identity TEXT PRIMARY KEY,
+            binding_hash TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE hook_events (
+            event_id TEXT PRIMARY KEY,
+            event TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            targets_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE hook_deliveries (
+            event_id TEXT NOT NULL REFERENCES hook_events(event_id),
+            target_ref TEXT NOT NULL,
+            required INTEGER NOT NULL CHECK(required IN (0, 1)),
+            status TEXT NOT NULL CHECK(status IN ('started', 'succeeded', 'failed', 'unknown')),
+            result_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(event_id, target_ref)
+        )
+    """)
+
+
+def _migration_037_step_invocation_contract(conn: sqlite3.Connection) -> None:
+    # NULL is deliberately unknown for historical attempts; never backfill
+    # current Plugin declarations as proof about a past execution.
+    _ensure_column(conn, table="plan_step_runs", column="invocation_contract_json", definition="TEXT")
+    _ensure_column(conn, table="plan_step_runs", column="dispatch_started_at", definition="TEXT")
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_plan_step_runs_invocation_contract_immutable
+        BEFORE UPDATE ON plan_step_runs
+        WHEN NEW.invocation_contract_json IS NOT OLD.invocation_contract_json
+        BEGIN
+            SELECT RAISE(ABORT, 'plan step invocation contract is immutable');
+        END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_plan_step_runs_dispatch_immutable
+        BEFORE UPDATE ON plan_step_runs
+        WHEN OLD.dispatch_started_at IS NOT NULL
+         AND NEW.dispatch_started_at IS NOT OLD.dispatch_started_at
+        BEGIN
+            SELECT RAISE(ABORT, 'plan step dispatch marker is immutable');
+        END
+    """)
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -4462,6 +4519,8 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (33, _migration_033_tool_manifest_receipt),
     (34, _migration_034_validation_batch_source_gc),
     (35, _migration_035_validation_batch_material_uploads),
+    (36, _migration_036_hook_delivery_completion),
+    (37, _migration_037_step_invocation_contract),
 ]
 
 

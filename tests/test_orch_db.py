@@ -1019,6 +1019,8 @@ def test_start_step_run_allowed_on_retry_after_step_returns_to_running(tmp_path)
     pending, the executor re-runs it through RUNNING, and start_step_run then
     opens attempt 2. Simulate that flow and assert the second run is accepted
     and numbered attempt 2."""
+    from tests.test_orch_executor import FakeRunner
+
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
     repo = PlanRepository(db_path)
@@ -1026,8 +1028,10 @@ def test_start_step_run_allowed_on_retry_after_step_returns_to_running(tmp_path)
 
     _mark_step_running(repo, "step-1")
     run1 = repo.start_step_run(
-        plan_id="plan-1", step_id="step-1", tool_ref="_sample.echo", inputs={}
+        plan_id="plan-1", step_id="step-1", tool_ref="_sample.echo", inputs={},
+        invocation_contract=FakeRunner().prepare_invocation(ToolRef("_sample", "echo")),
     )
+    repo.mark_step_run_dispatched(run1)
     repo.finish_step_run(run1, status="failed", error="boom", error_kind="RuntimeError")
 
     # Retry resets the step to pending (mimicking retry_failed_step), then the

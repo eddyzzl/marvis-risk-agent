@@ -123,7 +123,7 @@ from marvis.pipeline import (
     run_pmml_scoring_stage,
     run_report_stage,
 )
-from marvis.validation.suggested_confirmation import confirm_unambiguous_contract
+from marvis.validation_services.confirmation import confirm_unambiguous_contract
 from marvis.validation_batch_runner import (
     sync_agent_batch_after_child_report,
     sync_agent_batch_child_progress,

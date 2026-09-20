@@ -5,6 +5,7 @@ from pathlib import Path
 from marvis.agent.gates.contracts import FailureEnvelope
 from marvis.data.errors import CsvParseError, DataIngestError
 from marvis.error_kinds import ErrorKind
+from marvis.orchestrator.errors import requires_effect_reconciliation
 
 
 _WORKFLOW_NAMES = {
@@ -109,6 +110,19 @@ def enrich_workflow_error_diagnostic(diagnostic: dict) -> dict:
     """Upgrade persisted generic failures when a safe current diagnosis exists."""
 
     result = dict(diagnostic or {})
+    if result.get("code") == "workflow_reconciliation_required" or requires_effect_reconciliation(
+        f"{result.get('technical_detail') or ''} {result.get('cause') or ''}",
+        result.get("error_kind"),
+    ):
+        result.update({
+            "code": "workflow_reconciliation_required",
+            "retryable": False,
+            "auto_recoverable": False,
+            "actions": ["核对该动作的实际执行记录和凭据，再恢复当前流程。"],
+            "agent_prompt": "请核对当前动作的执行证据，不要重试或重新规划此动作。",
+            "recovery_actions": [],
+        })
+        return result
     if _is_parquet_column_alias_detail(result.get("technical_detail")) or (
         _is_parquet_column_alias_detail(result.get("cause"))
     ):

@@ -79,7 +79,7 @@ from marvis.orchestrator.contracts import PlanStatus, StepStatus
 from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.state_machine import ConflictError
-from marvis.validation.suggested_confirmation import confirm_unambiguous_batch_contracts
+from marvis.validation_services.confirmation import confirm_unambiguous_batch_contracts
 from marvis.validation_report_copy import (
     METRIC_REWRITE_REFUSAL,
     looks_like_accept_suggested_contracts,

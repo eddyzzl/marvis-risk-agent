@@ -29,7 +29,7 @@ from marvis.repositories.validation_contracts import (
     ValidationContractRepository,
     require_confirmed_validation_input_contract,
 )
-from marvis.validation.suggested_confirmation import confirm_unambiguous_contract
+from marvis.validation_services.confirmation import confirm_unambiguous_contract
 
 
 MAX_INPUT_CONFIRMATION_CANDIDATE_LINES = 24
