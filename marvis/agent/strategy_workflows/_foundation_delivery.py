@@ -17,6 +17,10 @@ from typing import Any
 
 from marvis.data.predicate_ast import PredicateAstError, canonicalize_predicate
 
+from ._input_validation import (
+    column as _column,
+    required_text as _required_text,
+)
 from .contracts import (
     PreparedStrategyPlan,
     StrategyWorkflowPreparationContext,
@@ -1795,26 +1799,6 @@ def _reject_fields(
             + "、".join(unexpected)
             + "。"
         )
-
-
-def _column(
-    value: object,
-    *,
-    name: str,
-    whitelist: Sequence[str],
-) -> str:
-    column = _required_text(value, name=name)
-    if column not in whitelist:
-        raise StrategyWorkflowValidationError(
-            f"{name} 使用了数据集中不存在的列「{column}」。"
-        )
-    return column
-
-
-def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise StrategyWorkflowValidationError(f"{name} 必须是非空文本。")
-    return value.strip()
 
 
 _NO_REQUIREMENTS = StrategyWorkflowRequirements(

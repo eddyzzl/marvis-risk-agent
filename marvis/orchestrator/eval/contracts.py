@@ -5,6 +5,10 @@ from typing import Any
 
 from marvis.orchestrator.contracts import Plan
 
+EVALUATION_MODES = frozenset({"blind", "contract_regression"})
+EXECUTION_MODES = frozenset({"fixture_simulation", "real_execution"})
+MODEL_SOURCES = frozenset({"real_model", "fixture_model", "unknown"})
+
 
 @dataclass(frozen=True)
 class EvalCase:
@@ -16,9 +20,9 @@ class EvalCase:
     fixtures: dict[str, Any]
     # Set when this case documents a *known, currently-unsafe* touchpoint
     # behavior rather than a behavior the platform actually guarantees today.
-    # ``score_case``/regression tooling must not treat an expected_failure
-    # case's non-pass as a regression; it is a tracked gap, recorded here so
-    # the eval corpus stays honest about what is and is not defended today.
+    # Only explicit contract_regression runs may exclude a declared known
+    # gap from their scoring denominator. Blind runs retain every case,
+    # including these failures; the marker is then informational only.
     expected_failure: str = ""
 
 
@@ -32,6 +36,10 @@ class EvalResult:
     transcript_ref: str
     final_status: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    evaluation_mode: str = "unknown"
+    execution_mode: str = "unknown"
+    model_source: str = "unknown"
+    executor_invoked: bool = False
 
 
 @dataclass(frozen=True)
@@ -48,3 +56,9 @@ class PlanRunTrace:
     invented_numbers: bool = False
     transcript_ref: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Missing provenance on historical/custom traces is never evidence of a
+    # blind or real execution run. The fixture runner sets these explicitly.
+    evaluation_mode: str = "unknown"
+    execution_mode: str = "unknown"
+    model_source: str = "unknown"
+    executor_invoked: bool = False

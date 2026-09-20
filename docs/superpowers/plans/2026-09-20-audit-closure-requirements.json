@@ -1,0 +1,389 @@
+{
+  "schema_version": "marvis.audit_requirements.v1",
+  "baseline_commit": "60d4b1b4",
+  "findings": [
+    {
+      "id": "F01",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "A",
+        "H"
+      ],
+      "source_paths": [
+        "marvis/orchestrator/eval/runner.py",
+        "marvis/agent/plan_driver.py"
+      ],
+      "work_packages": [
+        "WP01",
+        "WP08",
+        "WP15"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F02",
+      "required_evidence_tiers": [
+        "C"
+      ],
+      "source_paths": [
+        "marvis/orchestrator/eval/runner.py"
+      ],
+      "work_packages": [
+        "WP01"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F03",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "A",
+        "H"
+      ],
+      "source_paths": [
+        "marvis/orchestrator/reviewer.py",
+        "marvis/orchestrator/templates/_shared.py"
+      ],
+      "work_packages": [
+        "WP06",
+        "WP15"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F04",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "H"
+      ],
+      "source_paths": [
+        "marvis/data/contracts.py",
+        "marvis/data/join_engine.py",
+        "marvis/packs/modeling/readiness.py"
+      ],
+      "work_packages": [
+        "WP00",
+        "WP07"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F05",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/packs/strategy/economics.py",
+        "marvis/packs/modeling/reject_inference.py"
+      ],
+      "work_packages": [
+        "WP06",
+        "WP12",
+        "WP16"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F06",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/operations/integration.py",
+        "marvis/app.py"
+      ],
+      "work_packages": [
+        "WP11",
+        "WP16"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F07",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/production_governance/evidence.py",
+        "marvis/production_governance/repository.py"
+      ],
+      "work_packages": [
+        "WP09",
+        "WP10",
+        "WP16"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F08",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "A",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/decision_twin/authenticated_entry.py",
+        "marvis/decision_twin/reconciliation.py"
+      ],
+      "work_packages": [
+        "WP12",
+        "WP15",
+        "WP16"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F09",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/packs/modeling/scoring.py",
+        "marvis/packs/strategy/dsl.py"
+      ],
+      "work_packages": [
+        "WP09",
+        "WP16"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F10",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/packs/modeling/scenarios.py"
+      ],
+      "work_packages": [
+        "WP13",
+        "WP16"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F11",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/packs/strategy/candidate_design.py"
+      ],
+      "work_packages": [
+        "WP14",
+        "WP16"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F12",
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/static/app.js"
+      ],
+      "work_packages": [
+        "WP02"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F13",
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "tests/test_frontend_static_v2.py"
+      ],
+      "work_packages": [
+        "WP01",
+        "WP02",
+        "WP05"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F14",
+      "required_evidence_tiers": [
+        "C"
+      ],
+      "source_paths": [
+        "marvis/validation/input_confirmation.py",
+        "marvis/validation/platform_metrics.py",
+        "marvis/validation/pmml_stress.py",
+        "marvis/validation/stress_risk.py",
+        "marvis/output/excel.py",
+        "marvis/validation/results.py",
+        "marvis/validation/stress_test.py",
+        "marvis/agent/vintage_setup.py",
+        "marvis/agent/portfolio_setup.py",
+        "marvis/agent/modeling_setup.py",
+        "marvis/agent/join_setup.py",
+        "marvis/agent/strategy_workflows/_tree_workflows.py",
+        "marvis/agent/strategy_workflows/_pool_workflows.py",
+        "marvis/agent/strategy_workflows/_cross_voting.py",
+        "marvis/agent/strategy_workflows/_analytics.py",
+        "marvis/agent/strategy_workflows/_univariate_scorecard.py",
+        "marvis/agent/strategy_workflows/_foundation_delivery.py",
+        "marvis/feature/univariate.py",
+        "marvis/packs/strategy/candidate_asset.py",
+        "marvis/validation/pmml_score_artifacts.py"
+      ],
+      "work_packages": [
+        "WP02",
+        "WP03"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F15",
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/validation/effectiveness.py",
+        "marvis/validation/platform_metrics.py",
+        "marvis/pipeline_cellgen.py"
+      ],
+      "work_packages": [
+        "WP03"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F16",
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "A"
+      ],
+      "source_paths": [
+        "marvis/agent/turn_handlers/__init__.py",
+        "marvis/agent/strategy_request_compiler/__init__.py"
+      ],
+      "work_packages": [
+        "WP04"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F17",
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/static/app.js",
+        "marvis/static/js/task-workspace-state.js"
+      ],
+      "work_packages": [
+        "WP05"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F18",
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/validation/suggested_confirmation.py",
+        "marvis/validation/platform_metrics.py"
+      ],
+      "work_packages": [
+        "WP03"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F19",
+      "required_evidence_tiers": [
+        "C"
+      ],
+      "source_paths": [
+        "marvis/reconcile.py",
+        "tests/test_reconcile.py"
+      ],
+      "work_packages": [
+        "WP02"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F20",
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/validation/effectiveness.py",
+        "marvis/api.py",
+        "marvis/db.py"
+      ],
+      "work_packages": [
+        "WP00",
+        "WP02",
+        "WP04"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F21",
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/orchestrator/executor.py",
+        "marvis/orchestrator/plan_recovery.py"
+      ],
+      "work_packages": [
+        "WP03"
+      ],
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F22",
+      "required_evidence_tiers": [
+        "R",
+        "A",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/agent/plan_driver.py",
+        "marvis/production_governance/repository.py"
+      ],
+      "work_packages": [
+        "WP15",
+        "WP16"
+      ],
+      "criterion_version": "audit-closure-v1"
+    }
+  ]
+}

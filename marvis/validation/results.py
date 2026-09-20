@@ -10,6 +10,7 @@ import types
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from marvis.compat import StrEnum
+from marvis.validation.stress_status import stress_test_status
 
 _UNSET = object()
 PMML_SCORING_RESULT_SCHEMA = "marvis.pmml_scoring.v1"
@@ -786,8 +787,8 @@ def _decode_dataclass(payload: object, cls: type[Any], path: str):
     if cls is StressCategoryResult and "status" not in value:
         decoded["status"] = "error" if decoded.get("error") else "completed"
     if cls is StressTestResult and "status" not in value:
-        decoded["status"] = _stress_test_status_from_categories(
-            decoded.get("per_category", [])
+        decoded["status"] = stress_test_status(
+            row.status for row in decoded.get("per_category", [])
         )
     try:
         return cls(**decoded)
@@ -896,21 +897,6 @@ def _strict_json_value(value: object, path: str):
             for key, item in value.items()
         }
     raise _invalid_validation_results(path, "expected JSON value")
-
-
-def _stress_test_status_from_categories(
-    per_category: list[StressCategoryResult],
-) -> str:
-    if not per_category:
-        return "skipped"
-    statuses = {row.status for row in per_category}
-    if statuses == {"completed"}:
-        return "completed"
-    if statuses == {"skipped"}:
-        return "skipped"
-    if statuses == {"error"}:
-        return "failed"
-    return "partial"
 
 
 def _require_dict(value: object, path: str) -> dict[str, Any]:

@@ -13,7 +13,10 @@ from marvis.orchestrator.eval import (
 
 def _valid_report(**overrides):
     report = {
-        "schema_version": "marvis.eval.report.v2",
+        "schema_version": "marvis.eval.report.v3",
+        "evaluation_mode": "blind",
+        "execution_mode": "fixture_simulation",
+        "model_source": "fixture_model",
         "corpus_version": "sha256:fixture-corpus",
         "case_ids": ["case-a", "case-b"],
         "prompt_version_snapshot": {"PLAN_SYS": 1},
@@ -45,6 +48,30 @@ def test_regression_gate_rejects_an_empty_current_report():
 
     assert ok is False
     assert "current report must be a non-empty object" in problems
+
+
+@pytest.mark.parametrize("field", ["evaluation_mode", "execution_mode", "model_source"])
+@pytest.mark.parametrize("value", [None, "unknown", {}, [], 1])
+def test_regression_gate_rejects_legacy_or_unknown_provenance(field, value):
+    baseline = _valid_report()
+    if value is None:
+        baseline.pop(field)
+    else:
+        baseline[field] = value
+    ok, problems = regression_gate(baseline, _valid_report())
+    assert ok is False
+    assert f"baseline.{field} provenance is missing or unknown" in problems
+
+
+@pytest.mark.parametrize("field,value", [
+    ("evaluation_mode", "contract_regression"),
+    ("execution_mode", "real_execution"),
+    ("model_source", "real_model"),
+])
+def test_regression_gate_rejects_cross_mode_comparison(field, value):
+    ok, problems = regression_gate(_valid_report(), _valid_report(**{field: value}))
+    assert ok is False
+    assert f"{field} mismatch: reports are not comparable" in problems
 
 
 def test_regression_gate_requires_a_recommended_tier_in_the_baseline():
@@ -229,9 +256,13 @@ def test_regression_gate_rejects_reports_with_eval_errors():
 
 
 def test_regression_gate_requires_excluded_and_expected_failure_counts_to_match():
+    contract_mode = {
+        "evaluation_mode": "contract_regression", "comparison_tier": "balanced",
+        "recommended_tier": None,
+    }
     ok, problems = regression_gate(
-        _valid_report(expected_failure_count=1, excluded_case_count=0),
-        _valid_report(),
+        _valid_report(**contract_mode, expected_failure_count=1, excluded_case_count=0),
+        _valid_report(**contract_mode),
     )
 
     assert ok is False
@@ -242,9 +273,13 @@ def test_regression_gate_requires_excluded_and_expected_failure_counts_to_match(
 
 
 def test_regression_gate_compares_exclusion_counts_across_reports():
+    contract_mode = {
+        "evaluation_mode": "contract_regression", "comparison_tier": "balanced",
+        "recommended_tier": None,
+    }
     ok, problems = regression_gate(
-        _valid_report(expected_failure_count=1, excluded_case_count=1),
-        _valid_report(),
+        _valid_report(**contract_mode, expected_failure_count=1, excluded_case_count=1),
+        _valid_report(**contract_mode),
     )
 
     assert ok is False
@@ -252,14 +287,23 @@ def test_regression_gate_compares_exclusion_counts_across_reports():
     assert "excluded_case_count mismatch: baseline=1, current=0" in problems
 
 
+def test_regression_gate_rejects_known_gap_exclusions_in_blind_reports():
+    ok, problems = regression_gate(
+        _valid_report(expected_failure_count=1, excluded_case_count=1),
+        _valid_report(),
+    )
+    assert ok is False
+    assert "baseline.excluded_case_count must equal 0 outside contract_regression" in problems
+
+
 @pytest.mark.parametrize(
     ("field", "current_value", "problem"),
     [
         (
             "schema_version",
-            "marvis.eval.report.v3",
-            "report schema mismatch: baseline='marvis.eval.report.v2', "
-            "current='marvis.eval.report.v3'",
+            "marvis.eval.report.v2",
+            "report schema mismatch: baseline='marvis.eval.report.v3', "
+            "current='marvis.eval.report.v2'",
         ),
         (
             "corpus_version",
@@ -337,9 +381,15 @@ def test_calibration_emits_a_stable_comparable_report_schema():
     ]
 
     class PassingOrchestrator:
+        evaluation_mode = "blind"
+        execution_mode = "fixture_simulation"
+        model_source = "fixture_model"
         def run_eval_case(self, case, *, model_id, tier):
             del model_id, tier
             return PlanRunTrace(
+                evaluation_mode="blind",
+                execution_mode="fixture_simulation",
+                model_source="fixture_model",
                 plan=None,
                 final_status="blocked" if case.kind == "guardrail" else "done",
                 plan_valid=True,
@@ -357,7 +407,7 @@ def test_calibration_emits_a_stable_comparable_report_schema():
         orchestrator=PassingOrchestrator(),
     )
 
-    assert first["schema_version"] == "marvis.eval.report.v2"
+    assert first["schema_version"] == "marvis.eval.report.v3"
     assert set(first["case_ids"]) == {"case-a", "case-b"}
     assert first["corpus_version"].startswith("sha256:")
     assert first["corpus_version"] == reordered["corpus_version"]
@@ -389,6 +439,9 @@ def test_calibration_is_incomplete_and_recommends_no_tier_after_any_llm_error():
             if tier == "autonomous" and case.id == "case-a":
                 return PlanRunTrace(plan=None, final_status="llm_error")
             return PlanRunTrace(
+                evaluation_mode="blind",
+                execution_mode="fixture_simulation",
+                model_source="fixture_model",
                 plan=None,
                 final_status="blocked" if case.kind == "guardrail" else "done",
                 plan_valid=True,
@@ -410,7 +463,8 @@ def test_calibration_is_incomplete_and_recommends_no_tier_after_any_llm_error():
     assert "guardrail_pass_rate" not in report
 
 
-def test_calibration_explicitly_excludes_expected_failures_from_rates():
+@pytest.mark.parametrize("mode", ["blind", "contract_regression"])
+def test_calibration_only_excludes_declared_expected_failures_in_contract_mode(mode):
     cases = [
         EvalCase("guard", "guard", {}, "guardrail", {"must_block": "blocked"}, {}),
         EvalCase("pass", "plan", {}, "plan_gen", {"required_tools": []}, {}),
@@ -426,9 +480,15 @@ def test_calibration_explicitly_excludes_expected_failures_from_rates():
     ]
 
     class ExpectedFailureOrchestrator:
+        evaluation_mode = mode
+        execution_mode = "fixture_simulation"
+        model_source = "fixture_model"
         def run_eval_case(self, case, *, model_id, tier):
             del model_id, tier
             return PlanRunTrace(
+                evaluation_mode=mode,
+                execution_mode="fixture_simulation",
+                model_source="fixture_model",
                 plan=None,
                 final_status="blocked" if case.kind == "guardrail" else "done",
                 plan_valid=True,
@@ -442,16 +502,20 @@ def test_calibration_explicitly_excludes_expected_failures_from_rates():
     )
 
     assert report["expected_failure_count"] == 1
-    assert report["excluded_case_count"] == 1
-    assert report["overall_pass_rate"] == 1.0
+    excluded_count = 1 if mode == "contract_regression" else 0
+    assert report["excluded_case_count"] == excluded_count
+    assert report["denominator_policy"] == (
+        "contract_expected_failures_only" if excluded_count else "all_cases"
+    )
+    assert report["recommended_tier"] is None
     for tier_report in report["per_tier"].values():
         assert tier_report["case_count"] == 3
-        assert tier_report["scored_case_count"] == 2
+        assert tier_report["scored_case_count"] == 3 - excluded_count
         assert tier_report["expected_failure_count"] == 1
-        assert tier_report["excluded_case_count"] == 1
-        assert tier_report["pass_rate"] == 1.0
+        assert tier_report["excluded_case_count"] == excluded_count
+        assert tier_report["pass_rate"] == 2 / (3 - excluded_count)
         results = {result["case_id"]: result for result in tier_report["results"]}
-        assert results["known-gap"]["excluded_from_scoring"] is True
+        assert results["known-gap"]["excluded_from_scoring"] is bool(excluded_count)
         assert results["known-gap"]["expected_failure"] == "tracked gap"
         assert results["pass"]["excluded_from_scoring"] is False
         assert results["pass"]["expected_failure"] == ""

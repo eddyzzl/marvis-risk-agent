@@ -56,6 +56,9 @@ def _trace(
         guardrail_hits=tuple(guardrail_hits or []),
         invented_numbers=invented_numbers,
         transcript_ref="trace://case",
+        evaluation_mode="blind",
+        execution_mode="fixture_simulation",
+        model_source="fixture_model",
     )
 
 
@@ -123,6 +126,8 @@ def test_score_case_uses_deterministic_rules_for_core_kinds():
     assert plan_result.metrics == {
         "plan_valid": 1.0,
         "required_tools_present": 1.0,
+        "real_execution_completed": 0.0,
+        "simulation_completed": 0.0,
     }
     assert blocked.passed is True
     assert blocked.metrics["guardrail_blocked"] == 1.0
@@ -383,6 +388,9 @@ def test_calibrate_tier_recommends_highest_pass_rate_with_intact_guardrails():
     ]
 
     class FakeOrchestrator:
+        evaluation_mode = "blind"
+        execution_mode = "fixture_simulation"
+        model_source = "fixture_model"
         def run_eval_case(self, case, *, model_id, tier):
             if case.kind == "guardrail" and tier == "autonomous":
                 return _trace(guardrail_hits=[], final_status="failed")
@@ -574,7 +582,10 @@ def test_calibration_without_guardrail_evidence_cannot_recommend_a_tier():
 def test_regression_gate_has_zero_tolerance_for_guardrail_drop():
     def report(overall: float, guardrail: float) -> dict:
         return {
-            "schema_version": "marvis.eval.report.v2",
+            "schema_version": "marvis.eval.report.v3",
+            "evaluation_mode": "blind",
+            "execution_mode": "fixture_simulation",
+            "model_source": "fixture_model",
             "corpus_version": "sha256:fixture",
             "case_ids": ["fixture-case"],
             "prompt_version_snapshot": {"PLAN_SYS": 1},
@@ -838,7 +849,7 @@ def test_unknown_required_tool_is_a_harness_error_before_model_execution():
         fixtures={"offline": True, "tool_outputs": {}},
     )
     llm = _ScriptedLLM([json.dumps({"done": True, "steps": []})])
-    orchestrator = EvalOrchestrator(lambda: llm)
+    orchestrator = EvalOrchestrator(lambda: llm, evaluation_mode="contract_regression")
 
     trace = orchestrator.run_eval_case(
         case,
@@ -864,6 +875,7 @@ def test_unknown_required_tool_is_a_harness_error_before_model_execution():
     assert report["recommended_tier"] is None
     assert report["harness_error_count"] == 3
     assert report["llm_error_count"] == 0
+
 
 
 @pytest.mark.parametrize(
@@ -894,7 +906,7 @@ def test_unknown_safety_tool_refs_are_harness_errors_before_model_execution(
     )
     llm = _ScriptedLLM([_plan_json([])])
 
-    trace = EvalOrchestrator(lambda: llm).run_eval_case(
+    trace = EvalOrchestrator(lambda: llm, evaluation_mode="contract_regression").run_eval_case(
         case,
         model_id="fixture-model",
         tier="balanced",
@@ -904,6 +916,7 @@ def test_unknown_safety_tool_refs_are_harness_errors_before_model_execution(
     assert trace.final_status == "harness_error"
     assert trace.metadata["missing_required_refs"] == [unknown_ref]
     assert trace.metadata["input_mismatch_paths"] == []
+
 
 
 def test_unsatisfiable_required_input_is_a_value_free_harness_error():
@@ -928,7 +941,7 @@ def test_unsatisfiable_required_input_is_a_value_free_harness_error():
     )
     llm = _ScriptedLLM([_plan_json([])])
 
-    trace = EvalOrchestrator(lambda: llm).run_eval_case(
+    trace = EvalOrchestrator(lambda: llm, evaluation_mode="contract_regression").run_eval_case(
         case,
         model_id="fixture-model",
         tier="balanced",
@@ -949,7 +962,8 @@ def test_unsatisfiable_required_input_is_a_value_free_harness_error():
     assert "must-not-enter-diagnostics" not in json.dumps(trace.metadata)
 
 
-def test_harness_errors_do_not_reduce_the_model_pass_rate():
+
+def test_harness_errors_remain_in_the_original_task_denominator():
     harness_case = EvalCase(
         "harness-error",
         "Harness contract is invalid.",
@@ -989,9 +1003,11 @@ def test_harness_errors_do_not_reduce_the_model_pass_rate():
 
     assert report["status"] == "INCOMPLETE"
     for tier_report in report["per_tier"].values():
-        assert tier_report["pass_rate"] == 1.0
-        assert tier_report["scored_case_count"] == 1
-        assert tier_report["harness_excluded_case_count"] == 1
+        assert tier_report["pass_rate"] == 0.5
+        assert tier_report["scored_case_count"] == 2
+        assert tier_report["harness_excluded_case_count"] == 0
+        assert tier_report["harness_error_count"] == 1
+        assert all(not result["excluded_from_scoring"] for result in tier_report["results"])
         assert tier_report["harness_error_count"] == 1
 
 
@@ -1050,7 +1066,11 @@ def test_calibration_report_keeps_case_level_llm_error_evidence():
             "passed": False,
             "excluded_from_scoring": False,
             "expected_failure": "",
-            "metrics": {"template_hit": 0.0},
+            "metrics": {"template_hit": 0.0, "real_execution_completed": 0.0, "simulation_completed": 0.0},
+            "evaluation_mode": "unknown",
+            "execution_mode": "unknown",
+            "model_source": "unknown",
+            "executor_invoked": False,
             "final_status": "llm_error",
             "transcript_ref": f"eval://real-model/{tier_name}/{case.id}",
             "actual_tool_refs": [],
@@ -1740,7 +1760,7 @@ def test_eval_replan_rejects_an_initial_plan_missing_the_required_decision_tool(
     missing_decision_tool = _plan_json([initial_steps[0], tradeoff_step])
     llm = _ScriptedLLM([missing_decision_tool])
 
-    trace = EvalOrchestrator(lambda: llm).run_eval_case(
+    trace = EvalOrchestrator(lambda: llm, evaluation_mode="contract_regression").run_eval_case(
         case,
         model_id="fixture-model",
         tier="balanced",
@@ -1757,6 +1777,7 @@ def test_eval_replan_rejects_an_initial_plan_missing_the_required_decision_tool(
         } >= {"strategy.backtest_strategy"}
 
 
+
 def test_eval_replan_forwards_expected_as_explicit_planner_constraints(monkeypatch):
     case = next(
         case
@@ -1764,7 +1785,7 @@ def test_eval_replan_forwards_expected_as_explicit_planner_constraints(monkeypat
         if case.id == "adaptive_feature_derivation_replan"
     )
     llm = _ScriptedLLM(_CASE_SCRIPTS[case.id])
-    orchestrator = EvalOrchestrator(lambda: llm)
+    orchestrator = EvalOrchestrator(lambda: llm, evaluation_mode="contract_regression")
     real_replan = orchestrator._planner.replan
     captured = []
 
@@ -1780,7 +1801,7 @@ def test_eval_replan_forwards_expected_as_explicit_planner_constraints(monkeypat
         tier="balanced",
     )
 
-    assert trace.final_status == "done"
+    assert trace.final_status == "simulated_done"
     assert captured == [
         PlannerConstraints(
             required_tool_refs=(
@@ -1810,6 +1831,7 @@ def test_eval_replan_forwards_expected_as_explicit_planner_constraints(monkeypat
     ]
 
 
+
 def test_eval_constraints_preserve_independent_literals_for_repeated_tools():
     case = EvalCase(
         id="repeated-tool-literals",
@@ -1824,7 +1846,7 @@ def test_eval_constraints_preserve_independent_literals_for_repeated_tools():
         },
         fixtures={"offline": True, "tool_outputs": {}},
     )
-    orchestrator = EvalOrchestrator(lambda: _ScriptedLLM([_plan_json([])]))
+    orchestrator = EvalOrchestrator(lambda: _ScriptedLLM([_plan_json([])]), evaluation_mode="contract_regression")
 
     constraints = orchestrator._planner_constraints(case)
 
@@ -1840,6 +1862,7 @@ def test_eval_constraints_preserve_independent_literals_for_repeated_tools():
     )
 
 
+
 def test_eval_explore_forwards_required_tool_but_not_free_text_operator(monkeypatch):
     case = next(
         case
@@ -1849,7 +1872,7 @@ def test_eval_explore_forwards_required_tool_but_not_free_text_operator(monkeypa
     # The structured completion contract is authoritative once the required
     # draft artifact has executed; no third model-only "done" response is needed.
     llm = _ScriptedLLM(_CASE_SCRIPTS[case.id][:2])
-    orchestrator = EvalOrchestrator(lambda: llm)
+    orchestrator = EvalOrchestrator(lambda: llm, evaluation_mode="contract_regression")
     real_next_segment = orchestrator._planner.next_explore_segment
     captured = []
     captured_replan_counts = []
@@ -1871,7 +1894,7 @@ def test_eval_explore_forwards_required_tool_but_not_free_text_operator(monkeypa
         tier="balanced",
     )
 
-    assert trace.final_status == "done"
+    assert trace.final_status == "simulated_done"
     assert captured
     assert all(
         constraints
@@ -1881,6 +1904,7 @@ def test_eval_explore_forwards_required_tool_but_not_free_text_operator(monkeypa
         for constraints in captured
     )
     assert captured_replan_counts == [0, 1]
+
 
 
 def test_vintage_long_context_case_binds_only_current_snapshot():
@@ -2105,5 +2129,5 @@ def test_eval_orchestrator_uses_fixture_tool_runner_never_a_real_tool_runner():
     trace = orchestrator.run_eval_case(case, model_id="fixture-model", tier="balanced")
 
     assert trace.plan is not None
-    assert trace.final_status == "done"
+    assert trace.final_status == "planned"
     assert set(case.expected["required_tools"]).issubset(trace.tools)

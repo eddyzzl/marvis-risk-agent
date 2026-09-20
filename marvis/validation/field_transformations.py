@@ -141,6 +141,24 @@ def topologically_sorted_transformations(
     return tuple(ordered)
 
 
+def transformation_closure(
+    output_fields: Sequence[str], specs: Sequence[TransformationSpec]
+) -> tuple[TransformationSpec, ...]:
+    """Select requested transformations and their dependencies in execution order."""
+    ordered = topologically_sorted_transformations(specs)
+    by_output = {spec.output_field: spec for spec in ordered}
+    needed: set[str] = set()
+    stack = list(reversed(tuple(output_fields)))
+    while stack:
+        field = stack.pop()
+        spec = by_output.get(field)
+        if spec is None or field in needed:
+            continue
+        needed.add(field)
+        stack.extend(reversed(spec.input_fields))
+    return tuple(spec for spec in ordered if spec.output_field in needed)
+
+
 def required_transformation_inputs(
     output_fields: Collection[str], specs: Sequence[TransformationSpec]
 ) -> tuple[str, ...]:

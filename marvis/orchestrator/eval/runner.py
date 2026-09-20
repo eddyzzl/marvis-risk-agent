@@ -1,11 +1,10 @@
-"""Production ``run_eval_case`` implementation (LLM-2).
+"""Planning evaluation with explicit fixture-only execution provenance.
 
 Wires the real ``IntentRouter`` + ``Planner`` + ``PlanValidator`` against an
 injected LLM client (a real model in production, a ``FakeLLM`` in tests /
 offline replay) and a ``FixtureToolRunner`` that returns preset tool outputs
 from ``case.fixtures.tool_outputs`` instead of ever invoking a real tool. This
-keeps the eval framework fully offline-self-contained (INV: no eval run may
-touch the network or execute untrusted code) while still exercising real
+keeps tool execution offline and side-effect free while still exercising real
 prompt construction, real JSON-extraction/retry paths, and the real plan
 validator.
 
@@ -17,6 +16,7 @@ model_id, tier)`` returning a ``PlanRunTrace``.
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 from typing import Any
@@ -25,7 +25,12 @@ from marvis.db_schema import init_db
 from marvis.repositories.plugins import PluginRepository
 from marvis.orchestrator.capability import resolve_tier
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
-from marvis.orchestrator.eval.contracts import EvalCase, PlanRunTrace
+from marvis.orchestrator.eval.contracts import (
+    EVALUATION_MODES,
+    MODEL_SOURCES,
+    EvalCase,
+    PlanRunTrace,
+)
 from marvis.orchestrator.intent import IntentRouter
 from marvis.orchestrator.planner import (
     Planner,
@@ -89,13 +94,13 @@ class FixtureToolRunner:
 
     def run(self, step: PlanStep) -> dict[str, Any]:
         key = step.tool_ref.label()
-        if key in self._outputs:
-            return self._outputs[key]
-        # Unfixtured tool: return an empty-but-valid object so downstream
-        # $ref lookups don't crash the simulation; this is intentionally
-        # permissive since eval cases only assert on plan shape / routed
-        # tools / guardrail interception, not on live numeric outputs.
-        return {}
+        if not isinstance(self._outputs.get(key), dict) or not self._outputs[key]:
+            raise UnmodeledFixtureError(key)
+        return deepcopy(self._outputs[key])
+
+
+class UnmodeledFixtureError(RuntimeError):
+    """The corpus does not model this tool's output; no execution occurred."""
 
 
 class EvalOrchestrator:
@@ -106,7 +111,22 @@ class EvalOrchestrator:
     model run, or a ``FakeLLM`` factory for offline replay / regression tests.
     """
 
-    def __init__(self, llm_factory, *, tool_registry: ToolRegistry | None = None):
+    def __init__(
+        self,
+        llm_factory,
+        *,
+        tool_registry: ToolRegistry | None = None,
+        evaluation_mode: str = "blind",
+        model_source: str = "unknown",
+    ):
+        if not isinstance(evaluation_mode, str) or evaluation_mode not in EVALUATION_MODES:
+            raise ValueError(f"unsupported evaluation_mode: {evaluation_mode}")
+        if not isinstance(model_source, str) or model_source not in MODEL_SOURCES:
+            raise ValueError(f"unsupported model_source: {model_source}")
+        self.evaluation_mode = evaluation_mode
+        self.execution_mode = "fixture_simulation"
+        self.model_source = model_source
+        self.executor_invoked = False
         load_builtin_templates()
         self._llm_factory = llm_factory
         self._tools = tool_registry or build_tool_registry()
@@ -122,9 +142,39 @@ class EvalOrchestrator:
         )
 
     def run_eval_case(self, case: EvalCase, *, model_id: str, tier: str) -> PlanRunTrace:
+        trace = self._run_case(case, model_id=model_id, tier=tier)
+        # A blind run consumes only the task/fixtures before consulting the
+        # answer key. Even an invalid expected catalog entry cannot change
+        # routing, retries, compression, replanning, or model call count.
+        if self.evaluation_mode == "blind":
+            missing, mismatches = self._catalog_preflight(case)
+            if missing or mismatches:
+                trace = replace(
+                    trace,
+                    final_status="harness_error",
+                    metadata={
+                        "failure_stage": "catalog_postflight",
+                        "error_kind": "catalog_contract_unsatisfied",
+                        "missing_required_refs": missing,
+                        "input_mismatch_paths": mismatches,
+                    },
+                )
+        return replace(
+            trace,
+            evaluation_mode=self.evaluation_mode,
+            execution_mode=self.execution_mode,
+            model_source=self.model_source,
+            executor_invoked=False,
+        )
+
+    def _run_case(self, case: EvalCase, *, model_id: str, tier: str) -> PlanRunTrace:
         capability_tier = resolve_tier(tier)
         transcript_ref = f"eval://{model_id}/{tier}/{case.id}"
-        missing_required_refs, input_mismatch_paths = self._catalog_preflight(case)
+        missing_required_refs, input_mismatch_paths = (
+            self._catalog_preflight(case)
+            if self.evaluation_mode == "contract_regression"
+            else ([], [])
+        )
         if missing_required_refs or input_mismatch_paths:
             return PlanRunTrace(
                 plan=None,
@@ -249,7 +299,7 @@ class EvalOrchestrator:
         return PlanRunTrace(
             plan=plan,
             tools=tuple(step.tool_ref.label() for step in plan.steps),
-            final_status="done",
+            final_status="planned",
             plan_valid=not self._validator.validate(plan),
             transcript_ref=transcript_ref,
         )
@@ -318,7 +368,10 @@ class EvalOrchestrator:
         replan_count = 0
         completed: dict[str, dict] = {}
         for step in plan.steps:
-            output = runner.run(step)
+            try:
+                output = runner.run(step)
+            except UnmodeledFixtureError as exc:
+                return _unmodeled_trace(plan, exc, transcript_ref=transcript_ref)
             completed[step.id] = output
             step.status = StepStatus.DONE
             if step.tool_ref.label() == decision_tool:
@@ -379,15 +432,26 @@ class EvalOrchestrator:
         )
         completed: dict[str, dict] = {}
         segments = 0
-        max_segments = int(case.expected.get("max_segments", tier.max_replan_iterations))
+        max_segments = tier.max_replan_iterations
+        if self.evaluation_mode == "contract_regression":
+            # A corpus contract may tighten the budget, never extend the
+            # production tier and turn its forced stop into completion.
+            max_segments = min(
+                max_segments, int(case.expected.get("max_segments", max_segments))
+            )
         done = False
         failure_metadata: dict[str, Any] = {}
         constraints = self._planner_constraints(case)
-        has_structured_completion = bool(
-            case.expected.get("required_tools")
-            or case.expected.get("required_tool_inputs")
+        has_structured_completion = (
+            self.evaluation_mode == "contract_regression"
+            and bool(
+                case.expected.get("required_tools")
+                or case.expected.get("required_tool_inputs")
+            )
         )
-        while segments < max_segments + 1:
+        # The production planner treats budget exhaustion as a stop signal.
+        # Do not reinterpret that signal as modeled goal completion here.
+        while segments < max_segments:
             try:
                 new_steps, done = self._planner.next_explore_segment(
                     plan,
@@ -403,7 +467,10 @@ class EvalOrchestrator:
                 break
             plan.steps.extend(new_steps)
             for step in new_steps:
-                completed[step.id] = runner.run(step)
+                try:
+                    completed[step.id] = runner.run(step)
+                except UnmodeledFixtureError as exc:
+                    return _unmodeled_trace(plan, exc, transcript_ref=transcript_ref)
                 step.status = StepStatus.DONE
             # The production repository increments the adaptive-loop counter when
             # it appends an explore segment. The in-memory eval harness must mirror
@@ -417,7 +484,7 @@ class EvalOrchestrator:
             ):
                 done = True
                 break
-        final_status = "done" if done else "incomplete"
+        final_status = "simulated_done" if done else "incomplete"
         return PlanRunTrace(
             plan=plan,
             tools=tuple(step.tool_ref.label() for step in plan.steps),
@@ -457,7 +524,7 @@ class EvalOrchestrator:
             return PlanRunTrace(
                 plan=plan,
                 tools=tuple(step.tool_ref.label() for step in plan.steps),
-                final_status="done",
+                final_status="planned",
                 plan_valid=True,
                 guardrail_hits=(),
                 guardrail_outcome=outcome,
@@ -501,7 +568,9 @@ class EvalOrchestrator:
                 transcript_ref=transcript_ref,
             )
 
-    def _planner_constraints(self, case: EvalCase) -> PlannerConstraints:
+    def _planner_constraints(self, case: EvalCase) -> PlannerConstraints | None:
+        if self.evaluation_mode == "blind":
+            return None
         required_labels = {
             str(item)
             for item in case.expected.get("required_tools") or []
@@ -602,18 +671,41 @@ def _simulate_execution(
     """Deterministically "execute" a plan against fixture tool outputs.
 
     This is a pure simulation, not the real ``PlanExecutor`` (which is
-    DB/subagent/hook wired) -- it exists only to mark steps DONE for scoring
-    purposes (tools invoked, terminal status), matching what ``score_case``
-    inspects.
+    DB/subagent/hook wired). Local step states drive subsequent prompt ledgers;
+    they are not real tool receipts and cannot make the plan DONE.
     """
     done = already_done or set()
     for step in plan.steps:
         if step.id in done:
             continue
-        runner.run(step)
+        try:
+            runner.run(step)
+        except UnmodeledFixtureError:
+            plan.status = PlanStatus.FAILED
+            return plan, "simulation_unmodeled"
         step.status = StepStatus.DONE
-    plan.status = PlanStatus.DONE
-    return plan, "done"
+    # DONE would describe a real executor transition. Simulated step states
+    # are used only inside this isolated plan to build subsequent prompts.
+    plan.status = PlanStatus.REVIEW
+    return plan, "simulated_done"
+
+
+def _unmodeled_trace(
+    plan: Plan, exc: UnmodeledFixtureError, *, transcript_ref: str
+) -> PlanRunTrace:
+    plan.status = PlanStatus.FAILED
+    return PlanRunTrace(
+        plan=plan,
+        tools=tuple(step.tool_ref.label() for step in plan.steps),
+        final_status="simulation_unmodeled",
+        replan_count=plan.replan_count,
+        metadata={
+            "failure_stage": "fixture_simulation",
+            "error_kind": "unmodeled_tool_output",
+            "tool_ref": str(exc),
+        },
+        transcript_ref=transcript_ref,
+    )
 
 
 def _invents_numbers(plan: Plan, validator: PlanValidator) -> bool:

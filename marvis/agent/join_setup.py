@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 
+from marvis.agent.setup_context import dataset_name as _dataset_name
 from marvis.agent.data_setup import reconcile_source_data_tables
 from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.data.errors import DatasetContentDriftError
@@ -197,24 +197,6 @@ def build_join_proposal(registry, task_id: str, source_dir) -> JoinProposal:
 def _consume_ingest_notices(registry, task_id: str) -> list[dict]:
     consume = getattr(registry, "consume_ingest_notices", None)
     return list(consume(task_id)) if callable(consume) else []
-
-
-def _dataset_name(registry, dataset) -> str:
-    source_identity = getattr(registry, "source_identity", None)
-    if callable(source_identity):
-        try:
-            identity = source_identity(dataset.id)
-        except (KeyError, OSError, TypeError, ValueError):
-            identity = None
-        original_name = (
-            str(identity.get("original_name") or "").strip()
-            if isinstance(identity, dict)
-            else ""
-        )
-        if original_name:
-            return original_name
-    source = getattr(dataset, "source_path", None)
-    return Path(source).name if source else str(getattr(dataset, "id", ""))
 
 
 def _column_names(dataset) -> list[str]:

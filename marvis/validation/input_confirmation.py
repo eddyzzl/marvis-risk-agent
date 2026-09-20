@@ -18,7 +18,7 @@ from marvis.validation.feature_metadata import (
 from marvis.validation.field_transformations import (
     apply_confirmed_transformations,
     required_transformation_inputs,
-    topologically_sorted_transformations,
+    transformation_closure,
     validate_transformation_plan,
 )
 from marvis.validation.input_contracts import (
@@ -355,7 +355,7 @@ def _validate_confirmation_against_materials(
             + _bounded_join(static_missing)
         )
 
-    control_transformations = _transformation_closure(
+    control_transformations = transformation_closure(
         (requested.target_col, requested.split_col, requested.time_col),
         requested_transformations,
     )
@@ -517,23 +517,6 @@ def _typed_json_fingerprint(
             ),
         )
     raise ValueError("transformation value is not JSON-compatible")
-
-
-def _transformation_closure(
-    output_fields: Sequence[str], specs: Sequence[TransformationSpec]
-) -> tuple[TransformationSpec, ...]:
-    ordered = topologically_sorted_transformations(specs)
-    by_output = {spec.output_field: spec for spec in ordered}
-    needed: set[str] = set()
-    stack = list(reversed(tuple(output_fields)))
-    while stack:
-        field = stack.pop()
-        spec = by_output.get(field)
-        if spec is None or field in needed:
-            continue
-        needed.add(field)
-        stack.extend(reversed(spec.input_fields))
-    return tuple(spec for spec in ordered if spec.output_field in needed)
 
 
 def _require_atomic_metadata_candidate(

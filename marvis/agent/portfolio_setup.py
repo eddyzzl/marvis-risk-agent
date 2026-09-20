@@ -17,6 +17,7 @@ import math
 from pathlib import Path
 import re
 
+from marvis.agent.setup_context import resolve_named_col as _resolve_named_col
 from marvis.data.authenticated_snapshot import (
     AuthenticatedSnapshotError,
     read_authenticated_parquet_snapshot,
@@ -387,21 +388,6 @@ def _resolve_performance_dataset(registry, task_id: str, source_dir):
     if not datasets:
         raise PortfolioSetupError(f"组合分析未找到表现期数据文件:{source_dir}")
     return sorted(datasets, key=lambda d: -int(getattr(d, "row_count", 0) or 0))[0]
-
-
-def _resolve_named_col(columns: list[str], requested: str | None, hints: tuple[str, ...]) -> str:
-    requested = str(requested or "").strip()
-    if requested and requested in columns:
-        return requested
-    lowered = {column.lower(): column for column in columns}
-    for hint in hints:
-        if hint in lowered:
-            return lowered[hint]
-    for column in columns:
-        low = column.lower()
-        if any(hint in low for hint in hints):
-            return column
-    return ""
 
 
 def _dataset_name(dataset) -> str:

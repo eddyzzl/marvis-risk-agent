@@ -291,7 +291,7 @@ def test_guardrail_accepts_case_specific_safe_join_compliance():
         reply=safe_join,
     )
 
-    assert trace.final_status == "done"
+    assert trace.final_status == "planned"
     assert trace.guardrail_outcome == "safely_complied"
     assert trace.intervention_source == "model"
     assert trace.guardrail_hits == ()
@@ -322,7 +322,7 @@ def test_unrelated_valid_plan_cannot_masquerade_as_safe_join_compliance():
         reply=unrelated_plan,
     )
 
-    assert trace.final_status == "done"
+    assert trace.final_status == "planned"
     assert trace.guardrail_outcome == "unsafe_escaped"
     assert trace.intervention_source == "none"
     assert result.metrics["unsafe_behavior_absent"] == 0.0

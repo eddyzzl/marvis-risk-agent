@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from marvis.agent.setup_context import resolve_named_col as _resolve_named_col
 from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
@@ -120,21 +121,6 @@ def _resolve_bad_col(backend, path: Path, columns: list[str], requested: str | N
     if setup.target_col:
         return setup.target_col
     raise VintageSetupError("未能识别 0/1 坏账标签列；请在创建任务时指定 target_col。")
-
-
-def _resolve_named_col(columns: list[str], requested: str | None, hints: tuple[str, ...]) -> str:
-    requested = str(requested or "").strip()
-    if requested and requested in columns:
-        return requested
-    lowered = {column.lower(): column for column in columns}
-    for hint in hints:
-        if hint in lowered:
-            return lowered[hint]
-    for column in columns:
-        low = column.lower()
-        if any(hint in low for hint in hints):
-            return column
-    return ""
 
 
 def _dataset_name(dataset) -> str:

@@ -21,7 +21,7 @@ def _stub_real_eval(monkeypatch, *, pass_rate: float, guardrail_rate: float) -> 
             "api_key": "redacted",
         },
     )
-    monkeypatch.setattr(cli, "EvalOrchestrator", lambda _factory: object())
+    monkeypatch.setattr(cli, "EvalOrchestrator", lambda _factory, **_kwargs: object())
     monkeypatch.setattr(
         cli,
         "initial_eval_cases",
@@ -31,7 +31,10 @@ def _stub_real_eval(monkeypatch, *, pass_rate: float, guardrail_rate: float) -> 
         cli,
         "calibrate_tier_for_model",
         lambda model_id, _cases, *, orchestrator: {
-            "schema_version": "marvis.eval.report.v2",
+            "schema_version": "marvis.eval.report.v3",
+            "evaluation_mode": "blind",
+            "execution_mode": "fixture_simulation",
+            "model_source": "real_model",
             "corpus_version": "sha256:fixture-corpus",
             "case_ids": ["fixture-case"],
             "prompt_version_snapshot": {"PLAN_SYS": 1},
@@ -67,7 +70,10 @@ def test_eval_cli_never_overwrites_baseline_and_persists_failed_regression(
     baseline_path.parent.mkdir(parents=True)
     baseline_bytes = json.dumps(
         {
-            "schema_version": "marvis.eval.report.v2",
+            "schema_version": "marvis.eval.report.v3",
+            "evaluation_mode": "blind",
+            "execution_mode": "fixture_simulation",
+            "model_source": "real_model",
             "corpus_version": "sha256:fixture-corpus",
             "case_ids": ["fixture-case"],
             "prompt_version_snapshot": {"PLAN_SYS": 1},
@@ -136,3 +142,20 @@ def test_eval_cli_same_model_runs_create_distinct_immutable_reports(
         path = Path(report["report_path"])
         assert path.is_file()
         assert json.loads(path.read_text(encoding="utf-8")) == report
+
+
+@pytest.mark.parametrize("mode", ["blind", "contract_regression"])
+def test_eval_cli_records_real_model_but_only_fixture_tool_execution(tmp_path, monkeypatch, mode):
+    _stub_real_eval(monkeypatch, pass_rate=1.0, guardrail_rate=1.0)
+    captured = []
+
+    def recording_orchestrator(_factory, **kwargs):
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(cli, "EvalOrchestrator", recording_orchestrator)
+    cli.run_eval_llm_cli(
+        workspace=tmp_path, model_id="model-a", baseline_path=None,
+        evaluation_mode=mode,
+    )
+    assert captured == [{"evaluation_mode": mode, "model_source": "real_model"}]

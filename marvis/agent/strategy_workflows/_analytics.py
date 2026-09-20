@@ -4,6 +4,11 @@ from collections.abc import Mapping, Sequence
 import math
 from typing import Any
 
+from ._input_validation import (
+    bounded_number as _bounded_number,
+    column as _column,
+    required_text as _required_text,
+)
 from .contracts import (
     PreparedStrategyPlan,
     StrategyWorkflowPreparationContext,
@@ -501,42 +506,6 @@ def _reject_fields(
             + "、".join(unexpected)
             + "。"
         )
-
-
-def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise StrategyWorkflowValidationError(f"{name} 必须是非空文本。")
-    return value.strip()
-
-
-def _column(value: object, *, name: str, whitelist: tuple[str, ...]) -> str:
-    column = _required_text(value, name=name)
-    if column not in whitelist:
-        raise StrategyWorkflowValidationError(
-            f"{name} 使用了数据集中不存在的列「{column}」。"
-        )
-    return column
-
-
-def _bounded_number(
-    value: object, *, name: str, maximum: float | None = None
-) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise StrategyWorkflowValidationError(f"{name} 必须是有限数字。")
-    number = float(value)
-    if (
-        not math.isfinite(number)
-        or number < 0
-        or (maximum is not None and number > maximum)
-    ):
-        if maximum is None:
-            raise StrategyWorkflowValidationError(
-                f"{name} 必须是大于等于 0 的有限数字。"
-            )
-        raise StrategyWorkflowValidationError(
-            f"{name} 必须是 0 到 {maximum:g} 之间的有限数字。"
-        )
-    return number
 
 
 def _number_sequence(

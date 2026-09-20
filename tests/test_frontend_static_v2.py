@@ -11,6 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from tests.javascript_source import slice_function as _slice_function
 from tests.static_stylesheets import read_browser_stylesheets
 
 
@@ -353,8 +354,6 @@ def _workflow_step_statuses_for(task: dict, notebook_steps: list[dict]) -> list[
     app_js = _read_static("app.js")
     failure_start = app_js.index("function taskFailedDuringScan")
     failure_end = app_js.index("function taskFailureActionStatusTitle", failure_start)
-    workflow_start = app_js.index("function workflowIndex")
-    workflow_end = app_js.index("function workflowStepStatusLabel", workflow_start)
     notebook_start = app_js.index("function notebookStepTone")
     notebook_end = app_js.index("function plannedReproducibilitySteps", notebook_start)
     script = "\n".join(
@@ -366,7 +365,9 @@ def _workflow_step_statuses_for(task: dict, notebook_steps: list[dict]) -> list[
             "function taskBusyAction() { return null; }",
             "function taskServerBusyAction() { return null; }",
             app_js[failure_start:failure_end],
-            app_js[workflow_start:workflow_end],
+            *(_slice_function(app_js, f"function {name}(") for name in (
+                "workflowIndex", "taskFailureStepId", "taskRunningStepId", "workflowStepStatus",
+            )),
             app_js[notebook_start:notebook_end],
             "const statuses = workflowSteps.map((_, index) => workflowStepStatus(index, workflowIndex(selectedTask.status)));",
             "process.stdout.write(JSON.stringify(statuses));",
@@ -4225,9 +4226,7 @@ def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     assert "const selectedBusyAction = taskBusyAction(task?.id);" in downloads_ready
     assert "task?.report_available === true" in downloads_ready
 
-    status_start = app_js.index("function taskActionStatusSnapshot")
-    status_end = app_js.index("function clearStatus", status_start)
-    status_snapshot = app_js[status_start:status_end]
+    status_snapshot = _slice_function(app_js, "function taskActionStatusSnapshot(")
     assert 'task.active_job_kind === "join"' in status_snapshot
     assert "数据拼接进行中。" in status_snapshot
     assert 'task.active_job_kind === "plan"' in status_snapshot
@@ -4342,9 +4341,7 @@ def test_workflow_actions_are_gated_by_completed_previous_steps():
 def test_workflow_step_status_separates_next_action_from_running_action():
     app_js = _read_static("app.js")
 
-    status_start = app_js.index("function workflowStepStatus")
-    status_end = app_js.index("function workflowStepStatusLabel", status_start)
-    status_renderer = app_js[status_start:status_end]
+    status_renderer = _slice_function(app_js, "function workflowStepStatus(")
     running_start = app_js.index("function taskRunningStepId")
     running_end = app_js.index("function workflowStepStatus", running_start)
     running_helper = app_js[running_start:running_end]
@@ -4606,9 +4603,7 @@ def test_feature_create_dialog_has_optional_metric_selector():
 def test_stage_failures_keep_completed_previous_steps_green():
     app_js = _read_static("app.js")
 
-    status_start = app_js.index("function workflowStepStatus")
-    status_end = app_js.index("function workflowStepStatusLabel", status_start)
-    status_renderer = app_js[status_start:status_end]
+    status_renderer = _slice_function(app_js, "function workflowStepStatus(")
     helper_start = app_js.index("function taskFailureStage")
     helper_end = app_js.index("function taskFailureActionStatusTitle", helper_start)
     helper_renderer = app_js[helper_start:helper_end]
@@ -6634,9 +6629,9 @@ def test_failed_task_error_detail_moves_to_current_status_only():
 
     assert "function taskFailureActionStatusMessage" in app_js
     assert "function taskFailureActionStatusTitle" in app_js
-    status_start = app_js.index("function taskFailureActionStatusMessage")
-    status_end = app_js.index("function clearStatus", status_start)
-    status_renderer = app_js[status_start:status_end]
+    status_renderer = "\n".join(_slice_function(app_js, f"function {name}(") for name in (
+        "taskFailureActionStatusMessage", "setTaskFailureActionStatus",
+    ))
     assert "task.status_message" in status_renderer
     assert 'const kind = task.status === "review_required" ? "success" : "error";' in status_renderer
     assert "setActionStatus(taskFailureActionStatusTitle(task), kind, message)" in status_renderer
@@ -8212,7 +8207,6 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "function openDraftToolsDialog" not in app_js
     assert 'openGovernanceSettingsCenter("drafts")' not in app_js
     assert "async function loadDraftTools" in app_js
-    assert "async function inspectDraftTool" in app_js
     assert "async function runDraftTool" in app_js
     assert "async function promoteDraftTool" in app_js
     assert "async function rejectDraftTool" in app_js
@@ -8885,9 +8879,7 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert '`api/agent-memory/${encodeURIComponent(memoryId)}/negative-feedback`' in memory_panel_js
     assert 'async function reportNotUseful' in memory_panel_js
     assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in memory_panel_js
-    assert 'api(`api/tasks/${encodeURIComponent(taskId)}/agent/messages/${encodeURIComponent(messageId)}/memory-references`)' in app_js
     assert 'if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");' in app_js
-    assert "function syncAgentMemoryViewControls" in app_js
     assert "function setAgentMemoryViewMode" in app_js
     assert "dialog.agent-memory-dialog" in styles_css
     assert ".governance-settings-dialog" in styles_css
@@ -10370,20 +10362,6 @@ def test_step_rail_bottom_padding_is_visually_balanced():
 
 
 # ====== Polling render signature guards ======
-
-
-def _slice_function(app_js: str, signature: str) -> str:
-    """Return the source of a top-level function declared with `signature`.
-
-    All top-level functions in app.js close with a `}` at column 0, so we
-    find the next column-0 `}` line after the signature. This is robust
-    against destructured default params (which would confuse naive brace
-    counting started at the first `{`).
-    """
-    start = app_js.index(signature)
-    needle = "\n}"
-    end = app_js.index(needle, start)
-    return app_js[start : end + len(needle)]
 
 
 def _gate_controller_context_region(app_js: str) -> str:

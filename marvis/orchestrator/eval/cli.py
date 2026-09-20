@@ -40,6 +40,7 @@ def run_eval_llm_cli(
     workspace: Path,
     model_id: str | None,
     baseline_path: Path | None,
+    evaluation_mode: str = "blind",
 ) -> dict:
     """Run the planning/guardrail suite against a real configured model.
 
@@ -68,7 +69,9 @@ def run_eval_llm_cli(
     def llm_factory():
         return OpenAICompatibleLLMClient(profile)
 
-    orchestrator = EvalOrchestrator(llm_factory)
+    orchestrator = EvalOrchestrator(
+        llm_factory, evaluation_mode=evaluation_mode, model_source="real_model"
+    )
     cases = list(initial_eval_cases())
     generated_at = datetime.now(UTC)
     run_id = uuid.uuid4().hex

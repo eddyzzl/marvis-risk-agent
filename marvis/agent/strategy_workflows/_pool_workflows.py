@@ -16,6 +16,7 @@ from typing import Any
 from marvis.packs.strategy.dsl import StrategyAction
 from marvis.packs.strategy.errors import StrategyError
 
+from ._input_validation import reject_fields_with_metadata as _reject_fields
 from .contracts import (
     PreparedStrategyPlan,
     StrategyWorkflowPreparationContext,
@@ -1620,26 +1621,6 @@ def _required_text(value: object, *, name: str, workflow: str) -> str:
     if not isinstance(value, str) or not value.strip():
         _invalid(workflow, f"{name} 必须是非空文本。", name)
     return value.strip()
-
-
-def _reject_fields(
-    inputs: Mapping[str, Any],
-    allowed: set[str],
-    *,
-    workflow: str,
-) -> None:
-    if any(not isinstance(key, str) for key in inputs):
-        raise StrategyWorkflowValidationError(
-            f"{workflow} workflow_inputs 字段名必须是文本。"
-        )
-    unexpected = sorted(set(inputs) - allowed)
-    if unexpected:
-        raise StrategyWorkflowValidationError(
-            f"{workflow} workflow_inputs 包含不支持的字段："
-            + "、".join(unexpected)
-            + "。",
-            fields=unexpected,
-        )
 
 
 def _compact_json(value: object) -> str:

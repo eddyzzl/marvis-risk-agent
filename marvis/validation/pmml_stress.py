@@ -28,10 +28,9 @@ from marvis.validation.config import ValidationConfig
 from marvis.validation.field_transformations import (
     apply_confirmed_transformations,
     required_transformation_inputs,
-    topologically_sorted_transformations,
+    transformation_closure,
 )
 from marvis.validation.input_contracts import (
-    TransformationSpec,
     ValidationInputContract,
 )
 from marvis.validation.pmml_score_artifacts import (
@@ -262,7 +261,7 @@ def materialize_oot_pmml_inputs(
         raise ValueError("OOT input materialization requires rows")
     manifest = contract.require_pmml_manifest()
     internal_row_id = _oot_row_id_field(manifest.raw_required_fields)
-    transformations = _transformation_closure(
+    transformations = transformation_closure(
         manifest.raw_required_fields, contract.transformations
     )
     projection = required_transformation_inputs(
@@ -1123,24 +1122,6 @@ def _validated_feature_categories(
         seen.add(category)
         normalized.append((category, fields))
     return tuple(normalized)
-
-
-def _transformation_closure(
-    output_fields: Sequence[str],
-    specs: Sequence[TransformationSpec],
-) -> tuple[TransformationSpec, ...]:
-    ordered = topologically_sorted_transformations(specs)
-    by_output = {spec.output_field: spec for spec in ordered}
-    needed: set[str] = set()
-    stack = list(reversed(tuple(output_fields)))
-    while stack:
-        field = stack.pop()
-        spec = by_output.get(field)
-        if spec is None or field in needed:
-            continue
-        needed.add(field)
-        stack.extend(reversed(spec.input_fields))
-    return tuple(spec for spec in ordered if spec.output_field in needed)
 
 
 def _verify_oot_input_artifact(

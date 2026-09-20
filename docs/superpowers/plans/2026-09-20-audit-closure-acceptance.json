@@ -1,0 +1,1184 @@
+{
+  "schema_version": 1,
+  "dependency_semantics": "Every dependency names a work package and a milestone: B is frozen software baseline, S is software readiness. WP15:S never waits for H/P; WP16 institutional integration waits for WP15:S and actual traffic additionally requires the selected business line's WP15:H. WP12-A can start after WP06:S/WP07:S.",
+  "storage": {
+    "git_ignored_by_existing_policy": false,
+    "staged": false,
+    "committed": false,
+    "implementation_requirement": "Only the approved plan, acceptance ledger, frozen requirements and implementation record are explicitly unignored; historical superpowers files remain ignored."
+  },
+  "document_kind": "authored_development_acceptance_plan",
+  "created_on": "2026-09-20",
+  "baseline_commit": "60d4b1b4",
+  "plan_file": "2026-09-20-audit-closure-development-plan.md",
+  "overall_status": "in_progress",
+  "implementation_started": true,
+  "acceptance_executed": false,
+  "confirmed_user_conditions": {
+    "data": "deidentified_historical_data_only",
+    "institution_test_interfaces": "not_available",
+    "provided_dataset_inventory": "not_yet_inspected"
+  },
+  "evidence_tiers": {
+    "C": "code_contract_negative_tests",
+    "R": "real_runtime_http_ui_fault_injection",
+    "A": "real_llm_and_real_tool_joint_evaluation",
+    "H": "user_historical_data_acceptance",
+    "P": "specified_institution_production_acceptance"
+  },
+  "status_enum": [
+    "planned",
+    "in_progress",
+    "ready_for_review",
+    "failed",
+    "awaiting_external",
+    "closed"
+  ],
+  "closure_rules": [
+    "Every required evidence tier must have original evidence tied to commit, input and criterion versions.",
+    "Fixture, mock, skipped, missing or unknown evidence cannot satisfy a real execution tier.",
+    "Partial software or historical acceptance does not close an item requiring production evidence.",
+    "Unknown or unidentifiable business facts must be detected and bounded; they must not be invented.",
+    "Do not remove failures, change denominators or weaken required scope to close a finding.",
+    "All findings closed and independent review passed are required for overall completion."
+  ],
+  "external_dependencies": [
+    {
+      "id": "EXT01",
+      "description": "Historical data inventory, time semantics, decision actions, labels and cashflows",
+      "status": "awaiting_input",
+      "blocks": [
+        "WP00:H",
+        "WP07:H",
+        "WP12:H",
+        "WP15:H"
+      ]
+    },
+    {
+      "id": "EXT02",
+      "description": "Device/relationship/fraud and collection action/cost/recovery histories",
+      "status": "availability_unknown",
+      "blocks": [
+        "WP13:H",
+        "WP14:H"
+      ]
+    },
+    {
+      "id": "EXT03",
+      "description": "Institution/vendor API contracts, test environments, identities and notification channels",
+      "status": "unavailable",
+      "blocks": [
+        "WP16:P"
+      ]
+    },
+    {
+      "id": "EXT04",
+      "description": "Business-approved production scope, SLO, action policies, risk limits and independent approvers",
+      "status": "not_yet_defined",
+      "blocks": [
+        "WP16:P"
+      ]
+    },
+    {
+      "id": "EXT05",
+      "description": "Mature production outcomes and identifiable experiment evidence where causal claims are required",
+      "status": "not_yet_collected",
+      "blocks": [
+        "WP16:P"
+      ]
+    }
+  ],
+  "work_packages": [
+    {
+      "id": "WP00",
+      "status": "in_progress",
+      "dependencies": [],
+      "notes": "Software baseline 60d4b1b4; initial code-only entrypoint/workflow/tool/artifact inventory and dynamic/compatibility boundaries recorded in implementation.md. Unrelated work preserved. Historical dataset location, complete compatibility-symbol inventory and frozen business budgets remain open.",
+      "milestones": {
+        "B": "in_progress",
+        "H": "awaiting_input"
+      }
+    },
+    {
+      "id": "WP01",
+      "status": "in_progress",
+      "dependencies": [
+        {
+          "work_package": "WP00",
+          "milestone": "B"
+        }
+      ],
+      "notes": "Blind expected isolation, fixture provenance and read-only evidence integrity gate implemented. Real Executor benchmark runner and trusted acceptance adapters are still pending. No real-execution acceptance claimed.",
+      "milestones": {
+        "S": "in_progress"
+      }
+    },
+    {
+      "id": "WP02",
+      "status": "in_progress",
+      "dependencies": [
+        {
+          "work_package": "WP00",
+          "milestone": "B"
+        }
+      ],
+      "notes": "Initial six unused frontend functions removed, behavior tests added; actual settings/memory/draft UI passed at 1440/1600/1920. Independent tied-score KS fixed and C01-C10 helper implementations consolidated. Full suite: 12543 passed, 2 path-sensitive negatives failed with in-repository basetemp, 11 skipped; unchanged two negatives passed using external basetemp. Remaining compatibility symbols and task/batch UI coverage stay open.",
+      "milestones": {
+        "S": "in_progress"
+      }
+    },
+    {
+      "id": "WP03",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP02",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP04",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP03",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP05",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP02",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP06",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP00",
+          "milestone": "B"
+        },
+        {
+          "work_package": "WP01",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP07",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP00",
+          "milestone": "B"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP08",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP01",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP03",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP04",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP06",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP07",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP09",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP06",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP07",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP10",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP09",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP11",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP06",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP12",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP06",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP07",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP09",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP10",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP11",
+          "milestone": "S"
+        }
+      ],
+      "notes": "Historical submilestone WP12-A may start after WP06/WP07; runtime submilestone WP12-B requires the full dependency list.",
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP13",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP07",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP09",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP10",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP14",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP06",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP07",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP09",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP10",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned"
+      }
+    },
+    {
+      "id": "WP15",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP01",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP02",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP03",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP04",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP05",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP06",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP07",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP08",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP09",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP10",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP11",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP12",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP13",
+          "milestone": "S"
+        },
+        {
+          "work_package": "WP14",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "S": "planned",
+        "H": "planned"
+      }
+    },
+    {
+      "id": "WP16",
+      "status": "planned",
+      "dependencies": [
+        {
+          "work_package": "WP15",
+          "milestone": "S"
+        }
+      ],
+      "notes": null,
+      "milestones": {
+        "P": "awaiting_external"
+      },
+      "traffic_preconditions": [
+        "WP15:H for the selected business line",
+        "Institution-specific authorization, data, identities, policies and SLO"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "F01",
+      "title": "真实模型与真实工具的完整任务证据不足",
+      "status": "planned",
+      "work_packages": [
+        "WP01",
+        "WP08",
+        "WP15"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "A",
+        "H"
+      ],
+      "source_paths": [
+        "marvis/orchestrator/eval/runner.py",
+        "marvis/agent/plan_driver.py"
+      ],
+      "closure_criterion": "冻结任务集经真实入口完成联合评测；保留失败分母、干预、成本和置信区间。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F02",
+      "title": "expected 输入污染与模拟完成口径混用",
+      "status": "in_progress",
+      "work_packages": [
+        "WP01"
+      ],
+      "required_evidence_tiers": [
+        "C"
+      ],
+      "source_paths": [
+        "marvis/orchestrator/eval/runner.py"
+      ],
+      "closure_criterion": "expected 隔离反例通过；契约、盲测和真实执行结果分开，fixture 不可满足真实执行门槛。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F03",
+      "title": "流程完成与业务达标混用",
+      "status": "planned",
+      "work_packages": [
+        "WP06",
+        "WP15"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "A",
+        "H"
+      ],
+      "source_paths": [
+        "marvis/orchestrator/reviewer.py",
+        "marvis/orchestrator/templates/_shared.py"
+      ],
+      "closure_criterion": "执行、业务验收、审批状态独立；缺标准、缺证据、错采用对象不产生业务通过。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F04",
+      "title": "数据准备到训练缺少强制时间正确性契约",
+      "status": "planned",
+      "work_packages": [
+        "WP00",
+        "WP07"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "H"
+      ],
+      "source_paths": [
+        "marvis/data/contracts.py",
+        "marvis/data/join_engine.py",
+        "marvis/packs/modeling/readiness.py"
+      ],
+      "closure_criterion": "时点与修订规则贯通；穿越负例正确阻断；未知历史可得性明确不可证明且不被补造。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F05",
+      "title": "情景假设与实际增量收益证据不足",
+      "status": "planned",
+      "work_packages": [
+        "WP06",
+        "WP12",
+        "WP16"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/packs/strategy/economics.py",
+        "marvis/packs/modeling/reject_inference.py"
+      ],
+      "closure_criterion": "假设、观察、可识别增量效果分开；成熟结果正确对账；无法识别时不输出因果收益。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F06",
+      "title": "默认监控装配不完整",
+      "status": "planned",
+      "work_packages": [
+        "WP11",
+        "WP16"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/operations/integration.py",
+        "marvis/app.py"
+      ],
+      "closure_criterion": "标准入口可执行已配置监控与通知；水位、调度和送达有实际证明，机构环境独立验证。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F07",
+      "title": "生产激活与回滚缺运行环境闭环",
+      "status": "planned",
+      "work_packages": [
+        "WP09",
+        "WP10",
+        "WP16"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/production_governance/evidence.py",
+        "marvis/production_governance/repository.py"
+      ],
+      "closure_criterion": "目标环境真实切换与回滚并读回；外部成功本地失败可恢复；不能仅以数据库状态证明。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F08",
+      "title": "decision_twin 未完整接入用户路径",
+      "status": "planned",
+      "work_packages": [
+        "WP12",
+        "WP15",
+        "WP16"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "A",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/decision_twin/authenticated_entry.py",
+        "marvis/decision_twin/reconciliation.py"
+      ],
+      "closure_criterion": "Tool、Workflow、API、UI及报告贯通；历史/实际来源、执行动作和成熟结果正确绑定。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F09",
+      "title": "申请级在线决策服务缺口",
+      "status": "planned",
+      "work_packages": [
+        "WP09",
+        "WP16"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/packs/modeling/scoring.py",
+        "marvis/packs/strategy/dsl.py"
+      ],
+      "closure_criterion": "真实服务复用既有评分与策略；幂等、原因码、版本、降级和已冻结SLO通过。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F10",
+      "title": "KYC征信及实时反欺诈工作流缺口",
+      "status": "planned",
+      "work_packages": [
+        "WP13",
+        "WP16"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/packs/modeling/scenarios.py"
+      ],
+      "closure_criterion": "连接器和事件关系特征完整参考旅程通过，并完成指定机构与适用历史数据验证。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F11",
+      "title": "催收动作尚不支持",
+      "status": "planned",
+      "work_packages": [
+        "WP14",
+        "WP16"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/packs/strategy/candidate_design.py"
+      ],
+      "closure_criterion": "typed动作、政策约束、执行、成本和回收反馈闭环通过；不再以分群冒充催收。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F12",
+      "title": "六个前端内部函数无生产调用",
+      "status": "in_progress",
+      "work_packages": [
+        "WP02"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/static/app.js"
+      ],
+      "closure_criterion": "确认残留删除且真实controller入口行为保持，相关测试不再依赖死符号。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F13",
+      "title": "源码形状断言保护残留",
+      "status": "in_progress",
+      "work_packages": [
+        "WP01",
+        "WP02",
+        "WP05"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "tests/test_frontend_static_v2.py"
+      ],
+      "closure_criterion": "已审无效断言清除；关键交互以行为和真实后端浏览器验收，不以名称存在证明功能。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F14",
+      "title": "同业务语义辅助逻辑重复",
+      "status": "in_progress",
+      "work_packages": [
+        "WP02",
+        "WP03"
+      ],
+      "required_evidence_tiers": [
+        "C"
+      ],
+      "source_paths": [
+        "marvis/validation/input_confirmation.py",
+        "marvis/validation/platform_metrics.py",
+        "marvis/validation/pmml_stress.py",
+        "marvis/validation/stress_risk.py",
+        "marvis/output/excel.py",
+        "marvis/validation/results.py",
+        "marvis/validation/stress_test.py",
+        "marvis/agent/vintage_setup.py",
+        "marvis/agent/portfolio_setup.py",
+        "marvis/agent/modeling_setup.py",
+        "marvis/agent/join_setup.py",
+        "marvis/agent/strategy_workflows/_tree_workflows.py",
+        "marvis/agent/strategy_workflows/_pool_workflows.py",
+        "marvis/agent/strategy_workflows/_cross_voting.py",
+        "marvis/agent/strategy_workflows/_analytics.py",
+        "marvis/agent/strategy_workflows/_univariate_scorecard.py",
+        "marvis/agent/strategy_workflows/_foundation_delivery.py",
+        "marvis/feature/univariate.py",
+        "marvis/packs/strategy/candidate_asset.py",
+        "marvis/validation/pmml_score_artifacts.py"
+      ],
+      "closure_criterion": "C01-C10 each have a recorded canonical implementation or a reviewed explicit semantic variant, all consumers migrated, behavior evidence and dependency direction verified; completing only validation groups is insufficient.",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F15",
+      "title": "效果验证流程四处编排",
+      "status": "planned",
+      "work_packages": [
+        "WP03"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/validation/effectiveness.py",
+        "marvis/validation/platform_metrics.py",
+        "marvis/pipeline_cellgen.py"
+      ],
+      "closure_criterion": "所有入口复用同一阶段定义，指标、Notebook内存、进度、取消与事务保持。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F16",
+      "title": "源码exec共享全局命名空间",
+      "status": "planned",
+      "work_packages": [
+        "WP04"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R",
+        "A"
+      ],
+      "source_paths": [
+        "marvis/agent/turn_handlers/__init__.py",
+        "marvis/agent/strategy_request_compiler/__init__.py"
+      ],
+      "closure_criterion": "两个包正常模块化；不依赖共享globals或导入顺序；兼容和Agent旅程通过。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F17",
+      "title": "前端任务与消息状态所有权不清",
+      "status": "planned",
+      "work_packages": [
+        "WP05"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/static/app.js",
+        "marvis/static/js/task-workspace-state.js"
+      ],
+      "closure_criterion": "唯一任务会话所有权；乱序响应、任务/模型切换、编辑与轮询竞态不串状态。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F18",
+      "title": "validation混入任务数据库和产物副作用",
+      "status": "planned",
+      "work_packages": [
+        "WP03"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/validation/suggested_confirmation.py",
+        "marvis/validation/platform_metrics.py"
+      ],
+      "closure_criterion": "指定算法入口不再拥有DB/HTTP/报告生命周期，服务编排与兼容行为通过。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F19",
+      "title": "独立KS参考核并列分数错误",
+      "status": "in_progress",
+      "work_packages": [
+        "WP02"
+      ],
+      "required_evidence_tiers": [
+        "C"
+      ],
+      "source_paths": [
+        "marvis/reconcile.py",
+        "tests/test_reconcile.py"
+      ],
+      "closure_criterion": "并列与排列不变性等边界正确，独立参考算法仍独立，生产KS不被无故改变。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F20",
+      "title": "测试独用和兼容符号缺少处置依据",
+      "status": "in_progress",
+      "work_packages": [
+        "WP00",
+        "WP02",
+        "WP04"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/validation/effectiveness.py",
+        "marvis/api.py",
+        "marvis/db.py"
+      ],
+      "closure_criterion": "逐项记录保留、迁移或删除依据；不删除动态/公开入口，不无限保留无消费方别名。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F21",
+      "title": "正常执行和恢复完成契约分叉",
+      "status": "planned",
+      "work_packages": [
+        "WP03"
+      ],
+      "required_evidence_tiers": [
+        "C",
+        "R"
+      ],
+      "source_paths": [
+        "marvis/orchestrator/executor.py",
+        "marvis/orchestrator/plan_recovery.py"
+      ],
+      "closure_criterion": "复核条件、warning与事件契约一致；多故障窗口恢复测试和副作用幂等通过。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    },
+    {
+      "id": "F22",
+      "title": "业务负责人完整旅程和人工工作量未验收",
+      "status": "planned",
+      "work_packages": [
+        "WP15",
+        "WP16"
+      ],
+      "required_evidence_tiers": [
+        "R",
+        "A",
+        "H",
+        "P"
+      ],
+      "source_paths": [
+        "marvis/agent/plan_driver.py",
+        "marvis/production_governance/repository.py"
+      ],
+      "closure_criterion": "真实操作者经应用完成已承诺旅程，无开发者救场；工作量记录且发布职责分离。",
+      "evidence": [],
+      "independent_review": null,
+      "criterion_version": "audit-closure-v1"
+    }
+  ],
+  "next_review": {
+    "mode": "source_first_and_original_runtime_evidence",
+    "reviewer_independent_of_implementation": true,
+    "claim_limits": [
+      "No guarantee of universal autonomy or absence of future defects.",
+      "No production or causal benefit claim based only on historical replay or reference services.",
+      "Industry leadership requires independent comparative evidence and is not an acceptance result of this repository plan."
+    ]
+  },
+  "evidence_record_contract": {
+    "status": "integrity_gate_implemented_trusted_receipt_and_review_adapters_pending",
+    "required_fields": [
+      "schema_version",
+      "run_id",
+      "finding_ids",
+      "work_package",
+      "evidence_tier",
+      "environment_kind",
+      "source_kind",
+      "target_id",
+      "commit",
+      "dataset_hashes",
+      "input_hashes",
+      "criterion_version",
+      "real_executor",
+      "tool_receipts",
+      "artifact_hashes",
+      "independent_review",
+      "evidence_paths",
+      "source_hashes"
+    ],
+    "environment_kind_enum": [
+      "test_process",
+      "local_reference",
+      "institution_test",
+      "institution_production"
+    ],
+    "source_kind_enum": [
+      "synthetic_fixture",
+      "deidentified_historical",
+      "reference_runtime",
+      "institution_runtime"
+    ],
+    "validation_rules": [
+      "P requires institution_production target identity and verified real operation receipts; institution_test alone is insufficient.",
+      "H requires a user historical-data manifest and cannot use synthetic_fixture as the business evidence.",
+      "A requires a real model profile, real Executor and real Tool receipts.",
+      "C/R may use synthetic input, but R still requires actual application execution.",
+      "Closed rejects missing original evidence, hash/input/criterion mismatch or missing independent review."
+    ],
+    "independent_review_required": true,
+    "schema_version": "marvis.audit_evidence.v1",
+    "reference_format": {
+      "path": "relative/record.json",
+      "sha256": "64 lowercase hexadecimal characters"
+    },
+    "hash_map_format": "source_hashes maps source-root-relative paths to SHA-256; dataset/input/artifact hashes map evidence-root-relative paths to SHA-256. Hashes prove binding, not execution. CLI has no trusted receipt/reviewer adapters and cannot authenticate closure.",
+    "requirements_spec_file": "2026-09-20-audit-closure-requirements.json",
+    "requirements_spec_sha256": "05587bd02aec550400a9a6d4ad726766a3ddbf67fe204a2de28c974e26f8cc6b",
+    "trust_rule": "The ledger copy of the spec digest is descriptive only. The acceptance environment must independently supply the approved digest/spec and trusted receipt and review verifiers. Never derive trusted requirements from this candidate ledger."
+  },
+  "clone_groups": [
+    {
+      "id": "C01",
+      "finding": "F14",
+      "symbol": "_transformation_closure",
+      "consumers": [
+        "marvis/validation/input_confirmation.py",
+        "marvis/validation/platform_metrics.py",
+        "marvis/validation/pmml_stress.py",
+        "marvis/validation/pmml_score_artifacts.py"
+      ],
+      "target_owner": "marvis/validation/field_transformations.py",
+      "status": "ready_for_review",
+      "disposition": "Single transformation_closure in validation/field_transformations.py; all four consumers use it. Independent review found and included the fourth copy in pmml_score_artifacts.py.",
+      "evidence": []
+    },
+    {
+      "id": "C02",
+      "finding": "F14",
+      "symbol": "stress_risk_label / _stress_risk_label",
+      "consumers": [
+        "marvis/validation/stress_risk.py",
+        "marvis/output/excel.py"
+      ],
+      "target_owner": "marvis/validation/stress_risk.py",
+      "status": "ready_for_review",
+      "disposition": "Excel uses validation/stress_risk.py stress_risk_label directly.",
+      "evidence": []
+    },
+    {
+      "id": "C03",
+      "finding": "F14",
+      "symbol": "_stress_test_status_from_categories / _stress_test_status",
+      "consumers": [
+        "marvis/validation/results.py",
+        "marvis/validation/stress_test.py"
+      ],
+      "target_owner": "narrow stress-state function without result-class imports",
+      "status": "ready_for_review",
+      "disposition": "Both execution and legacy result decoding use validation/stress_status.py with category status strings; no result-class dependency.",
+      "evidence": []
+    },
+    {
+      "id": "C04",
+      "finding": "F14",
+      "symbol": "_resolve_named_col",
+      "consumers": [
+        "marvis/agent/vintage_setup.py",
+        "marvis/agent/portfolio_setup.py"
+      ],
+      "target_owner": "proposed marvis/agent/setup_context.py",
+      "status": "ready_for_review",
+      "disposition": "agent/setup_context.py owns resolve_named_col; existing consumers keep local import aliases.",
+      "evidence": []
+    },
+    {
+      "id": "C05",
+      "finding": "F14",
+      "symbol": "_dataset_name",
+      "consumers": [
+        "marvis/agent/modeling_setup.py",
+        "marvis/agent/join_setup.py"
+      ],
+      "target_owner": "proposed marvis/agent/setup_context.py",
+      "status": "ready_for_review",
+      "disposition": "agent/setup_context.py owns dataset_name with explicit registry dependency.",
+      "evidence": []
+    },
+    {
+      "id": "C06",
+      "finding": "F14",
+      "symbol": "_reject_fields",
+      "consumers": [
+        "marvis/agent/strategy_workflows/_tree_workflows.py",
+        "marvis/agent/strategy_workflows/_pool_workflows.py"
+      ],
+      "target_owner": "proposed marvis/agent/strategy_workflows/_input_validation.py",
+      "status": "ready_for_review",
+      "disposition": "strategy_workflows/_input_validation.py shares reject-field checking but preserves structured exception fields for tree/pool.",
+      "evidence": []
+    },
+    {
+      "id": "C07",
+      "finding": "F14",
+      "symbol": "_bounded_number",
+      "consumers": [
+        "marvis/agent/strategy_workflows/_cross_voting.py",
+        "marvis/agent/strategy_workflows/_analytics.py",
+        "marvis/agent/strategy_workflows/_univariate_scorecard.py"
+      ],
+      "target_owner": "proposed marvis/agent/strategy_workflows/_input_validation.py",
+      "status": "ready_for_review",
+      "disposition": "strategy_workflows/_input_validation.py owns the identical bounded-number contract.",
+      "evidence": []
+    },
+    {
+      "id": "C08",
+      "finding": "F14",
+      "symbol": "_reject_fields",
+      "consumers": [
+        "marvis/agent/strategy_workflows/_cross_voting.py",
+        "marvis/agent/strategy_workflows/_univariate_scorecard.py"
+      ],
+      "target_owner": "proposed marvis/agent/strategy_workflows/_input_validation.py with explicit semantic variants if needed",
+      "status": "ready_for_review",
+      "disposition": "Explicit reject_fields variant preserves cross/univariate error semantics without structured fields.",
+      "evidence": []
+    },
+    {
+      "id": "C09",
+      "finding": "F14",
+      "symbol": "_column",
+      "consumers": [
+        "marvis/agent/strategy_workflows/_cross_voting.py",
+        "marvis/agent/strategy_workflows/_foundation_delivery.py",
+        "marvis/agent/strategy_workflows/_univariate_scorecard.py"
+      ],
+      "target_owner": "strategy workflow field-validation responsibility",
+      "status": "ready_for_review",
+      "disposition": "strategy_workflows/_input_validation.py owns column/required-text checking for identical consumers.",
+      "evidence": []
+    },
+    {
+      "id": "C10",
+      "finding": "F14",
+      "symbol": "_amount_metrics",
+      "consumers": [
+        "marvis/feature/univariate.py",
+        "marvis/packs/strategy/candidate_asset.py"
+      ],
+      "target_owner": "pure amount metrics in the feature domain",
+      "status": "ready_for_review",
+      "disposition": "feature/amount_metrics.py owns pure paired amount and coverage metrics; no reverse strategy dependency.",
+      "evidence": []
+    }
+  ],
+  "agent_benchmark_plan": {
+    "separate_sets": [
+      "development",
+      "fixed_regression",
+      "independently_held_hidden_acceptance"
+    ],
+    "expected_result_type_frozen_before_run": true,
+    "base_normal": {
+      "families": 8,
+      "cases_per_family": 8,
+      "total": 64,
+      "min_success": 61,
+      "min_per_family": 7
+    },
+    "base_boundaries": {
+      "total": 20,
+      "min_correct": 20
+    },
+    "base_recovery": {
+      "total": 16,
+      "min_success": 16
+    },
+    "extension_normal": {
+      "families": 3,
+      "min_cases_per_family": 10,
+      "minimum_rate_per_family": 0.95,
+      "min_success_when_ten": 10,
+      "denominator_separate": true
+    },
+    "repeated_critical": {
+      "distinct_cases": 20,
+      "repeats": 3,
+      "total_runs": 60,
+      "min_success": 57
+    },
+    "severe_safety_or_evidence_failures_allowed": 0,
+    "denominator_includes": [
+      "failures",
+      "skips",
+      "fixture_substitutions",
+      "timeouts",
+      "budget_exhaustions",
+      "environment_failures",
+      "scorer_failures"
+    ],
+    "confidence_intervals_required": true,
+    "hidden_failure_protocol": "Preserve the original run and denominator, migrate exposed failures into regression, have an independent reviewer add unseen matched tasks, and report both original and added acceptance sets."
+  }
+}

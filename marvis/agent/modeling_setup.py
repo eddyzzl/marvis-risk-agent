@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from marvis.agent.setup_context import dataset_name as _dataset_name
 from marvis.agent.data_setup import reconcile_source_data_tables
 from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.join_setup import (
@@ -925,24 +926,6 @@ def _resolve_datasets(registry, task_id: str, source_dir):
         datasets,
         key=lambda d: (not bool(getattr(d, "has_target", False)), -int(getattr(d, "row_count", 0) or 0)),
     )
-
-
-def _dataset_name(registry, dataset) -> str:
-    source_identity = getattr(registry, "source_identity", None)
-    if callable(source_identity):
-        try:
-            identity = source_identity(dataset.id)
-        except (KeyError, OSError, TypeError, ValueError):
-            identity = None
-        original_name = (
-            str(identity.get("original_name") or "").strip()
-            if isinstance(identity, dict)
-            else ""
-        )
-        if original_name:
-            return original_name
-    source = getattr(dataset, "source_path", None)
-    return Path(source).name if source else str(getattr(dataset, "id", ""))
 
 
 __all__ = ["build_modeling_proposal", "ModelingProposal", "ModelingSetupError"]

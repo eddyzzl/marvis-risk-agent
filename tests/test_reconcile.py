@@ -136,3 +136,35 @@ def test_naive_ks_matches_production_feature_ks():
 def test_naive_ks_handles_single_class_and_empty():
     assert naive_ks([1.0, 2.0, 3.0], [1, 1, 1]) == 0.0
     assert naive_ks([], []) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("scores", "target", "expected"),
+    [
+        ([0.5, 0.5], [0, 1], 0.0),
+        ([1, 1, 2, 2], [0, 1, 0, 1], 0.0),
+        ([1, 1, 2, 3], [0, 1, 1, 0], 0.5),
+        ([1, 2, 2, 3], [0, 1, 0, 1], 0.5),
+        ([1, 1, np.nan, np.inf, 3], [0, 1, 1, 0, np.nan], 0.0),
+    ],
+)
+def test_naive_ks_ties_use_complete_score_groups(scores, target, expected):
+    from marvis.feature.metrics import feature_ks  # noqa: PLC0415
+
+    # Hand-calculated CDF differences, independent of the production kernel.
+    assert naive_ks(scores, target) == pytest.approx(expected)
+    assert feature_ks(scores, target) == pytest.approx(expected)
+
+
+def test_naive_ks_preserves_reference_filter_for_nonbinary_targets():
+    # The reference drops invalid pairs; production rejects nonbinary labels.
+    assert naive_ks([1, 1, 2], [0, 1, 2]) == 0.0
+
+
+def test_naive_ks_is_invariant_to_row_order_with_tied_scores():
+    scores = np.array([1, 1, 1, 2, 2, 3, 3, 3])
+    target = np.array([0, 0, 1, 0, 1, 1, 1, 0])
+    rng = np.random.default_rng(41)
+    for _ in range(30):
+        order = rng.permutation(len(scores))
+        assert naive_ks(scores[order], target[order]) == pytest.approx(0.25)

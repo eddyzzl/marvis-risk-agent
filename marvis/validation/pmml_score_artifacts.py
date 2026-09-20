@@ -26,7 +26,7 @@ import pypmml
 from marvis.validation.field_transformations import (
     apply_confirmed_transformations,
     required_transformation_inputs,
-    topologically_sorted_transformations,
+    transformation_closure,
 )
 from marvis.validation.input_contracts import (
     TransformationSpec,
@@ -379,7 +379,7 @@ def build_pmml_scoring_identity(
     if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
         raise ValueError("PMML scoring chunk size must be a positive integer")
     manifest = contract.require_pmml_manifest()
-    transformations = _transformation_closure(
+    transformations = transformation_closure(
         manifest.raw_required_fields, contract.transformations
     )
     transformation_digest = _transformation_sha256(transformations)
@@ -428,23 +428,6 @@ def pmml_scoring_cache_key(
         separators=(",", ":"),
     )
     return sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _transformation_closure(
-    output_fields: Sequence[str], specs: Sequence[TransformationSpec]
-) -> tuple[TransformationSpec, ...]:
-    ordered = topologically_sorted_transformations(specs)
-    by_output = {item.output_field: item for item in ordered}
-    needed: set[str] = set()
-    stack = list(output_fields)
-    while stack:
-        field = stack.pop()
-        spec = by_output.get(field)
-        if spec is None or field in needed:
-            continue
-        needed.add(field)
-        stack.extend(spec.input_fields)
-    return tuple(item for item in ordered if item.output_field in needed)
 
 
 def _material_digest(
@@ -565,7 +548,7 @@ def run_pmml_scoring(
 
     manifest = contract.require_pmml_manifest()
     output_field = contract.require_output_field()
-    transformations = _transformation_closure(
+    transformations = transformation_closure(
         manifest.raw_required_fields, contract.transformations
     )
     projected_columns = required_transformation_inputs(

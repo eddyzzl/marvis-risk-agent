@@ -132,6 +132,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path to a previous eval-llm JSON report; exits non-zero on regression",
     )
+    eval_llm_parser.add_argument(
+        "--evaluation-mode",
+        choices=("blind", "contract_regression"),
+        default="blind",
+        help="Blind planning evaluation (default), or expected-guided contract regression; neither proves real tool execution",
+    )
 
     backup_parser = subparsers.add_parser(
         "backup",
@@ -308,12 +314,18 @@ def _eval_llm(args: argparse.Namespace) -> None:
             workspace=settings.workspace,
             model_id=args.model_id,
             baseline_path=args.baseline,
+            evaluation_mode=args.evaluation_mode,
         )
     except (EvalCliError, LLMSettingsError) as exc:
         print(str(exc))
         raise SystemExit(1) from exc
     recommended = report.get("recommended_tier")
     print(f"MARVIS eval-llm report written to {report['report_path']}")
+    print(
+        f"evaluation_mode={report.get('evaluation_mode', 'unknown')} "
+        f"execution_mode={report.get('execution_mode', 'unknown')} "
+        f"recommendation_scope={report.get('recommendation_scope', 'unknown')}"
+    )
     print(f"model_id={report['model_id']} recommended_tier={recommended}")
     for tier, data in sorted(report.get("per_tier", {}).items()):
         print(

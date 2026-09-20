@@ -218,10 +218,12 @@ def naive_bad_rate(target: Any) -> float:
 
 
 def naive_ks(scores: Any, target: Any) -> float:
-    """Direct KS: max gap between the cumulative bad and good distributions over
-    all rank positions. Independent of feature.metrics.feature_ks -- this version
-    evaluates the gap at EVERY sorted row (no change-point compression), which is
-    numerically equal to the change-point max for the same data."""
+    """Independent empirical-CDF KS reference, evaluated at distinct scores.
+
+    A threshold cannot split a tied score group. Computing each class's CDF
+    separately also keeps this reference independent of the production kernel's
+    combined sort and cumulative-label implementation.
+    """
     import numpy as np
 
     scores_arr = np.asarray(list(scores), dtype="float64")
@@ -232,14 +234,13 @@ def naive_ks(scores: Any, target: Any) -> float:
     target_arr = target_arr[mask]
     if scores_arr.size == 0:
         return 0.0
-    order = np.argsort(scores_arr, kind="mergesort")
-    sorted_target = target_arr[order]
-    total_bad = float(np.sum(sorted_target == 1.0))
-    total_good = float(np.sum(sorted_target == 0.0))
-    if total_bad == 0.0 or total_good == 0.0:
+    bad_scores = np.sort(scores_arr[target_arr == 1.0])
+    good_scores = np.sort(scores_arr[target_arr == 0.0])
+    if bad_scores.size == 0 or good_scores.size == 0:
         return 0.0
-    cum_bad = np.cumsum(sorted_target == 1.0) / total_bad
-    cum_good = np.cumsum(sorted_target == 0.0) / total_good
+    thresholds = np.unique(scores_arr)
+    cum_bad = np.searchsorted(bad_scores, thresholds, side="right") / bad_scores.size
+    cum_good = np.searchsorted(good_scores, thresholds, side="right") / good_scores.size
     return float(np.max(np.abs(cum_bad - cum_good)))
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -31,7 +31,7 @@ from marvis.validation.effectiveness import (
 from marvis.validation.field_transformations import (
     apply_confirmed_transformations,
     required_transformation_inputs,
-    topologically_sorted_transformations,
+    transformation_closure,
 )
 from marvis.validation.feature_categories import (
     FeatureCategoryConflict,
@@ -45,7 +45,6 @@ from marvis.validation.input_confirmation import (
 )
 from marvis.validation.input_contracts import (
     FeatureMetadataResolution,
-    TransformationSpec,
     ValidationInputContract,
 )
 from marvis.validation.pmml_score_artifacts import (
@@ -267,7 +266,7 @@ def load_pmml_analysis_frame(
     target_col = _confirmed_field(contract, "target_col")
     split_col = _confirmed_field(contract, "split_col")
     time_col = _confirmed_field(contract, "time_col")
-    transformations = _transformation_closure(
+    transformations = transformation_closure(
         (target_col, split_col, time_col),
         contract.transformations,
     )
@@ -548,24 +547,6 @@ def _confirmed_field(contract: ValidationInputContract, key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"validation input contract has no confirmed {key}")
     return value
-
-
-def _transformation_closure(
-    output_fields: Sequence[str],
-    specs: Sequence[TransformationSpec],
-) -> tuple[TransformationSpec, ...]:
-    ordered = topologically_sorted_transformations(specs)
-    by_output = {spec.output_field: spec for spec in ordered}
-    needed: set[str] = set()
-    stack = list(reversed(tuple(output_fields)))
-    while stack:
-        field = stack.pop()
-        spec = by_output.get(field)
-        if spec is None or field in needed:
-            continue
-        needed.add(field)
-        stack.extend(reversed(spec.input_fields))
-    return tuple(spec for spec in ordered if spec.output_field in needed)
 
 
 def _validated_split_identity_mapping(value: object) -> dict[tuple[str, str], str]:

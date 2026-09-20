@@ -190,6 +190,10 @@ def server(tmp_path: Path):
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
     env = dict(os.environ)
+    # Keep real converter/server failures inspectable and avoid filling an
+    # undrained PIPE while HTTP polling is in progress.
+    server_log = tmp_path / "server.log"
+    log_stream = server_log.open("w", encoding="utf-8")
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -205,7 +209,7 @@ def server(tmp_path: Path):
         ],
         cwd=str(Path(__file__).resolve().parents[1]),
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=log_stream,
         stderr=subprocess.STDOUT,
         text=True,
     )
@@ -219,6 +223,7 @@ def server(tmp_path: Path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=10)
+        log_stream.close()
 
 
 def test_real_server_join_and_modeling_journey(server, tmp_path: Path):

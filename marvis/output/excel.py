@@ -32,6 +32,7 @@ from marvis.output.styles import (
     worst_stress_risk,
 )
 from marvis.output.xlsx_safety import safe_xlsx_cell
+from marvis.validation.stress_risk import stress_risk_label
 from marvis.validation.results import (
     BinRow,
     ConsistencyStatus,
@@ -439,7 +440,7 @@ def _write_stress_summary(workbook: Workbook, results: ValidationResults) -> Non
                 else ""
             ),
             item.psi_vs_baseline if item.psi_vs_baseline is not None else "",
-            _stress_risk_label(overall_risk),
+            stress_risk_label(overall_risk),
         ))
 
     _write_rows(
@@ -541,14 +542,6 @@ def _oot_psi(results: ValidationResults) -> float | None:
         if str(row.split).lower() == "oot":
             return float(row.psi_vs_train)
     return None
-
-
-def _stress_risk_label(risk: str | None) -> str:
-    return {
-        "low": "低风险",
-        "medium": "中风险",
-        "high": "高风险",
-    }.get(str(risk or ""), "无法评估")
 
 
 def _fill_stress_risk_cell(cell, risk: str | None) -> None:

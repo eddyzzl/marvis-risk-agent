@@ -25,7 +25,7 @@ def test_pyproject_declares_runtime_dependency_bounds():
         '"nbclient>=0.8,<0.12"',
         '"nbformat>=5.9,<6"',
         '"ipykernel>=6.23.2,<8"',
-        '"scikit-learn>=1.4,<2"',
+        '"scikit-learn>=1.4,<1.9.1"',
     ]:
         assert requirement in text
 
@@ -479,3 +479,25 @@ def test_update_from_conda_base_reuses_dedicated_env_without_deps(monkeypatch, t
     ]
     assert result["install_target"] == "conda:marvis"
     assert (tmp_path / cli.LAUNCHER_ENV_FILE).read_text(encoding="utf-8") == "marvis\n"
+@pytest.mark.parametrize("mode", ["blind", "contract_regression"])
+def test_eval_cli_passes_explicit_mode_to_evaluation(monkeypatch, tmp_path, capsys, mode):
+    from marvis.orchestrator.eval import cli as eval_cli
+
+    captured = {}
+
+    def run(**kwargs):
+        captured.update(kwargs)
+        return {
+            "report_path": "report.json", "model_id": "test", "per_tier": {},
+            "evaluation_mode": mode, "execution_mode": "fixture_simulation",
+            "recommendation_scope": "planning_only",
+        }
+
+    monkeypatch.setattr(eval_cli, "run_eval_llm_cli", run)
+    args = cli._parse_args([
+        "eval-llm", "--workspace", str(tmp_path), "--evaluation-mode", mode,
+    ])
+    cli._eval_llm(args)
+    assert captured["evaluation_mode"] == mode
+    assert cli._parse_args(["eval-llm"]).evaluation_mode == "blind"
+    assert f"evaluation_mode={mode} execution_mode=fixture_simulation recommendation_scope=planning_only" in capsys.readouterr().out

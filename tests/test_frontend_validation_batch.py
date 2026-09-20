@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from tests.javascript_source import slice_function
+
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
@@ -576,8 +578,6 @@ def test_validation_batch_server_busy_state_has_independent_copy_and_blocks_dele
     app = _read_static("app.js")
     busy_start = app.index("function taskBusyAction")
     busy_end = app.index("function selectedTaskIsBusy", busy_start)
-    snapshot_start = app.index("function taskActionStatusSnapshot")
-    snapshot_end = app.index("function clearStatus", snapshot_start)
     delete_start = app.index("async function deleteTask")
     delete_end = app.index("async function runAction", delete_start)
     delete_body = app[delete_start:delete_end]
@@ -592,7 +592,7 @@ def test_validation_batch_server_busy_state_has_independent_copy_and_blocks_dele
             "function usesPmmlScoringWorkflow() { return false; }",
             "function taskFailureStage() { return ''; }",
             app[busy_start:busy_end],
-            app[snapshot_start:snapshot_end],
+            slice_function(app, "function taskActionStatusSnapshot("),
             "assert.equal(taskServerBusyAction(selectedTask), 'validation_batch');",
             "assert.equal(taskBusyAction('parent-1'), 'validation_batch');",
             "assert.deepEqual(taskActionStatusSnapshot(selectedTask), {",

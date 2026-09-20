@@ -926,7 +926,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.9,<1" },
     { name = "rapidfuzz", specifier = ">=3,<4" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
-    { name = "scikit-learn", specifier = ">=1.4,<2" },
+    { name = "scikit-learn", specifier = ">=1.4,<1.9.1" },
     { name = "scipy", specifier = ">=1.12,<2" },
     { name = "seaborn", specifier = ">=0.13,<1" },
     { name = "sklearn2pmml", specifier = ">=0.131,<1" },

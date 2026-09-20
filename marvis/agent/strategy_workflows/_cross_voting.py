@@ -6,6 +6,12 @@ import re
 from typing import Any
 import unicodedata
 
+from ._input_validation import (
+    bounded_number as _bounded_number,
+    column as _column,
+    reject_fields as _reject_fields,
+    required_text as _required_text,
+)
 from ._univariate_scorecard import (
     UNIVARIATE_REFINEMENT_METHODS,
     validate_univariate_analysis_inputs,
@@ -1457,20 +1463,6 @@ def _voting_search_rule_id_array(value: object, *, name: str) -> list[str]:
     return sorted(normalized)
 
 
-def _column(
-    value: object,
-    *,
-    name: str,
-    whitelist: Sequence[str],
-) -> str:
-    column = _required_text(value, name=name)
-    if column not in whitelist:
-        raise StrategyWorkflowValidationError(
-            f"{name} 使用了数据集中不存在的列「{column}」。"
-        )
-    return column
-
-
 def _selection_reason(value: object, *, workflow_id: str) -> str:
     if not isinstance(value, str) or "\x00" in value:
         raise StrategyWorkflowValidationError(
@@ -1504,55 +1496,6 @@ def _cross_matrix_cell_selection_reason(value: object) -> str:
             f"{workflow} selection_reason 最多 500 个字符。"
         )
     return canonical
-
-
-def _reject_fields(
-    inputs: Mapping[str, Any],
-    allowed: set[str],
-    *,
-    workflow: str,
-) -> None:
-    if any(not isinstance(key, str) for key in inputs):
-        raise StrategyWorkflowValidationError(
-            f"{workflow} workflow_inputs 字段名必须是文本。"
-        )
-    unexpected = sorted(set(inputs) - allowed)
-    if unexpected:
-        raise StrategyWorkflowValidationError(
-            f"{workflow} workflow_inputs 包含不支持的字段："
-            + "、".join(unexpected)
-            + "。"
-        )
-
-
-def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise StrategyWorkflowValidationError(f"{name} 必须是非空文本。")
-    return value.strip()
-
-
-def _bounded_number(
-    value: object,
-    *,
-    name: str,
-    maximum: float | None = None,
-) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise StrategyWorkflowValidationError(f"{name} 必须是有限数字。")
-    number = float(value)
-    if (
-        not math.isfinite(number)
-        or number < 0
-        or (maximum is not None and number > maximum)
-    ):
-        if maximum is None:
-            raise StrategyWorkflowValidationError(
-                f"{name} 必须是大于等于 0 的有限数字。"
-            )
-        raise StrategyWorkflowValidationError(
-            f"{name} 必须是 0 到 {maximum:g} 之间的有限数字。"
-        )
-    return number
 
 
 CROSS_VOTING_WORKFLOW_SPECS = (

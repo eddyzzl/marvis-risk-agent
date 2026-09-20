@@ -15,6 +15,7 @@ from marvis.validation.binning import (
 )
 from marvis.validation.checks import finite_score_series
 from marvis.validation.config import ValidationConfig
+from marvis.validation.stress_status import stress_test_status
 from marvis.validation.results import (
     StressBaseline,
     StressCategoryResult,
@@ -151,7 +152,7 @@ def run_stress_test(
             ))
 
     unresolved = list(unclassified_features or [])
-    status = _stress_test_status(per_category)
+    status = stress_test_status(row.status for row in per_category)
     if unresolved and not per_category:
         status = "failed"
     elif unresolved and status == "completed":
@@ -168,19 +169,6 @@ def run_stress_test(
 def _raise_if_cancelled(cancellation_check: Callable[[], None] | None) -> None:
     if cancellation_check is not None:
         cancellation_check()
-
-
-def _stress_test_status(per_category: list[StressCategoryResult]) -> str:
-    if not per_category:
-        return "skipped"
-    statuses = {row.status for row in per_category}
-    if statuses == {"completed"}:
-        return "completed"
-    if statuses == {"skipped"}:
-        return "skipped"
-    if statuses == {"error"}:
-        return "failed"
-    return "partial"
 
 
 def require_complete_stress_result(result: StressTestResult) -> StressTestResult:

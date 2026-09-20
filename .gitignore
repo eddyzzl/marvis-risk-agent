@@ -3,7 +3,13 @@ AGENTS.md
 CLAUDE.md
 CODE_REVIEW_*.md
 CODEBASE_DESIGN_AUDIT_*.md
-docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/plans/
+docs/superpowers/plans/*
+!docs/superpowers/plans/2026-09-20-audit-closure-development-plan.md
+!docs/superpowers/plans/2026-09-20-audit-closure-acceptance.json
+!docs/superpowers/plans/2026-09-20-audit-closure-implementation.md
+!docs/superpowers/plans/2026-09-20-audit-closure-requirements.json
 .claude/
 .codex/
 .cursor/

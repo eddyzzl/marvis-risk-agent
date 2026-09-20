@@ -825,10 +825,6 @@ function openLLMSettingsDialog() {
   openGovernanceSettingsCenter("llm");
 }
 
-function closeLLMSettingsDialog() {
-  closeGovernanceSettingsDialog();
-}
-
 const governanceSettingsCopy = {
   "execution-environment": {
     title: "执行环境",
@@ -1015,10 +1011,6 @@ function handleGovernanceSettingsSearch(event) {
   }
   const empty = $("governanceSettingsNavEmpty");
   if (empty) empty.hidden = visibleCount !== 0;
-}
-
-function syncAgentMemoryViewControls() {
-  agentMemoryPanel.syncViewControls();
 }
 
 function setAgentMemoryViewMode(mode, { reload = true } = {}) {
@@ -1883,11 +1875,6 @@ function taskActionStatusSnapshot(task = selectedTask) {
   }
 }
 
-function clearStatus() {
-  setCreateStatus("");
-  setActionStatus("");
-}
-
 function statusLabel(status) {
   return statusLabels[status] || status || "未知";
 }
@@ -2148,12 +2135,6 @@ async function loadAgentMemoryItems() {
   return agentMemoryPanel.loadItems();
 }
 
-async function loadAgentMessageMemoryReferences(taskId, messageId) {
-  if (!taskId || !messageId) return [];
-  const payload = await api(`api/tasks/${encodeURIComponent(taskId)}/agent/messages/${encodeURIComponent(messageId)}/memory-references`);
-  return Array.isArray(payload?.memory_references) ? payload.memory_references : [];
-}
-
 function handleAgentMemoryListClick(event) {
   agentMemoryPanel.handleListClick(event);
 }
@@ -2168,10 +2149,6 @@ function setDraftToolsStatus(message = "", kind = "") {
 
 async function loadDraftTools({ preserveSelection = false } = {}) {
   return draftToolsPanel.load({ preserveSelection });
-}
-
-async function inspectDraftTool(draftId) {
-  return draftToolsPanel.inspect(draftId);
 }
 
 async function runDraftTool() {
@@ -3390,15 +3367,6 @@ function workflowStepStatus(index, activeIndex, task = selectedTask) {
   if (status === "review_required") return "succeeded";
   if (status === "succeeded") return "succeeded";
   return "pending";
-}
-
-function workflowStepStatusLabel(status, actionId) {
-  if (status === "succeeded") return "已完成";
-  if (status === "review") return "需复核";
-  if (status === "failed") return "失败";
-  if (status === "running" && taskBusyAction() === actionId) return "执行中";
-  if (status === "running") return "当前";
-  return "未开始";
 }
 
 function stepStopAction(step, task = workbenchTask()) {
