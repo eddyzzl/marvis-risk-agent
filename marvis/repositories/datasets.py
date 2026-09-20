@@ -56,15 +56,18 @@ class DatasetRepository:
 
     def get_dataset(self, dataset_id: str) -> Dataset | None:
         with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT id, task_id, role, source_path, format, sheet, row_count,
-                       columns_json, has_target, target_col, created_at, content_hash
-                  FROM datasets
-                 WHERE id = ?
-                """,
-                (dataset_id,),
-            ).fetchone()
+            return self.get_dataset_on_connection(conn, dataset_id)
+
+    def get_dataset_on_connection(self, conn: sqlite3.Connection, dataset_id: str) -> Dataset | None:
+        """Read exact dataset metadata inside a caller-owned unit of work."""
+        row = conn.execute(
+            """
+            SELECT id, task_id, role, source_path, format, sheet, row_count,
+                   columns_json, has_target, target_col, created_at, content_hash
+              FROM datasets WHERE id = ?
+            """,
+            (dataset_id,),
+        ).fetchone()
         return None if row is None else _dataset_from_row(row)
 
     def list_datasets(self, task_id: str) -> list[Dataset]:

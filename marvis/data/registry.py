@@ -676,6 +676,21 @@ class DatasetRegistry:
             expected_content_hash=binding.content_hash,
         )
 
+    def verify_dataset_binding_on_connection(
+        self, conn, binding: AuthenticatedDatasetBinding,
+    ) -> Dataset:
+        """Validate DB identity and pinned bytes without a nested connection."""
+        dataset = self._repo.get_dataset_on_connection(conn, binding.dataset_id)
+        if dataset is None or (
+            dataset.task_id != binding.task_id
+            or dataset.content_hash != binding.content_hash
+            or dataset.source_path != binding.relative_path
+            or dataset.row_count != binding.row_count
+        ):
+            raise DatasetContentDriftError(binding.dataset_id, reason="dataset binding changed before commit")
+        self.verify_authenticated_binding_snapshot(binding)
+        return dataset
+
     def verify_authenticated_binding_snapshot(
         self,
         binding: AuthenticatedDatasetBinding,

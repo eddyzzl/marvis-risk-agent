@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 import re
@@ -487,6 +488,23 @@ class ReplayedDecision:
         }
 
 
+def validate_point_in_time_visibility(
+    *, decision_at: datetime, as_of: datetime,
+    visible_fields: Iterable[tuple[str, datetime]],
+) -> None:
+    """Shared guard for already declared point-in-time visibility."""
+    decision_at = utc_datetime(decision_at, "decision_at")
+    as_of = utc_datetime(as_of, "as_of")
+    if decision_at > as_of:
+        raise ValueError("decision_at is after replay as_of")
+    for name, visible_at in visible_fields:
+        visible_at = utc_datetime(visible_at, f"{name} visible_at")
+        if visible_at > decision_at:
+            raise ValueError(f"field {name} is visible after decision_at")
+        if visible_at > as_of:
+            raise ValueError(f"field {name} is visible after replay as_of")
+
+
 class ReplayEngine:
     """Point-in-time replay coordinator with no metric or LLM implementation."""
 
@@ -508,13 +526,10 @@ class ReplayEngine:
         if not isinstance(record, ReplayRecord):
             raise ValueError("record must be a ReplayRecord")
         facts = record.facts
-        if facts.decision_at > manifest.as_of:
-            raise ValueError("decision_at is after replay as_of")
-        for field in facts.fields:
-            if field.visible_at > facts.decision_at:
-                raise ValueError(f"field {field.name} is visible after decision_at")
-            if field.visible_at > manifest.as_of:
-                raise ValueError(f"field {field.name} is visible after replay as_of")
+        validate_point_in_time_visibility(
+            decision_at=facts.decision_at, as_of=manifest.as_of,
+            visible_fields=((field.name, field.visible_at) for field in facts.fields),
+        )
         protected_name = record.protected_group.attribute.casefold()
         if any(field.name.casefold() == protected_name for field in facts.fields):
             raise ValueError(
