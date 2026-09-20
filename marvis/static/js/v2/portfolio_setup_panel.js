@@ -34,6 +34,8 @@ export function createPortfolioSetupPanel(dependencies = {}) {
   const request = dependencies.api;
   const getSelectedTask = dependencies.getSelectedTask || (() => null);
   const getAgentMessages = dependencies.getAgentMessages || (() => []);
+  const captureView = dependencies.captureView || (() => getSelectedTask()?.id);
+  const isCurrentView = dependencies.isCurrentView || (view => view === getSelectedTask()?.id);
   const onMessages = dependencies.onMessages || (() => {});
   const onSubmitted = dependencies.onSubmitted || (() => {});
   const onError = dependencies.onError || (() => {});
@@ -56,7 +58,10 @@ export function createPortfolioSetupPanel(dependencies = {}) {
     experimentId: requiredElement(getElementById, "portfolioExperimentId"),
   };
 
-  let submitting = false;
+  let activeSubmission = null;
+  const isSubmitting = () => Boolean(activeSubmission && isCurrentView(activeSubmission.view));
+  const beginActivity = dependencies.beginActivity || (() => ({}));
+  const endActivity = dependencies.endActivity || (() => {});
 
   function setStatus(message = "", kind = "") {
     elements.status.textContent = message;
@@ -68,7 +73,7 @@ export function createPortfolioSetupPanel(dependencies = {}) {
     const visible = task?.task_type === "portfolio"
       && !portfolioGateExists(getAgentMessages());
     elements.root.hidden = !visible;
-    elements.submit.disabled = submitting || !visible;
+    elements.submit.disabled = isSubmitting() || !visible;
     return visible;
   }
 
@@ -113,7 +118,7 @@ export function createPortfolioSetupPanel(dependencies = {}) {
 
   async function submit(event) {
     event?.preventDefault?.();
-    if (submitting) return false;
+    if (isSubmitting()) return false;
     const task = getSelectedTask();
     if (!task?.id || task.task_type !== "portfolio") {
       setStatus("请选择组合分析任务后再提交。", "error");
@@ -128,7 +133,11 @@ export function createPortfolioSetupPanel(dependencies = {}) {
       return false;
     }
 
-    submitting = true;
+    const view = captureView();
+    const lease = beginActivity("panel:portfolio", task.id);
+    if (!lease) return false;
+    const submission = { view, lease };
+    activeSubmission = submission;
     elements.submit.disabled = true;
     setStatus("正在校验字段和组合口径…", "busy");
     try {
@@ -139,16 +148,19 @@ export function createPortfolioSetupPanel(dependencies = {}) {
           portfolio_request: portfolioRequest,
         }),
       });
-      if (Array.isArray(result?.messages)) onMessages(result.messages);
+      if (!isCurrentView(view)) return false;
+      if (Array.isArray(result?.messages)) onMessages(result.messages, view);
       setStatus("口径已校验，请确认逾期桶顺序。", "success");
-      await onSubmitted(result);
+      await onSubmitted(result, view);
       return true;
     } catch (error) {
+      if (!isCurrentView(view)) return false;
       setStatus(error?.message || "组合分析口径提交失败。", "error");
       onError(error);
       return false;
     } finally {
-      submitting = false;
+      if (activeSubmission === submission) activeSubmission = null;
+      endActivity(lease);
       renderAvailability();
     }
   }

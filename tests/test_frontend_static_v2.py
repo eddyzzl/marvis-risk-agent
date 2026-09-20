@@ -11,6 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from tests.javascript_source import session_projection_fixture
 from tests.javascript_source import slice_function as _slice_function
 from tests.static_stylesheets import read_browser_stylesheets
 
@@ -65,7 +66,7 @@ def _with_workbench_context(script: str, app_js: str) -> str:
         for name in names:
             if not re.search(rf"\bfunction\s+{name}\b", script):
                 prefix.append(_slice_function(source, f"function {name}("))
-    return "\n".join([*prefix, script])
+    return session_projection_fixture("\n".join([*prefix, script]))
 
 
 def _read_browser_css() -> str:
@@ -132,6 +133,7 @@ def test_artifact_metrics_object_values_render_as_readable_key_values():
         "  process.stdout.write(html);"
         "});"
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -169,7 +171,7 @@ def test_v2_plan_rail_fetch_errors_are_visible_without_rail_controls():
     assert "createPlanRailController" in app_js
     assert "planRailController.render({ force, renderSignatures })" in app_js
     assert "const v2PlanFetchErrors = new Map()" in plan_js
-    assert "return api(`/api/tasks/${encodeURIComponent(taskId)}/plans`)" in plan_js
+    assert "await apiClient(`/api/tasks/${encodeURIComponent(taskId)}/plans`, { signal: request.signal })" in plan_js
     assert "计划读取失败" in plan_js
     assert "当前显示的是上次缓存的计划" not in plan_js
     assert "const fetchErrorBanner = fetchError" not in plan_js
@@ -221,6 +223,7 @@ def _agent_timeline_items_for(
             "process.stdout.write(JSON.stringify(items));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -247,6 +250,7 @@ def _agent_messages_html_for(messages: list[dict], label_stage: str | None = Non
             "));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -265,6 +269,7 @@ def _agent_report_messages_for_display(messages: list[dict]) -> list[dict]:
             "process.stdout.write(JSON.stringify(conversation.agentReportMessagesForDisplay(messages)));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -298,6 +303,7 @@ def _render_agent_markdown(markdown: str) -> str:
             f"process.stdout.write(renderAgentMarkdown({json.dumps(markdown, ensure_ascii=False)}));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -315,6 +321,7 @@ def _safe_markdown_hrefs(hrefs: list[str]) -> list[bool]:
             "process.stdout.write(JSON.stringify(hrefs.map(isSafeMarkdownHref)));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -332,6 +339,7 @@ def _safe_api_hrefs(hrefs: list[str]) -> list[str]:
             "process.stdout.write(JSON.stringify(hrefs.map(safeSameOriginApiHref)));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -356,6 +364,7 @@ def _agent_report_download_html(reports: list[dict]) -> str:
             "process.stdout.write(agentMessageReportDownloadHtml({ metadata: { report_downloads: reports } }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -388,6 +397,7 @@ def _workflow_step_statuses_for(task: dict, notebook_steps: list[dict]) -> list[
             "process.stdout.write(JSON.stringify(statuses));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -412,6 +422,7 @@ def _notebook_step_tones_for(task: dict, notebook_steps: list[dict]) -> list[str
             "process.stdout.write(JSON.stringify(steps.map((step) => notebookStepTone(step.status))));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -433,6 +444,7 @@ def _normalized_notebook_steps_for(notebook_steps: list[dict], notebook_cells: l
             "process.stdout.write(JSON.stringify(normalizeNotebookSteps(steps, cells)));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -460,6 +472,7 @@ def _task_action_status_for(task: dict) -> dict | None:
             "process.stdout.write(JSON.stringify(captured));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -501,6 +514,7 @@ def _task_display_status_for(
             "}));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         cwd=Path(__file__).resolve().parents[1],
@@ -633,6 +647,7 @@ def test_plan_rail_phase_rows_keep_modeling_spec_before_feature_screen():
             "process.stdout.write(JSON.stringify(rows.map((row) => [row.number, row.phase, row.steps.map((step) => step.title), row.checkerStatus])));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -746,6 +761,7 @@ assert.equal(styleValues.get("--progress-width"), "388px");
 assert.equal(JSON.parse(storageData.marvis_layout).progress, 388);
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -783,8 +799,8 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     assert 'button?.dataset?.planRetryStep || ""' in retry_body
     assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body
     assert "JSON.stringify({ inputs })" in retry_body
-    assert "v2PlanCache.delete(taskId)" in retry_body
-    assert "void retryFetch(taskId)" in retry_body
+    assert "publishPlan(operation, taskId, null)" in retry_body
+    assert "void retryFetch(taskId, 0, view, operation)" in retry_body
     assert "PLAN_RETRY_REFRESH_INTERVAL_MS" in retry_body
     assert "[data-plan-retry-step]" in click_body
     assert "void retryPlanStep(planRetryButton);" in click_body
@@ -816,6 +832,7 @@ const controller = createPlanRailController({{
   loadAgentMessages: async () => {{}},
   renderAll: () => {{}},
   apiClient: async (url, options) => {{
+    if (!options.method) return (await globalThis.fetch(url)).json();
     calls.push({{ url, body: JSON.parse(options.body) }});
     return {{ ok: true }};
   }},
@@ -852,6 +869,7 @@ assert.equal(calls.length, 1);
 assert.deepEqual(calls[0].body.inputs, {{ foo: "edited", extra: 1 }});
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=False,
@@ -886,6 +904,7 @@ const controller = createPlanRailController({{
   loadAgentMessages: async () => {{}},
   renderAll: () => {{}},
   apiClient: async (url, options) => {{
+    if (!options.method) return (await globalThis.fetch(url)).json();
     calls.push({{ url, body: JSON.parse(options.body) }});
     return {{ ok: true }};
   }},
@@ -926,6 +945,7 @@ assert.equal(calls.length, 1);
 assert.deepEqual(calls[0].body.inputs, {{ early_stopping_rounds: null }});
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=False,
@@ -969,7 +989,7 @@ const controller = createPlanRailController({{
   refreshTasks: async () => {{ refreshCount += 1; }},
   loadAgentMessages: async () => {{ messageRefreshCount += 1; }},
   renderAll: () => {{}},
-  apiClient: async () => ({{ ok: true }}),
+  apiClient: async (url, options) => options.method ? ({{ ok: true }}) : (await globalThis.fetch(url)).json(),
 }});
 controller.maybeFetchPlan("task-1");
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1012,6 +1032,7 @@ assert.equal(messageRefreshCount, 2);
 assert.equal(timers.length, 0);
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=False,
@@ -1141,6 +1162,7 @@ def test_plan_retry_schema_form_marks_required_fields_and_falls_back_to_inferred
             "process.stdout.write(JSON.stringify({ withRealSchema, withFailedFetch }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -1265,6 +1287,7 @@ def test_report_download_readiness_requires_generated_report_flag():
     )
 
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -1327,7 +1350,7 @@ def test_stage_actions_capture_task_id_before_polling():
     poll_start = app_js.index("async function pollValidationProgress")
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
     poll_renderer = app_js[poll_start:poll_end]
-    assert "taskId = selectedTaskId" in poll_renderer
+    assert "taskId = taskSession.taskId" in poll_renderer
     assert "let polledTask = findTaskInCache(taskId)" in poll_renderer
     assert "isWorkbenchTaskId(taskId)" in poll_renderer
 
@@ -1340,7 +1363,7 @@ def test_stage_actions_capture_task_id_before_polling():
         start = app_js.index(f"async function {function_name}")
         end = app_js.index("\n}\n", start)
         body = app_js[start:end]
-        assert "const taskId = selectedTaskId;" in body
+        assert "const taskId = taskSession.taskId;" in body
         assert "pollValidationProgress(" not in body or "taskId" in body
 
 
@@ -1537,6 +1560,7 @@ timeouts[0].fn();
 assert.equal(second.classList.contains("suppress-pointer-focus-ring"), true);
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -1602,7 +1626,7 @@ def test_task_display_does_not_require_model_version_separator():
     assert "function taskDisplayName" in app_js
     assert "taskDisplayName," in app_js
     assert "taskDisplayName?.(selectedTask)" in workspace_view_js
-    assert "${selectedTask.model_name} · ${selectedTask.model_version}" not in app_js
+    assert "${taskSession.task.model_name} · ${taskSession.task.model_version}" not in app_js
     assert "${task.model_name} · ${task.model_version}" not in app_js
     display_fn = app_js.split("function taskDisplayName", 1)[1].split(
         "function stampValidationBatchItemCount",
@@ -1901,6 +1925,7 @@ for (const id of ["modelName", "validator", "sourceDir", "modelOotKsMin", "mater
 }}
 assert.deepEqual(reportInputs.map((input) => input.value), ["", ""]);
 """
+    script = session_projection_fixture(script)
     subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -2041,6 +2066,7 @@ assert.equal(elements.materialUploadStatus.textContent, "请选择文件或文�
 assert.equal(elements.materialUploadStatus.title, "");
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -2144,8 +2170,8 @@ def test_validation_failure_stage_does_not_reveal_unfinished_evidence_sections()
     metric_visibility = _slice_function(app_js, "function shouldShowMetricSection")
     assert "taskFailedDuringNotebook(task)" not in notebook_complete
     assert "taskFailedDuringMetrics(task)" in notebook_complete
-    assert "taskFailedDuringNotebook(selectedTask)" not in metric_visibility
-    assert "taskFailedDuringMetrics(selectedTask)" not in metric_visibility
+    assert "taskFailedDuringNotebook(taskSession.task)" not in metric_visibility
+    assert "taskFailedDuringMetrics(taskSession.task)" not in metric_visibility
     assert "metricPreviewSignature(\n    previewTaskId,\n    lastMetricValues,\n    lastMetricTableSections,\n    emptyMessage," in app_js
 
 
@@ -2238,6 +2264,7 @@ def test_manual_risk_analysis_intake_exposes_deterministic_composer_without_llm(
             "process.stdout.write(JSON.stringify(phases));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -2300,6 +2327,7 @@ def test_manual_risk_analysis_intake_posts_content_without_model_configuration()
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -2396,6 +2424,7 @@ def test_manual_vintage_material_upload_control_runs_deterministic_intake():
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=False,
@@ -3117,11 +3146,11 @@ def test_task_selection_keeps_same_task_active_and_refresh_restores_remembered_t
     select_start = app_js.index("function selectTask")
     select_end = app_js.index("function renderMetricPreview", select_start)
     select_renderer = app_js[select_start:select_end]
-    assert "if (selectedTaskId === task.id && selectedTask)" in select_renderer
-    same_task_start = select_renderer.index("if (selectedTaskId === task.id && selectedTask)")
+    assert "if (taskSession.taskId === task.id && taskSession.task)" in select_renderer
+    same_task_start = select_renderer.index("if (taskSession.taskId === task.id && taskSession.task)")
     same_task_end = select_renderer.index("resetAgentTypingState", same_task_start)
     same_task_branch = select_renderer[same_task_start:same_task_end]
-    assert "selectedTask = task;" in same_task_branch
+    assert "taskSession.refreshTask(task);" in same_task_branch
     assert "rememberSelectedTaskId(task.id);" in same_task_branch
     assert "deselectCurrentTask()" not in same_task_branch
     assert "rememberSelectedTaskId(task.id);" in select_renderer
@@ -3186,11 +3215,11 @@ def test_refresh_restores_selected_task_before_async_detail_loads():
 
     first_render = init_body.index("renderAll();")
     message_load = init_body.index("await loadAgentMessages();")
-    restore_scroll = init_body.index("await restoreResultScrollPositionAfterRender(selectedTaskId);")
+    restore_scroll = init_body.index("await restoreResultScrollPositionAfterRender(taskSession.taskId);")
     finish_boot = init_body.index("finishAppBoot();")
     assert message_load < first_render
     assert first_render < restore_scroll < finish_boot
-    assert "if (selectedTaskId) renderAll();" not in init_body
+    assert "if (taskSession.taskId) renderAll();" not in init_body
 
 
 def test_boot_initializes_restored_strategy_candidate_lab_once_outside_polling():
@@ -3201,7 +3230,7 @@ def test_boot_initializes_restored_strategy_candidate_lab_once_outside_polling()
 
     start = (
         "const candidateLabLoadPromise = "
-        "strategyCandidateLabController.selectTask(selectedTask);"
+        "strategyCandidateLabController.selectTask(taskSession.task);"
     )
     assert init_body.count(start) == 1
     assert init_body.index("await refreshTasks();") < init_body.index(start)
@@ -4216,7 +4245,7 @@ def test_running_indicators_stop_animating_when_motion_is_reduced():
 def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     app_js = _read_static("app.js")
 
-    assert "const taskActivities = createTaskActivityOwner();" in app_js
+    assert "const taskActivities = taskSession.activities;" in app_js
     assert "let isBusy" not in app_js
     assert "let busyAction" not in app_js
     assert "function taskBusyAction" in app_js
@@ -4302,6 +4331,7 @@ def test_global_settings_actions_do_not_mark_selected_task_busy():
     )
 
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -4329,23 +4359,23 @@ def test_workflow_actions_are_gated_by_completed_previous_steps():
     recommended_start = app_js.index("function recommendedAction")
     recommended_end = app_js.index("function canRunStepAction", recommended_start)
     recommended = app_js[recommended_start:recommended_end]
-    assert 'if (status === "created" || taskFailedDuringScan(selectedTask)) return "scan";' in recommended
-    assert 'if (taskFailedDuringMetrics(selectedTask)) return "metrics";' in recommended
-    assert 'if (taskFailedDuringReport(selectedTask)) return "report";' in recommended
-    assert 'if (taskFailedDuringNotebook(selectedTask)) return "notebook";' in recommended
+    assert 'if (status === "created" || taskFailedDuringScan(taskSession.task)) return "scan";' in recommended
+    assert 'if (taskFailedDuringMetrics(taskSession.task)) return "metrics";' in recommended
+    assert 'if (taskFailedDuringReport(taskSession.task)) return "report";' in recommended
+    assert 'if (taskFailedDuringNotebook(taskSession.task)) return "notebook";' in recommended
 
     can_run_start = app_js.index("function canRunStepAction")
     can_run_end = app_js.index("function stepActionButtonHtml", can_run_start)
     can_run = app_js[can_run_start:can_run_end]
     assert 'return ["created", "scanned", "failed", "executed", "writing_artifacts", "succeeded", "review_required"].includes(status);' in can_run
     assert 'case "notebook":' in can_run
-    assert 'if (taskFailedDuringScan(selectedTask)) return false;' in can_run
+    assert 'if (taskFailedDuringScan(taskSession.task)) return false;' in can_run
     assert 'return ["scanned", "configured", "executed", "writing_artifacts", "succeeded", "review_required"].includes(status)' in can_run
-    assert "|| taskFailedDuringNotebook(selectedTask);" in can_run
+    assert "|| taskFailedDuringNotebook(taskSession.task);" in can_run
     assert 'case "metrics":' in can_run
-    assert 'return status === "executed" || taskFailedDuringMetrics(selectedTask);' in can_run
+    assert 'return status === "executed" || taskFailedDuringMetrics(taskSession.task);' in can_run
     assert 'case "report":' in can_run
-    assert 'return ["writing_artifacts", "review_required"].includes(status) || taskFailedDuringReport(selectedTask);' in can_run
+    assert 'return ["writing_artifacts", "review_required"].includes(status) || taskFailedDuringReport(taskSession.task);' in can_run
 
     renderer_start = app_js.index("function stepActionButtonHtml")
     renderer_end = app_js.index("function notebookStepTone", renderer_start)
@@ -4446,6 +4476,7 @@ for (const [recipe, targetType] of Object.entries(expected)) {{
 assert.equal(modelTargetTypeForRecipes(["xgb_regressor", "lr_regressor"]), "continuous");
 assert.equal(modelTargetTypeForRecipes(["xgb_regressor", "xgb_multiclass"]), null);
 """
+    script = session_projection_fixture(script)
     subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -4566,6 +4597,7 @@ timers[1].fn();
 assert.equal(toast.classList.contains("is-visible"), false);
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -4583,7 +4615,7 @@ def test_acceptance_chip_relabels_auto_accept_per_task_type():
     assert "function autoAcceptLabel" in app_js
     for label in ("自动拼接", "自动分析", "自动建模", "自动审查"):
         assert label in app_js
-    assert "autoOption.textContent = autoAcceptLabel(selectedTask?.task_type)" in app_js
+    assert "autoOption.textContent = autoAcceptLabel(taskSession.task?.task_type)" in app_js
 
 
 def test_feature_create_dialog_has_optional_metric_selector():
@@ -4745,7 +4777,7 @@ def test_result_workspace_preserves_scroll_position_per_task_switch():
     assert 'addEventListener("scroll", handleResultScroll' in app_js
     assert "scheduleResultScrollPositionsPersist();" in _slice_function(app_js, "function rememberResultScrollPosition")
     assert "persistResultScrollPositions();" in _slice_function(app_js, "async function deleteTask")
-    assert "await restoreResultScrollPositionAfterRender(selectedTaskId);" in _slice_function(app_js, "async function initializeApp")
+    assert "await restoreResultScrollPositionAfterRender(taskSession.taskId);" in _slice_function(app_js, "async function initializeApp")
 
     select_start = app_js.index("function selectTask")
     select_end = app_js.index("function deselectCurrentTask", select_start)
@@ -4777,7 +4809,7 @@ def test_result_workspace_preserves_scroll_position_per_task_switch():
     agent_scroll_start = app_js.index("function requestAgentConversationScrollToLatest")
     agent_scroll_end = app_js.index("function renderAgentConversation", agent_scroll_start)
     agent_scroll_renderer = app_js[agent_scroll_start:agent_scroll_end]
-    assert "if (suppressAgentAutoScrollTaskId === selectedTaskId) return;" in agent_scroll_renderer
+    assert "if (suppressAgentAutoScrollTaskId === taskSession.taskId) return;" in agent_scroll_renderer
     assert "scrollContent.scrollTo({ top: scrollContent.scrollHeight, behavior: \"auto\" });" in agent_scroll_renderer
 
 
@@ -4806,9 +4838,9 @@ def test_scan_failure_sets_top_status_instead_of_success_message():
     scan_end = app_js.index("async function createTaskAndScan", scan_start)
     scanner = app_js[scan_start:scan_end]
 
-    assert 'selectedTaskIsAgentMode(selectedTask) ? "材料完备性识别完成。" : "材料扫描完成。"' in scanner
-    assert "if (selectedTask?.status === \"failed\")" in scanner
-    assert "setTaskFailureActionStatus(selectedTask)" in scanner
+    assert 'selectedTaskIsAgentMode(taskSession.task) ? "材料完备性识别完成。" : "材料扫描完成。"' in scanner
+    assert "if (taskSession.task?.status === \"failed\")" in scanner
+    assert "setTaskFailureActionStatus(taskSession.task)" in scanner
     assert "return;" in scanner
 
 
@@ -4924,6 +4956,7 @@ boundDialog.listeners.click({ currentTarget: boundDialog, target: boundDialog })
 assert.equal(boundDialog.closeCalls, 1);
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -5704,6 +5737,7 @@ assert.deepEqual(
   ["none", "naitang", "xiaojiu", "auditbot", "auditbot-pro", "auditbot-poly", "auditbot-ink", "auditbot-clay", "auditbot-comic", "auditbot-pixel"],
 );
 """
+    script = session_projection_fixture(script)
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
@@ -5719,6 +5753,7 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync({json.dumps(str(catalog_path))}, "utf8"), context);
 process.stdout.write(JSON.stringify(context.MarvisPetCatalog));
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     catalog = json.loads(result.stdout)
 
@@ -5907,6 +5942,7 @@ assert.equal(controller.isActive(), true);
 controller.toggleTaskSearch();
 assert.equal(controller.isActive(), false);
 """
+    script = session_projection_fixture(script)
     subprocess.run(["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True)
 
 
@@ -6081,7 +6117,7 @@ def test_pet_companion_is_draggable_and_reacts_to_task_status():
     assert "function startPetDrag" in app_js
     assert "function restorePetPosition" in app_js
     assert "function savePetPosition" in app_js
-    assert 'selectedTask?.status || ""' in app_js
+    assert 'taskSession.task?.status || ""' in app_js
     assert 'if (selectedTaskIsBusy()) return "running";' in app_js
     assert 'if (status === "succeeded") return "success";' in app_js
     assert 'if (status === "failed") return "failed";' in app_js
@@ -6641,7 +6677,7 @@ def test_failed_task_error_detail_moves_to_current_status_only():
     step_start = app_js.index("function renderWorkflowStepper")
     step_end = app_js.index("function formatDate", step_start)
     step_renderer = app_js[step_start:step_end]
-    assert "selectedTask.status_message" not in step_renderer
+    assert "taskSession.task.status_message" not in step_renderer
     assert "step-error" not in step_renderer
 
     assert "function taskFailureActionStatusMessage" in app_js
@@ -6795,6 +6831,7 @@ def test_completed_parent_stage_does_not_spin_stale_running_substeps():
             "process.stdout.write(JSON.stringify(tones));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -6823,6 +6860,7 @@ def test_later_started_substep_clears_stale_running_rail_tone():
             "process.stdout.write(JSON.stringify(tones));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -6899,6 +6937,7 @@ def test_current_status_error_detail_is_compact_accessible_and_collapsible():
             "}));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -7091,7 +7130,7 @@ def test_status_card_glass_glow_tracks_inner_scroll_position():
     result_scroll_start = app_js.index("function handleResultScroll")
     result_scroll_end = app_js.index("function syncTaskHeroGlassLayout", result_scroll_start)
     result_scroll_body = app_js[result_scroll_start:result_scroll_end]
-    assert "if (pendingResultScrollRestoreTaskId !== selectedTaskId)" in result_scroll_body
+    assert "if (pendingResultScrollRestoreTaskId !== taskSession.taskId)" in result_scroll_body
     assert "rememberResultScrollPosition();" in result_scroll_body
     assert "scheduleTaskHeroGlassState();" in result_scroll_body
     assert '$("resultScrollContent").addEventListener("scroll", handleResultScroll, { passive: true });' in app_js
@@ -7132,7 +7171,7 @@ def test_validation_failure_writes_error_detail_to_global_action_status():
     validate_start = app_js.index("async function validateCurrentTask")
     validate_end = app_js.index("async function loadReportFields", validate_start)
     validate_renderer = app_js[validate_start:validate_end]
-    assert "setTaskFailureActionStatus(selectedTask || finalTask)" in validate_renderer
+    assert "setTaskFailureActionStatus(taskSession.task || finalTask)" in validate_renderer
 
     poll_start = app_js.index("async function pollValidationProgress")
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
@@ -7197,7 +7236,7 @@ def test_agent_mode_creation_routes_non_validation_tasks_to_conversation_compose
     assert "await scanCurrentTask();" not in agent_branch
     assert "正在自动识别材料" not in agent_branch
     assert "开始验证" not in agent_branch
-    assert "const taskId = task.id || selectedTaskId;" in agent_branch
+    assert "const taskId = task.id || taskSession.taskId;" in agent_branch
 
     assert "async function dispatchAgentValidation" in app_js
     assert 'api(`/api/tasks/${normalizedTaskId}/agent/start`' in app_js
@@ -7318,6 +7357,7 @@ def test_agent_driver_timeline_hides_recovered_failures_and_tracks_plan_status()
             "process.stdout.write(JSON.stringify({ done: ids('done'), failed: ids('failed'), historical: ids('historical'), unknown: ids('') }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -7355,6 +7395,7 @@ def test_modeling_gate_only_mounts_screen_picker_for_feature_selection():
             "process.stdout.write(JSON.stringify({ tuning, selection }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -7395,6 +7436,7 @@ def test_select_experiment_gate_does_not_resurrect_modeling_setup_controls():
             "process.stdout.write(html);",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -7472,6 +7514,7 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -7502,7 +7545,7 @@ def test_api_paths_stay_below_current_mount_and_agent_start_rejects_missing_task
     dispatch_start = app_js.index("async function dispatchAgentValidation")
     dispatch_end = app_js.index("async function waitForAgentValidation", dispatch_start)
     dispatch_body = app_js[dispatch_start:dispatch_end]
-    assert 'requireTaskId(taskId || selectedTaskId, "Agent 初始化")' in dispatch_body
+    assert 'requireTaskId(taskId || taskSession.taskId, "Agent 初始化")' in dispatch_body
     assert 'api(`/api/tasks/${normalizedTaskId}/agent/start`' in dispatch_body
     assert "api(`api/tasks/${taskId}/agent/start`" not in app_js
 
@@ -7700,6 +7743,7 @@ assert.equal(prevented, true);
 assert.equal(await escapePromise, false);
 process.stdout.write("ok");
 """
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -7773,6 +7817,7 @@ def test_delete_task_cannot_clear_a_pending_local_operation_from_server_idle():
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -7865,6 +7910,7 @@ def test_agent_wait_settles_when_failed_job_leaves_task_in_created_state():
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -8702,7 +8748,7 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     render_end = app_js.index("function agentStructuralSignature", render_start)
     render_body = app_js[render_start:render_end]
     # v2 wiring: renderAgentTimeline must be fed via agentReportMessagesForDisplay.
-    assert "agentReportMessagesForDisplay(agentMessages)" in render_body
+    assert "agentReportMessagesForDisplay(taskSession.messages)" in render_body
     assert "renderAgentTimeline(" in render_body
     assert "agentMessages.filter((message, index) => !agentMessageTargetId(message, index, agentMessages))" not in render_body
     assert "requestAgentConversationScrollToLatest();" in render_body
@@ -8720,7 +8766,7 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     alias_and_stage_label_body = app_js[alias_start:stage_label_end]
     stage_label_body = app_js[stage_label_start:stage_label_end]
     assert "function agentValidatorAlias" in alias_and_stage_label_body
-    assert 'return agentValidatorAlias(selectedTask?.validator) || "Agent";' in stage_label_body
+    assert 'return agentValidatorAlias(taskSession.task?.validator) || "Agent";' in stage_label_body
     # Real validator names must not be hard-coded in the shipped bundle: the alias
     # map is sourced from the workspace brand.json via agentValidatorAliases.
     assert "agentValidatorAliases[String(validator" in alias_and_stage_label_body
@@ -8746,7 +8792,7 @@ def test_agent_message_meta_label_includes_plan_step_context():
     meta_body = app_js[meta_start:meta_end]
 
     assert "function agentMessagePlanStep" in meta_body
-    assert "planRailController.planStep(metadata, selectedTaskId)" in meta_body
+    assert "planRailController.planStep(metadata, taskSession.taskId)" in meta_body
     assert "metadata.step_id" in plan_js
     assert "metadata.step_title || step?.title" in meta_body
     assert "metadata.phase || step?.phase" in meta_body
@@ -8809,6 +8855,7 @@ def test_agent_message_renderer_outputs_inline_memory_references():
             "process.stdout.write(html);",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     html = result.stdout
     assert "<details" in html
@@ -8844,6 +8891,7 @@ def test_agent_message_renderer_outputs_distillation_reference_audit_fields():
             "process.stdout.write(html);",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     html = result.stdout
     assert "进化沉淀" in html
@@ -9069,6 +9117,7 @@ def test_agent_advance_intent_accepts_task_start_shortcuts():
         ]
     )
 
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9447,6 +9496,7 @@ def test_agent_label_uses_validator_aliases_from_workspace_config():
             "process.stdout.write(JSON.stringify(labels));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -9522,6 +9572,7 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9552,7 +9603,7 @@ def test_agent_send_always_requires_llm():
     assert "showAgentModelGuidance(unavailableModelMessage)" in body
     # no task-type bypass of the model-availability gate
     assert "requiresLlm" not in body
-    assert "taskUsesPlanRail(selectedTask)" not in body
+    assert "taskUsesPlanRail(taskSession.task)" not in body
 
 
 def test_agent_material_selection_response_forces_dialog_then_requires_rescan():
@@ -9644,6 +9695,7 @@ def test_agent_running_composer_only_submits_explicit_stop_intent():
             "]));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9711,6 +9763,7 @@ def test_agent_send_shows_thinking_message_before_network_wait():
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9786,6 +9839,7 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9863,6 +9917,7 @@ def test_agent_stop_aborts_in_flight_message_request_and_clears_optimistic_state
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -9955,7 +10010,7 @@ def test_agent_composer_preferences_are_kept_per_task_in_local_storage():
     dispatcher_start = app_js.index("function persistCurrentAgentComposerPreference")
     dispatcher_end = dispatcher_start + 400
     dispatcher = app_js[dispatcher_start:dispatcher_end]
-    assert "updateAgentTaskComposerOverride(selectedTaskId, patch);" in dispatcher
+    assert "updateAgentTaskComposerOverride(taskSession.taskId, patch);" in dispatcher
     assert "saveAgentComposerPreferences();" in dispatcher
 
     # Acceptance mode change handler must also route through the per-task
@@ -10076,6 +10131,7 @@ def test_agent_model_preference_ignores_disabled_saved_model():
             "process.stdout.write(JSON.stringify([first, second, third]));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -10339,6 +10395,7 @@ def test_branding_normalizer_rejects_unsafe_asset_urls():
             "aliases, brandingAliases: fallback.validatorAliases }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -10433,7 +10490,7 @@ def test_action_status_writer_is_idempotent():
 def test_action_status_signature_is_scoped_to_selected_task():
     app_js = _read_static("app.js")
     body = _slice_function(app_js, "function setActionStatus")
-    assert "selectedTaskId" in body, (
+    assert "taskSession.taskId" in body, (
         "switching between tasks with the same status copy must still repaint "
         "the persistent status detail for the newly selected task"
     )
@@ -10517,6 +10574,7 @@ def _run_node_capture_json(script: str) -> dict:
     # These harnesses inline the whole app.js source, which exceeds Linux's
     # 128KB per-argument limit (MAX_ARG_STRLEN) — feed the program via stdin
     # instead of `-e` so the script size is unbounded on every platform.
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module"], input=script, check=True, capture_output=True, text=True
     )
@@ -10724,8 +10782,8 @@ def test_reproducibility_pass_status_hides_score_compare_rows():
     }
     test_driver = "\n".join(
         [
-            "selectedTaskId = 'task-pass';",
-            "selectedTask = { id: 'task-pass', status: 'executed' };",
+            "taskSession.selectTask(null, 'task-pass');",
+            "taskSession.selectTask({ id: 'task-pass', status: 'executed' });",
             f"renderReproducibilityEvidence({json.dumps(payload)});",
             "const html = globalThis.__writes.at(-1) || '';",
             "process.stdout.write(JSON.stringify({",
@@ -10799,8 +10857,8 @@ def test_reproducibility_render_skips_replay_and_disables_animation_on_rebuild()
 
     test_driver = "\n".join(
         [
-            "selectedTaskId = 'task-A';",
-            "selectedTask = { id: 'task-A', status: 'running', active_job_kind: 'pipeline' };",
+            "taskSession.selectTask(null, 'task-A');",
+            "taskSession.selectTask({ id: 'task-A', status: 'running', active_job_kind: 'pipeline' });",
             f"renderReproducibilityEvidence({json.dumps(populated_a)});",
             "const writesAfter1 = globalThis.__writes.length;",
             f"renderReproducibilityEvidence({json.dumps(empty)});",
@@ -10862,23 +10920,23 @@ def test_reproducibility_render_handles_task_switch_animation_policy():
 
     test_driver = "\n".join(
         [
-            "selectedTaskId = 'task-A';",
-            "selectedTask = { id: 'task-A', status: 'running' };",
+            "taskSession.selectTask(null, 'task-A');",
+            "taskSession.selectTask({ id: 'task-A', status: 'running' });",
             f"renderReproducibilityEvidence({json.dumps(populated)});",
             "const writesAfter_A_populated = globalThis.__writes.length;",
             "const animatedTaskAfter_A = renderSignatures.reproducibilityAnimatedTaskId;",
             # Switch to task B and render the SAME evidence shape — should
             # rebuild (different task) AND re-enable animation.
-            "selectedTaskId = 'task-B';",
-            "selectedTask = { id: 'task-B', status: 'running' };",
+            "taskSession.selectTask(null, 'task-B');",
+            "taskSession.selectTask({ id: 'task-B', status: 'running' });",
             f"renderReproducibilityEvidence({json.dumps(populated)});",
             "const writesAfter_B_populated = globalThis.__writes.length;",
             "const animatedTaskAfter_B = renderSignatures.reproducibilityAnimatedTaskId;",
             "const writeForB = globalThis.__writes[writesAfter_B_populated - 1];",
             # Switch to task C and feed empty evidence — placeholder should
             # appear; previous chart must not be preserved across tasks.
-            "selectedTaskId = 'task-C';",
-            "selectedTask = { id: 'task-C', status: 'running' };",
+            "taskSession.selectTask(null, 'task-C');",
+            "taskSession.selectTask({ id: 'task-C', status: 'running' });",
             f"renderReproducibilityEvidence({json.dumps(empty)});",
             "const reproElText = document.getElementById('reproducibilitySummary').textContent;",
             "const signatureAfter_C = renderSignatures.reproducibilityEvidence;",
@@ -10947,7 +11005,7 @@ def test_validation_status_snapshot_keeps_persistent_stage_detail():
     render_body = _slice_function(app_js, "function renderCurrentTask")
     assert "setActionStatus: setWorkspaceActionStatus" in render_body
     workspace_status_body = _slice_function(app_js, "function setWorkspaceActionStatus")
-    assert "taskActionStatusSnapshot(selectedTask)" in workspace_status_body
+    assert "taskActionStatusSnapshot(taskSession.task)" in workspace_status_body
     assert "snapshot.detail" in workspace_status_body
 
     failure_status_body = _slice_function(app_js, "function setTaskFailureActionStatus")
@@ -10986,6 +11044,7 @@ def test_writing_artifacts_idle_shows_metrics_complete():
         ]
     )
 
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11022,6 +11081,7 @@ def test_task_stopped_uses_structured_stopped_field_only():
         ]
     )
 
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11058,6 +11118,7 @@ def test_writing_artifacts_status_tone_idle_vs_report_busy():
         ]
     )
 
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11190,6 +11251,7 @@ def test_agent_typewriter_resume_after_completion_seeds_visible():
         ]
     )
 
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11259,8 +11321,8 @@ def test_scroll_to_manual_workflow_section_captures_task_id():
     """
     app_js = _read_static("app.js")
     body = _slice_function(app_js, "function scrollToManualWorkflowSection")
-    assert "const targetTaskId = selectedTaskId;" in body
-    assert "if (selectedTaskId !== targetTaskId) return;" in body
+    assert "const targetTaskId = taskSession.taskId;" in body
+    assert "if (taskSession.taskId !== targetTaskId) return;" in body
 
 
 def test_modeling_and_join_controller_contexts_expose_the_same_behavior():
@@ -11296,6 +11358,7 @@ def test_modeling_and_join_controller_contexts_expose_the_same_behavior():
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11345,6 +11408,7 @@ def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally()
         ]
     )
     script = _with_workbench_context(script, app_js)
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11423,6 +11487,7 @@ def test_submit_driver_confirm_shows_busy_state_and_polls_before_response_resolv
             "}));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -11486,6 +11551,7 @@ def test_recompute_agent_auto_scroll_follow_toggles_on_position():
         ]
     )
 
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11570,6 +11636,7 @@ def test_agent_typewriter_continues_after_stream_ends():
         ]
     )
 
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11637,6 +11704,7 @@ def test_agent_typewriter_catches_up_long_backlog_quickly():
         ]
     )
 
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "-e", script],
         check=True,
@@ -11751,6 +11819,7 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
             "process.stdout.write(JSON.stringify({ html }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -11856,11 +11925,11 @@ def test_agent_mode_latest_gate_keeps_typed_controls_interactive_with_chat():
     test_driver = "\n".join(
         [
             f"const messages = {json.dumps(messages)};",
-            "selectedTaskId = 'task-gate';",
-            "selectedTask = { id: 'task-gate', task_type: 'modeling', run_mode: 'agent', active_job_kind: null };",
-            "taskCache = [selectedTask];",
+            "taskSession.selectTask(null, 'task-gate');",
+            "taskSession.selectTask({ id: 'task-gate', task_type: 'modeling', run_mode: 'agent', active_job_kind: null });",
+            "taskCache = [taskSession.task];",
             "globalThis.fetch = async (url) => ({ ok: true, json: async () => ({ plans: [{",
-            "  id: 'plan-new', status: 'awaiting_confirm', steps: [{",
+            "  id: 'plan-new', task_id: 'task-gate', status: 'awaiting_confirm', steps: [{",
             "    id: 'gate-new', status: 'awaiting_confirm',",
             "    confirmation_snapshot: messages[1].metadata.confirmation_snapshot,",
             "  }],",
@@ -11983,6 +12052,7 @@ def test_manual_mode_gate_strips_chat_instruction_and_keeps_button():
             "process.stdout.write(html);",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12073,6 +12143,7 @@ def test_agent_mode_widget_submit_payload_matches_manual_mode_controller():
             "process.stdout.write(JSON.stringify({ html, calls }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12116,6 +12187,7 @@ def test_skeleton_templates_render_block_rows_and_table_shapes():
             "}));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12168,6 +12240,7 @@ def test_plan_rail_shows_skeleton_only_on_genuine_first_load():
             "process.stdout.write(JSON.stringify({ firstHtml, secondHtml }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12238,6 +12311,7 @@ def test_plan_rail_omits_replan_events_and_subagent_rows():
             "process.stdout.write(elements.workflowStepper.innerHTML);",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12296,6 +12370,7 @@ def test_plan_rail_shows_waiting_for_confirmation_not_generating():
             "process.stdout.write(elements.workflowStepper.innerHTML);",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12338,6 +12413,7 @@ def test_plan_rail_reports_not_started_without_job_or_gate():
             "process.stdout.write(elements.workflowStepper.innerHTML);",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12378,6 +12454,7 @@ def test_gate_confirm_button_states_consequence_by_tool():
             "process.stdout.write(JSON.stringify({ joinHtml, reportHtml, deliveryHtml, genericHtml }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12463,6 +12540,7 @@ def test_manual_analysis_mounts_structured_adoption_gate_in_middle_workspace():
             "process.stdout.write(html);",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12504,6 +12582,7 @@ def test_adoption_gate_requires_reason_and_submits_gate_bound_payload():
             "process.stdout.write(JSON.stringify({ html, calls }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12554,6 +12633,7 @@ def test_adoption_conflict_refreshes_latest_gate_without_reviving_stale_button()
             "assert.deepEqual(statuses.at(-1), ['计划已更新，已加载最新待确认步骤，请重新检查后操作。', 'info']);",
         ]
     )
+    script = session_projection_fixture(script)
     subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12579,6 +12659,7 @@ def test_active_driver_conflict_is_busy_duplicate_not_snapshot_or_validation_fai
             "assert.ok(!statuses[0][0].includes('验证失败'));",
         ]
     )
+    script = session_projection_fixture(script)
     subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12620,6 +12701,7 @@ def test_strategy_clarification_controller_renders_exact_contract_and_readonly_h
             "}));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12694,6 +12776,7 @@ def test_strategy_clarification_submits_exact_http_payload_and_refreshes_workspa
             "process.stdout.write(JSON.stringify({ calls, statuses, refreshes, rails, rendered, messages }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12780,6 +12863,7 @@ def test_strategy_clarification_validation_and_request_error_keep_form_editable(
             "}));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -12817,6 +12901,7 @@ def test_strategy_clarification_uses_one_renderer_in_agent_and_manual_modes():
             "process.stdout.write(JSON.stringify({ html, calls }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -13310,6 +13395,7 @@ def test_calibration_reliability_curve_renders_diagonal_and_tiered_points():
             "process.stdout.write(JSON.stringify({ html }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
     )
@@ -13345,6 +13431,7 @@ def test_calibration_reliability_curve_renders_nothing_for_empty_points():
             "process.stdout.write(JSON.stringify({ html }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
     )
@@ -13383,6 +13470,7 @@ def test_score_band_chart_renders_bars_and_bad_rate_line():
             "process.stdout.write(JSON.stringify({ html }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
     )
@@ -13411,6 +13499,7 @@ def test_score_band_chart_renders_nothing_for_empty_bands():
             "process.stdout.write(JSON.stringify({ html }));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
     )
@@ -13497,6 +13586,7 @@ def test_driver_table_chart_html_mounts_above_table_and_skips_when_absent():
             "}));",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
     )
@@ -13711,7 +13801,7 @@ globalThis.__taskList = __taskList;
 
     driver = r"""
 taskGroupMode = "none";
-selectedTaskId = "t1";
+taskSession.selectTask(null, "t1");
 function mk(u) { return [
   { id: "t1", model_name: "模型A", task_type: "modeling", status: "running", validator: "张三", updated_at: u },
   { id: "t2", model_name: "模型B", task_type: "validation", status: "scanned", validator: "李四", updated_at: u },
@@ -14075,7 +14165,7 @@ def test_v2_pending_input_contract_has_an_interactive_confirmation_panel():
     assert "function submitValidationInputContract" in app_js
     assert "/validation-input-contract`" in app_js
     assert 'data-validation-contract-submit' in app_js
-    assert "const taskId = form.dataset.validationContractTaskId || workbenchTaskId() || selectedTaskId;" in app_js
+    assert "const taskId = form.dataset.validationContractTaskId || workbenchTaskId() || taskSession.taskId;" in app_js
     assert 'await loadValidationInputContract(taskId);' in app_js
     assert 'if (selectedTaskIsAgentMode()) {' in app_js
     assert 'await startAgentValidation();' in app_js

@@ -60,6 +60,7 @@ async function harness(steps, { agentMode = false, apiHandler = null, viewCallba
     setActionStatus: (message, kind) => statuses.push({ message, kind }),
     setDriverExecutionBusy: (value) => busy.push(value),
     apiClient: async (url, options) => {
+      if (!options.method) return (await globalThis.fetch(url)).json();
       requests.push({ url, method: options.method, body: JSON.parse(options.body) });
       return apiHandler ? await apiHandler(url, options) : {};
     },

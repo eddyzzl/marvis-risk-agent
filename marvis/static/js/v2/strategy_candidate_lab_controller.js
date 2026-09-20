@@ -856,6 +856,9 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     renderAvailability();
     dependencies.setActionStatus?.(`${content}…`, "busy");
     const requestTaskId = taskId;
+    const view = dependencies.captureView?.();
+    const ownsSubmission = () => selectedTaskId() === requestTaskId
+      && (!dependencies.isCurrentView || dependencies.isCurrentView(view));
     try {
       const requestPromise = submitCandidateLab(requestTaskId, strategyRequest, content);
       const pollPromise = Promise.resolve(
@@ -867,9 +870,9 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       ).catch(() => {});
       const result = await requestPromise;
       await pollPromise;
-      if (selectedTaskId() !== requestTaskId) return result;
+      if (!ownsSubmission()) return result;
       if (Array.isArray(result?.messages)) {
-        dependencies.setAgentMessages?.(result.messages);
+        dependencies.setAgentMessages?.(result.messages, view);
       }
       dependencies.renderAgentConversation?.();
       dependencies.resetPlanFetchThrottle?.(requestTaskId);
@@ -890,7 +893,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       }
       await dependencies.refreshAgentMessages?.(requestTaskId);
       await dependencies.settleCandidateLabSubmission?.(requestTaskId);
-      if (selectedTaskId() !== requestTaskId) return result;
+      if (!ownsSubmission()) return result;
       if (
         strategyRequest.request_kind === "strategy_lifecycle"
         || strategyRequest.workflow === "cross_matrix_candidate_search"
@@ -909,13 +912,13 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         || STRATEGY_POOL_OPERATION_WORKFLOWS.includes(strategyRequest.workflow)
       ) {
         await refresh(requestTaskId, { silent: true });
-        if (selectedTaskId() !== requestTaskId) return result;
+        if (!ownsSubmission()) return result;
       }
       state.submitting = false;
       dependencies.setActionStatus?.(`${content}已提交。`, "success");
       return result;
     } catch (error) {
-      if (selectedTaskId() !== requestTaskId) return null;
+      if (!ownsSubmission()) return null;
       state.submitting = false;
       const message = error?.message || `${content}失败。`;
       // Do not reset or re-render the static form: every operator input stays
@@ -925,7 +928,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       renderAvailability();
       return null;
     } finally {
-      if (selectedTaskId() === requestTaskId) {
+      if (ownsSubmission()) {
         state.submitting = false;
         dependencies.resetPlanFetchThrottle?.(requestTaskId);
         dependencies.renderWorkflowStepper?.({ force: true });

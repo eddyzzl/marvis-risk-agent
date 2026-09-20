@@ -1,4 +1,5 @@
 import { api } from "../api.js";
+import { createTaskRequestScope } from "../task-request-scope.js";
 import { escapeHtml } from "../ui-utils.js";
 import { safeSameOriginApiHref } from "../url-safety.js";
 import { skeletonRowsHtml } from "../skeleton.js";
@@ -473,6 +474,8 @@ export function createPlanRailController({
   getSelectedTaskId,
   getTaskBusyAction,
   setDriverExecutionBusy,
+  requestOwner,
+  onPlanProjection = () => true,
   captureView = () => getSelectedTaskId?.(),
   isCurrentView = (view) => view === getSelectedTaskId?.(),
   beginActivity = (_operation, taskId) => {
@@ -504,7 +507,9 @@ export function createPlanRailController({
   listStrategyArtifactsClient = listStrategyArtifacts,
   listTaskArtifactsClient = listTaskArtifacts,
 } = {}) {
+  const requests = requestOwner || createTaskRequestScope();
   const v2PlanCache = new Map();
+  const v2PlanViews = new Map();
   const v2PlanLastFetch = new Map();
   const v2PlanFetchErrors = new Map();
   // LT-4: real tool input_schema, keyed by "plugin:tool", fetched lazily the
@@ -677,36 +682,52 @@ export function createPlanRailController({
     return null;
   }
 
-  function maybeFetchPlan(taskId = selectedTaskId()) {
-    if (!taskId) return Promise.resolve(null);
-    // Note: we intentionally do NOT short-circuit on a terminal cached plan. Re-engaging
-    // a finished driver task now builds a FRESH plan (see _active_plan in api.py), so the
-    // rail must be able to pick that new plan up. Driver tasks aren't on a polling loop,
-    // so this only fetches on render events (throttled below), not continuously.
-    const now = Date.now();
-    if (now - (v2PlanLastFetch.get(taskId) || 0) < 900) {
-      return Promise.resolve(v2PlanCache.get(taskId) || null);
-    }
-    v2PlanLastFetch.set(taskId, now);
-    return api(`/api/tasks/${encodeURIComponent(taskId)}/plans`)
-      .then((data) => {
-        const plans = (data && data.plans) || [];
-        const next = plans.length ? plans[plans.length - 1] : null;
-        const hadError = v2PlanFetchErrors.delete(taskId);
-        const changed = hadError || JSON.stringify(v2PlanCache.get(taskId)) !== JSON.stringify(next);
-        v2PlanCache.set(taskId, next);
-        if (changed && selectedTaskId() === taskId) renderAll?.();
-        return next;
-      })
-      .catch((error) => {
-        v2PlanFetchErrors.set(taskId, error?.message || "network");
-        if (selectedTaskId() === taskId) renderWorkflowStepper?.({ force: true });
-        return null;
-      });
+  function cachedPlan(taskId) {
+    return requests.current(v2PlanViews.get(taskId)) ? v2PlanCache.get(taskId) : undefined;
   }
 
-  async function retryFetch(taskId = selectedTaskId(), attempt = 0) {
-    if (!taskId || selectedTaskId() !== taskId) return;
+  function publishPlan(view, taskId, plan) {
+    if (!requests.current(view) || taskId !== selectedTaskId()
+        || !onPlanProjection(view, taskId, plan)) return false;
+    v2PlanCache.set(taskId, plan);
+    v2PlanViews.set(taskId, requests.capture());
+    return true;
+  }
+
+  async function maybeFetchPlan(taskId = selectedTaskId()) {
+    if (!taskId || taskId !== selectedTaskId()) return null;
+    if (!requestOwner) requests.select(taskId);
+    const view = captureView();
+    const last = v2PlanLastFetch.get(taskId);
+    if (last && isCurrentView(last.view) && Date.now() - last.time < 900) {
+      return cachedPlan(taskId) || null;
+    }
+    v2PlanLastFetch.set(taskId, { view, time: Date.now() });
+    const request = requests.begin("plan", { operation: "plan" });
+    try {
+      const data = await apiClient(`/api/tasks/${encodeURIComponent(taskId)}/plans`, { signal: request.signal });
+      if (!requests.accepts(request) || !isCurrentView(view)) return null;
+      const plans = data?.plans || [];
+      const next = plans.length ? plans[plans.length - 1] : null;
+      const changed = v2PlanFetchErrors.has(taskId)
+        || JSON.stringify(cachedPlan(taskId)) !== JSON.stringify(next);
+      if (!publishPlan(request, taskId, next)) return null;
+      v2PlanFetchErrors.delete(taskId);
+      if (changed) renderAll?.();
+      return next;
+    } catch (error) {
+      if (requests.accepts(request) && isCurrentView(view)) {
+        v2PlanFetchErrors.set(taskId, error?.message || "network");
+        renderWorkflowStepper?.({ force: true });
+      }
+      return null;
+    } finally {
+      requests.finish(request);
+    }
+  }
+
+  async function retryFetch(taskId = selectedTaskId(), attempt = 0, view = captureView(), operation = requests.capture({ operation: "plan" })) {
+    if (!taskId || selectedTaskId() !== taskId || !isCurrentView(view) || !requests.current(operation)) return;
     v2PlanLastFetch.delete(taskId);
     v2PlanFetchErrors.delete(taskId);
     const [planResult] = await Promise.allSettled([
@@ -714,27 +735,31 @@ export function createPlanRailController({
       refreshTasks?.(),
       loadAgentMessages?.(taskId, { preserveOptimistic: true }),
     ]);
+    if (!isCurrentView(view) || !requests.current(operation)) return;
     const nextPlan = planResult.status === "fulfilled" ? planResult.value : null;
-    if (selectedTaskId() === taskId) renderAll?.();
+    renderAll?.();
     renderWorkflowStepper?.({ force: true });
     const status = String(nextPlan?.status || "");
     const stillRunning = !nextPlan || ["confirmed", "running"].includes(status);
     if (stillRunning && attempt < PLAN_RETRY_REFRESH_MAX_ATTEMPTS) {
       window.setTimeout(
-        () => { void retryFetch(taskId, attempt + 1); },
+        () => { void retryFetch(taskId, attempt + 1, view, operation); },
         PLAN_RETRY_REFRESH_INTERVAL_MS,
       );
     }
   }
 
-  function resetFetchThrottle(taskId = selectedTaskId()) {
+  function resetFetchThrottle(taskId = selectedTaskId(), { invalidate = true } = {}) {
     if (!taskId) return;
     v2PlanLastFetch.delete(taskId);
+    // Any plan mutation supersedes in-flight reads, including a later visit
+    // to the same task. A new GET may only publish after that mutation.
+    if (invalidate) requests.advance("plan");
   }
 
   async function retryPlanStep(button) {
     const taskId = selectedTaskId();
-    const plan = v2PlanCache.get(taskId);
+    const plan = cachedPlan(taskId);
     const stepId = button?.dataset?.planRetryStep || "";
     if (!taskId || !plan?.id || !stepId) {
       setActionStatus?.("缺少可重试的计划步骤，请刷新后重试。", "error");
@@ -761,39 +786,48 @@ export function createPlanRailController({
       setActionStatus?.(error?.message || "重试参数无效。", "error");
       return;
     }
+    const view = captureView();
+    const lease = beginActivity(`plan:retry:${plan.id}:${stepId}`, taskId, "正在重试步骤…");
+    if (!lease) return;
+    resetFetchThrottle(taskId);
+    let operation = requests.capture({ operation: "plan" });
     button.disabled = true;
-    setDriverExecutionBusy?.(true, taskId);
     renderWorkflowStepper?.({ force: true });
     try {
       await apiClient(`/api/plans/${encodeURIComponent(plan.id)}/steps/${encodeURIComponent(stepId)}/retry`, {
         method: "POST",
         body: JSON.stringify({ inputs }),
       });
+      if (!isCurrentView(view) || !requests.current(operation)) return;
+      operation = requests.advance("plan");
       setActionStatus?.("正在重试步骤...", "busy");
       v2PlanLastFetch.delete(taskId);
-      v2PlanCache.delete(taskId);
+      publishPlan(operation, taskId, null);
       renderWorkflowStepper?.({ force: true });
       await refreshTasks?.();
+      if (!isCurrentView(view) || !requests.current(operation)) return;
       await loadAgentMessages?.(taskId, { preserveOptimistic: true });
-      if (selectedTaskId() === taskId) {
+      if (isCurrentView(view) && requests.current(operation)) {
         renderAll?.();
         maybeFetchPlan(taskId);
         window.setTimeout(
-          () => { void retryFetch(taskId); },
+          () => { void retryFetch(taskId, 0, view, operation); },
           PLAN_RETRY_REFRESH_INTERVAL_MS,
         );
       }
     } catch (error) {
-      button.disabled = false;
-      setActionStatus?.(error?.message || "重试步骤失败。", "error");
+      if (isCurrentView(view) && requests.current(operation)) {
+        button.disabled = false;
+        setActionStatus?.(error?.message || "重试步骤失败。", "error");
+      }
     } finally {
-      setDriverExecutionBusy?.(false, taskId);
+      endActivity(lease);
     }
   }
 
   async function reconcileExecution(button) {
     const taskId = selectedTaskId();
-    const plan = v2PlanCache.get(taskId);
+    const plan = cachedPlan(taskId);
     const targetId = button?.dataset?.planReconcile || "";
     const target = plan?.reconciliation?.targets?.find((item) => item.id === targetId);
     if (!plan?.id || target?.supported !== true || button.disabled) {
@@ -805,7 +839,7 @@ export function createPlanRailController({
   }
 
   async function continueReconciledPlan(button) {
-    const plan = v2PlanCache.get(selectedTaskId());
+    const plan = cachedPlan(selectedTaskId());
     const continuation = plan?.reconciliation?.continuation;
     if (plan?.status !== "running" || !continuation || button.disabled
         || continuation.expected_plan_fingerprint !== button?.dataset?.planContinue) {
@@ -822,26 +856,30 @@ export function createPlanRailController({
     const view = captureView();
     const lease = beginActivity(`plan:${action}:${plan.id}`, taskId, action === "run" ? "正在继续剩余步骤…" : "正在核对原执行结果…");
     if (!lease) return;
+    resetFetchThrottle(taskId);
+    let operation = requests.capture({ operation: "plan" });
     button.disabled = true;
     try {
       const result = await apiClient(`/api/plans/${encodeURIComponent(plan.id)}/${action}`, {
         method: "POST", body: JSON.stringify(body),
       });
-      if (!isCurrentView(view)) return;
-      if (result?.plan) v2PlanCache.set(taskId, result.plan);
-      else if (action === "run") {
-        v2PlanCache.set(taskId, { ...plan, reconciliation: { ...plan.reconciliation, continuation: null } });
+      if (!isCurrentView(view) || !requests.current(operation)) return;
+      operation = requests.advance("plan");
+      if (result?.plan) {
+        if (!publishPlan(operation, taskId, result.plan)) return;
+      } else if (action === "run") {
+        if (!publishPlan(operation, taskId, { ...plan, reconciliation: { ...plan.reconciliation, continuation: null } })) return;
       }
       setActionStatus?.(result?.reconciliation_result?.reason || (action === "run" ? "已提交继续执行，剩余步骤仍按原审批要求执行。" : "已核对执行凭据。"), result?.reconciliation_result?.outcome === "unknown" ? "error" : "success");
       v2PlanLastFetch.delete(taskId);
       await refreshTasks?.();
-      if (!isCurrentView(view)) return;
+      if (!isCurrentView(view) || !requests.current(operation)) return;
       await loadAgentMessages?.(taskId, { preserveOptimistic: true });
-      if (!isCurrentView(view)) return;
+      if (!isCurrentView(view) || !requests.current(operation)) return;
       renderAll?.();
       renderWorkflowStepper?.({ force: true });
     } catch (error) {
-      if (isCurrentView(view)) setActionStatus?.(error?.message || "恢复操作失败，原执行凭据已保留。", "error");
+      if (isCurrentView(view) && requests.current(operation)) setActionStatus?.(error?.message || "恢复操作失败，原执行凭据已保留。", "error");
     } finally {
       button.disabled = false;
       endActivity(lease);
@@ -1601,9 +1639,9 @@ export function createPlanRailController({
     // VD-3: "no response has landed for this task yet" — captured before
     // maybeFetchPlan's async .then can populate v2PlanCache — is the genuine
     // first-load moment that gets the skeleton treatment below.
-    const firstLoad = !v2PlanCache.has(taskId);
+    const firstLoad = cachedPlan(taskId) === undefined;
     maybeFetchPlan(taskId);
-    const plan = v2PlanCache.get(taskId);
+    const plan = cachedPlan(taskId);
     const railPlan = planForRail(plan, task);
     const blocked = driverHasBlockingError();
     const fetchError = v2PlanFetchErrors.get(taskId) || "";
@@ -1666,7 +1704,7 @@ export function createPlanRailController({
       event.stopPropagation();
       const taskId = selectedTaskId();
       strategyArtifactsCache.delete(taskId);
-      maybeFetchStrategyArtifacts(v2PlanCache.get(taskId), taskId);
+      maybeFetchStrategyArtifacts(cachedPlan(taskId), taskId);
       renderWorkflowStepper?.({ force: true });
       return true;
     }
@@ -1683,13 +1721,13 @@ export function createPlanRailController({
   function planStep(metadata = {}, taskId = selectedTaskId()) {
     const stepId = metadata.step_id ? String(metadata.step_id) : "";
     if (!stepId) return null;
-    const plan = v2PlanCache.get(taskId);
+    const plan = cachedPlan(taskId);
     const steps = Array.isArray(plan?.steps) ? plan.steps : [];
     return steps.find((step) => String(step?.id || "") === stepId) || null;
   }
 
   function planId(taskId = selectedTaskId()) {
-    return String(v2PlanCache.get(taskId)?.id || "");
+    return String(cachedPlan(taskId)?.id || "");
   }
 
   // VD-2: the gate card's consequence line ("确认后将执行:<下一步>") reads the
@@ -1698,7 +1736,7 @@ export function createPlanRailController({
   function nextStepAfter(metadata = {}, taskId = selectedTaskId()) {
     const gate = planStep(metadata, taskId);
     if (!gate) return null;
-    const plan = v2PlanCache.get(taskId);
+    const plan = cachedPlan(taskId);
     const steps = Array.isArray(plan?.steps) ? plan.steps : [];
     const downstream = steps.filter((step) => (step?.depends_on || []).includes(gate.id));
     if (!downstream.length) return null;
@@ -1708,7 +1746,7 @@ export function createPlanRailController({
   }
 
   function statusSnapshot(taskId = selectedTaskId()) {
-    return planWorkflowStatus(v2PlanCache.get(taskId));
+    return planWorkflowStatus(cachedPlan(taskId));
   }
 
   return {

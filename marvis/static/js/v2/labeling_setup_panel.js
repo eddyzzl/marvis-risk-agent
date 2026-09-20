@@ -106,6 +106,8 @@ export function createLabelingSetupPanel(dependencies = {}) {
   const workspaceController = dependencies.workspaceController;
   const getSelectedTask = dependencies.getSelectedTask || (() => null);
   const getAgentMessages = dependencies.getAgentMessages || (() => []);
+  const captureView = dependencies.captureView || (() => getSelectedTask()?.id);
+  const isCurrentView = dependencies.isCurrentView || (view => view === getSelectedTask()?.id);
   const onMessages = dependencies.onMessages || (() => {});
   const onSubmitted = dependencies.onSubmitted || (() => {});
   const onError = dependencies.onError || (() => {});
@@ -141,7 +143,10 @@ export function createLabelingSetupPanel(dependencies = {}) {
     states: requiredElement(getElementById, "labelingStates"),
   };
 
-  let submitting = false;
+  let activeSubmission = null;
+  const isSubmitting = () => Boolean(activeSubmission && isCurrentView(activeSubmission.view));
+  const beginActivity = dependencies.beginActivity || (() => ({}));
+  const endActivity = dependencies.endActivity || (() => {});
 
   function setStatus(message = "", kind = "") {
     elements.status.textContent = message;
@@ -174,7 +179,7 @@ export function createLabelingSetupPanel(dependencies = {}) {
     if (uiState.mode === "confirm") {
       elements.proposalSummary.textContent = proposalSummary(uiState.proposal);
       elements.submit.disabled = true;
-      elements.confirm.disabled = submitting || !availability.ready;
+      elements.confirm.disabled = isSubmitting() || !availability.ready;
       setStatus(
         availability.ready
           ? "平台已完成只读核验；确认后才会生成并执行标签构造计划。"
@@ -184,7 +189,7 @@ export function createLabelingSetupPanel(dependencies = {}) {
       return true;
     }
     elements.confirm.disabled = true;
-    elements.submit.disabled = submitting || !availability.ready;
+    elements.submit.disabled = isSubmitting() || !availability.ready;
     setStatus(availability.message, availability.ready ? "" : "warning");
     return true;
   }
@@ -261,7 +266,7 @@ export function createLabelingSetupPanel(dependencies = {}) {
 
   async function submit(event) {
     event?.preventDefault?.();
-    if (submitting) return false;
+    if (isSubmitting()) return false;
     const task = getSelectedTask();
     if (!task?.id || task.task_type !== "data_join") {
       setStatus("请选择数据处理任务后再提交标签口径。", "error");
@@ -281,7 +286,11 @@ export function createLabelingSetupPanel(dependencies = {}) {
       return false;
     }
 
-    submitting = true;
+    const view = captureView();
+    const lease = beginActivity("panel:labeling", task.id);
+    if (!lease) return false;
+    const submission = { view, lease };
+    activeSubmission = submission;
     elements.submit.disabled = true;
     setStatus("正在核验数据切点、字段和 cohort 成熟度…", "busy");
     try {
@@ -292,21 +301,24 @@ export function createLabelingSetupPanel(dependencies = {}) {
           labeling_request: labelingRequest,
         }),
       });
-      if (Array.isArray(result?.messages)) onMessages(result.messages);
-      await onSubmitted(result);
+      if (!isCurrentView(view)) return false;
+      if (Array.isArray(result?.messages)) onMessages(result.messages, view);
+      await onSubmitted(result, view);
       return true;
     } catch (error) {
+      if (!isCurrentView(view)) return false;
       setStatus(error?.message || "标签构造口径提交失败。", "error");
       onError(error);
       return false;
     } finally {
-      submitting = false;
+      if (activeSubmission === submission) activeSubmission = null;
+      endActivity(lease);
       renderAvailability();
     }
   }
 
   async function confirm() {
-    if (submitting) return false;
+    if (isSubmitting()) return false;
     const task = getSelectedTask();
     const uiState = labelingUiState(getAgentMessages());
     const availability = workspaceAvailability(workspaceController, task);
@@ -318,7 +330,11 @@ export function createLabelingSetupPanel(dependencies = {}) {
       setStatus(availability.message, "warning");
       return false;
     }
-    submitting = true;
+    const view = captureView();
+    const lease = beginActivity("panel:labeling", task.id);
+    if (!lease) return false;
+    const submission = { view, lease };
+    activeSubmission = submission;
     elements.confirm.disabled = true;
     setStatus("正在确认并生成受治理的标签构造计划…", "busy");
     try {
@@ -326,15 +342,18 @@ export function createLabelingSetupPanel(dependencies = {}) {
         method: "POST",
         body: JSON.stringify({ content: "确认" }),
       });
-      if (Array.isArray(result?.messages)) onMessages(result.messages);
-      await onSubmitted(result);
+      if (!isCurrentView(view)) return false;
+      if (Array.isArray(result?.messages)) onMessages(result.messages, view);
+      await onSubmitted(result, view);
       return true;
     } catch (error) {
+      if (!isCurrentView(view)) return false;
       setStatus(error?.message || "标签构造提案确认失败。", "error");
       onError(error);
       return false;
     } finally {
-      submitting = false;
+      if (activeSubmission === submission) activeSubmission = null;
+      endActivity(lease);
       renderAvailability();
     }
   }

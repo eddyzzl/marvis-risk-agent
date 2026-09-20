@@ -10,15 +10,16 @@ def test_agent_message_waits_for_draft_save_and_retains_prompt_on_failure():
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createTaskActivityOwner } from './marvis/static/js/task-activity.js';
-import { createTaskRequestScope } from './marvis/static/js/task-request-scope.js';
+import { createTaskSession } from './marvis/static/js/task-session.js';
 const app=fs.readFileSync('./marvis/static/app.js','utf8');
 const source=app.slice(app.indexOf('async function startAgentValidation()'),app.indexOf('async function uploadRiskAnalysisMaterials('));
 function setup(save) {
   const input={value:'请只修订结论'};
   const calls=[];
   const activity=createTaskActivityOwner();
-  const taskRequests=createTaskRequestScope(); taskRequests.select('a');
-  const context={taskRequests,claimBusy:(action,_message,taskId,operation)=>activity.claim(taskId,action,operation),releaseBusy:activity.release,workbenchTaskId:()=> 'a',$:(id)=>id==='agentComposerInput'?input:{value:'model'},
+  const taskSession=createTaskSession(); taskSession.selectTask({id:'a'});
+  const taskRequests=taskSession.requests;
+  const context={taskSession,taskRequests,claimBusy:(action,_message,taskId,operation)=>activity.claim(taskId,action,operation),releaseBusy:activity.release,workbenchTaskId:()=> 'a',$:(id)=>id==='agentComposerInput'?input:{value:'model'},
     selectedTaskNeedsManualRiskIntake:()=>false,selectedTaskNeedsDeterministicPortfolioTurn:()=>false,
     agentModelUnavailableMessage:()=>'',showAgentModelGuidance:()=>false,setAgentComposerNotice:()=>{},
     autoGrowComposerInput:()=>{},updateAgentSendDisabled:()=>{},appendOptimisticAgentUserMessage:()=>({id:'user'}),
@@ -26,7 +27,7 @@ function setup(save) {
     reportDraftState:{get:()=>({dirty:true}),save},agentEffort:()=> 'high',agentAcceptanceModeValue:()=> 'auto_accept',
     api:async(url,options)=>{calls.push([url,JSON.parse(options.body)]);return {messages:[],status:'done'};},
     pollAgentMessagesUntilSettled:async()=>{},removeOptimisticAgentMessage:()=>{},agentModelConfigurationErrorMessage:()=>'',
-    agentMessages:[],renderAgentConversation:()=>{},setActionStatus:()=>{}};
+    renderAgentConversation:()=>{},setActionStatus:()=>{}};
   return {input,calls,context,start:new Function('ctx',`with(ctx){${source};return startAgentValidation;}`)(context)};
 }
 let finishSave;
@@ -54,7 +55,7 @@ finishOldSave();await oldRequest;
 assert.equal(changed.calls[0][0],'api/tasks/a/agent/messages');
 assert.equal(changed.calls[0][1].effort,'high');
 assert.equal(changed.input.value,'新任务指令');
-assert.deepEqual(changed.context.agentMessages,[]);
+assert.deepEqual(changed.context.taskSession.messages,[]);
 '''
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script], cwd=ROOT,
@@ -68,7 +69,7 @@ def test_report_draft_switch_poll_and_confirmation_boundaries():
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createTaskActivityOwner } from './marvis/static/js/task-activity.js';
-import { createTaskRequestScope } from './marvis/static/js/task-request-scope.js';
+import { createTaskSession } from './marvis/static/js/task-session.js';
 import { createReportDraftState } from './marvis/static/js/report-draft-state.js';
 import { latestPendingReportDraftMessageId, hasReportDraftValues, reportDraftTableHtml } from './marvis/static/js/report-draft-table.js';
 const app = fs.readFileSync('./marvis/static/app.js', 'utf8');
@@ -92,13 +93,15 @@ function setup(api) {
     return null;
   }, querySelectorAll(selector) {return selector === '[data-report-draft-key]' ? fields : [];}};
   const activity=createTaskActivityOwner();
-  const taskRequests=createTaskRequestScope(); taskRequests.select('a');
-  const context = {taskRequests,claimBusy:(action,_message,taskId,operation)=>activity.claim(taskId,action,operation),releaseBusy:activity.release,workbenchTask:()=>({task_type:'validation',model_name:'A'}),selectedTaskIsAgentMode:()=>true,$:()=>panel,
-    workbenchTaskId:()=> 'a',agentMessages:[message('a')],latestPendingReportDraftMessageId,hasReportDraftValues,
+  const taskSession=createTaskSession(); taskSession.selectTask({id:'a'});
+  const taskRequests=taskSession.requests;
+  const context = {taskSession,taskRequests,claimBusy:(action,_message,taskId,operation)=>activity.claim(taskId,action,operation),releaseBusy:activity.release,workbenchTask:()=>({task_type:'validation',model_name:'A'}),selectedTaskIsAgentMode:()=>true,$:()=>panel,
+    workbenchTaskId:()=> 'a',latestPendingReportDraftMessageId,hasReportDraftValues,
     renderedReportDraftSignature:'',escapeHtml:(x)=>x,reportDraftTableHtml,reportDraftFeedbackHtml:()=>'',
     activeValidationViewTaskId:'a',activeValidationView:'report',validationViewState:new Map(),selectValidationView:()=>{},
     pendingTaskContentLoadTaskId:null,setBusy:()=>{},api,renderAgentConversation:()=>{},pollAgentMessagesUntilSettled:async()=>{},
     refreshTasks:async()=>{},setActionStatus:()=>{},loadAgentMessages:async()=>{}};
+  taskSession.replaceMessages(taskRequests.capture(), [message('a')]);
   context.updateReportDraftSaveStatus = extract(context, 'updateReportDraftSaveStatus', 'rememberValidationView');
   const state = createReportDraftState({delay:100000,api,onChange:context.updateReportDraftSaveStatus});
   context.reportDraftState = state;
@@ -110,9 +113,9 @@ function setup(api) {
 const switched = setup(async()=>({message:message('a',1)}));
 switched.state.receive('a',message('a')); switched.state.edit('a',values('unsaved A'));
 const render = extract(switched.context,'renderReportDraftWorkspace','renderAgentConversation');
-switched.context.agentMessages=[message('b')]; render();
+switched.context.taskSession.replaceMessages(switched.context.taskRequests.capture(), [message('b')]); render();
 assert.equal(switched.state.get('a').conflict,undefined);
-switched.context.agentMessages=[message('a')]; render();
+switched.context.taskSession.replaceMessages(switched.context.taskRequests.capture(), [message('a')]); render();
 await switched.state.save('a'); assert.equal(switched.state.hasUnsaved(),false);
 // A delayed pre-save poll cannot turn the next local edit into a false conflict.
 switched.state.edit('a',values('next edit'));
@@ -125,7 +128,7 @@ await assert.rejects(switched.state.save('a'),/冲突/);
 assert.equal(switched.state.payload('a').text_values['TEXT:final_validation_conclusion'],'next edit');
 switched.state.resolve('a','local');
 // Explicit server confirmation continues to retire the draft safely.
-switched.context.agentMessages=[message('a'),{task_id:'a',id:'confirmed',stage:'word_conclusion_confirmed'}];
+switched.context.taskSession.replaceMessages(switched.context.taskRequests.capture(), [message('a'),{task_id:'a',id:'confirmed',stage:'word_conclusion_confirmed'}]);
 render(); assert.equal(switched.state.get('a').conflict.unavailable,true);
 switched.state.discard('a');
 
@@ -134,7 +137,7 @@ switched.state.discard('a');
 const incomplete = setup(async()=>({message:message('a',1)}));
 const emptyDraft = message('a',1);
 emptyDraft.metadata.draft_values = values('');
-incomplete.context.agentMessages = [message('a'),emptyDraft];
+incomplete.context.taskSession.replaceMessages(incomplete.context.taskRequests.capture(), [message('a'),emptyDraft]);
 extract(incomplete.context,'renderReportDraftWorkspace','renderAgentConversation')();
 assert.equal(incomplete.state.get('a').values['TEXT:final_validation_conclusion'],'');
 assert.match(incomplete.panel.innerHTML,/data-report-draft-editable="true"/);

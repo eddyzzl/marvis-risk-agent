@@ -247,7 +247,7 @@ def test_data_workspace_panel_is_mounted_in_the_task_workspace():
     assert "row.onclick = () => selectTask(task);" not in app_js
     assert "async function reloadDataWorkspace(" in app_js
     assert app_js.count("await reloadDataWorkspace(taskId, { silent: true });") >= 2
-    assert "await reloadDataWorkspace(selectedTaskId, { silent: true });" in app_js
+    assert "await reloadDataWorkspace(taskSession.taskId, { silent: true });" in app_js
 
     for element_id in (
         "dataWorkspacePanel",

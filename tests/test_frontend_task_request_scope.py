@@ -16,13 +16,9 @@ def run_node(body: str, *functions: str) -> None:
     helpers = "\n".join(slice_function(APP, name) for name in functions)
     script = '''
 import assert from "node:assert/strict";
-import { createTaskRequestScope } from "./marvis/static/js/task-request-scope.js";
-const taskRequests = createTaskRequestScope();
-let selectedTaskId = null;
-let selectedTask = null;
-let projectedValidationChildTaskId = "";
-let projectedValidationChildTask = null;
-let agentMessages = [];
+import { createTaskSession } from "./marvis/static/js/task-session.js";
+const taskSession = createTaskSession();
+const taskRequests = taskSession.requests;
 const usesAgentValidationWorkbench = task => task?.task_type === "validation_batch";
 const pending = [];
 const painted = [];
@@ -75,11 +71,11 @@ def test_projection_rejects_reordered_reads_and_previous_visit(loader):
     run_node('''
 const renderEvidence = value => painted.push(value.value);
 const renderMetricPreview = value => painted.push(value.value);
-const renderAgentConversation = () => painted.push(agentMessages[0]?.value);
+const renderAgentConversation = () => painted.push(taskSession.messages[0]?.value);
 const resetEvidenceSummaries = () => painted.push("empty");
 const loadValidationInputContract = async () => {};
 const notebookReproducibilityComplete = () => true;
-const findTaskInCache = () => selectedTask;
+const findTaskInCache = () => taskSession.task;
 const selectedTaskIsAgentMode = () => true;
 const taskUsesPlanRail = () => false;
 const agentMessageCanPollIncrementally = () => false;
@@ -137,7 +133,7 @@ pending[1].resolve({ id: "m2", marker: "current" });
 assert.equal(await second, true);
 pending[0].resolve({ id: "m1", marker: "late" });
 assert.equal(await first, false);
-assert.equal(projectedValidationChildTask.id, "m2");
+assert.equal(taskSession.model.id, "m2");
 assert.deepEqual(painted, ["m2"]);
 const previous = applyProjectedValidationChild("m1");
 setSelectedTask({ id: "other" });
@@ -145,10 +141,10 @@ setSelectedTask({ id: "batch", task_type: "validation_batch" });
 const current = applyProjectedValidationChild("m1");
 pending[2].resolve({ id: "m1", marker: "previous-visit" });
 assert.equal(await previous, false);
-assert.equal(projectedValidationChildTask, null);
+assert.equal(taskSession.model, null);
 pending[3].resolve({ id: "m1", marker: "new-visit" });
 assert.equal(await current, true);
-assert.equal(projectedValidationChildTask.marker, "new-visit");
+assert.equal(taskSession.model.marker, "new-visit");
 assert.deepEqual(painted, ["m2", "m1"]);
 ''', *IDENTITY, "function isCurrentProjectedChildLoad(", "async function applyProjectedValidationChild(")
 
@@ -158,15 +154,15 @@ def test_placeholder_restoration_invalidates_previous_visit():
 let stored = "a";
 const storedSelectedTaskId = () => stored;
 restoreSelectedTaskPlaceholder();
-assert.equal(selectedTaskId, "a");
-assert.equal(selectedTask, null);
+assert.equal(taskSession.taskId, "a");
+assert.equal(taskSession.task, null);
 const old = taskRequests.begin("messages");
 setSelectedTask(null);
 restoreSelectedTaskPlaceholder();
 assert.equal(taskRequests.accepts(old), false);
 stored = "b";
 restoreSelectedTaskPlaceholder();
-assert.equal(selectedTaskId, "a");
+assert.equal(taskSession.taskId, "a");
 ''', *IDENTITY, "function restoreSelectedTaskPlaceholder(")
 
 

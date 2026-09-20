@@ -15,13 +15,13 @@ def run_node(body, *functions):
     script = '''
 import assert from "node:assert/strict";
 import { createTaskActivityOwner } from "./marvis/static/js/task-activity.js";
-import { createTaskRequestScope } from "./marvis/static/js/task-request-scope.js";
+import { createTaskSession } from "./marvis/static/js/task-session.js";
 const taskActivities = createTaskActivityOwner();
-const taskRequests = createTaskRequestScope();
-let selectedTaskId = "a";
-taskRequests.select("a");
+const taskSession = createTaskSession();
+const taskRequests = taskSession.requests;
+taskSession.selectTask({id:"a"});
 const painted = [];
-const isWorkbenchTaskId = id => id === selectedTaskId;
+const isWorkbenchTaskId = id => id === taskSession.taskId;
 const setActionStatus = (...args) => painted.push(args);
 const renderWorkflowStepper = () => {};
 const renderPetState = () => {};
@@ -76,7 +76,7 @@ await runAction(stop,{actionId:"agent",operation:"agent:stop"});
 assert.equal(stopCount,1);
 endStart(); await first;
 assert.equal(taskActivities.action("a"),"agent");
-selectedTaskId="b"; taskRequests.select("b");
+taskSession.selectTask({id:"b"});
 const newer=taskActivities.claim("b","metrics");
 endStop(); await stopping;
 assert.equal(taskActivities.action("a"),null);
@@ -105,7 +105,7 @@ def test_real_start_and_stop_adapters_do_not_accept_late_start_messages():
     run_node('''
 const composer={value:"original instruction"};
 const $=id => id==="agentComposerInput" ? composer : {value:"model"};
-const workbenchTaskId=()=>selectedTaskId;
+const workbenchTaskId=()=>taskSession.taskId;
 const requireTaskId=id=>id;
 const selectedTaskNeedsManualRiskIntake=()=>false;
 const selectedTaskNeedsDeterministicPortfolioTurn=()=>false;
@@ -121,7 +121,7 @@ const agentAcceptanceModeValue=()=>"normal";
 const reportDraftState={get:()=>null};
 const pollAgentMessagesUntilSettled=async()=>{};
 const invalidateAgentBatchAutoRun=()=>{};
-let agentMessages=[];
+
 const renderAgentConversation=()=>{};
 const requests=[];
 const api=(path,options)=>new Promise(resolve=>requests.push({path,options,resolve}));
@@ -134,7 +134,7 @@ await stopAgentValidation();
 assert.equal(requests.length,2);
 requests[1].resolve({messages:[{id:"stop"}],status:"stopped"}); await stop;
 requests[0].resolve({messages:[{id:"late-start"}],status:"done"}); await start;
-assert.deepEqual(agentMessages,[{id:"stop"}]);
+assert.deepEqual(taskSession.messages,[{id:"stop"}]);
 assert.equal(taskActivities.action("a"),null);
 assert.equal(composer.value,"should not submit twice");
 ''', *BUSY, "async function startAgentValidation(", "async function stopAgentValidation(")

@@ -1591,7 +1591,7 @@ def test_screen_table_gains_search_sort_chips_bulk_pagination_wiring():
     assert 'document.addEventListener("input", handleScreenMetricFilterInput)' in app_js
     assert 'document.addEventListener("change", handleScreenPickChange)' in app_js
     assert 'document.addEventListener("click", handleScreenAgentRecommendClick)' in app_js
-    assert "getAgentMessages: () => agentMessages" in app_js
+    assert "getAgentMessages: () => taskSession.messages" in app_js
     # CSS for the new toolbar/summary/bulk/pagination affordances
     assert ".screen-toolbar" in css
     assert ".screen-chip" in css

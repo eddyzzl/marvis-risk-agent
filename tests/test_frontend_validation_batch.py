@@ -1,3 +1,4 @@
+from tests.javascript_source import session_projection_fixture
 import json
 import subprocess
 from pathlib import Path
@@ -19,6 +20,7 @@ import assert from "node:assert/strict";
 const batch = await import({json.dumps(module_url)});
 {script_body}
 """
+    script = session_projection_fixture(script)
     subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=True,
@@ -487,7 +489,7 @@ assert.equal(timers.size, 0);
 
     app = _read_static("app.js")
     assert "refreshParentTask: async ({ parentTaskId } = {}) => {" in app
-    assert 'return taskServerBusyAction(selectedTask) !== "validation_batch";' in app
+    assert 'return taskServerBusyAction(taskSession.task) !== "validation_batch";' in app
 
 
 def test_batch_detail_recovery_only_clears_the_matching_transient_status():
@@ -527,6 +529,7 @@ def test_batch_detail_recovery_only_clears_the_matching_transient_status():
             "assert.equal(updates.length, 1);",
         ]
     )
+    script = session_projection_fixture(script)
     subprocess.run(
         ["node", "--input-type=module", "-e", 'import assert from "node:assert/strict";\n' + script],
         check=True,
@@ -566,6 +569,7 @@ def test_validation_batch_uses_only_its_dedicated_progress_poll():
             "assert.equal(genericPolls, 1);",
         ]
     )
+    script = session_projection_fixture(script)
     subprocess.run(
         ["node", "--input-type=module", "-e", 'import assert from "node:assert/strict";\n' + script],
         check=True,
@@ -603,6 +607,7 @@ def test_validation_batch_server_busy_state_has_independent_copy_and_blocks_dele
             "});",
         ]
     )
+    script = session_projection_fixture(script)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", 'import assert from "node:assert/strict";\n' + script],
         check=True,
@@ -696,6 +701,7 @@ def test_validation_batch_delete_preview_surfaces_full_cascade_and_fails_closed(
             "}",
         ]
     )
+    script = session_projection_fixture(script)
     subprocess.run(
         ["node", "--input-type=module", "-e", 'import assert from "node:assert/strict";\n' + script],
         check=True,
@@ -870,14 +876,14 @@ def test_batch_contract_submission_is_explicitly_bound_to_child_and_refreshes_pa
     assert 'data-validation-contract-task-id="${escapeHtml(taskId)}"' in app_js
     assert 'data-validation-contract-parent-task-id="${escapeHtml(parentTaskId)}"' in app_js
     assert 'const parentTaskId = form.dataset.validationContractParentTaskId || "";' in app_js
-    assert "form.dataset.validationContractTaskId || workbenchTaskId() || selectedTaskId" in app_js
+    assert "form.dataset.validationContractTaskId || workbenchTaskId() || taskSession.taskId" in app_js
     assert "isWorkbenchTaskId(taskId)" in app_js
     assert 'api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`' in app_js
-    assert 'if (selectedTaskId !== parentTaskId) return;' in app_js
-    assert 'validationBatchPanelController.selectTask(selectedTask, { force: true })' in app_js
+    assert 'if (taskSession.taskId !== parentTaskId) return;' in app_js
+    assert 'validationBatchPanelController.selectTask(taskSession.task, { force: true })' in app_js
     assert (
-        'await validationBatchPanelController.selectTask(selectedTask, { force: true });\n'
-        '      if (selectedTaskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;'
+        'await validationBatchPanelController.selectTask(taskSession.task, { force: true });\n'
+        '      if (taskSession.taskId !== parentTaskId || !selectedTaskIsValidationBatch()) return;'
         in app_js
     )
     # Contract read ordering and task/model revisit isolation are behavior-tested
@@ -931,8 +937,8 @@ def test_batch_frontend_is_wired_without_reusing_single_task_creation_dialog():
         1,
     )[0]
     assert "syncTaskDeepLink(window.history, window.location" in remember_body
-    boot = app_js[app_js.index("selectedTaskId = preferredStartupTaskId"):app_js.index("initializeApp();")]
-    assert "if (selectedTaskId) rememberSelectedTaskId(selectedTaskId);" in boot
+    boot = app_js[app_js.index("taskSession.selectTask(null, preferredStartupTaskId"):app_js.index("initializeApp();")]
+    assert "if (taskSession.taskId) rememberSelectedTaskId(taskSession.taskId);" in boot
     assert "else rememberSelectedTaskId(null);" in boot
 
     # Multi-model validation is created from the same 模型验证 dialog.
@@ -1013,14 +1019,14 @@ def test_agent_batch_uses_compact_switcher_instead_of_old_overview():
 
     assert "function workbenchTask(" in app_js
     assert "function workbenchTaskId(" in app_js
-    assert "projectedValidationChildTaskId" in app_js
+    assert "taskSession.modelId" in app_js
     assert "onProjectedChildChange:" in app_js
     apply_start = app_js.index("async function applyProjectedValidationChild")
     apply_end = app_js.index("function selectedTaskIsRiskAnalysisAgent", apply_start)
     apply_body = app_js[apply_start:apply_end]
     # Messages are cleared only when model identity changes; race tests assert
     # that a late child response cannot restore the previous model.
-    assert "const childChanged = projectedValidationChildTaskId !== normalizedChildId;" in apply_body
+    assert "const childChanged = taskSession.modelId !== normalizedChildId;" in apply_body
     assert "resetAgentTypingState();" in apply_body
     assert "beginTaskContentLoad(normalizedChildId);" in apply_body
     assert "finishTaskContentLoad(normalizedChildId);" in apply_body
@@ -1196,15 +1202,15 @@ def test_agent_batch_stepper_follows_projected_child_not_parent():
     assert "workflowStepStatus(index, activeIndex, task)" in renderer
     assert "usesPmmlScoringWorkflow(task)" in renderer
     assert "const renderTaskId = workbenchTaskId() || \"\";" in renderer
-    assert "usesPmmlScoringWorkflow(selectedTask)" not in renderer
-    assert "workflowIndex(selectedTask?.status)" not in renderer
+    assert "usesPmmlScoringWorkflow(taskSession.task)" not in renderer
+    assert "workflowIndex(taskSession.task?.status)" not in renderer
 
     downloads = app_js.split("function downloadWordReport", 1)[1].split(
         "function previewWordReport",
         1,
     )[0]
     assert "workbenchTaskId()" in downloads
-    assert "selectedTaskId" not in downloads
+    assert "taskSession.taskId" not in downloads
 
     preview = app_js.split("function openWordPreviewDialog", 1)[1].split(
         "function closeWordPreviewDialog",
