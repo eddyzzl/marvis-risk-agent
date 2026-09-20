@@ -469,6 +469,7 @@ def _task_display_status_for(
     label_end = app_js.index("function notebookReproducibilityComplete", label_start)
     script = "\n".join(
         [
+            'import { actionStatusPresentation } from "./marvis/static/js/task-status.js";',
             f"const statusLabels = {json.dumps({'scanned': '已扫描', 'failed': '失败'}, ensure_ascii=False)};",
             f"const task = {json.dumps(task, ensure_ascii=False)};",
             "function taskUsesPlanRail(task) { return ['data_join', 'feature_analysis', 'modeling', 'strategy', 'vintage', 'portfolio'].includes(task?.task_type); }",
@@ -486,7 +487,8 @@ def _task_display_status_for(
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
+        cwd=Path(__file__).resolve().parents[1],
         check=True,
         capture_output=True,
         text=True,
@@ -6896,8 +6898,14 @@ def test_current_status_error_detail_is_compact_accessible_and_collapsible():
 
     # failures are signalled by a red status pill, not a red box
     assert "function actionStatusPill" in app_js
-    assert 'tone: "fail"' in app_js
-    assert '? { label: "需复核", tone: "ok" }' in app_js
+    assert _task_display_status_for(
+        {"task_type": "validation", "status": "failed"},
+        action_message="复核前检查失败。", action_kind="error",
+    )["heroPill"] == {"label": "验证失败", "tone": "fail"}
+    assert _task_display_status_for(
+        {"task_type": "validation", "status": "review_required"},
+        action_message="报告需要复核。", action_kind="error",
+    )["heroPill"] == {"label": "需复核", "tone": "ok"}
     assert '.task-pill.fail' in styles_css
 
     detail_start = styles_css.index(".action-error-detail {")

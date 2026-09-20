@@ -63,6 +63,7 @@ import {
   updateWorkspaceGreeting as updateWorkspaceGreetingView,
 } from "./js/task-workspace-view.js";
 import { createTaskSearchController } from "./js/task-search.js";
+import { actionStatusPresentation } from "./js/task-status.js";
 import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
@@ -1534,34 +1535,13 @@ function actionStatusPill(
   kind,
   task = typeof selectedTask !== "undefined" ? selectedTask : null,
 ) {
-  if (!message) return null;
-  if (kind === "error") {
-    return /复核/.test(message)
-      ? { label: "需复核", tone: "ok" }
-      : { label: "验证失败", tone: "fail" };
-  }
-  if (kind === "stopped") return { label: "停止", tone: "neutral" };
-  if (kind === "busy") return { label: "进行中", tone: "run" };
-  if (kind === "success") {
-    if (taskStopped(task)) return { label: "停止", tone: "neutral" };
-    const planSnapshot = task && taskUsesPlanRail(task)
-      ? taskPlanWorkflowStatusSnapshot(task)
-      : null;
-    const wholeTaskComplete = task
-      ? (taskUsesPlanRail(task)
-        ? ["已完成", "待复核"].includes(String(planSnapshot?.label || ""))
-        : ["succeeded", "review_required"].includes(String(task?.status || "")))
-      : true;
-    if (wholeTaskComplete) return { label: "已完成", tone: "ok" };
-    if (/(?:等待|请).*确认|待确认/.test(message)) {
-      return { label: "待确认", tone: "review" };
-    }
-    return { label: "待继续", tone: "review" };
-  }
-  if (kind === "info" && /(?:等待|待|请).*确认/.test(message)) {
-    return { label: "待确认", tone: "review" };
-  }
-  return { label: "待处理", tone: "neutral" };
+  const usesPlanWorkflow = Boolean(task && taskUsesPlanRail(task));
+  return actionStatusPresentation(message, kind, {
+    task,
+    stopped: taskStopped(task),
+    usesPlanWorkflow,
+    workflowSnapshot: usesPlanWorkflow ? taskPlanWorkflowStatusSnapshot(task) : null,
+  });
 }
 
 function describeActionStatus(message, kind, detail) {
