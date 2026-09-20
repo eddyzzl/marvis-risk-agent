@@ -146,7 +146,7 @@ def handle_agent_stop_message_with_callbacks(
             task.id,
             role="assistant",
             stage="chat",
-            content="当前没有正在执行的 Agent 任务，无需停止。需要继续验证时可以重新发送指令。",
+            content="当前没有正在执行的 Agent 任务，无需停止。需要继续处理时可以重新发送指令。",
             metadata={"intent": "stop", "active_job": None},
         )
         return {

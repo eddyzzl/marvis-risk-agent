@@ -108,7 +108,7 @@
           "milestone": "B"
         }
       ],
-      "notes": "Blind expected isolation, fixture provenance and read-only evidence integrity gate implemented. Real Executor benchmark runner and trusted acceptance adapters are still pending. No real-execution acceptance claimed.",
+      "notes": "Real HTTP Agent/Driver/Executor/ToolRunner benchmark merged (156baa3c), with isolated expected scoring, provider metering and pacing correction (8193c8fe). Original synthetic real-model run failed 2/2 on HTTP budget; unchanged-case rerun passed JOIN and failed feature on 8-attempt limit (1/2). Both archives retained. Provider retry observability implemented independently; full workflow families, hidden acceptance, trusted closure adapters and aggregate token/cost limits remain open.",
       "milestones": {
         "S": "in_progress"
       }
@@ -136,7 +136,7 @@
           "milestone": "S"
         }
       ],
-      "notes": "Shared effectiveness stages, live Notebook cancellation/reentry, validation services and durable required Hook completion implemented. Immutable invocation contract and dispatch marker now gate retries and recovery, including cancellation and upstream resets. Frozen joint regression: 1748 passed, one incomplete historical migration fixture failed; fixture repaired to construct actual v34, then 192 migration/API/DB checks passed. Three desktop widths verified retry guards on a real isolated server; top-bar status mismatch remains WP05 work. Trusted unknown-outcome reconciliation and completion-only application resume remain required.",
+      "notes": "Shared validation/completion protocol and immutable invocation safety merged. Trusted original-producer reconciliation merged f39e981a: atomic strategy adoption receipts, read-only bound verifiers, append-only proof, completion-only recovery, cancelled-plan explicit resume, fenced Hook generation, and fingerprint-bound continuation through existing executor. 90 API/controller/reconciliation checks, 226 producer/governance/recovery checks and 583 final integration checks passed. Real browser continuation to original approval gate passed at three widths. External verifier coverage and independent full readiness acceptance remain open.",
       "milestones": {
         "S": "in_progress"
       }
@@ -150,28 +150,28 @@
           "milestone": "S"
         }
       ],
-      "notes": "Compiler module refactor is isolated on codex/audit-module-refactor-20260921. Initial normal-import change passed compiler regression; acyclic symbol ownership is being implemented. Main branch still retains both shared-exec entry points until reviewed integration. Turn handlers and real Agent acceptance remain.",
+      "notes": "Compiler ownership merged as 5c9b5fa8 (1640 checks); turn-handler ownership merged as bdf47290 (1259 distinct passing cases and one existing opt-in skip). Both packages use ordinary acyclic imports and retain public facades. Root reviewed interfaces/ownership; real Agent full-family acceptance and remaining large domain functions are not claimed complete.",
       "milestones": {
         "S": "in_progress"
       }
     },
     {
       "id": "WP05",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP02",
           "milestone": "S"
         }
       ],
-      "notes": null,
+      "notes": "Structured task headline merged e2f7922d (336 checks, real browser at 1440/1600/1920). Task/model visit-scoped read lifecycle merged 8876ec66 (377 checks, real HTTP A-B-A response race at three widths). Activity leases, mutation races, session ownership and additional real-browser journeys remain in active development. Activity leases and superseded mutation response protection merged 94ffecb0; 372 focused checks and real browser POST deduplication/stop/task and model revisits passed. Complete session and plan-fetch ownership consolidation continues.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
       "id": "WP06",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP00",
@@ -182,21 +182,21 @@
           "milestone": "S"
         }
       ],
-      "notes": null,
+      "notes": "In progress in isolated codex/wp06-business-contract-20260921: versioned objectives, deterministic business acceptance and authenticated adopted-object evidence integration. No software or historical acceptance claimed yet.",
       "milestones": {
         "S": "planned"
       }
     },
     {
       "id": "WP07",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP00",
           "milestone": "B"
         }
       ],
-      "notes": null,
+      "notes": "Isolated implementation started for authenticated as-of JOIN/time contracts and explicit modeling partition isolation. Ordinary JOIN and legacy unknown status retained; no PIT or historical acceptance claimed.",
       "milestones": {
         "S": "planned"
       }
@@ -445,7 +445,7 @@
     {
       "id": "F01",
       "title": "真实模型与真实工具的完整任务证据不足",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP01",
         "WP08",
@@ -487,7 +487,7 @@
     {
       "id": "F03",
       "title": "流程完成与业务达标混用",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP06",
         "WP15"
@@ -510,7 +510,7 @@
     {
       "id": "F04",
       "title": "数据准备到训练缺少强制时间正确性契约",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP00",
         "WP07"
@@ -533,7 +533,7 @@
     {
       "id": "F05",
       "title": "情景假设与实际增量收益证据不足",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP06",
         "WP12",
@@ -813,7 +813,7 @@
     {
       "id": "F17",
       "title": "前端任务与消息状态所有权不清",
-      "status": "planned",
+      "status": "in_progress",
       "work_packages": [
         "WP05"
       ],

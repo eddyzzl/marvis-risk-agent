@@ -173,7 +173,7 @@ Chromium 在 1440、1600、1920 × 1000 下均通过：页面身份与非空内�
 下列边界必须保留或另批迁移，不能按静态引用少直接删除：
 
 1. `plugins/subprocess_worker.py:184/663` 按 manifest 的 module/entrypoint 动态调用 Tool；无静态 import 不代表无调用。
-2. `agent/turn_handlers/__init__.py:35` 与 `strategy_request_compiler/__init__.py:27` 的共享 exec 仍在，归 WP04 处理，不以本轮 helper 收敛宣称已移除。
+2. 初始盘点时 `agent/turn_handlers/__init__.py:35` 与 `strategy_request_compiler/__init__.py:27` 均使用共享 exec；compiler 已在后续 WP04 批次迁移，turn handlers 仍待处理。
 3. `api.py:96/127` 的兼容别名和旧 `repo=` 参数转换仍承载扩展导入责任；需要逐项迁移与兼容测试。
 4. `orchestrator/templates/sample.py:173` 的动态注册及 `templates/skills.py:77` 用户模板装载继续使用既有 ToolRegistry/PlanValidator，不能另立 runtime。
 5. `reconcile.naive_ks` 保留独立数值交叉核验责任。消费者的 `_dataset_name`、`_resolve_named_col`、`_amount_metrics` 等导入别名仍被业务调用，是单一实现的引用，不是重复算法。
@@ -198,3 +198,69 @@ Chromium 在 1440、1600、1920 × 1000 下均通过：页面身份与非空内�
 ## WP04 独立开发分支
 
 `codex/audit-module-refactor-20260921` 已开始编译器真实模块化。初步去除 shared exec 的版本通过 1635 项编译器回归与 11 项模块身份/类型解析检查；仍有普通 imports 循环，不能以删除 exec 即宣告完成。已根据符号依赖制定 contracts、共享文本规则、标识正则与各语法家族的归属搬迁，继续实现无环依赖并保持公开 facade。此时尚未合入主树，turn handlers 和真实 Agent 全流程验收仍待完成。
+
+
+## WP04 编译器模块化合入
+
+`5c9b5fa8` 已合入主线：十个语法 lane 使用普通 imports；contracts、grounding、identifiers 持有公共结果、文本规则及标识定义，语法家族不反向依赖 facade/core。保留已有公共导出、兼容入口和 logger 名称；删除 exec/shared-globals 及 TYPE_CHECKING 假接线。模块依赖无环，函数定义归属和类型解析由实际导入检查。
+
+隔离分支最终 1640 项编译器、特征化和模块归属回归通过（12.85 秒），scoped Ruff 与差异检查通过；主代理检查模块分层和接口后合入。原始记录在模块 worktree `.pytest_cache/wp04/compiler-dag-tests.log/xml`。这批未运行外部模型，不能代替 A 层；`turn_handlers` 仍需迁移，WP04/F16 保持进行中。
+
+## WP05 状态呈现首批合入
+
+`e2f7922d` 将任务顶部状态移到 `task-status.js`，直接使用现有 plan 的结构化状态。待核对显示待核对，通用失败提示不再把 JOIN 任务解释为模型验证失败；自由文本中的“复核”也不能改变确定失败的状态。
+
+最终两文件 336 项 Python/Node 检查通过（7.03 秒），JS 语法、scoped Ruff 和差异检查通过。真实临时 HTTP 服务下，1440/1600/1920 × 1000 均检查顶部、侧栏和步骤栏一致，unknown 无重试表单、安全失败保留重试入口，切换任务没有残留控件；实际查看了 1440 unknown 和 1920 safe 的静止截图。Browser plugin not available，沿用本机 Playwright。证据目录为 `/var/folders/z1/yls0t5ds7zj16tk472xr8kpc0000gn/T/marvis-wp05-status-browser-20260921-onojce71/`，临时服务已停止。
+
+这批只关闭具体状态显示缺陷，不将 WP05/F17 标为完成。任务/模型访问身份、请求取消、乱序响应、消息和 busy 状态所有权继续开发；历史数据与生产证据尚未取得。
+
+
+## WP04 Agent 流程模块合入
+
+`bdf47290` 合入 `turn_handlers` 的普通模块边界；contracts、C1 state、data context、semantic authorization、strategy evidence 持有下层职责，dispatch/recovery/registry 使用明确依赖，facade 保留全部 307 个既有导出。产品定义归一化 AST 等价，250 个注解可解析、992 个跨模块符号查找可解析，依赖图无环。
+
+73 文件分四片运行，首次为 1255 passed、4 failed、1 skipped；4 个失败均来自同一个参数化测试仍通过变量名 patch 旧 facade。迁移到实际 strategy_candidates owner 后，受影响文件和架构检查 17 passed，去重后的相关案例为 1259 passed、1 个既有 live DeepSeek opt-in skip。产品源码 29 文件在回归期间哈希未变。没有将这批称为真实模型验收，也未宣称大领域函数全部完成细分。原始记录在 `/tmp/marvis-turn-lanes-20260921/.pytest_cache/`。
+
+## WP05 访问身份与晚到读取
+
+`8876ec66` 合入 task/model 访问代际、按资源 latest-request 身份和 AbortController。任务与批次子模型切换使旧读取失效；旧消息、输入契约、报告字段及动作提示不能写入新访问。377 个相关 Python/Node 检查通过（8.29 秒），JS/Ruff/diff 检查通过。
+
+真实 HTTP 浏览器在 1440/1600/1920 下延迟真实后端消息响应，执行 A→B→A 切换；旧请求取消、最新服务器消息保留，页面无错误。实际查看 1440 截图。证据 `/var/folders/z1/yls0t5ds7zj16tk472xr8kpc0000gn/T/marvis-wp05-request-browser-20260921-uehgty84/`。此前脚本误用 update_agent_message 签名的失败记录保留，不计为通过。写请求、busy lease 与完整 session 所有权继续由后续批次完成。
+
+## WP01 真实 Agent 联合运行及失败记录
+
+`156baa3c` 引入隔离应用副本的真实 HTTP Agent/Driver/Executor/ToolRunner runner；评分 expected 在父进程、应用与 worker 的模型配置均经过父进程代理，真实模型 key 不进入应用快照。服务调用、重试、工具回执和输出认证均留存；未知 usage/费用不按 0 处理。88 个相关检查通过，另有真实慢 headers/JSON trickle/无换行 SSE 的有界终止反例。总体 token 与费用硬上限尚未实现，仍标记 not_enforced。
+
+使用已有本机 DeepSeek v4 flash 配置，只发送开发用合成 JOIN/feature 数据与聚合，不读取用户历史数据。两例在首轮运行前冻结预算：每例 180 秒、8 次模型 transport attempts、120 HTTP、单次输出上限 4096；expected 与案例均未在重跑时变更。
+
+- 首轮 `20260920T182834930534Z-3084d3bb7af5`：2/2 失败；JOIN 及 feature 都因评测器 50ms 轮询耗尽 HTTP 限额，不能因为部分工具 DONE 而计为通过。
+- `8193c8fe` 修正为状态不变时逐步退避至 2 秒，实际状态变化恢复 250ms；两项 clock-driven 反例先失败，修复后 18 项 runtime 检查通过。
+- 原预算重跑 `20260920T183556260801Z-448e6690a648`：JOIN 通过（44.489 秒、23 HTTP、8 attempts）；feature 失败（107.433 秒、50 HTTP、8 attempts，后续 retry 被拒）。三 Tool/产物断言通过不能覆盖预算失败，总成绩仍是 1/2。baseline comparison 未发现倒退也不等于整组验收通过。
+- feature 第 6 次 critic 和第 8 次 summary 的 completion/reasoning 均为 4096；可证实 critic 重试及 summary 后续请求耗尽预算。旧记录缺 finish_reason，reasoning 耗尽正文额度只是推测，不补写历史结论，也不提高预算掩盖失败。
+
+原始案例、expected、两轮 report/attempt/HTTP/原始评分档案位于 `/var/folders/z1/yls0t5ds7zj16tk472xr8kpc0000gn/T/marvis-runtime-acceptance-20260921-fkiev2tv/evidence/`。这些是公开合成开发例的真实模型证据，不是隐藏集、全部工作流、H 或 P 验收；WP01 保持进行中。
+
+
+## WP03 原生产者核对与明确续执行
+
+`f39e981a` 合入 migration 38、只读 OutcomeVerifier 注册、不可变核对证据和原始策略采用凭据。策略采用在同一领域事务中保存完整输出、审批/调用身份和产物哈希；核对仅接受服务器推导的 target_id，不能提交 success/proof/verifier。缺核对器、旧 NULL 契约、缺完整输出、身份漂移或产物改动继续未知。已确认未生效且原生产者被 fence 后，最多消费一次新 Hook generation；Tool 后续重试仍经正常审批。
+
+恢复只调用共享 completion 协议，不重发原 Tool。取消后核对不自动继续，需明确 resume-completion；复核不通过仍保持失败。root 独立审查补出非末步骤恢复后的死路：原步骤完成但计划 RUNNING/无活动 job。现在 GET 给出带当前 fingerprint 的 continuation，UI 显示待继续，POST 现有 run 入口执行剩余步骤；入队前、拿到执行 lease 后再次检查快照，后续确认门不改变。三个新反例在修复前全部失败、修复后通过。
+
+最终验证：API/controller/reconciliation 90 passed；producer/governance/runner/recovery/module 226 passed（64.93 秒）；completion/Driver/reconciliation/controller/module 联合 583 passed（63.25 秒）。这些集合重叠，不相加为独立测试数量。相关 Ruff、JS 语法与 diff 检查通过。根额外检查了原子 producer receipt、绑定不可变约束和领域输出认证路径。
+
+真实独立 HTTP 服务、Chromium 1440/1600/1920 均通过“待继续 → 继续剩余步骤 → 原审批门”；首步 run 账本未变化，第二步没有提前生成 run。UI 数据由明确标注的合成 Hook/runner 夹具生成，服务与 API 未 mock；此证据证明界面与审批门，不是机构效果核对。实际查看 1440 继续页与 1920 确认页。证据 `/var/folders/z1/yls0t5ds7zj16tk472xr8kpc0000gn/T/marvis-wp03-continuation-browser-20260921-u_eb3dnj/`；首版脚本误把说明定位在步骤栏的失败留在 `_15nfitu`，修正定位后新目录通过。Browser plugin not available，使用本机 Playwright。
+
+正式实现的原生产者核对器当前只有 strategy.adopt_strategy；合成 Hook adapter 仅用于测试。不声称外部支付、通知、机构部署已有真实核对能力，WP03 整体仍等待范围内独立验收。
+
+## WP05 写请求与操作租约
+
+`94ffecb0` 引入 task-activity 唯一活动账本，旧 finally 只能释放自己的 lease；请求访问和 operation 代际拒绝过期 start/POST/poll 回复，stop 使用独立操作，重复提交不重复派发。真实浏览器暴露 manual Vintage 入口 POST 在途时没有 stop 投影，已修正为这些已支持风险入口也能停止。
+
+372 个相关前端检查通过，最后提示清理后 17 个受影响检查再次通过。三个桌面宽度的真实后端浏览器证明 POST 恰一次、stop 独立、旧响应不能覆盖停止结果，A→B→A 保留最新消息/未发送草稿，批次 M1→M2→M1 的真实 GET 乱序不串模型。实际查看 model-revisit-1440 和 stop-owner-1920。证据 `/var/folders/z1/yls0t5ds7zj16tk472xr8kpc0000gn/T/marvis-wp05-activity-browser-20260921-bsiv4s0k/`。完整 session、plan 读取与修订身份继续下一批，未以删除若干全局变量冒充完成。
+
+## WP01 安全的响应观测
+
+`e0c738e9` 增加 allowlist finish_reason、首 choice 正文/思考字符计数与 attempt_outcome；不保存正文、prompt、思考内容、业务明细或密钥。HTTP 200 与正文缺失、格式损坏、输出耗尽分别记录，content_present 只表示 transport envelope，不意味着业务成功。修正无末尾换行 SSE 行的 usage 漏记。
+
+98 项真实 loopback response/runtime/LLM/CLI 检查通过（87.94 秒），原两轮 16 个归档文件 hash 保持不变。未额外调用真实模型、未改变预算或判分。总体 token/费用硬保证仍 not_enforced：事后 usage 门只能阻止后续调用，不能保证供应商已在途计费上限；未知价格/usage 仍未知。
