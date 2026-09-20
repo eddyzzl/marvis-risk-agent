@@ -899,6 +899,13 @@ class PlanDriver:
             raise DriverError("AUTO 不得操作或确认强制人工业务决策节点，请由人工继续。")
         return self._gate_execution.apply_replan(plan, gate, goal, run_seq)
 
+    def reconcile_execution(self, plan_id: str, target_id: str) -> dict:
+        """Explicit result lookup; never route through retry or free-text approval."""
+        return self._executor.reconcile_execution(plan_id, target_id)
+
+    def resume_completion(self, plan_id: str, target_id: str) -> dict:
+        return self._executor.resume_completion(plan_id, target_id)
+
     def retry_failed_step(
         self,
         plan_id: str,

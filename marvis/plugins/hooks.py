@@ -49,6 +49,7 @@ class HookDispatcher:
         self._required: dict[tuple[str, str], bool] = {}
         self._bindings: dict[str, str] = {}
         self._listener_requirements: dict[tuple[str, str], bool] = {}
+        self._listener_bindings: dict[tuple[str, str], str] = {}
         self._deliveries = HookDeliveryRepository(repo.db_path) if repo is not None else None
 
     def rebuild_index(self) -> None:
@@ -69,7 +70,7 @@ class HookDispatcher:
         self._required = required
         self._bindings = bindings
 
-    def register_listener(self, event: str, listener: HookListener, *, required: bool = False) -> None:
+    def register_listener(self, event: str, listener: HookListener, *, required: bool = False, binding: str = "") -> None:
         if not isinstance(required, bool):
             raise ValueError("required must be a boolean")
         if required and event not in REQUIRED_HOOK_EVENTS:
@@ -79,6 +80,7 @@ class HookDispatcher:
             raise ValueError(f"duplicate hook listener identity: {identity}")
         self._listeners[str(event)].append(listener)
         self._listener_requirements[(str(event), identity)] = required
+        self._listener_bindings[(str(event), identity)] = str(binding)
 
     def listener_count(self, event: str) -> int:
         return len(self._listeners.get(str(event), []))
@@ -115,7 +117,8 @@ class HookDispatcher:
     def _targets(self, event: str) -> list[dict]:
         return [
             {"ref": _listener_ref(listener), "kind": "listener",
-             "required": self._listener_requirements[(event, _listener_ref(listener))]}
+             "required": self._listener_requirements[(event, _listener_ref(listener))],
+             **({"binding": self._listener_bindings[(event, _listener_ref(listener))]} if self._listener_bindings.get((event, _listener_ref(listener))) else {})}
             for listener in self._listeners.get(event, [])
         ] + [
             {"ref": _target_ref(ref), "kind": "plugin",
@@ -141,6 +144,7 @@ class HookDispatcher:
         targets = self._deliveries.prepare_event(
             event_id=event_id, event=event, task_id=task_id,
             payload_hash="sha256:" + hashlib.sha256(encoded).hexdigest(), targets=targets,
+            payload=payload,
         )
         listeners = {_listener_ref(item): item for item in self._listeners.get(event, [])}
         plugins = {_target_ref(item): item for item in self._index.get(event, [])}
@@ -158,10 +162,15 @@ class HookDispatcher:
                     listener = listeners.get(target["ref"])
                     if listener is None:
                         result = _delivery_failure("binding", "persisted hook listener is unavailable")
+                    elif target.get("binding") != (self._listener_bindings.get((event, target["ref"])) or None):
+                        result = _delivery_failure("binding", "persisted hook listener binding changed")
                     elif not self._write_listener_started(event, target["ref"], task_id):
                         result = _delivery_failure("audit", "hook start audit failed")
                     else:
-                        listener(event, payload)
+                        delivery_payload = payload
+                        if target.get("binding"):
+                            delivery_payload = {**payload, "_hook_delivery": {"target_ref": target["ref"], "generation": delivery["generation"], "binding": target["binding"]}}
+                        listener(event, delivery_payload)
                         result = ToolResult(ok=True, output=None, error=None, error_kind=None, duration_ms=0)
                         self._write_listener_audit(event, target["ref"], task_id, None)
                 else:
@@ -184,7 +193,7 @@ class HookDispatcher:
                     "error": None if result.ok else f"hook delivery failed ({result.error_kind or 'execution'}); inspect hook audit",
                     "error_kind": result.error_kind, "duration_ms": result.duration_ms,
                 }
-                self._deliveries.finish(event_id, target["ref"], status=status, result=receipt)
+                self._deliveries.finish(event_id, target["ref"], status=status, result=receipt, generation=delivery["generation"])
                 result = ToolResult(**receipt)
             except Exception:
                 result = _delivery_failure("unknown", "hook receipt could not be persisted; explicit reconciliation required")

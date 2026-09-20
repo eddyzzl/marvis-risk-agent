@@ -10,7 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from marvis.governance.errors import AuthorizationError
 from marvis.errors import conflict, forbidden, not_found, unprocessable
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from marvis.agent.strategy_setup import strategy_development_slot_clarification
 from marvis.api_schemas import (
@@ -69,6 +69,16 @@ class CreatePlanRequest(BaseModel):
 
 class RetryStepRequest(BaseModel):
     inputs: dict | None = None
+
+
+class ReconcileExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: str = Field(min_length=1, max_length=128)
+
+
+class RunPlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_plan_fingerprint: str = Field(min_length=1, max_length=128)
 
 
 @router.post("/tasks/{task_id}/plans", status_code=201)
@@ -243,10 +253,16 @@ def confirm_plan(
 
 
 @router.post("/plans/{plan_id}/run", status_code=202)
-def run_plan(request: Request, plan_id: str, background_tasks: BackgroundTasks) -> dict:
+def run_plan(
+    request: Request, plan_id: str, background_tasks: BackgroundTasks,
+    body: RunPlanRequest | None = None,
+) -> dict:
     plan = _load_plan(request, plan_id)
     if plan.status not in {PlanStatus.CONFIRMED, PlanStatus.AWAITING_CONFIRM, PlanStatus.RUNNING}:
         raise conflict(f"plan is not runnable: {plan.status.value}")
+    fingerprint = body.expected_plan_fingerprint if body is not None else None
+    if fingerprint is not None and plan_fingerprint(plan) != fingerprint:
+        raise conflict("计划快照已变化，请刷新后继续。")
     job_id = _start_plan_job(request, plan.task_id)
     background_tasks.add_task(
         _run_plan_job,
@@ -254,6 +270,7 @@ def run_plan(request: Request, plan_id: str, background_tasks: BackgroundTasks) 
         _db_path(request),
         request.app.state.plan_executor,
         plan_id,
+        fingerprint,
     )
     return {"ok": True, "plan_id": plan_id, "job_id": job_id, "status": plan.status.value}
 
@@ -432,6 +449,30 @@ def retry_step(
     }
 
 
+@router.post("/plans/{plan_id}/reconcile")
+def reconcile_execution(request: Request, plan_id: str, body: ReconcileExecutionRequest) -> dict:
+    _load_plan(request, plan_id)
+    try:
+        result = request.app.state.plan_executor.reconcile_execution(plan_id, body.target_id)
+    except (ConflictError, ValueError, KeyError) as exc:
+        raise conflict(str(exc)) from exc
+    payload = _load_plan_payload(request, plan_id)
+    payload["reconciliation_result"] = result
+    return payload
+
+
+@router.post("/plans/{plan_id}/resume-completion")
+def resume_completion(request: Request, plan_id: str, body: ReconcileExecutionRequest) -> dict:
+    _load_plan(request, plan_id)
+    try:
+        result = request.app.state.plan_executor.resume_completion(plan_id, body.target_id)
+    except (ConflictError, ValueError, KeyError) as exc:
+        raise conflict(str(exc)) from exc
+    payload = _load_plan_payload(request, plan_id)
+    payload["reconciliation_result"] = result
+    return payload
+
+
 @router.post("/plans/{plan_id}/cancel")
 def cancel_plan(request: Request, plan_id: str) -> dict:
     repo = request.app.state.plan_repo
@@ -479,6 +520,9 @@ def _plan_payload(request: Request, plan) -> dict:
             ),
         }
     _attach_failure_envelopes(payload, request.app.state.plan_repo)
+    reconciler = getattr(getattr(request.app.state, "plan_executor", None), "reconciler", None)
+    if reconciler is not None:
+        payload["reconciliation"] = reconciler.describe(plan)
     _attach_running_step_started_at(request, payload, plan.id)
     payload["sub_agents"] = [
         _sub_agent_payload(sub)
@@ -537,11 +581,14 @@ def _attach_running_step_started_at(request: Request, payload: dict, plan_id: st
 
 def _attach_failure_envelopes(payload: dict, repo=None) -> None:
     steps = payload.get("steps") or []
-    if any(
+    workflow_pending = any(
         event.get("type") == "hook_completion_failed"
         for event in payload.get("loop_events") or []
         if isinstance(event, dict)
-    ):
+    )
+    if repo is not None:
+        workflow_pending = repo.workflow_completion_pending(str(payload.get("id") or ""))
+    if workflow_pending:
         payload["failure_envelope"] = build_failure_envelope(
             plan_id=str(payload.get("id") or ""), step_id=None, run_seq=0,
             message="工作流完成动作尚未核对；已有结果和执行凭据已保留，当前流程暂停，不能直接重跑。",
@@ -711,12 +758,19 @@ def _start_plan_job(request: Request, task_id: str) -> str:
         raise conflict(ACTIVE_JOB_DETAIL) from exc
 
 
-def _run_plan_job(job_id: str, db_path: Path, executor, plan_id: str) -> None:
+def _run_plan_job(
+    job_id: str, db_path: Path, executor, plan_id: str,
+    expected_plan_fingerprint: str | None = None,
+) -> None:
     repo = TaskRepository(db_path)
     if not repo.mark_job_running(job_id):
         return
     try:
         with heartbeat_job(repo, job_id):
+            if expected_plan_fingerprint is not None and plan_fingerprint(
+                PlanRepository(db_path).load_plan(plan_id)
+            ) != expected_plan_fingerprint:
+                raise ConflictError("计划快照已变化，请刷新后继续。")
             result = executor.run(plan_id)
     except (ConflictError, IllegalPlanTransition) as exc:
         try:

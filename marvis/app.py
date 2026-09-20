@@ -874,6 +874,8 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
     app.state.harness_state = harness_state
     app.state.subagent_dispatcher = subagent_dispatcher
     app.state.plan_executor = plan_executor
+    from marvis.orchestrator.reconciliation import register_governed_outcome_verifier
+    register_governed_outcome_verifier(plan_executor.reconciler.verifiers, app.state.governance_repo)
 
 
 def _llm_factory(settings: Settings, *, role: str | None = None):

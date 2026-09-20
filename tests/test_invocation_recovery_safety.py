@@ -339,7 +339,7 @@ def test_migration_36_to_37_does_not_invent_historical_invocation_contract(tmp_p
     # The installed declaration is read-only, but says nothing about this old run.
     assert runner.prepare_invocation(step.tool_ref)["side_effects"] == ["read:input"]
     with connect(repo.db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 37
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db_schema.SCHEMA_VERSION
         row = conn.execute("SELECT * FROM plan_step_runs WHERE id = 'historical-run'").fetchone()
         assert row["invocation_contract_json"] is None
         assert row["dispatch_started_at"] is None

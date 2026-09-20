@@ -576,6 +576,16 @@ def reclaim_running_plans(
 def _reclaim_one_running_plan(plan_repo, step_recovery, task_repo, plan) -> None:
     step_recovery.recover_inflight_steps(plan)
     statuses = {step.status for step in plan.steps}
+    if statuses and statuses.issubset({StepStatus.DONE, StepStatus.SKIPPED}):
+        # All Tools have durable results. A crash before the workflow checkpoint
+        # must expose completion-only recovery, never a dead end or Tool retry.
+        from marvis.orchestrator.completion import _workflow_event_id
+        from marvis.repositories.hook_deliveries import HookDeliveryRepository
+        if HookDeliveryRepository(plan_repo.db_path).get_event(_workflow_event_id(plan)) is not None:
+            plan_repo.append_loop_event(plan.id, {
+                "type": "hook_completion_failed",
+                "reason": "workflow checkpoint interrupted; explicit reconciliation required",
+            })
     resumed_at_confirmation = (
         StepStatus.AWAITING_CONFIRM in statuses
         and not statuses.intersection(

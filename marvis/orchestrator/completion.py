@@ -97,8 +97,10 @@ def _prepare_events(repo, hooks, events: list[tuple[str, str]], task_id: str) ->
             )
 
 
-def complete_step(repo, reviewer, hooks, plan, step, output: dict) -> None:
-    ledger = _ledger(repo)
+def step_completion_identity(repo, plan, step, output=None) -> tuple[dict, dict, dict]:
+    """Authenticate the original result for both completion and reconciliation."""
+    if output is None:
+        output = repo.load_step_output(step.id)
     binding_loader = getattr(repo, "load_step_recovery_binding", None)
     if callable(binding_loader):
         binding = binding_loader(step.id, str(step.output_ref))
@@ -126,6 +128,12 @@ def complete_step(repo, reviewer, hooks, plan, step, output: dict) -> None:
         "execution_id": evidence.get("step_run_id"),
         "output_hash": evidence.get("output_hash") or payload_hash(output),
     }
+    return identity, output, evidence
+
+
+def complete_step(repo, reviewer, hooks, plan, step, output: dict) -> None:
+    ledger = _ledger(repo)
+    identity, output, evidence = step_completion_identity(repo, plan, step, output)
     event_names = (
         ["feature.computed"] if step.tool_ref.plugin == "feature" else []
     ) + ["step.completed"]

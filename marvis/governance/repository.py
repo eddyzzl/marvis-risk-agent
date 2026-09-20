@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import uuid
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from marvis.governance.contracts import (
     LocalPrincipal,
     LocalSession,
     ReconciliationReport,
+    PRODUCER_RECEIPT_SCHEMA_VERSION,
 )
 from marvis.governance.errors import (
     ApprovalBindingError,
@@ -41,6 +43,8 @@ from marvis.orchestrator.contracts import (
     plan_from_dict,
     plan_step_confirmation_fingerprint,
 )
+from marvis.plugins.invocation import load_invocation_contract, valid_invocation_contract
+from marvis.orchestrator.evidence import payload_hash
 
 
 Clock = Callable[[], datetime]
@@ -62,6 +66,123 @@ def canonical_payload_hash(payload: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _require_bound_invocation(
+    conn: sqlite3.Connection,
+    invocation_id: str | None,
+    binding: AuthorizationBinding,
+    *,
+    expected_contract: dict | None = None,
+) -> tuple[sqlite3.Row, str]:
+    """Check persisted invocation facts without consulting a plugin registry."""
+    if not isinstance(invocation_id, str) or not invocation_id.strip():
+        raise ApprovalBindingError("effect requires its original invocation id")
+    run = conn.execute(
+        "SELECT * FROM plan_step_runs WHERE id = ?",
+        (invocation_id,),
+    ).fetchone()
+    if run is None:
+        raise ApprovalBindingError("original effect invocation is missing")
+    contract = load_invocation_contract(run["invocation_contract_json"])
+    if not valid_invocation_contract(contract):
+        raise ApprovalBindingError("original invocation has no trusted declaration")
+    if expected_contract is not None and contract != expected_contract:
+        raise ApprovalBindingError(
+            "invocation declaration changed before effect reservation"
+        )
+    if (
+        str(run["plan_id"]) != binding.plan_id
+        or str(run["step_id"]) != binding.step_id
+        or str(run["tool_ref"]) != contract["tool_ref"]
+        or binding.tool_ref != f"{contract['tool_ref']}@{contract['tool_version']}"
+        or run["dispatch_started_at"] is None
+    ):
+        raise ApprovalBindingError(
+            "effect invocation plan/step/tool/dispatch binding mismatch"
+        )
+    current = conn.execute(
+        "SELECT p.task_id, p.replan_count, s.tool_plugin, s.tool_name, s.tool_version, s.status AS step_status "
+        "FROM plans p JOIN plan_steps s ON s.plan_id = p.id WHERE p.id = ? AND s.id = ?",
+        (binding.plan_id, binding.step_id),
+    ).fetchone()
+    latest = conn.execute(
+        "SELECT id FROM plan_step_runs WHERE step_id = ? ORDER BY attempt DESC, id DESC LIMIT 1",
+        (binding.step_id,),
+    ).fetchone()
+    if (
+        current is None
+        or str(current["task_id"]) != binding.task_id
+        or int(current["replan_count"]) != binding.plan_revision
+        or f"{current['tool_plugin']}.{current['tool_name']}" != contract["tool_ref"]
+        or (
+            current["tool_version"]
+            and str(current["tool_version"]) != contract["tool_version"]
+        )
+        or latest is None
+        or str(latest["id"]) != invocation_id
+        or (expected_contract is not None and str(current["step_status"]) != "running")
+    ):
+        raise ApprovalBindingError(
+            "effect invocation is stale or belongs to another plan revision"
+        )
+    # Keep the existing governance codec, including collision-safe nonfinite
+    # float tags. Its input hash is deliberately distinct from receipt JSON.
+    from marvis.governance.service import _governance_payload_hash
+
+    try:
+        inputs = json.loads(str(run["input_json"]))
+        input_hash = _governance_payload_hash(inputs)
+    except (TypeError, ValueError) as exc:
+        raise ApprovalBindingError("original invocation inputs are invalid") from exc
+    if not isinstance(inputs, dict) or input_hash != binding.input_hash:
+        raise ApprovalBindingError("effect invocation resolved inputs mismatch")
+    return run, payload_hash(contract)
+
+
+def _producer_binding_on_connection(
+    conn: sqlite3.Connection,
+    effect: sqlite3.Row,
+    approval: sqlite3.Row,
+) -> dict[str, Any]:
+    binding = _binding_from_row(approval)
+    run, contract_hash = _require_bound_invocation(
+        conn, effect["invocation_id"], binding
+    )
+    if (
+        contract_hash != effect["invocation_contract_hash"]
+        or str(effect["reservation_id"]) != str(approval["reservation_id"] or "")
+        or effect["released_at"] is not None
+        and str(effect["status"]) == "committed"
+    ):
+        raise ApprovalBindingError("producer effect binding mismatch")
+    decision = conn.execute(
+        "SELECT * FROM decision_records WHERE id = ?",
+        (approval["decision_id"],),
+    ).fetchone()
+    if (
+        decision is None
+        or _binding_from_row(decision) != binding
+        or str(decision["decision"]) != "approve"
+        or str(decision["principal_id"]) != str(approval["principal_id"])
+    ):
+        raise ApprovalBindingError("producer approval decision binding mismatch")
+    return {
+        "invocation_id": str(run["id"]),
+        "invocation_contract_hash": contract_hash,
+        "effect_execution_id": str(effect["id"]),
+        "approval_id": str(approval["id"]),
+        "decision_id": str(approval["decision_id"]),
+        "reservation_id": str(effect["reservation_id"]),
+        "runtime_generation": str(effect["runtime_generation"]),
+        "task_id": binding.task_id,
+        "plan_id": binding.plan_id,
+        "plan_revision": binding.plan_revision,
+        "step_id": binding.step_id,
+        "tool_ref": binding.tool_ref,
+        "input_hash": binding.input_hash,
+        "authorization_binding_hash": canonical_payload_hash(asdict(binding)),
+    }
 
 
 class GovernanceRepository:
@@ -1001,6 +1122,9 @@ class GovernanceRepository:
         self,
         context: ExecutionContext,
         binding: AuthorizationBinding,
+        *,
+        invocation_id: str | None = None,
+        invocation_contract: dict | None = None,
     ) -> EffectExecution:
         _require_effect_target(binding)
         if (
@@ -1044,6 +1168,15 @@ class GovernanceRepository:
                 )
             self._assert_execution_binding(row, context, binding)
             self._require_active_principal_id(conn, str(row["principal_id"]), now)
+            frozen_contract_hash = None
+            if invocation_id is not None or invocation_contract is not None:
+                if not valid_invocation_contract(invocation_contract):
+                    raise ApprovalBindingError("runner must supply its resolved invocation declaration")
+                run, frozen_contract_hash = _require_bound_invocation(
+                    conn, invocation_id, binding, expected_contract=invocation_contract,
+                )
+                if str(run["status"]) != "running":
+                    raise ApprovalBindingError("effect invocation is no longer running")
             active = conn.execute(
                 """
                 SELECT id FROM effect_executions
@@ -1071,9 +1204,9 @@ class GovernanceRepository:
                 """
                 INSERT INTO effect_executions(
                     id, approval_id, reservation_id, runtime_generation, status,
-                    prepared_at, detail_json
+                    prepared_at, detail_json, invocation_id, invocation_contract_hash
                 )
-                VALUES (?, ?, ?, ?, 'prepared', ?, '{}')
+                VALUES (?, ?, ?, ?, 'prepared', ?, '{}', ?, ?)
                 """,
                 (
                     execution_id,
@@ -1081,6 +1214,8 @@ class GovernanceRepository:
                     reservation_id,
                     context.runtime_generation,
                     now,
+                    invocation_id,
+                    frozen_contract_hash,
                 ),
             )
             execution_row = conn.execute(
@@ -1296,6 +1431,136 @@ class GovernanceRepository:
         if row is None:
             raise EffectExecutionNotFound(execution_id)
         return _effect_from_row(row)
+
+    def verify_producer_outcome(
+        self,
+        invocation_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        """Read original producer facts; never repair a ledger or rerun a tool.
+
+        A supplied connection keeps verification in the reconciliation caller's
+        snapshot/CAS transaction. Registry state and free-text audit entries are
+        intentionally not evidence for a historical invocation.
+        """
+        if conn is None:
+            with connect(self.db_path) as snapshot:
+                snapshot.execute("BEGIN")
+                return self.verify_producer_outcome(invocation_id, conn=snapshot)
+        original_run = conn.execute(
+            "SELECT invocation_contract_json FROM plan_step_runs WHERE id = ?",
+            (invocation_id,),
+        ).fetchone()
+        original_contract = (
+            load_invocation_contract(original_run["invocation_contract_json"])
+            if original_run is not None
+            else None
+        )
+        unknown = {
+            "outcome": "unknown",
+            "reason": "no_bound_producer_receipt",
+            "invocation_contract_hash": payload_hash(original_contract)
+            if valid_invocation_contract(original_contract)
+            else None,
+        }
+        effect = conn.execute(
+            "SELECT * FROM effect_executions WHERE invocation_id = ?",
+            (invocation_id,),
+        ).fetchone()
+        if effect is None:
+            return unknown
+        approval = conn.execute(
+            "SELECT * FROM approval_records WHERE id = ?",
+            (effect["approval_id"],),
+        ).fetchone()
+        if approval is None:
+            return {**unknown, "reason": "producer_approval_missing"}
+        try:
+            bindings = _producer_binding_on_connection(conn, effect, approval)
+            detail = json.loads(str(effect["detail_json"] or "{}"))
+            if not isinstance(detail, dict):
+                raise ValueError("producer detail must be an object")
+            from marvis.repositories.strategy import StrategyRepository
+
+            strategy = StrategyRepository(self.db_path)
+            binding = _binding_from_row(approval)
+            if not binding.tool_ref.startswith("strategy.adopt_strategy@"):
+                return {**unknown, "reason": "unsupported_producer"}
+            receipt = detail.get("producer_receipt")
+            if str(effect["status"]) == "committed":
+                if (
+                    str(approval["status"]) != "consumed"
+                    or approval["consumed_at"] is None
+                    or effect["committed_at"] is None
+                    or effect["dispatched_at"] is None
+                    or not isinstance(receipt, dict)
+                    or receipt.get("schema_version") != PRODUCER_RECEIPT_SCHEMA_VERSION
+                ):
+                    return {**unknown, "reason": "complete_producer_receipt_missing"}
+                envelope = {
+                    key: value for key, value in receipt.items() if key != "receipt_hash"
+                }
+                receipt_hash = canonical_payload_hash(envelope)
+                if (
+                    receipt.get("receipt_hash") != receipt_hash
+                    or effect["result_hash"] != receipt_hash
+                    or receipt.get("bindings") != bindings
+                    or receipt.get("receipt_id") != f"producer:{effect['id']}"
+                    or not isinstance(receipt.get("output"), dict)
+                    or receipt.get("output_hash")
+                    != canonical_payload_hash(receipt["output"])
+                ):
+                    raise ApprovalBindingError("producer receipt hash or identity mismatch")
+                strategy.verify_adoption_producer_output_on_connection(
+                    conn,
+                    binding=binding,
+                    invocation_id=invocation_id,
+                    output=receipt["output"],
+                )
+                return {
+                    "outcome": "applied",
+                    "reason": "atomic_producer_receipt_verified",
+                    "receipt_id": receipt["receipt_id"],
+                    "receipt_hash": receipt_hash,
+                    "invocation_contract_hash": bindings["invocation_contract_hash"],
+                    "bindings": bindings,
+                    "output": receipt["output"],
+                }
+            # The domain write requires dispatched + reserved under the same
+            # SQLite writer lock. An uncertain execution with revoked approval
+            # is a durable fence against a late old worker committing adoption.
+            if (
+                str(effect["status"]) == "uncertain"
+                and str(approval["status"]) == "revoked"
+                and effect["uncertain_at"] is not None
+                and approval["revoked_at"] is not None
+                and receipt is None
+                and detail.get("domain_receipt") is None
+                and strategy.adoption_target_unchanged_on_connection(conn, binding=binding)
+            ):
+                fence = {
+                    "schema_version": "governed_domain_fence.v1",
+                    "bindings": bindings,
+                    "effect_state": "uncertain",
+                    "uncertain_at": str(effect["uncertain_at"]),
+                    "approval_state": "revoked",
+                    "revoked_at": str(approval["revoked_at"]),
+                }
+                return {
+                    "outcome": "not_applied_fenced",
+                    "reason": "adoption_fenced_with_unchanged_target",
+                    "receipt_id": f"fence:{effect['id']}",
+                    "receipt_hash": canonical_payload_hash(fence),
+                    "invocation_contract_hash": bindings["invocation_contract_hash"],
+                    "bindings": bindings,
+                }
+        except (ApprovalBindingError, ValueError, TypeError, KeyError, OSError) as exc:
+            return {
+                **unknown,
+                "reason": f"producer_verification_failed:{type(exc).__name__}",
+            }
+        return {**unknown, "reason": "effect_has_no_final_fenced_outcome"}
 
     def list_effect_executions(self, approval_id: str) -> list[EffectExecution]:
         with connect(self.db_path) as conn:
@@ -1699,6 +1964,8 @@ def _effect_from_row(row: sqlite3.Row) -> EffectExecution:
         uncertain_reason=_optional_str(row["uncertain_reason"]),
         result_hash=_optional_str(row["result_hash"]),
         detail=detail if isinstance(detail, dict) else {},
+        invocation_id=_optional_str(row["invocation_id"]),
+        invocation_contract_hash=_optional_str(row["invocation_contract_hash"]),
     )
 
 

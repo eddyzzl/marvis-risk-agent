@@ -609,6 +609,9 @@ class PlanMessageComposer:
             (event for event in reversed(plan.loop_events) if event.type == "hook_completion_failed"),
             None,
         )
+        pending_loader = getattr(self._plan_repository, "workflow_completion_pending", None)
+        if callable(pending_loader) and not pending_loader(plan.id):
+            completion_failure = None
         if failed is None and completion_failure is not None:
             detail = f"完成动作尚未核对：{completion_failure.reason}"
         meta = {

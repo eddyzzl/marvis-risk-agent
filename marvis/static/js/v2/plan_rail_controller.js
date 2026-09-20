@@ -108,6 +108,9 @@ export function planWorkflowStatus(plan) {
       detail: `当前步骤：${step?.title || "计划确认"}。`,
     };
   }
+  if (status === "running" && plan?.reconciliation?.continuation) {
+    return { label: "待继续", message: "已核对原执行结果，剩余步骤等待继续。", kind: "info", tone: "", detail: "继续后按原计划执行剩余步骤，审批要求保持有效。" };
+  }
   if (["running", "confirmed"].includes(status)) {
     const step = findStep("running") || findStep("checking") || findStep("pending");
     return {
@@ -331,7 +334,7 @@ function planRetryReplaceWarningHtml() {
     + "</p>";
 }
 
-function planReconciliationCardHtml(title, { stepId = "", planId = "" } = {}) {
+function planReconciliationCardHtml(title, { stepId = "", planId = "", targets = [] } = {}) {
   const identity = stepId
     ? `data-plan-reconciliation-step="${escapeHtml(stepId)}"`
     : `data-plan-reconciliation-id="${escapeHtml(planId)}"`;
@@ -340,7 +343,10 @@ function planReconciliationCardHtml(title, { stepId = "", planId = "" } = {}) {
       <span class="plan-retry-card-pill">执行结果待核对</span>
       <span class="plan-retry-card-title">${escapeHtml(title)}</span>
     </header>
-    <div class="plan-retry-card-body"><p>${PLAN_RECONCILIATION_MESSAGE}</p></div>
+    <div class="plan-retry-card-body"><p>${PLAN_RECONCILIATION_MESSAGE}</p>
+      ${targets.map((target) => `<p>${escapeHtml(target.reason || "")}</p>${target.supported === true
+        ? `<button type="button" class="button compact primary" data-plan-reconcile="${escapeHtml(target.id)}">${target.action === "resume_completion" ? "恢复完成步骤" : "核对执行结果"}</button>` : ""}`).join("")}
+    </div>
   </section>`;
 }
 
@@ -467,6 +473,13 @@ export function createPlanRailController({
   getSelectedTaskId,
   getTaskBusyAction,
   setDriverExecutionBusy,
+  captureView = () => getSelectedTaskId?.(),
+  isCurrentView = (view) => view === getSelectedTaskId?.(),
+  beginActivity = (_operation, taskId) => {
+    setDriverExecutionBusy?.(true, taskId);
+    return { taskId };
+  },
+  endActivity = (lease) => setDriverExecutionBusy?.(false, lease.taskId),
   getAgentMessages,
   isAgentMode,
   renderWorkflowStepper,
@@ -778,6 +791,63 @@ export function createPlanRailController({
     }
   }
 
+  async function reconcileExecution(button) {
+    const taskId = selectedTaskId();
+    const plan = v2PlanCache.get(taskId);
+    const targetId = button?.dataset?.planReconcile || "";
+    const target = plan?.reconciliation?.targets?.find((item) => item.id === targetId);
+    if (!plan?.id || target?.supported !== true || button.disabled) {
+      setActionStatus?.("核对目标已变化或尚未接入可信核对器，请刷新计划。", "error");
+      return;
+    }
+    const action = target.action === "resume_completion" ? "resume-completion" : "reconcile";
+    await runRecoveryAction(button, plan, action, { target_id: targetId });
+  }
+
+  async function continueReconciledPlan(button) {
+    const plan = v2PlanCache.get(selectedTaskId());
+    const continuation = plan?.reconciliation?.continuation;
+    if (plan?.status !== "running" || !continuation || button.disabled
+        || continuation.expected_plan_fingerprint !== button?.dataset?.planContinue) {
+      setActionStatus?.("计划快照已变化，请刷新后继续。", "error");
+      return;
+    }
+    await runRecoveryAction(button, plan, "run", {
+      expected_plan_fingerprint: continuation.expected_plan_fingerprint,
+    });
+  }
+
+  async function runRecoveryAction(button, plan, action, body) {
+    const taskId = selectedTaskId();
+    const view = captureView();
+    const lease = beginActivity(`plan:${action}:${plan.id}`, taskId, action === "run" ? "正在继续剩余步骤…" : "正在核对原执行结果…");
+    if (!lease) return;
+    button.disabled = true;
+    try {
+      const result = await apiClient(`/api/plans/${encodeURIComponent(plan.id)}/${action}`, {
+        method: "POST", body: JSON.stringify(body),
+      });
+      if (!isCurrentView(view)) return;
+      if (result?.plan) v2PlanCache.set(taskId, result.plan);
+      else if (action === "run") {
+        v2PlanCache.set(taskId, { ...plan, reconciliation: { ...plan.reconciliation, continuation: null } });
+      }
+      setActionStatus?.(result?.reconciliation_result?.reason || (action === "run" ? "已提交继续执行，剩余步骤仍按原审批要求执行。" : "已核对执行凭据。"), result?.reconciliation_result?.outcome === "unknown" ? "error" : "success");
+      v2PlanLastFetch.delete(taskId);
+      await refreshTasks?.();
+      if (!isCurrentView(view)) return;
+      await loadAgentMessages?.(taskId, { preserveOptimistic: true });
+      if (!isCurrentView(view)) return;
+      renderAll?.();
+      renderWorkflowStepper?.({ force: true });
+    } catch (error) {
+      if (isCurrentView(view)) setActionStatus?.(error?.message || "恢复操作失败，原执行凭据已保留。", "error");
+    } finally {
+      button.disabled = false;
+      endActivity(lease);
+    }
+  }
+
   // VD-3: three stand-in phase rows (checker + title-bar shimmer), matching the
   // shape of the real plan-rail phase rows below so the skeleton-to-content
   // swap doesn't jump in height.
@@ -837,13 +907,20 @@ export function createPlanRailController({
   // Only retryable steps need tool schemas for editable input controls.
   function planRetryPanelHtml(plan) {
     if (planNeedsReconciliation(plan)) {
-      return planReconciliationCardHtml("计划完成结果待核对", { planId: String(plan.id || "") });
+      return planReconciliationCardHtml("计划完成结果待核对", { planId: String(plan.id || ""), targets: plan?.reconciliation?.targets || [] });
+    }
+    const continuation = plan?.reconciliation?.continuation;
+    if (plan?.status === "running" && continuation) {
+      return `<header class="plan-retry-panel-head"><h3>原执行结果已核对</h3><p class="plan-retry-panel-sub">剩余步骤等待继续。已完成步骤保留原结果，后续审批要求保持有效。</p></header><div class="plan-retry-panel-body"><button class="button" type="button" data-plan-continue="${escapeHtml(continuation.expected_plan_fingerprint)}">继续剩余步骤</button></div>`;
     }
     const failed = failedPlanSteps(plan);
     if (!failed.length) return "";
     const reconciliationCount = failed.filter(planStepNeedsReconciliation).length;
-    const cards = failed.map((step) => {
+    const cards = failed.filter((step) => !isAgentMode?.() || planStepNeedsReconciliation(step)).map((step) => {
       const ref = step?.tool_ref || {};
+      if (planStepNeedsReconciliation(step)) return planReconciliationCardHtml(step.title, {
+        stepId: String(step.id), targets: (plan?.reconciliation?.targets || []).filter((target) => target.step_id === step.id),
+      });
       if (!planStepNeedsReconciliation(step)) maybeFetchToolSchema(ref);
       return planRetryCardHtml(step, toolSchemaFor(ref));
     });
@@ -1357,7 +1434,7 @@ export function createPlanRailController({
   function renderRetryPanel(plan) {
     const panel = $("planRetryPanel");
     if (!panel) return;
-    if (isAgentMode?.() && !planNeedsReconciliation(plan)) {
+    if (isAgentMode?.() && !planNeedsReconciliation(plan) && !plan?.reconciliation?.targets?.length && !plan?.reconciliation?.continuation) {
       clearRetryPanel();
       return;
     }
@@ -1376,6 +1453,8 @@ export function createPlanRailController({
     const signature = JSON.stringify({
       plan_id: plan?.id,
       plan_reconciliation: planNeedsReconciliation(plan),
+      reconciliation_targets: plan?.reconciliation?.targets,
+      reconciliation_continuation: plan?.reconciliation?.continuation,
       failed: failed.map((step) => {
         const ref = step?.tool_ref || {};
         return {
@@ -1567,6 +1646,20 @@ export function createPlanRailController({
   }
 
   function handleClick(event) {
+    const continuationButton = event.target?.closest?.("[data-plan-continue]");
+    if (continuationButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      void continueReconciledPlan(continuationButton);
+      return true;
+    }
+    const reconciliationButton = event.target?.closest?.("[data-plan-reconcile]");
+    if (reconciliationButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      void reconcileExecution(reconciliationButton);
+      return true;
+    }
     const strategyArtifactsRetry = event.target?.closest?.("[data-strategy-artifacts-retry]");
     if (strategyArtifactsRetry) {
       event.preventDefault();

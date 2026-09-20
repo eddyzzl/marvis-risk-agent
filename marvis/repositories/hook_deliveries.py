@@ -58,6 +58,7 @@ class HookDeliveryRepository:
         task_id: str,
         payload_hash: str | None = None,
         targets: list[dict],
+        payload: dict | None = None,
     ) -> list[dict]:
         return self.prepare_events(
             [
@@ -67,6 +68,7 @@ class HookDeliveryRepository:
                     "task_id": task_id,
                     "payload_hash": payload_hash,
                     "targets": targets,
+                    "payload": payload,
                 }
             ]
         )[0]
@@ -83,7 +85,7 @@ class HookDeliveryRepository:
                 )
                 bound_hash = item.get("payload_hash")
                 conn.execute(
-                    "INSERT OR IGNORE INTO hook_events VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO hook_events(event_id,event,task_id,payload_hash,targets_json,created_at,payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         event_id,
                         event,
@@ -91,6 +93,7 @@ class HookDeliveryRepository:
                         bound_hash or "",
                         _json(item["targets"]),
                         _now(),
+                        _json(item["payload"]) if item.get("payload") is not None else None,
                     ),
                 )
                 row = conn.execute(
@@ -109,6 +112,11 @@ class HookDeliveryRepository:
                         "UPDATE hook_events SET payload_hash = ? WHERE event_id = ? AND payload_hash = ''",
                         (bound_hash, event_id),
                     )
+                if item.get("payload") is not None:
+                    encoded = _json(item["payload"])
+                    if row["payload_json"] is not None and row["payload_json"] != encoded:
+                        raise ConflictError("hook event payload changed")
+                    conn.execute("UPDATE hook_events SET payload_json = ? WHERE event_id = ? AND payload_json IS NULL", (encoded, event_id))
                 results.append(json.loads(row["targets_json"]))
         return results
 
@@ -117,8 +125,15 @@ class HookDeliveryRepository:
     ) -> tuple[bool, dict]:
         now = _now()
         with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            event = conn.execute("SELECT payload_json FROM hook_events WHERE event_id=?", (event_id,)).fetchone()
+            payload = json.loads(event["payload_json"]) if event and event["payload_json"] else {}
+            plan = conn.execute("SELECT status FROM plans WHERE id=?", (payload.get("plan_id"),)).fetchone()
+            if plan and plan["status"] == "cancelled":
+                raise ConflictError("cancelled plan cannot dispatch completion hooks")
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO hook_deliveries
+                   (event_id,target_ref,required,status,result_json,created_at,updated_at)
                    VALUES (?, ?, ?, 'started', NULL, ?, ?)""",
                 (event_id, target_ref, int(required), now, now),
             )
@@ -127,18 +142,34 @@ class HookDeliveryRepository:
                 "SELECT * FROM hook_deliveries WHERE event_id = ? AND target_ref = ?",
                 (event_id, target_ref),
             ).fetchone()
+            if not claimed and row["retry_authorization_id"]:
+                resolution = conn.execute("SELECT * FROM execution_reconciliations WHERE id = ? AND outcome = 'not_applied_fenced'", (row["retry_authorization_id"],)).fetchone()
+                target = json.loads(resolution["target_json"]) if resolution else {}
+                if (target.get("event_id"), target.get("target_ref"), target.get("generation")) != (event_id, target_ref, row["generation"]):
+                    raise ConflictError("hook retry authorization binding changed")
+                consumed = conn.execute("INSERT OR IGNORE INTO reconciliation_consumptions VALUES (?, ?)", (resolution["id"], now))
+                if consumed.rowcount != 1:
+                    raise ConflictError("hook retry authorization already consumed")
+                conn.execute("UPDATE hook_deliveries SET status='started', result_json=NULL, generation=generation+1, retry_authorization_id=NULL, updated_at=? WHERE event_id=? AND target_ref=?", (now, event_id, target_ref))
+                row = conn.execute("SELECT * FROM hook_deliveries WHERE event_id=? AND target_ref=?", (event_id, target_ref)).fetchone()
+                claimed = True
         return claimed, dict(row)
 
+    def get_event(self, event_id: str) -> dict | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM hook_events WHERE event_id=?", (event_id,)).fetchone()
+        return dict(row) if row else None
+
     def finish(
-        self, event_id: str, target_ref: str, *, status: str, result: dict
+        self, event_id: str, target_ref: str, *, status: str, result: dict, generation: int = 1
     ) -> None:
         if status not in {"succeeded", "failed", "unknown"}:
             raise ValueError("invalid hook delivery terminal status")
         with connect(self.db_path) as conn:
             cursor = conn.execute(
                 """UPDATE hook_deliveries SET status = ?, result_json = ?, updated_at = ?
-                   WHERE event_id = ? AND target_ref = ? AND status = 'started'""",
-                (status, _json(result), _now(), event_id, target_ref),
+                   WHERE event_id = ? AND target_ref = ? AND status = 'started' AND generation = ?""",
+                (status, _json(result), _now(), event_id, target_ref, generation),
             )
             if cursor.rowcount != 1:
                 raise ConflictError("hook delivery is no longer owned by this attempt")

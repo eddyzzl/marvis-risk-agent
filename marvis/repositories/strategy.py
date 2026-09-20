@@ -388,6 +388,273 @@ class StrategyRepository:
     def transaction(self):
         return connect(self.db_path)
 
+    def adoption_target_unchanged_on_connection(self, conn, *, binding) -> bool:
+        """Read the original adoption target under an already-persisted fence."""
+        target = binding.effect_target
+        if target.get("kind") != "strategy":
+            return False
+        row = conn.execute(
+            "SELECT * FROM strategies WHERE id = ?", (target.get("id"),)
+        ).fetchone()
+        if row is None:
+            return False
+        expected_asset = target.get("expected_asset_status")
+        if expected_asset is None:
+            expected_asset = asset_status_from_legacy(target.get("expected_status"))
+        champions = target.get("current_champion_ids")
+        if champions is None and "current_champion_id" in target:
+            champions = (
+                []
+                if target["current_champion_id"] is None
+                else [target["current_champion_id"]]
+            )
+        return (
+            str(row["status"]) == LEGACY_STATUS_DRAFT
+            and str(row["asset_status"]) == expected_asset
+            and str(row["task_id"]) == binding.task_id == target.get("task_id")
+            and str(row["strategy_type"]) == target.get("strategy_type")
+            and int(row["version"]) == target.get("version")
+            and str(row["description"]) == target.get("strategy_description")
+            and _strategy_spec_hash_from_row(row) == target.get("strategy_spec_hash")
+            and isinstance(champions, list)
+            and sorted(champions)
+            == _current_local_champion_ids(
+                conn,
+                task_id=binding.task_id,
+                strategy_type=str(row["strategy_type"]),
+                exclude_strategy_id=str(row["id"]),
+            )
+        )
+
+    def verify_adoption_producer_output_on_connection(
+        self,
+        conn,
+        *,
+        binding,
+        invocation_id: str,
+        output: dict,
+    ) -> None:
+        """Validate the stored complete producer output and its durable artifacts."""
+        from marvis.files import sha256_file
+        from marvis.packs.strategy.monitoring_plan import canonical_monitoring_plan_hash
+
+        fields = {
+            "strategy_id",
+            "strategy_type",
+            "backtest_id",
+            "version",
+            "status",
+            "asset_status",
+            "lifecycle_notice",
+            "retired_strategy_ids",
+            "adoption_evidence",
+            "monitoring_plan_id",
+            "monitoring_plan_revision",
+            "monitoring_plan_hash",
+            "artifacts",
+        }
+        if not isinstance(output, dict) or set(output) != fields:
+            raise ValueError("incomplete adoption producer output")
+        target = binding.effect_target
+        strategy_id = target.get("id")
+        row = conn.execute(
+            "SELECT * FROM strategies WHERE id = ?", (strategy_id,)
+        ).fetchone()
+        run = conn.execute(
+            "SELECT input_json FROM plan_step_runs WHERE id = ?", (invocation_id,)
+        ).fetchone()
+        inputs = json.loads(str(run["input_json"])) if run is not None else {}
+        if (
+            row is None
+            or target.get("kind") != "strategy"
+            or output["strategy_id"] != strategy_id
+            or inputs.get("strategy_id") != strategy_id
+            or output["backtest_id"] != inputs.get("backtest_id")
+            or output["strategy_type"] != target.get("strategy_type")
+            or output["version"] != target.get("version")
+            or str(row["task_id"]) != binding.task_id
+            or str(row["strategy_type"]) != output["strategy_type"]
+            or int(row["version"]) != output["version"]
+            or _strategy_spec_hash_from_row(row) != target.get("strategy_spec_hash")
+            or str(row["description"]) != target.get("strategy_description")
+            or output["status"] != LEGACY_STATUS_ADOPTED
+            or str(row["status"]) != LEGACY_STATUS_ADOPTED
+            or output["asset_status"] != ASSET_STATUS_ADOPTED_LOCAL
+            or str(row["asset_status"]) != ASSET_STATUS_ADOPTED_LOCAL
+            or not isinstance(output["lifecycle_notice"], str)
+        ):
+            raise ValueError("adoption producer target/input binding mismatch")
+        champions = target.get("current_champion_ids")
+        if champions is None and "current_champion_id" in target:
+            champions = (
+                []
+                if target["current_champion_id"] is None
+                else [target["current_champion_id"]]
+            )
+        if not isinstance(champions, list) or output["retired_strategy_ids"] != sorted(
+            champions
+        ):
+            raise ValueError("adoption producer champion binding mismatch")
+        plan = conn.execute(
+            "SELECT * FROM strategy_monitoring_plans WHERE id = ?",
+            (output["monitoring_plan_id"],),
+        ).fetchone()
+        if (
+            plan is None
+            or str(plan["strategy_id"]) != strategy_id
+            or int(plan["strategy_version"]) != output["version"]
+            or int(plan["revision"]) != output["monitoring_plan_revision"]
+            or str(plan["payload_hash"]) != output["monitoring_plan_hash"]
+        ):
+            raise ValueError("adoption producer monitoring plan mismatch")
+        payload = json.loads(str(plan["payload_json"]))
+        parsed_plan = monitoring_plan_from_dict(payload)
+        if canonical_monitoring_plan_hash(parsed_plan) != output["monitoring_plan_hash"]:
+            raise ValueError("adoption producer monitoring payload drift")
+        evidence = output["adoption_evidence"]
+        if (
+            not isinstance(evidence, dict)
+            or evidence.get("backtest_id") != output["backtest_id"]
+        ):
+            raise ValueError("adoption producer evidence is incomplete")
+        for field in (
+            "strategy_effect_hash",
+            "baseline_effect_hash",
+            "source_dataset_id",
+            "source_dataset_content_hash",
+            "metrics",
+            "economics",
+            "breakdown",
+            "transitions",
+            "population_count",
+            "labeled_count",
+            "label_coverage",
+        ):
+            if evidence.get(field) != parsed_plan.expectation_baseline.get(field):
+                raise ValueError("adoption producer evidence/monitoring mismatch")
+        artifacts = output["artifacts"]
+        if (
+            not isinstance(artifacts, list)
+            or len(artifacts) != 2
+            or any(not isinstance(artifact, dict) for artifact in artifacts)
+            or {artifact.get("kind") for artifact in artifacts}
+            != {"decision_table_csv", "monitoring_plan_json"}
+        ):
+            raise ValueError("adoption producer artifacts are incomplete")
+        for artifact in artifacts:
+            stored = conn.execute(
+                "SELECT * FROM strategy_artifacts WHERE id = ?",
+                (artifact.get("artifact_id"),),
+            ).fetchone()
+            if stored is None or str(stored["strategy_id"]) != strategy_id:
+                raise ValueError("adoption producer artifact missing")
+            record = _strategy_artifact_record_from_row(stored)
+            expected = {
+                "artifact_id": record["id"],
+                **{
+                    key: record.get(key)
+                    for key in ("kind", "path", "content_hash", "content_size")
+                },
+            }
+            if artifact != expected or record.get("integrity_status") != "verified":
+                raise ValueError("adoption producer artifact metadata mismatch")
+            provenance = record["provenance"]
+            if (
+                provenance.get("task_id") != binding.task_id
+                or provenance.get("strategy_id") != strategy_id
+                or provenance.get("kind") != artifact["kind"]
+                or provenance.get("evidence", {}).get("backtest_id")
+                != output["backtest_id"]
+                or provenance.get("evidence", {}).get("strategy_effect_hash")
+                != evidence.get("strategy_effect_hash")
+            ):
+                raise ValueError("adoption producer artifact provenance mismatch")
+            path = Path(artifact["path"])
+            if (
+                not path.is_file()
+                or path.stat().st_size != artifact["content_size"]
+                or sha256_file(path) != artifact["content_hash"]
+            ):
+                raise ValueError("adoption producer artifact content mismatch")
+
+    def freeze_adoption_producer_receipt_on_connection(
+        self,
+        conn,
+        *,
+        effect_execution_id: str,
+        runtime_generation: str,
+        output: dict,
+    ) -> dict | None:
+        """Freeze full output before the adoption/artifact transaction commits."""
+        from marvis.governance.contracts import PRODUCER_RECEIPT_SCHEMA_VERSION
+        from marvis.governance.repository import (
+            _binding_from_row,
+            _producer_binding_on_connection,
+            canonical_payload_hash,
+        )
+
+        if not conn.in_transaction:
+            raise ValueError("producer receipt requires the adoption writer transaction")
+        effect = conn.execute(
+            "SELECT * FROM effect_executions WHERE id = ?", (effect_execution_id,)
+        ).fetchone()
+        if effect is None:
+            raise ValueError("producer effect is missing")
+        # Historical/manual effects have no original invocation contract. Their
+        # domain receipt remains useful audit evidence, never replayable output.
+        if effect["invocation_id"] is None and effect["invocation_contract_hash"] is None:
+            return None
+        approval = conn.execute(
+            "SELECT * FROM approval_records WHERE id = ?", (effect["approval_id"],)
+        ).fetchone()
+        if (
+            approval is None
+            or str(effect["status"]) != "committed"
+            or str(approval["status"]) != "consumed"
+            or effect["released_at"] is not None
+            or str(effect["runtime_generation"]) != runtime_generation
+        ):
+            raise ValueError("producer effect has not atomically committed")
+        bindings = _producer_binding_on_connection(conn, effect, approval)
+        self.verify_adoption_producer_output_on_connection(
+            conn,
+            binding=_binding_from_row(approval),
+            invocation_id=bindings["invocation_id"],
+            output=output,
+        )
+        receipt = {
+            "schema_version": PRODUCER_RECEIPT_SCHEMA_VERSION,
+            "receipt_id": f"producer:{effect_execution_id}",
+            "bindings": bindings,
+            "output": output,
+            "output_hash": canonical_payload_hash(output),
+        }
+        receipt["receipt_hash"] = canonical_payload_hash(receipt)
+        detail = json.loads(str(effect["detail_json"] or "{}"))
+        if not isinstance(detail, dict) or not isinstance(
+            detail.get("domain_receipt"), dict
+        ):
+            raise ValueError("producer domain receipt is missing")
+        if "producer_receipt" in detail:
+            if detail["producer_receipt"] != receipt:
+                raise ValueError("producer receipt is immutable")
+            return receipt
+        detail["producer_receipt"] = receipt
+        cursor = conn.execute(
+            "UPDATE effect_executions SET detail_json = ?, result_hash = ? "
+            "WHERE id = ? AND status = 'committed' AND detail_json = ? AND result_hash = ?",
+            (
+                json.dumps(detail, ensure_ascii=False, sort_keys=True, allow_nan=False),
+                receipt["receipt_hash"],
+                effect_execution_id,
+                effect["detail_json"],
+                effect["result_hash"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("producer effect changed before receipt freeze")
+        return receipt
+
     def create_strategy(
         self,
         task_id: str,

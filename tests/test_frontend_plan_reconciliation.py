@@ -37,7 +37,7 @@ function failedStep(id, retryable) {
     },
   };
 }
-async function harness(steps, { agentMode = false } = {}) {
+async function harness(steps, { agentMode = false, apiHandler = null, viewCallbacks = {} } = {}) {
   let plan = { id: "plan-1", status: "failed", steps };
   const elements = Object.fromEntries(
     ["progressRail", "workflowStepper", "planRetryPanel", "planDriverActions"]
@@ -51,6 +51,7 @@ async function harness(steps, { agentMode = false } = {}) {
     return { ok: true, json: async () => ({ plans: [structuredClone(plan)] }) };
   };
   const controller = createPlanRailController({
+    ...viewCallbacks,
     $: (id) => elements[id] || null,
     getSelectedTask: () => ({ id: "task-1", task_type: "modeling" }),
     getSelectedTaskId: () => "task-1",
@@ -60,7 +61,7 @@ async function harness(steps, { agentMode = false } = {}) {
     setDriverExecutionBusy: (value) => busy.push(value),
     apiClient: async (url, options) => {
       requests.push({ url, method: options.method, body: JSON.parse(options.body) });
-      return {};
+      return apiHandler ? await apiHandler(url, options) : {};
     },
     listPluginToolsClient: async (name) => {
       schemaRequests.push(name);
@@ -98,7 +99,25 @@ async function harness(steps, { agentMode = false } = {}) {
     return button;
   }
   await refresh();
-  return { controller, elements, requests, schemaRequests, statuses, busy, refresh, click };
+  async function reconcile(targetId) {
+    const button = { dataset: { planReconcile: targetId }, disabled: false };
+    assert.equal(controller.handleClick({
+      target: { closest: (selector) => selector === "[data-plan-reconcile]" ? button : null },
+      preventDefault() {}, stopPropagation() {},
+    }), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    return button;
+  }
+  async function continuePlan(fingerprint) {
+    const button = { dataset: { planContinue: fingerprint }, disabled: false };
+    assert.equal(controller.handleClick({
+      target: { closest: (selector) => selector === "[data-plan-continue]" ? button : null },
+      preventDefault() {}, stopPropagation() {},
+    }), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    return button;
+  }
+  return { controller, elements, requests, schemaRequests, statuses, busy, refresh, click, reconcile, continuePlan };
 }
 '''
 
@@ -281,3 +300,123 @@ assert.match(panel.innerHTML, /data-plan-retry-step="safe-step"/);
 await h.click(step.id);
 assert.equal(h.requests.length, 1);
 ''')
+
+
+@pytest.mark.parametrize("agent_mode", ["false", "true"])
+def test_trusted_reconciliation_action_sends_only_identity_and_never_retries_tool(agent_mode):
+    run_controller_test(r'''
+const step = failedStep("step-1", false);
+const target = { id: "opaque-original-binding", step_id: step.id, supported: true, reason: "原执行凭据可核对。" };
+let release;
+const waiting = new Promise((resolve) => { release = resolve; });
+const h = await harness([step], { agentMode: AGENT_MODE, apiHandler: async () => {
+  await waiting;
+  return { plan: { id: "plan-1", status: "done", steps: [{ ...step, status: "done" }] }, reconciliation_result: { outcome: "applied", reason: "原生产者回执已核对。" } };
+}});
+await h.refresh({ id: "plan-1", status: "failed", steps: [step], reconciliation: { targets: [target] } });
+assert.match(h.elements.planRetryPanel.innerHTML, /data-plan-reconcile="opaque-original-binding"/);
+assert.doesNotMatch(h.elements.planRetryPanel.innerHTML, /data-plan-retry-step=/);
+const button = await h.reconcile(target.id);
+assert.equal(button.disabled, true);
+assert.deepEqual(h.requests, [{ url: "/api/plans/plan-1/reconcile", method: "POST", body: { target_id: target.id } }]);
+assert.deepEqual(h.busy, [true]);
+release();
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(button.disabled, false);
+assert.deepEqual(h.busy, [true, false]);
+assert.equal(h.controller.statusSnapshot().label, "已完成");
+assert.match(h.statuses.at(-1).message, /原生产者回执已核对/);
+assert.equal(h.requests.length, 1);
+'''.replace("AGENT_MODE", agent_mode))
+
+
+def test_unsupported_or_stale_reconciliation_action_is_blocked_and_failure_is_visible():
+    run_controller_test(r'''
+const step = failedStep("step-1", false);
+const target = { id: "original", step_id: step.id, supported: false, reason: "没有可信核对器。" };
+const h = await harness([step], { apiHandler: async () => { throw new Error("原生产者暂不可用"); } });
+await h.refresh({ id: "plan-1", status: "failed", steps: [step], reconciliation: { targets: [target] } });
+assert.match(h.elements.planRetryPanel.innerHTML, /没有可信核对器/);
+assert.doesNotMatch(h.elements.planRetryPanel.innerHTML, /data-plan-reconcile=/);
+await h.reconcile("forged");
+await h.reconcile(target.id);
+assert.deepEqual(h.requests, []);
+target.supported = true;
+await h.refresh({ id: "plan-1", status: "failed", steps: [step], reconciliation: { targets: [target] } });
+const button = await h.reconcile(target.id);
+assert.equal(button.disabled, false);
+assert.match(h.statuses.at(-1).message, /原生产者暂不可用/);
+assert.equal(h.statuses.at(-1).kind, "error");
+assert.equal(h.controller.statusSnapshot().label, "待核对");
+assert.equal(h.requests.length, 1);
+''')
+
+
+def test_cancelled_completion_uses_explicit_resume_endpoint():
+    run_controller_test(r'''
+const step = failedStep("step-1", false);
+const target = { id: "checked-original-output", step_id: step.id, supported: true, action: "resume_completion" };
+const h = await harness([step], { agentMode: true });
+await h.refresh({ id: "plan-1", status: "cancelled", steps: [step], reconciliation: { targets: [target] } });
+assert.match(h.elements.planRetryPanel.innerHTML, /恢复完成步骤/);
+assert.doesNotMatch(h.elements.planRetryPanel.innerHTML, /data-plan-retry-step=/);
+await h.reconcile(target.id);
+assert.deepEqual(h.requests, [{ url: "/api/plans/plan-1/resume-completion", method: "POST", body: { target_id: target.id } }]);
+''')
+
+
+@pytest.mark.parametrize("agent_mode", ["false", "true"])
+def test_continue_remaining_uses_current_snapshot_and_rejects_repeated_action(agent_mode):
+    run_controller_test(r'''
+const h = await harness([], { agentMode: AGENT_MODE });
+await h.refresh({ id: "plan-1", status: "running", steps: [
+  { id: "done", status: "done" }, { id: "next", status: "pending" },
+], reconciliation: { targets: [], continuation: {
+  expected_plan_fingerprint: "current-snapshot", remaining_step_ids: ["next"],
+} } });
+assert.equal(h.controller.statusSnapshot().label, "待继续");
+assert.match(h.elements.planRetryPanel.innerHTML, /继续剩余步骤/);
+assert.match(h.elements.planRetryPanel.innerHTML, /data-plan-continue="current-snapshot"/);
+await h.continuePlan("stale-snapshot");
+assert.deepEqual(h.requests, []);
+await h.continuePlan("current-snapshot");
+assert.deepEqual(h.requests, [{ url: "/api/plans/plan-1/run", method: "POST",
+  body: { expected_plan_fingerprint: "current-snapshot" } }]);
+await h.continuePlan("current-snapshot");
+assert.equal(h.requests.length, 1);
+assert.deepEqual(h.busy, [true, false]);
+'''.replace("AGENT_MODE", agent_mode))
+
+
+@pytest.mark.parametrize("reject", ["false", "true"])
+def test_late_recovery_response_cannot_repaint_a_new_visit_and_releases_only_its_lease(reject):
+    run_controller_test(r'''
+let visit = 1, release, ownedLease;
+const released = [];
+const wait = new Promise((resolve) => { release = resolve; });
+const step = failedStep("step-1", false);
+const target = { id: "original", step_id: step.id, supported: true };
+const h = await harness([step], {
+  viewCallbacks: {
+    captureView: () => visit, isCurrentView: (view) => view === visit,
+    beginActivity: () => ownedLease || (ownedLease = { operation: "reconcile" }),
+    endActivity: (lease) => released.push(lease),
+  },
+  apiHandler: async () => {
+    await wait;
+    if (REJECT) throw new Error("old request failed");
+    return { plan: { id: "plan-1", status: "done", steps: [] } };
+  },
+});
+await h.refresh({ id: "plan-1", status: "failed", steps: [step], reconciliation: { targets: [target] } });
+await h.reconcile("original");
+const originalLease = ownedLease;
+visit += 2; // A -> B -> A: same task id, different visit.
+ownedLease = { operation: "new visit" };
+release();
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(h.statuses, []);
+assert.equal(h.controller.statusSnapshot().label, "待核对");
+assert.deepEqual(released, [originalLease]);
+assert.notEqual(released[0], ownedLease);
+'''.replace("REJECT", reject))

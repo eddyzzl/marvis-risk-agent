@@ -290,6 +290,14 @@ class PlanExecutor:
             else:
                 self._progress_fallback_task_repo = canonical_task_repo
         self._step_recovery = PlanStepRecovery(plan_repo, reviewer, hook_dispatcher, harness_state)
+        from marvis.orchestrator.reconciliation import ExecutionReconciler
+        self.reconciler = ExecutionReconciler(self)
+
+    def reconcile_execution(self, plan_id: str, target_id: str) -> dict:
+        return self.reconciler.reconcile(plan_id, target_id)
+
+    def resume_completion(self, plan_id: str, target_id: str) -> dict:
+        return self.reconciler.reconcile(plan_id, target_id, resume_completion=True)
 
     def run(self, plan_id: str, *, cancellation_check=None) -> ExecutionResult:
         plan = self._repo.load_plan(plan_id)

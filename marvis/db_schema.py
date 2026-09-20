@@ -32,6 +32,9 @@ _MIGRATION_TABLES = frozenset({
     "plan_step_outputs",
     "plan_step_output_versions",
     "plan_step_runs",
+    "effect_executions",
+    "hook_events",
+    "hook_deliveries",
     "model_artifacts",
     "llm_calls",
     "datasets",
@@ -225,7 +228,7 @@ _MIGRATION_TABLES = frozenset({
 # _migration_034_validation_batch_source_gc adds a narrowly typed cleanup target
 # for platform-owned validation-batch material trees.  The old migration remains
 # immutable; SQLite requires a table rebuild to extend its CHECK constraint.
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -4476,6 +4479,51 @@ def _migration_037_step_invocation_contract(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_038_trusted_reconciliation(conn: sqlite3.Connection) -> None:
+    # Governance evidence outlives task purge, just like approval/decision
+    # bindings. Reservation validates the live run atomically; no FK may make
+    # removal of an otherwise deletable task depend on deleting audit history.
+    _ensure_column(conn, table="effect_executions", column="invocation_id", definition="TEXT")
+    _ensure_column(conn, table="effect_executions", column="invocation_contract_hash", definition="TEXT")
+    conn.execute("CREATE UNIQUE INDEX idx_effect_invocation ON effect_executions(invocation_id) WHERE invocation_id IS NOT NULL")
+    conn.execute("""CREATE TRIGGER trg_effect_invocation_pair BEFORE INSERT ON effect_executions
+        WHEN (NEW.invocation_id IS NULL) != (NEW.invocation_contract_hash IS NULL)
+        BEGIN SELECT RAISE(ABORT, 'effect invocation binding must be complete'); END""")
+    conn.execute("""CREATE TRIGGER trg_effect_invocation_immutable BEFORE UPDATE ON effect_executions
+        WHEN NEW.invocation_id IS NOT OLD.invocation_id
+          OR NEW.invocation_contract_hash IS NOT OLD.invocation_contract_hash
+          OR (json_extract(OLD.detail_json, '$.producer_receipt') IS NOT NULL AND
+              json_extract(NEW.detail_json, '$.producer_receipt') IS NOT json_extract(OLD.detail_json, '$.producer_receipt'))
+          OR (json_extract(OLD.detail_json, '$.producer_receipt') IS NOT NULL AND NEW.result_hash IS NOT OLD.result_hash)
+        BEGIN SELECT RAISE(ABORT, 'effect producer binding is immutable'); END""")
+    _ensure_column(conn, table="hook_events", column="payload_json", definition="TEXT")
+    _ensure_column(conn, table="hook_deliveries", column="generation", definition="INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, table="hook_deliveries", column="retry_authorization_id", definition="TEXT")
+    conn.execute("""CREATE TABLE execution_reconciliations (
+        id TEXT PRIMARY KEY, target_id TEXT NOT NULL, binding_hash TEXT NOT NULL,
+        target_json TEXT NOT NULL, verifier_id TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK(outcome IN ('applied', 'not_applied_fenced', 'unknown')),
+        proof_json TEXT NOT NULL, proof_hash TEXT NOT NULL, previous_state_json TEXT NOT NULL,
+        created_at TEXT NOT NULL, UNIQUE(target_id, proof_hash)
+    )""")
+    conn.execute("""CREATE TABLE reconciliation_consumptions (
+        resolution_id TEXT PRIMARY KEY REFERENCES execution_reconciliations(id), created_at TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE execution_reconciliation_completions (
+        resolution_id TEXT PRIMARY KEY REFERENCES execution_reconciliations(id),
+        plan_id TEXT NOT NULL, step_id TEXT,
+        workflow_failure_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TRIGGER trg_execution_reconciliation_immutable BEFORE UPDATE ON execution_reconciliations
+        BEGIN SELECT RAISE(ABORT, 'reconciliation evidence is immutable'); END""")
+    conn.execute("""CREATE TRIGGER trg_execution_reconciliation_no_delete BEFORE DELETE ON execution_reconciliations
+        BEGIN SELECT RAISE(ABORT, 'reconciliation evidence is retained'); END""")
+    for table in ("execution_reconciliation_completions", "reconciliation_consumptions"):
+        for action in ("UPDATE", "DELETE"):
+            conn.execute(f"""CREATE TRIGGER trg_{table}_{action.lower()} BEFORE {action} ON {table}
+                BEGIN SELECT RAISE(ABORT, 'reconciliation receipt is immutable'); END""")
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -4521,6 +4569,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (35, _migration_035_validation_batch_material_uploads),
     (36, _migration_036_hook_delivery_completion),
     (37, _migration_037_step_invocation_contract),
+    (38, _migration_038_trusted_reconciliation),
 ]
 
 

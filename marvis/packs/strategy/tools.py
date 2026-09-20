@@ -2870,9 +2870,41 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
                         },
                     )
                 )
-            return adopt_result, plan_record, artifact_records
+            artifacts = [
+                {
+                    "artifact_id": str(record["id"]),
+                    "kind": str(record["kind"]),
+                    "path": str(record["path"]),
+                    "content_hash": str(record["content_hash"]),
+                    "content_size": int(record["content_size"]),
+                }
+                for record in artifact_records
+            ]
+            output = {
+                "strategy_id": strategy_id,
+                "strategy_type": strategy.strategy_type,
+                "backtest_id": backtest_id,
+                "version": version,
+                "status": "adopted",
+                "asset_status": "adopted_local",
+                "lifecycle_notice": "本地已采纳，不代表生产上线。",
+                "retired_strategy_ids": list(adopt_result["retired_strategy_ids"]),
+                "adoption_evidence": adoption_evidence,
+                "monitoring_plan_id": plan_record.id,
+                "monitoring_plan_revision": plan_record.revision,
+                "monitoring_plan_hash": plan_record.payload_hash,
+                "artifacts": artifacts,
+            }
+            if effect_execution_id is not None:
+                runtime.strategies.freeze_adoption_producer_receipt_on_connection(
+                    conn,
+                    effect_execution_id=effect_execution_id,
+                    runtime_generation=runtime_generation,
+                    output=output,
+                )
+            return output
 
-        adopt_result, plan_record, artifact_records = uow.finalize_with_connection(
+        output = uow.finalize_with_connection(
             runtime.strategies.transaction,
             finalize_adoption,
         )
@@ -2880,32 +2912,7 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         uow.rollback()
         raise
 
-    artifacts = [
-        {
-            "artifact_id": str(record["id"]),
-            "kind": str(record["kind"]),
-            "path": str(record["path"]),
-            "content_hash": str(record["content_hash"]),
-            "content_size": int(record["content_size"]),
-        }
-        for record in artifact_records
-    ]
-
-    return {
-        "strategy_id": strategy_id,
-        "strategy_type": strategy.strategy_type,
-        "backtest_id": backtest_id,
-        "version": version,
-        "status": "adopted",
-        "asset_status": "adopted_local",
-        "lifecycle_notice": "本地已采纳，不代表生产上线。",
-        "retired_strategy_ids": list(adopt_result["retired_strategy_ids"]),
-        "adoption_evidence": adoption_evidence,
-        "monitoring_plan_id": plan_record.id,
-        "monitoring_plan_revision": plan_record.revision,
-        "monitoring_plan_hash": plan_record.payload_hash,
-        "artifacts": artifacts,
-    }
+    return output
 
 
 def _adoption_artifact_provenance(

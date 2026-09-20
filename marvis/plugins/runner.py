@@ -278,6 +278,7 @@ class ToolRunner:
             cancellation_check=cancellation_check,
             expected_invocation=expected_invocation,
             on_dispatch=on_dispatch,
+            invocation_id=normalized_invocation_id,
         )
         if normalized_invocation_id is not None:
             result.invocation_id = normalized_invocation_id
@@ -297,6 +298,7 @@ class ToolRunner:
         cancellation_check: Callable[[], None] | None = None,
         expected_invocation: dict | None = None,
         on_dispatch: Callable[[], None] | None = None,
+        invocation_id: str | None = None,
     ) -> ToolResult:
         started = time.monotonic()
         target_ref = ref.label()
@@ -442,9 +444,18 @@ class ToolRunner:
                 )
                 if effect_authorization_required:
                     authorization_phase = "reserve"
+                    invocation_binding = (
+                        {
+                            "invocation_id": invocation_id,
+                            "invocation_contract": invocation_contract(manifest, tool, ref),
+                        }
+                        if invocation_id is not None
+                        else {}
+                    )
                     effect_execution = self._governance.reserve_effect(
                         execution_context,
                         live_binding,
+                        **invocation_binding,
                     )
                 else:
                     authorization_phase = "verify"

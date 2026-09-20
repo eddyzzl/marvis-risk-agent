@@ -2,6 +2,7 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import asdict, is_dataclass, replace as dataclass_replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,25 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _workflow_completion_pending(conn, plan_id, events) -> bool:
+    failures = sum(isinstance(event, dict) and event.get("type") == "hook_completion_failed" for event in events)
+    resolved = conn.execute(
+        """SELECT COALESCE(MAX(c.workflow_failure_count),0)
+             FROM execution_reconciliation_completions c JOIN execution_reconciliations r ON r.id=c.resolution_id
+            WHERE c.plan_id=? AND json_extract(r.target_json,'$.plan_id')=c.plan_id
+              AND r.outcome IN ('applied','not_applied_fenced')""",
+        (plan_id,),
+    ).fetchone()[0]
+    return failures > resolved
+
+
+def _run_fenced_not_applied(conn, run_id) -> bool:
+    return bool(run_id and conn.execute(
+        "SELECT 1 FROM execution_reconciliations WHERE outcome='not_applied_fenced' AND json_extract(target_json,'$.run_id')=? LIMIT 1",
+        (run_id,),
+    ).fetchone())
+
+
 def _unreconciled_step_ids(conn: sqlite3.Connection, step_ids) -> list[str]:
     """Read the same persisted stop state for presentation and mutation gates."""
     ids = tuple(dict.fromkeys(str(step_id) for step_id in step_ids))
@@ -50,7 +70,7 @@ def _unreconciled_step_ids(conn: sqlite3.Connection, step_ids) -> list[str]:
         return []
     placeholders = ",".join("?" for _ in ids)
     rows = conn.execute(
-        f"""SELECT s.id, s.error, p.loop_events_json, r.error_kind,
+        f"""SELECT s.id, s.plan_id, s.error, p.loop_events_json, r.error_kind, r.id AS run_id,
                    r.status AS run_status, r.invocation_contract_json, r.dispatch_started_at
               FROM plan_steps AS s JOIN plans AS p ON p.id = s.plan_id
               LEFT JOIN plan_step_runs AS r ON r.id = (
@@ -62,16 +82,12 @@ def _unreconciled_step_ids(conn: sqlite3.Connection, step_ids) -> list[str]:
     ).fetchall()
     return [
         row["id"] for row in rows
-        if requires_effect_reconciliation(row["error"], row["error_kind"])
+        if (requires_effect_reconciliation(row["error"], row["error_kind"])
         or (row["run_status"] in {"failed", "interrupted", "running"} and not retry_safe_run({
             "invocation_contract": load_invocation_contract(row["invocation_contract_json"]),
             "dispatch_started_at": row["dispatch_started_at"],
-        }))
-        or any(
-            event.get("type") == "hook_completion_failed"
-            for event in _load_json_array(row["loop_events_json"])
-            if isinstance(event, dict)
-        )
+        }))) and not _run_fenced_not_applied(conn, row["run_id"])
+        or _workflow_completion_pending(conn, row["plan_id"], _load_json_array(row["loop_events_json"]))
     ]
 
 
@@ -86,11 +102,7 @@ def _assert_no_unreconciled_step_effects(
     blocked = _unreconciled_step_ids(conn, step_ids)
     if plan_id is not None:
         plan = conn.execute("SELECT loop_events_json FROM plans WHERE id = ?", (plan_id,)).fetchone()
-        if plan is not None and any(
-            event.get("type") == "hook_completion_failed"
-            for event in _load_json_array(plan["loop_events_json"])
-            if isinstance(event, dict)
-        ):
+        if plan is not None and _workflow_completion_pending(conn, plan_id, _load_json_array(plan["loop_events_json"])):
             blocked.append(plan_id)
     if blocked:
         raise ConflictError(
@@ -120,6 +132,11 @@ class PlanRepository:
         """Expose retry policy; mutation paths always recheck under write lock."""
         with connect(self.db_path) as conn:
             return _unreconciled_step_ids(conn, step_ids)
+
+    def workflow_completion_pending(self, plan_id: str) -> bool:
+        with connect(self.db_path) as conn:
+            row = conn.execute("SELECT loop_events_json FROM plans WHERE id=?", (plan_id,)).fetchone()
+            return bool(row and _workflow_completion_pending(conn, plan_id, _load_json_array(row["loop_events_json"])))
 
     def create_plan(
         self,
@@ -1330,7 +1347,7 @@ class PlanRepository:
         with connect(self.db_path) as conn:
             row = conn.execute(
                 """
-                SELECT error_kind, status, invocation_contract_json, dispatch_started_at
+                SELECT id, error_kind, status, invocation_contract_json, dispatch_started_at
                   FROM plan_step_runs
                  WHERE step_id = ?
                  ORDER BY attempt DESC, COALESCE(finished_at, started_at) DESC
@@ -1338,6 +1355,8 @@ class PlanRepository:
                 """,
                 (step_id,),
             ).fetchone()
+            if row is not None and _run_fenced_not_applied(conn, row["id"]):
+                return "execution_not_applied"
         if row is None or row["status"] not in {"failed", "interrupted"}:
             return None
         if not retry_safe_run({
@@ -1385,9 +1404,9 @@ class PlanRepository:
             ).fetchone()
         return None if row is None else str(row["output_ref"] or "") or None
 
-    def store_step_output(self, step_id: str, output: dict, *, evidence: dict | EvidenceEnvelope | None = None) -> str:
+    def store_step_output(self, step_id: str, output: dict, *, evidence: dict | EvidenceEnvelope | None = None, _connection=None) -> str:
         now = _now()
-        with connect(self.db_path) as conn:
+        with nullcontext(_connection) if _connection is not None else connect(self.db_path) as conn:
             row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 AS next_version "
                 "FROM plan_step_output_versions WHERE step_id = ?",
@@ -1628,7 +1647,7 @@ class PlanRepository:
             step_id,
             output_ref,
             allowed_step_statuses=frozenset(
-                {StepStatus.RUNNING.value, StepStatus.CHECKING.value}
+                {StepStatus.RUNNING.value, StepStatus.CHECKING.value, StepStatus.FAILED.value, StepStatus.DONE.value}
             ),
         )
 

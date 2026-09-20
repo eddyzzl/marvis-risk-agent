@@ -6,6 +6,9 @@ from enum import Enum
 from typing import Any
 
 
+PRODUCER_RECEIPT_SCHEMA_VERSION = "governed_producer_receipt.v1"
+
+
 class ApprovalState(str, Enum):
     ISSUED = "issued"
     RESERVED = "reserved"
@@ -179,6 +182,8 @@ class EffectExecution:
     uncertain_reason: str | None = None
     result_hash: str | None = None
     detail: dict[str, Any] | None = None
+    invocation_id: str | None = None
+    invocation_contract_hash: str | None = None
 
     @property
     def effect_execution_id(self) -> str:
