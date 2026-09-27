@@ -81,7 +81,7 @@ export function createTaskSession() {
     if (!requests.current(view) || id !== workbenchId()) return false;
     if (value && value.task_id !== id) return false;
     const revision = Number(value?.replan_count || 0);
-    if (planIdentity?.id === value?.id && revision < planIdentity.revision) return false;
+    if (planIdentity && value && planIdentity.id === value.id && revision < planIdentity.revision) return false;
     planIdentity = value ? Object.freeze({
       id: value.id, taskId: id, revision,
       fingerprint: value.reconciliation?.continuation?.expected_plan_fingerprint || "",

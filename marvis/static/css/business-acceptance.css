@@ -1,0 +1,44 @@
+.business-objective-editor, .business-acceptance-panel {
+  border: 1px solid var(--border); border-radius: 14px; padding: 16px;
+  background: var(--surface); color: var(--text);
+}
+.business-objective-editor { grid-column: 1 / -1; margin-top: 12px; }
+.business-objective-editor summary, .business-objective-review summary { cursor: pointer; font-weight: 600; }
+.business-objective-editor summary span { display: block; margin: 5px 0; color: var(--text-muted); font-size: 12px; font-weight: 400; }
+.business-objective-editor fieldset { padding: 0; margin: 12px 0; border: 0; min-width: 0; }
+.business-objective-editor fieldset:disabled { opacity: .55; }
+.business-objective-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
+.business-objective-grid label { display: grid; align-content: start; gap: 5px; font-size: 12px; min-width: 0; }
+.business-objective-grid input, .business-objective-grid select { width: 100%; min-width: 0; min-height: 34px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--surface); color: var(--text); padding: 6px 9px; font: inherit; }
+.business-objective-enable { display: flex !important; align-items: center; gap: 8px; margin: 12px 0 8px; font-size: 13px; }
+.business-objective-enable input { width: 16px !important; min-height: 16px; }
+.business-note { color: var(--text-muted); font-size: 12px; line-height: 1.65; margin: 8px 0; }
+.business-criterion { border-top: 1px solid var(--border); margin: 14px 0; padding-top: 12px; }
+.business-criterion button { align-self: end; justify-self: start; }
+.business-contract-version { color: var(--text-muted); display: block; margin-top: 12px; }
+.business-objective-binding { padding-top: 12px; }
+.business-objective-binding .business-objective-grid { margin-top: 12px; }
+.business-acceptance-panel { margin: 0 0 16px; }
+.business-acceptance-panel[hidden] { display: none; }
+.business-acceptance-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.business-acceptance-head > div { display: flex; align-items: center; gap: 12px; font-size: 14px; }
+.business-acceptance-head > small { color: var(--text-secondary); }
+.business-verdict { font-size: 12px; border-radius: 20px; padding: 4px 9px; background: var(--surface-soft); }
+.business-verdict.success { color: var(--success); background: var(--success-soft); }
+.business-verdict.danger { color: var(--danger); background: var(--danger-soft); }
+.business-verdict.warning { color: var(--warning); background: var(--warning-soft); }
+.business-acceptance-reasons { margin: 8px 0 12px; padding-left: 18px; font-size: 13px; line-height: 1.65; }
+.business-objective-review { border-top: 1px solid var(--border); padding-top: 12px; font-size: 13px; }
+.business-evidence-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px 18px; }
+.business-evidence-grid dt { color: var(--text-muted); font-size: 11px; margin-bottom: 4px; }
+.business-evidence-grid dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.business-criteria-scroll { overflow-x: auto; }
+.business-criteria-table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+.business-criteria-table caption { text-align: left; padding: 10px 0; font-weight: 600; }
+.business-criteria-table th, .business-criteria-table td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.business-criteria-table small { display: block; max-width: 220px; color: var(--text-muted); margin-top: 4px; }
+.business-acceptance-downloads { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+@media (max-width: 900px) { .business-objective-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+
+.business-action-error { color: var(--danger); font-size: 13px; line-height: 1.6; }
+.business-action-error:empty { display: none; }

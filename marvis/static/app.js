@@ -1,3 +1,5 @@
+import { createBusinessAcceptanceController } from "./js/business-acceptance.js";
+import { handleBusinessObjectiveEvent } from "./js/business-objective.js";
 import { api, sleep } from "./js/api.js";
 import { createTaskSession } from "./js/task-session.js";
 import {
@@ -503,6 +505,21 @@ const planRailController = createPlanRailController({
   loadAgentMessages,
   renderAll,
   fillComposer: focusAgentComposerForIntervene,
+});
+const businessAcceptanceController = createBusinessAcceptanceController({
+  getElement: () => $("businessAcceptancePanel"),
+  getTask: () => taskSession.task,
+  getPlan: () => taskSession.plan,
+  captureView: () => taskRequests.capture(),
+  isCurrentView: (view) => taskRequests.current(view),
+  beginActivity: (operation, taskId) => claimBusy("business_objective", "正在保存业务合同…", taskId, operation),
+  endActivity: releaseBusy,
+  onSaved: async (task, view) => {
+    if (!taskRequests.current(view) || !taskSession.refreshTask(task)) return;
+    renderAll();
+    await refreshTasks();
+  },
+  setActionStatus,
 });
 const driverGateApi = createDriverGateApi({
   api,
@@ -6630,6 +6647,9 @@ if (typeof document !== "undefined") {
   document.addEventListener("click", handleFeatureBinningClick);
   document.addEventListener("click", handleSpecialValueClick);
   document.addEventListener("click", handleStrategyClarificationSubmit);
+  document.addEventListener("click", (event) => businessAcceptanceController.handleClick(event));
+  document.addEventListener("click", handleBusinessObjectiveEvent);
+  document.addEventListener("change", handleBusinessObjectiveEvent);
   document.addEventListener("change", handleStrategyClarificationChange);
 }
 

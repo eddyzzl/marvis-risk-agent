@@ -1,3 +1,4 @@
+import { businessObjectiveFormHtml, collectBusinessObjective } from "./business-objective.js";
 import { api, localToken } from "./api.js";
 import { defaultTaskType, taskTypeDefinitions } from "./task-types.js";
 import { formatDateInput } from "./ui-utils.js";
@@ -175,6 +176,7 @@ export function createCreateTaskDialogController({
     $("createTaskReportFields").hidden = !definition.reportFields;
     $("createTaskReportFields").classList.toggle("hidden", !definition.reportFields);
     toggleConditionalField("createTaskStrategyField", Boolean(definition.strategyField));
+    toggleConditionalField("createTaskBusinessObjectiveField", ["data_join","feature_analysis","modeling","strategy","vintage","portfolio"].includes(activeTaskType));
     setRunModeCardState("manual", {
       disabled: !definition.manualEnabled,
       checked: false,
@@ -205,6 +207,7 @@ export function createCreateTaskDialogController({
     }
     toggleConditionalField("createTaskTierField", Boolean(definition.tierField) && runMode === "agent");
     toggleConditionalField("createTaskStrategyField", Boolean(definition.strategyField));
+    toggleConditionalField("createTaskBusinessObjectiveField", ["data_join","feature_analysis","modeling","strategy","vintage","portfolio"].includes(activeTaskType));
   }
 
   function syncCreateTaskTierDefault() {
@@ -260,6 +263,8 @@ export function createCreateTaskDialogController({
       const input = $(id);
       if (input) input.value = value;
     }
+    const businessField = $("createTaskBusinessObjectiveField");
+    if (businessField) businessField.innerHTML = businessObjectiveFormHtml(null, { targetKind: activeTaskType === "modeling" ? "model" : activeTaskType === "strategy" ? "strategy" : "workflow" });
     updateStrategyProfitVisibility();
   }
 
@@ -535,6 +540,16 @@ export function createCreateTaskDialogController({
       run_mode: selectedRunMode,
       report_values: definition.reportFields ? collectCreateTaskReportValues() : {},
     };
+    let businessObjective = null;
+    if (["data_join","feature_analysis","modeling","strategy","vintage","portfolio"].includes(taskType)) {
+      try {
+        businessObjective = collectBusinessObjective($("createTaskBusinessObjectiveField")?.querySelector?.("[data-business-objective]"));
+      } catch (error) {
+        setCreateStatus(error.message, "error");
+        return null;
+      }
+      if (businessObjective) payload.business_objective = businessObjective;
+    }
     if (definition.strategyField) {
       const strategyInput = collectStrategyTaskInput();
       const error = strategyInputError(strategyInput);
@@ -542,6 +557,7 @@ export function createCreateTaskDialogController({
         setCreateStatus(error, "error");
         return null;
       }
+      if (businessObjective) strategyInput.business_objective = businessObjective;
       payload.strategy_input = strategyInput;
     }
     if (definition.algorithmField && selectedRunMode === "manual") {

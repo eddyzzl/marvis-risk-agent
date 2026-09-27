@@ -1,3 +1,4 @@
+import { renderBusinessAcceptance } from "../business-acceptance.js";
 import { api } from "../api.js";
 import { createTaskRequestScope } from "../task-request-scope.js";
 import { escapeHtml } from "../ui-utils.js";
@@ -1630,7 +1631,10 @@ export function createPlanRailController({
 
   function render({ force = false, renderSignatures = {} } = {}) {
     const task = selectedTask();
-    if (!taskUsesPlanRail(task)) return false;
+    if (!taskUsesPlanRail(task)) {
+      renderBusinessAcceptance($("businessAcceptancePanel"), null, null);
+      return false;
+    }
     const taskId = selectedTaskId();
     const progressRail = $("progressRail");
     const railTitle = document.querySelector("#progressRail .step-rail-head h3");
@@ -1642,6 +1646,7 @@ export function createPlanRailController({
     const firstLoad = cachedPlan(taskId) === undefined;
     maybeFetchPlan(taskId);
     const plan = cachedPlan(taskId);
+    renderBusinessAcceptance($("businessAcceptancePanel"), plan, task);
     const railPlan = planForRail(plan, task);
     const blocked = driverHasBlockingError();
     const fetchError = v2PlanFetchErrors.get(taskId) || "";

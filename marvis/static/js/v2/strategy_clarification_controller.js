@@ -1,3 +1,4 @@
+import { businessObjectiveFormHtml, collectBusinessObjective } from "../business-objective.js";
 const STRATEGY_CLARIFICATION_CODE = "strategy_business_inputs_required";
 
 const MISSING_FIELD_LABELS = {
@@ -112,6 +113,7 @@ export function renderStrategyClarification(message, options = {}) {
     `<input data-strategy-term-months type="number" min="1" step="1" inputmode="numeric" value="${inputValue(currentProfit.term_months)}" placeholder="例如：12"${disabled}></label>`,
     "</div>",
     "</fieldset>",
+    businessObjectiveFormHtml(currentInput.business_objective || null, { readonly: !interactive || clarification.business_objective_locked === true }),
     '<p class="strategy-clarification-error" data-strategy-clarification-error role="alert" aria-live="polite"></p>',
     '<div class="strategy-clarification-actions">',
     `<button type="button" class="button compact primary" data-strategy-clarification-submit="1"${disabled}${readonlyTitle}>${actionLabel}</button>`,
@@ -240,7 +242,16 @@ export async function submitStrategyClarification(button, context = {}) {
     return;
   }
 
-  const strategyInput = collectStrategyInput(wrap);
+  let strategyInput;
+  try {
+    strategyInput = collectStrategyInput(wrap);
+    const businessObjective = collectBusinessObjective(wrap?.querySelector?.("[data-business-objective]"));
+    if (businessObjective) strategyInput.business_objective = businessObjective;
+  } catch (error) {
+    setFormError(wrap, error.message);
+    setActionStatus(error.message, "error");
+    return;
+  }
   const validationError = strategyClarificationInputError(strategyInput);
   if (validationError) {
     setFormError(wrap, validationError);

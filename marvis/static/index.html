@@ -30,6 +30,7 @@
     <link rel="stylesheet" href="static/css/v2-task-setup.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/validation-batch.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/validation-batch-create.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/business-acceptance.css?v=__MARVIS_STATIC_VERSION__" />
     <script src="static/js/pet_catalog.js?v=__MARVIS_STATIC_VERSION__"></script>
   </head>
   <body class="app-booting" data-theme="light" data-marvis-local-token="__MARVIS_LOCAL_TOKEN__" data-marvis-plugin-admin-token="__MARVIS_PLUGIN_ADMIN_TOKEN__">
@@ -220,6 +221,7 @@
               </label>
             </div>
           </section>
+          <section id="createTaskBusinessObjectiveField" class="wide-field" hidden aria-label="业务验收合同"></section>
           <section id="validationCreateExtraModelsSection" class="task-form-section validation-create-extra-section" hidden>
             <div id="validationCreateExtraModels" class="validation-create-extra-list"></div>
             <button id="addValidationModelRowButton" class="button compact secondary" type="button">添加模型</button>
@@ -1473,6 +1475,7 @@
                 aria-label="批次模型验证字段合同"
                 aria-live="polite"
               ></section>
+              <section id="businessAcceptancePanel" class="business-acceptance-panel" aria-label="业务验收" aria-live="polite" hidden></section>
               <section
                 id="dataWorkspacePanel"
                 class="data-workspace-panel"

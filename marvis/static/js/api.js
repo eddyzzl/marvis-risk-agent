@@ -153,8 +153,9 @@ export async function api(endpoint, options = {}) {
   if (token && isSameOriginEndpoint(normalizedEndpoint) && !hasHeader(headers, "X-Marvis-Token")) {
     headers["X-Marvis-Token"] = token;
   }
+  const { responseType, ...requestOptions } = options;
   const response = await fetch(normalizedEndpoint, {
-    ...options,
+    ...requestOptions,
     headers,
   });
   if (!response.ok) {
@@ -168,7 +169,7 @@ export async function api(endpoint, options = {}) {
   if (response.status === 204) {
     return null;
   }
-  return response.json();
+  return responseType === "blob" ? response.blob() : response.json();
 }
 
 export function apiGet(endpoint, options = {}) {
