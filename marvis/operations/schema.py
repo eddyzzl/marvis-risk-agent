@@ -8,7 +8,7 @@ from pathlib import Path
 from marvis.db_schema import connect
 
 
-OPERATIONS_SCHEMA_VERSION = 1
+OPERATIONS_SCHEMA_VERSION = 2
 
 
 class OperationsSchemaVersionError(RuntimeError):
@@ -24,6 +24,25 @@ CREATE TABLE IF NOT EXISTS operations_schema_meta (
 """
 
 _OPERATIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS operations_local_inbox (
+    notification_id TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    delivered_at TEXT NOT NULL,
+    read_at TEXT,
+    read_by TEXT,
+    FOREIGN KEY(notification_id) REFERENCES operations_notification_outbox(notification_id)
+);
+CREATE TRIGGER IF NOT EXISTS operations_local_inbox_immutable
+BEFORE UPDATE ON operations_local_inbox
+WHEN NEW.notification_id != OLD.notification_id OR NEW.payload_json != OLD.payload_json
+OR NEW.payload_hash != OLD.payload_hash OR NEW.delivered_at != OLD.delivered_at
+OR (OLD.read_at IS NOT NULL AND (NEW.read_at IS NOT OLD.read_at OR NEW.read_by IS NOT OLD.read_by))
+BEGIN SELECT RAISE(ABORT, 'local delivery receipt is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS operations_local_inbox_no_delete
+BEFORE DELETE ON operations_local_inbox
+BEGIN SELECT RAISE(ABORT, 'local delivery receipts are retained'); END;
+
 CREATE TABLE IF NOT EXISTS operations_schedules (
     schedule_id TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision >= 1),

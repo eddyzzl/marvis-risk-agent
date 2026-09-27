@@ -166,6 +166,16 @@ class OperationsStore:
         contract_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if contract.recheck_of is not None:
+                source = contract.recheck_of
+                parent = conn.execute(
+                    "SELECT MAX(revision) AS revision FROM operations_schedules WHERE schedule_id = ?",
+                    (source.schedule_id,),
+                ).fetchone()
+                if parent is None or parent["revision"] != source.schedule_revision:
+                    raise ScheduleRevisionConflict(
+                        "source schedule revision changed before recheck publication"
+                    )
             row = conn.execute(
                 """
                 SELECT MAX(revision) AS revision
@@ -314,7 +324,14 @@ class OperationsStore:
             now=reference,
             limit=1,
         )
-        return None if not periods else periods[0]
+        if not periods:
+            return None
+        if (
+            schedule.active_until is not None
+            and periods[0].ends_at > schedule.active_until
+        ):
+            return None
+        return periods[0]
 
     def list_retryable_periods(
         self,
@@ -355,6 +372,8 @@ class OperationsStore:
             raise ValueError("period does not belong to the schedule calendar")
         if period.starts_at < schedule.active_from:
             raise ValueError("period begins before schedule activation")
+        if schedule.active_until is not None and period.ends_at > schedule.active_until:
+            raise ValueError("period ends after schedule deactivation")
         normalized_owner = _required_text(owner_id, "owner_id")
         now = _utc_datetime(self._clock(), "clock")
         if period.ends_at > now:
@@ -379,6 +398,12 @@ class OperationsStore:
                 raise ScheduleRevisionConflict(
                     "schedule contract does not match the persisted revision"
                 )
+            latest_row = conn.execute(
+                "SELECT revision, contract_json FROM operations_schedules WHERE schedule_id = ? ORDER BY revision DESC LIMIT 1",
+                (schedule.schedule_id,),
+            ).fetchone()
+            if not json.loads(latest_row["contract_json"])["enabled"]:
+                return None
             period_row = conn.execute(
                 """
                 SELECT * FROM operations_periods
@@ -386,6 +411,8 @@ class OperationsStore:
                 """,
                 (schedule.schedule_id, period.key),
             ).fetchone()
+            if period_row is None and int(latest_row["revision"]) != schedule.revision:
+                return None  # a newer published snapshot superseded this unseen period
             if period_row is not None:
                 state = str(period_row["state"])
                 if state != "retry_wait":
@@ -488,6 +515,32 @@ class OperationsStore:
             claimed_at=now,
             lease_expires_at=lease_expires_at,
         )
+
+    def renew_run_lease(self, claim: RunClaim, *, lease_seconds: int) -> None:
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int)
+            or lease_seconds < 1
+        ):
+            raise ValueError("lease_seconds must be a positive integer")
+        now = _utc_datetime(self._clock(), "clock")
+        expires = now + timedelta(seconds=lease_seconds)
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """UPDATE operations_periods SET lease_expires_at = ?, updated_at = ?
+                WHERE schedule_id = ? AND period_key = ? AND state = 'running'
+                AND lease_token = ? AND lease_expires_at > ?""",
+                (
+                    _iso_z(expires),
+                    _iso_z(now),
+                    claim.schedule_id,
+                    claim.period.key,
+                    claim.lease_token,
+                    _iso_z(now),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleRunLeaseError("run lease is no longer current")
 
     def complete_run(
         self,
@@ -649,6 +702,16 @@ class OperationsStore:
                     )
                 )
         return tuple(recovered)
+
+    def list_periods(
+        self, schedule_id: str, *, limit: int = 100
+    ) -> tuple[PeriodRecord, ...]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM operations_periods WHERE schedule_id = ? ORDER BY period_ends_at DESC LIMIT ?",
+                (schedule_id, limit),
+            ).fetchall()
+        return tuple(_period_record(row) for row in rows)
 
     def get_period(self, schedule_id: str, period_key: str) -> PeriodRecord | None:
         with connect(self.db_path) as conn:
@@ -977,9 +1040,7 @@ class OperationsStore:
                     "error_code": error_code,
                     "terminal": terminal,
                     "next_attempt_at": (
-                        None
-                        if next_attempt_at is None
-                        else _iso_z(next_attempt_at)
+                        None if next_attempt_at is None else _iso_z(next_attempt_at)
                     ),
                 }
             conn.execute(
@@ -1046,11 +1107,7 @@ class OperationsStore:
                     """,
                     (
                         status,
-                        (
-                            None
-                            if next_attempt_at is None
-                            else _iso_z(next_attempt_at)
-                        ),
+                        (None if next_attempt_at is None else _iso_z(next_attempt_at)),
                         _iso_z(now),
                         str(row["notification_id"]),
                     ),
@@ -1066,9 +1123,7 @@ class OperationsStore:
                         "attempt_number": int(row["attempt_count"]),
                         "terminal": terminal,
                         "next_attempt_at": (
-                            None
-                            if next_attempt_at is None
-                            else _iso_z(next_attempt_at)
+                            None if next_attempt_at is None else _iso_z(next_attempt_at)
                         ),
                     },
                     created_at=now,
@@ -1322,7 +1377,9 @@ def _load_schedule_on_connection(
 
 
 def _canonical_json(payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 def _payload_hash(payload: object) -> str:

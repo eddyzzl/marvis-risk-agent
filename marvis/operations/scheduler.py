@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Callable, Protocol
+import threading
+import re
+from contextlib import contextmanager
 
 from marvis.operations.contracts import (
     MAX_CATCH_UP_BUDGET,
@@ -64,6 +67,7 @@ class LocalScheduler:
         notification_adapter: NotificationAdapter | None = None,
         notification_redactor: NotificationRedactor | None = None,
         notification_retry_policy: RetryPolicy | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> None:
         if not isinstance(store, OperationsStore):
             raise ValueError("store must be an OperationsStore")
@@ -87,6 +91,7 @@ class LocalScheduler:
             notification_retry_policy, RetryPolicy
         ):
             raise ValueError("notification_retry_policy must be a RetryPolicy")
+        self._stop_requested = stop_requested or (lambda: False)
         self._store = store
         self._executor = executor
         self._owner_id = owner_id.strip()
@@ -124,9 +129,7 @@ class LocalScheduler:
         recovered = self._store.recover_expired_leases()
         schedules = self._store.list_active_schedules()
         active_by_id = {record.contract.schedule_id: record for record in schedules}
-        per_schedule_attempts = {
-            record.contract.schedule_id: 0 for record in schedules
-        }
+        per_schedule_attempts = {record.contract.schedule_id: 0 for record in schedules}
         attempted = 0
         succeeded = 0
         failed = 0
@@ -136,7 +139,7 @@ class LocalScheduler:
             limit=catch_up_budget,
         )
         for period_record in retryable:
-            if attempted >= catch_up_budget:
+            if attempted >= catch_up_budget or self._stop_requested():
                 break
             latest = active_by_id.get(period_record.schedule_id)
             if latest is None:
@@ -166,11 +169,11 @@ class LocalScheduler:
                 succeeded += 1
             else:
                 failed += 1
-        while attempted < catch_up_budget:
+        while attempted < catch_up_budget and not self._stop_requested():
             made_progress = False
             for record in schedules:
                 schedule = record.contract
-                if attempted >= catch_up_budget:
+                if attempted >= catch_up_budget or self._stop_requested():
                     break
                 if (
                     per_schedule_attempts[schedule.schedule_id]
@@ -229,13 +232,14 @@ class LocalScheduler:
             attempt_number=claim.attempt_number,
         )
         try:
-            outcome = self._executor(request)
-            outcome_record = self._store.complete_run(claim, outcome)
-        except Exception:
+            with self._renewing_lease(claim):
+                outcome = self._executor(request)
+                outcome_record = self._store.complete_run(claim, outcome)
+        except Exception as exc:
             try:
                 self._store.fail_run(
                     claim,
-                    error_code="monitoring_execution_failed",
+                    error_code=_execution_error_code(exc),
                 )
             except StaleRunLeaseError:
                 pass
@@ -254,6 +258,28 @@ class LocalScheduler:
                 pass
         return outcome_record
 
+    @contextmanager
+    def _renewing_lease(self, claim):
+        seconds = (claim.lease_expires_at - claim.claimed_at).total_seconds()
+        stop = threading.Event()
+
+        def heartbeat():
+            while not stop.wait(max(0.1, seconds / 3)):
+                try:
+                    self._store.renew_run_lease(claim, lease_seconds=int(seconds))
+                except Exception:
+                    return  # completion is still fenced by the authoritative DB
+
+        thread = threading.Thread(
+            target=heartbeat, name="operations-lease", daemon=True
+        )
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+
     def _flush_notifications(self, budget: int) -> tuple[int, int, int, int]:
         if self._notification_adapter is None or budget == 0:
             return (0, 0, 0, 0)
@@ -262,7 +288,7 @@ class LocalScheduler:
         attempted = 0
         sent = 0
         failed = 0
-        while attempted < budget:
+        while attempted < budget and not self._stop_requested():
             claim = self._store.claim_notification(owner_id=self._owner_id)
             if claim is None:
                 break
@@ -312,3 +338,10 @@ def _utc_datetime(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ValueError("clock must return a timezone-aware datetime")
     return value.astimezone(UTC)
+
+
+def _execution_error_code(exc: Exception) -> str:
+    code = getattr(exc, "error_code", None)
+    if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
+        return code
+    return "monitoring_execution_failed"

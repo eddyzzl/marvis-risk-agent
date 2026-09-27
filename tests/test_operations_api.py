@@ -214,7 +214,9 @@ def test_operations_api_rejects_unknown_or_request_supplied_callable_before_pers
     _claim_role(app, admin_client, "admin")
 
     assert app.state.operations_runtime.store.db_path == app.state.settings.db_path
-    assert app.state.operations_runtime.allowed_monitoring_refs == ()
+    assert app.state.operations_runtime.allowed_monitoring_refs == (
+        "modeling.monitor_run", "strategy.run_strategy_monitoring"
+    )
 
     unknown = admin_client.post(
         "/api/operations/schedules",

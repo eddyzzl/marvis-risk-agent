@@ -8,6 +8,8 @@ import math
 import re
 from typing import Any, Mapping
 
+from marvis.operations.bindings import MonitoringBinding, RecheckSource
+
 
 CALENDAR_SCHEMA_VERSION = "operations.calendar.fixed_interval.v1"
 RETRY_SCHEMA_VERSION = "operations.retry.v1"
@@ -55,7 +57,9 @@ class FixedIntervalCalendar:
     schema_version: str = CALENDAR_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "anchor_at", _utc_datetime(self.anchor_at, "anchor_at"))
+        object.__setattr__(
+            self, "anchor_at", _utc_datetime(self.anchor_at, "anchor_at")
+        )
         if self.schema_version != CALENDAR_SCHEMA_VERSION:
             raise ValueError(f"unsupported calendar schema: {self.schema_version}")
         if (
@@ -94,9 +98,7 @@ class FixedIntervalCalendar:
     def period(self, index: int) -> CalendarPeriod:
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise ValueError("period index must be a non-negative integer")
-        starts_at = self.anchor_at + timedelta(
-            seconds=index * self.interval_seconds
-        )
+        starts_at = self.anchor_at + timedelta(seconds=index * self.interval_seconds)
         ends_at = starts_at + timedelta(seconds=self.interval_seconds)
         return CalendarPeriod(
             key=f"{self.schema_version}:{_iso_z(starts_at)}/{_iso_z(ends_at)}",
@@ -141,16 +143,12 @@ class RetryPolicy:
             or not isinstance(self.max_attempts, int)
             or not 1 <= self.max_attempts <= MAX_RETRY_ATTEMPTS
         ):
-            raise ValueError(
-                f"max_attempts must be between 1 and {MAX_RETRY_ATTEMPTS}"
-            )
+            raise ValueError(f"max_attempts must be between 1 and {MAX_RETRY_ATTEMPTS}")
         initial = _non_negative_number(
             self.initial_backoff_seconds, "initial_backoff_seconds"
         )
         multiplier = _positive_number(self.multiplier, "multiplier")
-        maximum = _non_negative_number(
-            self.max_backoff_seconds, "max_backoff_seconds"
-        )
+        maximum = _non_negative_number(self.max_backoff_seconds, "max_backoff_seconds")
         if maximum < initial:
             raise ValueError(
                 "max_backoff_seconds must be at least initial_backoff_seconds"
@@ -167,8 +165,7 @@ class RetryPolicy:
         ):
             raise ValueError("attempt_number must be a positive integer")
         return min(
-            self.initial_backoff_seconds
-            * (self.multiplier ** (attempt_number - 1)),
+            self.initial_backoff_seconds * (self.multiplier ** (attempt_number - 1)),
             self.max_backoff_seconds,
         )
 
@@ -209,6 +206,9 @@ class ScheduleContract:
     lease_seconds: int
     retry_policy: RetryPolicy
     enabled: bool = True
+    monitoring_binding: MonitoringBinding | None = None
+    active_until: datetime | None = None
+    recheck_of: RecheckSource | None = None
     schema_version: str = SCHEDULE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -218,7 +218,9 @@ class ScheduleContract:
             self, "schedule_id", _required_text(self.schedule_id, "schedule_id")
         )
         object.__setattr__(
-            self, "monitoring_ref", _required_text(self.monitoring_ref, "monitoring_ref")
+            self,
+            "monitoring_ref",
+            _required_text(self.monitoring_ref, "monitoring_ref"),
         )
         if (
             isinstance(self.revision, bool)
@@ -232,6 +234,15 @@ class ScheduleContract:
         if active_from < self.calendar.anchor_at:
             raise ValueError("active_from must not precede calendar anchor_at")
         object.__setattr__(self, "active_from", active_from)
+        if self.active_until is not None:
+            until = _utc_datetime(self.active_until, "active_until")
+            if until <= active_from:
+                raise ValueError("active_until must be after active_from")
+            object.__setattr__(self, "active_until", until)
+        if self.recheck_of is not None and not isinstance(
+            self.recheck_of, RecheckSource
+        ):
+            raise ValueError("recheck_of must be a RecheckSource")
         if (
             isinstance(self.catch_up_budget, bool)
             or not isinstance(self.catch_up_budget, int)
@@ -248,6 +259,10 @@ class ScheduleContract:
             raise ValueError("lease_seconds must be a positive integer")
         if not isinstance(self.retry_policy, RetryPolicy):
             raise ValueError("retry_policy must be a RetryPolicy")
+        if self.monitoring_binding is not None and not isinstance(
+            self.monitoring_binding, MonitoringBinding
+        ):
+            raise ValueError("monitoring_binding must be a MonitoringBinding")
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be a boolean")
 
@@ -263,6 +278,19 @@ class ScheduleContract:
             "lease_seconds": self.lease_seconds,
             "retry_policy": self.retry_policy.to_dict(),
             "enabled": self.enabled,
+            **(
+                {"active_until": _iso_z(self.active_until)} if self.active_until else {}
+            ),
+            **(
+                {"recheck_of": self.recheck_of.model_dump(mode="json")}
+                if self.recheck_of
+                else {}
+            ),
+            **(
+                {"monitoring_binding": self.monitoring_binding.model_dump(mode="json")}
+                if self.monitoring_binding is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -283,11 +311,24 @@ class ScheduleContract:
             catch_up_budget=_required_int(
                 payload.get("catch_up_budget"), "catch_up_budget"
             ),
-            lease_seconds=_required_int(
-                payload.get("lease_seconds"), "lease_seconds"
-            ),
+            lease_seconds=_required_int(payload.get("lease_seconds"), "lease_seconds"),
             retry_policy=RetryPolicy.from_dict(retry_policy),
             enabled=_required_bool(payload.get("enabled"), "enabled"),
+            active_until=(
+                None
+                if payload.get("active_until") is None
+                else _parse_datetime(payload["active_until"], "active_until")
+            ),
+            recheck_of=(
+                None
+                if payload.get("recheck_of") is None
+                else RecheckSource.model_validate(payload["recheck_of"])
+            ),
+            monitoring_binding=(
+                None
+                if payload.get("monitoring_binding") is None
+                else MonitoringBinding.model_validate(payload["monitoring_binding"])
+            ),
         )
 
 

@@ -28,6 +28,10 @@ from marvis.operations.repository import (
     ScheduleRevisionConflict,
 )
 from marvis.operations.scheduler import TickReport
+from marvis.operations.bindings import MonitoringBinding
+from marvis.operations.monitoring import read_monitoring_evidence
+from marvis.operations.diagnostics import period_diagnostic
+from marvis.operations.rechecks import request_recheck
 from marvis.production_governance.errors import GovernanceNotFound
 from marvis.production_governance.repository import ProductionGovernanceRepository
 from marvis.repositories.tasks import TaskRepository
@@ -64,6 +68,8 @@ class SchedulePayload(BaseModel):
     lease_seconds: StrictInt = Field(ge=1)
     retry_policy: RetryPolicyPayload
     enabled: StrictBool = True
+    monitoring_binding: MonitoringBinding | None = None
+    active_until: datetime | None = None
 
 
 class PublishScheduleRequest(BaseModel):
@@ -71,6 +77,16 @@ class PublishScheduleRequest(BaseModel):
 
     expected_revision: StrictInt = Field(ge=0)
     schedule: SchedulePayload
+
+
+class RecheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    period_key: str = Field(min_length=1, max_length=500)
+    expected_revision: StrictInt = Field(ge=1)
+    idempotency_key: str = Field(
+        min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$"
+    )
+    monitoring_binding: MonitoringBinding
 
 
 class TickRequest(BaseModel):
@@ -165,6 +181,58 @@ def _task_filesystem_gc(
     return collector
 
 
+@router.get("/capabilities")
+def capabilities(request: Request) -> dict:
+    _require_role(request, "maker", "checker", "admin")
+    runtime = _runtime(request)
+    return {
+        "monitoring_refs": list(runtime.allowed_monitoring_refs),
+        "monitoring_binding_schema": MonitoringBinding.model_json_schema(),
+        "notification_target": "local_application_inbox",
+        "runtime": runtime.loop.status() if runtime.loop else None,
+    }
+
+
+@router.get("/inbox")
+def inbox(
+    request: Request, limit: StrictInt = Query(default=100, ge=1, le=500)
+) -> dict:
+    _require_role(request, "maker", "checker", "admin")
+    adapter = _runtime(request).local_inbox
+    return {"notifications": [] if adapter is None else adapter.list(limit=limit)}
+
+
+@router.post("/inbox/{notification_id}/acknowledge")
+def acknowledge_notification(notification_id: str, request: Request) -> dict:
+    principal = _require_role(request, "maker", "checker", "admin")
+    adapter = _runtime(request).local_inbox
+    try:
+        if adapter is None:
+            raise KeyError(notification_id)
+        adapter.acknowledge(notification_id, str(principal["id"]))
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="inbox notification not found"
+        ) from exc
+    return {"acknowledged": True, "automatic_action_permitted": False}
+
+
+@router.get("/schedules/{schedule_id}/evidence")
+def monitoring_evidence(schedule_id: str, period_key: str, request: Request) -> dict:
+    _require_role(request, "maker", "checker", "admin")
+    outcome = _runtime(request).store.get_outcome(schedule_id, period_key)
+    if outcome is None:
+        raise HTTPException(status_code=404, detail="monitoring outcome not found")
+    try:
+        return read_monitoring_evidence(
+            request.app.state.settings.workspace, outcome.outcome
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(
+            status_code=409, detail="monitoring evidence unavailable or changed"
+        ) from exc
+
+
 @router.post("/schedules", status_code=201)
 def publish_schedule(payload: PublishScheduleRequest, request: Request) -> dict:
     _require_role(request, "maker", "admin")
@@ -215,6 +283,50 @@ def list_schedule_revisions(schedule_id: str, request: Request) -> dict:
     return {"schedules": [_schedule_record(record) for record in records]}
 
 
+@router.get("/schedules/{schedule_id}/periods")
+def list_periods(
+    schedule_id: str,
+    request: Request,
+    limit: StrictInt = Query(default=100, ge=1, le=500),
+) -> dict:
+    _require_role(request, "maker", "checker", "admin")
+    store = _runtime(request).store
+    periods = []
+    for period in store.list_periods(schedule_id, limit=limit):
+        outcome = store.get_outcome(schedule_id, period.period.key)
+        events = store.list_events(schedule_id, period.period.key)
+        periods.append(
+            {
+                "period": _period_record(period),
+                "diagnostic": period_diagnostic(period, outcome, events),
+            }
+        )
+    return {"periods": periods}
+
+
+@router.post("/schedules/{schedule_id}/rechecks", status_code=201)
+def recheck(schedule_id: str, payload: RecheckRequest, request: Request) -> dict:
+    _require_role(request, "maker", "admin")
+    try:
+        record = request_recheck(
+            _runtime(request),
+            schedule_id,
+            period_key=payload.period_key,
+            expected_revision=payload.expected_revision,
+            idempotency_key=payload.idempotency_key,
+            binding=payload.monitoring_binding,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="source schedule or period not found"
+        ) from exc
+    except ScheduleRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _schedule_record(record)
+
+
 @router.get("/schedules/{schedule_id}/period")
 def get_period(
     schedule_id: str,
@@ -235,6 +347,7 @@ def get_period(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "period": _period_record(period),
+        "diagnostic": period_diagnostic(period, outcome, events),
         "outcome": None if outcome is None else _outcome_record(outcome),
         "runs": [_run_record(record) for record in runs],
         "events": [_event_record(record) for record in events],
@@ -452,9 +565,7 @@ def requeue_task_filesystem_gc(
         "target_type": payload.target_type,
         "relative_path": payload.relative_path,
     }
-    target_ref = (
-        f"task-filesystem-gc:{payload.target_type}:{payload.relative_path}"
-    )
+    target_ref = f"task-filesystem-gc:{payload.target_type}:{payload.relative_path}"
     audit_repo.write_audit(
         kind="task_filesystem_gc.manual_requeue",
         target_ref=target_ref,
@@ -530,6 +641,8 @@ def _schedule_contract(payload: SchedulePayload) -> ScheduleContract:
             max_backoff_seconds=payload.retry_policy.max_backoff_seconds,
         ),
         enabled=payload.enabled,
+        monitoring_binding=payload.monitoring_binding,
+        active_until=payload.active_until,
     )
 
 
@@ -682,9 +795,7 @@ def _dataset_source_gc_watchdog_status(request: Request) -> dict:
         "last_started_at": _optional_utc_iso(status.last_started_at),
         "last_finished_at": _optional_utc_iso(status.last_finished_at),
         "last_report": (
-            None
-            if status.last_report is None
-            else _gc_sweep_report(status.last_report)
+            None if status.last_report is None else _gc_sweep_report(status.last_report)
         ),
         "last_error": status.last_error,
     }
@@ -722,9 +833,7 @@ def _task_filesystem_gc_watchdog_status(request: Request) -> dict:
         "last_started_at": _optional_utc_iso(status.last_started_at),
         "last_finished_at": _optional_utc_iso(status.last_finished_at),
         "last_report": (
-            None
-            if status.last_report is None
-            else _gc_sweep_report(status.last_report)
+            None if status.last_report is None else _gc_sweep_report(status.last_report)
         ),
         "last_error": status.last_error,
     }

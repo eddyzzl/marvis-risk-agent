@@ -454,11 +454,6 @@ def create_app(
     app.state.task_filesystem_gc = task_filesystem_gc
     app.state.task_filesystem_gc_startup_report = task_filesystem_gc_startup_report
     app.state.task_filesystem_gc_startup_error = task_filesystem_gc_startup_error
-    app.state.operations_runtime = build_operations_runtime(
-        settings,
-        executor_allowlist=operations_executor_allowlist,
-        clock=operations_clock,
-    )
     app.state.production_activation_verifiers = dict(
         production_activation_verifiers or {}
     )
@@ -469,6 +464,15 @@ def create_app(
     app.state.plugin_admin_token = ensure_plugin_admin_token(settings.plugin_admin_token_path)
     app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
+    app.state.operations_runtime = build_operations_runtime(
+        settings,
+        executor_allowlist=operations_executor_allowlist,
+        clock=operations_clock,
+        tool_runner=app.state.tool_runner,
+        notification_secret=app.state.plugin_admin_token.encode(),
+    )
+    app.router.add_event_handler("startup", app.state.operations_runtime.loop.start)
+    app.router.add_event_handler("shutdown", app.state.operations_runtime.loop.stop)
     _configure_orchestrator(app, settings)
     task_repo = TaskRepository(settings.db_path)
     reclaim_running_plans(

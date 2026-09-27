@@ -13,6 +13,8 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Callable, Mapping
 import uuid
+import secrets
+import threading
 
 from marvis.operations.contracts import ScheduleContract
 from marvis.operations.notifications import NotificationAdapter, NotificationRedactor
@@ -29,6 +31,9 @@ from marvis.operations.scheduler import (
     TickReport,
 )
 from marvis.settings import Settings
+from marvis.operations.monitoring import BUILTIN_MONITORS, BuiltinMonitoringExecutor
+from marvis.operations.local_inbox import LocalInboxAdapter
+from marvis.operations.lifecycle import OperationsLoop
 
 
 class UnknownMonitoringReference(ValueError):
@@ -57,6 +62,7 @@ class OperationsRuntime:
         clock: Callable[[], datetime] | None = None,
         notification_adapter: NotificationAdapter | None = None,
         notification_redactor: NotificationRedactor | None = None,
+        builtin_tool_runner=None,
     ) -> None:
         if not isinstance(settings, Settings):
             raise ValueError("settings must be a Settings instance")
@@ -74,7 +80,20 @@ class OperationsRuntime:
 
         self.settings = settings
         self.store = OperationsStore(settings.db_path, clock=clock)
+        self.stop_event = threading.Event()
+        self.builtin_executor = None
+        if builtin_tool_runner is not None:
+            self.builtin_executor = BuiltinMonitoringExecutor(
+                settings,
+                self.store,
+                builtin_tool_runner,
+                clock=clock,
+                stop_event=self.stop_event,
+            )
+            bound.update({ref: self.builtin_executor for ref in BUILTIN_MONITORS})
         self._executors = MappingProxyType(bound)
+        self.local_inbox = None
+        self.loop = None
         self._scheduler = LocalScheduler(
             self.store,
             executor=self._execute,
@@ -82,6 +101,7 @@ class OperationsRuntime:
             clock=clock,
             notification_adapter=notification_adapter,
             notification_redactor=notification_redactor,
+            stop_requested=self.stop_event.is_set,
         )
 
     @property
@@ -97,6 +117,11 @@ class OperationsRuntime:
         if not isinstance(contract, ScheduleContract):
             raise ValueError("contract must be a ScheduleContract")
         self._require_executor(contract.monitoring_ref)
+        if (
+            self.builtin_executor is not None
+            and contract.monitoring_ref in BUILTIN_MONITORS
+        ):
+            self.builtin_executor.validate(contract)
         return self.store.publish_schedule(
             contract,
             expected_revision=expected_revision,
@@ -146,21 +171,28 @@ def build_operations_runtime(
     *,
     executor_allowlist: Mapping[str, MonitoringExecutor] | None = None,
     clock: Callable[[], datetime] | None = None,
+    tool_runner=None,
+    notification_secret: bytes | None = None,
 ) -> OperationsRuntime:
-    """Install operations on the workspace DB with no implicit side effects.
+    """Bind trusted built-ins and actual local inbox delivery at app assembly.
 
-    Production monitoring bindings must be supplied by trusted server assembly.
-    The default app runtime therefore starts with an empty allowlist and no
-    notification adapter or background cadence.
+    Explicit custom allowlists remain available for host integrations; they do
+    not resolve user-controlled imports and are not enabled by schedule data.
     """
-
-    return OperationsRuntime(
+    inbox = LocalInboxAdapter(settings.db_path, clock=clock)
+    runtime = OperationsRuntime(
         settings,
-        executor_allowlist=(
-            {} if executor_allowlist is None else executor_allowlist
-        ),
+        executor_allowlist=executor_allowlist or {},
         clock=clock,
+        builtin_tool_runner=tool_runner if executor_allowlist is None else None,
+        notification_adapter=inbox,
+        notification_redactor=NotificationRedactor(
+            notification_secret or secrets.token_bytes(32)
+        ),
     )
+    runtime.local_inbox = inbox
+    runtime.loop = OperationsLoop(runtime)
+    return runtime
 
 
 def _monitoring_ref(value: object) -> str:
