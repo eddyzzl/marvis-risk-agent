@@ -37,6 +37,8 @@ PREPROCESSING_STEPS_PARAM_KEY = "preprocessing_steps"
 #: sidecar at all (as opposed to a sidecar with zero steps) — surfaced on the model
 #: card as "预处理链不可追溯" rather than silently implying no preprocessing occurred.
 PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY = "preprocessing_chain_traceable"
+PREPROCESSING_ASSURANCE_PARAM_KEY = "preprocessing_assurance"
+PREPROCESSING_EVIDENCE_PARAM_KEY = "preprocessing_evidence"
 SPECIAL_VALUE_GOVERNANCE_PARAM_KEY = "special_value_governance"
 _MONOTONE_CONSTRAINT_KEYS = ("monotone_constraints", "monotonic_constraints")
 
@@ -82,6 +84,8 @@ REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY = "refit_on_train_plus_test"
 _PLATFORM_ONLY_PARAM_KEYS = frozenset({
     PREPROCESSING_STEPS_PARAM_KEY, PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY, VALID_GROUP_COLS_PARAM_KEY,
     REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY, SPECIAL_VALUE_GOVERNANCE_PARAM_KEY,
+    PREPROCESSING_ASSURANCE_PARAM_KEY,
+    PREPROCESSING_EVIDENCE_PARAM_KEY,
 })
 
 
@@ -375,6 +379,9 @@ def _column_list(values) -> list[str]:
 
 def artifact_params(params: dict, config: TrainConfig) -> dict:
     out = dict(params)
+    for key in (PREPROCESSING_ASSURANCE_PARAM_KEY, PREPROCESSING_EVIDENCE_PARAM_KEY):
+        if key in config.params:
+            out[key] = config.params[key]
     column = sample_weight_col(config)
     if column:
         out["sample_weight_col"] = column

@@ -216,7 +216,13 @@ def _tuning_inputs(*, xgb_trials: int = 1, recipes: list[str] | None = None) -> 
     }
 
 
-def _runtime(tmp_path: Path):
+def _runtime(tmp_path: Path, monkeypatch):
+    # This unit harness intentionally stores opaque bytes, not a registered
+    # Parquet dataset. Authenticated preprocessing is exercised by the real
+    # ToolRunner tests in test_feature_preprocessing_provenance.
+    from marvis.data.preprocessing_evidence import PreprocessingState
+    monkeypatch.setattr(train_tools, "training_preprocessing_state",
+                        lambda *args, **kwargs: PreprocessingState([], "unknown"))
     dataset_path = tmp_path / "dataset.parquet"
     dataset_path.write_bytes(b"stable dataset bytes")
     return SimpleNamespace(
@@ -255,7 +261,7 @@ def _patch_isolated_tuner(monkeypatch, fake_tune):
 def test_retry_reuses_completed_recipe_and_publishes_equivalent_progress(
     tmp_path, monkeypatch
 ):
-    runtime = _runtime(tmp_path)
+    runtime = _runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(train_tools, "_runtime", lambda _ctx: runtime)
     calls = []
     fail_xgb = True
@@ -321,7 +327,7 @@ def test_retry_reuses_completed_recipe_and_publishes_equivalent_progress(
 
 
 def test_checkpoint_miss_is_per_recipe_and_task_scoped(tmp_path, monkeypatch):
-    runtime = _runtime(tmp_path)
+    runtime = _runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(train_tools, "_runtime", lambda _ctx: runtime)
     calls = []
 
@@ -357,7 +363,7 @@ def test_checkpoint_miss_is_per_recipe_and_task_scoped(tmp_path, monkeypatch):
 
 
 def test_current_dataset_byte_change_invalidates_every_recipe(tmp_path, monkeypatch):
-    runtime = _runtime(tmp_path)
+    runtime = _runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(train_tools, "_runtime", lambda _ctx: runtime)
     calls = []
 
@@ -386,7 +392,7 @@ def test_current_dataset_byte_change_invalidates_every_recipe(tmp_path, monkeypa
 
 
 def test_single_recipe_output_shape_is_identical_on_checkpoint_hit(tmp_path, monkeypatch):
-    runtime = _runtime(tmp_path)
+    runtime = _runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(train_tools, "_runtime", lambda _ctx: runtime)
     calls = []
 
@@ -430,7 +436,7 @@ def test_multi_recipe_tuning_uses_one_isolated_worker_per_recipe(
     CatBoost starts.
     """
 
-    runtime = _runtime(tmp_path)
+    runtime = _runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(train_tools, "_runtime", lambda _ctx: runtime)
     calls = []
 
@@ -475,7 +481,7 @@ def test_multi_recipe_tuning_uses_one_isolated_worker_per_recipe(
 
 
 def test_checkpoint_save_and_hit_have_formal_correlatable_audits(tmp_path, monkeypatch):
-    runtime = _runtime(tmp_path)
+    runtime = _runtime(tmp_path, monkeypatch)
     audits = []
     runtime.repo = SimpleNamespace(write_audit=lambda **payload: audits.append(payload))
     monkeypatch.setattr(train_tools, "_runtime", lambda _ctx: runtime)

@@ -10,6 +10,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
+from marvis.db_schema import connect
 from marvis.feature.metrics import feature_metrics
 from marvis.packs.feature import tools as feature_tools
 from marvis.plugins.loader import load_builtin_packs
@@ -22,6 +23,12 @@ from marvis.settings import build_settings
 def _runtime(tmp_path):
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
+    task = TaskRepository(settings.db_path).create_task(TaskCreate(
+        model_name="Feature test", model_version="v1", validator="test",
+        source_dir=str(tmp_path), task_type="feature_analysis",
+    ))
+    with connect(settings.db_path) as conn:
+        conn.execute("UPDATE tasks SET id=? WHERE id=?", ("task-feature", task.id))
     plugin_repo = PluginRepository(settings.db_path)
     plugin_registry = PluginRegistry(plugin_repo)
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"

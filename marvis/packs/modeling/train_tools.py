@@ -7,7 +7,8 @@ import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
-from marvis.feature.preprocessing import read_preprocessing_chain, sidecar_path
+from marvis.feature.preprocessing import sidecar_path
+from marvis.data.preprocessing_evidence import load_preprocessing_state, training_preprocessing_state
 from marvis.files import sha256_file
 from marvis.modeling_limits import normalize_n_trials, normalize_n_trials_by_recipe
 from marvis.packs.modeling.artifact import persist_model_meta
@@ -300,7 +301,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
             dataset_content_hash=sha256_file(dataset_path),
             features=inputs.get("features") or [],
             sentinel_columns=sentinel_columns,
-            preprocessing_steps=read_preprocessing_chain(dataset_path),
+            preprocessing_steps=_preprocessing_steps_for_training(runtime, dataset.id),
             governance=inputs.get("special_value_governance"),
         )
     try:
@@ -352,6 +353,11 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
         runtime = runtime or _runtime(ctx)
         dataset = dataset or _task_dataset(runtime, ctx, inputs["dataset_id"])
         dataset_path = runtime.registry.resolve_path(dataset.id)
+        preprocessing_state = training_preprocessing_state(
+            runtime.registry, dataset.id, split_col=inputs["split_col"],
+            train_values=inputs["split_values"]["train"],
+        )
+        base_params["preprocessing_assurance"] = preprocessing_state.assurance
         seed = _effective_seed(inputs, ctx)
         requested_features = [str(f) for f in inputs["features"]]
         early_stopping_rounds = int(inputs.get("early_stopping_rounds", 100))
@@ -700,7 +706,16 @@ def tool_train_model(inputs: dict, ctx) -> dict:
     recipe = str(inputs["recipe"])
     target_type = _validated_target_type([recipe], inputs.get("target_type"))
     train_params = _training_params(inputs)
-    preprocessing_steps = _preprocessing_steps_for_training(runtime, dataset.id)
+    preprocessing_state = training_preprocessing_state(
+        runtime.registry, dataset.id, split_col=inputs["split_col"],
+        train_values=inputs["split_values"]["train"],
+    )
+    preprocessing_steps = preprocessing_state.steps
+    train_params["preprocessing_assurance"] = preprocessing_state.assurance
+    train_params["preprocessing_evidence"] = {
+        "artifact_id": preprocessing_state.artifact_id,
+        "content_hash": preprocessing_state.content_hash,
+    }
     governance = inputs.get("special_value_governance")
     _assert_sentinel_preprocessing_governed(
         dataset_id=dataset.id,
@@ -876,7 +891,10 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     # recover it later without the caller having to repeat it.
     eval_metric = str(inputs.get("eval_metric") or "ks_auc").strip() or "ks_auc"
     dataset_path = runtime.registry.resolve_path(dataset.id)
-    preprocessing_steps = read_preprocessing_chain(dataset_path)
+    preprocessing_state = training_preprocessing_state(
+        runtime.registry, dataset.id, split_col=split_col, train_values=split_values["train"],
+    )
+    preprocessing_steps = preprocessing_state.steps
     governance = inputs.get("special_value_governance")
     _assert_sentinel_preprocessing_governed(
         dataset_id=dataset.id,
@@ -902,6 +920,11 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             recipe_params = {**tuned_params, **control_params}
         else:
             recipe_params = dict(control_params)
+        recipe_params["preprocessing_assurance"] = preprocessing_state.assurance
+        recipe_params["preprocessing_evidence"] = {
+            "artifact_id": preprocessing_state.artifact_id,
+            "content_hash": preprocessing_state.content_hash,
+        }
         if preprocessing_steps:
             recipe_params["preprocessing_steps"] = preprocessing_steps
         elif not preprocessing_chain_traceable:
@@ -1162,11 +1185,7 @@ def _preprocessing_steps_for_training(runtime: "_Runtime", dataset_id: str) -> l
     historical dataset registered before this mechanism, or one built without any
     impute/cap/normalize/onehot step) — the resulting model artifact then has no
     preprocessing_steps and scoring-time replay is a no-op, matching pre-PREP-2 behavior."""
-    try:
-        dataset_path = runtime.registry.resolve_path(str(dataset_id))
-    except KeyError:
-        return []
-    return read_preprocessing_chain(dataset_path)
+    return load_preprocessing_state(runtime.registry, str(dataset_id)).steps
 
 
 def _preprocessing_chain_traceable(runtime: "_Runtime", dataset_id: str) -> bool:

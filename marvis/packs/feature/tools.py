@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,10 @@ from marvis.feature.derive import derive_batch, derive_date_features
 from marvis.feature.encode import apply_categorical_woe, categorical_woe_encode, onehot_encode, woe_encode
 from marvis.feature.errors import FeatureError
 from marvis.feature.fit_scope import fit_membership
+from marvis.data.preprocessing_evidence import (
+    fitting_evidence, load_preprocessing_state, register_preprocessing_evidence,
+)
+from marvis.files import sha256_file
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import (
     feature_psi,
@@ -36,7 +41,6 @@ from marvis.feature.metrics import (
     selected_feature_metrics,
 )
 from marvis.feature.preprocessing import (
-    read_preprocessing_chain,
     sidecar_path,
     write_preprocessing_chain,
 )
@@ -1158,6 +1162,7 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         dataset,
         ctx,
         "woe",
+        fit=fitting_evidence(frame, inputs, tool="woe_encode", dataset_id=dataset.id),
         preprocessing_steps=[
             *([sentinel_step] if sentinel_step else []),
             {"kind": "woe", "columns": features, "params": _jsonable(woe_maps)},
@@ -1223,6 +1228,7 @@ def tool_woe_encode_categorical(inputs: dict, ctx) -> dict:
         dataset,
         ctx,
         "catwoe",
+        fit=fitting_evidence(frame, inputs, tool="woe_encode_categorical", dataset_id=dataset.id),
         preprocessing_step={"kind": "categorical_woe", "columns": features, "params": _jsonable(woe_maps)},
     )
     return {
@@ -1253,6 +1259,7 @@ def tool_onehot_encode(inputs: dict, ctx) -> dict:
         dataset,
         ctx,
         "onehot",
+        fit=fitting_evidence(frame, inputs, tool="onehot_encode", dataset_id=dataset.id),
         preprocessing_step={"kind": "onehot", "columns": columns, "params": _jsonable(mapping)},
     )
     return {"result_dataset_id": result.id, "mapping": _jsonable(mapping),
@@ -1295,6 +1302,7 @@ def tool_normalize(inputs: dict, ctx) -> dict:
         dataset,
         ctx,
         "normalize",
+        fit=fitting_evidence(frame, inputs, tool="normalize", dataset_id=dataset.id),
         preprocessing_steps=[
             *([sentinel_step] if sentinel_step else []),
             {"kind": "normalize", "columns": columns, "params": _jsonable(params)},
@@ -1357,6 +1365,7 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
         dataset,
         ctx,
         "impute",
+        fit=fitting_evidence(frame, inputs, tool="impute_missing", dataset_id=dataset.id),
         preprocessing_steps=preprocessing_steps,
     )
     return {
@@ -1403,6 +1412,7 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
         dataset,
         ctx,
         "cap",
+        fit=fitting_evidence(frame, inputs, tool="cap_outliers", dataset_id=dataset.id),
         preprocessing_steps=[
             *([sentinel_step] if sentinel_step else []),
             {"kind": "cap", "columns": columns, "params": _jsonable(bounds)},
@@ -1551,7 +1561,7 @@ def _read_frame(
     columns: list[str] | None = None,
 ):
     dataset = _task_dataset(runtime, ctx, dataset_id)
-    frame = runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=columns)
+    frame = runtime.registry.read_authenticated_parquet_snapshot(dataset.id, columns=columns)
     return dataset, frame
 
 
@@ -1564,12 +1574,14 @@ def _register_frame(
     *,
     preprocessing_step: dict[str, Any] | None = None,
     preprocessing_steps: list[dict[str, Any]] | None = None,
+    fit: dict[str, Any] | None = None,
 ):
-    out_path = runtime.datasets_root / ctx.task_id / "feature" / f"{source_dataset.id}_{suffix}.parquet"
+    out_path = runtime.datasets_root / ctx.task_id / "feature" / f"{source_dataset.id}_{suffix}_{uuid.uuid4().hex}.parquet"
     uow = ArtifactUnitOfWork()
     artifact = uow.stage_file(out_path.parent, out_path.name)
     try:
         frame.to_parquet(artifact.path, index=False)
+        output_hash = sha256_file(artifact.path)
         steps_to_append = list(preprocessing_steps or [])
         if preprocessing_step is not None:
             steps_to_append.append(preprocessing_step)
@@ -1580,12 +1592,8 @@ def _register_frame(
             # param at scoring time instead of only seeing it in this tool's JSON
             # response. Staged via the same unit of work as the parquet so both
             # promote/commit atomically.
-            source_path = None
-            try:
-                source_path = runtime.registry.resolve_path(source_dataset.id)
-            except KeyError:
-                source_path = None
-            chain = read_preprocessing_chain(source_path) if source_path else []
+            source_state = load_preprocessing_state(runtime.registry, source_dataset.id)
+            chain = source_state.steps
             for step in steps_to_append:
                 chain = [
                     *chain,
@@ -1607,9 +1615,22 @@ def _register_frame(
         register_on_connection = getattr(runtime.registry, "register_existing_on_connection", None)
         transaction = getattr(runtime.registry, "transaction", None)
         if callable(register_on_connection) and callable(transaction):
+            def commit(conn):
+                conn.execute("BEGIN IMMEDIATE")
+                if sha256_file(artifact.final_path) != output_hash:
+                    raise FeatureError("transformed dataset changed before registration")
+                registered = register_on_connection(conn, artifact.final_path, **register_kwargs)
+                if steps_to_append:
+                    register_preprocessing_evidence(
+                        runtime.registry, conn, dataset=registered, source=source_dataset,
+                        path=sidecar_artifact.final_path, steps=chain,
+                        source_state=source_state, fit=fit,
+                    )
+                if sha256_file(artifact.final_path) != output_hash:
+                    raise FeatureError("transformed dataset changed before commit")
+                return registered
             return uow.finalize_with_connection(
-                transaction,
-                lambda conn: register_on_connection(conn, artifact.final_path, **register_kwargs),
+                transaction, commit,
             )
         return uow.finalize(
             lambda: runtime.registry.register_existing(artifact.final_path, **register_kwargs)

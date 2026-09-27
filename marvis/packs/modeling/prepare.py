@@ -9,7 +9,8 @@ import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.feature.candidates import candidate_numeric_features
-from marvis.feature.preprocessing import read_preprocessing_chain, sidecar_path, write_preprocessing_chain
+from marvis.feature.preprocessing import sidecar_path, write_preprocessing_chain
+from marvis.data.preprocessing_evidence import load_preprocessing_state, register_preprocessing_evidence
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.errors import ModelingError
 
@@ -92,7 +93,8 @@ def prepare_modeling_frame(
         # carry its accumulated preprocessing chain forward unchanged so training can
         # collect it into the model artifact for scoring-time replay. Staged via the
         # same unit of work as the parquet so both promote/commit atomically.
-        source_chain = read_preprocessing_chain(dataset_path)
+        source_state = load_preprocessing_state(registry, dataset.id)
+        source_chain = source_state.steps
         if source_chain:
             sidecar_name = sidecar_path(Path(out_path.name)).name
             sidecar_artifact = uow.stage_file(out_path.parent, sidecar_name)
@@ -103,6 +105,14 @@ def prepare_modeling_frame(
             "anchor_target": dataset.id,
             "seed": seed,
         }
+        def with_preprocessing_receipt(conn, registered):
+            if source_state.artifact_id:
+                register_preprocessing_evidence(
+                    registry, conn, dataset=registered, source=dataset,
+                    path=sidecar_artifact.final_path, steps=source_chain,
+                    source_state=source_state, fit=None,
+                )
+            return registered
         if audit_kind:
             detail = {
                 "source_dataset_id": dataset.id,
@@ -128,12 +138,12 @@ def prepare_modeling_frame(
             if callable(register_with_audit_on_connection) and callable(transaction):
                 return uow.finalize_with_connection(
                     transaction,
-                    lambda conn: register_with_audit_on_connection(
+                    lambda conn: with_preprocessing_receipt(conn, register_with_audit_on_connection(
                         conn,
                         artifact.final_path,
                         audit_factory=audit_factory,
                         **register_kwargs,
-                    ),
+                    )),
                 )
             return uow.finalize(
                 lambda: registry.register_existing_with_audit(
@@ -147,7 +157,9 @@ def prepare_modeling_frame(
         if callable(register_on_connection) and callable(transaction):
             return uow.finalize_with_connection(
                 transaction,
-                lambda conn: register_on_connection(conn, artifact.final_path, **register_kwargs),
+                lambda conn: with_preprocessing_receipt(
+                    conn, register_on_connection(conn, artifact.final_path, **register_kwargs),
+                ),
             )
         return uow.finalize(lambda: registry.register_existing(artifact.final_path, **register_kwargs))
     except Exception:

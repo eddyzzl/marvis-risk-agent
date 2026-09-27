@@ -84,10 +84,18 @@ def read_preprocessing_chain(dataset_path: Path) -> list[dict[str, Any]]:
         return []
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
+    except (OSError, ValueError) as exc:
+        raise FeatureError("preprocessing sidecar is unreadable or malformed") from exc
     steps = payload.get("preprocessing_steps") if isinstance(payload, dict) else None
-    return [dict(step) for step in steps] if isinstance(steps, list) else []
+    if not isinstance(steps, list) or any(
+        not isinstance(step, dict) or not isinstance(step.get("kind"), str)
+        or not isinstance(step.get("columns"), list)
+        or any(not isinstance(column, str) for column in step["columns"])
+        or not isinstance(step.get("params"), dict)
+        for step in steps
+    ):
+        raise FeatureError("preprocessing sidecar has an invalid step contract")
+    return [dict(step) for step in steps]
 
 
 def write_preprocessing_chain(dataset_path: Path, steps: list[dict[str, Any]]) -> Path:
