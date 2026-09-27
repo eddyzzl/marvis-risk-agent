@@ -164,7 +164,7 @@
           "milestone": "S"
         }
       ],
-      "notes": "Structured task headline merged e2f7922d (336 checks, real browser at 1440/1600/1920). Task/model visit-scoped read lifecycle merged 8876ec66 (377 checks, real HTTP A-B-A response race at three widths). Activity leases, mutation races, session ownership and additional real-browser journeys remain in active development. Activity leases and superseded mutation response protection merged 94ffecb0; 372 focused checks and real browser POST deduplication/stop/task and model revisits passed. Complete session and plan-fetch ownership consolidation continues.",
+      "notes": "Single TaskSession and plan visit/revision ownership merged 6c620d41. Agent branch verification: 446 related and 78 additional consumer checks; real backend three-width task/model/plan race journeys. Shared recovery/business/session integration: 106 passed. Remaining independent full journey and business UI acceptance are still open.",
       "milestones": {
         "S": "in_progress"
       }
@@ -182,9 +182,9 @@
           "milestone": "S"
         }
       ],
-      "notes": "In progress in isolated codex/wp06-business-contract-20260921: versioned objectives, deterministic business acceptance and authenticated adopted-object evidence integration. No software or historical acceptance claimed yet.",
+      "notes": "BusinessObjective and deterministic adopted-object acceptance merged e90a4b84. HTTP, Agent and document exports use the same persisted verdict. Recovery integration d46a6496 preserves execution_completed semantics (two counterexamples failed before fix, 106 combined checks passed). Generic task/Agent contract entry, certified producer context, UI and historical acceptance remain in development.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
@@ -196,9 +196,9 @@
           "milestone": "B"
         }
       ],
-      "notes": "Isolated implementation started for authenticated as-of JOIN/time contracts and explicit modeling partition isolation. Ordinary JOIN and legacy unknown status retained; no PIT or historical acceptance claimed.",
+      "notes": "Merged declared entity isolation 305fed25 (218 related checks), explicit training membership and onehot fit separation d1088b40 (102 checks), authenticated as-of materialization 3e367923 and governed data_ops.asof_join/template 614afb94 (155 Tool/workflow regressions). Parent/output hashes and temporal evidence do not assert external source authenticity, label maturity, complete fit lineage or business acceptance. Fit receipts and training consumers remain in development.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
@@ -265,16 +265,16 @@
     },
     {
       "id": "WP11",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP06",
           "milestone": "S"
         }
       ],
-      "notes": null,
+      "notes": "Default monitoring executor, app-managed scheduler lifecycle and actual local notification receipts are in development in a persistent isolated worktree. No scheduler or notification acceptance is claimed before runtime checks.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {

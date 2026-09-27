@@ -264,3 +264,19 @@ Chromium 在 1440、1600、1920 × 1000 下均通过：页面身份与非空内�
 `e0c738e9` 增加 allowlist finish_reason、首 choice 正文/思考字符计数与 attempt_outcome；不保存正文、prompt、思考内容、业务明细或密钥。HTTP 200 与正文缺失、格式损坏、输出耗尽分别记录，content_present 只表示 transport envelope，不意味着业务成功。修正无末尾换行 SSE 行的 usage 漏记。
 
 98 项真实 loopback response/runtime/LLM/CLI 检查通过（87.94 秒），原两轮 16 个归档文件 hash 保持不变。未额外调用真实模型、未改变预算或判分。总体 token/费用硬保证仍 not_enforced：事后 usage 门只能阻止后续调用，不能保证供应商已在途计费上限；未知价格/usage 仍未知。
+
+
+## 2026-09-27 恢复开发与已合入批次
+
+截至主线 `614afb94`，已合入以下经过独立阅读的批次；这些是软件进展，完整 S/H/P 仍未完成。
+
+- `305fed25`：明确声明的主体分组不能因缺列而退化为逐行切分；缺失主体身份、跨分区冲突停止执行。218 项建模相关检查通过。
+- `d1088b40`：WOE、统计变换、聚合共享训练成员选择；未知/空分区拒绝，省略 test 的 holdout 名单不能让 test 进入拟合；独热编码只从指定训练集学习类别，评分复用同一映射。16 个反例修复前失败，最终 102 项特征检查通过。
+- `3e367923` / `614afb94`：时点 JOIN 用事件、可得、决策时间及版本选择生成不可变矩阵与双来源证据，并通过正式 `data_ops.asof_join` 和 `dataset_asof_join` 模板运行。模式及 available_at（列契约或明确 null）必须显式给出，复用原有输入绑定审批；155 项相关检查通过，包括真实 Driver→Executor→ToolRunner 子进程。verified 仅代表记录的时间约束通过，外部来源真实性未独立验证；训练仍需显式选择产物。
+- `6c620d41`：TaskSession 收敛任务、模型、消息、计划及请求/操作生命周期；计划读取和重试同样受访问代际约束。446 项相关检查和 78 项额外消费者检查通过；真实后端三个桌面宽度包含计划 GET 的 A→B→A 乱序场景。
+- `e90a4b84`：业务合同、确定性采用对象验收、经济假设和 API/Agent/DOCX/XLSX 统一投影。宽门首次 968 passed / 2 个新增 null 字段断言失败，修复后相关 169 passed；解释链 29 passed。尚缺认证测量上下文时结果仍为证据不足。
+- `d46a6496`：整合检查发现核对恢复仍会把新业务 goal_doubt 错当作执行未完，两个反例先失败；修复后 completion/reconciliation/business acceptance/frontend session 联合 106 passed。旧 execution_completed=None 保留原兼容语义。
+
+恢复时主线 tracked 文件干净，用户未跟踪文件保持原样。多个 `/tmp` 隔离工作目录已仅剩空目录，未提交草稿和部分测试日志不可再读；不把历史日志位置当作当前可访问的正式证据。仍存在的前端八文件草稿已保留并迁移到持久工作区。后续修改和测试证据改在 `/Users/eddyz/.codex/worktrees/audit-{fit-provenance,business-producers,business-ui,operations-runtime}/` 下保存；检查目录位于各 checkout 外，避免源码读取许可干扰隔离负例。
+
+上述测试次数记录已发生的开发验证，不重新解释为当前全量回归或正式关闭证明。最终验收仍须使用当前冻结源码、实际可读取的原始证据与独立检查器。当前继续实现预处理参数/拟合成员证据到训练的完整消费、通用业务合同与真实采用上下文、业务验收界面、默认监控运行和本地通知。数据清单与机构条件的缺失不阻止这些独立软件工作，也不使 H/P 自动通过。
