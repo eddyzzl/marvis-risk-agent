@@ -2,11 +2,12 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from marvis.db_schema import connect
+from marvis.orchestrator.evidence import payload_hash
 from marvis.business_acceptance import BusinessObjective
 from marvis.domain import (
     TASK_TYPE_STRATEGY,
@@ -225,20 +226,29 @@ class TaskRepository:
         self,
         task_id: str,
         strategy_input: StrategyTaskInput,
+        *, job_id: str | None = None,
     ) -> TaskRecord:
         """Replace a strategy task's governed business contract atomically."""
 
         if not isinstance(strategy_input, StrategyTaskInput):
             raise ValueError("strategy_input must be a StrategyTaskInput")
         with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT task_type FROM tasks WHERE id = ?",
+                "SELECT * FROM tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"Task not found: {task_id}")
             if str(row["task_type"]) != TASK_TYPE_STRATEGY:
                 raise ValueError("strategy_input may only be persisted on a strategy task")
+            old = _row_to_task(row).business_objective
+            incoming = strategy_input.business_objective
+            if incoming is not None and incoming != old:
+                self._require_business_objective_mutation(conn, task_id, job_id)
+                conn.execute("UPDATE tasks SET business_objective_json = ? WHERE id = ?",
+                             (json.dumps(incoming.to_dict(), ensure_ascii=False), task_id))
+            strategy_input = replace(strategy_input, business_objective=incoming or old)
             conn.execute(
                 """
                 UPDATE tasks
@@ -248,6 +258,36 @@ class TaskRepository:
                 """,
                 (_dump_strategy_input(strategy_input), _now(), task_id),
             )
+        return self.get_task(task_id)
+
+    @staticmethod
+    def _require_business_objective_mutation(conn, task_id, job_id):
+        job = conn.execute("SELECT task_id, status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if job is None or job["task_id"] != task_id or job["status"] != "running":
+            raise ConflictError("business objective mutation requires the running task lease")
+        if conn.execute("SELECT 1 FROM plans WHERE task_id = ? LIMIT 1", (task_id,)).fetchone():
+            raise ConflictError("任务已有计划，业务验收合同已锁定；请创建新任务。")
+
+    def update_business_objective(self, task_id, objective, *, job_id):
+        if objective is not None and not isinstance(objective, BusinessObjective):
+            raise ValueError("business_objective must be a BusinessObjective or None")
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            self._require_business_objective_mutation(conn, task_id, job_id)
+            task = _row_to_task(row)
+            strategy = task.strategy_input
+            if strategy is not None:
+                strategy = replace(strategy, business_objective=objective)
+            conn.execute("""UPDATE tasks SET business_objective_json = ?, strategy_input_json = ?,
+                         updated_at = ? WHERE id = ?""",
+                         (None if objective is None else json.dumps(objective.to_dict(), ensure_ascii=False),
+                          _dump_strategy_input(strategy), _now(), task_id))
+            _write_audit_row(conn, kind="task.business_objective.updated", target_ref=task_id,
+                             outcome="succeeded", detail={"job_id": job_id,
+                             "objective_hash": None if objective is None else payload_hash(objective.to_dict())})
         return self.get_task(task_id)
 
     def update_material_paths(
@@ -1682,6 +1722,15 @@ def _seeded_report_values(payload: TaskCreate) -> dict[str, str]:
     )
 
 
+def _resolved_business_objective(objective, strategy_input):
+    nested = strategy_input.business_objective if strategy_input is not None else None
+    if objective is not None and not isinstance(objective, BusinessObjective):
+        raise ValueError("business_objective must be a BusinessObjective or None")
+    if nested is not None and objective is not None and nested != objective:
+        raise ValueError("business_objective conflicts with strategy_input.business_objective")
+    return objective or nested
+
+
 def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
     now = _now()
     task_type = _normalize_task_type(payload.task_type)
@@ -1706,6 +1755,7 @@ def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
         sample_weight_col=payload.sample_weight_col,
         oot_ks_min=payload.oot_ks_min,
         strategy_input=payload.strategy_input,
+        business_objective=_resolved_business_objective(payload.business_objective, payload.strategy_input),
         metrics=None if payload.metrics is None else list(payload.metrics),
         capability_tier=payload.capability_tier,
         notebook_path=payload.notebook_path,
@@ -1734,12 +1784,12 @@ def _insert_task_record_row(
         (
             id, task_type, validation_workflow_version, model_name, model_version, validator, source_dir,
             algorithm, run_mode, target_col, score_col, split_col,
-            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, strategy_input_json, metrics_json, metrics_configured, capability_tier, notebook_path, sample_path,
+            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, strategy_input_json, business_objective_json, metrics_json, metrics_configured, capability_tier, notebook_path, sample_path,
             pmml_path, dictionary_path, report_values_json,
             report_values_revision, status, status_message,
             status_reason_code, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.id,
@@ -1761,6 +1811,7 @@ def _insert_task_record_row(
             record.sample_weight_col,
             record.oot_ks_min,
             _dump_strategy_input(record.strategy_input),
+            None if record.business_objective is None else json.dumps(record.business_objective.to_dict(), ensure_ascii=False),
             _dump_json_list(record.metrics or []),
             0 if record.metrics is None else 1,
             record.capability_tier,
@@ -1805,6 +1856,10 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         oot_ks_min=(row["oot_ks_min"] if "oot_ks_min" in row.keys() else None),
         strategy_input=_load_strategy_input(
             row["strategy_input_json"] if "strategy_input_json" in row.keys() else None
+        ),
+        business_objective=_resolved_business_objective(
+            BusinessObjective.from_dict(json.loads(row["business_objective_json"])) if "business_objective_json" in row.keys() and row["business_objective_json"] else None,
+            _load_strategy_input(row["strategy_input_json"] if "strategy_input_json" in row.keys() else None),
         ),
         metrics=(
             _load_json_list(row["metrics_json"])

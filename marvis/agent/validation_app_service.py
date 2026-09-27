@@ -361,6 +361,8 @@ def dispatch_driver_turn(
     expected_step_fingerprint: str | None = None,
     ui_action: str | None = None,
     strategy_input: StrategyTaskInput | None = None,
+    business_objective=None,
+    business_objective_provided: bool = False,
     strategy_request: Mapping[str, object] | None = None,
     portfolio_request: Mapping[str, object] | None = None,
     labeling_request: Mapping[str, object] | None = None,
@@ -412,13 +414,15 @@ def dispatch_driver_turn(
         )
     cancel_token = register_job_cancellation(job_id)
     try:
+        if business_objective_provided:
+            task = repo_.update_business_objective(task.id, business_objective, job_id=job_id)
         if strategy_input is not None:
             if task.task_type != TASK_TYPE_STRATEGY:
                 raise DriverError("strategy_input 只能用于 strategy 类型任务。")
             plans = request.app.state.plan_repo.list_plans_for_task(task.id)
             if any(plan.status not in _TERMINAL_PLAN_STATUSES for plan in plans):
                 raise DriverError("当前策略任务已有进行中的计划，不能修改业务口径。")
-            task = repo_.update_strategy_input(task.id, strategy_input)
+            task = repo_.update_strategy_input(task.id, strategy_input, job_id=job_id)
         runtime = DriverTurnRuntime(
             settings=request.app.state.settings,
             plan_repo=request.app.state.plan_repo,
@@ -479,7 +483,7 @@ def dispatch_driver_turn(
             error_value=str(exc),
         )
         raise unprocessable(str(exc)) from exc
-    except DriverError as exc:
+    except (DriverError, ConflictError) as exc:
         repo_.finish_job(job_id, status="failed", error_name="DriverError", error_value=str(exc))
         raise conflict(str(exc)) from exc
     except Exception as exc:

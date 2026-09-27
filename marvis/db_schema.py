@@ -228,7 +228,7 @@ _MIGRATION_TABLES = frozenset({
 # _migration_034_validation_batch_source_gc adds a narrowly typed cleanup target
 # for platform-owned validation-batch material trees.  The old migration remains
 # immutable; SQLite requires a table rebuild to extend its CHECK constraint.
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -4524,6 +4524,14 @@ def _migration_038_trusted_reconciliation(conn: sqlite3.Connection) -> None:
                 BEGIN SELECT RAISE(ABORT, 'reconciliation receipt is immutable'); END""")
 
 
+def _migration_039_task_business_objective(conn: sqlite3.Connection) -> None:
+    _ensure_column(conn, table="tasks", column="business_objective_json", definition="TEXT")
+    # Preserve the exact legacy declaration; do not infer objectives from metrics.
+    conn.execute("""UPDATE tasks SET business_objective_json =
+        json_extract(strategy_input_json, '$.business_objective')
+        WHERE json_type(strategy_input_json, '$.business_objective') = 'object'""")
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -4570,6 +4578,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (36, _migration_036_hook_delivery_completion),
     (37, _migration_037_step_invocation_contract),
     (38, _migration_038_trusted_reconciliation),
+    (39, _migration_039_task_business_objective),
 ]
 
 

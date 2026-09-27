@@ -1055,32 +1055,9 @@ def test_init_db_migration_002_adds_strategy_versioning_to_version1_database(tmp
     db_path = tmp_path / "legacy_v1.sqlite"
 
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute(
-            """
-            CREATE TABLE strategies (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                strategy_type TEXT NOT NULL,
-                rules_json TEXT NOT NULL,
-                score_col TEXT,
-                default_decision_json TEXT NOT NULL,
-                description TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO strategies(
-                id, task_id, strategy_type, rules_json, score_col,
-                default_decision_json, description, created_at
-            )
-            VALUES ('s-1', 'task-1', 'approval', '[]', 'score', '\"approve\"',
-                    'legacy strategy', '2026-01-01T00:00:00+00:00')
-            """
-        )
-        conn.execute("PRAGMA user_version = 1")
+        _historical_schema(conn, 1)
+        _legacy_task(conn)
+        _legacy_strategy(conn, 's-1', description='legacy strategy')
 
     init_db(db_path)
 
@@ -1110,17 +1087,8 @@ def test_init_db_migration_004_adds_strategy_input_to_version3_database(tmp_path
     db_path = tmp_path / "legacy_v3.sqlite"
 
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute(
-            """
-            CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                model_name TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute("INSERT INTO tasks(id, model_name) VALUES ('task-1', '历史策略任务')")
-        conn.execute("PRAGMA user_version = 3")
+        _historical_schema(conn, 3)
+        _legacy_task(conn, model_name='历史策略任务')
 
     init_db(db_path)
 
@@ -1143,39 +1111,9 @@ def test_init_db_migration_006_adds_canonical_strategy_dsl_to_version5_database(
 
     db_path = tmp_path / "legacy_v5.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute(
-            """
-            CREATE TABLE strategies (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                strategy_type TEXT NOT NULL,
-                rules_json TEXT NOT NULL,
-                score_col TEXT,
-                default_decision_json TEXT NOT NULL,
-                description TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                version INTEGER NOT NULL DEFAULT 1,
-                status TEXT NOT NULL DEFAULT 'draft',
-                adopted_at TEXT,
-                adoption_reason TEXT,
-                parent_strategy_id TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO strategies(
-                id, task_id, strategy_type, rules_json, score_col,
-                default_decision_json, description, created_at
-            ) VALUES (
-                'legacy-strategy', 'task-1', 'approval',
-                '[{"condition":"score < 600","decision":"reject","value":null}]',
-                'score', '"approve"', 'legacy row', '2026-07-18T00:00:00Z'
-            )
-            """
-        )
-        conn.execute("PRAGMA user_version = 5")
+        _historical_schema(conn, 5)
+        _legacy_task(conn)
+        _legacy_strategy(conn, 'legacy-strategy', rules_json='[{"condition":"score < 600","decision":"reject","value":null}]')
 
     init_db(db_path)
 
@@ -1197,24 +1135,10 @@ def test_init_db_migration_006_adds_canonical_strategy_dsl_to_version5_database(
 def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_path):
     db_path = tmp_path / "legacy_v8.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute(
-            """
-            CREATE TABLE strategies (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL DEFAULT 'draft'
-            )
-            """
-        )
-        conn.executemany(
-            "INSERT INTO strategies(id, status) VALUES (?, ?)",
-            [
-                ("draft-strategy", "draft"),
-                ("adopted-strategy", "adopted"),
-                ("retired-strategy", "retired"),
-            ],
-        )
-        conn.execute("PRAGMA user_version = 8")
+        _historical_schema(conn, 8)
+        _legacy_task(conn)
+        for name, status in [('draft-strategy', 'draft'), ('adopted-strategy', 'adopted'), ('retired-strategy', 'retired')]:
+            _legacy_strategy(conn, name, status=status)
 
     init_db(db_path)
 
@@ -1237,24 +1161,11 @@ def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_pat
 def test_init_db_migration_009_preserves_validated_partial_canonical_row(tmp_path):
     db_path = tmp_path / "partial_v8.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute(
-            """
-            CREATE TABLE strategies (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                asset_status TEXT NOT NULL DEFAULT 'draft'
-            )
-            """
-        )
-        conn.executemany(
-            "INSERT INTO strategies(id, status, asset_status) VALUES (?, ?, ?)",
-            [
-                ("validated-strategy", "draft", "validated"),
-                ("partial-adopted", "adopted", "draft"),
-            ],
-        )
-        conn.execute("PRAGMA user_version = 8")
+        _historical_schema(conn, 8)
+        _legacy_task(conn)
+        conn.execute("ALTER TABLE strategies ADD COLUMN asset_status TEXT NOT NULL DEFAULT 'draft'")
+        _legacy_strategy(conn, 'validated-strategy', status='draft', asset_status='validated')
+        _legacy_strategy(conn, 'partial-adopted', status='adopted', asset_status='draft')
 
     init_db(db_path)
 
@@ -1271,10 +1182,8 @@ def test_init_db_migration_009_preserves_validated_partial_canonical_row(tmp_pat
 def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_path):
     db_path = tmp_path / "legacy_v9.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
-        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
-        conn.execute("PRAGMA user_version = 9")
+        _historical_schema(conn, 9)
+        _legacy_task(conn)
 
     init_db(db_path)
     init_db(db_path)
@@ -1307,15 +1216,8 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
 def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
     db_path = tmp_path / "legacy_v11.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
-        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
-        # A database stamped at migration 11 necessarily already owns the
-        # migration-10 artifact registry.  Later report migrations attach
-        # integrity triggers to that real predecessor table.
-        db_schema_module._migration_010_task_artifact_registry(conn)
-        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
-        conn.execute("PRAGMA user_version = 11")
+        _historical_schema(conn, 11)
+        _legacy_task(conn)
 
     init_db(db_path)
     init_db(db_path)
@@ -1350,14 +1252,8 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
 def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path):
     db_path = tmp_path / "legacy_v12.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
-        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
-        conn.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY)")
-        conn.execute("CREATE TABLE task_artifacts (id TEXT PRIMARY KEY)")
-        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
-        conn.execute("INSERT INTO datasets(id) VALUES ('dataset-1')")
-        conn.execute("PRAGMA user_version = 12")
+        _historical_schema(conn, 12)
+        _legacy_task(conn)
 
     init_db(db_path)
     init_db(db_path)
@@ -1421,12 +1317,8 @@ def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
 ):
     db_path = tmp_path / "legacy_v13.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
-        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
-        conn.execute("CREATE TABLE task_artifacts (id TEXT PRIMARY KEY)")
-        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
-        conn.execute("PRAGMA user_version = 13")
+        _historical_schema(conn, 13)
+        _legacy_task(conn)
 
     init_db(db_path)
     init_db(db_path)
@@ -1509,20 +1401,8 @@ def test_init_db_migration_016_upgrades_candidate_pool_ledger_from_v14_database(
 ):
     db_path = tmp_path / "legacy_v14.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
-        conn.execute(
-            """
-            CREATE TABLE task_artifacts (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                origin_tool TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute("PRAGMA user_version = 14")
+        _historical_schema(conn, 14)
+        _legacy_task(conn)
 
     init_db(db_path)
     init_db(db_path)
@@ -1707,19 +1587,8 @@ def test_init_db_migration_009_rejects_canonical_drift_without_stamping(tmp_path
 def test_init_db_migration_024_adds_metrics_configured_to_version23_database(tmp_path):
     db_path = tmp_path / "legacy_v23.sqlite"
     with connect(db_path) as conn:
-        _install_v1_plan_step_runs_predecessor(conn)
-        conn.execute(
-            """
-            CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                metrics_json TEXT NOT NULL DEFAULT '[]'
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO tasks(id, metrics_json) VALUES ('legacy-task', '[]')"
-        )
-        conn.execute("PRAGMA user_version = 23")
+        _historical_schema(conn, 23)
+        _legacy_task(conn, id='legacy-task')
 
     init_db(db_path)
 
@@ -2162,3 +2031,28 @@ def test_connect_reissues_journal_mode_pragma_for_a_fresh_db_path(tmp_path):
         sqlite3.connect = original_connect
 
     assert any("journal_mode=WAL" in sql for sql in traced_journal_mode_statements)
+
+
+def _historical_schema(conn, version):
+    """Build the complete actual predecessor, including unrelated dependencies."""
+    for migration_version, migration in db_schema_module._MIGRATIONS:
+        if migration_version > version:
+            break
+        migration(conn)
+    conn.execute(f"PRAGMA user_version = {version}")
+
+
+def _legacy_task(conn, **overrides):
+    row = dict(id="task-1", model_name="legacy", model_version="v1", validator="qa",
+               source_dir="/legacy", status="created", status_message="created",
+               created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z")
+    row.update(overrides)
+    conn.execute(f"INSERT INTO tasks({','.join(row)}) VALUES ({','.join('?' for _ in row)})", tuple(row.values()))
+
+
+def _legacy_strategy(conn, strategy_id, **overrides):
+    row = dict(id=strategy_id, task_id="task-1", strategy_type="approval", rules_json="[]",
+               score_col="score", default_decision_json='"approve"', description="legacy row",
+               created_at="2026-01-01T00:00:00Z")
+    row.update(overrides)
+    conn.execute(f"INSERT INTO strategies({','.join(row)}) VALUES ({','.join('?' for _ in row)})", tuple(row.values()))

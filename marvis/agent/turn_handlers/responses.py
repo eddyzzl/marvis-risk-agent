@@ -112,8 +112,14 @@ def _strategy_clarification_response(
     repo: TaskRepository, task: TaskRecord, clarification: dict
 ) -> dict:
     current_input = _strategy_input_snapshot(getattr(task, "strategy_input", None))
+    objective = getattr(task, "business_objective", None)
+    if objective is not None:
+        current_input = {**(current_input or {}), "business_objective": objective.to_dict()}
+    from marvis.repositories.plans import PlanRepository
+    locked = bool(PlanRepository(repo.db_path).list_plans_for_task(task.id))
     clarification_payload = {
         **dict(clarification),
+        "business_objective_locked": locked,
         "current_input": current_input,
     }
     repo.add_agent_message(
@@ -157,6 +163,7 @@ def _strategy_input_snapshot(strategy_input) -> dict | None:
         "min_approval_rate",
         "baseline_strategy_id",
         "profit",
+        "business_objective",
     )
     payload = {key: strategy_input[key] for key in allowed if key in strategy_input}
     profit = payload.get("profit")

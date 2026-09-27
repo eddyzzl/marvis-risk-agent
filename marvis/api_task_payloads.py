@@ -85,6 +85,7 @@ def task_payload(
     payload = {
         **task_to_dict(task),
         "workflow_status": resolved_workflow_status,
+        "business_objective_locked": resolved_workflow_status is not None,
         "active_job_kind": resolved_active_job_kind,
         "failure_stage": task_failure_stage(repo, task),
         "failure_reason_code": task_failure_reason_code(task),

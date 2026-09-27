@@ -629,7 +629,17 @@ def post_agent_message(
         raise unprocessable("labeling_request 只能用于 data_join 类型任务。")
     require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
     require_wired_agent_task_type(task, WIRED_AGENT_TASK_TYPES)
+    business_objective_provided = "business_objective" in payload.model_fields_set
+    if business_objective_provided:
+        from marvis.business_acceptance import BusinessObjective
+        business_objective = None if payload.business_objective is None else BusinessObjective.from_dict(payload.business_objective)
+        if payload.ui_action is not None or payload.strategy_request is not None or payload.portfolio_request is not None or payload.labeling_request is not None:
+            raise unprocessable("business_objective 不能与确认或其他业务动作同时提交。")
+    else:
+        business_objective = None
     content = payload.content.strip()
+    if business_objective_provided and is_stop_validation_intent(content):
+        raise unprocessable("停止指令不能与 business_objective 同时提交。")
     if not content:
         raise unprocessable("message content is required")
     if looks_like_metric_rewrite_request(content) and task.task_type in {
@@ -898,6 +908,8 @@ def post_agent_message(
             expected_step_fingerprint=payload.expected_step_fingerprint,
             ui_action=payload.ui_action,
             strategy_input=strategy_input,
+            business_objective=business_objective,
+            business_objective_provided=business_objective_provided,
             strategy_request=(
                 None
                 if payload.strategy_request is None

@@ -234,6 +234,7 @@ class TaskCreate:
     # an explicit StrategyTaskInput may itself contain unanswered fields so setup
     # can pause for clarification without inventing business defaults.
     strategy_input: StrategyTaskInput | None = None
+    business_objective: BusinessObjective | None = None
     # None denotes an omitted/legacy metric contract; [] is an explicit choice
     # to calculate no optional metrics (FEATURE §2: 选了才算).
     metrics: list[str] | None = None
@@ -278,6 +279,7 @@ class TaskRecord:
     sample_weight_col: str = ""
     oot_ks_min: float | None = None
     strategy_input: StrategyTaskInput | None = None
+    business_objective: BusinessObjective | None = None
     metrics: list[str] | None = None
     capability_tier: str = ""
     validation_workflow_version: int = 0

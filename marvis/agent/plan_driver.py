@@ -1634,6 +1634,19 @@ class PlanDriver:
             # (empty for the built-in modeling templates today) rather than replacing
             # it, so a future template with real defaults still gets to keep them.
             plan.success_criteria = [*plan.success_criteria, *success_criteria]
+        db_path = getattr(self._repo, "db_path", None)
+        if db_path is not None:
+            from marvis.repositories.tasks import TaskRepository
+            from marvis.business_acceptance import OBJECTIVE_VERSION
+            try:
+                objective = TaskRepository(db_path).get_task(task_id).business_objective
+            except KeyError:
+                objective = None
+            if objective is not None:
+                existing = [item for item in plan.success_criteria if item.get("schema_version") == OBJECTIVE_VERSION]
+                if existing and existing != [objective.to_dict()]:
+                    raise DriverError("plan objective conflicts with persisted task contract")
+                plan.success_criteria = [objective.to_dict()]
         if self._validator is not None:
             problems = self._validator.validate(plan)
             if problems:

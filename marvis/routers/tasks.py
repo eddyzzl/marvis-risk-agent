@@ -6,7 +6,8 @@ import uuid
 from fastapi import APIRouter, Request, Response
 from marvis.errors import conflict, not_found, unprocessable
 
-from marvis.api_schemas import CreateTaskRequest
+from marvis.api_schemas import CreateTaskRequest, BusinessObjectiveRequest
+from marvis.business_acceptance import BusinessObjective
 from marvis.api_task_helpers import (
     dispatch_platform_hook,
     get_task_or_404,
@@ -245,6 +246,7 @@ def _task_create_contract(
         sample_weight_col=str(payload.sample_weight_col or "").strip(),
         oot_ks_min=payload.oot_ks_min,
         strategy_input=_strategy_task_input(payload),
+        business_objective=None if payload.business_objective is None else BusinessObjective.from_dict(payload.business_objective),
         metrics=payload.metrics,
         capability_tier=normalized_capability_tier(payload.capability_tier),
         notebook_path=payload.notebook_path,
@@ -285,6 +287,30 @@ def get_task(task_id: str, request: Request) -> dict:
         get_task_or_404(repo, task_id),
         request.app.state.settings.tasks_dir,
     )
+
+
+@router.put("/tasks/{task_id}/business-objective")
+def put_business_objective(task_id: str, payload: BusinessObjectiveRequest, request: Request) -> dict:
+    repo = _repo(request)
+    get_task_or_404(repo, task_id)
+    try:
+        job_id = repo.start_job(task_id, "business_objective")
+    except ConflictError as exc:
+        raise conflict(str(exc)) from exc
+    try:
+        if not repo.mark_job_running(job_id):
+            raise ConflictError("task lease is no longer active")
+        objective = None if payload.business_objective is None else BusinessObjective.from_dict(payload.business_objective)
+        task = repo.update_business_objective(task_id, objective, job_id=job_id)
+    except ConflictError as exc:
+        repo.finish_job(job_id, status="failed", error_name="ConflictError", error_value=str(exc))
+        raise conflict(str(exc)) from exc
+    except Exception as exc:
+        repo.finish_job(job_id, status="failed", error_name=type(exc).__name__, error_value=str(exc))
+        raise
+    else:
+        repo.finish_job(job_id, status="succeeded")
+    return task_payload(repo, task, request.app.state.settings.tasks_dir)
 
 
 @router.get("/tasks/{task_id}/jobs/latest")

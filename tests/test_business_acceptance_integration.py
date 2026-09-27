@@ -118,6 +118,8 @@ def test_api_agent_and_document_share_same_persisted_verdict(tmp_path):
     assert "业务验收证据不足" in message.content
     xlsx = client.get(f"/api/plans/{plan.id}/business-acceptance/xlsx")
     assert xlsx.status_code == 200
+    assert client.get(f"/api/plans/{plan.id}/business-acceptance/xlsx", params={"expected_summary_ref": "stale"}).status_code == 409
+    assert client.get(f"/api/plans/{plan.id}/business-acceptance/xlsx", params={"expected_summary_ref": stored["summary_ref"]}).content == xlsx.content
     workbook = load_workbook(BytesIO(xlsx.content))
     assert workbook.active["B2"].value == "insufficient_evidence"
     assert (

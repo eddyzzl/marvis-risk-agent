@@ -172,6 +172,7 @@ class CreateTaskRequest(BaseModel):
     # injected into the plan. Never defaulted to a platform-chosen number.
     oot_ks_min: float | None = None
     strategy_input: StrategyTaskInputRequest | None = None
+    business_objective: dict[str, Any] | None = None
     # None/omitted means a legacy/default metric policy; [] is an explicit
     # user choice to run no optional metric.  Do not collapse these states.
     metrics: list[str] | None = None
@@ -182,6 +183,30 @@ class CreateTaskRequest(BaseModel):
     pmml_path: str | None = None
     dictionary_path: str | None = None
     report_values: dict[str, str] = Field(default_factory=dict)
+
+
+    @model_validator(mode="after")
+    def validate_business_contract(self):
+        _validate_task_business_contract(self)
+        return self
+
+
+def _validate_task_business_contract(value):
+    objective = None if value.business_objective is None else BusinessObjective.from_dict(value.business_objective)
+    nested = value.strategy_input.business_objective if value.strategy_input is not None else None
+    if nested is not None and "business_objective" in value.model_fields_set and BusinessObjective.from_dict(nested) != objective:
+        raise ValueError("business_objective conflicts with strategy_input.business_objective")
+
+
+class BusinessObjectiveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    business_objective: dict[str, Any] | None
+
+    @model_validator(mode="after")
+    def validate_business_contract(self):
+        if self.business_objective is not None:
+            BusinessObjective.from_dict(self.business_objective)
+        return self
 
 
 class ValidateRequest(BaseModel):
@@ -2234,6 +2259,7 @@ class AgentMessageRequest(BaseModel):
     # separate from free text so the backend never has to infer business targets
     # or constraints from the conversation.
     strategy_input: StrategyTaskInputRequest | None = None
+    business_objective: dict[str, Any] | None = None
     # Candidate Lab manual controls use the same canonical request and trusted
     # execution kernel as natural-language strategy requests. The free-text
     # content remains a user-visible action label, not executable business input.
@@ -2268,6 +2294,12 @@ class AgentMessageRequest(BaseModel):
     expected_plan_revision: StrictInt | None = Field(default=None, ge=0)
     expected_plan_fingerprint: StrictSha256 | None = None
     expected_step_fingerprint: StrictSha256 | None = None
+
+
+    @model_validator(mode="after")
+    def validate_business_contract(self):
+        _validate_task_business_contract(self)
+        return self
 
 
 class AgentModelRequest(BaseModel):
