@@ -258,18 +258,24 @@ def test_strategy_repository_persists_canonical_dsl_as_authoritative_spec(tmp_pa
     ]
 
 
-def test_migration_018_backfills_existing_canonical_strategy_hash(tmp_path):
+def test_migration_018_backfills_existing_canonical_strategy_hash(tmp_path, monkeypatch):
+    import marvis.db_schema as schema
+
     db_path = tmp_path / "app.sqlite"
-    init_db(db_path)
-    repo = StrategyRepository(db_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(schema, "_MIGRATIONS", [item for item in schema._MIGRATIONS if item[0] <= 17])
+        init_db(db_path)
     strategy = _strategy()
-    repo.create_strategy("task-1", strategy)
     with connect(db_path) as conn:
-        # Rewind to a real pre-v18 shape: the v22-only dependent ledger would
-        # not exist yet and must not block dropping the later hash column.
-        conn.execute("DROP TABLE strategy_pool_materializations")
-        conn.execute("ALTER TABLE strategies DROP COLUMN dsl_content_hash")
-        conn.execute("PRAGMA user_version = 17")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert "dsl_content_hash" not in {row["name"] for row in conn.execute("PRAGMA table_info(strategies)")}
+        # Persist the actual predecessor's columns, not a current-schema row
+        # with an artificially rewound version and later triggers left behind.
+        values = strategy_repo_module._strategy_insert_values("task-1", strategy, "2026-01-01T00:00:00Z")
+        conn.execute("""INSERT INTO strategies(
+            id, task_id, strategy_type, rules_json, score_col,
+            default_decision_json, description, created_at, dsl_json, dsl_schema_version
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)""", values[:-1])
 
     init_db(db_path)
 
