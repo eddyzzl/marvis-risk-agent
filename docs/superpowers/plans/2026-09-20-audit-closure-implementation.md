@@ -293,3 +293,46 @@ Chromium 在 1440、1600、1920 × 1000 下均通过：页面身份与非空内�
 最终 operations/default-runtime 52 passed（60.89 秒）；app/CLI/既有监控核 126 passed（147.96 秒，发生在最后一次显式成熟时长输入收紧之前）；管理接口 followup 20 passed。使用最终配置重跑实际 `python -m marvis serve`：全新 workspace、HTTP 上传 400 行合成数据、配置日历，后台自行调用真实模型监控并投递本地通知，再经 HTTP 记录已读；没有手工 tick、注入监控执行器或外部发送。证据 `/Users/eddyz/.codex/work-artifacts/operations-runtime-20260927/` 保存 HANDOFF、proof、server/configuration、CLI probe、测试日志和文件摘要；服务正常 shutdown。
 
 WP11 的应用内配置、通知、诊断、已读、重新评估浏览器完整旅程仍在接入。软件运行不能认证发布者声明的数据完整水位及真实标签事实；机构渠道与 P 验收仍未取得。主线最新软件批次是 `fb200d07`；业务合同/采用 producer 和 UI 的独立分支正在复核，申请级参考服务已经开始开发。冻结要求不变，全部工作包和问题均未借本次进展整体关闭。
+
+
+## WP07 派生特征的训练与评分一致性
+
+`1c0bcd8c` 补齐交叉、比值、日期和 log 派生的评分规则；分位排名和组统计保存训练集拟合参数，而非在新批次重新计算。平台评分器与移交 Notebook 继续调用原 `apply_preprocessing_steps`，新增规则进入同一链。每项统计变换保留自己的拟合成员，混合 recipe 只要一项用了评估成员就不能作为独立评估。纯逐行派生显示 `row_local`，不冒充时点来源已验证；目标列不能直接作为派生输入。
+
+抽出组统计拟合/回放的唯一纯计算实现，保留行顺序及 index；大整数分组 ID 不经 float 取整，避免将两个不同身份合并。未见组用固定训练总体回退值；缺失值保持缺失。已有纯探索 helper 的行为保留，正式 cross_features Tool 的 rank 则要求明确训练分区或全量探索声明。
+
+特征/证据回归 92 passed（190.85 秒）；拟合/回放 27 passed（8.54 秒）；评分/Notebook 门 67 passed / 1 个新增测试注册参数误用失败，修正为实际 public API 后最终 30 passed（10.12 秒）。真实 ToolRunner 派生→训练后，已变换批量评分、原始批量回放评分和逐行评分一致。scoped Ruff、diff 检查通过。持久日志 `/Users/eddyz/.codex/worktrees/audit-fit-provenance/{derived-first,derived-replay,derived-scoring,derived-final}.log`；没有覆盖原失败档案。普通清洗/JOIN 的完整传递、特征可得时间、业务标签及真实线上环境仍分别验收，不因这一批通过而关闭 WP07。
+
+## WP06 通用业务合同、采用对象与业务验收界面
+
+`2187333f` 将任务业务目标独立持久化到 schema39，明确更新 lease 和计划生成后的合同边界；旧嵌套目标仅按原值迁移，不推断新目标。`d4210195` 用真实 SampleDesign、最终模型及策略测量上下文绑定采用对象，人审确认来源口径；`b4f7d2bc` 核验标签 producer、源/结果 hash、实际成员、目标定义和观察成熟度。`8edf09ce` 阻止旧候选 max 上界被偷偷换成采用对象单值上界，非等价口径必须明确澄清。
+
+`227ac10e` 接入业务合同编辑、业务五态、证据和同一验收引用的 DOCX/XLSX 导出，同时修复空计划身份判定。UI 分支 416 项相关检查通过；真实浏览器三个桌面宽度的业务状态是明确合成夹具，不代表业务目标实际达标。主线 `227ac10e` 的 DB/合同/producer/标签/UI/operations 联合检查 209 passed（105.63 秒），仅既有 Starlette 弃用提醒；日志 `/Users/eddyz/.codex/work-artifacts/audit-integration-20260928/merged.log`。原生证明只保证平台登记内容一致，外部业务真实与 H 验收继续保留。
+
+## WP09/10 本地参考在线决策与受治理生命周期
+
+`07b15738` 冻结 canonical DSL、模型、ensemble 成员、校准、预处理来源及输入/业务节点契约，评分与规则继续复用既有计算核。`43645f1e` 把可信来源前移至原生训练/校准产出事务；打包阶段只核验原生字节收据，禁止读取旧文件后补签为可信来源，主进程不新增不可信 pickle 反序列化。已选中模型需要精确匹配最终产物；过大的数字输入返回受控错误。`5d9b6afd` 阻止校准期间的并发模型元数据变化被重新认证。
+
+`4d12919f` 提供真实 worker 安装探针、只读发现、受审批激活、状态读回及回滚，唯一运行指针继续属于原生产治理 head。客户端超时后查询已经提交的安装记录，不能盲目重复改变运行状态。`a6c3b9a1` 将崩溃恢复与新申请统一纳入四个并发槽；120/min 只指不同新申请 ID，不冒充全部执行尝试限额。完成请求的幂等读回不占新槽。
+
+模型/认证包相关 182 passed，部署治理 18 passed，校准并发反例 6 passed，过期恢复并发 5 passed。真实标准 CLI→HTTP 探针覆盖两包、三次审批安装、shadow/production 分离、决定幂等、安装客户端超时后的读回、应用重启及回滚；训练是实际 ToolRunner 的 400 行合成数据，策略 validated 状态是明确夹具。证据 `/Users/eddyz/.codex/work-artifacts/operations-runtime-20260927/reference-decision/{cli-proof.json,cli-server.log,cli_governance_probe.py,recovery-admission.log}`。这些检查不证明业务批准的 SLO、真实策略业务效果或机构生产验收。
+
+## WP11 监控工作台完整参考旅程
+
+`5ae9534e` 增加应用内任务/数据/目标选择、配置修订、诊断与确定性证据、本地通知、明确已读、停用恢复及关联重新评估。`59d376ce` 给后台轮询补身份与访问代际约束；旧 403 不得清空新会话身份，旧能力响应不得覆盖新视图，关闭面板后仍可在同一身份下刷新未读。
+
+394 项相关前端回归通过（53.71 秒），轮询反例修复前失败、修复后 20 项通过。标准 CLI 真实训练 LR 并运行后台监控，浏览器实际验证 1440/1600/1920、投递与已读分离、停用→恢复、陈旧版本 409 保留输入、重新评估保留原周期、真实上传晚响应和独立 checker 只读；无 pageerror，只有有意触发的 403/409。最新证据 `/Users/eddyz/.codex/work-artifacts/operations-ui-20260928/run-1790578954/proof.json`；root 查看实际 1440 指标证据截图。没有真实外部消息发送。
+
+## WP12 原生历史批量回放与现金流对账
+
+`117b204e` 增加独立 v2 批量合同，保留 v1 严格模型。认证同任务数据、逐字段事件/可得/决策时点和冻结包，在同一支持人群执行实际评分和规则；业务人审绑定来源、字段及可选经济/群体/产能假设。缺失维度保留 unknown，原生签名回执作为 API、Agent、JSON/Excel/Word 的同一证据。外部动作明确为 historical import，不冒充平台实际执行；成熟现金流与有可比预测的成员对账，不推断因果收益。
+
+新增 native/Agent/manual Workflow→人审→ToolRunner/API/导出检查 20 passed；v1/reference 联合 80 passed。插件/模板联合 136 passed / 1 个旧迁移夹具失败；该夹具曾把最新库版本号改成 35，却留有新索引，不能模拟历史升级。`89300c6a` 改为真实安装 schema35 后升级，`3fb9b21b` 修复相邻 schema37 夹具使用新增列的问题，均只改测试、保留原断言，联合 180 passed（34.42 秒）。记录 `/Users/eddyz/.codex/work-artifacts/historical-replay-20260928/{proof.json,migration-proof.json}`。独立时间窗口稳定性、完整工作台、历史包可用性及 H/P 仍未完成。
+
+上述在线/治理/历史/UI/调度/迁移在主线 `3fb9b21b` 联合 188 passed（124.20 秒），仅既有 Starlette 弃用提醒。首次命令误写不存在的测试文件，未执行测试；修正文件名后运行通过，两个日志分别保留为 `/Users/eddyz/.codex/work-artifacts/audit-integration-20260928/runtime-joined.log` 和 `runtime-joined-final.log`。这是一组相关软件回归，不是全量项目或正式关闭验收。
+
+## WP01 Agent 总 token 与费用准入预算
+
+增加可选任务总 token、费用及币种合同，每个重试/子调用在统一父进程锁内先预留上下文与输出的上界，再发出请求。已确认的最终完整 usage 可以释放未用预留；未知、断流、残缺、回退或自相矛盾的流式 usage 保留额度。即使 usage 不完整，已知字段越界也立即使后续准入停止。拒绝多个 completion 与可绕过 max_tokens 的替代字段；费用价格表在父进程预先冻结并核对模型/币种，缺失不能当成零。旧 case 未声明新字段时 wire/hash 保持不变。
+
+独立审阅先后发现流式提前释放、reasoning 矛盾、输出倍率、缺失字段掩盖已知超限及跨 chunk 拼接问题，均补实际 loopback 反例后修复。最终 budget/runtime/response 联合 54 passed（102.75 秒）；scoped Ruff/diff 通过。日志 `/Users/eddyz/.codex/worktrees/audit-fit-provenance/aggregate-budget-{first,final,review,complete}.log` 保留每轮结果。本次没有追加真实模型调用或修改旧评分档案。该预算保证的是声明的模型上限与指定价格下的准入控制；不宣称独立供应商账单保证。全工作流真实模型及封存验收、完整受信关闭适配器仍待完成。

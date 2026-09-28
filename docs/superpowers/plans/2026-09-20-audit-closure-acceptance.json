@@ -108,7 +108,7 @@
           "milestone": "B"
         }
       ],
-      "notes": "Real HTTP Agent/Driver/Executor/ToolRunner benchmark merged (156baa3c), with isolated expected scoring, provider metering and pacing correction (8193c8fe). Original synthetic real-model run failed 2/2 on HTTP budget; unchanged-case rerun passed JOIN and failed feature on 8-attempt limit (1/2). Both archives retained. Provider retry observability implemented independently; full workflow families, hidden acceptance, trusted closure adapters and aggregate token/cost limits remain open.",
+      "notes": "Real HTTP Agent/Driver/Executor/ToolRunner benchmark merged 156baa3c, pacing correction 8193c8fe and safe provider observations e0c738e9. Original synthetic real-model run failed 2/2 on HTTP budget; unchanged-case rerun passed JOIN and failed feature on 8-attempt limit (1/2). Both archives retained. Aggregate token/cost admission merged 4dcbfccc: atomic pre-call reservation across workers/retries, frozen prices, no refund for unknown/partial/interrupted usage, observed provider overrun blocking and output-multiplier rejection. 54 runtime/loopback checks passed after independent review corrections. This is conditional admission, not a provider billing guarantee. Full-family real-model/hidden acceptance and trusted closure adapters remain open.",
       "milestones": {
         "S": "in_progress"
       }
@@ -182,7 +182,7 @@
           "milestone": "S"
         }
       ],
-      "notes": "BusinessObjective and deterministic adopted-object acceptance merged e90a4b84. HTTP, Agent and document exports use the same persisted verdict. Recovery integration d46a6496 preserves execution_completed semantics (two counterexamples failed before fix, 106 combined checks passed). Generic task/Agent contract entry, certified producer context, UI and historical acceptance remain in development.",
+      "notes": "BusinessObjective and deterministic adopted-object acceptance merged e90a4b84. Generic task contract with migration39 and lease protection merged 2187333f; human-bound native sample/model/strategy producer context d4210195; actual label membership/maturity authentication b4f7d2bc; non-equivalent legacy upper caps explicitly rejected 8edf09ce. Business contract and verdict UI merged 227ac10e, including plan-null identity fix. Main joint regression 209 passed at 227ac10e. User historical business acceptance remains open; native provenance does not independently certify external truth.",
       "milestones": {
         "S": "in_progress"
       }
@@ -196,7 +196,7 @@
           "milestone": "B"
         }
       ],
-      "notes": "Authenticated preprocessing and exact fitting membership merged 27cc4c70. Immutable receipts survive modeling preparation; train_model, train_models and tuning reject reuse that puts fitted rows into evaluation. Broad run: 357 passed and six obsolete checkpoint-fixture failures; corrected focused final 31 passed. No full PIT, external-source or mature-label claim. Derivation replay and remaining lineage consumers continue.",
+      "notes": "Authenticated preprocessing and exact fitting membership merged 27cc4c70. Immutable receipts survive modeling preparation; train_model, train_models and tuning reject reuse that puts fitted rows into evaluation. Broad run: 357 passed and six obsolete checkpoint-fixture failures; corrected focused final 31 passed. No full PIT, external-source or mature-label claim. Derivation replay and remaining lineage consumers continue. Derivation replay merged 1c0bcd8c: cross/date/log recipes, frozen train-only rank and group maps use the same scoring replay, exact fitting components retained, registered target leakage rejected, large integer groups preserved. Feature/provenance gate 92 passed; fit/replay 27 passed; scoring/handoff gate 67 passed and one test registration typo failed, corrected final 30 passed including real training and batch/single-row score equality.",
       "milestones": {
         "S": "in_progress"
       }
@@ -244,23 +244,23 @@
           "milestone": "S"
         }
       ],
-      "notes": "Implementation started from current source: reuse artifact scorer, preprocessing replay and canonical strategy evaluator for a real reference HTTP decision service; bind package closure, request idempotency, authentication, readback and existing governance. No merged service or SLO pass claimed yet.",
+      "notes": "Reference HTTP service and frozen packages merged 07b15738; native model/member/calibrator producer receipts 43645f1e and calibration concurrency fence 5d9b6afd. Only authenticated private snapshots are deserialized by the existing scorer/evaluator. Selected final artifact supported, legacy unauthenticated artifacts require retraining, and huge invalid numbers are controlled failures. Recovery and new requests share four concurrency slots (a6c3b9a1); 120/min counts distinct new request IDs. Model/package gate 182 passed, calibration concurrency 6 passed, recovery admission 5 passed. Business-approved SLO, independent readiness and institution acceptance remain open.",
       "milestones": {
         "S": "in_progress"
       }
     },
     {
       "id": "WP10",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP09",
           "milestone": "S"
         }
       ],
-      "notes": null,
+      "notes": "Governed local installation, actual worker probe, readback, activation and rollback merged 4d12919f. Existing production governance head is the sole serving pointer; immutable installation receipt supports lost-response recovery. Discovery APIs expose packages, promotions, installations and environment heads. 18 related checks and actual CLI/HTTP sequence passed, including install-client timeout, application restart and rollback. Synthetic strategy validation fixture is explicit; production business acceptance is not established. UI and independent end-to-end acceptance remain in progress.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
@@ -272,14 +272,14 @@
           "milestone": "S"
         }
       ],
-      "notes": "Standard app startup now assembles trusted model/strategy ToolRunner monitors, bounded background scheduling with lease renewal, authenticated data windows, source-watermark/maturity diagnostics, explicit linked one-window reassessment and durable local inbox/read receipts (419c75c8). Disabled schedules remain manageable (fb200d07). Final runtime gate 52 passed; related app/CLI/kernel gate 126 passed before final explicit-maturity tightening. Final real CLI/HTTP probe delivered and acknowledged an actual synthetic monitor notification. Frontend complete journey remains in progress; local delivery is not institution delivery.",
+      "notes": "Default trusted monitor lifecycle, authenticated windows, lease renewal, local inbox and read receipts merged 419c75c8; disabled schedules discoverable fb200d07. Runtime gate 52 passed. UI 5ae9534e and late-poll identity fence 59d376ce provide real task/dataset/target selection, revision edits, period evidence and linked rechecks. 394 related UI checks, then 20 targeted checks passed; real standard CLI/browser journeys at 1440/1600/1920 verified delivery versus read, disabled restore, stale409 input retention, late upload fencing and separate checker identity. Local delivery and publisher-declared watermarks do not establish institution/source acceptance.",
       "milestones": {
         "S": "in_progress"
       }
     },
     {
       "id": "WP12",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP06",
@@ -302,14 +302,14 @@
           "milestone": "S"
         }
       ],
-      "notes": "Historical submilestone WP12-A may start after WP06/WP07; runtime submilestone WP12-B requires the full dependency list.",
+      "notes": "Native historical batch replay v2 merged 117b204e without relaxing v1: authenticated task dataset and per-field timestamps, same-population frozen package replay, optional economics/groups/capacity, human-bound workflow, signed receipts, mature external cashflow reconciliation and JSON/Excel/Word exports. New native/Agent/ToolRunner tests 20 passed; v1/reference joint 80 passed. Plugin/template run 136 passed and one invalid downgrade fixture failed; actual predecessor fixture fixed 89300c6a and adjacent schema37 fixture 3fb9b21b, final joint 180 passed. Independent temporal stability and workbench UI continue; imported actions are not platform execution, historical package availability and causal gain remain unestablished.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
       "id": "WP13",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP07",
@@ -324,9 +324,9 @@
           "milestone": "S"
         }
       ],
-      "notes": null,
+      "notes": "Current-source gap review confirms transaction modeling is not an event/fraud workflow. Implementation started for typed source authorization, historical adapter and independent local HTTP reference provider, followed by authenticated event/window/relationship features and the existing decision/workbench integration. No source connector or fraud workflow completion, supplier verification or historical fraud effectiveness claimed yet.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
