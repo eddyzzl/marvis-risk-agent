@@ -19,6 +19,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.authenticated_snapshot import (
     AuthenticatedSnapshotError,
     materialize_authenticated_file_snapshot,
+    read_authenticated_parquet_metadata,
     read_authenticated_parquet_snapshot,
     verify_content_addressed_file_snapshot,
 )
@@ -773,6 +774,24 @@ class DatasetRegistry:
                 self.verify_authenticated_binding_snapshot(binding)
             ),
         )
+
+    def authenticated_parquet_column_names(self, dataset_id: str) -> tuple[str, ...]:
+        """Authenticate physical schema without repinning a producer's dataset."""
+        dataset = self.get(dataset_id)
+        path = self.resolve_verified_path(dataset_id)
+        try:
+            names, row_count = read_authenticated_parquet_metadata(
+                path, root=self._root, expected_sha256=dataset.content_hash,
+            )
+        except AuthenticatedSnapshotError as exc:
+            raise DatasetContentDriftError(
+                dataset_id, reason=f"authenticated metadata failed: {exc.reason.value}",
+            ) from exc
+        if row_count != dataset.row_count or self.get(dataset_id) != dataset:
+            raise DatasetContentDriftError(
+                dataset_id, reason="authenticated metadata differs from registration",
+            )
+        return names
 
     def read_authenticated_parquet_snapshot(
         self,

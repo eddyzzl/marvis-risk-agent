@@ -205,15 +205,15 @@ class AsOfJoinEngine:
             raise ValueError("point-in-time row membership changed")
         if record["provenance"] != self._provenance(dataset_id, evidence, selection):
             raise ValueError("point-in-time provenance changed")
-        output = self.registry.authenticate_dataset_binding(
-            dataset_id, expected_task_id=dataset.task_id, expected_content_hash=evidence.output_sha256,
-        )
-        frame = self.registry.read_authenticated_binding_snapshot(output)
+        # An evidence read must preserve paths frozen by later sample designs.
+        frame = self.registry.read_authenticated_parquet_snapshot(dataset_id)
         _verify_matrix(selection.frame, frame)
         with self.registry.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._verify_sources_on_connection(conn, bindings, datasets)
-            self.registry.verify_dataset_binding_on_connection(conn, output)
+            if self.registry._repo.get_dataset_on_connection(conn, dataset_id) != dataset:
+                raise ValueError("materialized dataset binding changed during verification")
+            self.registry.resolve_verified_path(dataset_id)
             if sha256_file(resolved) != record["content_hash"]:
                 raise ValueError("point-in-time evidence changed during verification")
         return DatasetTimeStatus(assurance=selection.assurance, artifact_id=record["id"], reasons=selection.reasons), evidence

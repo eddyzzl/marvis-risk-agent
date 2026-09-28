@@ -18,6 +18,8 @@ from marvis.db import DatasetRepository, ModelingRepository, TaskRepository, ini
 from marvis.db_schema import connect
 from marvis.domain import TaskCreate
 from marvis.files import sha256_file
+from marvis.feature.errors import FeatureError
+from marvis.packs.feature.tools import tool_normalize
 from marvis.packs.modeling import evidence_tools
 from marvis.packs.modeling import tools as modeling_tools
 from marvis.packs.modeling.evidence import (
@@ -76,6 +78,7 @@ def _fixture(
     bad_weight_value: object = None,
     single_class_oot: str | None = None,
     single_class_required_split: str | None = None,
+    preprocessing_fit: str | None = None,
 ) -> dict:
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
@@ -201,6 +204,30 @@ def _fixture(
         settings.datasets_dir,
     )
     dataset = registry.register_existing(source, task_id=task.id, role="derived")
+    if preprocessing_fit is not None:
+        transform = tool_normalize(
+            {
+                "dataset_id": dataset.id,
+                "columns": ["x1"],
+                "method": "zscore",
+                **(
+                    {"allow_full_fit": True}
+                    if preprocessing_fit == "full"
+                    else {
+                        "split_col": "evidence_split",
+                        "train_values": [preprocessing_fit],
+                        "holdout_values": ["test", "oot", "approval_only"],
+                    }
+                ),
+            },
+            ToolContext(
+                task_id=task.id,
+                seed=0,
+                datasets_root=settings.datasets_dir,
+                workspace=settings.workspace,
+            ),
+        )
+        dataset = registry.get(transform["result_dataset_id"])
     workspaces = DataWorkspaceRepository(settings.db_path)
     activated = workspaces.save(
         task.id,
@@ -470,6 +497,41 @@ def _run(fx: dict) -> dict:
     return evidence_tools.run_train_model_with_evidence_v2(
         fx["inputs"], fx["ctx"], fx["runtime"]
     )
+
+
+def test_governed_training_rejects_preprocessing_fitted_on_evaluation_rows(tmp_path):
+    fx = _fixture(tmp_path, preprocessing_fit="full")
+    with pytest.raises(FeatureError, match="evaluation rows"):
+        _run(fx)
+    assert _governed_records(fx) == []
+
+
+def test_governed_training_uses_native_membership_instead_of_source_split_labels(tmp_path):
+    fx = _fixture(
+        tmp_path,
+        preprocessing_fit="train",
+        risk_evidence_splits=("test", "train", "oot"),
+    )
+    with pytest.raises(FeatureError, match="evaluation rows"):
+        _run(fx)
+    assert _governed_records(fx) == []
+
+
+def test_governed_training_carries_authenticated_preprocessing_and_temporal_limits(tmp_path):
+    fx = _fixture(tmp_path, preprocessing_fit="train")
+    original = fx["runtime"].registry.get(fx["dataset"].id)
+    output = _run(fx)
+    artifact = ModelingRepository(fx["settings"].db_path).get_model_artifact(
+        output["model_artifact_id"]
+    )
+    assert artifact.params["preprocessing_assurance"] == "training_only"
+    assert artifact.params["preprocessing_evidence"]["artifact_id"]
+    timing = artifact.params["feature_time_evidence"]
+    assert timing["dataset_id"] == fx["dataset"].id
+    assert timing["assurance"] == "unknown"
+    assert timing["fields"]["x1"]["assurance"] == "unknown"
+    assert _binding(fx, output).evidence["evidence_id"] == output["evidence_id"]
+    assert fx["runtime"].registry.get(fx["dataset"].id) == original
 
 
 def _governed_records(fx: dict) -> list[dict]:
@@ -1001,6 +1063,9 @@ def test_unsupported_recipe_is_rejected(tmp_path: Path, recipe: str) -> None:
         {"method": "platt"},
         {"refit_on_train_plus_test": True},
         {"preprocessing_steps": []},
+        {"preprocessing_assurance": "training_only"},
+        {"preprocessing_evidence": {"artifact_id": "caller-owned"}},
+        {"feature_time_evidence": {"assurance": "verified"}},
     ],
 )
 def test_calibration_and_platform_owned_params_are_rejected(

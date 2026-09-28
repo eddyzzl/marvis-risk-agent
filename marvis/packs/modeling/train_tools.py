@@ -1205,13 +1205,15 @@ def _preprocessing_chain_traceable(runtime: "_Runtime", dataset_id: str, *, stat
     through a chain-tracking FEATURE/prepare_modeling_frame call — the model card
     flags this explicitly ("预处理链不可追溯") rather than silently implying the model
     has zero preprocessing."""
-    # A native projection may carry temporal ancestry with zero preprocessing
-    # steps. That certificate does not establish a replayable preprocessing chain.
-    if state is not None and state.artifact_id and not state.steps and state.assurance == "unknown":
-        return False
     try:
         dataset_path = runtime.registry.resolve_path(str(dataset_id))
     except KeyError:
+        return False
+    if state is None:
+        state = load_preprocessing_state(runtime.registry, str(dataset_id))
+    # A native projection may carry temporal ancestry with zero preprocessing
+    # steps. That certificate does not establish a replayable preprocessing chain.
+    if state.artifact_id and not state.steps and state.assurance == "unknown":
         return False
     return sidecar_path(dataset_path).exists()
 

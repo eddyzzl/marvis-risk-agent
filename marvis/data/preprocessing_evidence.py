@@ -230,6 +230,26 @@ def training_preprocessing_state(registry, dataset_id, *, split_col, train_value
     )
     values = train_values if isinstance(train_values, (list, tuple)) else [train_values]
     train = frame[split_col].isin(values).to_numpy(dtype=bool)
+    return _check_training_membership(registry, dataset_id, state, train)
+
+
+def training_preprocessing_state_for_membership(registry, dataset_id, *, train_mask):
+    """Apply the same fit boundary to native full-dataset membership masks.
+
+    Governed training owns its partition in an authenticated sample artifact,
+    not in the source's optional split column or the later private risk frame.
+    """
+    train = np.asarray(train_mask)
+    dataset = registry.get(dataset_id)
+    if train.dtype != np.bool_ or train.shape != (dataset.row_count,):
+        raise FeatureError("training membership must be a full-dataset boolean mask")
+    state = load_preprocessing_state(registry, dataset_id)
+    return _check_training_membership(registry, dataset_id, state, train)
+
+
+def _check_training_membership(registry, dataset_id, state, train):
+    if not state.artifact_id:
+        return state
     dataset = registry.get(dataset_id)
     records = {
         record["id"]: record

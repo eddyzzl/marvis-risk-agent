@@ -12,6 +12,7 @@ from marvis.data.authenticated_snapshot import (
     AuthenticatedSnapshotError,
     SnapshotFailureReason,
     materialize_authenticated_file_snapshot,
+    read_authenticated_parquet_metadata,
     read_authenticated_parquet_snapshot,
 )
 
@@ -42,6 +43,37 @@ def test_authenticated_snapshot_reads_only_requested_columns(tmp_path: Path) -> 
         {"customer_id": "A", "score": 610},
         {"customer_id": "B", "score": 720},
     ]
+
+
+def test_authenticated_metadata_does_not_decode_sample_rows(tmp_path, monkeypatch):
+    dataset = tmp_path / "dataset.parquet"
+    digest = _write_parquet(dataset)
+
+    def unexpected_data_read(*args, **kwargs):
+        pytest.fail("metadata reader decoded sample rows")
+
+    monkeypatch.setattr(snapshot_module.pd, "read_parquet", unexpected_data_read)
+    assert read_authenticated_parquet_metadata(
+        dataset, root=tmp_path, expected_sha256=digest,
+    ) == (("customer_id", "score", "unused"), 2)
+
+
+def test_authenticated_metadata_rejects_drift_during_schema_read(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+
+    dataset = tmp_path / "dataset.parquet"
+    digest = _write_parquet(dataset)
+    original = pq.ParquetFile
+
+    def changed_source(snapshot, *args, **kwargs):
+        result = original(snapshot, *args, **kwargs)
+        dataset.write_bytes(b"changed during schema read")
+        return result
+
+    monkeypatch.setattr(pq, "ParquetFile", changed_source)
+    with pytest.raises(AuthenticatedSnapshotError) as captured:
+        read_authenticated_parquet_metadata(dataset, root=tmp_path, expected_sha256=digest)
+    assert captured.value.reason is SnapshotFailureReason.SOURCE_CHANGED_DURING_READ
 
 
 def test_authenticated_snapshot_rejects_hash_mismatch(tmp_path: Path) -> None:

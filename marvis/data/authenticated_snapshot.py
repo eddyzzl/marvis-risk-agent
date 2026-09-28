@@ -35,7 +35,27 @@ def read_authenticated_parquet_snapshot(
     expected_sha256: str,
     columns: Sequence[str] | None = None,
 ) -> pd.DataFrame:
-    """Read one immutable, hash-authenticated Parquet snapshot.
+    """Read one immutable, hash-authenticated Parquet snapshot."""
+    return _read_authenticated_parquet(
+        path, root=root, expected_sha256=expected_sha256,
+        columns=columns, metadata_only=False,
+    )
+
+
+def read_authenticated_parquet_metadata(
+    path: Path, *, root: Path, expected_sha256: str,
+) -> tuple[tuple[str, ...], int]:
+    """Read authenticated schema and row count without decoding sample rows."""
+    return _read_authenticated_parquet(
+        path, root=root, expected_sha256=expected_sha256,
+        columns=None, metadata_only=True,
+    )
+
+
+def _read_authenticated_parquet(
+    path, *, root, expected_sha256, columns, metadata_only,
+):
+    """Share retained-descriptor checks for schema and projected data reads.
 
     The source must be a regular file below ``root`` without symlink traversal.
     Bytes are copied from one retained descriptor into a private temporary file;
@@ -106,8 +126,14 @@ def read_authenticated_parquet_snapshot(
             )
 
         snapshot.seek(0)
-        selected_columns = None if columns is None else list(columns)
-        frame = pd.read_parquet(snapshot, columns=selected_columns)
+        if metadata_only:
+            import pyarrow.parquet as pq
+
+            parquet = pq.ParquetFile(snapshot)
+            result = (tuple(parquet.schema_arrow.names), parquet.metadata.num_rows)
+        else:
+            selected_columns = None if columns is None else list(columns)
+            result = pd.read_parquet(snapshot, columns=selected_columns)
         try:
             current = os.lstat(absolute_path)
         except OSError as exc:
@@ -127,7 +153,7 @@ def read_authenticated_parquet_snapshot(
                 SnapshotFailureReason.SOURCE_CHANGED_DURING_READ,
                 "authenticated snapshot source changed during read",
             )
-        return frame
+        return result
     except AuthenticatedSnapshotError:
         raise
     except Exception as exc:

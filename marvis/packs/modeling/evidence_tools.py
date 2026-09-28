@@ -44,6 +44,8 @@ from marvis.artifacts import (
     TransactionalArtifactStore,
 )
 from marvis.files import sha256_file
+from marvis.data.feature_time import feature_time_evidence
+from marvis.data.preprocessing_evidence import training_preprocessing_state_for_membership
 from marvis.packs.modeling._common import BINARY_MODELING_RECIPES
 from marvis.packs.modeling._runtime import _artifact_base_dir, _runtime
 from marvis.packs.modeling.contracts import Experiment, ModelArtifact, TrainConfig
@@ -70,7 +72,6 @@ from marvis.packs.modeling.evidence import (
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.train_tools import (
     _preprocessing_chain_traceable,
-    _preprocessing_steps_for_training,
     _train_recipe,
 )
 from marvis.packs.modeling.training_dataset import TrainingDataset
@@ -380,6 +381,7 @@ def run_train_model_with_evidence_v2(
             sample=sample,
             request=request,
             internal_split=internal_split,
+            train_membership=membership_masks["train"],
         )
         _validate_governed_training_weights(
             frame,
@@ -1412,6 +1414,7 @@ def _training_config(
     sample: Any,
     request: Mapping[str, Any],
     internal_split: Mapping[str, Any],
+    train_membership: np.ndarray,
 ) -> TrainConfig:
     design = sample.bundle["sample_design"]
     target = design["target_selector"]
@@ -1448,15 +1451,26 @@ def _training_config(
         raise ModelingError(
             "sample weight column must not be target, split, or a feature"
         )
-    steps = _preprocessing_steps_for_training(
-        runtime,
+    preprocessing = training_preprocessing_state_for_membership(
+        runtime.registry,
         sample.source_binding.dataset_id,
+        train_mask=train_membership,
+    )
+    steps = preprocessing.steps
+    params["preprocessing_assurance"] = preprocessing.assurance
+    params["preprocessing_evidence"] = {
+        "artifact_id": preprocessing.artifact_id,
+        "content_hash": preprocessing.content_hash,
+    }
+    params["feature_time_evidence"] = feature_time_evidence(
+        runtime.registry, sample.source_binding.dataset_id, request["features"],
     )
     if steps:
         params["preprocessing_steps"] = steps
     elif not _preprocessing_chain_traceable(
         runtime,
         sample.source_binding.dataset_id,
+        state=preprocessing,
     ):
         params["preprocessing_chain_traceable"] = False
     return TrainConfig(
@@ -1728,6 +1742,9 @@ def _reject_caller_owned_platform_params(value: object, path: str = "params") ->
     platform_owned = {
         "preprocessing_steps",
         "preprocessing_chain_traceable",
+        "preprocessing_assurance",
+        "preprocessing_evidence",
+        "feature_time_evidence",
         "refit_on_train_plus_test",
         "split_col",
         "split_values",

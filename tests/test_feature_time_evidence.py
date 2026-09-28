@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -10,6 +11,7 @@ from marvis.data.asof_join import AsOfJoinEngine
 from marvis.data.feature_time import feature_time_evidence
 from marvis.data.time_contracts import DatasetTimeContract
 from marvis.packs.modeling.prepare import prepare_modeling_frame
+from marvis.packs.modeling.train_tools import _preprocessing_chain_traceable
 from marvis.plugins.manifest import ToolRef
 from marvis.repositories.modeling import ModelingRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
@@ -83,6 +85,7 @@ def test_only_native_selected_fields_are_certified_and_anchor_payload_stays_unkn
     scenario,
 ):
     _, registry, _, joined = scenario
+    original = registry.get(joined.dataset.id)
     evidence = feature_time_evidence(
         registry, joined.dataset.id, ["asof__amount", "anchor_payload"]
     )
@@ -92,6 +95,21 @@ def test_only_native_selected_fields_are_certified_and_anchor_payload_stays_unkn
     assert evidence["artifact_ids"] == [joined.status.artifact_id]
     assert "source_authenticity" in evidence["excluded_assurances"]
     assert "s0" not in json.dumps(evidence)
+    assert registry.get(joined.dataset.id) == original
+
+
+def test_legacy_unknown_schema_read_does_not_load_the_whole_frame(scenario, monkeypatch):
+    _, registry, _, _ = scenario
+    source = next(item for item in registry.list_for_task("task-feature") if item.role == "decisions")
+    before = registry.get(source.id)
+
+    def unexpected_data_read(*args, **kwargs):
+        pytest.fail("legacy temporal lookup decoded sample rows")
+
+    monkeypatch.setattr(registry, "read_authenticated_parquet_snapshot", unexpected_data_read)
+    evidence = feature_time_evidence(registry, source.id, ["anchor_payload"])
+    assert evidence["assurance"] == "unknown"
+    assert registry.get(source.id) == before
 
 
 def test_actual_prepare_train_keeps_empty_preprocessing_temporal_chain(scenario):
@@ -109,6 +127,7 @@ def test_actual_prepare_train_keeps_empty_preprocessing_temporal_chain(scenario)
     assert evidence["assurance"] == "verified"
     assert joined.status.artifact_id in evidence["artifact_ids"]
     assert len(evidence["artifact_ids"]) == 2
+    assert not _preprocessing_chain_traceable(SimpleNamespace(registry=registry), prepared.id)
     trained = runner.invoke(
         ToolRef("modeling", "train_model"),
         {

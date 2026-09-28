@@ -78,12 +78,10 @@ def _fields(registry, dataset_id, seen):
     if dataset_id in seen or len(seen) >= 64:
         raise FeatureError("temporal lineage is cyclic or exceeds 64 transforms")
     dataset = registry.get(dataset_id)
-    binding = registry.authenticate_dataset_binding(
-        dataset_id,
-        expected_task_id=dataset.task_id,
-        expected_content_hash=dataset.content_hash,
-    )
-    names = registry.authenticated_binding_column_names(binding)
+    # Reading evidence must not repin the registry's source_path: sample-design
+    # artifacts may already freeze that exact path. The retained-descriptor
+    # snapshot authenticates bytes without changing an existing producer binding.
+    names = registry.authenticated_parquet_column_names(dataset_id)
     fields = {name: _unknown("no_field_availability_evidence") for name in names}
     repo = TaskArtifactRepository(registry._repo.db_path)
     engine = AsOfJoinEngine(
@@ -94,6 +92,7 @@ def _fields(registry, dataset_id, seen):
         if not native["fields"].keys() <= fields.keys():
             raise FeatureError("temporal evidence fields differ from dataset")
         fields.update(native["fields"])
+        _verify_dataset_unchanged(registry, dataset)
         return fields, [native["artifact_id"]], dataset
     state = load_preprocessing_state(registry, dataset_id)
     if not state.artifact_id:
@@ -105,8 +104,9 @@ def _fields(registry, dataset_id, seen):
             projected = _project_operations(parent, transformed.operations)
             if set(projected) != set(names):
                 raise FeatureError("temporal transform output schema changed")
-            registry.verify_dataset_binding(binding)
+            _verify_dataset_unchanged(registry, dataset)
             return projected, [*artifacts, transformed.result_artifact_id], dataset
+        _verify_dataset_unchanged(registry, dataset)
         return fields, [], dataset
     record = repo.get_for_task(dataset.task_id, state.artifact_id)
     proof = record["provenance"]
@@ -127,9 +127,7 @@ def _fields(registry, dataset_id, seen):
             before = registry.read_authenticated_parquet_snapshot(
                 source_id, columns=retained
             )
-            after = registry.read_authenticated_binding_snapshot(
-                binding, columns=retained
-            )
+            after = registry.read_authenticated_parquet_snapshot(dataset_id, columns=retained)
             for name in retained:
                 if (
                     not before[name]
@@ -142,8 +140,14 @@ def _fields(registry, dataset_id, seen):
     # Preparation may project fields and add a split. A new field stays unknown;
     # Unchanged values and order above bind each inherited timing claim.
     fields.update({name: projected[name] for name in names if name in projected})
-    registry.verify_dataset_binding(binding)
+    _verify_dataset_unchanged(registry, dataset)
     return fields, [*artifacts, state.artifact_id], dataset
+
+
+def _verify_dataset_unchanged(registry, dataset):
+    if registry.get(dataset.id) != dataset:
+        raise FeatureError("temporal dataset binding changed during verification")
+    registry.resolve_verified_path(dataset.id)
 
 
 def _project_step(fields, step):
