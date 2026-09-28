@@ -372,7 +372,7 @@ def test_client_falls_back_to_json_object_when_schema_unsupported(monkeypatch):
             "api_base_url": "https://api.example.com/v1",
             "model_name": "m",
             "api_key": "secret",
-            # structured_output defaults to json_object -> schema ignored
+            # JSON syntax is provider-enforced; fields are conveyed in the prompt.
         }
     ).complete(
         system_prompt="s",
