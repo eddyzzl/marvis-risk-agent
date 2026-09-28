@@ -24,7 +24,8 @@ from marvis.orchestrator.eval.runtime_runner import run_runtime_suite
 
 
 @contextmanager
-def fixture_model(*, missing_usage=False, fail_first=False, delay=0, sse=False):
+def fixture_model(*, missing_usage=False, fail_first=False, delay=0, sse=False,
+                  answer_factory=None):
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -62,6 +63,8 @@ def fixture_model(*, missing_usage=False, fail_first=False, delay=0, sse=False):
                     requests_change=False,
                     withholds_action=False,
                 )
+            if answer_factory is not None:
+                answer = answer_factory(request, answer, payload)
             content = json.dumps(answer, ensure_ascii=False)
             body = {
                 "choices": [{"message": {"content": content}, "finish_reason": "stop"}]

@@ -18,7 +18,9 @@ import pandas as pd
 from .runtime_contracts import digest
 
 
-def write_synthetic_suite(root: Path) -> dict[str, Path]:
+def write_synthetic_suite(
+    root: Path, *, include_workflow_families: bool = False
+) -> dict[str, Path]:
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     data = root / "data"
     private = root / "private"
@@ -46,6 +48,10 @@ def write_synthetic_suite(root: Path) -> dict[str, Path]:
             ),
         ),
     }
+    if include_workflow_families:
+        from .runtime_family_cases import workflow_frames
+
+        frames.update(workflow_frames())
     materials = {}
     for name, (role, frame) in frames.items():
         frame.to_parquet(data / name, index=False)
@@ -134,6 +140,12 @@ def write_synthetic_suite(root: Path) -> dict[str, Path]:
             ],
         },
     }
+    if include_workflow_families:
+        from .runtime_family_cases import workflow_cases
+
+        additional_cases, additional_expected = workflow_cases(materials)
+        cases.extend(additional_cases)
+        expected.update(additional_expected)
     paths = {
         "cases": root / "cases.json",
         "expected": private / "expected.json",
@@ -164,6 +176,9 @@ def write_synthetic_suite(root: Path) -> dict[str, Path]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--include-workflow-families", action="store_true")
     args = parser.parse_args()
-    for name, path in write_synthetic_suite(args.directory).items():
+    for name, path in write_synthetic_suite(
+        args.directory, include_workflow_families=args.include_workflow_families
+    ).items():
         print(f"{name}={path}")

@@ -8,12 +8,13 @@ independent cases, thresholds and business approval outside this local runner.
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import Field
 
 from .runtime_contracts import (
     StrictModel,
+    RuntimeTask,
     RUNTIME_ATTEMPT_OUTCOMES,
     RUNTIME_FINISH_REASONS,
     digest,
@@ -23,11 +24,13 @@ from .runtime_contracts import (
 class Assertion(StrictModel):
     kind: Literal[
         "tool_succeeded",
+        "tool_not_executed",
         "output_equals",
         "output_close",
         "output_length",
         "http_status",
         "message_metadata",
+        "latest_assistant_metadata",
         "dataset_rows",
         "artifact_exists",
     ]
@@ -72,14 +75,31 @@ def _assertion(assertion, record, private):
             if event["stage"] == assertion.stage
         ]
         return bool(values) and all(value == assertion.value for value in values)
-    if assertion.kind == "message_metadata":
-        for message in private["messages"]:
+    if assertion.kind in {"message_metadata", "latest_assistant_metadata"}:
+        messages = private["messages"]
+        if assertion.kind == "latest_assistant_metadata":
+            messages = [m for m in messages if m.get("role") == "assistant"][-1:]
+        for message in messages:
             try:
                 if _at(message.get("metadata", {}), assertion.path) == assertion.value:
                     return True
             except (KeyError, IndexError, TypeError):
                 pass
         return False
+    if assertion.kind == "tool_not_executed":
+        targets = [
+            step for step in record.get("execution", {}).get("steps", [])
+            if step["tool"] == assertion.tool
+        ]
+        # A missing plan, a tool failure, or an unbound output is not proof of
+        # non-execution. Every matching declared step must have no invocation.
+        return bool(targets) and all(
+            step["status"] in {"pending", "skipped"}
+            and not step.get("runs")
+            and not step.get("output_ref")
+            and not step.get("producer_invocation_id")
+            for step in targets
+        )
     steps = [
         step
         for step in record.get("execution", {}).get("steps", [])
@@ -244,7 +264,8 @@ def score_case(
             status in {"running", "confirmed", "done"} for status in statuses
         )
         terminal_ok &= any(
-            a.kind in {"message_metadata", "http_status"} for a in expected.assertions
+            a.kind in {"message_metadata", "latest_assistant_metadata", "http_status"}
+            for a in expected.assertions
         )
     checks = [_assertion(a, record, private) for a in expected.assertions]
     job = record.get("execution", {}).get("latest_job") or {}
@@ -313,10 +334,51 @@ def summarize(records):
     return {
         "summary": _rate(records),
         "groups": groups,
+        "runtime_task_coverage": runtime_task_coverage(records),
         "all_passed": all(record["score"]["passed"] for record in records),
         "a_evidence_case_count": sum(
             record["score"].get("a_evidence_eligible", False) for record in records
         ),
+    }
+
+
+def runtime_task_coverage(records):
+    """Expose missing families/scenarios even when a selected subset passes.
+
+    The supported HTTP intake types are a finite scope, not a claim to cover
+    all installed tools, production workflows, or independently held acceptance.
+    Legacy receipts with no task_type remain unclassified instead of inferred
+    from caller-chosen family labels.
+    """
+    task_types = get_args(RuntimeTask.model_fields["task_type"].annotation)
+    scenarios = ("normal", "clarification", "rejection", "recovery")
+    cells = {}
+    missing = []
+    for task_type in task_types:
+        cells[task_type] = {}
+        for scenario in scenarios:
+            members = [
+                r for r in records
+                if r.get("task_type") == task_type and r["scenario"] == scenario
+            ]
+            cells[task_type][scenario] = {
+                **_rate(members),
+                "case_ids": [r["case_id"] for r in members],
+                "real_model_runtime_eligible": sum(
+                    r["score"].get("a_evidence_eligible", False) for r in members
+                ),
+            }
+            if not members:
+                missing.append({"task_type": task_type, "scenario": scenario})
+    return {
+        "scope": "supported_http_intake_types; not all product workflows or acceptance",
+        "cells": cells,
+        "missing_cells": missing,
+        "unclassified_case_ids": [
+            r["case_id"] for r in records if r.get("task_type") not in task_types
+        ],
+        "all_cells_represented": not missing,
+        "acceptance_claim": "not_established",
     }
 
 

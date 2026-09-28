@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
+from marvis.api_schemas import PortfolioSetupRequest
 
 RUNTIME_FINISH_REASONS = frozenset(
     {"stop", "length", "tool_calls", "function_call", "content_filter", "other"}
@@ -101,19 +102,31 @@ class RuntimeTask(StrictModel):
 
 
 class RuntimeAction(StrictModel):
-    kind: Literal["message", "approve_step", "replay_approval", "retry_step", "stop"]
+    kind: Literal[
+        "message", "approve_step", "reject_step", "replay_approval", "retry_step", "stop"
+    ]
     content: str = ""
     tool: str = ""
+    portfolio_request: PortfolioSetupRequest | None = None
 
     @model_validator(mode="after")
     def required_fields(self):
-        if self.kind in {"message", "approve_step"} and not self.content.strip():
+        if self.portfolio_request is not None and self.kind != "message":
+            raise ValueError("portfolio_request belongs to a user message only")
+        if self.kind in {"message", "approve_step", "reject_step"} and not self.content.strip():
             raise ValueError(
                 "a user message / approval requires explicit business text"
             )
-        if self.kind in {"approve_step", "retry_step"} and not self.tool.strip():
+        if self.kind in {"approve_step", "reject_step", "retry_step"} and not self.tool.strip():
             raise ValueError("a step action requires a tool reference")
         return self
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_identity(self, handler):
+        value = handler(self)
+        if value.get("portfolio_request") is None:
+            value.pop("portfolio_request", None)
+        return value
 
 
 class RuntimeCase(StrictModel):

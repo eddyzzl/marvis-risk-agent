@@ -940,17 +940,22 @@ class Journey:
         for action in self.case.actions:
             if action.kind == "message":
                 self.interventions += 1
+                message = {
+                    "content": action.content,
+                    "acceptance_mode": self.case.acceptance_mode,
+                }
+                if action.portfolio_request is not None:
+                    message["portfolio_request"] = action.portfolio_request.model_dump(
+                        exclude_none=True
+                    )
                 self.json_request(
                     "POST",
                     f"/api/tasks/{self.task_id}/agent/messages",
                     label="agent_user_turn",
-                    json={
-                        "content": action.content,
-                        "acceptance_mode": self.case.acceptance_mode,
-                    },
+                    json=message,
                 )
                 self.wait_idle()
-            elif action.kind in {"approve_step", "retry_step"}:
+            elif action.kind in {"approve_step", "reject_step", "retry_step"}:
                 plans = self.plans()
                 match = [
                     (p, s)
@@ -960,7 +965,7 @@ class Journey:
                     and s["status"]
                     == (
                         "awaiting_confirm"
-                        if action.kind == "approve_step"
+                        if action.kind != "retry_step"
                         else "failed"
                     )
                 ]
@@ -971,15 +976,19 @@ class Journey:
                 plan, step = match[0]
                 prefix = f"/api/plans/{plan['id']}/steps/{step['id']}"
                 self.interventions += 1
-                if action.kind == "approve_step":
+                if action.kind in {"approve_step", "reject_step"}:
                     approval = {
-                        "decision": "approve",
+                        "decision": "approve" if action.kind == "approve_step" else "reject",
                         "reason": action.content,
                         **step["confirmation_snapshot"],
                     }
-                    self.approval = (prefix + "/decisions", approval)
+                    route = prefix + "/decisions"
+                    if action.kind == "approve_step":
+                        self.approval = (route, approval)
                     self.json_request(
-                        "POST", self.approval[0], label="human_approval", json=approval
+                        "POST", route,
+                        label="human_approval" if action.kind == "approve_step" else "human_rejection",
+                        json=approval,
                     )
                     self.wait_idle(changed_step=step["id"])
                 else:
@@ -1159,6 +1168,7 @@ def _run_case(
     record = {
         "case_id": case.id,
         "family": case.family,
+        "task_type": case.task.task_type,
         "case_set": case.case_set,
         "scenario": case.scenario,
         "case_sha256": digest(case.model_dump()),
@@ -1395,6 +1405,7 @@ def run_runtime_suite(
             record = {
                 "case_id": case.id,
                 "family": case.family,
+                "task_type": case.task.task_type,
                 "case_set": case.case_set,
                 "scenario": case.scenario,
                 "runtime_status": "not_run_after_interrupt",
