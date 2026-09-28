@@ -1032,6 +1032,7 @@ def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
     from marvis.repositories.plans import PlanRepository
     from marvis.repositories.tasks import TaskRepository
     from marvis.repositories.datasets import DatasetRepository
+    from marvis.agent.semantic_diagnostics import sanitize_diagnostics
     from marvis.settings import Settings
 
     db = Settings(workspace).db_path
@@ -1061,6 +1062,18 @@ def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
         else None
     )
     private = {"outputs": {}, "messages": tasks.list_agent_messages(task_id)}
+    semantic_observations = []
+    for ordinal, message in enumerate(private["messages"], 1):
+        metadata = message.get("metadata")
+        if message.get("role") != "assistant" or not isinstance(metadata, dict):
+            continue
+        safe = sanitize_diagnostics(metadata.get("semantic_diagnostics"))
+        if safe:
+            semantic_observations.append({"message_ordinal": ordinal, **safe})
+    if semantic_observations:
+        # Diagnostic facts only; neither raw message text nor authorization proof.
+        # Preserve them before the isolated workspace is removed after scoring.
+        evidence["semantic_observations"] = semantic_observations
     for plan in repo.list_plans_for_task(task_id):
         evidence["plans"].append(
             {
