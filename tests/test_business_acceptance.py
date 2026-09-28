@@ -254,16 +254,21 @@ def test_malformed_contract_enums_raise_value_error(field):
         BusinessObjective.from_dict({**objective().to_dict(), field: []})
 
 
-def test_candidate_max_upper_bound_cannot_be_replaced_by_adopted_object_bound():
+@pytest.mark.parametrize("aggregate", ["omitted", None, "max"])
+def test_candidate_max_upper_bound_cannot_be_replaced_by_adopted_object_bound(
+    aggregate,
+):
     from marvis.business_acceptance import bind_business_criteria
 
     upper = objective(
         criteria=(BusinessCriterion("oot_ks", "ratio", "mature_loans", maximum=0.5),)
     )
-    with pytest.raises(ValueError, match="无法映射"):
-        bind_business_criteria(
-            upper, [{"metric": "oot_ks", "max": 0.5, "aggregate": "max"}]
-        )
+    legacy = {"metric": "oot_ks", "max": 0.5}
+    if aggregate != "omitted":
+        legacy["aggregate"] = aggregate
+    with pytest.raises(ValueError, match="候选最大值上界.*不等价"):
+        bind_business_criteria(upper, [legacy])
+    assert legacy["max"] == 0.5
     # Adopted KS >= 0.3 does imply the candidate maximum is >= 0.3.
     lower = {"metric": "oot_ks", "min": 0.3, "aggregate": "max"}
     assert bind_business_criteria(objective(), [lower])[1] == lower

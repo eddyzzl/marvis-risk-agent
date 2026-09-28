@@ -418,6 +418,14 @@ def require_objective_covers_legacy(objective, criteria):
         if item.get("schema_version") == OBJECTIVE_VERSION:
             continue
         metric = item.get("metric")
+        # The historic reviewer defaults omitted aggregate to candidate max.
+        # A cap on that maximum constrains every candidate, which one adopted
+        # value cannot discharge even when the numerical bound is identical.
+        if item.get("aggregate") in {None, "max"} and "max" in item:
+            raise ValueError(
+                f"旧阈值 {metric!r} 的候选最大值上界与新采用对象阈值不等价；"
+                "请明确迁移旧聚合约束，不能仅用采用对象的单值覆盖。"
+            )
         criterion = by_metric.get(metric)
         if (
             set(item) - {"metric", "min", "max", "aggregate", "label", "target_type"}
@@ -427,7 +435,6 @@ def require_objective_covers_legacy(objective, criteria):
             or criterion.unit != "ratio"
             or criterion.comparison != "absolute"
             or item.get("aggregate") not in {None, "max"}
-            or (item.get("aggregate") == "max" and "max" in item)
             or not (set(item) & {"min", "max"})
         ):
             raise ValueError(
