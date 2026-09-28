@@ -233,6 +233,7 @@ def replay_batch(
                 population=temporal_population,
                 package_hash=scenario.package_hash,
                 score_product=manifest["configuration"]["score_product"],
+                package_kind=manifest["configuration"].get("package_kind", "model"),
             )
         scenarios.append(
             {

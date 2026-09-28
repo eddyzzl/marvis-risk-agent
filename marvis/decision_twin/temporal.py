@@ -197,16 +197,19 @@ def measure_temporal_stability(
     *,
     population: TemporalPopulation,
     package_hash: str,
-    score_product: str,
+    score_product: str | None,
+    package_kind: str = "model",
 ):
     actual_population = bind_temporal_population(records, contract)
     if actual_population != population:
         raise ValueError("temporal population binding drifted")
-    if len(records) != len(decisions) or score_product not in {
-        "raw_pd",
-        "calibrated_pd",
-        "scorecard_points",
-    }:
+    rule_only = package_kind == "rule_only"
+    if package_kind not in {"model", "rule_only"} or len(records) != len(decisions):
+        raise ValueError("temporal replay score population mismatch")
+    if (rule_only and score_product is not None) or (
+        not rule_only
+        and score_product not in {"raw_pd", "calibrated_pd", "scorecard_points"}
+    ):
         raise ValueError("temporal replay score population mismatch")
     scores = []
     for record, decision in zip(records, decisions, strict=True):
@@ -221,15 +224,30 @@ def measure_temporal_stability(
         ):
             raise ValueError("temporal replay package or score product drifted")
         score = decision.get("score")
-        if type(score) not in (int, float) or not math.isfinite(score):
+        if rule_only and (
+            "score" not in decision or "score_product" not in decision or score is not None
+        ):
+            raise ValueError("rule-only replay cannot contain a model score")
+        if not rule_only and (type(score) not in (int, float) or not math.isfinite(score)):
             raise ValueError("temporal replay requires finite native scores")
-        if score_product != "scorecard_points" and not 0 <= score <= 1:
+        if not rule_only and score_product != "scorecard_points" and not 0 <= score <= 1:
             raise ValueError("temporal probability is outside its native range")
         if decision.get("action", {}).get("type") not in _ACTIONS:
             raise ValueError("temporal replay requires a supported native action")
         scores.append(score)
-    scores = np.asarray(scores, dtype=float)
-    edges, bins = _reference_bins(scores, population, contract)
+    if rule_only:
+        # No score was produced, so no rows fitted score bins. Keep the actual
+        # temporal membership and action distribution independently measurable.
+        scores, edges = None, None
+        bins = {
+            "status": "unknown", "reason": "package_has_no_score",
+            "requested_bin_count": contract.bin_count, "actual_bin_count": None,
+            "edges": None, "proportions": None, "fit_sample_count": 0,
+            "fit_members_hash": None, "fit_scope": "not_applicable",
+        }
+    else:
+        scores = np.asarray(scores, dtype=float)
+        edges, bins = _reference_bins(scores, population, contract)
     reference_actions = _actions(decisions, population.reference.positions)
     reference_supported = (
         len(population.reference.positions) >= contract.minimum_reference_rows
