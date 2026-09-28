@@ -61,3 +61,17 @@ export function gateHtml(plan) {
   if (!s) return "";
   return `<section class="collection-gate"><h4>人工复核 · ${esc(s.title)}</h4><p class="collection-note">核对当前冻结批次、政策、历史覆盖和资源限制。仅授权本次计划快照；执行仍是本地参考模拟。</p>${details("查看待执行合同", s.inputs)}<label>本次复核理由<input name="collection_decision_reason" required maxlength="4000"></label><div class="collection-actions">${button("approve", "授权本次执行")}${button("reject", "拒绝本次执行")}</div></section>`;
 }
+
+export function collectionError(error) {
+  const code = error?.detail?.code;
+  const labels = {
+    collection_idempotency_conflict: "该业务编号已登记且内容不同，请核对原记录",
+    collection_material_identity_conflict:
+      "该导入编号已绑定其他文件或映射，请核对来源或使用新编号",
+    collection_case_actor_forbidden: "当前会话不属于这些案件的配置人员",
+    collection_material_actor_forbidden: "当前会话没有登记该来源的权限",
+    collection_contract_invalid:
+      "资料不符合业务合同，请核对必填字段、单位、时点及编号",
+  };
+  return labels[code] || code || error?.message || "提交失败，请核对本次资料";
+}

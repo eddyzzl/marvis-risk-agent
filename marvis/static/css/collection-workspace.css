@@ -174,3 +174,19 @@
   align-self: end;
   justify-self: start;
 }
+
+.collection-csv-mapping {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  margin: 12px 0;
+}
+.collection-csv-mapping > label:nth-child(odd) {
+  grid-column: 1;
+}
+.collection-csv-mapping > label:nth-child(even) {
+  grid-column: 2;
+}
+.collection-csv-mapping > [hidden] {
+  display: none;
+}

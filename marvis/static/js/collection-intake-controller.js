@@ -1,3 +1,4 @@
+import { createCollectionCsvController } from "./collection-csv-controller.js";
 import { escapeHtml as esc } from "./ui-utils.js";
 import {
   intakeHtml,
@@ -8,7 +9,12 @@ import {
   valuesOf,
   collectIntake,
 } from "./collection-intake-form.js";
-import { button, details, money } from "./collection-workspace-view.js";
+import {
+  button,
+  details,
+  money,
+  collectionError,
+} from "./collection-workspace-view.js";
 const path = encodeURIComponent;
 const routes = {
   case: "cases",
@@ -17,7 +23,7 @@ const routes = {
   reconcile: "reconciliations",
   batch: "batch-proposals",
 };
-const err = (e) => e?.detail?.code || e?.message || "提交失败，请核对本次资料";
+const err = collectionError;
 export function createCollectionIntakeController({
   getRoot,
   getOwner,
@@ -41,12 +47,25 @@ export function createCollectionIntakeController({
     identity(d.owner) === d.identity;
   const post = (url, value) =>
     apiClient(url, { method: "POST", body: JSON.stringify(value) });
+  const bulk = createCollectionCsvController({
+    getRoot,
+    getOwner,
+    isCurrent,
+    apiClient,
+    message,
+    setPending,
+    refresh,
+    onOpen: () => {
+      draft = null;
+    },
+  });
   function open(kind) {
     const owner = getOwner();
     if (owner?.principal?.role !== "maker") {
       message("请先读取工作区，并使用案件所属配置人员的会话");
       return;
     }
+    bulk.reset();
     draft = {
       owner,
       identity: identity(owner),
@@ -216,6 +235,7 @@ export function createCollectionIntakeController({
     }
   }
   function handle(event) {
+    if (bulk.handle(event)) return true;
     const form = event.target.closest("[data-collection-form]");
     if (event.type === "submit" && form) {
       event.preventDefault();

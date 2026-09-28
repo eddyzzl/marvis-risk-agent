@@ -106,7 +106,7 @@ const elements=new Map();const root={querySelector:s=>{if(!elements.has(s))eleme
 let owner={taskId:'A',principal:{id:'maker-A',role:'maker'},cases:[],pending:false};let messages=[],calls=[],refreshes=0;
 const intake=createCollectionIntakeController({getRoot:()=>root,getOwner:()=>owner,isCurrent:o=>o===owner,apiClient:(url,options)=>new Promise((resolve,reject)=>calls.push({url,options,resolve,reject})),message:s=>messages.push(s),setPending:(o,p)=>o.pending=p,refresh:async()=>{refreshes++},onBatch:async()=>{},downloadBlob:()=>{}});
 const formOf=values=>({querySelectorAll:s=>s==='[name]'?Object.entries(values).map(([name,value])=>({name,value})):[]});
-const submit=form=>intake.handle({type:'submit',target:{closest:()=>form},preventDefault(){}});
+const submit=form=>intake.handle({type:'submit',target:{closest:s=>s==='[data-collection-form]'?form:null},preventDefault(){}});
 const caseValues={case_id:'case-1',subject_namespace:'bank',subject_token:'a'.repeat(64),currency:'CNY',minor_unit_exponent:'2',definition_source:'Explicit source',opening_balance_minor:'10000',opened_at:'2026-08-01T00:00:00Z',source_description:'declared'};
 '''
 

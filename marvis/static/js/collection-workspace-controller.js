@@ -156,6 +156,7 @@ export function createCollectionWorkspaceController({
               ["new-cashflow", "登记资金观测"],
               ["new-reconcile", "核对资金"],
               ["new-batch", "配置参考批次"],
+              ["import-csv", "批量资料映射"],
               ["import-batch", "高级合同导入"],
             ]
               .map(([action, label]) => button(action, label))
