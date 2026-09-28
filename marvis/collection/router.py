@@ -37,11 +37,13 @@ def error(exc):
 
 
 async def body(request, model):
-    raw = await request.body()
-    if len(raw) > 16_000_000:
-        raise HTTPException(413, {"code": "collection_request_too_large"})
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 16_000_000:
+            raise HTTPException(413, {"code": "collection_request_too_large"})
+        raw.extend(chunk)
     try:
-        return model.model_validate(_decode(raw))
+        return model.model_validate(_decode(bytes(raw)))
     except ValueError:
         raise HTTPException(422, {"code": "collection_contract_invalid"}) from None
 
