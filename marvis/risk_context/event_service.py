@@ -144,6 +144,17 @@ class EventService:
             self._access(conn, body, request, actor_id, grant_id, "read")
         return self._proposal(body, request)
 
+    def authorize_inputs(self, conn, task_id, inputs, actor_id):
+        """Read a pending plan's signed intent without executing its producer."""
+        inputs = EventToolInput.model_validate(inputs)
+        body, request = self._intent(conn, task_id, inputs.request_id)
+        if (
+            inputs.proposal_hash != content_hash(body)
+            or inputs.contract != request.contract
+        ):
+            raise EventError("event_reviewed_contract_mismatch")
+        self._access(conn, body, request, actor_id, request.grant_id, "read")
+
     def execute(self, task_id, inputs: EventToolInput, *, invocation=None):
         inputs = EventToolInput.model_validate(inputs.model_dump())
         with connect(self.repo.db_path) as conn:

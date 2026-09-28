@@ -383,6 +383,37 @@ class ExecutionReconciler:
         ).fetchall():
             self.verifiers.authorize_read(run["tool_ref"], run["id"], conn)
 
+    def authorize_proposed_plan_read(self, plan, *, actor_id=None):
+        with self.verifiers.reader(actor_id), connect(self.repo.db_path) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            for step in plan.steps:
+                self.verifiers.authorize_inputs(
+                    step.tool_ref.plugin + "." + step.tool_ref.tool,
+                    plan.task_id, step.inputs, conn,
+                )
+
+    def authorize_plan_read(self, plan_id, *, actor_id=None):
+        """Read-only authorization; no job, completion, or execution mutation."""
+        with self.verifiers.reader(actor_id), connect(self.repo.db_path) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            self._authorize_reads(plan_id, conn)
+            for step in conn.execute(
+                """SELECT s.*,p.task_id FROM plan_steps s JOIN plans p ON p.id=s.plan_id WHERE p.id=?""",
+                (plan_id,),
+            ).fetchall():
+                self.verifiers.authorize_inputs(
+                    step["tool_plugin"] + "." + step["tool_name"],
+                    step["task_id"], json.loads(step["inputs_json"]), conn,
+                )
+
+    def authorize_task_read(self, task_id, *, actor_id=None):
+        with connect(self.repo.db_path) as conn:
+            plans = conn.execute(
+                "SELECT id FROM plans WHERE task_id=?", (task_id,)
+            ).fetchall()
+        for plan in plans:
+            self.authorize_plan_read(plan["id"], actor_id=actor_id)
+
     def _reconcile(self, plan_id, target_id, *, resume_completion=False):
         plan = self.repo.load_plan(plan_id)
         self._authorize_reads(plan_id)

@@ -118,7 +118,14 @@ def proposal(ctx, *, client=None, contract=None):
     return response.json()
 
 
-def run(ctx, proposed, *, goal="历史决策回放", slot="replay_contract"):
+def run(
+    ctx,
+    proposed,
+    *,
+    goal="历史决策回放",
+    slot="replay_contract",
+    expect_read_denied=False,
+):
     client = ctx.rt.maker
     response = client.post(
         f"/api/tasks/{ctx.material.task_id}/plans",
@@ -149,7 +156,14 @@ def run(ctx, proposed, *, goal="历史决策回放", slot="replay_contract"):
         },
     )
     assert response.status_code == 202, response.text
-    return client.get(f"/api/plans/{plan['id']}").json()["plan"]
+    response = client.get(f"/api/plans/{plan['id']}")
+    if expect_read_denied:
+        from test_event_runtime import private_plan_snapshot
+
+        assert response.status_code == 403, response.text
+        return private_plan_snapshot(ctx.rt.app, plan["id"])
+    assert response.status_code == 200, response.text
+    return response.json()["plan"]
 
 
 def receipts(ctx):
@@ -405,6 +419,22 @@ def test_integrity_authority_or_context_failure_aborts_whole_real_worker_batch(
             f"/api/tasks/{ctx.rt.task.id}/risk-events/grants/{ctx.reference.grant_id}/revoke"
         )
         assert response.status_code == 200
+        response = ctx.rt.maker.post(
+            f"/api/tasks/{ctx.material.task_id}/plans",
+            json={
+                "goal": "历史决策回放",
+                "slots": {
+                    "replay_contract": prepared["contract"],
+                    "proposal_hash": prepared["proposal_hash"],
+                },
+            },
+        )
+        assert response.status_code == 403, response.text
+        assert (
+            ctx.rt.app.state.plan_repo.list_plans_for_task(ctx.material.task_id) == []
+        )
+        assert receipts(ctx) == []
+        return
     if failure == "native_file":
         record = ctx.material.artifacts.get_for_task(
             ctx.rt.task.id, ctx.evidence["artifact_id"]

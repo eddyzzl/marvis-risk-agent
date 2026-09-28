@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from marvis.errors import conflict, unprocessable
+from marvis.governance.http_reads import native_task_read_scope
 
 from marvis.agent.service import (
     agent_rerun_stage,
@@ -369,6 +370,7 @@ def _report_revision_instruction_context(
 
 
 @router.get("/tasks/{task_id}/agent/messages")
+@native_task_read_scope
 def get_agent_messages(
     task_id: str,
     request: Request,
@@ -565,6 +567,7 @@ def _enrich_historical_result_download(
 
 
 @router.post("/tasks/{task_id}/agent/start", status_code=202)
+@native_task_read_scope
 def start_agent_task(
     task_id: str,
     payload: AgentModelRequest,
@@ -611,6 +614,7 @@ def start_agent_task(
 
 
 @router.post("/tasks/{task_id}/agent/messages", status_code=202)
+@native_task_read_scope
 def post_agent_message(
     task_id: str,
     payload: AgentMessageRequest,
@@ -1174,6 +1178,7 @@ def post_agent_message(
 
 
 @router.post("/tasks/{task_id}/agent/stop", status_code=202)
+@native_task_read_scope
 def stop_agent_action(task_id: str, request: Request) -> dict:
     repo = agent_repo(request)
     task = get_task_or_404(repo, task_id)
@@ -1182,6 +1187,7 @@ def stop_agent_action(task_id: str, request: Request) -> dict:
 
 
 @router.post("/tasks/{task_id}/agent/summarize")
+@native_task_read_scope
 def summarize_agent_task(
     task_id: str,
     payload: AgentModelRequest,
@@ -1219,6 +1225,7 @@ def summarize_agent_task(
 
 
 @router.post("/tasks/{task_id}/agent/report-draft")
+@native_task_read_scope
 def draft_agent_report_conclusions(
     task_id: str,
     payload: AgentModelRequest,
@@ -1270,6 +1277,7 @@ def draft_agent_report_conclusions(
 
 
 @router.put("/tasks/{task_id}/agent/report-draft")
+@native_task_read_scope
 def save_agent_report_draft_route(
     task_id: str, payload: AgentReportDraftSaveRequest, request: Request,
 ) -> dict:
@@ -1290,6 +1298,7 @@ def save_agent_report_draft_route(
 
 
 @router.post("/tasks/{task_id}/agent/report-draft/confirm", status_code=202)
+@native_task_read_scope
 def confirm_agent_report_conclusions_route(
     task_id: str,
     payload: AgentReportDraftConfirmRequest,

@@ -60,7 +60,7 @@ def _case(
         tool_ref = "risk_context.replay_events"
 
         def run():
-            return approve(rt, plan)
+            return approve(rt, plan, expect_read_denied=unbound and completion_loss)
 
         task_id = rt.task.id
     else:
@@ -109,7 +109,13 @@ def _case(
             )
 
         def run():
-            return batches.run(ctx, proposed, goal=goal, slot=slot)
+            return batches.run(
+                ctx,
+                proposed,
+                goal=goal,
+                slot=slot,
+                expect_read_denied=unbound and completion_loss,
+            )
 
         task_id = ctx.material.task_id
 
@@ -507,7 +513,8 @@ def test_missing_receipt_file_cannot_skip_cached_resolution_read_guard(
 
 
 def test_ordinary_legacy_batch_without_source_scope_keeps_completion(
-    ordinary_batch, monkeypatch  # noqa: F811
+    ordinary_batch,  # noqa: F811
+    monkeypatch,
 ):
     app, material, contract, _, _ = ordinary_batch
     client = TestClient(app)

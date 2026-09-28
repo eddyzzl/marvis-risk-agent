@@ -384,7 +384,59 @@ def authorize_native_read(settings, event_repository, run_id, conn, actor_id):
         ) from exc
 
 
-def register_native_outcome_verifiers(registry, settings, event_repository):
+def authorize_native_inputs(
+    settings, event_service, producer, task_id, inputs, conn, actor_id
+):
+    try:
+        if producer == "risk_context.replay_events":
+            event_service.authorize_inputs(conn, task_id, inputs, actor_id)
+            return
+        if not _legacy_output_is_sensitive(
+            conn,
+            {
+                "tool_ref": producer,
+                "input_json": canonical_json(inputs),
+                "task_id": task_id,
+            },
+        ):
+            return
+        from marvis.decision_twin.batch_contracts import (
+            HistoricalReplayRequest,
+            HistoricalReconciliationRequest,
+        )
+        from marvis.decision_twin.batch_material import sign_batch_body
+        from marvis.decision_twin.event_batch import read_event_intent
+
+        replay = producer == "decision_twin.replay_history"
+        schema = HistoricalReplayRequest if replay else HistoricalReconciliationRequest
+        contract = schema.model_validate(inputs["contract"])
+        secret = settings.plugin_admin_token_path.read_text().strip().encode()
+        body = read_event_intent(
+            conn,
+            task_id,
+            inputs["proposal_hash"],
+            contract.contract_hash,
+            "replay" if replay else "reconcile",
+            lambda value: sign_batch_body(secret, value),
+        )
+        for scope in body["scopes"]:
+            source = event_service.repo._access(
+                conn,
+                scope["task_id"],
+                scope["source_id"],
+                scope["grant_id"],
+                actor_id,
+                "read",
+            )
+            if source.contract_hash != scope["source_contract_hash"]:
+                raise ValueError("native_source_scope_changed")
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        raise PermissionError("当前用户无权读取该计划的来源合同或派生结果。") from exc
+
+
+def register_native_outcome_verifiers(registry, settings, event_service):
+    event_repository = event_service.repo
+
     def verify(target, conn):
         return verify_native_outcome(settings, event_repository, target, conn)
 
@@ -392,4 +444,17 @@ def register_native_outcome_verifiers(registry, settings, event_repository):
         authorize_native_read(settings, event_repository, run_id, conn, actor_id)
 
     for producer in PRODUCERS:
-        registry.register("tool", producer, ORIGIN, verify, read_guard=read_guard)
+
+        def input_read_guard(task_id, inputs, conn, actor_id, producer=producer):
+            authorize_native_inputs(
+                settings, event_service, producer, task_id, inputs, conn, actor_id
+            )
+
+        registry.register(
+            "tool",
+            producer,
+            ORIGIN,
+            verify,
+            read_guard=read_guard,
+            input_read_guard=input_read_guard,
+        )

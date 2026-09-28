@@ -73,6 +73,26 @@ def check_scopes(settings, scopes, actor_id):
             raise DecisionError("historical_event_source_changed", 409)
 
 
+def read_event_intent(conn, task_id, proposal_hash, contract_hash, operation, sign):
+    """Authenticate the server-issued intent on the caller's read snapshot."""
+    row = conn.execute(
+        "SELECT * FROM historical_event_intents WHERE proposal_hash=? AND task_id=?",
+        (proposal_hash, task_id),
+    ).fetchone()
+    if row is None:
+        raise DecisionError("historical_event_reviewed_proposal_required", 403)
+    body = json.loads(row["body"])
+    if (
+        not hmac.compare_digest(row["signature"], sign(body))
+        or body["task_id"] != task_id
+        or body["proposal_hash"] != proposal_hash
+        or body["operation"] != operation
+        or body["contract_hash"] != contract_hash
+    ):
+        raise DecisionError("historical_event_intent_binding_failed", 409)
+    return body
+
+
 class EventBatchAuthority:
     def __init__(self, material):
         self.material = material
@@ -119,21 +139,14 @@ class EventBatchAuthority:
     def resolve(self, proposal_hash, contract_hash, operation):
         material = self.material
         with connect(material.settings.db_path) as conn:
-            row = conn.execute(
-                "SELECT * FROM historical_event_intents WHERE proposal_hash=? AND task_id=?",
-                (proposal_hash, material.task_id),
-            ).fetchone()
-        if row is None:
-            raise DecisionError("historical_event_reviewed_proposal_required", 403)
-        body = json.loads(row["body"])
-        if (
-            not hmac.compare_digest(row["signature"], material._signature(body))
-            or body["task_id"] != material.task_id
-            or body["proposal_hash"] != proposal_hash
-            or body["operation"] != operation
-            or body["contract_hash"] != contract_hash
-        ):
-            raise DecisionError("historical_event_intent_binding_failed", 409)
+            body = read_event_intent(
+                conn,
+                material.task_id,
+                proposal_hash,
+                contract_hash,
+                operation,
+                material._signature,
+            )
         check_scopes(material.settings, body["scopes"], body["actor_id"])
         material.actor_id = body["actor_id"]
         return {"actor_id": body["actor_id"], "scopes": body["scopes"]}

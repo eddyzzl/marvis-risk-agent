@@ -9,6 +9,8 @@ from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from marvis.governance.errors import AuthorizationError
+from marvis.governance.http_reads import require_native_read
+from marvis.db_schema import connect
 from marvis.errors import conflict, forbidden, not_found, unprocessable
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,6 +53,7 @@ def export_business_acceptance(request: Request, plan_id: str, format: Literal["
     from marvis.output.business_acceptance import render_business_acceptance
 
     plan = _load_plan(request, plan_id)
+    require_native_read(request, plan_id=plan_id)
     review = stored_business_review(request.app.state.plan_repo, plan.id)
     if not review:
         raise not_found("business acceptance is not available for this plan")
@@ -170,6 +173,7 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
         if problems:
             raise HTTPException(status_code=422, detail={"problems": problems})
 
+        require_native_read(request, proposed_plan=plan)
         plan.status = PlanStatus.VALIDATED
         repo.create_plan(plan)
         # Serialize the persisted snapshot, not the pre-insert object.  The
@@ -206,6 +210,11 @@ def list_capability_tiers() -> dict:
 @router.get("/step-outputs/{step_id}")
 def get_step_output(request: Request, step_id: str) -> dict:
     resolved_step_id, version = _parse_step_output_id(step_id)
+    with connect(request.app.state.plan_repo.db_path) as conn:
+        row = conn.execute("SELECT plan_id FROM plan_steps WHERE id=?", (resolved_step_id,)).fetchone()
+    if row is None:
+        raise not_found("step output not found")
+    require_native_read(request, plan_id=row["plan_id"])
     try:
         repository = request.app.state.plan_repo
         if version is None:
@@ -554,6 +563,7 @@ def _load_plan(request: Request, plan_id: str):
 
 
 def _plan_payload(request: Request, plan) -> dict:
+    require_native_read(request, plan_id=plan.id)
     payload = plan_to_dict(plan)
     from marvis.orchestrator.business_acceptance import stored_business_review
 

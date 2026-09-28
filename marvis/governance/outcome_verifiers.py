@@ -48,7 +48,7 @@ class OutcomeVerifierRegistry:
 
     def __init__(self):
         self._verifiers: dict[
-            tuple[str, str], tuple[str, Callable, Callable | None]
+            tuple[str, str], tuple[str, Callable, Callable | None, Callable | None]
         ] = {}
         self._reader = ContextVar("reconciliation_reader", default=None)
 
@@ -60,11 +60,12 @@ class OutcomeVerifierRegistry:
         verifier: Callable,
         *,
         read_guard: Callable | None = None,
+        input_read_guard: Callable | None = None,
     ) -> None:
         key = (kind, producer)
         if key in self._verifiers:
             raise ValueError("outcome verifier already registered")
-        self._verifiers[key] = (verifier_id, verifier, read_guard)
+        self._verifiers[key] = (verifier_id, verifier, read_guard, input_read_guard)
 
     @contextmanager
     def reader(self, actor_id):
@@ -86,6 +87,17 @@ class OutcomeVerifierRegistry:
         finally:
             connection.execute(f"PRAGMA query_only = {int(prior)}")
 
+    def authorize_inputs(self, producer, task_id, inputs, connection):
+        configured = self._verifiers.get(("tool", producer))
+        if configured is None or configured[3] is None:
+            return
+        prior = connection.execute("PRAGMA query_only").fetchone()[0]
+        connection.execute("PRAGMA query_only = ON")
+        try:
+            configured[3](task_id, inputs, connection, self._reader.get())
+        finally:
+            connection.execute(f"PRAGMA query_only = {int(prior)}")
+
     def supports(self, target: VerificationTarget) -> bool:
         return (target.kind, target.producer) in self._verifiers
 
@@ -97,7 +109,7 @@ class OutcomeVerifierRegistry:
             return "unavailable", OutcomeProof(
                 "unknown", target.id, reason="当前动作未接入可信核对器。"
             )
-        verifier_id, verifier, _ = configured
+        verifier_id, verifier, _, _ = configured
         prior = connection.execute("PRAGMA query_only").fetchone()[0]
         connection.execute("PRAGMA query_only = ON")
         try:

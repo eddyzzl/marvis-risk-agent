@@ -34,6 +34,14 @@ OUTCOME_KIND = "decision_twin_batch_reconciliation"
 PRODUCER = "decision_twin.historical_replay.v2"
 
 
+def sign_batch_body(secret, body):
+    return hmac.new(
+        secret,
+        ("decision-twin-batch.v2:" + canonical_json(body)).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def timestamp(value, field):
     if isinstance(value, (datetime, pd.Timestamp)):
         value = value.isoformat()
@@ -296,11 +304,7 @@ class BatchMaterial:
         )
 
     def _signature(self, body):
-        return hmac.new(
-            self.secret,
-            ("decision-twin-batch.v2:" + canonical_json(body)).encode(),
-            hashlib.sha256,
-        ).hexdigest()
+        return sign_batch_body(self.secret, body)
 
     def publish(self, kind, payload, *, binding):
         authorization = payload.get("event_authorization")

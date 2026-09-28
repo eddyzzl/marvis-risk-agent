@@ -183,7 +183,7 @@ def gated_plan(rt, proposal):
     return current
 
 
-def approve(rt, plan):
+def approve(rt, plan, *, expect_read_denied=False):
     step = plan["steps"][0]
     response = rt.maker.post(
         f"/api/plans/{plan['id']}/steps/{step['id']}/decisions",
@@ -194,7 +194,24 @@ def approve(rt, plan):
         },
     )
     assert response.status_code == 202, response.text
-    return rt.maker.get(f"/api/plans/{plan['id']}").json()["plan"]
+    response = rt.maker.get(f"/api/plans/{plan['id']}")
+    if expect_read_denied:
+        assert response.status_code == 403, response.text
+        return private_plan_snapshot(rt.app, plan["id"])
+    assert response.status_code == 200, response.text
+    return response.json()["plan"]
+
+
+def private_plan_snapshot(app, plan_id):
+    # Tests may inspect the repository to assert no execution took place after
+    # HTTP read authorization failed; this is never a production HTTP fallback.
+    from marvis.orchestrator.contracts import plan_to_dict
+
+    plan = app.state.plan_repo.load_plan(plan_id)
+    return {
+        **plan_to_dict(plan),
+        "reconciliation": app.state.plan_executor.reconciler.describe(plan),
+    }
 
 
 def url(rt, proposal, suffix=""):
@@ -270,6 +287,25 @@ def test_approved_plan_rechecks_live_authority_and_review_binding(runtime, failu
         proposal["contract"]["window_seconds"] = 120
     if failure == "changed_hash":
         proposal["proposal_hash"] = "f" * 64
+    if failure in {"changed_contract", "changed_hash"}:
+        response = rt.maker.post(
+            f"/api/tasks/{rt.task.id}/plans",
+            json={
+                "goal": "事件窗口特征回放",
+                "slots": {
+                    "event_request_id": proposal["request_id"],
+                    "event_proposal_hash": proposal["proposal_hash"],
+                    "event_contract": proposal["contract"],
+                },
+            },
+        )
+        assert response.status_code == 403, response.text
+        assert rt.app.state.plan_repo.list_plans_for_task(rt.task.id) == []
+        assert not any(
+            a["kind"] == KIND
+            for a in rt.app.state.risk_events.artifacts.list_for_task(rt.task.id)
+        )
+        return
     plan = gated_plan(rt, proposal)
     if failure == "revoked":
         response = rt.admin.post(
@@ -282,7 +318,7 @@ def test_approved_plan_rechecks_live_authority_and_review_binding(runtime, failu
                 "UPDATE production_principals SET status='revoked' WHERE local_principal_id=?",
                 (rt.principal["id"],),
             )
-    result = approve(rt, plan)
+    result = approve(rt, plan, expect_read_denied=True)
     assert result["status"] != "done", result
     assert not any(
         a["kind"] == KIND
