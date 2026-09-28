@@ -3,7 +3,7 @@ from __future__ import annotations
 import hmac
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
@@ -42,6 +42,7 @@ class CreatePromotionRequest(BaseModel):
     strategy_version: StrictInt = Field(ge=1)
     reason: str = Field(min_length=1, max_length=4000)
     expires_in_seconds: StrictInt = Field(default=900, ge=1, le=86_400)
+    decision_package_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class PromotionApprovalRequest(BaseModel):
@@ -71,7 +72,9 @@ class RollbackDeploymentRequest(BaseModel):
 
 
 def _repo(request: Request) -> ProductionGovernanceRepository:
-    return ProductionGovernanceRepository(request.app.state.settings.db_path)
+    adapter = getattr(request.app.state, "reference_deployment_adapter", None)
+    return ProductionGovernanceRepository(request.app.state.settings.db_path,
+        deployment_validator=adapter.validate_deployment if adapter else None)
 
 
 def _local_principal_id(request: Request) -> str:
@@ -133,6 +136,12 @@ def _raise_public_error(exc: Exception) -> None:
 def create_promotion_request(payload: CreatePromotionRequest, request: Request) -> dict:
     actor = _current_principal(request)
     try:
+        if payload.decision_package_hash:
+            from marvis.reference_decision.contracts import DecisionError
+            try:
+                request.app.state.reference_decision.packages.get(payload.decision_package_hash)
+            except DecisionError as exc:
+                raise GovernanceConflict(exc.code) from exc
         return _repo(request).create_promotion_request(
             actor_principal_id=actor["id"],
             environment=payload.environment,
@@ -141,6 +150,7 @@ def create_promotion_request(payload: CreatePromotionRequest, request: Request) 
             strategy_version=payload.strategy_version,
             reason=payload.reason,
             expires_in_seconds=payload.expires_in_seconds,
+            decision_package_hash=payload.decision_package_hash,
         )
     except (GovernanceForbidden, GovernanceNotFound, GovernanceConflict) as exc:
         _raise_public_error(exc)
@@ -163,6 +173,22 @@ def approve_promotion_request(
     except (GovernanceForbidden, GovernanceNotFound, GovernanceConflict) as exc:
         _raise_public_error(exc)
         raise AssertionError("unreachable")
+
+
+@router.get("/promotion-requests")
+def list_promotion_requests(request: Request, environment: str | None = None,
+                            limit: int = Query(default=100, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+    _current_principal(request)
+    try:
+        return _repo(request).list_promotion_requests(environment=environment, limit=limit, offset=offset)
+    except GovernanceConflict as exc:
+        _raise_public_error(exc)
+
+
+@router.get("/environments")
+def list_environments(request: Request):
+    _current_principal(request)
+    return _repo(request).list_environments()
 
 
 @router.get("/promotion-requests/{request_id}")

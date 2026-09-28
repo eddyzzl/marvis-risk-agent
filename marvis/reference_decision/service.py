@@ -8,7 +8,7 @@ import time
 
 from marvis.db_schema import connect
 from marvis.plugins.contracts import PROTOCOL_VERSION
-from marvis.plugins.runner import _parse_worker_result, _run_worker
+from marvis.plugins.runner import WorkerResourceLimitExceeded, _parse_worker_result, _run_worker
 from marvis.reference_decision.contracts import DecisionError, digest, validate_features
 from marvis.reference_decision.ledger import DecisionLedger
 from marvis.reference_decision.packages import PackageStore
@@ -62,6 +62,7 @@ class ReferenceDecisionService:
             "manifest_hash": row["manifest_hash"],
             "state": "serving",
             "assurance": "local_reference_only",
+            "execution_identity": "local_reference_worker.v1",
         }
 
     def evaluate(self, package_hash, features, timeout):
@@ -84,6 +85,8 @@ class ReferenceDecisionService:
             )
         except subprocess.TimeoutExpired as exc:
             raise DecisionError("scoring_timeout", 503) from exc
+        except (WorkerResourceLimitExceeded, OSError) as exc:
+            raise DecisionError("scoring_resource_unavailable", 503) from exc
         result = _parse_worker_result(completed.stdout)
         if completed.returncode or not result or not result.get("ok"):
             # Do not echo raw feature values or worker exception text into logs/API.
@@ -93,7 +96,10 @@ class ReferenceDecisionService:
     def decide(self, request, *, slot="production"):
         started = time.perf_counter()
         ledger_scope = f"{ENVIRONMENT}:{slot}"
-        input_hash = digest(request.model_dump())
+        try:
+            input_hash = digest(request.model_dump())
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise DecisionError("invalid_feature_payload") from exc
         existing = self.ledger.existing(ledger_scope, request.request_id, input_hash)
         if existing is not None:
             return existing
@@ -149,6 +155,7 @@ class ReferenceDecisionService:
             ),
             "request_id": request.request_id,
             "input_hash": input_hash,
+            "execution_identity": "local_reference_worker.v1",
             "package_hash": package_hash,
             "decision_node": request.decision_node,
             "environment": ENVIRONMENT,
@@ -171,4 +178,7 @@ class ReferenceDecisionService:
                 "files": manifest["files"],
             },
         }
+        response["output_hash"] = digest({key: response[key] for key in (
+            "action", "matched_rule_id", "score", "score_product", "package_hash", "versions", "status"
+        )})
         return self.ledger.finish(ledger_scope, request.request_id, owner, response)

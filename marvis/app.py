@@ -80,6 +80,7 @@ from marvis.plugins.runner import ToolRunner
 from marvis.production_governance.router import router as production_governance_router
 from marvis.reference_decision.router import router as reference_decision_router
 from marvis.reference_decision.service import ReferenceDecisionService
+from marvis.reference_decision.deployment import ADAPTER_ID, LocalReferenceAdapter
 from marvis.production_governance.evidence import ActivationEvidenceVerifier
 from marvis.job_watchdog import (
     JobHeartbeatWatchdog,
@@ -468,6 +469,8 @@ def create_app(
     app.state.reference_decision = ReferenceDecisionService(
         settings, app.state.plugin_admin_token.encode()
     )
+    app.state.reference_deployment_adapter = LocalReferenceAdapter(app.state.reference_decision)
+    app.state.production_activation_verifiers.setdefault(ADAPTER_ID, app.state.reference_deployment_adapter)
     app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
     app.state.operations_runtime = build_operations_runtime(

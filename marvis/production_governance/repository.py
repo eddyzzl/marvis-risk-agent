@@ -39,8 +39,9 @@ def _canonical_json(value: Any) -> str:
 class ProductionGovernanceRepository:
     """SQLite authority for local production roles and its hash-chained audit."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, deployment_validator=None) -> None:
         self.db_path = Path(db_path)
+        self.deployment_validator = deployment_validator
 
     def claim_principal(
         self,
@@ -122,6 +123,7 @@ class ProductionGovernanceRepository:
         strategy_version: int,
         reason: str,
         expires_in_seconds: int,
+        decision_package_hash: str | None = None,
     ) -> dict[str, Any]:
         now_dt = datetime.now(UTC)
         now = now_dt.isoformat()
@@ -143,6 +145,7 @@ class ProductionGovernanceRepository:
                 deployment_slot=deployment_slot,
                 strategy=strategy,
                 created_at=now,
+                decision_package_hash=decision_package_hash,
             )
             head = conn.execute(
                 "SELECT * FROM production_environment_heads WHERE environment = ?",
@@ -378,6 +381,13 @@ class ProductionGovernanceRepository:
             ).fetchone()
             if request_row is None:
                 raise GovernanceNotFound("promotion request not found")
+            if environment == "local-reference" and request_row["status"] == "promoted":
+                previous = conn.execute("SELECT * FROM production_deployments WHERE id=?", (request_row["promoted_deployment_id"],)).fetchone()
+                if previous is None or previous["environment"] != environment or previous["activation_evidence_id"] != evidence.content_hash:
+                    raise GovernanceConflict("activation retry evidence drifted")
+                # Read back a committed operation after a lost HTTP response;
+                # never turn a superseded deployment active by replaying it.
+                return _deployment_from_row(previous)
             if _parse_time(str(request_row["expires_at"])) <= now_dt:
                 if str(request_row["status"]) not in {"expired", "promoted"}:
                     conn.execute(
@@ -419,12 +429,14 @@ class ProductionGovernanceRepository:
                 ):
                     raise GovernanceConflict("strategy binding drifted after approval")
                 slot = str(request_row["deployment_slot"])
+                approved_manifest = _deployment_manifest_tx(conn, str(request_row["manifest_hash"]))
                 manifest_hash = _register_deployment_manifest_tx(
                     conn,
                     environment=environment,
                     deployment_slot=slot,
                     strategy=strategy,
                     created_at=now,
+                    decision_package_hash=approved_manifest.get("decision_package_hash"),
                 )
                 if manifest_hash != str(request_row["manifest_hash"]):
                     raise GovernanceConflict("deployment manifest binding drifted")
@@ -461,6 +473,10 @@ class ProductionGovernanceRepository:
                     raise GovernanceConflict(
                         "target environment changed after the promotion request was created"
                     )
+                if environment == "local-reference":
+                    if self.deployment_validator is None:
+                        raise GovernanceConflict("local reference deployment validator unavailable")
+                    self.deployment_validator(conn, manifest_hash, current_id)
                 if current_id is not None:
                     predecessor = conn.execute(
                         "SELECT * FROM production_deployments WHERE id = ?",
@@ -590,6 +606,21 @@ class ProductionGovernanceRepository:
         assert result is not None
         return result
 
+    def list_promotion_requests(self, *, environment=None, limit=100, offset=0):
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN")
+            where, args = (" WHERE environment=?", [environment]) if environment else ("", [])
+            total = conn.execute("SELECT count(*) FROM production_promotion_requests" + where, args).fetchone()[0]
+            rows = conn.execute("SELECT * FROM production_promotion_requests" + where + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
+            return {"requests": [_promotion_from_row(conn, row) for row in rows], "count": total,
+                    "next_offset": offset + len(rows) if offset + len(rows) < total else None}
+
+    def list_environments(self):
+        with connect(self.db_path) as conn:
+            rows = conn.execute("SELECT * FROM production_environment_heads ORDER BY environment").fetchall()
+            return {"environments": [{"environment": row["environment"], "revision": row["revision"],
+                "active_deployment_id": row["active_deployment_id"], "shadow_deployment_id": row["shadow_deployment_id"]} for row in rows], "count": len(rows)}
+
     def get_environment(self, environment: str) -> dict[str, Any]:
         with connect(self.db_path) as conn:
             head = conn.execute(
@@ -667,6 +698,15 @@ class ProductionGovernanceRepository:
                 "SELECT * FROM production_environment_heads WHERE environment = ?",
                 (environment,),
             ).fetchone()
+            if environment == "local-reference" and head is not None:
+                previous = conn.execute("SELECT * FROM production_deployments WHERE id=?", (deployment_id,)).fetchone()
+                if (previous is not None and previous["status"] == "rolled_back" and
+                    previous["environment"] == environment and
+                    head["active_deployment_id"] == previous["predecessor_deployment_id"]):
+                    restored = conn.execute("SELECT * FROM production_deployments WHERE id=?", (head["active_deployment_id"],)).fetchone()
+                    return {"environment": environment, "revision": int(head["revision"]),
+                            "rolled_back_deployment": _deployment_from_row(previous),
+                            "restored_deployment": _deployment_from_row(restored)}
             if head is None or head["active_deployment_id"] != deployment_id:
                 raise GovernanceConflict(
                     "deployment is not the current active record in this environment"
@@ -698,6 +738,10 @@ class ProductionGovernanceRepository:
                 or str(predecessor["status"]) != "superseded"
             ):
                 raise GovernanceConflict("rollback predecessor is inconsistent")
+            if environment == "local-reference":
+                if self.deployment_validator is None:
+                    raise GovernanceConflict("local reference deployment validator unavailable")
+                self.deployment_validator(conn, str(predecessor["manifest_hash"]), deployment_id)
             rolled_back = conn.execute(
                 """
                 UPDATE production_deployments
@@ -955,6 +999,7 @@ def _register_deployment_manifest_tx(
     deployment_slot: str,
     strategy: dict[str, Any],
     created_at: str,
+    decision_package_hash: str | None = None,
 ) -> str:
     manifest = {
         "schema_version": "production-deployment-manifest.v1",
@@ -967,6 +1012,19 @@ def _register_deployment_manifest_tx(
             "strategy_content_hash",
         ),
     }
+    if environment == "local-reference" and not decision_package_hash:
+        raise GovernanceConflict("local reference deployments require a frozen decision package")
+    if decision_package_hash is not None:
+        if environment != "local-reference" or not _is_sha256(decision_package_hash):
+            raise GovernanceConflict("reference package environment or hash is invalid")
+        row = conn.execute("SELECT canonical_json FROM reference_decision_packages WHERE id=?", (decision_package_hash,)).fetchone()
+        if row is None:
+            raise GovernanceConflict("reference decision package not found")
+        package = json.loads(row["canonical_json"])
+        if hashlib.sha256(_canonical_json(package).encode()).hexdigest() != decision_package_hash or package["strategy"] != strategy:
+            raise GovernanceConflict("reference package strategy binding drifted")
+        manifest["schema_version"] = "production-deployment-manifest.v2"
+        manifest["decision_package_hash"] = decision_package_hash
     canonical = _canonical_json(manifest)
     manifest_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     existing = conn.execute(
@@ -996,6 +1054,13 @@ def _register_deployment_manifest_tx(
         ),
     )
     return manifest_hash
+
+
+def _deployment_manifest_tx(conn, manifest_hash):
+    row = conn.execute("SELECT canonical_json FROM production_deployment_manifests WHERE id=?", (manifest_hash,)).fetchone()
+    if row is None or hashlib.sha256(str(row["canonical_json"]).encode()).hexdigest() != manifest_hash:
+        raise GovernanceConflict("deployment manifest authentication failed")
+    return json.loads(row["canonical_json"])
 
 
 def _register_activation_evidence_tx(
@@ -1060,7 +1125,7 @@ def _promotion_from_row(
         """,
         (row["id"],),
     ).fetchall()
-    return {
+    result = {
         "id": str(row["id"]),
         "environment": str(row["environment"]),
         "deployment_slot": str(row["deployment_slot"]),
@@ -1085,6 +1150,10 @@ def _promotion_from_row(
             for item in approvals
         ],
     }
+    package_hash = _deployment_manifest_tx(conn, str(row["manifest_hash"])).get("decision_package_hash")
+    if package_hash:
+        result["decision_package_hash"] = package_hash
+    return result
 
 
 def _deployment_by_id(

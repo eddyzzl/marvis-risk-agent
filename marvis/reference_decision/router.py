@@ -1,6 +1,7 @@
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from marvis.production_governance.errors import GovernanceConflict
 from marvis.production_governance.router import _current_principal
@@ -12,6 +13,37 @@ from marvis.reference_decision.contracts import (
 
 
 router = APIRouter(prefix="/api/reference-decision", tags=["reference-decision"])
+
+
+class InstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    promotion_id: str = Field(min_length=1, max_length=160)
+    probe_features: dict = Field(max_length=500)
+
+
+@router.post("/installations", status_code=201)
+def install(payload: InstallRequest, request: Request):
+    if _current_principal(request)["role"] != "admin":
+        raise HTTPException(403, "only an admin can install an approved package")
+    try:
+        return request.app.state.reference_deployment_adapter.install(payload.promotion_id, payload.probe_features)
+    except (DecisionError, GovernanceConflict) as exc:
+        public_error(exc)
+
+
+@router.get("/installations")
+def list_installations(request: Request, limit: int = Query(default=100, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+    _current_principal(request)
+    return request.app.state.reference_deployment_adapter.list(limit=limit, offset=offset)
+
+
+@router.get("/installations/{promotion_id}")
+def read_installation(promotion_id: str, request: Request):
+    _current_principal(request)
+    try:
+        return request.app.state.reference_deployment_adapter.readback(promotion_id)
+    except (DecisionError, GovernanceConflict) as exc:
+        public_error(exc)
 
 
 def service(request):
@@ -62,6 +94,16 @@ def build_package(payload: PackageRequest, request: Request):
             "state": "built_not_installed",
         }
     except (DecisionError, GovernanceConflict) as exc:
+        public_error(exc)
+
+
+@router.get("/packages")
+def list_packages(request: Request, task_id: str | None = None,
+                  limit: int = Query(default=100, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+    _current_principal(request)
+    try:
+        return service(request).packages.list(task_id=task_id, limit=limit, offset=offset)
+    except DecisionError as exc:
         public_error(exc)
 
 
