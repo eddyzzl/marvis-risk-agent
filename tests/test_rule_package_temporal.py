@@ -103,8 +103,8 @@ def test_rule_receipt_must_explicitly_declare_missing_score(key):
 
 
 def test_rule_package_real_workflow_and_exports_keep_missing_score_visible(
-    rule_runtime, tmp_path
-):  # noqa: F811
+    rule_runtime, tmp_path  # noqa: F811 - imported pytest fixture
+):
     app, _, _, _, _, request, _ = rule_runtime
     package_hash, _ = app.state.reference_decision.packages.build(
         request, actor_id="maker"
