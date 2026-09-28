@@ -1,8 +1,10 @@
 """Read-only package preparation from authenticated producer/transform evidence."""
 
+from copy import deepcopy
 import json
 
 from marvis.data.backend import DataBackend
+from marvis.data.dataset_identity import dataset_identity_equal
 from marvis.data.registry import DatasetRegistry
 from marvis.db_schema import connect
 from marvis.feature.errors import FeatureError
@@ -38,6 +40,7 @@ def required_raw_fields(model_fields, steps, source_names):
 def _readiness_result():
     return {
         "schema_version": "reference-decision-readiness.v1",
+        "scope": "local_reference_package_preparation",
         "state": "blocked",
         "build_ready": False,
         "reason_codes": [],
@@ -45,8 +48,16 @@ def _readiness_result():
         "producer": {"state": "unknown", "artifact_id": None},
         "preprocessing": {
             "state": "unknown",
+            "scope": "recorded_transforms_and_fitting_membership",
             "receipt_ids": [],
             "source_binding": None,
+        },
+        "feature_time_evidence": {
+            "assurance": "unknown",
+            "scope": "selected_field_availability_at_recorded_decisions",
+            "reasons": ["native_feature_time_evidence_not_recorded"],
+            "fields": {},
+            "artifact_ids": [],
         },
         "raw_requirements": [],
         "score_products": [],
@@ -123,6 +134,11 @@ def package_readiness(
             snapshots
         )  # Authentication only; never deserialize a model in this endpoint.
         result["producer"] = {"state": "authenticated", "artifact_id": producer["id"]}
+        # The native closure authenticates these producer-time statements. Serving
+        # replay and train-only membership do not establish historical timing.
+        temporal_evidence = artifact.params.get("feature_time_evidence")
+        if isinstance(temporal_evidence, dict):
+            result["feature_time_evidence"] = deepcopy(temporal_evidence)
         steps = artifact.params.get("preprocessing_steps") or []
         if steps:
             proof = store._preprocessing_receipt(experiment, artifact)
@@ -132,28 +148,39 @@ def package_readiness(
                 DataBackend(store.settings.datasets_dir),
                 store.settings.datasets_dir,
             )
-            binding = registry.authenticate_dataset_binding(
-                root["source_dataset_id"],
-                expected_task_id=experiment.task_id,
-                expected_content_hash=root["source_content_hash"],
-            )
-            source_names = registry.authenticated_binding_column_names(binding)
-            result["preprocessing"] = {
+            source = registry.get(root["source_dataset_id"])
+            if (
+                source.task_id != experiment.task_id
+                or source.content_hash != root["source_content_hash"]
+            ):
+                raise DecisionError("package_source_evidence_invalid")
+            # A read must not repin source_path: sample designs may already bind
+            # the full registered identity. Authenticate only physical metadata.
+            source_names = registry.authenticated_parquet_column_names(source.id)
+            if not dataset_identity_equal(source, registry.get(source.id)):
+                raise DecisionError("package_source_evidence_invalid")
+            result["preprocessing"].update({
                 "state": proof["assurance"],
                 "receipt_ids": [r["id"] for r in proof["lineage"]],
                 "source_binding": {
-                    "dataset_id": binding.dataset_id,
-                    "task_id": binding.task_id,
-                    "content_hash": binding.content_hash,
+                    "dataset_id": source.id,
+                    "task_id": source.task_id,
+                    "content_hash": source.content_hash,
                 },
-            }
+            })
         else:
             source_names = list(artifact.feature_list)
-            result["preprocessing"] = {
-                "state": "not_required",
-                "receipt_ids": [],
-                "source_binding": None,
-            }
+            # No recorded operations does not establish that preprocessing was
+            # unnecessary. Retain authenticated row-local/fit assurance where
+            # the native producer recorded it, and unknown for legacy sources.
+            assurance = artifact.params.get("preprocessing_assurance", "unknown")
+            proof = artifact.params.get("preprocessing_evidence") or {}
+            result["preprocessing"].update({
+                "state": assurance
+                if assurance in {"row_local", "training_only", "unknown", "exploration"}
+                else "unknown",
+                "receipt_ids": [proof["artifact_id"]] if proof.get("artifact_id") else [],
+            })
         names, outputs, _ = required_raw_fields(
             artifact.feature_list, steps, source_names
         )
@@ -231,6 +258,7 @@ def rule_package_readiness(store, *, strategy_id, strategy_version):
     result.update(
         package_kind="rule_only", producer={"state": "not_required", "artifact_id": None},
         preprocessing={"state": "not_required", "receipt_ids": [], "source_binding": None},
+        feature_time_evidence=None,
         build_requires_explicit_declaration=["raw_schema.types", "raw_schema.nullable", "decision_node"],
     )
     try:
