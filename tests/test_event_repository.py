@@ -26,6 +26,26 @@ from marvis.settings import build_settings
 from test_event_features import T, ago, coverage, event, query, source, values
 
 
+def test_authorize_read_checks_live_grant_without_loading_snapshot(runtime, monkeypatch):
+    rt = runtime
+    monkeypatch.setattr(rt.repo, "_decision_body", lambda *a: pytest.fail("loaded snapshot"))
+    assert rt.repo.authorize_read(
+        rt.task.id, rt.source.source_id,
+        grant_id=rt.grant.grant_id, actor_id=rt.actors["maker"],
+    ) == rt.source
+    with pytest.raises(EventError, match="scope_forbidden"):
+        rt.repo.authorize_read(
+            rt.task.id, rt.source.source_id,
+            grant_id=rt.grant.grant_id, actor_id=rt.actors["other"],
+        )
+    rt.repo.revoke_grant(rt.task.id, rt.grant.grant_id, rt.actors["admin"])
+    with pytest.raises(EventError, match="not_active"):
+        rt.repo.authorize_read(
+            rt.task.id, rt.source.source_id,
+            grant_id=rt.grant.grant_id, actor_id=rt.actors["maker"],
+        )
+
+
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
     settings = build_settings(tmp_path / "workspace")

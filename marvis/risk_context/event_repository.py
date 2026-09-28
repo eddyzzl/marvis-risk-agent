@@ -532,6 +532,12 @@ class EventRepository:
             raise EventError("event_decision_binding_failed")
         return body
 
+    def authorize_read(self, task_id, source_id, *, grant_id, actor_id):
+        """Check current source authority without materializing a snapshot."""
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN")
+            return self._access(conn, task_id, source_id, grant_id, actor_id, "read")
+
     def replay(self, task_id, decision_id, *, grant_id, actor_id):
         with connect(self.db_path) as conn:
             conn.execute("BEGIN")
