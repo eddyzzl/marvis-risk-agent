@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
 from marvis.collection.batches import CollectionBatchRequest
+from marvis.collection.proposals import CollectionBusinessProposal
 from marvis.collection.contracts import (
     CollectionCase,
     InstallmentSchedule,
@@ -58,6 +59,7 @@ def capabilities(task_id: str, request: Request):
         "cashflow_schema": CashflowImport.model_json_schema(),
         "reconciliation_schema": ReconciliationRequest.model_json_schema(),
         "batch_schema": CollectionBatchRequest.model_json_schema(),
+        "business_proposal_schema": CollectionBusinessProposal.model_json_schema(),
         "workflows": [
             "collection_queue_batch",
             "collection_execute_reference",
@@ -133,6 +135,17 @@ def report(task_id: str, case_id: str, digest: str, request: Request):
     try:
         return service(request).report(
             task_id, case_id, digest, _local_principal_id(request)
+        )
+    except (ValueError, RuntimeError, KeyError, OSError) as exc:
+        error(exc)
+
+
+@router.post("/batch-proposals", status_code=201)
+async def prepare_business_proposal(task_id: str, request: Request):
+    payload = await body(request, CollectionBusinessProposal)
+    try:
+        return service(request).prepare(
+            task_id, payload.batch(), _local_principal_id(request)
         )
     except (ValueError, RuntimeError, KeyError, OSError) as exc:
         error(exc)

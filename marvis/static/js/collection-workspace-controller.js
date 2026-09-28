@@ -1,3 +1,4 @@
+import { createCollectionIntakeController } from "./collection-intake-controller.js";
 import { api } from "./api.js";
 import { escapeHtml as esc } from "./ui-utils.js";
 import { taskUsesPlanRail } from "./v2/plan_rail_controller.js";
@@ -96,6 +97,7 @@ export function createCollectionWorkspaceController({
         taskId: task.id,
         view: captureView(),
         principal: null,
+        cases: [],
         pending: false,
         detailVersion: 0,
         loadVersion: 0,
@@ -145,6 +147,20 @@ export function createCollectionWorkspaceController({
       ]);
       if (!current(owner) || version !== owner.loadVersion) return;
       owner.capabilities = cap;
+      owner.cases = cases.cases;
+      q("[data-collection-intake-actions]").innerHTML =
+        principal.role === "maker"
+          ? [
+              ["new-case", "登记历史案件"],
+              ["new-schedule", "登记还款排期"],
+              ["new-cashflow", "登记资金观测"],
+              ["new-reconcile", "核对资金"],
+              ["new-batch", "配置参考批次"],
+              ["import-batch", "高级合同导入"],
+            ]
+              .map(([action, label]) => button(action, label))
+              .join("")
+          : "";
       q("[data-collection-lists]").innerHTML = listsHtml(
         cases.cases,
         batches.batches,
@@ -311,9 +327,42 @@ export function createCollectionWorkspaceController({
       if (current(owner) && version === owner.detailVersion) message(error(e));
     }
   }
+  const intake = createCollectionIntakeController({
+    getRoot: getElement,
+    getOwner: () => state,
+    isCurrent: current,
+    apiClient,
+    message,
+    downloadBlob,
+    setPending: (owner, pending) => {
+      owner.pending = pending;
+      if (current(owner)) {
+        if (pending) {
+          owner.intakeDisabled = new Map();
+          getElement()
+            ?.querySelectorAll(
+              "[data-collection-form] input, [data-collection-form] select, [data-collection-form] button",
+            )
+            .forEach((el) => {
+              owner.intakeDisabled.set(el, el.disabled);
+              el.disabled = true;
+            });
+        } else {
+          owner.intakeDisabled?.forEach((disabled, el) => {
+            el.disabled = disabled;
+          });
+          owner.intakeDisabled = null;
+        }
+        lock();
+      }
+    },
+    refresh: () => load(),
+    onBatch: (id) => read("batch", id),
+  });
   function handle(event) {
-    if (!getElement()?.contains(event.target) || event.type !== "click")
-      return false;
+    if (!getElement()?.contains(event.target)) return false;
+    if (intake.handle(event)) return true;
+    if (event.type !== "click") return false;
     const control = event.target.closest("[data-collection-action]");
     if (!control) return false;
     event.preventDefault();

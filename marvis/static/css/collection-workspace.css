@@ -117,3 +117,60 @@
   color: var(--text);
   background: var(--surface);
 }
+
+.collection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.collection-body form label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+.collection-body form input:not([type="checkbox"]),
+.collection-body form select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  min-height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+}
+.collection-body form fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 12px 0;
+  padding: 12px;
+  min-width: 0;
+}
+.collection-body form .collection-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.collection-body form input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+.collection-body form legend {
+  font-size: 12px;
+  font-weight: 600;
+}
+.collection-body form [data-collection-installment],
+.collection-body form [data-collection-coverage],
+.collection-body form [data-collection-window],
+.collection-body form [data-collection-attempt] {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.collection-grid > button {
+  align-self: end;
+  justify-self: start;
+}
