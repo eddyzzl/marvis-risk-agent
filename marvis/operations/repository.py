@@ -273,6 +273,10 @@ class OperationsStore:
 
     def list_active_schedules(self) -> tuple[ScheduleRecord, ...]:
         """Return the enabled latest immutable revision of every schedule."""
+        return tuple(record for record in self.list_schedules() if record.contract.enabled)
+
+    def list_schedules(self) -> tuple[ScheduleRecord, ...]:
+        """Return latest revisions, including disabled schedules for management."""
 
         with connect(self.db_path) as conn:
             rows = conn.execute(
@@ -290,8 +294,7 @@ class OperationsStore:
                  ORDER BY schedule.schedule_id
                 """
             ).fetchall()
-        records = tuple(_schedule_record(row) for row in rows)
-        return tuple(record for record in records if record.contract.enabled)
+        return tuple(_schedule_record(row) for row in rows)
 
     def next_unseen_due_period(
         self,

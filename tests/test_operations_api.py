@@ -56,6 +56,22 @@ def _publish_payload(
     }
 
 
+def test_disabled_schedule_remains_discoverable_for_management(tmp_path):
+    app = create_app(tmp_path, operations_executor_allowlist={"bound": lambda _: None})
+    client = TestClient(app)
+    _claim_role(app, client, "maker")
+    payload = _publish_payload(monitoring_ref="bound")
+    assert client.post("/api/operations/schedules", json=payload).status_code == 201
+    payload["expected_revision"] = 1
+    payload["schedule"].update(revision=2, enabled=False)
+    disabled = client.post("/api/operations/schedules", json=payload)
+    assert disabled.status_code == 201
+    assert client.get("/api/operations/schedules").json()["count"] == 0
+    listed = client.get("/api/operations/schedules?include_disabled=true").json()
+    assert listed == {"schedules": [disabled.json()], "count": 1}
+    assert app.state.operations_runtime.store.list_active_schedules() == ()
+
+
 def _enqueue_dataset_source_gc_entry(
     app,
     *,

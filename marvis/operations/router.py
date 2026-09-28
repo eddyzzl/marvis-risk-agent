@@ -250,9 +250,10 @@ def publish_schedule(payload: PublishScheduleRequest, request: Request) -> dict:
 
 
 @router.get("/schedules")
-def list_active_schedules(request: Request) -> dict:
+def list_active_schedules(request: Request, include_disabled: bool = False) -> dict:
     _require_role(request, "maker", "checker", "admin")
-    records = _runtime(request).store.list_active_schedules()
+    store = _runtime(request).store
+    records = store.list_schedules() if include_disabled else store.list_active_schedules()
     schedules = [_schedule_record(record) for record in records]
     return {"schedules": schedules, "count": len(schedules)}
 
