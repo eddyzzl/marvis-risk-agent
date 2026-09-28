@@ -61,7 +61,7 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_ORIGIN_TOOL,
     StrategySampleDesignV2ArtifactBinding,
-    load_any_strategy_sample_design_v2_artifacts,
+    load_requested_strategy_sample_design_v2_artifacts as _load_sample_design,
     require_any_strategy_sample_design_v2_artifact_binding_on_connection,
     resolve_strategy_sample_design_v2_source_mode,
 )
@@ -312,8 +312,7 @@ def derive_strategy_model_evidence_candidate_execution_ref(
 ) -> dict[str, str]:
     """Derive the sole exact candidate-development ref for an authenticated V2 pair.
 
-    Callers must pass the result of
-    :func:`load_any_strategy_sample_design_v2_artifacts`.  The concrete binding
+    Callers must pass an authenticated V2 artifact pair. The concrete binding
     class and the strict compatibility shape jointly select the legacy or
     native lineage, so Agent orchestration never has to duplicate artifact
     kind/origin dispatch.
@@ -894,29 +893,6 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         )
     _require_json_byte_budget(request, "materialize_model_evidence_v2 inputs")
     return request
-
-
-def _load_sample_design(
-    runtime, task_id: str, request: Mapping[str, Any]
-) -> _StrategySampleDesignV2Binding:
-    ref = request["sample_design_ref"]
-    return load_any_strategy_sample_design_v2_artifacts(
-        runtime,
-        task_id=task_id,
-        membership_artifact_id=ref["membership_artifact_id"],
-        expected_membership_artifact_content_hash=ref[
-            "expected_membership_artifact_content_hash"
-        ],
-        bundle_artifact_id=ref["bundle_artifact_id"],
-        expected_bundle_artifact_content_hash=ref[
-            "expected_bundle_artifact_content_hash"
-        ],
-        expected_bundle_id=ref["expected_bundle_id"],
-        expected_sample_design_id=ref["expected_sample_design_id"],
-        expected_sample_design_content_hash=ref[
-            "expected_sample_design_content_hash"
-        ],
-    )
 
 
 def _load_candidate_sources(

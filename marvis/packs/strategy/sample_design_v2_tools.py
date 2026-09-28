@@ -505,6 +505,30 @@ def load_strategy_sample_design_v2_artifacts(
         raise StrategyError(str(exc)) from exc
 
 
+def load_requested_strategy_sample_design_v2_artifacts(
+    runtime, task_id: str, request: Mapping[str, Any]
+):
+    """Resolve the same exact sample-design reference for every V2 consumer."""
+    ref = request["sample_design_ref"]
+    return load_any_strategy_sample_design_v2_artifacts(
+        runtime,
+        task_id=task_id,
+        membership_artifact_id=ref["membership_artifact_id"],
+        expected_membership_artifact_content_hash=ref[
+            "expected_membership_artifact_content_hash"
+        ],
+        bundle_artifact_id=ref["bundle_artifact_id"],
+        expected_bundle_artifact_content_hash=ref[
+            "expected_bundle_artifact_content_hash"
+        ],
+        expected_bundle_id=ref["expected_bundle_id"],
+        expected_sample_design_id=ref["expected_sample_design_id"],
+        expected_sample_design_content_hash=ref[
+            "expected_sample_design_content_hash"
+        ],
+    )
+
+
 def load_any_strategy_sample_design_v2_artifacts(
     runtime,
     *,
@@ -3073,6 +3097,7 @@ __all__ = [
     "load_historical_any_strategy_sample_design_v2_artifacts",
     "load_historical_strategy_sample_design_v2_artifacts",
     "load_any_strategy_sample_design_v2_artifacts",
+    "load_requested_strategy_sample_design_v2_artifacts",
     "load_strategy_sample_design_v2_artifacts",
     "require_any_strategy_sample_design_v2_artifact_binding_on_connection",
     "require_historical_any_strategy_sample_design_v2_artifact_binding_on_connection",

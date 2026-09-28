@@ -64,7 +64,7 @@ from marvis.packs.strategy.sample_design_v2_native_tools import (
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
-    load_any_strategy_sample_design_v2_artifacts,
+    load_requested_strategy_sample_design_v2_artifacts as _load_sample_design_binding,
     require_any_strategy_sample_design_v2_artifact_binding_on_connection,
     resolve_strategy_sample_design_v2_source_mode,
 )
@@ -735,32 +735,6 @@ def _load_pool_binding(
     if not binding.pool["entries"]:
         raise StrategyError("cannot measure an empty Strategy Pool")
     return binding
-
-
-def _load_sample_design_binding(
-    runtime,
-    *,
-    task_id: str,
-    request: Mapping[str, Any],
-) -> _StrategySampleDesignV2Binding:
-    ref = request["sample_design_ref"]
-    return load_any_strategy_sample_design_v2_artifacts(
-        runtime,
-        task_id=task_id,
-        membership_artifact_id=ref["membership_artifact_id"],
-        expected_membership_artifact_content_hash=ref[
-            "expected_membership_artifact_content_hash"
-        ],
-        bundle_artifact_id=ref["bundle_artifact_id"],
-        expected_bundle_artifact_content_hash=ref[
-            "expected_bundle_artifact_content_hash"
-        ],
-        expected_bundle_id=ref["expected_bundle_id"],
-        expected_sample_design_id=ref["expected_sample_design_id"],
-        expected_sample_design_content_hash=ref[
-            "expected_sample_design_content_hash"
-        ],
-    )
 
 
 def _require_sample_contract(
