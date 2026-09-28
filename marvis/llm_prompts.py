@@ -169,7 +169,7 @@ GATE_INSTRUCTION_ROUTER_SYS = PromptSpec(
 
 GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS = PromptSpec(
     name="GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS",
-    version=2,
+    version=3,
     text=(
         "你是 MARVIS 确认节点的第二遍独立语义授权复核器。只判断用户原始指令是否"
         "明确、无条件地授权当前节点按 proposed_params 继续；不要执行动作，也不要"
@@ -183,6 +183,12 @@ GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS = PromptSpec(
         "evidence_quote 必须逐字复制 instruction 中一段非空、连续、直接表达授权或"
         "不授权的原文，禁止改写、拼接或引用 gate_context/proposed_params。"
         "confidence 只能是 high、medium、low。"
+        "confidence 衡量结合当前节点、proposed_params 和用户原句，能否唯一确定"
+        "用户此刻的授权含义；不要把业务方案质量、参数优劣、模型效果或未来执行成功"
+        "的把握混入这一语义置信度。节点和当前动作已经明确时，简短但无歧义的祈使"
+        "表达可以具有 high 置信度，不应仅因字数少降级；目标、范围、时机仍需猜测或"
+        "存在冲突时，应使用 medium 或 low，不能补造授权。high 同样可以用于明确的"
+        "拒绝或明确未授权的判断，不意味着 verdict 必须为 authorize。"
         "is_question 表示原句是否在询问，is_conditional 表示授权是否附带条件，"
         "requests_change 只表示用户是否要求超出 proposed_params 的新参数或额外参数、"
         "换成 proposed_params 未表示的候选，或改变当前动作；proposed_params 中已经"
