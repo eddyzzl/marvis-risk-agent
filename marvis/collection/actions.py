@@ -8,7 +8,7 @@ and recheck live constraints before any effect.
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator, model_serializer
 
 from marvis.collection.contracts import Contract, CurrencyUnit, Hash, Identity, Minor
 from marvis.decision_twin._canonical import iso_z, parse_datetime
@@ -59,6 +59,14 @@ class CollectionQueue(Contract):
     channels: list[Channel] = Field(default_factory=list, max_length=4)
     # A preview allocation bound, not a statement about live queue occupancy.
     max_batch_actions: int = Field(ge=1, le=10000)
+    max_active_actions: int | None = Field(default=None, ge=1, le=10000)
+
+    @model_serializer(mode="wrap")
+    def execution_limit(self, handler):
+        result = handler(self)
+        if self.max_active_actions is None:
+            result.pop("max_active_actions", None)
+        return result
 
     @field_validator("channels")
     @classmethod
@@ -82,6 +90,15 @@ class CollectionPolicy(Contract):
     max_contacts_per_subject_window: int = Field(ge=1, le=10000)
     min_contact_interval_seconds: int = Field(ge=0, le=366 * 86400)
     max_estimated_batch_cost_minor: Minor
+    max_estimated_active_cost_minor: Minor | None = None
+
+    @model_serializer(mode="wrap")
+    def execution_budget(self, handler):
+        result = handler(self)
+        if self.max_estimated_active_cost_minor is None:
+            result.pop("max_estimated_active_cost_minor", None)
+        return result
+
     basis_artifact_id: str = Field(min_length=1, max_length=160)
     basis_artifact_hash: Hash
     assurance: Literal["business_declared"] = "business_declared"
@@ -125,6 +142,17 @@ class ContactAttempt(Contract):
     attempt_id: Identity
     case_id: Identity
     attempted_at: str
+    # Explicit identity only for a platform-recorded reference action. Ordinary
+    # publisher attempt IDs are never inferred to be the same native action.
+    reference_action_id: Hash | None = None
+
+    @model_serializer(mode="wrap")
+    def native_identity(self, handler):
+        result = handler(self)
+        if self.reference_action_id is None:
+            result.pop("reference_action_id", None)
+        return result
+
     available_at: str | None
     # Unknown effects consume capacity until positively reconciled. A failed
     # provider response alone cannot be declared failed_before_dispatch.

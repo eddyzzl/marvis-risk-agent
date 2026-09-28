@@ -1481,11 +1481,32 @@ class GovernanceRepository:
             detail = json.loads(str(effect["detail_json"] or "{}"))
             if not isinstance(detail, dict):
                 raise ValueError("producer detail must be an object")
-            from marvis.repositories.strategy import StrategyRepository
-
-            strategy = StrategyRepository(self.db_path)
             binding = _binding_from_row(approval)
-            if not binding.tool_ref.startswith("strategy.adopt_strategy@"):
+            if binding.tool_ref.startswith("strategy.adopt_strategy@"):
+                from marvis.repositories.strategy import StrategyRepository
+
+                strategy = StrategyRepository(self.db_path)
+                verify_output = strategy.verify_adoption_producer_output_on_connection
+                target_unchanged = strategy.adoption_target_unchanged_on_connection
+                fence_reason = "adoption_fenced_with_unchanged_target"
+            elif binding.tool_ref.split("@", 1)[0] in {
+                "collection.queue_batch",
+                "collection.execute_reference",
+                "collection.cancel_batch",
+            }:
+                from marvis.collection.execution_state import (
+                    verify_output as verify_collection_output,
+                    target_unchanged as collection_target_unchanged,
+                )
+
+                def verify_output(conn, **kwargs):
+                    return verify_collection_output(conn, self.db_path, **kwargs)
+
+                def target_unchanged(conn, *, binding):
+                    return collection_target_unchanged(conn, self.db_path, binding)
+
+                fence_reason = "collection_fenced_with_unchanged_target"
+            else:
                 return {**unknown, "reason": "unsupported_producer"}
             receipt = detail.get("producer_receipt")
             if str(effect["status"]) == "committed":
@@ -1499,7 +1520,9 @@ class GovernanceRepository:
                 ):
                     return {**unknown, "reason": "complete_producer_receipt_missing"}
                 envelope = {
-                    key: value for key, value in receipt.items() if key != "receipt_hash"
+                    key: value
+                    for key, value in receipt.items()
+                    if key != "receipt_hash"
                 }
                 receipt_hash = canonical_payload_hash(envelope)
                 if (
@@ -1511,8 +1534,10 @@ class GovernanceRepository:
                     or receipt.get("output_hash")
                     != canonical_payload_hash(receipt["output"])
                 ):
-                    raise ApprovalBindingError("producer receipt hash or identity mismatch")
-                strategy.verify_adoption_producer_output_on_connection(
+                    raise ApprovalBindingError(
+                        "producer receipt hash or identity mismatch"
+                    )
+                verify_output(
                     conn,
                     binding=binding,
                     invocation_id=invocation_id,
@@ -1537,7 +1562,7 @@ class GovernanceRepository:
                 and approval["revoked_at"] is not None
                 and receipt is None
                 and detail.get("domain_receipt") is None
-                and strategy.adoption_target_unchanged_on_connection(conn, binding=binding)
+                and target_unchanged(conn, binding=binding)
             ):
                 fence = {
                     "schema_version": "governed_domain_fence.v1",
@@ -1549,7 +1574,7 @@ class GovernanceRepository:
                 }
                 return {
                     "outcome": "not_applied_fenced",
-                    "reason": "adoption_fenced_with_unchanged_target",
+                    "reason": fence_reason,
                     "receipt_id": f"fence:{effect['id']}",
                     "receipt_hash": canonical_payload_hash(fence),
                     "invocation_contract_hash": bindings["invocation_contract_hash"],

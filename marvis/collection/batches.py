@@ -77,72 +77,81 @@ def ensure_batch_schema(db_path):
         """)
 
 
+def batch_signature(
+    secret, task_id, batch_id, request_hash, preview_hash, actor_id, created_at
+):
+    return hmac.new(
+        secret,
+        canonical_json(
+            [
+                "collection.batch.v1",
+                task_id,
+                batch_id,
+                request_hash,
+                preview_hash,
+                actor_id,
+                created_at,
+            ]
+        ).encode(),
+        "sha256",
+    ).hexdigest()
+
+
+def decode_batch(row, secret):
+    if row is None:
+        raise CollectionEvidenceError("collection_batch_not_found")
+    request, preview = (
+        json.loads(row["request_json"]),
+        json.loads(row["preview_json"]),
+    )
+    if (
+        content_hash(request) != row["request_hash"]
+        or preview.get("preview_hash") != row["preview_hash"]
+        or content_hash(
+            {key: value for key, value in preview.items() if key != "preview_hash"}
+        )
+        != row["preview_hash"]
+        or request["batch_id"] != row["batch_id"]
+        or not hmac.compare_digest(
+            row["signature"],
+            batch_signature(
+                secret,
+                row["task_id"],
+                row["batch_id"],
+                row["request_hash"],
+                row["preview_hash"],
+                row["actor_id"],
+                row["created_at"],
+            ),
+        )
+    ):
+        raise CollectionEvidenceError("collection_batch_integrity_failed")
+    return {
+        "task_id": row["task_id"],
+        "batch_id": row["batch_id"],
+        "request_hash": row["request_hash"],
+        "preview_hash": row["preview_hash"],
+        "request": request,
+        "preview": preview,
+        "actor_id": row["actor_id"],
+        "created_at": row["created_at"],
+        "status": row["status"],
+        "revision": row["revision"],
+        "execution_authorized": False,
+    }
+
+
 class CollectionBatchStore:
     def __init__(self, settings):
         self.settings = settings
         self.ledger = CollectionLedger(settings)
         ensure_batch_schema(settings.db_path)
 
-    def _signature(
-        self, task_id, batch_id, request_hash, preview_hash, actor_id, created_at
-    ):
-        return hmac.new(
-            self.ledger.secret,
-            canonical_json(
-                [
-                    "collection.batch.v1",
-                    task_id,
-                    batch_id,
-                    request_hash,
-                    preview_hash,
-                    actor_id,
-                    created_at,
-                ]
-            ).encode(),
-            "sha256",
-        ).hexdigest()
+    def _signature(self, *args):
+        return batch_signature(self.ledger.secret, *args)
 
     def _decode(self, row):
-        if row is None:
-            raise CollectionEvidenceError("collection_batch_not_found")
-        request, preview = (
-            json.loads(row["request_json"]),
-            json.loads(row["preview_json"]),
-        )
-        if (
-            content_hash(request) != row["request_hash"]
-            or preview.get("preview_hash") != row["preview_hash"]
-            or content_hash(
-                {key: value for key, value in preview.items() if key != "preview_hash"}
-            )
-            != row["preview_hash"]
-            or request["batch_id"] != row["batch_id"]
-            or not hmac.compare_digest(
-                row["signature"],
-                self._signature(
-                    row["task_id"],
-                    row["batch_id"],
-                    row["request_hash"],
-                    row["preview_hash"],
-                    row["actor_id"],
-                    row["created_at"],
-                ),
-            )
-        ):
-            raise CollectionEvidenceError("collection_batch_integrity_failed")
-        return {
-            "task_id": row["task_id"],
-            "batch_id": row["batch_id"],
-            "request_hash": row["request_hash"],
-            "preview_hash": row["preview_hash"],
-            "request": request,
-            "preview": preview,
-            "actor_id": row["actor_id"],
-            "created_at": row["created_at"],
-            "status": row["status"],
-            "revision": row["revision"],
-            "execution_authorized": False,
-        }
+        return decode_batch(row, self.ledger.secret)
 
     def _sources(self, conn, task_id, request):
         references = {
@@ -174,8 +183,14 @@ class CollectionBatchStore:
             ):
                 raise CollectionEvidenceError("collection_batch_precedes_case_opening")
 
-    def prepare(self, task_id, request: CollectionBatchRequest, actor_id):
+    def prepare(
+        self, task_id, request: CollectionBatchRequest, actor_id, *, writer_guard=None
+    ):
         request = CollectionBatchRequest.model_validate(request.model_dump())
+        if parse_datetime(request.knowledge_cutoff, "knowledge_cutoff") > datetime.now(
+            UTC
+        ):
+            raise CollectionEvidenceError("collection_future_knowledge_cutoff")
         encoded = canonical_json(request.model_dump())
         if len(encoded.encode()) > 16_000_000:
             raise CollectionEvidenceError("collection_batch_byte_budget_exceeded")
@@ -197,6 +212,8 @@ class CollectionBatchStore:
         )
         with connect(self.settings.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if writer_guard is not None:
+                writer_guard(conn)
             require_actor(conn, actor_id, {"maker"})
             self._sources(conn, task_id, request)
             row = conn.execute(
@@ -204,7 +221,11 @@ class CollectionBatchStore:
                 (task_id, request.batch_id),
             ).fetchone()
             if row is not None:
-                old = self._decode(row)
+                from marvis.collection.execution_state import batch_on_connection
+
+                old = batch_on_connection(
+                    conn, task_id, request.batch_id, self.ledger.secret
+                )
                 if old["request_hash"] != request_hash or old["actor_id"] != actor_id:
                     raise CollectionEvidenceError(
                         "collection_batch_idempotency_conflict"
@@ -242,7 +263,9 @@ class CollectionBatchStore:
                 "SELECT * FROM collection_batches WHERE task_id=? AND batch_id=?",
                 (task_id, batch_id),
             ).fetchone()
-            result = self._decode(row)
+            from marvis.collection.execution_state import batch_on_connection
+
+            result = batch_on_connection(conn, task_id, batch_id, self.ledger.secret)
             if role == "maker" and row["actor_id"] != actor_id:
                 raise CollectionEvidenceError("collection_batch_actor_forbidden")
             return result

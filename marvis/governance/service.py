@@ -285,6 +285,18 @@ class GovernanceService:
             return {}
         if target_policy is None:
             raise ApprovalBindingError("effect target policy is missing")
+        if target_policy.kind == "collection_batch":
+            from marvis.collection.execution_state import effect_target
+            from marvis.collection.ledger import CollectionEvidenceError
+
+            try:
+                return effect_target(
+                    self._governance.db_path, plan.task_id, inputs, target_policy
+                )
+            except (CollectionEvidenceError, KeyError, OSError) as exc:
+                raise ApprovalBindingError(
+                    "collection target evidence is invalid"
+                ) from exc
         if target_policy.kind != "strategy":
             raise ApprovalBindingError(
                 f"unsupported effect target kind: {target_policy.kind}"

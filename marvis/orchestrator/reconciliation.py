@@ -102,6 +102,12 @@ def register_governed_outcome_verifier(registry, governance):
     registry.register(
         "tool", "strategy.adopt_strategy", "strategy.atomic-producer.v1", verify
     )
+    for producer in (
+        "collection.queue_batch",
+        "collection.execute_reference",
+        "collection.cancel_batch",
+    ):
+        registry.register("tool", producer, "collection.atomic-producer.v1", verify)
 
 
 class ExecutionReconciler:

@@ -1,0 +1,406 @@
+{
+  "name": "collection",
+  "version": "0.1.0",
+  "display_name": "Collection reference workflow",
+  "description": "原生案件、受治理本地排队与参考动作回执。无真实客户触达；实际资金只来自独立显式导入。",
+  "module": "marvis.packs.collection.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "queue_batch",
+      "summary": "确认冻结提案并预占本地参考队列；执行时重验频次、容量和估算预算。",
+      "entrypoint": "tool_queue_batch",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          },
+          "request_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "preview_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "batch_id",
+          "request_hash",
+          "preview_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "batch_id": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "receipt_hash": {
+            "type": "string"
+          },
+          "evidence_url": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "collection.reference_result.v1"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 2
+          },
+          "action_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "held_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "estimated_cost_minor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "actual_cost_minor": {
+            "type": "null"
+          },
+          "execution_mode": {
+            "const": "local_reference"
+          },
+          "external_action_executed": {
+            "const": false
+          },
+          "estimated_cost_scope": {
+            "const": "contact_actions_only"
+          },
+          "unestimated_review_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "task_id",
+          "batch_id",
+          "operation",
+          "status",
+          "artifact_id",
+          "receipt_hash",
+          "evidence_url",
+          "schema_version",
+          "revision",
+          "action_count",
+          "held_count",
+          "estimated_cost_minor",
+          "actual_cost_minor",
+          "execution_mode",
+          "external_action_executed",
+          "estimated_cost_scope",
+          "unestimated_review_count"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "memory_limit_mb": 2048,
+      "failure_policy": "fail",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "required",
+        "effect_target": {
+          "kind": "collection_batch",
+          "id_input": "batch_id",
+          "expected_statuses": [
+            "proposed"
+          ],
+          "result_status": "queued"
+        }
+      },
+      "side_effects": [
+        "write:artifact",
+        "write:task"
+      ]
+    },
+    {
+      "name": "execute_reference",
+      "summary": "再次确认已排队批次，写入本地参考工单完成回执；不联系客户。",
+      "entrypoint": "tool_execute_reference",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          },
+          "request_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "preview_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "batch_id",
+          "request_hash",
+          "preview_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "batch_id": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "receipt_hash": {
+            "type": "string"
+          },
+          "evidence_url": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "collection.reference_result.v1"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 2
+          },
+          "action_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "held_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "estimated_cost_minor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "actual_cost_minor": {
+            "type": "null"
+          },
+          "execution_mode": {
+            "const": "local_reference"
+          },
+          "external_action_executed": {
+            "const": false
+          },
+          "estimated_cost_scope": {
+            "const": "contact_actions_only"
+          },
+          "unestimated_review_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "task_id",
+          "batch_id",
+          "operation",
+          "status",
+          "artifact_id",
+          "receipt_hash",
+          "evidence_url",
+          "schema_version",
+          "revision",
+          "action_count",
+          "held_count",
+          "estimated_cost_minor",
+          "actual_cost_minor",
+          "execution_mode",
+          "external_action_executed",
+          "estimated_cost_scope",
+          "unestimated_review_count"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "memory_limit_mb": 2048,
+      "failure_policy": "fail",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "required",
+        "effect_target": {
+          "kind": "collection_batch",
+          "id_input": "batch_id",
+          "expected_statuses": [
+            "queued"
+          ],
+          "result_status": "completed"
+        }
+      },
+      "side_effects": [
+        "write:artifact",
+        "write:task"
+      ]
+    },
+    {
+      "name": "cancel_batch",
+      "summary": "取消未完成参考批次并释放本地预约；保留原始审批和执行证据。",
+      "entrypoint": "tool_cancel_batch",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "batch_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          },
+          "request_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "preview_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "batch_id",
+          "request_hash",
+          "preview_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "batch_id": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "receipt_hash": {
+            "type": "string"
+          },
+          "evidence_url": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "collection.reference_result.v1"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 2
+          },
+          "action_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "held_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "estimated_cost_minor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "actual_cost_minor": {
+            "type": "null"
+          },
+          "execution_mode": {
+            "const": "local_reference"
+          },
+          "external_action_executed": {
+            "const": false
+          },
+          "estimated_cost_scope": {
+            "const": "contact_actions_only"
+          },
+          "unestimated_review_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "task_id",
+          "batch_id",
+          "operation",
+          "status",
+          "artifact_id",
+          "receipt_hash",
+          "evidence_url",
+          "schema_version",
+          "revision",
+          "action_count",
+          "held_count",
+          "estimated_cost_minor",
+          "actual_cost_minor",
+          "execution_mode",
+          "external_action_executed",
+          "estimated_cost_scope",
+          "unestimated_review_count"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "memory_limit_mb": 2048,
+      "failure_policy": "fail",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "required",
+        "effect_target": {
+          "kind": "collection_batch",
+          "id_input": "batch_id",
+          "expected_statuses": [
+            "proposed",
+            "queued"
+          ],
+          "result_status": "cancelled"
+        }
+      },
+      "side_effects": [
+        "write:artifact",
+        "write:task"
+      ]
+    }
+  ],
+  "hooks": [],
+  "permissions": [
+    "write:artifact",
+    "write:task"
+  ]
+}

@@ -143,19 +143,25 @@ class CollectionLedger:
         ):
             raise CollectionEvidenceError("collection_source_integrity_failed")
 
-    def create_case(self, task_id, case: CollectionCase):
+    def create_case(self, task_id, case: CollectionCase, *, writer_guard=None):
         case = CollectionCase.model_validate(case.model_dump())
         with connect(self.settings.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if writer_guard is not None:
+                writer_guard(conn)
             self._source(
                 conn, task_id, case.source_artifact_id, case.source_artifact_hash
             )
             return self._put(conn, task_id, "case", case.case_id, case.model_dump())
 
-    def register_schedule(self, task_id, schedule: InstallmentSchedule):
+    def register_schedule(
+        self, task_id, schedule: InstallmentSchedule, *, writer_guard=None
+    ):
         schedule = InstallmentSchedule.model_validate(schedule.model_dump())
         with connect(self.settings.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if writer_guard is not None:
+                writer_guard(conn)
             case = CollectionCase.model_validate(
                 self._get(conn, task_id, "case", schedule.case_id)
             )
@@ -187,12 +193,14 @@ class CollectionLedger:
     def _flow_key(event):
         return canonical_json([event.source_id, event.event_id])
 
-    def append(self, task_id, events: list[CashflowEvent]):
+    def append(self, task_id, events: list[CashflowEvent], *, writer_guard=None):
         if not 0 < len(events) <= self.MAX_EVENTS:
             raise CollectionEvidenceError("collection_event_budget_exceeded")
         pending = [CashflowEvent.model_validate(e.model_dump()) for e in events]
         with connect(self.settings.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if writer_guard is not None:
+                writer_guard(conn)
             cases, existing = {}, {}
             checked_sources = set()
             for event in pending:
@@ -284,13 +292,15 @@ class CollectionLedger:
                 pending = deferred
             return result
 
-    def reconcile(self, task_id, request: ReconciliationRequest):
+    def reconcile(self, task_id, request: ReconciliationRequest, *, writer_guard=None):
         request = ReconciliationRequest.model_validate(request.model_dump())
         as_of, cutoff = _at(request.as_of), _at(request.knowledge_cutoff)
         if cutoff > datetime.now(UTC):
             raise CollectionEvidenceError("collection_future_knowledge_cutoff")
         with connect(self.settings.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if writer_guard is not None:
+                writer_guard(conn)
             case = CollectionCase.model_validate(
                 self._get(conn, task_id, "case", request.case_id)
             )
