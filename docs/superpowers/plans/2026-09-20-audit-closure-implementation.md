@@ -483,3 +483,15 @@ Vintage 平台原本明确要求回复“材料已上传”，但路由只收到
 正常建模原案例在 `e473f53a` 通过 1/1，12 步 done、13 条断言过，178.146 秒、24 次模型尝试和 127 次 HTTP 均符合原预算。6 次输出上限空响应仍记录；两次运行不能证明普遍性能提升，首轮 0/1 不覆盖。报告 `normal-modeling-20260928/reviewer-schema-real-model-runs/20260928T172915986322Z-53029500cbe3/report.json`，两轮绑定比对 `reviewer-schema-diagnostic.json`。该源码正在执行原九例跨流程回归。
 
 实际 attempt receipt 未带提示词 name/version 的既有缺口由 `1b786c6c` 补齐，首轮和重试均引用注册值，42 项审查/提示词检查通过；这项 telemetry 补充没有合入正在运行的冻结源码，未倒填旧回执。
+
+## WP07 普通 JOIN 来源证据与 WP14 执行界面集成
+
+`246a548f` 修复空表资料重复反序列化时 NaN 不等引起的身份误判，仅双方对应 NaN 视为同一未知值，完整字段和文件认证仍校验。`6fc5154d` 从同一物化 JOIN 记录实际左/右成员、双亲 hash 与碰撞后列名，在同一产物事务中登记；左字段须核验复制值才能继承时点证据，右字段及整表 PIT 状态保持 unknown。复用原去重、规范化、1:1 行数和 source_path 绑定，未改变拟合或标签证据。旧注入式 registry/repository 兼容路径保留，但不生成原生时点证明。96 项执行、53 项时点/快照、32 项原生/身份以及最终 5 项事务负例通过；失败原记录保留于 `/Users/eddyz/.codex/work-artifacts/wp07-join-*.log`。
+
+`e0887ad9` 增加催收任务工作台的批次发现、冻结预览、现有 Plan 人审、独立 checker、排队/本地参考执行/取消及原生回执 JSON 导出。真实 CLI 浏览器在 1440/1600/1920 验证完整链；根代理回看完成态截图，实际成本未知、未联系客户表达清楚。344 项前端与 8 项专项检查通过；主线 JOIN/训练证据/催收 UI 联合 111 项通过，改动 JS 的 node 检查通过。证据 `collection-ui-20260929/run-1790616614/proof.json` 与 `reviewer-contract-20260929/main-joined.log`。数据准备和常用政策业务表单继续开发，WP14 未闭合。
+
+审查输出契约两个提交经独立只读代码审阅，未发现本次引入的可复现回归或确定性验收绕过。`e473f53a` 的第六次固定九例再次通过 9/9，5 个真实模型候选与 4 个零模型澄清例分别记录，报告 `runtime-family-20260928/reviewer-schema-real-model-runs/20260928T173258834913Z-196fd869b4d6/report.json`。正常验证将分别覆盖标准 V2 Agent 与兼容 Workflow，不能用不同入口的成功替代标准入口验收。
+
+## WP02 特征输入重复实现收口
+
+源码 AST 扫描确认 Feature 与 Modeling 中三类 helper 共六份函数体完全相同。`d471b1a3` 将它们收口到共同的 pack 输入适配层：特征列表去重展开、被自动筛除的类别列提示、数值类别编码提示；保留旧导入名，算法内核仍在 feature 层，未合并两包不同的指标/错误语义。63 行新增、129 行移除，净减 66 行。6 对函数体排除文档字符串后 AST 一致，证据 `reviewer-contract-20260929/feature-dedup-body-equivalence.json`；190 项真实能力包、候选列和筛选检查通过（398.63 秒），scoped Ruff/diff 通过，日志 `feature-dedup.log`。未将仅扫描命中或动态入口误判为僵尸代码，剩余大模块和兼容边界仍需复核。
