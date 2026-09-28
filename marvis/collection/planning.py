@@ -134,6 +134,14 @@ def plan_collection_actions(
         raise ValueError("collection_case_identity_conflict")
     if len({_subject(history) for history in histories}) != len(histories):
         raise ValueError("collection_subject_history_conflict")
+    known_case_subjects = {case.case_id: _subject(case) for case in cases}
+    for history in histories:
+        if any(
+            attempt.case_id in known_case_subjects
+            and known_case_subjects[attempt.case_id] != _subject(history)
+            for attempt in history.attempts
+        ):
+            raise ValueError("collection_history_case_subject_conflict")
     if not {_subject(history) for history in histories} <= {
         _subject(case) for case in cases
     }:

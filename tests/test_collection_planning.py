@@ -313,6 +313,17 @@ def test_same_subject_cross_case_provisional_reservations_and_namespace_separati
     assert [row["status"] for row in rows] == ["eligible_for_approval"] * 2
 
 
+def test_history_cannot_move_a_known_cases_attempt_to_a_different_subject():
+    p = policy(max_contacts_per_subject_window=1, min_contact_interval_seconds=0)
+    cases = [case("a"), case("b", "b" * 64)]
+    histories = [
+        history(attempts=[attempt("2026-09-28T03:30:00Z", case_id="b")]),
+        history("b" * 64),
+    ]
+    with pytest.raises(ValueError, match="history_case_subject_conflict"):
+        preview(p, cases, histories)
+
+
 def test_priority_allocation_is_input_order_independent_and_budget_is_exact():
     p = policy(max_estimated_batch_cost_minor=30)
     s = spec(
