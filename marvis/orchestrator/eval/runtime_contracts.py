@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 
 RUNTIME_FINISH_REASONS = frozenset(
@@ -45,6 +45,25 @@ class RuntimeBudget(StrictModel):
     max_llm_attempts: int = Field(default=30, ge=0, le=1000)
     max_http_requests: int = Field(default=150, ge=1, le=5000)
     max_output_tokens_per_attempt: int = Field(default=2048, ge=1, le=32768)
+    max_total_tokens: int | None = Field(default=None, ge=0)
+    max_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    currency: str | None = Field(default=None, min_length=1, max_length=12)
+
+    @model_validator(mode="after")
+    def cost_currency(self):
+        if (self.max_cost is None) != (self.currency is None):
+            raise ValueError("max_cost and currency must be declared together")
+        return self
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_identity(self, handler):
+        # Old archived cases must retain their original digest. Only newly
+        # declared limits add keys; do not silently rewrite historical budgets.
+        value = handler(self)
+        for key in ("max_total_tokens", "max_cost", "currency"):
+            if value.get(key) is None:
+                value.pop(key, None)
+        return value
 
 
 class Material(StrictModel):

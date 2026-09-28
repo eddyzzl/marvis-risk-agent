@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 import httpx
 import psutil
 
+from .runtime_budget import AdmissionBudgetExceeded, AggregateBudget
 from .runtime_contracts import (
     ModelConnection,
     RuntimeCase,
@@ -60,7 +61,8 @@ def _write_new(path: Path, payload) -> None:
 class AttemptObserver:
     """Append-only transport receipts, including retries and interrupted attempts."""
 
-    def __init__(self, path: Path, *, max_attempts: int, deadline: float):
+    def __init__(self, path: Path, *, max_attempts: int, deadline: float,
+                 aggregate_budget: AggregateBudget | None = None):
         self.path = path
         self.max_attempts = max_attempts
         self.deadline = deadline
@@ -68,7 +70,10 @@ class AttemptObserver:
         self.closed = False
         self.failed = False
         self.lock = threading.Lock()
+        self.aggregate_budget = aggregate_budget
         self.path.touch(exist_ok=False, mode=0o600)
+        if aggregate_budget is not None and aggregate_budget.configured:
+            self._append({"event": "aggregate_budget_policy", **aggregate_budget.policy()})
 
     def _append(self, value: dict):
         try:
@@ -91,6 +96,8 @@ class AttemptObserver:
         with self.lock:
             if self.closed:
                 raise RuntimeBudgetExceeded("runtime observation is closed")
+            if self.failed:
+                raise RuntimeJourneyError("LLM observation persistence failed")
             if time.monotonic() >= self.deadline or self.count >= self.max_attempts:
                 self._append(
                     {
@@ -100,14 +107,25 @@ class AttemptObserver:
                     }
                 )
                 raise RuntimeBudgetExceeded("runtime LLM budget exhausted")
-            self.count += 1
             ticket = uuid.uuid4().hex
+            reservation = {}
+            if self.aggregate_budget is not None:
+                try:
+                    reservation = self.aggregate_budget.reserve(
+                        ticket, metadata["forwarded_max_output_tokens"]
+                    )
+                except AdmissionBudgetExceeded as exc:
+                    self._append({"event": "budget_blocked", "reason": str(exc),
+                                  "logical_call_id": metadata["logical_call_id"]})
+                    raise RuntimeBudgetExceeded(str(exc)) from None
+            self.count += 1
             self._append(
                 {
                     "event": "started",
                     "attempt_id": ticket,
                     "ordinal": self.count,
                     **metadata,
+                    **reservation,
                 }
             )
             return ticket
@@ -115,12 +133,15 @@ class AttemptObserver:
     def after_attempt(self, ticket: str, result: dict):
         with self.lock:
             if not self.closed:
-                self._append({"event": "finished", "attempt_id": ticket, **result})
+                settlement = self.aggregate_budget.settle(ticket, result) if self.aggregate_budget else {}
+                self._append({"event": "finished", "attempt_id": ticket, **result, **settlement})
 
     def seal(self, reason="case_closed"):
         with self.lock:
             if not self.closed:
                 try:
+                    if self.aggregate_budget is not None and self.aggregate_budget.configured:
+                        self._append({"event": "aggregate_budget_snapshot", **self.aggregate_budget.snapshot()})
                     self._append({"event": "measurement_closed", "reason": reason})
                 finally:
                     self.closed = True
@@ -160,6 +181,8 @@ class _CompletionObservation:
         self.observed = False
         self.invalid = False
         self.missing_content = False
+        self.final_usage_candidate = False
+        self.usage_regressed = False
 
     def read(self, raw, result, *, streaming):
         try:
@@ -171,15 +194,29 @@ class _CompletionObservation:
             self.invalid = True
             return
         # A later usage-only SSE event must not reset prior observed fields.
+        usage_fields = _usage_fields(payload)
+        complete_usage_chunk = all(usage_fields[key] is not None for key in ("prompt_tokens", "completion_tokens"))
+        if payload.get("usage") is not None:
+            # Confirmation belongs to one whole envelope. A later partial chunk
+            # cannot inherit completeness from an earlier pair of counts.
+            self.final_usage_candidate = False
+        for key, value in usage_fields.items():
+            if value is not None:
+                field = f"observed_{key}_max"
+                if value < result.get(field, 0):
+                    self.usage_regressed = True
+                result[field] = max(result.get(field, 0), value)
         result.update(
             {
                 key: value
-                for key, value in _usage_fields(payload).items()
+                for key, value in usage_fields.items()
                 if value is not None
             }
         )
         choices = payload.get("choices")
         if streaming and choices in (None, []):
+            if complete_usage_chunk:
+                self.final_usage_candidate = self.finish_reason is not None
             return
         if (
             not isinstance(choices, list)
@@ -197,6 +234,8 @@ class _CompletionObservation:
                 if isinstance(finish, str) and finish in RUNTIME_FINISH_REASONS
                 else "other"
             )
+        if complete_usage_chunk:
+            self.final_usage_candidate = self.finish_reason is not None
         container = choice.get("delta") if streaming else None
         if not isinstance(container, dict):
             container = choice.get("message")
@@ -266,7 +305,8 @@ class _CompletionObservation:
 
 @contextmanager
 def _model_gateway(
-    profile, secret_env, attempt_path, *, max_attempts, deadline, max_output_tokens=2048
+    profile, secret_env, attempt_path, *, max_attempts, deadline, max_output_tokens=2048,
+    budget=None, price_bytes=None,
 ):
     """One credential-owning, metered endpoint shared by the app and all workers.
 
@@ -274,8 +314,23 @@ def _model_gateway(
     loopback endpoint and an ephemeral bearer token. No inherited role profile or
     model switch can bypass the case's shared attempt budget.
     """
+    aggregate_budget = None
+    if budget is not None and (budget.max_total_tokens is not None or budget.max_cost is not None):
+        price = None
+        if budget.max_cost is not None:
+            from .runtime_scoring import PriceBook
+            if price_bytes is None:
+                raise RuntimeJourneyError("cost_budget_requires_frozen_price_book")
+            price = PriceBook.model_validate_json(price_bytes)
+            if price.model_name != profile["model_name"] or price.currency != budget.currency:
+                raise RuntimeJourneyError("cost_budget_price_book_mismatch")
+        aggregate_budget = AggregateBudget(
+            context_window=profile["context_window"], max_total_tokens=budget.max_total_tokens,
+            max_cost=budget.max_cost, currency=budget.currency, price=price,
+            price_hash=digest(price_bytes) if price is not None else None,
+        )
     observer = AttemptObserver(
-        attempt_path, max_attempts=max_attempts, deadline=deadline
+        attempt_path, max_attempts=max_attempts, deadline=deadline, aggregate_budget=aggregate_budget
     )
     token = uuid.uuid4().hex + uuid.uuid4().hex
     provider_key = profile.get("api_key") or secret_env.get(profile.get("api_key_env"))
@@ -393,6 +448,12 @@ def _model_gateway(
                 requested_output = payload.get("max_tokens")
                 if type(requested_output) is not int or requested_output < 1:
                     raise ValueError
+                # One sampled completion is the metering contract. Alternative
+                # output limit fields or multiplicity cannot bypass reservation.
+                if any(type(payload.get(key, 1)) is not int or payload.get(key, 1) != 1 for key in ("n", "best_of")) or "max_completion_tokens" in payload:
+                    observer.reject("unsupported_output_budget_parameters")
+                    self.reject(400, "unsupported_output_budget_parameters")
+                    return
                 effective_output = min(requested_output, output_cap)
                 metadata["requested_max_output_tokens"] = requested_output
                 metadata["forwarded_max_output_tokens"] = effective_output
@@ -416,6 +477,7 @@ def _model_gateway(
                 "prompt_tokens": None,
                 "completion_tokens": None,
                 "reasoning_tokens": None,
+                "usage_final": False,
             }
             observation = _CompletionObservation()
             response_hash = hashlib.sha256()
@@ -469,6 +531,7 @@ def _model_gateway(
                 size = 0
                 buffered = b""
                 is_sse = "text/event-stream" in content_type
+                saw_stream_done = False
                 while True:
                     if closing.is_set() or time.monotonic() >= deadline:
                         raise RuntimeBudgetExceeded("stream wall budget exhausted")
@@ -489,12 +552,16 @@ def _model_gateway(
                     if is_sse:
                         while b"\n" in buffered:
                             line, buffered = buffered.split(b"\n", 1)
+                            if line.startswith(b"data:") and line[5:].strip() == b"[DONE]":
+                                saw_stream_done = True
                             if (
                                 line.startswith(b"data:")
                                 and line[5:].strip() != b"[DONE]"
                             ):
                                 observation.read(line[5:], result, streaming=True)
                 if is_sse:
+                    if buffered.startswith(b"data:") and buffered[5:].strip() == b"[DONE]":
+                        saw_stream_done = True
                     # The client also consumes a final SSE line without a newline.
                     # Preserve its usage/finish facts instead of silently dropping it.
                     if (
@@ -505,6 +572,14 @@ def _model_gateway(
                 else:
                     observation.read(buffered, result, streaming=False)
                 result["transport_ok"] = 200 <= status < 300
+                result["usage_final"] = (
+                    result["transport_ok"] and observation.final_usage_candidate
+                    and not observation.invalid and not observation.usage_regressed
+                    and (not is_sse or saw_stream_done)
+                    and not (type(result["reasoning_tokens"]) is int
+                             and type(result["completion_tokens"]) is int
+                             and result["reasoning_tokens"] > result["completion_tokens"])
+                )
                 result["output_limit_exceeded"] = (
                     type(result["completion_tokens"]) is int
                     and result["completion_tokens"] > effective_output
@@ -645,6 +720,7 @@ def _application(
     secret_env: dict,
     source_sha256: str,
     forbidden_inputs: tuple[Path, ...],
+    price_bytes: bytes | None = None,
 ):
     deadline = time.monotonic() + case.budget.wall_seconds
     with _model_gateway(
@@ -654,6 +730,8 @@ def _application(
         max_attempts=case.budget.max_llm_attempts,
         deadline=deadline,
         max_output_tokens=case.budget.max_output_tokens_per_attempt,
+        budget=case.budget,
+        price_bytes=price_bytes,
     ) as child_profile:
         with _application_process(
             root, case, child_profile, source_sha256, deadline, forbidden_inputs
@@ -1074,7 +1152,8 @@ def _read_attempts(path: Path) -> list[dict]:
 
 
 def _run_case(
-    case, dataset_root, profile, case_dir, secret_env, source_sha256, forbidden_inputs
+    case, dataset_root, profile, case_dir, secret_env, source_sha256, forbidden_inputs,
+    price_bytes=None,
 ):
     started = time.monotonic()
     record = {
@@ -1105,6 +1184,7 @@ def _run_case(
                 secret_env,
                 source_sha256,
                 forbidden_inputs,
+                price_bytes,
             ) as (client, workspace, deadline):
                 journey = Journey(client, case, deadline)
                 try:
@@ -1159,6 +1239,7 @@ def _run_case(
     if any(
         item["event"] == "budget_blocked"
         or item.get("output_limit_exceeded") is True
+        or item.get("aggregate_budget_violation") is True
         or (
             item["event"] == "finished"
             and item.get("error_type") == "RuntimeBudgetExceeded"
@@ -1332,6 +1413,7 @@ def run_runtime_suite(
                 allowed_env,
                 report["source"]["source_sha256"],
                 forbidden_inputs,
+                price_bytes,
             )
             interrupted = record["runtime_status"] == "interrupted"
         # Commit the original execution outcome before attempting any scoring.

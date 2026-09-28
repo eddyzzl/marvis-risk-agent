@@ -160,6 +160,7 @@ def usage_summary(
     complete = (
         bool(attempts)
         and set(started) == set(finished)
+        and all(finished[key].get("usage_final", True) is True for key in attempts)
         and all(
             type(finished[key].get(field)) is int
             for key in attempts
@@ -188,6 +189,26 @@ def usage_summary(
         "cost_budget_status": "not_enforced",
         "token_budget_status": "not_enforced",
     }
+    policies = [event for event in events if event["event"] == "aggregate_budget_policy"]
+    snapshots = [event for event in events if event["event"] == "aggregate_budget_snapshot"]
+    if policies:
+        policy = policies[-1]
+        result["aggregate_budget"] = snapshots[-1] if snapshots else policy
+        result["aggregate_budget_receipt_complete"] = bool(snapshots)
+        violated = any(event.get("aggregate_budget_violation") is True for event in events)
+        for dimension, field, reason in (
+            ("token", "max_total_tokens", "aggregate_token_reservation_exhausted"),
+            ("cost", "max_cost", "aggregate_cost_reservation_exhausted"),
+        ):
+            if policy.get(field) is None:
+                continue
+            blocked = any(event.get("reason") == reason for event in events)
+            result[f"{dimension}_budget_status"] = (
+                "provider_ceiling_violated" if violated else
+                "admission_blocked" if blocked else
+                "admission_enforced_under_declared_ceiling" if snapshots else
+                "admission_receipt_incomplete"
+            )
     if price_bytes is not None:
         price = PriceBook.model_validate_json(price_bytes)
         result["price_book_sha256"] = digest(price_bytes)
