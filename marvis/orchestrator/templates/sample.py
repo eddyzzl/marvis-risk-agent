@@ -4,6 +4,11 @@ from marvis.orchestrator.templates import _register_builtin_template
 from marvis.orchestrator.templates.asof_join import DATASET_ASOF_JOIN
 from marvis.orchestrator.templates.risk_source import RISK_SOURCE_QUERY
 from marvis.orchestrator.templates.event_replay import EVENT_FEATURE_REPLAY
+from marvis.orchestrator.templates.collection import (
+    COLLECTION_QUEUE,
+    COLLECTION_EXECUTE,
+    COLLECTION_CANCEL,
+)
 from marvis.orchestrator.templates.decision_twin import (
     HISTORICAL_DECISION_REPLAY,
     HISTORICAL_OUTCOME_RECONCILIATION,
@@ -99,6 +104,9 @@ from marvis.orchestrator.templates.validation import MODEL_VALIDATION
 BUILTIN_TEMPLATES = (
     RISK_SOURCE_QUERY,
     EVENT_FEATURE_REPLAY,
+    COLLECTION_QUEUE,
+    COLLECTION_EXECUTE,
+    COLLECTION_CANCEL,
     SAMPLE_ECHO,
     DATASET_DESCRIPTIVE_ANALYSIS,
     DATASET_TRANSFORM,

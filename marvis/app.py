@@ -83,6 +83,8 @@ from marvis.reference_decision.service import ReferenceDecisionService
 from marvis.risk_context.source_service import SourceService
 from marvis.risk_context.source_router import router as risk_source_router
 from marvis.risk_context.event_service import EventService
+from marvis.collection.service import CollectionService
+from marvis.collection.router import router as collection_router
 from marvis.risk_context.event_router import router as risk_event_router
 from marvis.reference_decision.deployment import ADAPTER_ID, LocalReferenceAdapter
 from marvis.production_governance.evidence import ActivationEvidenceVerifier
@@ -477,6 +479,7 @@ def create_app(
     app.state.reference_deployment_adapter = LocalReferenceAdapter(app.state.reference_decision)
     app.state.risk_sources = SourceService(settings)
     app.state.risk_events = EventService(settings)
+    app.state.collection = CollectionService(settings)
     app.state.production_activation_verifiers.setdefault(ADAPTER_ID, app.state.reference_deployment_adapter)
     app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
@@ -646,6 +649,7 @@ def create_app(
     app.include_router(reference_decision_router)
     app.include_router(risk_source_router)
     app.include_router(risk_event_router)
+    app.include_router(collection_router)
     app.include_router(report_fields_router)
     app.include_router(scans_router)
     app.include_router(skills_router)
