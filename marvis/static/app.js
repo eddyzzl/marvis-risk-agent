@@ -1,4 +1,5 @@
 import { createBusinessAcceptanceController } from "./js/business-acceptance.js";
+import { createOperationsController } from "./js/operations-controller.js";
 import { handleBusinessObjectiveEvent } from "./js/business-objective.js";
 import { api, sleep } from "./js/api.js";
 import { createTaskSession } from "./js/task-session.js";
@@ -8980,6 +8981,7 @@ bindPlatformConfirmDialog();
 materialBindingDialog.bind();
 strategyCandidateLabController.bind(document);
 mountGovernanceExtensions();
+createOperationsController({root: $("operationsDialog"), openButton: $("operationsOpenButton")}).bind();
 onSelectedTierChange(syncCreateTaskTierDefault);
 createTaskDialog.bindMaterialSourceControls();
 const pet = $("petCompanion");

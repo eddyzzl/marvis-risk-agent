@@ -31,6 +31,7 @@
     <link rel="stylesheet" href="static/css/validation-batch.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/validation-batch-create.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/business-acceptance.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/operations.css?v=__MARVIS_STATIC_VERSION__" />
     <script src="static/js/pet_catalog.js?v=__MARVIS_STATIC_VERSION__"></script>
   </head>
   <body class="app-booting" data-theme="light" data-marvis-local-token="__MARVIS_LOCAL_TOKEN__" data-marvis-plugin-admin-token="__MARVIS_PLUGIN_ADMIN_TOKEN__">
@@ -925,6 +926,12 @@
       </div>
     </dialog>
 
+    <dialog id="operationsDialog" class="ops-dialog" aria-labelledby="operationsTitle">
+      <header class="ops-header"><div><h2 id="operationsTitle">监控通知</h2><p class="ops-note">查看应用回执、监控周期与可追溯证据</p></div><button type="button" data-ops-action="close" aria-label="关闭监控通知">×</button></header>
+      <div class="ops-toolbar"><button type="button" class="secondary" data-ops-tab="inbox" aria-pressed="true">通知</button><button type="button" class="secondary" data-ops-tab="schedules" aria-pressed="false">监控配置</button><span class="ops-toolbar-spacer"></span><button type="button" class="secondary" data-ops-action="refresh">刷新</button><button type="button" class="primary" data-ops-action="new" hidden>新建监控</button></div>
+      <div class="ops-status" data-ops-runtime aria-live="polite"></div>
+      <p class="ops-error" data-ops-error role="alert"></p><div class="ops-body" data-ops-body></div>
+    </dialog>
     <dialog id="c1DatasetPreviewDialog" class="task-dialog c1-dataset-preview-dialog" aria-labelledby="c1DatasetPreviewTitle">
       <div class="task-dialog-panel c1-dataset-preview-panel">
         <header class="dialog-head">
@@ -1052,6 +1059,7 @@
         </section>
 
         <footer class="sidebar-footer">
+          <button id="operationsOpenButton" type="button" class="ops-entry"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M9 21h6"/></svg><span>监控通知</span><span data-ops-unread hidden></span></button>
           <details id="sidebarSettings" class="sidebar-settings">
             <summary>
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
