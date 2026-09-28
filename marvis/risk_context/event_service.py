@@ -54,6 +54,11 @@ class EventService:
                 BEFORE UPDATE ON event_requests BEGIN
                 SELECT RAISE(ABORT,'event intent is immutable'); END""")
 
+            conn.execute("""CREATE TRIGGER IF NOT EXISTS event_requests_no_delete
+                BEFORE DELETE ON event_requests
+                WHEN EXISTS(SELECT 1 FROM tasks WHERE id=OLD.task_id)
+                BEGIN SELECT RAISE(ABORT,'event intent is immutable'); END""")
+
     def _intent(self, conn, task_id, request_id):
         row = conn.execute(
             "SELECT * FROM event_requests WHERE task_id=? AND request_id=?",

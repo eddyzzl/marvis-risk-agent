@@ -188,7 +188,8 @@ def test_active_original_actor_is_required_in_worker(runtime):
     service, _, _, inputs = prepare(rt)
     with connect(rt.settings.db_path) as conn:
         conn.execute(
-            "UPDATE local_principals SET expires_at='2020-01-01T00:00:00+00:00' WHERE id=?", (rt.actors["maker"],)
+            "UPDATE local_principals SET expires_at='2020-01-01T00:00:00+00:00' WHERE id=?",
+            (rt.actors["maker"],),
         )
     with pytest.raises(SourceError, match="source_role_forbidden"):
         service.execute(rt.task.id, inputs)
@@ -203,3 +204,39 @@ def test_artifact_parent_symlink_cannot_escape_task(runtime):
     with pytest.raises(EventError, match="event_artifact_path_invalid"):
         service.execute(rt.task.id, inputs)
     assert list(outside.iterdir()) == []
+
+
+def test_current_read_grant_can_replay_after_original_writer_grant_revocation(runtime):
+    rt = runtime
+    service, _, _, inputs = prepare(rt)
+    original = service.execute(rt.task.id, inputs)
+    grant = rt.grant.model_copy(
+        update={
+            "grant_id": "checker-read",
+            "grantee_id": rt.actors["checker"],
+            "permissions": ["read"],
+        }
+    )
+    rt.repo.create_grant(grant, rt.actors["admin"])
+    rt.repo.revoke_grant(rt.task.id, rt.grant.grant_id, rt.actors["admin"])
+    replay = service.read(
+        rt.task.id, inputs.request_id, rt.actors["checker"], grant.grant_id
+    )
+    assert replay["features"] == original["features"]
+    assert replay["artifact_id"] == original["artifact_id"]
+    assert replay["evidence_url"].endswith("grant_id=checker-read")
+    with pytest.raises(EventError, match="event_grant_not_active"):
+        service.execute(rt.task.id, inputs)
+
+
+def test_live_intent_cannot_be_deleted_but_task_cascade_is_allowed(runtime):
+    import sqlite3
+
+    rt = runtime
+    prepare(rt)
+    with connect(rt.settings.db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="event intent is immutable"):
+            conn.execute("DELETE FROM event_requests")
+    with connect(rt.settings.db_path) as conn:
+        conn.execute("DELETE FROM tasks WHERE id=?", (rt.task.id,))
+        assert conn.execute("SELECT count(*) FROM event_requests").fetchone()[0] == 0

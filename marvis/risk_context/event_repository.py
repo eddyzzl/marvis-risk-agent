@@ -88,6 +88,22 @@ def ensure_event_schema(db_path):
             conn.execute(
                 f"CREATE TRIGGER IF NOT EXISTS {table}_immutable BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT,'event evidence is immutable'); END"
             )
+        for table in (
+            "event_sources",
+            "event_grants",
+            "event_claims",
+            "event_imports",
+            "event_decisions",
+        ):
+            task_scope = (
+                "SELECT 1 FROM tasks WHERE id=OLD.task_id"
+                if table in {"event_sources", "event_grants", "event_decisions"}
+                else "SELECT 1 FROM event_sources s JOIN tasks t ON t.id=s.task_id WHERE s.id=OLD.source_id"
+            )
+            conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {table}_no_delete BEFORE DELETE ON {table} "
+                f"WHEN EXISTS({task_scope}) BEGIN SELECT RAISE(ABORT,'event evidence is immutable'); END"
+            )
         conn.execute("""CREATE TRIGGER IF NOT EXISTS event_grants_immutable
             BEFORE UPDATE ON event_grants WHEN
               NEW.payload != OLD.payload OR NEW.signature != OLD.signature

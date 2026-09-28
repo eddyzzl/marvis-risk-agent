@@ -566,3 +566,30 @@ def test_event_schema_does_not_change_global_version_and_evidence_is_immutable(r
             grant_id=rt.grant.grant_id,
             actor_id=rt.actors["maker"],
         )
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "event_sources",
+        "event_grants",
+        "event_claims",
+        "event_imports",
+        "event_decisions",
+    ],
+)
+def test_live_event_evidence_cannot_be_deleted_but_task_cascade_is_allowed(
+    runtime, table
+):
+    import sqlite3
+
+    rt = runtime
+    ingest(rt, [event()])
+    ingest(rt, [coverage()], kind="coverage")
+    evaluate(rt)
+    with connect(rt.settings.db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="event evidence is immutable"):
+            conn.execute(f"DELETE FROM {table}")
+    with connect(rt.settings.db_path) as conn:
+        conn.execute("DELETE FROM tasks WHERE id=?", (rt.task.id,))
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
