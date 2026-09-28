@@ -1,5 +1,6 @@
 import { createBusinessAcceptanceController } from "./js/business-acceptance.js";
 import { createOperationsController } from "./js/operations-controller.js";
+import { createHistoricalReplayController } from "./js/historical-replay-controller.js";
 import { handleBusinessObjectiveEvent } from "./js/business-objective.js";
 import { api, sleep } from "./js/api.js";
 import { createTaskSession } from "./js/task-session.js";
@@ -521,6 +522,24 @@ const businessAcceptanceController = createBusinessAcceptanceController({
     await refreshTasks();
   },
   setActionStatus,
+});
+const historicalReplayController = createHistoricalReplayController({
+  getElement: () => $("historicalReplayPanel"),
+  getTask: () => taskSession.task,
+  getPlan: () => taskSession.plan,
+  captureView: () => taskRequests.capture(),
+  isCurrentView: (view) => taskRequests.current(view),
+  isBusy: selectedTaskIsBusy,
+  beginActivity: (operation, taskId) => claimBusy("historical_replay", "正在提交历史回放…", taskId, operation),
+  endActivity: releaseBusy,
+  openIdentity: () => $("operationsOpenButton")?.click(),
+  onPlanCreated: async (plan, view) => {
+    if (!taskRequests.current(view)) return;
+    taskSession.acceptPlan(view, taskSession.taskId, plan);
+    await refreshDriverGateState(taskSession.taskId);
+    renderAll();
+  },
+  refreshPlan: refreshDriverGateState,
 });
 const driverGateApi = createDriverGateApi({
   api,
@@ -2056,6 +2075,7 @@ function renderBusyActivity(lease, active) {
     setActionStatus("正在执行下一步…", "busy");
   }
   renderWorkflowStepper();
+  historicalReplayController.render();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -5361,6 +5381,7 @@ function renderAll() {
   strategyCandidateLabController.renderAvailability();
   labelingSetupPanel.renderAvailability();
   portfolioSetupPanel.renderAvailability();
+  historicalReplayController.render();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -5380,6 +5401,7 @@ function renderChangedValidationViews() {
   strategyCandidateLabController.renderAvailability();
   labelingSetupPanel.renderAvailability();
   portfolioSetupPanel.renderAvailability();
+  historicalReplayController.render();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -6553,13 +6575,12 @@ function agentMessageStrategyClarificationHtml(message, options = {}) {
 
 async function refreshDriverGateState(taskId) {
   if (!taskId) return;
-  planRailController.resetFetchThrottle(taskId);
   try {
-    const [, , plan] = await Promise.all([
-      loadAgentMessages(taskId),
-      refreshTasks(),
-      planRailController.maybeFetchPlan(taskId),
-    ]);
+    // Message rendering may schedule another plan read. Complete that work
+    // before the authoritative post-mutation read advances its request scope.
+    await Promise.all([loadAgentMessages(taskId), refreshTasks()]);
+    planRailController.resetFetchThrottle(taskId);
+    const plan = await planRailController.maybeFetchPlan(taskId);
     if (!plan) throw new Error("最新执行计划加载失败。");
   } finally {
     if (taskSession.taskId === taskId) {
@@ -6649,6 +6670,9 @@ if (typeof document !== "undefined") {
   document.addEventListener("click", handleSpecialValueClick);
   document.addEventListener("click", handleStrategyClarificationSubmit);
   document.addEventListener("click", (event) => businessAcceptanceController.handleClick(event));
+  for (const type of ["click", "input", "change", "submit"]) {
+    document.addEventListener(type, (event) => historicalReplayController.handle(event));
+  }
   document.addEventListener("click", handleBusinessObjectiveEvent);
   document.addEventListener("change", handleBusinessObjectiveEvent);
   document.addEventListener("change", handleStrategyClarificationChange);
@@ -6829,6 +6853,7 @@ function driverConfirmControllerContext() {
   const selection = taskRequests.capture();
   return {
     getSelectedTaskId: () => taskSession.taskId,
+    getSelectedTask: () => taskSession.task,
     api: typeof driverGateApi === "function" ? driverGateApi : api,
     setActionStatus: (...args) => { if (taskRequests.current(selection)) setActionStatus(...args); },
     setAgentMessages: (messages) => {

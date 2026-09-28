@@ -276,6 +276,7 @@ export function driverGateActionable({
   snapshot = {},
   localBusy = false,
   serverBusy = false,
+  startStatuses = ["validated"],
 } = {}) {
   const expectedStatus = stepId ? "awaiting_confirm" : "validated";
   const pending = currentDriverGateSubmission({
@@ -287,7 +288,7 @@ export function driverGateActionable({
     serverBusy,
   });
   return confirmationSnapshotIsValid(snapshot, { requireStep: Boolean(stepId) })
-    && String(stepStatus || "") === expectedStatus
+    && (stepId ? String(stepStatus || "") === expectedStatus : startStatuses.includes(String(stepStatus || "")))
     && !localBusy
     && !serverBusy
     && !pending;
@@ -483,6 +484,32 @@ export async function submitDriverConfirm(button, context = {}) {
   );
   if (!expectedPlanId || !confirmationSnapshot) {
     setActionStatus("计划已变化，请刷新后重新确认。", "error");
+    return;
+  }
+  if (!expectedStepId && context.getSelectedTask?.()?.run_mode === "manual") {
+    button.disabled = true;
+    setDriverExecutionBusy(true, taskId);
+    setActionStatus("正在确认并启动计划…", "busy");
+    try {
+      const confirmed = confirmationSnapshot.expected_plan_status === "confirmed"
+        ? {plan:{confirmation_snapshot:confirmationSnapshot}}
+        : await api(`/api/plans/${encodeURIComponent(expectedPlanId)}/confirm`, {
+          method: "POST", body: JSON.stringify(confirmationSnapshot),
+        });
+      const fingerprint = confirmed?.plan?.confirmation_snapshot?.expected_plan_fingerprint;
+      if (!fingerprint) throw new Error("确认响应缺少计划快照，请刷新后重试。");
+      await api(`/api/plans/${encodeURIComponent(expectedPlanId)}/run`, {
+        method: "POST", body: JSON.stringify({expected_plan_fingerprint:fingerprint}),
+      });
+    } catch (error) {
+      setActionStatus(error?.message || "计划启动失败", "error");
+    } finally {
+      setDriverExecutionBusy(false, taskId);
+      resetFetchThrottle(taskId);
+      try { await refreshAgentMessages?.(taskId); }
+      catch (error) { setActionStatus(error?.message || "计划状态刷新失败，请刷新后重试", "error"); }
+      renderWorkflowStepper({ force: true });
+    }
     return;
   }
   const body = { content: "确认", ui_action: expectedStepId ? "confirm_gate" : "start_plan" };

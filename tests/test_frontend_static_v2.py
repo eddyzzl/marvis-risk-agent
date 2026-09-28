@@ -36,6 +36,7 @@ def _with_workbench_context(script: str, app_js: str) -> str:
         # These fixtures do not open a report editor. Draft-save lifecycle is
         # exercised separately with populated state in the behavior regressions.
         "reportDraftState": "{ get: () => null }",
+        "historicalReplayController": "{ render: () => {} }",
     }
     prefix = [
         f"let {name} = {value};"

@@ -1295,7 +1295,8 @@ export function createPlanRailController({
     // generic confirm button that cannot supply those required values. Also wait
     // for the matching gate message before exposing a plain action, avoiding a
     // transient unsafe button while plan polling is ahead of message polling.
-    const agentGateHasStructuredInput = agentGateNeedsStructuredInput(agentGateMessage);
+    const agentGateHasStructuredInput = agentGateNeedsStructuredInput(agentGateMessage)
+      || agentGate?.tool_ref?.plugin === "decision_twin";
     if (agentGate && !agentGateHasStructuredInput) {
       const planId = String(plan?.id || "");
       const stepId = String(agentGate?.id || "");
@@ -1325,7 +1326,7 @@ export function createPlanRailController({
         "</section>",
       ].join(""));
     }
-    const awaitingStart = plan?.status === "validated";
+    const awaitingStart = plan?.status === "validated" || (!agentMode && plan?.status === "confirmed");
     if (awaitingStart) {
       const snapshotAttrs = confirmationSnapshotAttributes(
         plan?.confirmation_snapshot || {},
@@ -1337,6 +1338,7 @@ export function createPlanRailController({
         snapshot: plan?.confirmation_snapshot || {},
         localBusy: localDriverBusy,
         serverBusy: serverDriverBusy,
+        startStatuses: agentMode ? ["validated"] : ["validated", "confirmed"],
       });
       const startBusyAttrs = startActionable
         ? ""
@@ -1396,7 +1398,7 @@ export function createPlanRailController({
     const serverBusy = Boolean(activeJobKind);
     return JSON.stringify({
       plan_id: String(plan?.id || ""),
-      start: plan?.status === "validated",
+      start: plan?.status === "validated" || (!isAgentMode?.() && plan?.status === "confirmed"),
       plan_confirmation_snapshot: plan?.confirmation_snapshot || null,
       authorization_busy: activeJobKind,
       local_busy_action: localBusyAction,

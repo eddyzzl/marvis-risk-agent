@@ -23,6 +23,7 @@ taskSession.selectTask({id:"a"});
 const painted = [];
 const isWorkbenchTaskId = id => id === taskSession.taskId;
 const setActionStatus = (...args) => painted.push(args);
+const historicalReplayController = {render() {}};
 const renderWorkflowStepper = () => {};
 const renderPetState = () => {};
 const updateAgentSendDisabled = () => {};

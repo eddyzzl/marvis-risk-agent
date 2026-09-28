@@ -1,0 +1,212 @@
+.historical-replay-panel {
+  margin: 0 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  min-width: 0;
+}
+.historical-replay-panel > details > summary {
+  padding: 14px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.historical-replay-panel > details > summary > span {
+  margin-left: 12px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+.history-body {
+  padding: 0 16px 16px;
+}
+.history-body h4 {
+  font-size: 13px;
+  margin: 20px 0 12px;
+}
+.history-note,
+.history-boundary {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.history-boundary {
+  padding: 12px;
+  border-left: 3px solid var(--warning);
+  background: var(--surface-soft);
+}
+.history-error {
+  font-size: 12px;
+  color: var(--danger);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.history-error:empty {
+  display: none;
+}
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.history-grid label,
+.history-gate label {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  min-width: 0;
+  font-size: 12px;
+}
+.history-body input:not([type="checkbox"]),
+.history-body select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.history-body input:disabled,
+.history-body select:disabled {
+  background: var(--surface-soft);
+  color: var(--text-muted);
+}
+.history-feature {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
+.history-feature legend {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 6px;
+}
+.history-feature .history-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.history-option,
+.history-scenario,
+.history-json {
+  margin: 16px 0;
+}
+.history-option > summary,
+.history-scenario > summary,
+.history-json > summary {
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+.history-option summary > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.history-option > fieldset {
+  border: 0;
+  margin: 12px 0 0;
+  padding: 0;
+  min-width: 0;
+}
+.history-option input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 16px;
+  accent-color: var(--accent);
+}
+.history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+.history-constraint {
+  border-bottom: 1px solid var(--border);
+  padding: 12px 0;
+  margin-bottom: 12px;
+}
+.history-constraint button {
+  justify-self: start;
+}
+.history-proposal,
+.history-gate {
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 0 14px 14px;
+  margin: 16px 0;
+}
+.history-proposal .history-facts {
+  margin-bottom: 16px;
+}
+.history-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+.history-facts dt {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+}
+.history-facts dd {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.history-table-scroll {
+  overflow-x: auto;
+}
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: left;
+}
+.history-table th,
+.history-table td {
+  padding: 10px 9px;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.history-table th small {
+  display: block;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.history-json pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow: auto;
+  background: var(--surface-soft);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 11px;
+}
+.history-receipt {
+  margin: 0 8px 8px 0;
+}
+@media (max-width: 1000px) {
+  .history-feature .history-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.history-time-window {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.history-time-window button {
+  justify-self: start;
+  align-self: end;
+}
