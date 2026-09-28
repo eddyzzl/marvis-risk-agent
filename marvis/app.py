@@ -78,6 +78,8 @@ from marvis.plugins.loader import load_builtin_packs, sync_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.production_governance.router import router as production_governance_router
+from marvis.reference_decision.router import router as reference_decision_router
+from marvis.reference_decision.service import ReferenceDecisionService
 from marvis.production_governance.evidence import ActivationEvidenceVerifier
 from marvis.job_watchdog import (
     JobHeartbeatWatchdog,
@@ -349,6 +351,7 @@ def _is_local_only_path(path: str) -> bool:
         path == "/api/branding"
         or path.startswith("/api/operations")
         or path.startswith("/api/production-governance")
+        or path.startswith("/api/reference-decision")
         or path.startswith("/api/settings")
         or path == "/api/skills/reload"
         or path == "/api/skills/validate"
@@ -462,6 +465,9 @@ def create_app(
     # Per-workspace plugin-admin secret (replaces the old "local-dev" magic
     # header): minted into the workspace on first startup, stored 0600.
     app.state.plugin_admin_token = ensure_plugin_admin_token(settings.plugin_admin_token_path)
+    app.state.reference_decision = ReferenceDecisionService(
+        settings, app.state.plugin_admin_token.encode()
+    )
     app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
     app.state.operations_runtime = build_operations_runtime(
@@ -626,6 +632,7 @@ def create_app(
     app.include_router(operations_router)
     app.include_router(plans_router)
     app.include_router(production_governance_router)
+    app.include_router(reference_decision_router)
     app.include_router(report_fields_router)
     app.include_router(scans_router)
     app.include_router(skills_router)
