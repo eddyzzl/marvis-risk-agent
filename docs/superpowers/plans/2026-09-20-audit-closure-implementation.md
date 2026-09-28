@@ -463,3 +463,11 @@ Vintage 平台原本明确要求回复“材料已上传”，但路由只收到
 `5004a46e` 增加独立正常策略 case，通过明确人工样本选择/语义输入、原生 workspace CAS 和既有采纳审批；旧两例、九例、正常建模的 case/expected/数据/预算字节全部保持。70 项 runtime 检查通过，真实 HTTP fixture 两计划九工具和文档交付完成，拒绝采纳时采纳/文档工具均不执行。冻结 cases SHA 为 `1ec965a101a39a82f8673a89307815be50415ff1b50d8a64e48e390fcdba45a3`，expected SHA 为 `65298e9bce23f83906f91ebfeeae68f9ab3371e894790af3df3ef81043d6328e`。
 
 真实模型源 `4de23581` 首轮 0/1，20.979 秒、4 次模型请求；两条明确的策略请求均在独立 reviewer 被标记 requests_change=true，router 则为 false，安全门阻断，零 Plan。报告在 `normal-strategy-20260929/real-model-runs/20260928T165503740738Z-a46a47ac1af9/report.json`。独立固定十例语义诊断同源 7/10，三个肯定请求全失败，七个否定/条件/修改/注入反例均拒绝；该诊断不替换正式 case 分母。正在修复意图定义，失败记录与预算保持原样。全部证据根为 `/Users/eddyz/.codex/work-artifacts`。
+
+## WP01 正常策略复跑通过；WP09 分数方向与 WP13 权限修复
+
+`1df30c5b` 将两遍独立意图判断的标志定义统一到同一文本合同，区分首次声明工作流约束与修改既有口径；问题、未满足条件、拒绝和真正修改的标志仍逐项拦截。53 项离线语义/JOIN/提示词版本检查通过。相同十例真实模型诊断在 `a1854755` 从 7/10 提升至 10/10；相同正常策略完整 case 随后通过 1/1，146.993 秒、18 次模型尝试、43 次 HTTP、九工具 done、13 条断言全通过。报告为 `normal-strategy-20260929/intent-corrected-real-model-runs/20260928T170733449072Z-b43d73fdb111/report.json`。7 次输出限制空响应和 4 次重试仍是效率问题；未配置有日期来源的价格表，费用未知。原九例跨流程回归正在运行，公开合成案例不等同隐藏或业务验收。
+
+`7371a761` 让原生样本的历史分方向进入 tradeoff/cutoff 消费端，显式相反方向即使携带确认标志也不能覆盖冻结合同，旧 V1 默认保持。91 项策略检查、原低风险方向 HTTP 旅程通过；高分高风险真实 HTTP 链九工具与 15 断言通过。证据 `normal-strategy-20260929/direction-{regression,low-risk-compat}.log`。主线建模证据后续消费及治理界面另通过 30 项联合检查，见 `feature-time-20260929/native-delivery-joined.log`。
+
+`f3f93d51` 封堵刚复现的通用产物下载旁路：按原生产物 kind+origin 识别来源权限，所有同文件登记别名同样受限，通用下载/预览拒绝并指向既有 domain 证据入口。两项真实 HTTP 红例先确认 200 旁路；后续 43 项相关检查通过，最终两项权限例通过，共验证 44 个不同用例。SourceService 原 maker 撤权后保留不含 normalized_source/assessment 的审计回执，沿用已有 unauthorized 语义；没有把这种审计响应改成泄露敏感字段。日志在 `operations-runtime-20260927/reference-decision/event-batch-20260929/artifact-acl-{before,after,final}.log`。未声称全应用 task ACL 已完成。
