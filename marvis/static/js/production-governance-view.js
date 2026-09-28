@@ -33,7 +33,7 @@ export function headsHtml(heads, environment, role) {
         serving = h.state === "serving",
         deployment =
           slot === "production" ? environment?.active : environment?.shadow;
-      return `<section class="production-card"><h3>${slot === "production" ? "本地正式服务" : "本地影子服务"}</h3><p class="production-state">${serving ? "正在服务" : "未提供服务"}</p><p class="production-note">${serving ? `治理版本 ${esc(h.revision)} · 冻结包 ${esc(h.package_hash.slice(0, 12))}` : esc(h.next_action || h.error_code || "尚未激活")}</p>${serving ? button("probe", "发起单笔验证", slot) : ""}${serving && slot === "production" && role === "admin" ? (deployment?.predecessor_deployment_id ? button("rollback", "回滚到上一版本", h.deployment_id) : '<p class="production-note">首个版本没有可恢复的前驱版本。</p>') : ""}${jsonDetails("查看当前治理指针", h)}</section>`;
+      return `<section class="production-card"><h3>${slot === "production" ? "本地正式服务" : "本地影子服务"}</h3><p class="production-state">${serving ? "正在服务" : "未提供服务"}</p><p class="production-note">${serving ? `治理版本 ${esc(h.revision)} · 冻结包 ${esc(h.package_hash.slice(0, 12))}` : esc(h.next_action || h.error_code || "尚未激活")}</p>${serving ? button("probe", "发起单笔验证", slot) : ""}${serving && role === "admin" ? (deployment?.predecessor_deployment_id ? button("rollback", "回滚到上一版本", slot) : '<p class="production-note">首个版本没有可恢复的前驱版本。</p>') : ""}${jsonDetails("查看当前治理指针", h)}</section>`;
     })
     .join("")}</div>`;
 }
@@ -85,7 +85,22 @@ export function requestHtml(r, principal, installation = null) {
     stage = role === "admin" ? "admin" : "checker",
     already = r.approvals.some((a) => a.stage === stage),
     independent = r.maker_principal_id !== principal.id;
-  return `<section><h3>发布申请 · ${esc(statuses[r.status] || r.status)}</h3><p class="production-note">${esc(r.strategy_id)} v${r.strategy_version} · ${r.deployment_slot === "shadow" ? "影子" : "正式"} · 到期 ${esc(r.expires_at)}</p><p>${esc(r.reason)}</p><p class="production-note">已完成审批：${r.approvals.map((a) => roles[a.role]).join("、") || "暂无"}</p>${jsonDetails("冻结绑定与审批身份", r)}${independent && !already && ((role === "checker" && r.status === "pending_checker") || (role === "admin" && r.status === "awaiting_admin")) ? `<form data-production-form="approve">${input("reason", "本次复核理由", "text", 'required maxlength="4000"')}${submit("同意本次发布")}</form>` : ""}${role === "admin" && r.status === "approved" ? (installation ? `<p class="production-note">已读回核对安装回执；激活将切换相应的治理指针。</p>${jsonDetails("安装探针与证据", installation)}<form data-production-form="activate">${input("reason", "激活理由", "text", 'required maxlength="4000"')}${submit("激活已安装方案")}</form>` : button("prepare-install", "准备安装探针", r.id)) : ""}</section>`;
+  return `<section><h3>发布申请 · ${esc(statuses[r.status] || r.status)}</h3><p class="production-note">${esc(r.strategy_id)} v${r.strategy_version} · ${r.deployment_slot === "shadow" ? "影子" : "正式"} · 到期 ${esc(r.expires_at)}</p><p>${esc(r.reason)}</p><p class="production-note">已完成审批：${r.approvals.map((a) => roles[a.role]).join("、") || "暂无"}</p>${r.rejection ? `<p class="production-error">${esc(roles[r.rejection.role] || r.rejection.role)}已拒绝：${esc(r.rejection.reason)}</p>` : ""}${jsonDetails("冻结绑定与审批身份", r)}${
+    independent &&
+    !already &&
+    ((role === "checker" && r.status === "pending_checker") ||
+      (role === "admin" && r.status === "awaiting_admin"))
+      ? `<form data-production-form="approve">${select(
+          "decision",
+          "复核决定",
+          [
+            { id: "approve", label: "同意发布" },
+            { id: "reject", label: "拒绝发布" },
+          ],
+          "required",
+        )}${input("reason", "本次复核理由", "text", 'required maxlength="4000"')}${submit("提交复核决定")}</form>`
+      : ""
+  }${role === "admin" && r.status === "approved" ? (installation ? `<p class="production-note">已读回核对安装回执；激活将切换相应的治理指针。</p>${jsonDetails("安装探针与证据", installation)}<form data-production-form="activate">${input("reason", "激活理由", "text", 'required maxlength="4000"')}${submit("激活已安装方案")}</form>` : button("prepare-install", "准备安装探针", r.id)) : ""}</section>`;
 }
 export function featuresFormHtml(
   kind,
@@ -118,8 +133,8 @@ export function featuresFormHtml(
       "",
     )}</div>${submit(kind === "install" ? "安装并运行探针" : "提交本地决策请求")}</form>`;
 }
-export function rollbackHtml(head) {
-  return `<form data-production-form="rollback"><h3>回滚本地正式服务</h3><p class="production-note">将当前部署 ${esc(head.deployment_id)} 恢复到其已验证前驱。若治理指针已变化，平台拒绝此旧请求。</p>${input("reason", "回滚理由", "text", 'required maxlength="4000"')}${submit("确认回滚到上一版本")}</form>`;
+export function rollbackHtml(head, slot = "production") {
+  return `<form data-production-form="rollback"><h3>回滚本地${slot === "shadow" ? "影子" : "正式"}服务</h3><p class="production-note">将当前部署 ${esc(head.deployment_id)} 恢复到其已验证前驱。若治理指针已变化，平台拒绝此旧请求。</p>${input("reason", "回滚理由", "text", 'required maxlength="4000"')}${submit("确认回滚到上一版本")}</form>`;
 }
 export function decisionHtml(result) {
   return `<h3>本地决策回执</h3>${result.status === "fallback" ? `<p class="production-error">执行不可用，已按冻结合同使用失败动作。${esc(result.error_code || "")} · ${esc(result.next_action || "")}</p>` : ""}<p>动作：${esc(result.action?.type || result.action || "未知")} · 分数：${result.score == null ? "未知" : esc(result.score)}</p><p class="production-note">此结果来自本地参考执行器。回执反映本次请求，不代表机构实际放款或收益。</p>${jsonDetails("查看本次请求、治理绑定与完整结果", result)}`;

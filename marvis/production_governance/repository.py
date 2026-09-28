@@ -214,12 +214,28 @@ class ProductionGovernanceRepository:
         return result
 
     def approve_promotion_request(
+        self, *, request_id: str, actor_principal_id: str, reason: str
+    ) -> dict[str, Any]:
+        return self.review_promotion_request(
+            request_id=request_id,
+            actor_principal_id=actor_principal_id,
+            reason=reason,
+            decision="approve",
+        )
+
+    def review_promotion_request(
         self,
         *,
         request_id: str,
         actor_principal_id: str,
         reason: str,
+        decision: str,
     ) -> dict[str, Any]:
+        if decision not in {"approve", "reject"}:
+            raise GovernanceConflict("unsupported review decision")
+        reason = reason.strip()
+        if not reason or len(reason) > 4000:
+            raise GovernanceConflict("review reason must contain 1 to 4000 characters")
         now_dt = datetime.now(UTC)
         now = now_dt.isoformat()
         expired = False
@@ -233,6 +249,8 @@ class ProductionGovernanceRepository:
             ).fetchone()
             if row is None:
                 raise GovernanceNotFound("promotion request not found")
+            if row["status"] == "rejected":
+                raise GovernanceConflict("promotion request is rejected")
             if _parse_time(str(row["expires_at"])) <= now_dt:
                 if str(row["status"]) not in {"expired", "promoted"}:
                     conn.execute(
@@ -255,7 +273,7 @@ class ProductionGovernanceRepository:
                 status = str(row["status"])
                 maker_id = str(row["maker_principal_id"])
                 if actor["id"] == maker_id:
-                    raise GovernanceForbidden("maker cannot approve their own request")
+                    raise GovernanceForbidden("maker cannot review their own request")
                 if status == "pending_checker":
                     if actor["role"] == "admin":
                         raise GovernanceConflict(
@@ -296,23 +314,26 @@ class ProductionGovernanceRepository:
                     raise GovernanceConflict(
                         f"promotion request cannot be approved from status {status}"
                     )
-                approval_id = uuid.uuid4().hex
-                conn.execute(
-                    """
-                    INSERT INTO production_promotion_approvals(
-                        id, request_id, stage, principal_id, role, reason, approved_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        approval_id,
-                        request_id,
-                        stage,
-                        actor["id"],
-                        actor["role"],
-                        reason,
-                        now,
-                    ),
-                )
+                if decision == "reject":
+                    next_status = "rejected"
+                else:
+                    approval_id = uuid.uuid4().hex
+                    conn.execute(
+                        """
+                        INSERT INTO production_promotion_approvals(
+                            id, request_id, stage, principal_id, role, reason, approved_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            approval_id,
+                            request_id,
+                            stage,
+                            actor["id"],
+                            actor["role"],
+                            reason,
+                            now,
+                        ),
+                    )
                 conn.execute(
                     """
                     UPDATE production_promotion_requests
@@ -323,7 +344,9 @@ class ProductionGovernanceRepository:
                 )
                 _append_event(
                     conn,
-                    event_type="promotion.approved",
+                    event_type="promotion.approved"
+                    if decision == "approve"
+                    else "promotion.rejected",
                     actor_principal_id=actor["id"],
                     actor_role=actor["role"],
                     target_type="promotion_request",
@@ -331,6 +354,7 @@ class ProductionGovernanceRepository:
                     environment=str(row["environment"]),
                     payload={
                         "approval_stage": stage,
+                        "decision": decision,
                         "result_status": next_status,
                         "reason": reason,
                     },
@@ -381,6 +405,8 @@ class ProductionGovernanceRepository:
             ).fetchone()
             if request_row is None:
                 raise GovernanceNotFound("promotion request not found")
+            if request_row["status"] == "rejected":
+                raise GovernanceConflict("promotion request is rejected")
             if environment == "local-reference" and request_row["status"] == "promoted":
                 previous = conn.execute("SELECT * FROM production_deployments WHERE id=?", (request_row["promoted_deployment_id"],)).fetchone()
                 if previous is None or previous["environment"] != environment or previous["activation_evidence_id"] != evidence.content_hash:
@@ -683,7 +709,16 @@ class ProductionGovernanceRepository:
         expected_active_deployment_id: str,
         actor_principal_id: str,
         reason: str,
+        deployment_slot: str = "production",
     ) -> dict[str, Any]:
+        if deployment_slot not in {"production", "shadow"}:
+            raise GovernanceConflict("unsupported deployment slot")
+        head_column = (
+            "active_deployment_id"
+            if deployment_slot == "production"
+            else "shadow_deployment_id"
+        )
+        serving_status = "active" if deployment_slot == "production" else "shadow"
         now = datetime.now(UTC).isoformat()
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -699,15 +734,28 @@ class ProductionGovernanceRepository:
                 (environment,),
             ).fetchone()
             if environment == "local-reference" and head is not None:
-                previous = conn.execute("SELECT * FROM production_deployments WHERE id=?", (deployment_id,)).fetchone()
-                if (previous is not None and previous["status"] == "rolled_back" and
-                    previous["environment"] == environment and
-                    head["active_deployment_id"] == previous["predecessor_deployment_id"]):
-                    restored = conn.execute("SELECT * FROM production_deployments WHERE id=?", (head["active_deployment_id"],)).fetchone()
-                    return {"environment": environment, "revision": int(head["revision"]),
-                            "rolled_back_deployment": _deployment_from_row(previous),
-                            "restored_deployment": _deployment_from_row(restored)}
-            if head is None or head["active_deployment_id"] != deployment_id:
+                previous = conn.execute(
+                    "SELECT * FROM production_deployments WHERE id=?", (deployment_id,)
+                ).fetchone()
+                if (
+                    previous is not None
+                    and previous["status"] == "rolled_back"
+                    and previous["environment"] == environment
+                    and previous["deployment_slot"] == deployment_slot
+                    and head[head_column] == previous["predecessor_deployment_id"]
+                ):
+                    restored = conn.execute(
+                        "SELECT * FROM production_deployments WHERE id=?",
+                        (head[head_column],),
+                    ).fetchone()
+                    return {
+                        "environment": environment,
+                        "deployment_slot": deployment_slot,
+                        "revision": int(head["revision"]),
+                        "rolled_back_deployment": _deployment_from_row(previous),
+                        "restored_deployment": _deployment_from_row(restored),
+                    }
+            if head is None or head[head_column] != deployment_id:
                 raise GovernanceConflict(
                     "deployment is not the current active record in this environment"
                 )
@@ -718,8 +766,8 @@ class ProductionGovernanceRepository:
             if (
                 current is None
                 or str(current["environment"]) != environment
-                or str(current["deployment_slot"]) != "production"
-                or str(current["status"]) != "active"
+                or str(current["deployment_slot"]) != deployment_slot
+                or str(current["status"]) != serving_status
             ):
                 raise GovernanceConflict("active deployment record is inconsistent")
             predecessor_id = current["predecessor_deployment_id"]
@@ -734,36 +782,40 @@ class ProductionGovernanceRepository:
             if (
                 predecessor is None
                 or str(predecessor["environment"]) != environment
-                or str(predecessor["deployment_slot"]) != "production"
+                or str(predecessor["deployment_slot"]) != deployment_slot
                 or str(predecessor["status"]) != "superseded"
             ):
                 raise GovernanceConflict("rollback predecessor is inconsistent")
             if environment == "local-reference":
                 if self.deployment_validator is None:
-                    raise GovernanceConflict("local reference deployment validator unavailable")
-                self.deployment_validator(conn, str(predecessor["manifest_hash"]), deployment_id)
+                    raise GovernanceConflict(
+                        "local reference deployment validator unavailable"
+                    )
+                self.deployment_validator(
+                    conn, str(predecessor["manifest_hash"]), deployment_id
+                )
             rolled_back = conn.execute(
                 """
                 UPDATE production_deployments
                    SET status = 'rolled_back', updated_at = ?
-                 WHERE id = ? AND status = 'active'
+                 WHERE id = ? AND status = ?
                 """,
-                (now, deployment_id),
+                (now, deployment_id, serving_status),
             )
             restored = conn.execute(
                 """
                 UPDATE production_deployments
-                   SET status = 'active', updated_at = ?
+                   SET status = ?, updated_at = ?
                  WHERE id = ? AND status = 'superseded'
                 """,
-                (now, predecessor_id),
+                (serving_status, now, predecessor_id),
             )
             head_update = conn.execute(
-                """
+                f"""
                 UPDATE production_environment_heads
-                   SET active_deployment_id = ?, revision = revision + 1,
+                   SET {head_column} = ?, revision = revision + 1,
                        updated_at = ?
-                 WHERE environment = ? AND active_deployment_id = ?
+                 WHERE environment = ? AND {head_column} = ?
                 """,
                 (predecessor_id, now, environment, deployment_id),
             )
@@ -782,6 +834,7 @@ class ProductionGovernanceRepository:
                 target_id=deployment_id,
                 environment=environment,
                 payload={
+                    "deployment_slot": deployment_slot,
                     "rolled_back_deployment_id": deployment_id,
                     "restored_deployment_id": str(predecessor_id),
                     "restored_strategy_id": str(predecessor["strategy_id"]),
@@ -808,6 +861,7 @@ class ProductionGovernanceRepository:
             ).fetchone()
         return {
             "environment": environment,
+            "deployment_slot": deployment_slot,
             "revision": int(updated_head["revision"]),
             "rolled_back_deployment": _deployment_from_row(rolled_back_row),
             "restored_deployment": _deployment_from_row(restored_row),
@@ -929,7 +983,8 @@ def _require_principal_tx(
     principal_id: str,
 ) -> dict[str, Any]:
     row = conn.execute(
-        "SELECT * FROM production_principals WHERE local_principal_id = ?",
+        """SELECT p.* FROM production_principals p JOIN local_principals l
+        ON l.id=p.local_principal_id WHERE p.local_principal_id=? AND l.status='active'""",
         (str(principal_id),),
     ).fetchone()
     if row is None or str(row["status"]) != "active":
@@ -1150,7 +1205,32 @@ def _promotion_from_row(
             for item in approvals
         ],
     }
-    package_hash = _deployment_manifest_tx(conn, str(row["manifest_hash"])).get("decision_package_hash")
+    if row["status"] == "rejected":
+        rejected = conn.execute(
+            """
+            SELECT actor_principal_id, actor_role, payload_json, at, event_hash
+            FROM production_governance_events
+            WHERE target_type='promotion_request' AND target_id=?
+              AND event_type='promotion.rejected'
+            ORDER BY sequence DESC LIMIT 1
+        """,
+            (row["id"],),
+        ).fetchone()
+        if rejected is None:
+            raise GovernanceConflict("rejected promotion has no audit evidence")
+        payload = json.loads(rejected["payload_json"])
+        result["rejection"] = {
+            "decision": "reject",
+            "stage": payload["approval_stage"],
+            "principal_id": rejected["actor_principal_id"],
+            "role": rejected["actor_role"],
+            "reason": payload["reason"],
+            "at": rejected["at"],
+            "event_hash": rejected["event_hash"],
+        }
+    package_hash = _deployment_manifest_tx(conn, str(row["manifest_hash"])).get(
+        "decision_package_hash"
+    )
     if package_hash:
         result["decision_package_hash"] = package_hash
     return result

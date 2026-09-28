@@ -389,8 +389,10 @@ export function createProductionGovernanceController({
         body = promotionPayload(values, bound.record);
       } else if (kind === "approve") {
         url = `/api/production-governance/promotion-requests/${path(bound.request.id)}/approvals`;
+        if (!["approve", "reject"].includes(values.decision))
+          throw new Error("请选择复核决定");
         body = {
-          decision: "approve",
+          decision: values.decision,
           reason: text(values.reason, "本次复核理由"),
         };
       } else if (kind === "activate") {
@@ -428,6 +430,7 @@ export function createProductionGovernanceController({
         body = {
           reason: text(values.reason, "回滚理由"),
           expected_active_deployment_id: bound.head.deployment_id,
+          deployment_slot: bound.slot,
         };
       } else return;
     } catch (e) {
@@ -537,8 +540,10 @@ export function createProductionGovernanceController({
     if (action === "prepare-install") void prepareFeatures("install", id);
     if (action === "probe") void prepareFeatures("decision", id);
     if (action === "rollback") {
-      selectContext({ kind: "rollback", head: heads[0] });
-      q("[data-production-editor]").innerHTML = rollbackHtml(heads[0]);
+      const slot = id === "shadow" ? "shadow" : "production";
+      const head = heads[slot === "shadow" ? 1 : 0];
+      selectContext({ kind: "rollback", head, slot });
+      q("[data-production-editor]").innerHTML = rollbackHtml(head, slot);
     }
     if (action === "build") void startBuild();
     if (action === "readiness") void checkReadiness();

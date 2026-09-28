@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from marvis.production_governance.errors import (
     GovernanceConflict,
@@ -48,8 +48,15 @@ class CreatePromotionRequest(BaseModel):
 class PromotionApprovalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    decision: Literal["approve"]
+    decision: Literal["approve", "reject"]
     reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("reason")
+    @classmethod
+    def require_review_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("review reason must not be blank")
+        return value.strip()
 
 
 class ActivatePromotionRequest(BaseModel):
@@ -69,6 +76,7 @@ class RollbackDeploymentRequest(BaseModel):
 
     reason: str = Field(min_length=1, max_length=4000)
     expected_active_deployment_id: str = Field(min_length=1, max_length=160)
+    deployment_slot: Literal["production", "shadow"] = "production"
 
 
 def _repo(request: Request) -> ProductionGovernanceRepository:
@@ -165,10 +173,11 @@ def approve_promotion_request(
 ) -> dict:
     actor = _current_principal(request)
     try:
-        return _repo(request).approve_promotion_request(
+        return _repo(request).review_promotion_request(
             request_id=request_id,
             actor_principal_id=actor["id"],
             reason=payload.reason,
+            decision=payload.decision,
         )
     except (GovernanceForbidden, GovernanceNotFound, GovernanceConflict) as exc:
         _raise_public_error(exc)
@@ -277,6 +286,7 @@ def rollback_deployment(
             environment=environment,
             deployment_id=deployment_id,
             expected_active_deployment_id=payload.expected_active_deployment_id,
+            deployment_slot=payload.deployment_slot,
             actor_principal_id=actor["id"],
             reason=payload.reason,
         )

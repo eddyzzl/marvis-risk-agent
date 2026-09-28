@@ -135,3 +135,25 @@ calls.findLast(c=>c.url.endsWith('/me')).resolve({id:'maker',role:'maker',displa
 assert.match(root.querySelector('[data-production-detail]').innerHTML,/new/);
 assert.equal(calls.some(c=>c.url.endsWith('/promotion-requests/accepted-request')),false,'older accepted action must not navigate over a newer user selection');
 ''')
+
+
+def test_rejection_is_explicit_terminal_and_escaped_with_no_install_or_activation():
+    node(r'''
+const r={id:"p",strategy_id:"s",strategy_version:1,status:"pending_checker",maker_principal_id:"maker",approvals:[],reason:"request",expires_at:"later"};
+const html=requestHtml(r,{id:"checker",role:"checker"});
+assert.match(html,/name="decision" required/);assert.match(html,/value="approve"/);assert.match(html,/value="reject"/);assert.doesNotMatch(html,/ selected/);
+const rejected=requestHtml({...r,status:"rejected",rejection:{role:"checker",reason:"missing <policy>"}},{id:"admin",role:"admin"},{activation_evidence:{receipt_id:"old"}});
+assert.match(rejected,/missing &lt;policy&gt;/);assert.doesNotMatch(rejected,/data-production-form="(approve|activate)"|data-production-action="prepare-install"/);
+const h={state:"serving",revision:3,package_hash:"a".repeat(64),deployment_id:"shadow-new"};
+assert.match(headsHtml([{state:"unavailable"},h],{shadow:{predecessor_deployment_id:"shadow-old"}},"admin"),/data-production-action="rollback" data-production-id="shadow"/);
+''')
+
+
+def test_shadow_rollback_submit_binds_shadow_head_and_slot():
+    node(CONTROLLER + r'''
+const loaded=c.refresh();calls.at(-1).resolve({id:"admin",role:"admin",display_name:"Admin"});await tick();
+for(const call of calls.filter(c=>c.url.includes('/status?'))){call.settled=true;const shadow=call.url.endsWith('shadow');call.resolve({state:'serving',revision:4,package_hash:'a'.repeat(64),deployment_id:shadow?'shadow-current':'production-current'});}settle();await loaded;
+click('rollback','shadow');
+const form={dataset:{productionForm:'rollback'},querySelectorAll:()=>[{name:'reason',value:'verified rollback'}]};c.handle({type:'submit',target:{closest:()=>form},preventDefault(){}});
+const request=calls.at(-1);assert.match(request.url,/shadow-current\/rollback$/);assert.equal(JSON.parse(request.options.body).deployment_slot,'shadow');assert.equal(JSON.parse(request.options.body).expected_active_deployment_id,'shadow-current');
+''')
