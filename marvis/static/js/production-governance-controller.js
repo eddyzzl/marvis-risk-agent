@@ -1,6 +1,7 @@
 import { projectedStrategyItems } from "./v2/strategy_candidate_lab_contracts.js";
 import {
   packageBuildHtml,
+  packageSignature,
   readinessHtml,
   collectPackage,
   selectOptions,
@@ -331,27 +332,35 @@ export function createProductionGovernanceController({
     const state = context,
       form = q('[data-production-form="build"]');
     if (state?.kind !== "build" || !form) return;
-    const artifact = form.elements.model_artifact_id.value,
+    const kind = form.elements.package_kind.value,
+      artifact = form.elements.model_artifact_id.value,
       strategy = state.strategies.find(
         (s) => s.strategy_id === form.elements.strategy_id.value,
       );
-    if (!state.artifacts.some((a) => a.id === artifact) || !strategy) {
-      message("请选择当前任务发现的模型产物和物化策略");
+    if (
+      !["model", "rule_only"].includes(kind) ||
+      !strategy ||
+      (kind === "model" && !state.artifacts.some((a) => a.id === artifact))
+    ) {
+      message("请选择决策包类型、物化策略；模型决策另需当前任务发现的模型产物");
       return;
     }
     const owner = { ticket: epoch, version: selection },
       version = ++state.sourceVersion,
-      signature = JSON.stringify([
-        artifact,
-        strategy.strategy_id,
-        strategy.version,
-      ]);
+      signature = packageSignature(
+        { package_kind: kind, model_artifact_id: artifact },
+        strategy,
+      );
     state.readiness = null;
     state.checkedSignature = null;
-    message("正在核对原生训练与预处理来源…");
+    message(
+      kind === "rule_only"
+        ? "正在核对策略表达式与原始字段…"
+        : "正在核对原生训练与预处理来源…",
+    );
     try {
       const result = await apiClient(
-        `/api/reference-decision/readiness?model_artifact_id=${path(artifact)}&strategy_id=${path(strategy.strategy_id)}&strategy_version=${strategy.version}`,
+        `/api/reference-decision/readiness?${kind === "rule_only" ? "package_kind=rule_only" : `model_artifact_id=${path(artifact)}`}&strategy_id=${path(strategy.strategy_id)}&strategy_version=${strategy.version}`,
       );
       if (
         !selected(owner) ||
@@ -361,7 +370,7 @@ export function createProductionGovernanceController({
         return;
       state.readiness = result;
       state.checkedSignature = signature;
-      q("[data-production-readiness]").innerHTML = readinessHtml(result);
+      q("[data-production-readiness]").innerHTML = readinessHtml(result, kind);
       message("");
     } catch (e) {
       if (selected(owner) && version === state.sourceVersion)
@@ -444,7 +453,10 @@ export function createProductionGovernanceController({
       const result = await post(url, body);
       if (!selected(owner)) return;
       if (kind === "decision") {
-        q("[data-production-detail]").innerHTML = decisionHtml(result);
+        q("[data-production-detail]").innerHTML = decisionHtml(
+          result,
+          bound.record.manifest.configuration.package_kind,
+        );
         message("本地决策回执已返回；请求标识和输入已保留，可用于幂等重试。");
       } else {
         busy = false;
@@ -504,10 +516,20 @@ export function createProductionGovernanceController({
         return true;
       }
       if (event.type !== "change") return false;
+      if (event.target.name === "package_kind") {
+        const model = event.target.value === "model";
+        q("[data-production-model-source]").hidden = !model;
+        for (const name of ["model_task_id", "model_artifact_id"]) {
+          form.elements[name].disabled = !model;
+          form.elements[name].required = model;
+        }
+      }
       if (["model_task_id", "strategy_task_id"].includes(event.target.name))
         void buildSource(form, event.target.name);
       else if (
-        ["model_artifact_id", "strategy_id"].includes(event.target.name)
+        ["package_kind", "model_artifact_id", "strategy_id"].includes(
+          event.target.name,
+        )
       ) {
         ++context.sourceVersion;
         context.readiness = null;

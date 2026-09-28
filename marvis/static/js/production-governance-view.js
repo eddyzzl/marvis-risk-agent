@@ -42,7 +42,7 @@ export const packagesHtml = (rows) =>
     ? rows
         .map(
           (p) =>
-            `<button class="production-row" type="button" data-production-action="package" data-production-id="${esc(p.package_hash)}"><strong>${esc(p.strategy_id)} · v${esc(p.strategy_version)}</strong><span>${esc(p.decision_node)} · ${esc(p.package_hash.slice(0, 16))}</span></button>`,
+            `<button class="production-row" type="button" data-production-action="package" data-production-id="${esc(p.package_hash)}"><strong>${esc(p.strategy_id)} · v${esc(p.strategy_version)}</strong><span>${p.package_kind === "rule_only" ? "纯规则" : "模型与规则"} · ${esc(p.decision_node)} · ${esc(p.package_hash.slice(0, 16))}</span></button>`,
         )
         .join("")
     : '<p class="production-note">尚无已登记冻结包。</p>';
@@ -66,7 +66,7 @@ export const installationsHtml = (rows) =>
     : '<p class="production-note">尚无安装记录。</p>';
 export function packageHtml(p, role) {
   const c = p.manifest.configuration;
-  return `<section><h3>冻结包详情</h3><p class="production-note">本次读取已校验包内容。审批与激活仍需独立完成。</p>${jsonDetails("字段与冻结内容", p)}${
+  return `<section><h3>冻结包详情 · ${c.package_kind === "rule_only" ? "纯规则" : "模型与规则"}</h3><p class="production-note">本次读取已校验包内容。审批与激活仍需独立完成。</p>${jsonDetails("字段与冻结内容", p)}${
     role === "maker"
       ? `<form data-production-form="promotion"><h4>提请发布</h4><p class="production-note">${esc(c.strategy_id)} · v${c.strategy_version} · 本地参考环境</p><div class="production-grid">${select(
           "deployment_slot",
@@ -136,6 +136,6 @@ export function featuresFormHtml(
 export function rollbackHtml(head, slot = "production") {
   return `<form data-production-form="rollback"><h3>回滚本地${slot === "shadow" ? "影子" : "正式"}服务</h3><p class="production-note">将当前部署 ${esc(head.deployment_id)} 恢复到其已验证前驱。若治理指针已变化，平台拒绝此旧请求。</p>${input("reason", "回滚理由", "text", 'required maxlength="4000"')}${submit("确认回滚到上一版本")}</form>`;
 }
-export function decisionHtml(result) {
-  return `<h3>本地决策回执</h3>${result.status === "fallback" ? `<p class="production-error">执行不可用，已按冻结合同使用失败动作。${esc(result.error_code || "")} · ${esc(result.next_action || "")}</p>` : ""}<p>动作：${esc(result.action?.type || result.action || "未知")} · 分数：${result.score == null ? "未知" : esc(result.score)}</p><p class="production-note">此结果来自本地参考执行器。回执反映本次请求，不代表机构实际放款或收益。</p>${jsonDetails("查看本次请求、治理绑定与完整结果", result)}`;
+export function decisionHtml(result, kind = "model") {
+  return `<h3>本地决策回执</h3>${result.status === "fallback" ? `<p class="production-error">执行不可用，已按冻结合同使用失败动作。${esc(result.error_code || "")} · ${esc(result.next_action || "")}</p>` : ""}<p>动作：${esc(result.action?.type || result.action || "未知")} · 分数：${kind === "rule_only" ? "不适用（纯规则）" : result.score == null ? "未知" : esc(result.score)}</p><p class="production-note">此结果来自本地参考执行器。回执反映本次请求，不代表机构实际放款或收益。</p>${jsonDetails("查看本次请求、治理绑定与完整结果", result)}`;
 }

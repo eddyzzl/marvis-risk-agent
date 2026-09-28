@@ -38,8 +38,8 @@ assert.throws(()=>promotionPayload({...v,deployment_slot:"unknown"},record),/服
 
 BUILD = r'''
 const readiness={state:"authenticated",raw_requirements:[{name:"raw_x",type:null,nullable:null,declaration_required:true}],score_products:[{value:"raw_pd",available:true},{value:"calibrated_pd",available:false,reason_code:"no_calibration"}],score_field_candidates:["pd"]};
-const values={model_artifact_id:"m",strategy_id:"s",score_product:"raw_pd",score_field:"pd",decision_node:"approval",timeout_seconds:"10",failure_action:"review",raw_type_0:"number",raw_nullable_0:"false"};
-const context={readiness,strategies:[{strategy_id:"s",version:4}],checkedSignature:JSON.stringify(["m","s",4])};
+const values={package_kind:"model",model_artifact_id:"m",strategy_id:"s",score_product:"raw_pd",score_field:"pd",decision_node:"approval",timeout_seconds:"10",failure_action:"review",raw_type_0:"number",raw_nullable_0:"false"};
+const context={readiness,strategies:[{strategy_id:"s",version:4}],checkedSignature:JSON.stringify(["model","m","s",4])};
 '''
 
 
@@ -156,4 +156,18 @@ for(const call of calls.filter(c=>c.url.includes('/status?'))){call.settled=true
 click('rollback','shadow');
 const form={dataset:{productionForm:'rollback'},querySelectorAll:()=>[{name:'reason',value:'verified rollback'}]};c.handle({type:'submit',target:{closest:()=>form},preventDefault(){}});
 const request=calls.at(-1);assert.match(request.url,/shadow-current\/rollback$/);assert.equal(JSON.parse(request.options.body).deployment_slot,'shadow');assert.equal(JSON.parse(request.options.body).expected_active_deployment_id,'shadow-current');
+''')
+
+
+def test_rule_only_build_has_no_model_or_score_and_empty_default_contract_is_valid():
+    node(r'''
+const readiness={state:'authenticated',raw_requirements:[{name:'x1'}],score_products:[],score_field_candidates:[],unbound_strategy_fields:[]};
+const values={package_kind:'rule_only',model_artifact_id:'stale-model',score_product:'raw_pd',score_field:'stale-score',strategy_id:'s',decision_node:'underwriting',timeout_seconds:'10',failure_action:'review',raw_type_0:'number',raw_nullable_0:'false'};
+const context={readiness,strategies:[{strategy_id:'s',version:2}],checkedSignature:JSON.stringify(['rule_only',null,'s',2])};
+const result=collectPackage(values,context);assert.equal(result.package_kind,'rule_only');assert.deepEqual(result.raw_schema,[{name:'x1',type:'number',nullable:false}]);
+for(const key of ['model_artifact_id','score_field','score_product'])assert.equal(Object.hasOwn(result,key),false);
+assert.throws(()=>collectPackage({...values,package_kind:'model'},context),/来源已变化/);
+const empty={...context,readiness:{...readiness,raw_requirements:[]}};assert.deepEqual(collectPackage(values,empty).raw_schema,[]);
+const html=readinessHtml(empty.readiness,'rule_only');assert.match(html,/请求合同为空/);assert.doesNotMatch(html,/name="score_product"|name="score_field"|原生训练来源已认证/);
+assert.match(decisionHtml({score:null},'rule_only'),/不适用（纯规则）/);
 ''')
