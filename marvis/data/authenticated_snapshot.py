@@ -445,8 +445,13 @@ def _verify_content_addressed_file(path: Path, *, expected_sha256: str) -> None:
 
 
 def _harden_content_addressed_path(path: Path) -> None:
-    os.chmod(path, 0o444)
-    os.chmod(path.parent, 0o555)
+    for target, allowed in ((path, 0o444), (path.parent, 0o555)):
+        mode = stat.S_IMODE(target.stat().st_mode)
+        # Repeating chmod on an already hardened object changes ctime and
+        # invalidates concurrent retained-descriptor readers. Apply the policy
+        # only while forbidden bits remain; preserve already stricter modes.
+        if mode & ~allowed:
+            os.chmod(target, allowed)
 
 
 def _discard_snapshot_staging(path: Path) -> None:
