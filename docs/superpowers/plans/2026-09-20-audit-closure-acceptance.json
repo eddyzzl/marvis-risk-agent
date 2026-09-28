@@ -196,7 +196,7 @@
           "milestone": "B"
         }
       ],
-      "notes": "Merged declared entity isolation 305fed25 (218 related checks), explicit training membership and onehot fit separation d1088b40 (102 checks), authenticated as-of materialization 3e367923 and governed data_ops.asof_join/template 614afb94 (155 Tool/workflow regressions). Parent/output hashes and temporal evidence do not assert external source authenticity, label maturity, complete fit lineage or business acceptance. Fit receipts and training consumers remain in development.",
+      "notes": "Authenticated preprocessing and exact fitting membership merged 27cc4c70. Immutable receipts survive modeling preparation; train_model, train_models and tuning reject reuse that puts fitted rows into evaluation. Broad run: 357 passed and six obsolete checkpoint-fixture failures; corrected focused final 31 passed. No full PIT, external-source or mature-label claim. Derivation replay and remaining lineage consumers continue.",
       "milestones": {
         "S": "in_progress"
       }
@@ -233,7 +233,7 @@
     },
     {
       "id": "WP09",
-      "status": "planned",
+      "status": "in_progress",
       "dependencies": [
         {
           "work_package": "WP06",
@@ -244,9 +244,9 @@
           "milestone": "S"
         }
       ],
-      "notes": null,
+      "notes": "Implementation started from current source: reuse artifact scorer, preprocessing replay and canonical strategy evaluator for a real reference HTTP decision service; bind package closure, request idempotency, authentication, readback and existing governance. No merged service or SLO pass claimed yet.",
       "milestones": {
-        "S": "planned"
+        "S": "in_progress"
       }
     },
     {
@@ -272,7 +272,7 @@
           "milestone": "S"
         }
       ],
-      "notes": "Default monitoring executor, app-managed scheduler lifecycle and actual local notification receipts are in development in a persistent isolated worktree. No scheduler or notification acceptance is claimed before runtime checks.",
+      "notes": "Standard app startup now assembles trusted model/strategy ToolRunner monitors, bounded background scheduling with lease renewal, authenticated data windows, source-watermark/maturity diagnostics, explicit linked one-window reassessment and durable local inbox/read receipts (419c75c8). Disabled schedules remain manageable (fb200d07). Final runtime gate 52 passed; related app/CLI/kernel gate 126 passed before final explicit-maturity tightening. Final real CLI/HTTP probe delivered and acknowledged an actual synthetic monitor notification. Frontend complete journey remains in progress; local delivery is not institution delivery.",
       "milestones": {
         "S": "in_progress"
       }
