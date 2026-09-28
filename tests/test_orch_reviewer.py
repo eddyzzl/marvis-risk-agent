@@ -3,6 +3,7 @@ import json
 import pytest
 
 from marvis.llm_settings import LLMSettingsError
+from marvis.llm_prompts import CRITIC_SYS
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck, StepStatus
 from marvis.orchestrator.reviewer import FinalReview, Reviewer
 from marvis.plugins.manifest import ToolRef
@@ -317,6 +318,9 @@ def test_review_calls_supply_distinct_typed_contracts_from_first_attempt():
         assert llm.calls[0]["json_schema"]["name"] == name
         assert llm.calls[0]["json_schema"]["schema"]["required"] == required
         assert llm.calls[0]["json_schema"]["schema"]["additionalProperties"] is False
+        for call in llm.calls:
+            assert call["prompt_name"] == CRITIC_SYS.name
+            assert call["prompt_version"] == CRITIC_SYS.version
 
 
 @pytest.mark.parametrize("bad", [

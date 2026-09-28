@@ -131,6 +131,8 @@ class Reviewer:
                 response_format={"type": "json_object"},
                 json_schema=_CRITIQUE_SCHEMA,
                 caller="critic",
+                prompt_name=_CRITIC_SYS_SPEC.name,
+                prompt_version=_CRITIC_SYS_SPEC.version,
                 stream=False,
             )
             passed, reasons, ok = _parse_soft_verdict(raw)
@@ -145,6 +147,8 @@ class Reviewer:
                     response_format={"type": "json_object"},
                     json_schema=_CRITIQUE_SCHEMA,
                     caller="critic",
+                    prompt_name=_CRITIC_SYS_SPEC.name,
+                    prompt_version=_CRITIC_SYS_SPEC.version,
                     stream=False,
                 )
                 passed, reasons, _ok = _parse_soft_verdict(raw)
@@ -207,6 +211,8 @@ class Reviewer:
                 response_format={"type": "json_object"},
                 json_schema=_NARRATIVE_SCHEMA,
                 caller="reviewer_summary",
+                prompt_name=_CRITIC_SYS_SPEC.name,
+                prompt_version=_CRITIC_SYS_SPEC.version,
                 stream=False,
             )
             data = _parse_narrative(raw)
@@ -221,6 +227,8 @@ class Reviewer:
                     response_format={"type": "json_object"},
                     json_schema=_NARRATIVE_SCHEMA,
                     caller="reviewer_summary",
+                    prompt_name=_CRITIC_SYS_SPEC.name,
+                    prompt_version=_CRITIC_SYS_SPEC.version,
                     stream=False,
                 )
                 data = _parse_narrative(raw)
