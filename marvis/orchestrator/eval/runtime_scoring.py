@@ -33,6 +33,7 @@ class Assertion(StrictModel):
         "latest_assistant_metadata",
         "dataset_rows",
         "artifact_exists",
+        "validation_report_verified",
     ]
     tool: str = ""
     path: list[str | int] = Field(default_factory=list)
@@ -123,6 +124,11 @@ def _assertion(assertion, record, private):
         return bool(datasets) and all(
             item["file_verified"] and item["row_count"] == assertion.value
             for item in datasets
+        )
+    if assertion.kind == "validation_report_verified":
+        return assertion.tool == "v1_compat.render_reports" and any(
+            item.get("kind") == assertion.value and item.get("format_verified") is True
+            and item.get("size_bytes", 0) > 0 for item in steps[0].get("validation_report_files", [])
         )
     if assertion.kind == "artifact_exists":
         return any(
@@ -360,6 +366,7 @@ def runtime_task_coverage(records):
             members = [
                 r for r in records
                 if r.get("task_type") == task_type and r["scenario"] == scenario
+                and r.get("runtime_entry") != "manual_compatibility_workflow"
             ]
             cells[task_type][scenario] = {
                 **_rate(members),
@@ -374,6 +381,10 @@ def runtime_task_coverage(records):
         "scope": "supported_http_intake_types; not all product workflows or acceptance",
         "cells": cells,
         "missing_cells": missing,
+        "manual_compatibility_case_ids": [
+            r["case_id"] for r in records
+            if r.get("runtime_entry") == "manual_compatibility_workflow"
+        ],
         "unclassified_case_ids": [
             r["case_id"] for r in records if r.get("task_type") not in task_types
         ],

@@ -897,51 +897,56 @@ class Journey:
             time.sleep(min(delay, remaining))
 
     def run(self, dataset_root: Path, workspace: Path):
-        source = workspace / "source"
-        source.mkdir()
-        body = self.case.task.model_dump(exclude_none=True)
-        body.update(source_dir=str(source), run_mode="agent")
-        task = self.json_request("POST", "/api/tasks", label="create_task", json=body)
-        self.task_id = task["id"]
-        for material in self.case.materials:
-            path = (dataset_root / material.path).resolve()
-            if not path.is_relative_to(dataset_root.resolve()):
-                raise RuntimeJourneyError("material_identity_mismatch")
-            # Upload the exact frozen bytes that were hashed. A source-file edit
-            # between a separate hash pass and HTTP upload cannot change input.
-            with path.open("rb") as source_stream, tempfile.TemporaryFile() as stream:
-                material_hash = hashlib.sha256()
-                while chunk := source_stream.read(1024 * 1024):
-                    if time.monotonic() >= self.deadline:
-                        raise RuntimeBudgetExceeded("material snapshot wall budget")
-                    material_hash.update(chunk)
-                    stream.write(chunk)
-                if material_hash.hexdigest() != material.sha256:
+        if self.case.task.task_type == "validation":
+            self.prepare_validation_task(dataset_root, workspace)
+        else:
+            source = workspace / "source"
+            source.mkdir()
+            body = self.case.task.model_dump(exclude_none=True)
+            body.update(source_dir=str(source), run_mode="agent")
+            task = self.json_request("POST", "/api/tasks", label="create_task", json=body)
+            self.task_id = task["id"]
+            for material in self.case.materials:
+                path = (dataset_root / material.path).resolve()
+                if not path.is_relative_to(dataset_root.resolve()):
                     raise RuntimeJourneyError("material_identity_mismatch")
-                stream.seek(0)
-                uploaded = self.json_request(
-                    "POST",
-                    f"/api/tasks/{self.task_id}/datasets/upload",
-                    label="upload_material",
-                    files={"file": (path.name, stream)},
-                    data={"role": material.role},
-                )
-                if material.role == "sample":
-                    self.uploaded_samples.extend(uploaded["datasets"])
-        payload = {"acceptance_mode": self.case.acceptance_mode}
-        route = "start"
-        if self.case.initial_message is not None:
-            route = "messages"
-            payload["content"] = self.case.initial_message
-        self.json_request(
-            "POST",
-            f"/api/tasks/{self.task_id}/agent/{route}",
-            label="agent_initial_turn",
-            json=payload,
-        )
-        self.wait_idle()
+                # Upload the exact frozen bytes that were hashed. A source-file edit
+                # between a separate hash pass and HTTP upload cannot change input.
+                with path.open("rb") as source_stream, tempfile.TemporaryFile() as stream:
+                    material_hash = hashlib.sha256()
+                    while chunk := source_stream.read(1024 * 1024):
+                        if time.monotonic() >= self.deadline:
+                            raise RuntimeBudgetExceeded("material snapshot wall budget")
+                        material_hash.update(chunk)
+                        stream.write(chunk)
+                    if material_hash.hexdigest() != material.sha256:
+                        raise RuntimeJourneyError("material_identity_mismatch")
+                    stream.seek(0)
+                    uploaded = self.json_request(
+                        "POST",
+                        f"/api/tasks/{self.task_id}/datasets/upload",
+                        label="upload_material",
+                        files={"file": (path.name, stream)},
+                        data={"role": material.role},
+                    )
+                    if material.role == "sample":
+                        self.uploaded_samples.extend(uploaded["datasets"])
+            payload = {"acceptance_mode": self.case.acceptance_mode}
+            route = "start"
+            if self.case.initial_message is not None:
+                route = "messages"
+                payload["content"] = self.case.initial_message
+            self.json_request(
+                "POST",
+                f"/api/tasks/{self.task_id}/agent/{route}",
+                label="agent_initial_turn",
+                json=payload,
+            )
+            self.wait_idle()
         for action in self.case.actions:
-            if action.kind == "message":
+            if action.kind == "start_validation_workflow":
+                self.start_validation_workflow(action)
+            elif action.kind == "message":
                 self.interventions += 1
                 message = {
                     "content": action.content,
@@ -1022,6 +1027,83 @@ class Journey:
                     label="user_stop",
                     json={},
                 )
+
+    def prepare_validation_task(self, dataset_root, workspace):
+        """Upload exactly four role/hash-bound artifacts through the product API."""
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            files = []
+            paths = {}
+            for material in self.case.materials:
+                path = (dataset_root / material.path).resolve()
+                if not path.is_relative_to(dataset_root.resolve()) or not path.is_file():
+                    raise RuntimeJourneyError("material_identity_mismatch")
+                source = stack.enter_context(path.open("rb"))
+                stream = stack.enter_context(tempfile.TemporaryFile())
+                sha = hashlib.sha256()
+                while chunk := source.read(1024 * 1024):
+                    if time.monotonic() >= self.deadline:
+                        raise RuntimeBudgetExceeded("material snapshot wall budget")
+                    sha.update(chunk)
+                    stream.write(chunk)
+                if sha.hexdigest() != material.sha256:
+                    raise RuntimeJourneyError("material_identity_mismatch")
+                stream.seek(0)
+                paths[material.role] = material.path
+                files.append(("files", (material.path, stream)))
+            uploaded = self.json_request(
+                "POST", "/api/material-uploads", label="upload_validation_materials",
+                files=files, data={"relative_paths": list(paths.values())},
+            )
+        source_dir = Path(uploaded["source_dir"]).resolve()
+        if (not source_dir.is_relative_to((workspace / "material_uploads").resolve())
+                or sorted(f["relative_path"] for f in uploaded["files"]) != sorted(paths.values())):
+            raise RuntimeJourneyError("validation_upload_binding_mismatch")
+        # The public compatibility workflow uses the existing manual/API entry.
+        # Do not pretend this exercised the separate V2 validation Agent route.
+        body = self.case.task.model_dump(exclude_none=True)
+        body.update(source_dir=str(source_dir), run_mode="manual")
+        task = self.json_request("POST", "/api/tasks", label="create_task", json=body)
+        self.task_id = task["id"]
+        self.interventions += 1
+        self.json_request(
+            "PUT", f"/api/tasks/{self.task_id}/materials",
+            label="human_validation_material_selection",
+            json={role + "_path": path for role, path in paths.items()},
+        )
+
+    def start_validation_workflow(self, action):
+        """A declared human start, bound to the sole current native template plan."""
+        if self.case.task.task_type != "validation" or not action.content.strip():
+            raise RuntimeJourneyError("validation_start_not_declared")
+        if self.plans():
+            raise RuntimeJourneyError("validation_start_requires_no_existing_plan")
+        created = self.json_request(
+            "POST", f"/api/tasks/{self.task_id}/plans", label="create_validation_workflow",
+            json={"goal": "模型验证", "slots": {"task_id": self.task_id}},
+        )["plan"]
+        plan = self.json_request(
+            "GET", f"/api/plans/{created['id']}", label="read_validation_start_snapshot",
+        )["plan"]
+        if (plan["task_id"] != self.task_id or plan["template_id"] != "model_validation"
+                or plan["status"] != "validated"
+                or [_tool_name(step["tool_ref"]) for step in plan["steps"]] != [
+                    "v1_compat.scan_materials", "v1_compat.run_notebook",
+                    "v1_compat.compute_validation_metrics", "v1_compat.render_reports",
+                ]
+                or any(step["inputs"] != {"task_id": self.task_id} for step in plan["steps"])):
+            raise RuntimeJourneyError("validation_workflow_contract_changed")
+        self.interventions += 1
+        confirmed = self.json_request(
+            "POST", f"/api/plans/{plan['id']}/confirm", label="human_validation_workflow_start",
+            json=plan["confirmation_snapshot"],
+        )["plan"]
+        self.json_request(
+            "POST", f"/api/plans/{plan['id']}/run", label="run_validation_workflow",
+            json={"expected_plan_fingerprint": confirmed["confirmation_snapshot"]["expected_plan_fingerprint"]},
+        )
+        self.wait_idle()
 
     def bind_single_strategy_sample(self, action):
         """Replay a declared human sample/semantics selection through workspace CAS."""
@@ -1227,6 +1309,47 @@ def _output_identity(output, evidence, tool):
         }
 
 
+def _validation_report_files(workspace, task_id, output):
+    """Inspect only the two native report carriers, never caller-selected paths."""
+    import io
+    import zipfile
+
+    # macOS's system temporary directory may use /var -> /private/var. Resolve
+    # the trusted workspace root once, while rejecting links below that root.
+    workspace = workspace.resolve()
+    result = []
+    artifacts = output.get("artifacts", [])
+    if not isinstance(artifacts, list):
+        return result
+    for kind, filename, part in (
+        ("excel", "validation.xlsx", "xl/workbook.xml"),
+        ("word", "validation_report.docx", "word/document.xml"),
+    ):
+        relative = f"tasks/{task_id}/outputs/{filename}"
+        matches = [a for a in artifacts if isinstance(a, dict) and a.get("kind") == kind]
+        if len(matches) != 1 or matches[0].get("path") != relative:
+            continue
+        path = workspace / relative
+        try:
+            if path.resolve() != path or not path.is_file() or path.stat().st_size > 32_000_000:
+                continue
+            raw = path.read_bytes()
+            if not raw or len(raw) > 32_000_000:
+                continue
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                entries = archive.infolist()
+                if (len(entries) > 1024 or sum(i.file_size for i in entries) > 64_000_000
+                        or part not in archive.namelist() or "[Content_Types].xml" not in archive.namelist()
+                        or archive.testzip() is not None or not archive.read(part)):
+                    continue
+                if kind == "excel" and not any(i.filename.startswith("xl/worksheets/sheet") for i in entries):
+                    continue
+            result.append({"kind": kind, "sha256": digest(raw), "size_bytes": len(raw), "format_verified": True})
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+            continue
+    return result
+
+
 def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
     """Read authenticated output bindings only after the application has stopped.
 
@@ -1360,6 +1483,10 @@ def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
                                     "suffix": path.suffix,
                                 }
                             )
+                    if receipt["tool"] == "v1_compat.render_reports":
+                        receipt["validation_report_files"] = _validation_report_files(
+                            workspace, task_id, bound["output"],
+                        )
                     private["outputs"][step.id] = bound["output"]
                 except (ValueError, KeyError, OSError):
                     receipt["binding_verified"] = False
@@ -1464,6 +1591,8 @@ def _run_case(
             record["runtime_status"] = "receipt_error"
         record["http_events"] = journey.events if journey else []
         record["human_interventions"] = journey.interventions if journey else 0
+    if case.task.task_type == "validation":
+        record["runtime_entry"] = "manual_compatibility_workflow"
     attempts = _read_attempts(case_dir / "llm-attempts.jsonl")
     if any(
         item["event"] == "budget_blocked"
@@ -1601,6 +1730,8 @@ def run_runtime_suite(
         "acceptance_claim": "not_established",
         "cases": [],
     }
+    if all(case.task.task_type == "validation" for case in suite.cases):
+        report["execution_mode"] = "real_http_manual_compatibility_workflow_tools"
     report["declared_max_total_llm_attempts"] = sum(
         case.budget.max_llm_attempts for case in suite.cases
     )

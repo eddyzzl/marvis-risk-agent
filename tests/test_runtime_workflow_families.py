@@ -123,7 +123,7 @@ def test_successful_subset_keeps_missing_family_scenarios_visible():
     result = runtime_task_coverage([record])
     assert result["cells"]["portfolio"]["normal"]["passed"] == 1
     assert result["cells"]["portfolio"]["normal"]["real_model_runtime_eligible"] == 0
-    assert len(result["missing_cells"]) == 23
+    assert len(result["missing_cells"]) == 27
     assert not result["all_cells_represented"]
     del record["task_type"]
     assert runtime_task_coverage([record])["unclassified_case_ids"] == ["one"]

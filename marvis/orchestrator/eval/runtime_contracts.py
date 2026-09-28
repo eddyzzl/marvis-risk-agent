@@ -70,24 +70,26 @@ class RuntimeBudget(StrictModel):
 class Material(StrictModel):
     path: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    role: Literal["sample", "feature", "unknown"] = "sample"
+    role: Literal["sample", "feature", "unknown", "notebook", "pmml", "dictionary"] = "sample"
     source_kind: Literal["synthetic", "deidentified_historical"] = "synthetic"
 
     @model_validator(mode="after")
     def relative_path(self):
         path = Path(self.path)
+        allowed = {
+            "notebook": {".ipynb"}, "pmml": {".pmml"}, "dictionary": {".csv", ".xlsx"},
+        }.get(self.role, {".csv", ".parquet", ".xlsx"})
         if (
-            path.is_absolute()
-            or ".." in path.parts
-            or path.suffix.lower() not in {".csv", ".parquet", ".xlsx"}
+            path.is_absolute() or ".." in path.parts or "\\" in self.path
+            or ":" in self.path or path.suffix.lower() not in allowed
         ):
-            raise ValueError("material must be a relative CSV, Parquet or XLSX path")
+            raise ValueError("material path must be relative and match its declared role")
         return self
 
 
 class RuntimeTask(StrictModel):
     task_type: Literal[
-        "data_join", "feature_analysis", "modeling", "strategy", "vintage", "portfolio"
+        "data_join", "feature_analysis", "modeling", "strategy", "vintage", "portfolio", "validation"
     ]
     model_name: str = "Runtime benchmark"
     validator: str = "benchmark"
@@ -99,6 +101,14 @@ class RuntimeTask(StrictModel):
     metrics: list[str] | None = None
     target_type: str = ""
     strategy_input: dict | None = None
+    algorithm: Literal["lr", "lgb", "xgb", "catboost", "scorecard", "dnn"] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_identity(self, handler):
+        value = handler(self)
+        if value.get("algorithm") is None:
+            value.pop("algorithm", None)
+        return value
 
 
 class RuntimeAction(StrictModel):
@@ -111,6 +121,7 @@ class RuntimeAction(StrictModel):
         "stop",
         "select_recommended_experiment",
         "bind_single_strategy_sample",
+        "start_validation_workflow",
     ]
     content: str = ""
     tool: str = ""
@@ -119,6 +130,11 @@ class RuntimeAction(StrictModel):
 
     @model_validator(mode="after")
     def required_fields(self):
+        if self.kind == "start_validation_workflow" and (
+            self.tool or not self.content.strip() or self.portfolio_request is not None
+            or self.semantic_mapping is not None
+        ):
+            raise ValueError("validation start accepts explicit human text only, no tool or injected identifiers")
         if self.kind == "bind_single_strategy_sample":
             if self.tool or not self.content.strip() or self.semantic_mapping is None:
                 raise ValueError(
@@ -177,6 +193,23 @@ class RuntimeCase(StrictModel):
 
     @model_validator(mode="after")
     def strategy_sample_binding(self):
+        validation_roles = {"sample", "notebook", "pmml", "dictionary"}
+        if self.task.task_type == "validation":
+            if (
+                self.task.algorithm is None or self.initial_message is not None
+                or len(self.materials) != 4
+                or {m.role for m in self.materials} != validation_roles
+                or len({m.path for m in self.materials}) != 4
+                or not self.actions or self.actions[0].kind != "start_validation_workflow"
+                or any(a.kind == "start_validation_workflow" for a in self.actions[1:])
+                or any(a.kind not in {"approve_step", "reject_step"}
+                       or a.tool != "v1_compat.render_reports" for a in self.actions[1:])
+            ):
+                raise ValueError("validation requires four unique role-bound files and its declared compatibility Workflow actions")
+        elif (self.task.algorithm is not None
+              or any(m.role in {"notebook", "pmml", "dictionary"} for m in self.materials)
+              or any(a.kind == "start_validation_workflow" for a in self.actions)):
+            raise ValueError("validation files and start action belong only to validation")
         if any(a.kind == "bind_single_strategy_sample" for a in self.actions):
             if (
                 self.task.task_type != "strategy"
