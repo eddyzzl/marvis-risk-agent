@@ -46,7 +46,7 @@ def ledger(tmp_path):
     record = TaskArtifactRepository(settings.db_path).register(
         task_id=task.id,
         kind="collection_source",
-        path="source.json",
+        path=str(source.relative_to(settings.workspace)),
         content_hash=digest,
         origin_tool="synthetic_test",
         provenance={},
@@ -127,6 +127,46 @@ def schedule(evidence):
         terms_artifact_id=evidence["source_artifact_id"],
         terms_artifact_hash=evidence["source_artifact_hash"],
     )
+
+
+def test_report_is_listed_and_downloaded_through_shared_artifact_api(ledger):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from marvis.routers.artifacts import router
+
+    store, task, evidence = ledger
+    result = store.reconcile(task, request(evidence))
+    app = FastAPI()
+    app.state.settings = store.settings
+    app.include_router(router)
+    with TestClient(app) as client:
+        listed = client.get(f"/api/tasks/{task}/task-artifacts").json()["artifacts"]
+        report = next(
+            row for row in listed if row["kind"] == "collection_cashflow_reconciliation"
+        )
+        assert report["available"] is True
+        response = client.get(report["download_url"])
+        assert response.status_code == 200
+        assert hashlib.sha256(response.content).hexdigest() == result["receipt_hash"]
+        assert response.json() == {
+            k: v for k, v in result.items() if k != "receipt_hash"
+        }
+
+
+def test_task_deletion_cascades_but_live_case_evidence_cannot_be_deleted(ledger):
+    store, task, evidence = ledger
+    store.reconcile(task, request(evidence))
+    with connect(store.settings.db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute("DELETE FROM collection_evidence WHERE task_id=?", (task,))
+    TaskRepository(store.settings.db_path).delete_task(task)
+    with connect(store.settings.db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM collection_evidence WHERE task_id=?", (task,)
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_gold_reconciliation_reversals_costs_and_installment_fulfillment(ledger):

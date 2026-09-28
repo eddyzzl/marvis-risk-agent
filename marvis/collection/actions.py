@@ -45,7 +45,7 @@ class ContactWindow(Contract):
         min_length=1, max_length=7
     )
     start: str = Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
-    end: str = Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+    end: str = Field(pattern=r"^(?:(?:[01][0-9]|2[0-3]):[0-5][0-9]|24:00)$")
 
     @model_validator(mode="after")
     def coherent(self):

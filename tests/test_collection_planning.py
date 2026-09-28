@@ -392,6 +392,23 @@ def test_expiry_and_timezone_window_boundaries():
         assert result["results"][0]["status"] == "eligible_for_approval"
 
 
+def test_split_overnight_policy_can_include_the_final_minute_of_the_day():
+    p = policy(
+        contact_windows=[
+            {"weekdays": [1], "start": "22:00", "end": "24:00"},
+            {"weekdays": [2], "start": "00:00", "end": "01:00"},
+        ]
+    )
+    for when in ("2026-09-28T15:59:59Z", "2026-09-28T16:00:00Z"):
+        row = preview(
+            p,
+            histories=[history(through_at=when, available_at=when)],
+            as_of=when,
+            knowledge_cutoff=when,
+        )["results"][0]
+        assert row["status"] == "eligible_for_approval"
+
+
 def test_review_and_hold_do_not_invent_contact_or_contact_cost():
     p = policy()
     review = CollectionAction(kind="review", policy_hash=p.content_hash, queue_id="q")

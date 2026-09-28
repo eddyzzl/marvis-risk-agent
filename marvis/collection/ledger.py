@@ -46,7 +46,7 @@ class CollectionLedger:
         with connect(settings.db_path) as conn:
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS collection_evidence (
-                task_id TEXT NOT NULL REFERENCES tasks(id),
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                 kind TEXT NOT NULL CHECK(kind IN ('case','schedule','flow','reconciliation')),
                 identity TEXT NOT NULL, case_id TEXT NOT NULL,
                 body_json TEXT NOT NULL, body_hash TEXT NOT NULL, signature TEXT NOT NULL,
@@ -57,7 +57,9 @@ class CollectionLedger:
             CREATE TRIGGER IF NOT EXISTS collection_evidence_no_update
             BEFORE UPDATE ON collection_evidence BEGIN SELECT RAISE(ABORT,'collection evidence is immutable'); END;
             CREATE TRIGGER IF NOT EXISTS collection_evidence_no_delete
-            BEFORE DELETE ON collection_evidence BEGIN SELECT RAISE(ABORT,'collection evidence is immutable'); END;
+            BEFORE DELETE ON collection_evidence
+            WHEN EXISTS(SELECT 1 FROM tasks WHERE id=OLD.task_id)
+            BEGIN SELECT RAISE(ABORT,'collection evidence is immutable'); END;
             """)
 
     def _signature(self, task_id, kind, identity, body_hash):
@@ -128,7 +130,7 @@ class CollectionLedger:
             raise CollectionEvidenceError("collection_source_binding_invalid")
         root = (self.settings.tasks_dir / task_id).resolve()
         raw = Path(row["path"])
-        path = raw if raw.is_absolute() else root / raw
+        path = raw if raw.is_absolute() else self.settings.workspace / raw
         if (
             not path.resolve().is_relative_to(root)
             or path.resolve() != path.absolute()
@@ -448,7 +450,7 @@ class CollectionLedger:
             identity = content_hash(body)
             self._put(conn, task_id, "reconciliation", identity, body)
             artifacts = TaskArtifactRepository(self.settings.db_path)
-            relative = f"collection/reconciliation-{identity}.json"
+            relative = self._report_path(task_id, identity)
             prior = conn.execute(
                 "SELECT id FROM task_artifacts WHERE task_id=? AND kind='collection_cashflow_reconciliation' AND path=?",
                 (task_id, relative),
@@ -489,9 +491,19 @@ class CollectionLedger:
             body = self._get(conn, task_id, "reconciliation", receipt_hash)
             row = conn.execute(
                 "SELECT id FROM task_artifacts WHERE task_id=? AND kind='collection_cashflow_reconciliation' AND path=?",
-                (task_id, f"collection/reconciliation-{receipt_hash}.json"),
+                (task_id, self._report_path(task_id, receipt_hash)),
             ).fetchone()
             if row is None:
                 raise CollectionEvidenceError("collection_report_artifact_missing")
             self._source(conn, task_id, row["id"], receipt_hash)
             return {"receipt_hash": receipt_hash, **body}
+
+    def _report_path(self, task_id, receipt_hash):
+        return str(
+            (
+                self.settings.tasks_dir
+                / task_id
+                / "collection"
+                / f"reconciliation-{receipt_hash}.json"
+            ).relative_to(self.settings.workspace)
+        )
