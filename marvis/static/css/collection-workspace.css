@@ -1,0 +1,119 @@
+.collection-workspace {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  min-width: 0;
+}
+.collection-workspace[hidden] {
+  display: none;
+}
+.collection-workspace > details > summary {
+  padding: 12px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.collection-workspace > details > summary span {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.collection-body {
+  padding: 0 16px 16px;
+  min-width: 0;
+}
+.collection-body h4 {
+  font-size: 13px;
+  margin: 18px 0 10px;
+}
+.collection-note,
+.collection-message {
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+}
+.collection-message {
+  color: var(--danger);
+}
+.collection-message:empty {
+  display: none;
+}
+.collection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.collection-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 12px 4px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+}
+.collection-row span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.collection-table-scroll {
+  overflow: auto;
+}
+.collection-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: left;
+}
+.collection-body th,
+.collection-body td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.collection-evidence {
+  margin: 12px 0;
+  font-size: 12px;
+}
+.collection-evidence summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+.collection-evidence pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow: auto;
+  background: var(--surface-soft);
+  padding: 12px;
+  border-radius: 7px;
+  font-size: 11px;
+}
+.collection-gate {
+  border: 1px solid var(--border);
+  padding: 12px;
+  border-radius: 9px;
+}
+.collection-gate label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.collection-gate input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 8px;
+  color: var(--text);
+  background: var(--surface);
+}

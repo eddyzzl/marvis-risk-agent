@@ -37,6 +37,7 @@ def _with_workbench_context(script: str, app_js: str) -> str:
         # exercised separately with populated state in the behavior regressions.
         "reportDraftState": "{ get: () => null }",
         "historicalReplayController": "{ render: () => {} }",
+        "collectionWorkspaceController": "{ render: () => {} }",
     }
     prefix = [
         f"let {name} = {value};"

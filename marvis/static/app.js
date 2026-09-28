@@ -1,3 +1,4 @@
+import { createCollectionWorkspaceController } from "./js/collection-workspace-controller.js";
 import { createBusinessAcceptanceController } from "./js/business-acceptance.js";
 import { createOperationsController } from "./js/operations-controller.js";
 import { createProductionGovernanceController } from "./js/production-governance-controller.js";
@@ -532,6 +533,24 @@ const historicalReplayController = createHistoricalReplayController({
   isCurrentView: (view) => taskRequests.current(view),
   isBusy: selectedTaskIsBusy,
   beginActivity: (operation, taskId) => claimBusy("historical_replay", "正在提交历史回放…", taskId, operation),
+  endActivity: releaseBusy,
+  openIdentity: () => $("operationsOpenButton")?.click(),
+  onPlanCreated: async (plan, view) => {
+    if (!taskRequests.current(view)) return;
+    taskSession.acceptPlan(view, taskSession.taskId, plan);
+    await refreshDriverGateState(taskSession.taskId);
+    renderAll();
+  },
+  refreshPlan: refreshDriverGateState,
+});
+const collectionWorkspaceController = createCollectionWorkspaceController({
+  getElement: () => $("collectionWorkspacePanel"),
+  getTask: () => taskSession.task,
+  getPlan: () => taskSession.plan,
+  captureView: () => taskRequests.capture(),
+  isCurrentView: (view) => taskRequests.current(view),
+  isBusy: selectedTaskIsBusy,
+  beginActivity: (operation, taskId) => claimBusy("collection_workspace", "正在提交催收参考操作…", taskId, operation),
   endActivity: releaseBusy,
   openIdentity: () => $("operationsOpenButton")?.click(),
   onPlanCreated: async (plan, view) => {
@@ -2086,6 +2105,7 @@ function renderBusyActivity(lease, active) {
   }
   renderWorkflowStepper();
   historicalReplayController.render();
+  collectionWorkspaceController.render();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -5392,6 +5412,7 @@ function renderAll() {
   labelingSetupPanel.renderAvailability();
   portfolioSetupPanel.renderAvailability();
   historicalReplayController.render();
+  collectionWorkspaceController.render();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -5412,6 +5433,7 @@ function renderChangedValidationViews() {
   labelingSetupPanel.renderAvailability();
   portfolioSetupPanel.renderAvailability();
   historicalReplayController.render();
+  collectionWorkspaceController.render();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -6682,6 +6704,7 @@ if (typeof document !== "undefined") {
   document.addEventListener("click", (event) => businessAcceptanceController.handleClick(event));
   for (const type of ["click", "input", "change", "submit"]) {
     document.addEventListener(type, (event) => historicalReplayController.handle(event));
+    document.addEventListener(type, (event) => collectionWorkspaceController.handle(event));
   }
   document.addEventListener("click", handleBusinessObjectiveEvent);
   document.addEventListener("change", handleBusinessObjectiveEvent);
