@@ -33,6 +33,9 @@ def main(argv: list[str] | None = None) -> None:
             return
         if args.command == "validate":
             _validate(args)
+        elif args.command == "reference-source":
+            from marvis.risk_context.reference_provider.server import serve_reference_provider
+            serve_reference_provider(args)
         elif args.command == "update":
             result = _update(args)
             print(f"MARVIS updated at {result['repo']} ({result['version']}).")
@@ -64,6 +67,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     _add_serve_options(parser)
 
     subparsers = parser.add_subparsers(dest="command")
+    source_parser = subparsers.add_parser("reference-source", help="Run the independent loopback reference source (no institution integration)")
+    source_parser.add_argument("--state-dir", type=Path, required=True)
+    source_parser.add_argument("--port", type=int, default=8767)
+    source_parser.add_argument("--records", type=Path)
+    source_parser.add_argument("--fault-mode", choices=("normal", "unavailable", "unauthorized", "schema_drift", "timeout_after_commit"), default="normal", help="Explicit local conformance fault only")
     serve_parser = subparsers.add_parser(
         "serve",
         help="Start the FastAPI app",

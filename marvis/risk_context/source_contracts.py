@@ -13,7 +13,8 @@ from pydantic import (
     model_validator,
 )
 
-from marvis.decision_twin._canonical import canonical_json, content_hash
+from marvis.decision_twin._canonical import canonical_json as canonical_json
+from marvis.decision_twin._canonical import content_hash as content_hash
 
 Id = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")]
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -269,10 +270,13 @@ def assess(envelope: SourceEnvelope, now: float):
         "inquiry_count": len(bureau.inquiries) if complete else None,
         "totals_by_currency": totals if complete else None,
         "missing_reasons": sorted(set(reasons)),
+        "finding_codes": sorted(
+            f"kyc.{key}:{value}"
+            for key, value in kyc.items()
+            if value in {"mismatch", "invalid", "expired", "fail", "hit"}
+        ),
         "automated_clearance": False,
     }
 
-
-__all__ = ["canonical_json", "content_hash"]
 
 ProviderResult.model_rebuild()

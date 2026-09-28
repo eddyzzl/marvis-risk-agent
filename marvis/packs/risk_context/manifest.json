@@ -1,0 +1,133 @@
+{
+  "name": "risk_context",
+  "version": "0.1.0",
+  "display_name": "Risk source evidence",
+  "description": "服务端授权的本地参考来源查询、认证历史导入与同ID只读恢复；不证明机构核验。",
+  "module": "marvis.packs.risk_context.source_tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "query_source",
+      "summary": "执行服务端已冻结授权的来源请求；已发送请求只读回，不重发。仅返回无身份及凭据的摘要。",
+      "entrypoint": "tool_query_source",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "risk_source.summary.v1"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contract_hash": {
+            "type": "string"
+          },
+          "origin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "external_authenticity": {
+            "const": "not_independently_verified"
+          },
+          "missing_reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "automated_clearance": {
+            "const": false
+          },
+          "evidence_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_action": {
+            "type": "string"
+          },
+          "finding_codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "task_id",
+          "request_id",
+          "profile_id",
+          "grant_id",
+          "state",
+          "status",
+          "artifact_id",
+          "contract_hash",
+          "origin",
+          "external_authenticity",
+          "missing_reasons",
+          "automated_clearance",
+          "evidence_url",
+          "next_action",
+          "finding_codes"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 25,
+      "memory_limit_mb": 2048,
+      "failure_policy": "fail",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:dataset",
+        "write:artifact"
+      ]
+    }
+  ],
+  "hooks": [],
+  "permissions": [
+    "read:dataset",
+    "write:artifact"
+  ]
+}
