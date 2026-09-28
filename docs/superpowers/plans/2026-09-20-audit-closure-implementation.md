@@ -418,3 +418,24 @@ Vintage 平台原本明确要求回复“材料已上传”，但路由只收到
 `4ded3db1` 使纯规则包的历史窗口严格校验明确为空的 score/score_product、成员与包身份，真实计算动作 PSI 和通过率变化；分数 PSI 记录为不适用，部分证据不能判为通过，动作漂移仍失败。原模型缺分数仍拒绝。88 项联合检查和 61 项最终时间窗口检查通过，覆盖真实 HTTP→人审→ToolRunner→签名回执及 JSON/XLSX/DOCX 导出。格式化造成的单个 Ruff fixture 注释位置问题由 `c8721c07` 修正后检查通过。
 
 `c326cd6e` 新增轻量事件读取授权，仍检查实际主体、来源和当前 grant，原生事件到包/worker 的完整绑定继续开发。`5407a443` 统一 collection 结构化动作与 repository 核验。所有执行仍限定本地参考环境，没有机构或客户接触。17 个工作包、22 项发现与 S/H/P 要求保持不变。
+
+
+## WP01 固定九例通过与正常建模预算失败（2026-09-29）
+
+材料上下文修复快照 `5eb4ce76` 的第四次固定九例运行通过 9/9，报告 `runtime-family-20260928/intake-context-real-model-runs/20260928T160127635130Z-4c5798dca411/report.json`。原预算、期望、分母没有变化；四个无需模型调用的澄清用例不计 A 证据，公开合成例整体仍标记 acceptance=not_established。
+
+`35f68b5b` 增加独立正常建模案例，当前展示中唯一推荐实验通过现有人审快照选择，不能任意传 ID、route 或 selector。46 项 runtime 和 9 项传输复核通过；原两例/九例所有案例、期望、数据字节与基线相同。新 cases SHA 为 `e65ab52e191d0a9b5ce9d03cd2c05032ee771cf6c8f1346ddc30972c14cc91b8`，expected SHA 为 `5f02beff0c886ee6bb22f3e78e1f6bf7a1cd7ec612ee8ccf425a91b9292cc485`，在 `normal-modeling-20260928/frozen-public-suite`。
+
+新案例真实模型首轮源 `f3b9c423` 仍为 0/1：12 步 done、13 条功能断言全过，但第 17 次 critic 请求/转发上限 2048，provider usage 回报 completion_tokens=2049。因此严格预算门判失败，未调整预算、覆盖使用量或重复运行直到通过。242.822 秒、28 次模型请求、162 次 HTTP 未超各自上限；13/28 响应在输出限制时无 content，是另一个效率诊断。原报告及诊断在 `normal-modeling-20260928/real-model-runs/20260928T161426771028Z-d2852a3faa2f/report.json` 和 `real-model-first-diagnostic.json`。所有证据根均为 `/Users/eddyz/.codex/work-artifacts`。
+
+## WP07 字段级时点证据传到建模产物
+
+`04673717` 复用既有 as-of、preprocessing 和产物登记，只给原生 as-of 真正选择的带前缀字段认证，决策锚表自带字段继续未知。逐行确定性派生保留输入证据，未记录参数可得时点的拟合变换继续未知；train-only 是拟合成员证明，不能冒充历史时点证明。建模投影比较实际列值及行序，原始时点链无预处理步骤时也能保留；tune/train 的证据经过平台参数剥离后附回模型产物，模型卡 JSON 和 Markdown 如实呈现证据或缺口。
+
+独立审阅在真实 ToolRunner 复现 WOE 覆盖已有同名列却仍 verified 的问题；先保留红例，再按输出写集覆盖已有字段证据，numeric/categorical WOE 反例均通过。相关 71 项、交付/runtime 31 项、最后 as-of/字段证据 29 项通过，Ruff/diff 通过。初轮 5 passed/1 错写测试工具名失败和 WOE 红例日志保留。证据 `feature-time-20260929/{initial,collision-red,related,delivery,final}.log`，独立复现目录 `feature-time-review-20260929`。普通清洗/JOIN、拟合参数时点、业务标签和真实历史数据仍未整体关闭。
+
+## WP13 原生事件进入同一个受限决策 worker
+
+`254c305d` 将冻结事件 recipe 接入模型/纯规则包，逐次申请提交完整原生证据引用，主体身份来自实际 session。主 HTTP 在幂等读前检查当前来源授权，准入后 worker 校验签名收据、来源 hash、完整主体/时点合同，并重放原生事件；不能外填派生事件值。未知覆盖按包内 review/reject 降级，安装审计只暴露执行状态/hash，避免给无来源权限的人展示主体评估。
+
+94 项联合检查和最后 2 项真实 HTTP→人工门→ToolRunner→安装激活→决定→CLI 重启→撤权检查通过，日志 `operations-runtime-20260927/reference-decision/event-binding-{final,last}-tests.log`。旧无事件包/请求哈希契约保持。历史批量逐行事件绑定继续开发，未把本地决定称为机构部署或生产 SLO。17 个工作包和 22 项发现未删减，整体保持进行中。
