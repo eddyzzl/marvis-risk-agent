@@ -98,6 +98,11 @@ def _calibrate_model(inputs: dict, ctx, *, producer_record=None, score_base_dir=
     artifact = _task_artifact(runtime, ctx, inputs["artifact_id"])
     experiment = _task_experiment(runtime, ctx, artifact.experiment_id)
     config = experiment.config
+    if producer_record is not None:
+        from marvis.packs.modeling.producer_receipts import metadata_hash
+
+        if metadata_hash(artifact) != producer_record["provenance"]["scoring_metadata_hash"]:
+            raise ModelingError("native_model_changed_before_calibration")
     if getattr(config, "target_type", "binary") != "binary":
         raise ModelingError("probability calibration is only supported for binary models")
 
@@ -290,6 +295,15 @@ def _calibrate_model(inputs: dict, ctx, *, producer_record=None, score_base_dir=
     transaction = getattr(runtime.modeling_repo, "transaction", None)
     if callable(set_params_on_connection) and callable(transaction):
         def publish(conn):
+            if producer_record is not None:
+                from marvis.repositories.modeling import _model_artifact_from_row
+                from marvis.packs.modeling.producer_receipts import metadata_hash
+
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute("SELECT * FROM model_artifacts WHERE id=?", (artifact.id,)).fetchone()
+                if current is None or metadata_hash(_model_artifact_from_row(current)) != metadata_hash(artifact):
+                    raise ModelingError("native_model_changed_during_calibration")
             set_params_on_connection(conn, artifact.id, params, audit=audit)
             if producer_record is not None:
                 from marvis.packs.modeling.producer_receipts import metadata_hash, register_on_connection

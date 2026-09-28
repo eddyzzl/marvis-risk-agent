@@ -500,3 +500,31 @@ def test_real_ensemble_and_calibrator_producer_authenticate_all_source_bytes(
     assert repeated.output["calibration_path"] != calibrated.output["calibration_path"]
     assert store.build(request, actor_id="maker")[0] != package_hash
     assert store.get(package_hash) == manifest
+
+
+def test_calibration_cannot_certify_or_overwrite_concurrently_changed_model(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from marvis.packs.modeling import calibrate_tools
+    from marvis.packs.modeling.errors import ModelingError
+    from marvis.repositories.task_artifacts import TaskArtifactRepository
+
+    runner, _, registry, _, settings, task = _runtime(tmp_path)
+    trained, _ = _train_lr_experiment(runner, registry, tmp_path, task)
+    repo = ModelingRepository(settings.db_path)
+    artifact = repo.get_model_artifact(trained.output["artifact_id"])
+    experiment = repo.get_experiment(artifact.experiment_id)
+    original_fit = calibrate_tools._fit_calibrator
+    changed = {**artifact.params, "concurrent_note": "new declaration"}
+    before = TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    def change_while_fitting(*args, **kwargs):
+        result = original_fit(*args, **kwargs)
+        repo.set_model_artifact_params(artifact.id, changed)
+        return result
+    monkeypatch.setattr(calibrate_tools, "_fit_calibrator", change_while_fitting)
+    with pytest.raises(ModelingError, match="changed_during_calibration"):
+        calibrate_tools.tool_calibrate_model({"artifact_id": artifact.id, "dataset_id": experiment.config.dataset_id,
+            "method": "sigmoid", "split": "test", "min_samples": 20, "n_bins": 5},
+            SimpleNamespace(task_id=task.id, workspace=settings.workspace, datasets_root=settings.datasets_dir, seed=None))
+    assert repo.get_model_artifact(artifact.id).params == changed
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == before
+    assert not list((settings.tasks_dir / task.id / "modeling_artifacts").glob("*.calibration.*.joblib"))
