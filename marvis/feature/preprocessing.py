@@ -64,6 +64,7 @@ import pandas as pd
 from marvis.feature.contracts import CategoricalWOECategory, CategoricalWOEResult, WOEResult
 from marvis.feature.encode import apply_categorical_woe, apply_onehot_mapping, woe_encode
 from marvis.feature.errors import FeatureError
+from marvis.feature.derived_preprocessing import replay_derived_step
 from marvis.feature.transform import apply_scaler, mask_sentinel_values
 
 
@@ -138,7 +139,9 @@ def apply_preprocessing_steps(frame: pd.DataFrame, steps: list[dict[str, Any]]) 
         kind = str(step.get("kind") or "")
         columns = [str(c) for c in step.get("columns") or []]
         params = step.get("params") or {}
-        if kind == "sentinel":
+        if kind in {"derive", "group_aggregate", "fitted_rank"}:
+            out = replay_derived_step(out, step)
+        elif kind == "sentinel":
             out = _apply_sentinel(out, columns, params)
         elif kind == "impute":
             out = _apply_impute(out, columns, params)

@@ -132,43 +132,13 @@ def aggregate_feature(
     the same overfitting guard ``tree_edges``'s ``min_samples_leaf`` and WOE's
     rare-category pooling already apply elsewhere in the feature pack.
     """
-    _assert_columns(df, [group_col, value_col])
-    if not aggs:
-        raise FeatureError("aggregate functions must not be empty")
-    invalid = [agg for agg in aggs if agg not in ALLOWED_AGGS]
-    if invalid:
-        raise FeatureError(f"unsupported aggregate functions: {', '.join(invalid)}")
-    if target_col is not None and value_col == target_col:
-        raise FeatureError(
-            f"aggregate_feature cannot use the target column ({target_col!r}) as value_col "
-            "-- this leaks a per-group bad-rate into a feature"
-        )
+    from marvis.feature.derived_parameters import fit_aggregate_parameters, apply_aggregate_parameters
 
-    fit_frame = df if fit_mask is None else df.loc[fit_mask]
-    if fit_frame.empty:
-        raise FeatureError("aggregate_feature fit frame is empty after excluding holdout rows")
-    by_group = fit_frame.groupby(group_col, dropna=False)[value_col]
-    grouped = by_group.agg(aggs)
-    group_size = by_group.size()  # separate from grouped -- "count" may itself be a requested agg
-    global_stats = fit_frame[value_col].agg(aggs)
-    small_groups = group_size < int(min_group_size)
-    for agg in aggs:
-        grouped.loc[small_groups, agg] = global_stats[agg]
-    grouped = grouped.rename(
-        columns={agg: f"{value_col}_by_{group_col}_{agg}" for agg in aggs}
-    ).reset_index()
-
-    new_cols = [f"{value_col}_by_{group_col}_{agg}" for agg in aggs]
-    _assert_no_conflicts(df, {col: None for col in new_cols})
-    merged = df.merge(grouped, on=group_col, how="left", sort=False)
-    if len(merged) != len(df):
-        raise FeatureError("aggregate join expanded row count")
-    # Unseen groups (present in df but not in the fit frame, e.g. an OOT-only
-    # region code) fall back to the global fit-frame statistic too.
-    for agg in aggs:
-        column = f"{value_col}_by_{group_col}_{agg}"
-        merged[column] = merged[column].fillna(global_stats[agg])
-    return merged, new_cols
+    params = fit_aggregate_parameters(
+        df, group_col, value_col, aggs, fit_mask=fit_mask,
+        min_group_size=min_group_size, target_col=target_col,
+    )
+    return apply_aggregate_parameters(df, params)
 
 
 def derive_date_features(df: pd.DataFrame, recipe: list[dict]) -> tuple[pd.DataFrame, list[str]]:

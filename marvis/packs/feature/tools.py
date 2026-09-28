@@ -26,7 +26,7 @@ from marvis.feature.binning import (
     tree_edges,
 )
 from marvis.feature.correlation import correlation_report
-from marvis.feature.derive import derive_batch, derive_date_features
+from marvis.feature.derived_preprocessing import derive_with_parameters
 from marvis.feature.encode import apply_categorical_woe, categorical_woe_encode, onehot_encode, woe_encode
 from marvis.feature.errors import FeatureError
 from marvis.feature.fit_scope import fit_membership
@@ -1481,8 +1481,13 @@ def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str
 def tool_cross_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
-    derived, new_columns = derive_batch(frame, list(inputs["recipe"]), dataset_id=dataset.id)
-    result = _register_frame(runtime, derived, dataset, ctx, "cross")
+    derived, new_columns, steps, fits = derive_with_parameters(
+        frame, list(inputs["recipe"]), dataset_id=dataset.id, target_col=dataset.target_col,
+    )
+    result = _register_frame(
+        runtime, derived, dataset, ctx, "cross", preprocessing_steps=steps,
+        fit=[fitting_evidence(frame, item, tool=tool, dataset_id=dataset.id) for tool, item in fits],
+    )
     return {"result_dataset_id": result.id, "new_columns": new_columns}
 
 
@@ -1493,8 +1498,12 @@ def tool_derive_date_features(inputs: dict, ctx) -> dict:
     inference) to pull date information into the modeling frame."""
     runtime = _runtime(ctx)
     dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
-    derived, new_columns = derive_date_features(frame, list(inputs["recipe"]))
-    result = _register_frame(runtime, derived, dataset, ctx, "datefeat")
+    if any(item.get("kind") not in {"month", "datediff", "tenure_months"} for item in inputs["recipe"]):
+        raise FeatureError("date derivation requires a date recipe")
+    derived, new_columns, steps, _ = derive_with_parameters(
+        frame, list(inputs["recipe"]), dataset_id=dataset.id, target_col=dataset.target_col,
+    )
+    result = _register_frame(runtime, derived, dataset, ctx, "datefeat", preprocessing_steps=steps, fit=[])
     return {"result_dataset_id": result.id, "new_columns": new_columns}
 
 
@@ -1574,7 +1583,7 @@ def _register_frame(
     *,
     preprocessing_step: dict[str, Any] | None = None,
     preprocessing_steps: list[dict[str, Any]] | None = None,
-    fit: dict[str, Any] | None = None,
+    fit: dict[str, Any] | list[dict[str, Any]] | None = None,
 ):
     out_path = runtime.datasets_root / ctx.task_id / "feature" / f"{source_dataset.id}_{suffix}_{uuid.uuid4().hex}.parquet"
     uow = ArtifactUnitOfWork()

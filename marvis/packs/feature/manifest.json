@@ -534,7 +534,7 @@
     },
     {
       "name": "cross_features",
-      "summary": "Create a derived dataset from explicit feature derivation recipes (an agg item requires split_col or allow_full_fit=true).",
+      "summary": "Create a derived dataset from explicit feature derivation recipes (agg and rank items require split_col or allow_full_fit=true; fitted parameters are replayed at scoring).",
       "input_schema": {
         "type": "object",
         "properties": {

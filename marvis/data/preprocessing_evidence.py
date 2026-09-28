@@ -188,8 +188,8 @@ def load_preprocessing_state(registry, dataset_id, *, _seen=()) -> Preprocessing
     if _digest(steps[: len(parent.steps)]) != _digest(parent.steps):
         raise FeatureError("preprocessing parent parameters changed")
     fit = proof["fit"]
-    if fit is not None:
-        column = fit["selection"].get("split_col")
+    for component in _fit_components(fit):
+        column = component["selection"].get("split_col")
         frame = (
             registry.read_authenticated_parquet_snapshot(source.id, columns=[column])
             if column
@@ -197,19 +197,25 @@ def load_preprocessing_state(registry, dataset_id, *, _seen=()) -> Preprocessing
         )
         if (
             fitting_evidence(
-                frame, fit["selection"], tool=fit["tool"], dataset_id=source.id
+                frame,
+                component["selection"],
+                tool=component["tool"],
+                dataset_id=source.id,
             )
-            != fit
+            != component
         ):
             raise FeatureError("preprocessing fitting membership changed")
+    components = _fit_components(fit)
     assurance = (
-        "training_only"
-        if fit and fit["scope"] == "train"
-        else "exploration"
-        if fit
+        "exploration"
+        if any(item["scope"] == "full" for item in components)
+        else "training_only"
+        if components
+        else "row_local"
+        if fit == [] and not parent.steps
         else parent.assurance
     )
-    if parent.steps and parent.assurance != "training_only":
+    if parent.steps and parent.assurance not in {"training_only", "row_local"}:
         assurance = parent.assurance
     return PreprocessingState(steps, assurance, record["id"], record["content_hash"])
 
@@ -235,11 +241,13 @@ def training_preprocessing_state(registry, dataset_id, *, split_col, train_value
     while identity:
         proof = records[identity]["provenance"]
         fit = proof["fit"]
-        if fit:
+        for component in _fit_components(fit):
             mask = np.unpackbits(
-                np.frombuffer(base64.b64decode(fit["membership"]), dtype=np.uint8),
+                np.frombuffer(
+                    base64.b64decode(component["membership"]), dtype=np.uint8
+                ),
                 bitorder="little",
-                count=fit["row_count"],
+                count=component["row_count"],
             ).astype(bool)
             if len(mask) != len(train) or np.any(mask & ~train):
                 raise FeatureError(
@@ -247,3 +255,9 @@ def training_preprocessing_state(registry, dataset_id, *, split_col, train_value
                 )
         identity = proof["parent_artifact_id"]
     return state
+
+
+def _fit_components(fit):
+    # Existing single-fit receipts stay readable; a derivation recipe may fit
+    # several independent transforms, each retaining its own exact selection.
+    return [] if fit is None else fit if isinstance(fit, list) else [fit]

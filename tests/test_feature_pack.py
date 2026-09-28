@@ -1556,9 +1556,8 @@ def test_impute_missing_without_add_indicators_omits_indicator_columns(tmp_path)
     assert [step["kind"] for step in chain] == ["impute"]
 
 
-def test_cross_features_does_not_append_preprocessing_steps(tmp_path):
-    """cross_features derives new columns (cross/ratio) rather than transforming
-    existing ones in place — not recorded in preprocessing_steps (PREP-2 scope)."""
+def test_cross_features_records_replayable_preprocessing_steps(tmp_path):
+    """A new raw scoring row must reproduce the derived training feature."""
     from marvis.feature.preprocessing import read_preprocessing_chain
 
     runner, registry, _repo, _backend = _runtime(tmp_path)
@@ -1570,7 +1569,9 @@ def test_cross_features_does_not_append_preprocessing_steps(tmp_path):
         task_id="task-feature",
     )
     assert crossed.ok is True, crossed.error
-    assert read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"])) == []
+    chain = read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"]))
+    assert chain[0]["kind"] == "derive"
+    assert chain[0]["params"]["recipe"] == [{"kind": "ratio", "num": "x1", "den": "x2"}]
 
 
 def test_woe_encode_and_woe_encode_categorical_persist_preprocessing_chain_sidecar(tmp_path):
