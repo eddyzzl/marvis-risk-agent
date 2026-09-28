@@ -33,10 +33,10 @@ export function createOperationsController({ root, openButton, apiClient = api,
     q('[data-ops-action="new"]').hidden = !writable();
     root.querySelectorAll("[data-ops-tab]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.opsTab === tab)));
   }
-  async function inbox({ render = false } = {}) {
+  async function inbox({ render = false, valid = () => true } = {}) {
     const version = ++inboxEpoch, ticket = epoch;
     const payload = await apiClient("/api/operations/inbox?limit=100");
-    if (version !== inboxEpoch) return;
+    if (version !== inboxEpoch || !valid()) return;
     const changed = JSON.stringify(notifications) !== JSON.stringify(payload.notifications);
     notifications = payload.notifications; badge();
     if (changed && render && current(ticket) && tab === "inbox" && !formState) content(inboxHtml(notifications));
@@ -233,13 +233,21 @@ export function createOperationsController({ root, openButton, apiClient = api,
   }
   async function poll() {
     if (!principal || refreshing || busy) return;
+    const ticket = epoch, identity = principal;
+    // A closed dialog may refresh its badge, but an obsolete visit or identity
+    // cannot change a newer view, including clearing it after an old 403.
+    const valid = () => epoch === ticket && principal === identity;
     refreshing = true;
     try {
-      await inbox({render:root.open && tab === "inbox"});
+      await inbox({render:root.open && tab === "inbox", valid});
+      if (!valid()) return;
       if (root.open) {
-        capabilities = await apiClient("/api/operations/capabilities"); toolbar();
+        const result = await apiClient("/api/operations/capabilities");
+        if (!valid()) return;
+        capabilities = result; toolbar();
       }
     } catch (error) {
+      if (!valid()) return;
       if (root.open) message(`自动刷新失败：${errorText(error)}`);
       openButton.title = "监控通知刷新失败，请打开后刷新";
       if ([401,403].includes(error.status)) principal = null;

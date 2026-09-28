@@ -148,3 +148,55 @@ const poll=timers[0]();await tick();resolveView();await tick();resolveView();awa
 assert.equal(root.querySelector('[data-ops-action="new"]').hidden,true);
 assert.match(root.querySelector("[data-ops-runtime]").innerHTML,/current checker/);
 ''')
+
+
+POLL_HARNESS = r'''
+controller.bind();calls.at(-1).resolve({role:"maker",display_name:"original maker"});
+await tick();resolveView();await tick();
+const opened=controller.open();calls.at(-1).resolve({role:"maker",display_name:"original maker"});
+await tick();resolveView();await opened;
+const reopen=async()=>{
+ root.open=false;events.get("close")();
+ const next=controller.open();calls.at(-1).resolve({role:"checker",display_name:"current checker"});
+ await tick();resolveView();await next;
+};
+'''
+
+
+def test_poll_unauthorized_response_cannot_clear_reopened_identity():
+    run_node(CONTROLLER_HARNESS + POLL_HARNESS + r'''
+const oldPoll=timers[0]();const stale=calls.at(-1);stale.settled=true;
+await reopen();
+stale.reject(Object.assign(new Error("old session expired"),{status:403}));await oldPoll;
+assert.equal(root.querySelector("[data-ops-error]").textContent,"");
+const count=calls.length;
+const freshPoll=timers[0]();assert.equal(calls.length,count+1,"new identity must still poll after obsolete 403");
+await tick();resolveView();await tick();resolveView();await freshPoll;
+assert.match(root.querySelector("[data-ops-runtime]").innerHTML,/current checker/);
+assert.equal(root.querySelector('[data-ops-action="new"]').hidden,true);
+''')
+
+
+def test_late_poll_capabilities_cannot_overwrite_reopened_runtime_state():
+    run_node(CONTROLLER_HARNESS + POLL_HARNESS + r'''
+const oldPoll=timers[0]();resolveView();await tick();
+const stale=calls.at(-1);assert.match(stale.url,/capabilities$/);stale.settled=true;
+root.open=false;events.get("close")();
+const fresh=controller.open();calls.at(-1).resolve({role:"checker",display_name:"current checker"});await tick();
+const latestCaps=calls.at(-3);assert.match(latestCaps.url,/capabilities$/);
+latestCaps.settled=true;latestCaps.resolve({runtime:{alive:false},monitoring_refs:[]});resolveView();await fresh;
+stale.resolve({runtime:{alive:true},monitoring_refs:[]});await oldPoll;
+assert.match(root.querySelector("[data-ops-runtime]").innerHTML,/后台未运行/);
+assert.match(root.querySelector("[data-ops-runtime]").innerHTML,/current checker/);
+''')
+
+
+def test_closed_dialog_can_refresh_unread_badge_without_reopening():
+    run_node(CONTROLLER_HARNESS + r'''
+controller.bind();calls.at(-1).resolve({role:"maker",display_name:"maker"});await tick();
+calls.at(-1).resolve({notifications:[{notification_id:"one",read_at:null}]});await tick();
+assert.equal(root.open,false);assert.equal(root.querySelector("badge").textContent,"1");
+assert.equal(root.querySelector("badge").hidden,false);
+const poll=timers[0]();calls.at(-1).resolve({notifications:[{notification_id:"one",read_at:"ack"}]});await poll;
+assert.equal(root.open,false);assert.equal(root.querySelector("badge").hidden,true);
+''')
