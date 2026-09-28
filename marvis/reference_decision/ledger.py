@@ -39,9 +39,9 @@ class DecisionLedger:
 
     def claim(self, environment, request_id, input_hash, package_hash, timeout):
         owner = uuid.uuid4().hex
-        now = time.time()
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = time.time()
             row = conn.execute(
                 "SELECT * FROM reference_decisions WHERE environment=? AND request_id=?",
                 (environment, request_id),
@@ -57,21 +57,30 @@ class DecisionLedger:
                 # package, with a new fenced owner. Never switch to a new head.
                 if row["package_hash"] != package_hash:
                     raise DecisionError("idempotency_package_conflict", 409)
+            # Every new owner consumes the same shared concurrency slot,
+            # including recovery of expired work. Completed idempotent reads
+            # returned above and do not claim a slot. BEGIN IMMEDIATE keeps
+            # this admission check atomic across application processes.
+            count = conn.execute(
+                "SELECT count(*) FROM reference_decisions WHERE environment=? AND status='running' AND lease_until>?",
+                (environment, now),
+            ).fetchone()[0]
+            if count >= 4:
+                raise DecisionError("reference_capacity_exceeded", 429)
+            if row:
                 conn.execute(
                     "UPDATE reference_decisions SET owner=?, lease_until=? WHERE environment=? AND request_id=?",
                     (owner, now + timeout + 15, environment, request_id),
                 )
             else:
-                # Persistent per-environment admission bound across workers.
-                count = conn.execute(
-                    "SELECT count(*) FROM reference_decisions WHERE environment=? AND status='running' AND lease_until>?",
-                    (environment, now),
-                ).fetchone()[0]
+                # The 120/minute limit counts distinct new application IDs,
+                # not recovery attempts. Retry rate is not separately limited;
+                # retries still require a shared concurrency slot above.
                 recent = conn.execute(
                     "SELECT count(*) FROM reference_decisions WHERE environment=? AND created_at>?",
                     (environment, datetime.fromtimestamp(now - 60, UTC).isoformat()),
                 ).fetchone()[0]
-                if count >= 4 or recent >= 120:
+                if recent >= 120:
                     raise DecisionError("reference_capacity_exceeded", 429)
                 conn.execute(
                     "INSERT INTO reference_decisions VALUES (?,?,?,?,?,?,'running',NULL,?)",
