@@ -172,11 +172,14 @@ class AsOfJoinEngine:
         This checks recorded temporal constraints, not external source authenticity,
         model split isolation, label maturity, or train-only transform fitting.
         """
+        return self._dataset_time_evidence(dataset_id)[0]
+
+    def _dataset_time_evidence(self, dataset_id: str) -> tuple[DatasetTimeStatus, AsOfEvidence | None]:
         dataset = self.registry.get(dataset_id)
         records = [record for record in self.artifacts.list_for_task(dataset.task_id)
                    if record["kind"] == _KIND and record["provenance"].get("output_dataset_id") == dataset_id]
         if not records:
-            return DatasetTimeStatus(assurance="unknown", reasons=("no_point_in_time_evidence",))
+            return DatasetTimeStatus(assurance="unknown", reasons=("no_point_in_time_evidence",)), None
         if len(records) != 1:
             raise ValueError("ambiguous point-in-time evidence")
         record = records[0]
@@ -213,7 +216,27 @@ class AsOfJoinEngine:
             self.registry.verify_dataset_binding_on_connection(conn, output)
             if sha256_file(resolved) != record["content_hash"]:
                 raise ValueError("point-in-time evidence changed during verification")
-        return DatasetTimeStatus(assurance=selection.assurance, artifact_id=record["id"], reasons=selection.reasons)
+        return DatasetTimeStatus(assurance=selection.assurance, artifact_id=record["id"], reasons=selection.reasons), evidence
+
+    def feature_time_status(self, dataset_id: str) -> dict:
+        """Scope temporal assurance to the joined fields actually selected.
+
+        Decision-table payload columns have no feature-availability contract.
+        They must not acquire assurance merely by sharing an as-of output file.
+        """
+        status, evidence = self._dataset_time_evidence(dataset_id)
+        if status.artifact_id is None:
+            return {"artifact_id": None, "fields": {}}
+        return {
+            "artifact_id": status.artifact_id,
+            "fields": {
+                evidence.spec.feature_prefix + name: {
+                    "assurance": status.assurance,
+                    "reasons": list(status.reasons),
+                }
+                for name in evidence.spec.feature_columns
+            },
+        }
 
 
 def _verify_matrix(expected: pd.DataFrame, actual: pd.DataFrame) -> None:

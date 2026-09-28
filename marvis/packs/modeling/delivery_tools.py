@@ -843,6 +843,14 @@ def _model_card_payload(
         challenger_comparison=challenger_comparison,
         is_refit=is_refit,
     )
+    temporal_evidence = (artifact.params or {}).get("feature_time_evidence")
+    if not isinstance(temporal_evidence, dict):
+        temporal_evidence = {"assurance": "unknown", "fields": {}, "artifact_ids": []}
+    if temporal_evidence.get("assurance") != "verified":
+        limitations.append(
+            "部分或全部特征缺少可认证的历史可得时间；训练完成和 train-only 拟合记录"
+            "不能证明决策时点无穿越，需补原生时点证据及变换参数的可得时间。"
+        )
     return _json_safe({
         "schema_version": 1,
         "card_version": MODEL_CARD_VERSION,
@@ -864,6 +872,7 @@ def _model_card_payload(
         "sample_weight_col": str(sample_weight_policy.get("sample_weight_col") or ""),
         "training": {
             "sample_weight": sample_weight_policy,
+            "feature_time_evidence": _json_safe(temporal_evidence),
         },
         "key_metrics": _model_card_key_metrics(metrics, is_refit=is_refit),
         "governance": {

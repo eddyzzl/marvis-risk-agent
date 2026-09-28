@@ -583,6 +583,10 @@ def test_train_model_without_preprocessing_chain_flags_untraceable_on_model_card
     assert any(
         "不可追溯" in item for item in post_training.output["model_card"]["limitations"]
     )
+    card = post_training.output["model_card"]
+    assert card["training"]["feature_time_evidence"]["assurance"] == "unknown"
+    assert any("历史可得时间" in item for item in card["limitations"])
+    assert "历史可得时间" in Path(post_training.output["model_card_markdown_path"]).read_text()
 
 
 @pytest.mark.slow

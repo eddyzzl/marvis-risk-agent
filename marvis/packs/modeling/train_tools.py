@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from marvis.feature.preprocessing import sidecar_path
 from marvis.data.preprocessing_evidence import load_preprocessing_state, training_preprocessing_state
+from marvis.data.feature_time import feature_time_evidence
 from marvis.files import sha256_file
 from marvis.modeling_limits import normalize_n_trials, normalize_n_trials_by_recipe
 from marvis.packs.modeling.artifact import persist_model_meta
@@ -358,6 +359,9 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
             train_values=inputs["split_values"]["train"],
         )
         base_params["preprocessing_assurance"] = preprocessing_state.assurance
+        base_params["feature_time_evidence"] = feature_time_evidence(
+            runtime.registry, dataset.id, inputs["features"],
+        )
         seed = _effective_seed(inputs, ctx)
         requested_features = [str(f) for f in inputs["features"]]
         early_stopping_rounds = int(inputs.get("early_stopping_rounds", 100))
@@ -712,6 +716,9 @@ def tool_train_model(inputs: dict, ctx) -> dict:
     )
     preprocessing_steps = preprocessing_state.steps
     train_params["preprocessing_assurance"] = preprocessing_state.assurance
+    train_params["feature_time_evidence"] = feature_time_evidence(
+        runtime.registry, dataset.id, inputs["features"],
+    )
     train_params["preprocessing_evidence"] = {
         "artifact_id": preprocessing_state.artifact_id,
         "content_hash": preprocessing_state.content_hash,
@@ -896,6 +903,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     )
     preprocessing_steps = preprocessing_state.steps
     governance = inputs.get("special_value_governance")
+    temporal_evidence = feature_time_evidence(runtime.registry, dataset.id, features)
     _assert_sentinel_preprocessing_governed(
         dataset_id=dataset.id,
         dataset_content_hash=sha256_file(dataset_path),
@@ -921,6 +929,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         else:
             recipe_params = dict(control_params)
         recipe_params["preprocessing_assurance"] = preprocessing_state.assurance
+        recipe_params["feature_time_evidence"] = temporal_evidence
         recipe_params["preprocessing_evidence"] = {
             "artifact_id": preprocessing_state.artifact_id,
             "content_hash": preprocessing_state.content_hash,

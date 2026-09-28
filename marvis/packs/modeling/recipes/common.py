@@ -39,6 +39,7 @@ PREPROCESSING_STEPS_PARAM_KEY = "preprocessing_steps"
 PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY = "preprocessing_chain_traceable"
 PREPROCESSING_ASSURANCE_PARAM_KEY = "preprocessing_assurance"
 PREPROCESSING_EVIDENCE_PARAM_KEY = "preprocessing_evidence"
+FEATURE_TIME_EVIDENCE_PARAM_KEY = "feature_time_evidence"
 SPECIAL_VALUE_GOVERNANCE_PARAM_KEY = "special_value_governance"
 _MONOTONE_CONSTRAINT_KEYS = ("monotone_constraints", "monotonic_constraints")
 
@@ -86,6 +87,7 @@ _PLATFORM_ONLY_PARAM_KEYS = frozenset({
     REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY, SPECIAL_VALUE_GOVERNANCE_PARAM_KEY,
     PREPROCESSING_ASSURANCE_PARAM_KEY,
     PREPROCESSING_EVIDENCE_PARAM_KEY,
+    FEATURE_TIME_EVIDENCE_PARAM_KEY,
 })
 
 
@@ -379,7 +381,8 @@ def _column_list(values) -> list[str]:
 
 def artifact_params(params: dict, config: TrainConfig) -> dict:
     out = dict(params)
-    for key in (PREPROCESSING_ASSURANCE_PARAM_KEY, PREPROCESSING_EVIDENCE_PARAM_KEY):
+    for key in (PREPROCESSING_ASSURANCE_PARAM_KEY, PREPROCESSING_EVIDENCE_PARAM_KEY,
+                FEATURE_TIME_EVIDENCE_PARAM_KEY):
         if key in config.params:
             out[key] = config.params[key]
     column = sample_weight_col(config)

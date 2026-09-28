@@ -11,6 +11,7 @@ from marvis.artifacts import ArtifactUnitOfWork
 from marvis.feature.candidates import candidate_numeric_features
 from marvis.feature.preprocessing import sidecar_path, write_preprocessing_chain
 from marvis.data.preprocessing_evidence import load_preprocessing_state, register_preprocessing_evidence
+from marvis.data.feature_time import feature_time_evidence
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.errors import ModelingError
 
@@ -95,7 +96,9 @@ def prepare_modeling_frame(
         # same unit of work as the parquet so both promote/commit atomically.
         source_state = load_preprocessing_state(registry, dataset.id)
         source_chain = source_state.steps
-        if source_chain:
+        source_time = feature_time_evidence(registry, dataset.id, feature_cols)
+        preserve_evidence = bool(source_state.artifact_id or source_time["artifact_ids"])
+        if source_chain or preserve_evidence:
             sidecar_name = sidecar_path(Path(out_path.name)).name
             sidecar_artifact = uow.stage_file(out_path.parent, sidecar_name)
             write_preprocessing_chain(sidecar_artifact.path, source_chain)
@@ -106,7 +109,7 @@ def prepare_modeling_frame(
             "seed": seed,
         }
         def with_preprocessing_receipt(conn, registered):
-            if source_state.artifact_id:
+            if preserve_evidence:
                 register_preprocessing_evidence(
                     registry, conn, dataset=registered, source=dataset,
                     path=sidecar_artifact.final_path, steps=source_chain,
