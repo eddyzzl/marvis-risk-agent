@@ -12,22 +12,24 @@ from marvis.packs.strategy.errors import StrategyError
 
 
 STRATEGY_DSL_SCHEMA_VERSION = "strategy.dsl.v1"
+COLLECTION_STRATEGY_DSL_SCHEMA_VERSION = "strategy.dsl.v2"
 FIRST_MATCH_POLICY = "first_match"
 
 _COMPARISON_OPERATORS = frozenset({"<", "<=", ">", ">=", "==", "!=", "in", "not_in"})
 _COMPARISON_COERCIONS = frozenset({"auto", "strict"})
 _MISSING_POLICIES = frozenset({"no_match", "match", "error"})
 _ACTION_TYPES = frozenset(
-    {"approval", "reject", "review", "limit", "pricing", "segment"}
+    {"approval", "reject", "review", "limit", "pricing", "segment", "collection"}
 )
-_VALUE_ACTION_TYPES = frozenset({"limit", "pricing", "segment"})
-_STRATEGY_TYPES = frozenset({"approval", "reject", "limit", "pricing", "segmentation"})
+_VALUE_ACTION_TYPES = frozenset({"limit", "pricing", "segment", "collection"})
+_STRATEGY_TYPES = frozenset({"approval", "reject", "limit", "pricing", "segmentation", "collection"})
 _STRATEGY_ACTION_TYPES = {
     "approval": frozenset({"approval", "reject", "review"}),
     "reject": frozenset({"approval", "reject", "review"}),
     "limit": frozenset({"limit"}),
     "pricing": frozenset({"pricing"}),
     "segmentation": frozenset({"segment"}),
+    "collection": frozenset({"collection"}),
 }
 
 
@@ -325,6 +327,17 @@ class StrategyAction:
         if value is None and action_type in _VALUE_ACTION_TYPES:
             raise StrategyError(f"action {action_type} requires a value")
         value = _canonical_json_value(value, path="action value")
+        if action_type == "collection":
+            from pydantic import ValidationError
+
+            from marvis.collection.actions import CollectionAction
+
+            try:
+                value = CollectionAction.model_validate(value).model_dump()
+            except ValidationError as exc:
+                raise StrategyError("invalid typed collection action") from exc
+            if self.output_value is not None:
+                raise StrategyError("collection output_value cannot replace the typed action")
         if action_type == "limit" and (
             not isinstance(value, int | float) or isinstance(value, bool) or value < 0
         ):
@@ -366,7 +379,7 @@ class StrategyAction:
         if not isinstance(self.stop, bool):
             raise StrategyError("action stop must be a boolean")
         if not self.stop:
-            raise StrategyError("strategy.dsl.v1 first_match supports only stop=true")
+            raise StrategyError("strategy first_match supports only stop=true")
         object.__setattr__(self, "type", action_type)
         object.__setattr__(self, "value", value)
         object.__setattr__(self, "reason_code", reason_code)
@@ -461,13 +474,17 @@ class StrategySpec:
     match_policy: str = FIRST_MATCH_POLICY
 
     def __post_init__(self) -> None:
-        if self.schema_version != STRATEGY_DSL_SCHEMA_VERSION:
+        if self.schema_version not in {
+            STRATEGY_DSL_SCHEMA_VERSION, COLLECTION_STRATEGY_DSL_SCHEMA_VERSION
+        }:
             raise StrategyError(
                 f"unsupported strategy schema_version: {self.schema_version}"
             )
         strategy_type = _nonempty_string(self.strategy_type, name="strategy_type")
         if strategy_type not in _STRATEGY_TYPES:
             raise StrategyError(f"unsupported strategy_type: {strategy_type}")
+        if strategy_type == "collection" and self.schema_version != COLLECTION_STRATEGY_DSL_SCHEMA_VERSION:
+            raise StrategyError("collection requires strategy.dsl.v2")
         if self.match_policy != FIRST_MATCH_POLICY:
             raise StrategyError(
                 f"unsupported strategy match_policy: {self.match_policy}"
@@ -605,6 +622,7 @@ def strategy_spec_hash(spec: StrategySpec | Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "COLLECTION_STRATEGY_DSL_SCHEMA_VERSION",
     "FIRST_MATCH_POLICY",
     "STRATEGY_DSL_SCHEMA_VERSION",
     "StrategyAction",
