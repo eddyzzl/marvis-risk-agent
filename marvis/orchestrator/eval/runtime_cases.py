@@ -25,8 +25,9 @@ def write_synthetic_suite(
     normal_modeling_only: bool = False,
     normal_strategy_only: bool = False,
     normal_validation_only: bool = False,
+    normal_validation_agent_only: bool = False,
 ) -> dict[str, Path]:
-    if sum((normal_modeling_only, normal_strategy_only, normal_validation_only, include_workflow_families)) > 1:
+    if sum((normal_modeling_only, normal_strategy_only, normal_validation_only, normal_validation_agent_only, include_workflow_families)) > 1:
         raise ValueError(
             "normal suites are separate, not additions to the archived nine cases"
         )
@@ -39,6 +40,11 @@ def write_synthetic_suite(
         from .runtime_validation_case import normal_validation_materials, normal_validation_cases
 
         cases, expected = normal_validation_cases(normal_validation_materials(data))
+        return _write_suite_files(root, private, data, cases, expected)
+    if normal_validation_agent_only:
+        from .runtime_validation_case import normal_validation_materials, normal_validation_agent_cases
+
+        cases, expected = normal_validation_agent_cases(normal_validation_materials(data))
         return _write_suite_files(root, private, data, cases, expected)
     n = 80
     ids = [f"synthetic-customer-{i:04d}" for i in range(n)]
@@ -217,6 +223,7 @@ if __name__ == "__main__":
     group.add_argument("--normal-modeling-only", action="store_true")
     group.add_argument("--normal-strategy-only", action="store_true")
     group.add_argument("--normal-validation-only", action="store_true")
+    group.add_argument("--normal-validation-agent-only", action="store_true")
     args = parser.parse_args()
     for name, path in write_synthetic_suite(
         args.directory,
@@ -224,5 +231,6 @@ if __name__ == "__main__":
         normal_modeling_only=args.normal_modeling_only,
         normal_strategy_only=args.normal_strategy_only,
         normal_validation_only=args.normal_validation_only,
+        normal_validation_agent_only=args.normal_validation_agent_only,
     ).items():
         print(f"{name}={path}")

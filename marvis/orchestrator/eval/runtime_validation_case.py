@@ -120,3 +120,51 @@ def normal_validation_cases(materials):
         {"kind": "validation_report_verified", "tool": "v1_compat.render_reports", "value": "word"},
     ]
     return [case], {case["id"]: {"result": "done", "assertions": assertions}}
+
+
+def normal_validation_agent_cases(materials):
+    case = {
+        "id": "synthetic_normal_validation_agent_v2", "revision": "2",
+        "family": "validation", "case_set": "development", "scenario": "normal",
+        "task": {"task_type": "validation", "algorithm": "lr", "feature_columns": ["x1", "x2"]},
+        "materials": materials,
+        "business_constraints_source": (
+            "Public synthetic 180-row sample, fixed supplied PMML logit(p_bad)=x1-x2 and dictionary "
+            "with explicitly declared importance 0.5/0.5. Notebook/sample/PMML/dictionary are uploaded. "
+            "The Notebook supplies static field declarations and is not executed in this V2 entry. "
+            "Standard V2 Agent /agent/start uses PMML-first scoring and platform "
+            "effectiveness/stability/stress stages. It does not establish Notebook-model vs PMML "
+            "consistency; that has its own compatibility Workflow suite. User selects the four roles "
+            "and explicitly approves the current displayed complete model-generated report draft with "
+            "its exact message/edit/report revision. No invented replacement draft or fallback approval. "
+            "Auto-review may only confirm unambiguous native input candidates. Missing importance or "
+            "ambiguous fields must stop. Local execution/report delivery is distinct from production "
+            "acceptance: no authentic historical provenance, mature financial outcomes or business "
+            "deployment authorization is established by these synthetic materials."
+        ),
+        "actions": [
+            {"kind": "start_validation_agent", "content": "已选择四份公开合成材料和明确的 importance，Notebook 仅用于静态字段识别，开始标准 V2 Agent 自动验证。PMML 是本次评分基准，不要求 Notebook 一致性。"},
+            {"kind": "confirm_current_validation_report", "content": "人工核对当前已展示的完整报告草稿后，确认该版本并生成本地 Word 和 Excel。此操作不代表真实业务或上线审批。"},
+        ],
+        "budget": {"wall_seconds": 420, "max_llm_attempts": 40, "max_http_requests": 260, "max_output_tokens_per_attempt": 2048},
+    }
+    assertions = [
+        {"kind": "http_status", "stage": "agent_initial_turn", "value": 202},
+        {"kind": "http_status", "stage": "human_validation_material_selection", "value": 200},
+        {"kind": "http_status", "stage": "human_validation_report_confirmation", "value": 202},
+        {"kind": "http_status", "stage": "download_validation_word", "value": 200},
+        {"kind": "http_status", "stage": "download_validation_excel", "value": 200},
+    ] + [
+        {"kind": "validation_pipeline_equals", "path": [key], "value": value}
+        for key, value in (
+            ("material_binding_verified", True), ("scoring_verified", True),
+            ("scored_rows", 180), ("metrics_verified", True),
+            ("notebook_consistency", "not_in_v2_entry"),
+            ("report_confirmation_verified", True), ("execution_complete", True),
+            ("business_acceptance", "not_established"),
+        )
+    ] + [
+        {"kind": "validation_report_verified", "value": "word"},
+        {"kind": "validation_report_verified", "value": "excel"},
+    ]
+    return [case], {case["id"]: {"result": "done", "assertions": assertions}}

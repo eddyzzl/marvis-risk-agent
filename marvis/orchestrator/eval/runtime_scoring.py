@@ -34,6 +34,7 @@ class Assertion(StrictModel):
         "dataset_rows",
         "artifact_exists",
         "validation_report_verified",
+        "validation_pipeline_equals",
     ]
     tool: str = ""
     path: list[str | int] = Field(default_factory=list)
@@ -69,6 +70,20 @@ def _at(value, path):
 
 
 def _assertion(assertion, record, private):
+    if assertion.kind == "validation_pipeline_equals" or (
+            assertion.kind == "validation_report_verified" and not assertion.tool):
+        if record.get("runtime_entry") != "standard_validation_agent_v2":
+            return False
+        pipeline = record.get("execution", {}).get("validation_pipeline", {})
+        if assertion.kind == "validation_report_verified":
+            return pipeline.get("report_confirmation_verified") is True and any(
+                f.get("kind") == assertion.value and f.get("format_verified") is True
+                for f in pipeline.get("report_files", []))
+        try:
+            value = _at(pipeline, assertion.path)
+            return type(value) is type(assertion.value) and value == assertion.value
+        except (KeyError, IndexError, TypeError):
+            return False
     if assertion.kind == "http_status":
         values = [
             event.get("status_code")
@@ -261,6 +276,8 @@ def score_case(
     statuses = [plan["status"] for plan in record.get("execution", {}).get("plans", [])]
     if expected.result == "done":
         terminal_ok = bool(statuses) and all(status == "done" for status in statuses)
+        if record.get("runtime_entry") == "standard_validation_agent_v2":
+            terminal_ok = not statuses and record.get("execution", {}).get("validation_pipeline", {}).get("execution_complete") is True
     elif expected.result in {"failed", "cancelled"}:
         terminal_ok = expected.result in statuses
     else:
@@ -293,6 +310,10 @@ def score_case(
         step.get("binding_verified") is True
         for step in record.get("execution", {}).get("steps", [])
     )
+    observed_native_pipeline = (
+        record.get("runtime_entry") == "standard_validation_agent_v2"
+        and record.get("execution", {}).get("validation_pipeline", {}).get("execution_complete") is True
+    )
     return {
         "passed": passed,
         "expected_result": expected.result,
@@ -306,7 +327,7 @@ def score_case(
         and model_source == "real_model"
         and usage["transport_attempts"] > 0
         and usage["trace_complete"]
-        and observed_tools,
+        and (observed_tools or observed_native_pipeline),
         "acceptance_claim": "not_established",
         "evidence_scope": "runtime_regression"
         if model_source == "fixture_model"
@@ -366,7 +387,7 @@ def runtime_task_coverage(records):
             members = [
                 r for r in records
                 if r.get("task_type") == task_type and r["scenario"] == scenario
-                and r.get("runtime_entry") != "manual_compatibility_workflow"
+                and (task_type != "validation" or r.get("runtime_entry") == "standard_validation_agent_v2")
             ]
             cells[task_type][scenario] = {
                 **_rate(members),
@@ -387,6 +408,8 @@ def runtime_task_coverage(records):
         ],
         "unclassified_case_ids": [
             r["case_id"] for r in records if r.get("task_type") not in task_types
+            or (r.get("task_type") == "validation" and r.get("runtime_entry") not in {
+                "manual_compatibility_workflow", "standard_validation_agent_v2"})
         ],
         "all_cells_represented": not missing,
         "acceptance_claim": "not_established",

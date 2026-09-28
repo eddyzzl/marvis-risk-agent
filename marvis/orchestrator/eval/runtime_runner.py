@@ -946,6 +946,12 @@ class Journey:
         for action in self.case.actions:
             if action.kind == "start_validation_workflow":
                 self.start_validation_workflow(action)
+            elif action.kind == "start_validation_agent":
+                from .runtime_validation_adapter import start_agent
+                start_agent(self, action)
+            elif action.kind == "confirm_current_validation_report":
+                from .runtime_validation_adapter import confirm_current_report
+                confirm_current_report(self, action)
             elif action.kind == "message":
                 self.interventions += 1
                 message = {
@@ -1029,7 +1035,7 @@ class Journey:
                 )
 
     def prepare_validation_task(self, dataset_root, workspace):
-        """Upload exactly four role/hash-bound artifacts through the product API."""
+        """Upload only role/hash-bound validation artifacts through the product API."""
         from contextlib import ExitStack
 
         with ExitStack() as stack:
@@ -1063,7 +1069,9 @@ class Journey:
         # The public compatibility workflow uses the existing manual/API entry.
         # Do not pretend this exercised the separate V2 validation Agent route.
         body = self.case.task.model_dump(exclude_none=True)
-        body.update(source_dir=str(source_dir), run_mode="manual")
+        from .runtime_validation_adapter import validation_entry
+        compatibility = validation_entry(self.case) == "manual_compatibility_workflow"
+        body.update(source_dir=str(source_dir), run_mode="manual" if compatibility else "agent")
         task = self.json_request("POST", "/api/tasks", label="create_task", json=body)
         self.task_id = task["id"]
         self.interventions += 1
@@ -1350,7 +1358,7 @@ def _validation_report_files(workspace, task_id, output):
     return result
 
 
-def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
+def _receipts(workspace: Path, task_id: str | None, *, case=None, journey=None) -> tuple[dict, dict]:
     """Read authenticated output bindings only after the application has stopped.
 
     Raw tool outputs stay in memory for the scorer. The public artifact includes
@@ -1389,6 +1397,13 @@ def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
         else None
     )
     private = {"outputs": {}, "messages": tasks.list_agent_messages(task_id)}
+    from .runtime_validation_adapter import validation_entry, pipeline_receipt
+    if case is not None and validation_entry(case) == "standard_validation_agent_v2":
+        evidence["validation_pipeline"] = pipeline_receipt(
+            workspace, task_id, case, private["messages"],
+            confirmation=getattr(journey, "validation_confirmation", None),
+            downloads=getattr(journey, "validation_downloads", ()),
+        )
     semantic_observations = []
     for ordinal, message in enumerate(private["messages"], 1):
         metadata = message.get("metadata")
@@ -1583,7 +1598,7 @@ def _run_case(
             workspace = root / "workspace"
         try:
             evidence, private = _receipts(
-                workspace, journey.task_id if journey else None
+                workspace, journey.task_id if journey else None, case=case, journey=journey,
             )
             record["execution"] = evidence
         except Exception as exc:
@@ -1592,7 +1607,8 @@ def _run_case(
         record["http_events"] = journey.events if journey else []
         record["human_interventions"] = journey.interventions if journey else 0
     if case.task.task_type == "validation":
-        record["runtime_entry"] = "manual_compatibility_workflow"
+        from .runtime_validation_adapter import validation_entry
+        record["runtime_entry"] = validation_entry(case)
     attempts = _read_attempts(case_dir / "llm-attempts.jsonl")
     if any(
         item["event"] == "budget_blocked"
@@ -1731,7 +1747,11 @@ def run_runtime_suite(
         "cases": [],
     }
     if all(case.task.task_type == "validation" for case in suite.cases):
-        report["execution_mode"] = "real_http_manual_compatibility_workflow_tools"
+        from .runtime_validation_adapter import validation_entry
+        entries = {validation_entry(case) for case in suite.cases}
+        report["execution_mode"] = ("real_http_manual_compatibility_workflow_tools"
+                                    if entries == {"manual_compatibility_workflow"}
+                                    else "real_http_validation_native_entries")
     report["declared_max_total_llm_attempts"] = sum(
         case.budget.max_llm_attempts for case in suite.cases
     )

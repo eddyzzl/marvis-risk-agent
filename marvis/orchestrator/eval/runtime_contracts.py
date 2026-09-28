@@ -122,6 +122,8 @@ class RuntimeAction(StrictModel):
         "select_recommended_experiment",
         "bind_single_strategy_sample",
         "start_validation_workflow",
+        "start_validation_agent",
+        "confirm_current_validation_report",
     ]
     content: str = ""
     tool: str = ""
@@ -130,7 +132,7 @@ class RuntimeAction(StrictModel):
 
     @model_validator(mode="after")
     def required_fields(self):
-        if self.kind == "start_validation_workflow" and (
+        if self.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report"} and (
             self.tool or not self.content.strip() or self.portfolio_request is not None
             or self.semantic_mapping is not None
         ):
@@ -195,20 +197,22 @@ class RuntimeCase(StrictModel):
     def strategy_sample_binding(self):
         validation_roles = {"sample", "notebook", "pmml", "dictionary"}
         if self.task.task_type == "validation":
+            compatibility = bool(self.actions and self.actions[0].kind == "start_validation_workflow")
             if (
                 self.task.algorithm is None or self.initial_message is not None
-                or len(self.materials) != 4
+                or len(self.materials) != len(validation_roles)
                 or {m.role for m in self.materials} != validation_roles
-                or len({m.path for m in self.materials}) != 4
-                or not self.actions or self.actions[0].kind != "start_validation_workflow"
-                or any(a.kind == "start_validation_workflow" for a in self.actions[1:])
-                or any(a.kind not in {"approve_step", "reject_step"}
-                       or a.tool != "v1_compat.render_reports" for a in self.actions[1:])
+                or len({m.path for m in self.materials}) != len(validation_roles)
+                or not self.actions
+                or (compatibility and any(a.kind not in {"approve_step", "reject_step"}
+                    or a.tool != "v1_compat.render_reports" for a in self.actions[1:]))
+                or (not compatibility and [a.kind for a in self.actions] != [
+                    "start_validation_agent", "confirm_current_validation_report"])
             ):
-                raise ValueError("validation requires four unique role-bound files and its declared compatibility Workflow actions")
+                raise ValueError("validation requires unique role-bound files and one declared native entry with its own confirmation")
         elif (self.task.algorithm is not None
               or any(m.role in {"notebook", "pmml", "dictionary"} for m in self.materials)
-              or any(a.kind == "start_validation_workflow" for a in self.actions)):
+              or any(a.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report"} for a in self.actions)):
             raise ValueError("validation files and start action belong only to validation")
         if any(a.kind == "bind_single_strategy_sample" for a in self.actions):
             if (
