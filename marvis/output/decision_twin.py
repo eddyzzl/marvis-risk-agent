@@ -1,0 +1,130 @@
+"""Exports read the exact authenticated receipt shown by the API."""
+
+from io import BytesIO
+import json
+
+from docx import Document
+from openpyxl import Workbook
+
+from marvis.spreadsheet_safety import safe_xlsx_cell
+
+
+def render_historical_replay(receipt, format):
+    payload = receipt["payload"]
+    facts = [
+        ("artifact_id", receipt["artifact_id"]),
+        ("kind", receipt["kind"]),
+        ("contract_hash", payload["contract_hash"]),
+        ("authority", "proposal_only"),
+        ("causal_gain_verified", False),
+        ("marvis_historical_execution_verified", False),
+    ]
+    summary = {k: v for k, v in payload.items() if k not in {"scenarios", "records"}}
+    rows = []
+    for scenario in payload.get("scenarios", []):
+        for row in scenario["decisions"]:
+            rows.append(
+                (
+                    scenario["name"],
+                    row["record_id"],
+                    row["decision_at"],
+                    row["score"],
+                    row["action"]["type"],
+                    row["action"].get("reason_code"),
+                    row["facts_hash"],
+                    row["package_hash"],
+                )
+            )
+    columns = (
+        "scenario",
+        "record_id",
+        "decision_at",
+        "score",
+        "action",
+        "reason_code",
+        "facts_hash",
+        "package_hash",
+    )
+    stream = BytesIO()
+    if format == "xlsx":
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "回放证据"
+        for fact in facts:
+            sheet.append([safe_xlsx_cell(value) for value in fact])
+        # JSON is split by top-level sections so wide population receipts never
+        # disappear into Excel's 32,767-character single-cell limit.
+        sheet.append(
+            [
+                "source",
+                safe_xlsx_cell(json.dumps(payload.get("source"), ensure_ascii=False)),
+            ]
+        )
+        metrics = workbook.create_sheet("场景指标")
+        metrics.append(["scenario", "metric", "value"])
+        for scenario in payload.get("scenarios", []):
+            for key in ("metrics", "constraints", "comparison"):
+                encoded = json.dumps(scenario[key], ensure_ascii=False)
+                for offset in range(0, len(encoded), 30_000):
+                    metrics.append(
+                        [
+                            safe_xlsx_cell(scenario["name"]),
+                            key,
+                            safe_xlsx_cell(encoded[offset : offset + 30_000]),
+                        ]
+                    )
+        decisions = workbook.create_sheet("逐笔回放")
+        decisions.append(list(columns))
+        for row in rows:
+            decisions.append([safe_xlsx_cell(value) for value in row])
+        imported = payload.get("observed_actions", {}).get("records", [])
+        if imported:
+            observed = workbook.create_sheet("外部历史动作")
+            keys = tuple(imported[0])
+            observed.append(list(keys))
+            for row in imported:
+                observed.append([safe_xlsx_cell(row[key]) for key in keys])
+        if payload.get("records"):
+            outcomes = workbook.create_sheet("现金流对账")
+            keys = tuple(payload["records"][0])
+            outcomes.append(list(keys))
+            for row in payload["records"]:
+                outcomes.append([safe_xlsx_cell(row[k]) for k in keys])
+        contract = workbook.create_sheet("口径与边界")
+        for key, value in summary.items():
+            if key == "observed_actions":
+                value = {k: v for k, v in value.items() if k != "records"}
+            encoded = json.dumps(value, ensure_ascii=False, indent=2)
+            for offset in range(0, len(encoded), 30_000):
+                contract.append(
+                    [key, safe_xlsx_cell(encoded[offset : offset + 30_000])]
+                )
+        workbook.save(stream)
+    elif format == "docx":
+        document = Document()
+        document.add_heading("历史决策回放与对账", 0)
+        document.add_paragraph(
+            "结果来自平台冻结包的历史模拟。导入的历史动作和现金流不等于 MARVIS 线上执行证明；场景差异不等于因果增益。"
+        )
+        for key, value in facts:
+            document.add_paragraph(f"{key}: {value}")
+        document.add_heading("口径与证据", 1)
+        document.add_paragraph(json.dumps(summary, ensure_ascii=False, indent=2))
+        for scenario in payload.get("scenarios", []):
+            document.add_heading(scenario["name"], 1)
+            document.add_paragraph(
+                json.dumps(
+                    {k: v for k, v in scenario.items() if k != "decisions"},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        # Complete row evidence is retained in the canonical JSON / Excel; the
+        # narrative export explicitly states its summary scope.
+        document.add_paragraph(
+            "逐笔明细见相同 artifact_id 的 JSON 或 Excel；本 Word 展示完整场景汇总及合同。"
+        )
+        document.save(stream)
+    else:
+        raise ValueError("unsupported historical export format")
+    return stream.getvalue()

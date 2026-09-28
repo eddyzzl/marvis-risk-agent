@@ -103,6 +103,7 @@ from marvis.routers.data import router as data_router
 from marvis.routers.data_analysis import router as data_analysis_router
 from marvis.routers.drafts import router as drafts_router
 from marvis.routers.evidence import router as evidence_router
+from marvis.routers.decision_twin import router as decision_twin_router
 from marvis.routers.materials import router as materials_router
 from marvis.routers.modeling import router as modeling_router
 from marvis.routers.plans import router as plans_router
@@ -630,6 +631,7 @@ def create_app(
     app.include_router(plugins_router)
     app.include_router(drafts_router)
     app.include_router(evidence_router)
+    app.include_router(decision_twin_router)
     app.include_router(materials_router)
     app.include_router(modeling_router)
     app.include_router(operations_router)

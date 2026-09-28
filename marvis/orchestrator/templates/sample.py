@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from marvis.orchestrator.templates import _register_builtin_template
 from marvis.orchestrator.templates.asof_join import DATASET_ASOF_JOIN
+from marvis.orchestrator.templates.decision_twin import (
+    HISTORICAL_DECISION_REPLAY,
+    HISTORICAL_OUTCOME_RECONCILIATION,
+)
 from marvis.orchestrator.templates.data import DATASET_DESCRIPTIVE_ANALYSIS
 from marvis.orchestrator.templates.data_export import DATASET_EXPORT
 from marvis.orchestrator.templates.data_transform import DATASET_TRANSFORM
@@ -100,6 +104,8 @@ BUILTIN_TEMPLATES = (
     DATA_JOIN,
     DATASET_ASOF_JOIN,
     LABEL_CONSTRUCTION,
+    HISTORICAL_DECISION_REPLAY,
+    HISTORICAL_OUTCOME_RECONCILIATION,
     MODELING,
     MODELING_WITH_JOIN,
     FEATURE_ANALYSIS,

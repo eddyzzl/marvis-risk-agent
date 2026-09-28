@@ -1,0 +1,685 @@
+{
+  "name": "decision_twin",
+  "version": "0.2.0",
+  "display_name": "Historical Decision Twin",
+  "description": "认证历史决策包回放、同人群比较与外部成熟现金流对账。仅证据提案，无部署权限。",
+  "module": "marvis.packs.decision_twin.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "replay_history",
+      "summary": "按明确的逐字段历史时点合同回放认证冻结包；比较同一人群，缺失经济及群体证据显式未知。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "contract": {
+            "additionalProperties": false,
+            "properties": {
+              "schema_version": {
+                "const": "decision_twin.batch_request.v2",
+                "default": "decision_twin.batch_request.v2",
+                "title": "Schema Version",
+                "type": "string"
+              },
+              "dataset_id": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Dataset Id",
+                "type": "string"
+              },
+              "expected_content_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Expected Content Hash",
+                "type": "string"
+              },
+              "record_id_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Record Id Col",
+                "type": "string"
+              },
+              "decision_at_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Decision At Col",
+                "type": "string"
+              },
+              "as_of": {
+                "title": "As Of",
+                "type": "string"
+              },
+              "source_ref": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Source Ref",
+                "type": "string"
+              },
+              "population": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Population",
+                "type": "string"
+              },
+              "features": {
+                "items": {
+                  "$ref": "#/$defs/HistoricalFeature"
+                },
+                "maxItems": 500,
+                "minItems": 1,
+                "title": "Features",
+                "type": "array"
+              },
+              "scenarios": {
+                "items": {
+                  "$ref": "#/$defs/HistoricalScenario"
+                },
+                "maxItems": 3,
+                "minItems": 2,
+                "title": "Scenarios",
+                "type": "array"
+              },
+              "economics": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HistoricalEconomics"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "protected_group": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HistoricalGroup"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "capacity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HistoricalCapacity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "observed_actions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HistoricalActions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "constraints": {
+                "items": {
+                  "$ref": "#/$defs/HistoricalConstraint"
+                },
+                "maxItems": 20,
+                "title": "Constraints",
+                "type": "array"
+              }
+            },
+            "required": [
+              "dataset_id",
+              "expected_content_hash",
+              "record_id_col",
+              "decision_at_col",
+              "as_of",
+              "source_ref",
+              "population",
+              "features",
+              "scenarios"
+            ],
+            "title": "HistoricalReplayRequest",
+            "type": "object"
+          },
+          "proposal_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "contract",
+          "proposal_hash"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "HistoricalActions": {
+            "additionalProperties": false,
+            "properties": {
+              "action_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Action Col",
+                "type": "string"
+              },
+              "recorded_at_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Recorded At Col",
+                "type": "string"
+              },
+              "source_ref": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Source Ref",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action_col",
+              "recorded_at_col",
+              "source_ref"
+            ],
+            "title": "HistoricalActions",
+            "type": "object"
+          },
+          "HistoricalCapacity": {
+            "additionalProperties": false,
+            "properties": {
+              "unit": {
+                "pattern": "^[a-z][a-z0-9_]{0,79}$",
+                "title": "Unit",
+                "type": "string"
+              },
+              "per_action": {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "propertyNames": {
+                  "enum": [
+                    "approval",
+                    "reject",
+                    "review"
+                  ]
+                },
+                "title": "Per Action",
+                "type": "object"
+              },
+              "source_ref": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Source Ref",
+                "type": "string"
+              }
+            },
+            "required": [
+              "unit",
+              "per_action",
+              "source_ref"
+            ],
+            "title": "HistoricalCapacity",
+            "type": "object"
+          },
+          "HistoricalConstraint": {
+            "additionalProperties": false,
+            "properties": {
+              "metric": {
+                "enum": [
+                  "approval_rate",
+                  "ead",
+                  "expected_loss",
+                  "profit",
+                  "protected_group_disparity",
+                  "operations_capacity"
+                ],
+                "title": "Metric",
+                "type": "string"
+              },
+              "operator": {
+                "enum": [
+                  ">=",
+                  "<="
+                ],
+                "title": "Operator",
+                "type": "string"
+              },
+              "threshold": {
+                "title": "Threshold",
+                "type": "number"
+              },
+              "unit": {
+                "maxLength": 80,
+                "minLength": 1,
+                "title": "Unit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "metric",
+              "operator",
+              "threshold",
+              "unit"
+            ],
+            "title": "HistoricalConstraint",
+            "type": "object"
+          },
+          "HistoricalEconomics": {
+            "additionalProperties": false,
+            "description": "Fixed-condition estimates, never inferred actual cash flows or causal gains.",
+            "properties": {
+              "currency": {
+                "pattern": "^[A-Z]{3}$",
+                "title": "Currency",
+                "type": "string"
+              },
+              "ead_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Ead Col",
+                "type": "string"
+              },
+              "available_at_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Available At Col",
+                "type": "string"
+              },
+              "annual_rate": {
+                "maximum": 1,
+                "minimum": 0,
+                "title": "Annual Rate",
+                "type": "number"
+              },
+              "funding_rate": {
+                "maximum": 1,
+                "minimum": 0,
+                "title": "Funding Rate",
+                "type": "number"
+              },
+              "lgd": {
+                "maximum": 1,
+                "minimum": 0,
+                "title": "Lgd",
+                "type": "number"
+              },
+              "term_months": {
+                "exclusiveMinimum": 0,
+                "title": "Term Months",
+                "type": "number"
+              },
+              "operating_cost_per_loan": {
+                "minimum": 0,
+                "title": "Operating Cost Per Loan",
+                "type": "number"
+              },
+              "assumption_sources": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "title": "Assumption Sources",
+                "type": "object"
+              }
+            },
+            "required": [
+              "currency",
+              "ead_col",
+              "available_at_col",
+              "annual_rate",
+              "funding_rate",
+              "lgd",
+              "term_months",
+              "operating_cost_per_loan",
+              "assumption_sources"
+            ],
+            "title": "HistoricalEconomics",
+            "type": "object"
+          },
+          "HistoricalFeature": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Name",
+                "type": "string"
+              },
+              "value_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Value Col",
+                "type": "string"
+              },
+              "available_at_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Available At Col",
+                "type": "string"
+              },
+              "event_at_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Event At Col",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value_col",
+              "available_at_col",
+              "event_at_col"
+            ],
+            "title": "HistoricalFeature",
+            "type": "object"
+          },
+          "HistoricalGroup": {
+            "additionalProperties": false,
+            "properties": {
+              "column": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Column",
+                "type": "string"
+              },
+              "available_at_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Available At Col",
+                "type": "string"
+              },
+              "governance_ref": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Governance Ref",
+                "type": "string"
+              },
+              "minimum_group_size": {
+                "minimum": 1,
+                "title": "Minimum Group Size",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "column",
+              "available_at_col",
+              "governance_ref",
+              "minimum_group_size"
+            ],
+            "title": "HistoricalGroup",
+            "type": "object"
+          },
+          "HistoricalScenario": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "maxLength": 80,
+                "minLength": 1,
+                "title": "Name",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "baseline",
+                  "challenger",
+                  "counterfactual"
+                ],
+                "title": "Kind",
+                "type": "string"
+              },
+              "package_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Package Hash",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "package_hash"
+            ],
+            "title": "HistoricalScenario",
+            "type": "object"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "decision_twin.tool_result.v2"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "contract_hash": {
+            "type": "string"
+          },
+          "authority": {
+            "const": "proposal_only"
+          },
+          "automatic_action_permitted": {
+            "const": false
+          },
+          "evidence_url": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "object"
+          },
+          "scenarios": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "artifact_id",
+          "kind",
+          "contract_hash",
+          "authority",
+          "automatic_action_permitted",
+          "evidence_url",
+          "summary",
+          "scenarios"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 600,
+      "memory_limit_mb": 4096,
+      "failure_policy": "fail",
+      "entrypoint": "tool_replay_history",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:dataset",
+        "read:model",
+        "write:artifact"
+      ]
+    },
+    {
+      "name": "reconcile_history",
+      "summary": "以同一回放回执对账外部历史已批准人群的成熟现金流，保留外部导入与因果边界。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "contract": {
+            "additionalProperties": false,
+            "properties": {
+              "replay_artifact_id": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Replay Artifact Id",
+                "type": "string"
+              },
+              "dataset_id": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Dataset Id",
+                "type": "string"
+              },
+              "expected_content_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Expected Content Hash",
+                "type": "string"
+              },
+              "record_id_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Record Id Col",
+                "type": "string"
+              },
+              "observed_at_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Observed At Col",
+                "type": "string"
+              },
+              "actual_loss_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Actual Loss Col",
+                "type": "string"
+              },
+              "actual_profit_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Actual Profit Col",
+                "type": "string"
+              },
+              "currency": {
+                "pattern": "^[A-Z]{3}$",
+                "title": "Currency",
+                "type": "string"
+              },
+              "maturity_days": {
+                "maximum": 36500,
+                "minimum": 1,
+                "title": "Maturity Days",
+                "type": "integer"
+              },
+              "maturity_source_ref": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Maturity Source Ref",
+                "type": "string"
+              },
+              "source_ref": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Source Ref",
+                "type": "string"
+              },
+              "reconciled_at": {
+                "title": "Reconciled At",
+                "type": "string"
+              }
+            },
+            "required": [
+              "replay_artifact_id",
+              "dataset_id",
+              "expected_content_hash",
+              "record_id_col",
+              "observed_at_col",
+              "actual_loss_col",
+              "actual_profit_col",
+              "currency",
+              "maturity_days",
+              "maturity_source_ref",
+              "source_ref",
+              "reconciled_at"
+            ],
+            "title": "HistoricalReconciliationRequest",
+            "type": "object"
+          },
+          "proposal_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "contract",
+          "proposal_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "decision_twin.tool_result.v2"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "contract_hash": {
+            "type": "string"
+          },
+          "authority": {
+            "const": "proposal_only"
+          },
+          "automatic_action_permitted": {
+            "const": false
+          },
+          "evidence_url": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "object"
+          },
+          "scenarios": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "artifact_id",
+          "kind",
+          "contract_hash",
+          "authority",
+          "automatic_action_permitted",
+          "evidence_url",
+          "summary",
+          "scenarios"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 600,
+      "memory_limit_mb": 4096,
+      "failure_policy": "fail",
+      "entrypoint": "tool_reconcile_history",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:dataset",
+        "read:model",
+        "write:artifact"
+      ]
+    }
+  ],
+  "hooks": [],
+  "permissions": [
+    "read:dataset",
+    "read:model",
+    "write:artifact"
+  ]
+}
