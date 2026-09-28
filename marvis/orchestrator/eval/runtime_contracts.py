@@ -103,7 +103,8 @@ class RuntimeTask(StrictModel):
 
 class RuntimeAction(StrictModel):
     kind: Literal[
-        "message", "approve_step", "reject_step", "replay_approval", "retry_step", "stop"
+        "message", "approve_step", "reject_step", "replay_approval", "retry_step", "stop",
+        "select_recommended_experiment",
     ]
     content: str = ""
     tool: str = ""
@@ -111,6 +112,11 @@ class RuntimeAction(StrictModel):
 
     @model_validator(mode="after")
     def required_fields(self):
+        if self.kind == "select_recommended_experiment":
+            if self.tool != "modeling.select_experiment" or not self.content.strip():
+                raise ValueError(
+                    "recommended selection requires the modeling selection gate and explicit human text"
+                )
         if self.portfolio_request is not None and self.kind != "message":
             raise ValueError("portfolio_request belongs to a user message only")
         if self.kind in {"message", "approve_step", "reject_step"} and not self.content.strip():

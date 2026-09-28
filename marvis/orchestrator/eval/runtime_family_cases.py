@@ -251,3 +251,148 @@ def workflow_cases(materials: dict) -> tuple[list[dict], dict]:
         ],
     }
     return cases, expected
+
+
+def normal_modeling_frames() -> dict:
+    """Declared synthetic statistical signal, never customer or outcome evidence."""
+    import numpy as np
+
+    rng = np.random.default_rng(20260928)
+    n = 600
+    signal, affordability, noise = rng.normal(size=(3, n))
+    probability = 1 / (1 + np.exp(-(0.8 * signal - 0.6 * affordability)))
+    return {
+        "normal_modeling.parquet": (
+            "sample",
+            pd.DataFrame(
+                {
+                    "signal": signal,
+                    "affordability": affordability,
+                    "noise": noise,
+                    "y": (rng.random(n) < probability).astype(int),
+                    "split": ["train"] * 360 + ["test"] * 120 + ["oot"] * 120,
+                }
+            ),
+        )
+    }
+
+
+def normal_modeling_cases(materials: dict) -> tuple[list[dict], dict]:
+    """A separate opt-in denominator; no changes to the archived nine cases."""
+    case = {
+        "id": "synthetic_normal_modeling",
+        "revision": "1",
+        "family": "modeling",
+        "case_set": "development",
+        "scenario": "normal",
+        "task": {
+            "task_type": "modeling",
+            "target_col": "y",
+            "split_col": "split",
+            "feature_columns": ["signal", "affordability", "noise"],
+        },
+        "materials": [materials["normal_modeling.parquet"]],
+        "initial_message": "请按已上传的合成样本建立二分类模型，目标列 y，使用现有 split 的 train/test/oot，特征为 signal、affordability、noise。只训练逻辑回归 lr，调参 1 轮。",
+        "business_constraints_source": "Public synthetic 600-row fixed-seed logistic sample, 360/120/120 train/test/OOT. Human explicitly chooses the platform-displayed recommended experiment and authorizes local reports/delivery. No real customers, loan economics, MOB maturity, feature dictionary, production Champion or business acceptance threshold supplied; previous_selected_experiment is only the current synthetic task's pre-refit candidate, never a production Champion; missing evidence must remain visible. Execution completion is not production or business approval.",
+        "actions": [
+            {
+                "kind": "approve_step",
+                "tool": "modeling.screen_features",
+                "content": "确认当前展示的 360/120/120 合成 train/test/oot 切分与仅 lr、1 轮规格，开始筛选特征。",
+            },
+            {
+                "kind": "approve_step",
+                "tool": "modeling.select_features",
+                "content": "采用平台展示的训练集特征筛选设置并保留筛选记录，继续精选特征。",
+            },
+            {
+                "kind": "approve_step",
+                "tool": "modeling.configure_tuning",
+                "content": "确认仅逻辑回归 lr、1 轮调参，不扩大搜索或改变训练口径。",
+            },
+            {
+                "kind": "approve_step",
+                "tool": "modeling.tune_hyperparameters",
+                "content": "确认当前已展示的特征和单轮调参配置，执行真实训练。",
+            },
+            {
+                "kind": "select_recommended_experiment",
+                "tool": "modeling.select_experiment",
+                "content": "我已审阅当前展示的候选和限制，明确采用平台展示的推荐实验，仅用于本次合成流程验证。",
+            },
+            {
+                "kind": "approve_step",
+                "tool": "modeling.generate_model_reports",
+                "content": "生成本地模型开发报告，保留所有缺少业务列、字典和成熟度证据的说明，不宣称业务验收通过。",
+            },
+            {
+                "kind": "approve_step",
+                "tool": "modeling.post_training_action",
+                "content": "批准本地模型交付产物与验证移交，保留业务证据限制；仅本任务合成实验内部对照，不当作生产 Champion，不进行生产发布。",
+            },
+        ],
+        "budget": {
+            "wall_seconds": 300,
+            "max_llm_attempts": 40,
+            "max_http_requests": 240,
+            "max_output_tokens_per_attempt": 2048,
+        },
+    }
+    assertions = [
+        {"kind": "tool_succeeded", "tool": "modeling." + tool}
+        for tool in (
+            "train_models",
+            "select_experiment",
+            "generate_model_reports",
+            "post_training_action",
+        )
+    ]
+    assertions += [
+        {"kind": "http_status", "stage": "human_recommended_selection", "value": 202},
+        {
+            "kind": "output_equals",
+            "tool": "modeling.select_experiment",
+            "path": ["policy_decision", "explicit_selection"],
+            "value": True,
+        },
+        {
+            "kind": "output_equals",
+            "tool": "modeling.select_experiment",
+            "path": ["recipe"],
+            "value": "lr",
+        },
+        {
+            "kind": "artifact_exists",
+            "tool": "modeling.generate_model_reports",
+            "path": ["report_path"],
+        },
+        {
+            "kind": "output_equals",
+            "tool": "modeling.generate_model_reports",
+            "path": ["section_status", 0, "available"],
+            "value": False,
+        },
+        {
+            "kind": "output_equals",
+            "tool": "modeling.generate_model_reports",
+            "path": ["section_status", 1, "available"],
+            "value": False,
+        },
+        {
+            "kind": "artifact_exists",
+            "tool": "modeling.post_training_action",
+            "path": ["model_card_path"],
+        },
+        {
+            "kind": "artifact_exists",
+            "tool": "modeling.post_training_action",
+            "path": ["approval_package_path"],
+        },
+        {
+            "kind": "output_equals",
+            "tool": "modeling.post_training_action",
+            "path": ["challenger_comparison", "champion", "label"],
+            "value": "previous_selected_experiment",
+        },
+    ]
+    return [case], {case["id"]: {"result": "done", "assertions": assertions}}

@@ -955,6 +955,8 @@ class Journey:
                     json=message,
                 )
                 self.wait_idle()
+            elif action.kind == "select_recommended_experiment":
+                self.select_recommended_experiment(action)
             elif action.kind in {"approve_step", "reject_step", "retry_step"}:
                 plans = self.plans()
                 match = [
@@ -1015,6 +1017,88 @@ class Journey:
                     label="user_stop",
                     json={},
                 )
+    def select_recommended_experiment(self, action):
+        """Replay an explicit public human policy using the currently shown gate.
+
+        The candidate is supplied by the application presentation, never by the
+        private expected file or by ranking metrics inside the benchmark.
+        """
+        if (
+            action.tool != "modeling.select_experiment"
+            or self.case.task.task_type != "modeling"
+        ):
+            raise RuntimeJourneyError("recommended_selection_wrong_gate")
+        matches = [
+            (p, s)
+            for p in self.plans()
+            for s in p["steps"]
+            if _tool_name(s["tool_ref"]) == action.tool
+            and s["status"] == "awaiting_confirm"
+            and p["status"] == "awaiting_confirm"
+        ]
+        if len(matches) != 1:
+            raise RuntimeJourneyError("declared_action_has_no_unique_current_step")
+        plan, step = matches[0]
+        messages = self.json_request(
+            "GET", f"/api/tasks/{self.task_id}/agent/messages", label="read_selection_gate"
+        )["messages"]
+        gates = [
+            m.get("metadata", {})
+            for m in messages
+            if m.get("role") == "assistant"
+            and m.get("metadata", {}).get("plan_id") == plan["id"]
+            and m.get("metadata", {}).get("step_id") == step["id"]
+            and m.get("metadata", {}).get("kind") == "gate"
+        ]
+        if not gates:
+            raise RuntimeJourneyError("recommended_selection_missing_display")
+        gate = gates[-1]
+        from marvis.api_schemas import StepConfirmationRequest
+        from pydantic import ValidationError
+
+        snapshot = gate.get("confirmation_snapshot")
+        try:
+            StepConfirmationRequest.model_validate(snapshot)
+        except ValidationError:
+            raise RuntimeJourneyError("recommended_selection_stale_display") from None
+        if (
+            snapshot != step.get("confirmation_snapshot")
+            or snapshot["expected_plan_status"] != "awaiting_confirm"
+        ):
+            raise RuntimeJourneyError("recommended_selection_stale_display")
+        delivery = gate.get("model_delivery") or {}
+        candidates = delivery.get("candidates") or []
+        recommended = delivery.get("recommended_experiment_id")
+        ids = [c.get("id") for c in candidates if isinstance(c, dict)]
+        marked = [
+            c.get("id")
+            for c in candidates
+            if isinstance(c, dict) and c.get("recommended") is True
+        ]
+        if (
+            not isinstance(recommended, str)
+            or not recommended
+            or len(ids) != len(candidates)
+            or any(not isinstance(i, str) or not i for i in ids)
+            or len(set(ids)) != len(ids)
+            or marked != [recommended]
+            or recommended not in ids
+        ):
+            raise RuntimeJourneyError("recommended_selection_not_unique")
+        body = {
+            "content": action.content,
+            "ui_action": "confirm_gate",
+            "acceptance_mode": self.case.acceptance_mode,
+            "adjust_params": {"selected_experiment_id": recommended},
+            "expected_plan_id": plan["id"],
+            "expected_step_id": step["id"],
+            **snapshot,
+        }
+        route = f"/api/tasks/{self.task_id}/agent/messages"
+        self.interventions += 1
+        self.json_request("POST", route, label="human_recommended_selection", json=body)
+        self.approval = (route, body)
+        self.wait_idle(changed_step=step["id"])
 
 
 def _tool_name(value):
@@ -1141,7 +1225,9 @@ def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
                             }
                         )
                     receipt["output_files"] = []
-                    for key in ("report_path", "pmml_path"):
+                    for key in (
+                        "report_path", "pmml_path", "model_card_path", "approval_package_path"
+                    ):
                         if not isinstance(bound["output"].get(key), str):
                             continue
                         path = Path(bound["output"][key]).resolve()
