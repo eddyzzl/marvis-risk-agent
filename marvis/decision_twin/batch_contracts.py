@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from marvis.decision_twin._canonical import content_hash, parse_datetime
+from marvis.decision_twin.event_batch_contracts import HistoricalEventMapping
 
 
 class StrictContract(BaseModel):
@@ -179,7 +180,10 @@ class HistoricalReplayRequest(StrictContract):
     as_of: str
     source_ref: str = Field(min_length=1, max_length=500)
     population: str = Field(min_length=1, max_length=500)
-    features: list[HistoricalFeature] = Field(min_length=1, max_length=500)
+    features: list[HistoricalFeature] = Field(max_length=500)
+    event_mappings: list[HistoricalEventMapping] = Field(
+        default_factory=list, max_length=3
+    )
     scenarios: list[HistoricalScenario] = Field(min_length=2, max_length=3)
     economics: HistoricalEconomics | None = None
     protected_group: HistoricalGroup | None = None
@@ -200,6 +204,9 @@ class HistoricalReplayRequest(StrictContract):
             raise ValueError("exactly one baseline and challenger are required")
         if len({s.name for s in self.scenarios}) != len(self.scenarios):
             raise ValueError("scenario names must be unique")
+        mapped = [m.scenario_kind for m in self.event_mappings]
+        if len(set(mapped)) != len(mapped) or not set(mapped) <= set(kinds):
+            raise ValueError("event mappings must name unique declared scenarios")
         if self.temporal_stability:
             as_of = parse_datetime(self.as_of, "as_of")
             windows = [
@@ -219,6 +226,8 @@ class HistoricalReplayRequest(StrictContract):
         # Absence and explicit null add no temporal assertion or receipt identity.
         if self.temporal_stability is None:
             payload.pop("temporal_stability", None)
+        if not self.event_mappings:
+            payload.pop("event_mappings", None)
         return payload
 
     @property

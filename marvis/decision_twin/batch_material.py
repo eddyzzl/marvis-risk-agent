@@ -66,9 +66,10 @@ def record_key(value):
 
 
 class BatchMaterial:
-    def __init__(self, settings, task_id):
+    def __init__(self, settings, task_id, *, actor_id=None):
         TaskRepository(settings.db_path).get_task(task_id)
         self.settings, self.task_id = settings, task_id
+        self.actor_id = actor_id
         self.registry = DatasetRegistry(
             DatasetRepository(settings.db_path),
             DataBackend(settings.datasets_dir),
@@ -83,21 +84,38 @@ class BatchMaterial:
             settings.tasks_dir / task_id / "decision_twin"
         )
 
-    def dataset(self, dataset_id, expected_hash):
+    def dataset(self, dataset_id, expected_hash, *, columns=None):
         binding = self.registry.authenticate_dataset_binding(
             dataset_id,
             expected_task_id=self.task_id,
             expected_content_hash=expected_hash,
         )
-        frame = self.registry.read_authenticated_binding_snapshot(binding)
+        if not 0 < binding.row_count <= MAX_BATCH_ROWS:
+            raise DecisionError("historical_batch_row_budget_exceeded")
+        if columns and not set(columns) <= set(
+            self.registry.authenticated_binding_column_names(binding)
+        ):
+            raise DecisionError("historical_columns_missing")
+        frame = self.registry.read_authenticated_binding_snapshot(
+            binding, columns=columns
+        )
         if not 0 < len(frame) <= MAX_BATCH_ROWS:
             raise DecisionError("historical_batch_row_budget_exceeded")
         return binding, frame
 
-    def prepare(self, contract: HistoricalReplayRequest):
-        binding, frame = self.dataset(
-            contract.dataset_id, contract.expected_content_hash
+    def prepare(
+        self, contract: HistoricalReplayRequest, *, reviewed_proposal_hash=None
+    ):
+        from marvis.decision_twin.event_batch import (
+            EventBatchAuthority,
+            map_row,
+            prepare_mappings,
         )
+
+        if contract.event_mappings and reviewed_proposal_hash:
+            EventBatchAuthority(self).resolve(
+                reviewed_proposal_hash, contract.contract_hash, "replay"
+            )
         columns = {contract.record_id_col, contract.decision_at_col}
         for feature in contract.features:
             columns.update(
@@ -121,6 +139,17 @@ class BatchMaterial:
                     contract.observed_actions.recorded_at_col,
                 )
             )
+        for mapping in contract.event_mappings:
+            columns.update(
+                (
+                    mapping.reference_col,
+                    mapping.subject_namespace_col,
+                    mapping.subject_token_col,
+                )
+            )
+        binding, frame = self.dataset(
+            contract.dataset_id, contract.expected_content_hash, columns=sorted(columns)
+        )
         if columns - set(frame.columns):
             raise DecisionError("historical_columns_missing")
         as_of = timestamp(contract.as_of, "as_of")
@@ -153,6 +182,13 @@ class BatchMaterial:
                 "features": values,
                 "field_times": clocks,
             }
+            if contract.event_mappings:
+                record["event_refs"] = {
+                    mapping.scenario_kind: map_row(
+                        row, mapping, decision_at, as_of
+                    ).model_dump()
+                    for mapping in contract.event_mappings
+                }
             for name, extra in (
                 ("economics", contract.economics),
                 ("protected_group", contract.protected_group),
@@ -188,10 +224,12 @@ class BatchMaterial:
             record["facts_hash"] = content_hash(record)
             records.append(record)
         summaries = []
+        manifests = {}
         fields = {f.name for f in contract.features}
         nodes = set()
         for scenario in contract.scenarios:
             manifest = self.packages.get(scenario.package_hash)
+            manifests[scenario.kind] = manifest
             configuration = manifest["configuration"]
             if fields != {f["name"] for f in configuration["raw_schema"]}:
                 raise DecisionError("scenario_raw_schema_mismatch")
@@ -216,6 +254,7 @@ class BatchMaterial:
             )
         if len(nodes) != 1:
             raise DecisionError("scenario_decision_nodes_do_not_match")
+        scopes = prepare_mappings(self, contract, records, manifests)
         population_hash = content_hash(
             [
                 {k: r[k] for k in ("record_id", "decision_at", "facts_hash")}
@@ -239,7 +278,19 @@ class BatchMaterial:
                 records, contract.temporal_stability
             ).to_dict()
         proposal["proposal_hash"] = content_hash(proposal)
+        if scopes:
+            EventBatchAuthority(self).freeze(
+                proposal, contract.contract_hash, "replay", scopes
+            )
         return binding, records, proposal
+
+    def _event_store(self):
+        # Generic artifact downloads intentionally serve only task-local files.
+        # Source-scoped receipts are available exclusively through this domain's
+        # current-grant-checked detail and export endpoints.
+        return ContentAddressedAuditStore(
+            self.settings.workspace / "historical_event_private" / self.task_id
+        )
 
     def _signature(self, body):
         return hmac.new(
@@ -249,6 +300,12 @@ class BatchMaterial:
         ).hexdigest()
 
     def publish(self, kind, payload, *, binding):
+        authorization = payload.get("event_authorization")
+        if authorization:
+            from marvis.decision_twin.event_batch import check_scopes
+
+            check_scopes(self.settings, authorization["scopes"], self.actor_id)
+        store = self._event_store() if authorization else self.store
         body = {
             "producer": PRODUCER,
             "platform_version": __version__,
@@ -262,14 +319,14 @@ class BatchMaterial:
         with self.artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self.registry.verify_dataset_binding_on_connection(conn, binding)
-            receipt = self.store.put(
+            receipt = store.put(
                 kind, envelope, idempotency_key=f"{kind}:{content_hash(payload)}"
             )
             record = self.artifacts.register_on_connection(
                 conn,
                 task_id=self.task_id,
                 kind=kind,
-                path=str(self.store.artifact_path(receipt.artifact_hash)),
+                path=str(store.artifact_path(receipt.artifact_hash)),
                 content_hash=receipt.artifact_hash,
                 origin_tool=PRODUCER,
                 provenance={
@@ -277,6 +334,7 @@ class BatchMaterial:
                     "artifact_id": receipt.artifact_hash,
                     "source_dataset_id": binding.dataset_id,
                     "source_content_hash": binding.content_hash,
+                    **({"event_scoped": True} if authorization else {}),
                 },
             )
         return {
@@ -288,15 +346,21 @@ class BatchMaterial:
 
     def load(self, artifact_id, *, kind=REPLAY_KIND):
         records = self.artifacts.list_for_task(self.task_id)
-        if not any(
-            r["kind"] == kind
-            and r["origin_tool"] == PRODUCER
-            and r["content_hash"] == artifact_id
-            and r["provenance"].get("artifact_id") == artifact_id
+        matches = [
+            r
             for r in records
-        ):
+            if (
+                r["kind"] == kind
+                and r["origin_tool"] == PRODUCER
+                and r["content_hash"] == artifact_id
+                and r["provenance"].get("artifact_id") == artifact_id
+            )
+        ]
+        if not matches:
             raise DecisionError("historical_artifact_not_found", 404)
-        envelope = self.store.get_typed(artifact_id, expected_kind=kind)
+        restricted = any(r["provenance"].get("event_scoped") for r in matches)
+        store = self._event_store() if restricted else self.store
+        envelope = store.get_typed(artifact_id, expected_kind=kind)
         body = envelope.get("body")
         if not isinstance(body, dict) or not hmac.compare_digest(
             str(envelope.get("signature", "")), self._signature(body)
@@ -309,4 +373,11 @@ class BatchMaterial:
             or body.get("platform_version") != __version__
         ):
             raise DecisionError("historical_receipt_binding_mismatch", 409)
+        authorization = body["payload"].get("event_authorization")
+        if bool(authorization) != restricted:
+            raise DecisionError("historical_receipt_scope_mismatch", 409)
+        if authorization:
+            from marvis.decision_twin.event_batch import check_scopes
+
+            check_scopes(self.settings, authorization["scopes"], self.actor_id)
         return {"artifact_id": artifact_id, "kind": kind, "payload": body["payload"]}

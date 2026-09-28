@@ -11,7 +11,7 @@ import math
 
 import pandas as pd
 
-from marvis.decision_twin._canonical import iso_z
+from marvis.decision_twin._canonical import content_hash, iso_z
 from marvis.decision_twin.batch_contracts import (
     HistoricalReconciliationRequest,
     HistoricalReplayRequest,
@@ -175,7 +175,9 @@ def _constraints(contract, metrics):
 def replay_batch(
     material: BatchMaterial, contract: HistoricalReplayRequest, proposal_hash: str
 ):
-    binding, records, proposal = material.prepare(contract)
+    binding, records, proposal = material.prepare(
+        contract, reviewed_proposal_hash=proposal_hash
+    )
     if not hmac.compare_digest(proposal_hash, proposal["proposal_hash"]):
         raise DecisionError("historical_proposal_stale", 409)
     temporal_population = (
@@ -188,7 +190,14 @@ def replay_batch(
         decisions = []
         with material.packages.snapshot(scenario.package_hash) as (manifest, directory):
             for record in records:
-                result = evaluate(manifest, directory, record["features"])
+                if manifest["configuration"].get("event_binding"):
+                    from marvis.decision_twin.event_batch import evaluate_row
+
+                    result = evaluate_row(
+                        material, manifest, directory, record, scenario.kind
+                    )
+                else:
+                    result = evaluate(manifest, directory, record["features"])
                 # Runtime timings are not business values and are excluded from the
                 # deterministic receipt identity. Exact model/rule outputs are retained.
                 result.pop("timing_ms", None)
@@ -225,7 +234,29 @@ def replay_batch(
                 ),
                 **contract.capacity.model_dump(),
             }
-        if temporal_population is not None:
+        event_unknown = sum(
+            d.get("error_code") == "event_features_unknown" for d in decisions
+        )
+        if manifest["configuration"].get("event_binding"):
+            metrics["event_evidence"] = {
+                "status": "unknown" if event_unknown else "authenticated",
+                "total_rows": len(records),
+                "unknown_rows": event_unknown,
+                "measured_rows": len(records) - event_unknown,
+                "row_mapping_hash": content_hash(
+                    [d["event_evidence"] for d in decisions]
+                ),
+                "source_assurance": "publisher_declared",
+                "fraud_or_identity_proof": False,
+            }
+        if temporal_population is not None and event_unknown:
+            metrics["stability"] = {
+                **_unknown("event_evidence_incomplete"),
+                "score_missing_cause": "authenticated_event_features_unknown",
+                "unknown_rows": event_unknown,
+                "population_count": len(records),
+            }
+        elif temporal_population is not None:
             metrics["stability"] = measure_temporal_stability(
                 records,
                 decisions,
@@ -235,12 +266,17 @@ def replay_batch(
                 score_product=manifest["configuration"]["score_product"],
                 package_kind=manifest["configuration"].get("package_kind", "model"),
             )
+        constraints = _constraints(contract, metrics)
+        if event_unknown and constraints["status"] == "passed":
+            constraints.update(
+                status="insufficient_evidence", reason="event_evidence_incomplete"
+            )
         scenarios.append(
             {
                 **scenario.model_dump(),
                 "population_hash": proposal["population_hash"],
                 "metrics": metrics,
-                "constraints": _constraints(contract, metrics),
+                "constraints": constraints,
                 "decisions": decisions,
                 "observed_execution": False,
                 "receipt_origin": "marvis_native_package_replay",
@@ -321,6 +357,8 @@ def replay_batch(
         "authority": "proposal_only",
         "automatic_action_permitted": False,
     }
+    if proposal.get("event_authorization"):
+        payload["event_authorization"] = proposal["event_authorization"]
     return material.publish(REPLAY_KIND, payload, binding=binding)
 
 
@@ -330,7 +368,18 @@ def reconcile_batch(
     proposal_hash: str,
 ):
     if not hmac.compare_digest(contract.contract_hash, proposal_hash):
-        raise DecisionError("historical_reconciliation_proposal_stale", 409)
+        from marvis.decision_twin.event_batch import EventBatchAuthority
+
+        try:
+            EventBatchAuthority(material).resolve(
+                proposal_hash, contract.contract_hash, "reconcile"
+            )
+        except DecisionError as exc:
+            if exc.code != "historical_event_reviewed_proposal_required":
+                raise
+            raise DecisionError(
+                "historical_reconciliation_proposal_stale", 409
+            ) from exc
     replay = material.load(contract.replay_artifact_id)["payload"]
     actions = replay["observed_actions"]
     if actions.get("origin") != "external_history_import":
@@ -435,4 +484,6 @@ def reconcile_batch(
         "causal_gain_verified": False,
         "automatic_action_permitted": False,
     }
+    if replay.get("event_authorization"):
+        payload["event_authorization"] = replay["event_authorization"]
     return material.publish(OUTCOME_KIND, payload, binding=binding)

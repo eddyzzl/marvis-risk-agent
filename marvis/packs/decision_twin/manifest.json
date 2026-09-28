@@ -65,8 +65,15 @@
                   "$ref": "#/$defs/HistoricalFeature"
                 },
                 "maxItems": 500,
-                "minItems": 1,
                 "title": "Features",
+                "type": "array"
+              },
+              "event_mappings": {
+                "items": {
+                  "$ref": "#/$defs/HistoricalEventMapping"
+                },
+                "maxItems": 3,
+                "title": "Event Mappings",
                 "type": "array"
               },
               "scenarios": {
@@ -346,6 +353,52 @@
               "assumption_sources"
             ],
             "title": "HistoricalEconomics",
+            "type": "object"
+          },
+          "HistoricalEventMapping": {
+            "additionalProperties": false,
+            "properties": {
+              "scenario_kind": {
+                "enum": [
+                  "baseline",
+                  "challenger",
+                  "counterfactual"
+                ],
+                "title": "Scenario Kind",
+                "type": "string"
+              },
+              "reference_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Reference Col",
+                "type": "string"
+              },
+              "subject_namespace_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Subject Namespace Col",
+                "type": "string"
+              },
+              "subject_token_col": {
+                "maxLength": 160,
+                "minLength": 1,
+                "title": "Subject Token Col",
+                "type": "string"
+              },
+              "grant_id": {
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                "title": "Grant Id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "scenario_kind",
+              "reference_col",
+              "subject_namespace_col",
+              "subject_token_col",
+              "grant_id"
+            ],
+            "title": "HistoricalEventMapping",
             "type": "object"
           },
           "HistoricalFeature": {

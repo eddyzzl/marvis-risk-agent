@@ -13,6 +13,7 @@ from marvis.decision_twin.batch_material import (
     OUTCOME_KIND,
     REPLAY_KIND,
 )
+from marvis.decision_twin.event_batch_contracts import HistoricalNativeEventReference
 from marvis.output.decision_twin import render_historical_replay
 from marvis.reference_decision.contracts import DecisionError
 
@@ -22,7 +23,13 @@ router = APIRouter(prefix="/api", tags=["decision-twin"])
 
 def _material(request, task_id):
     try:
-        return BatchMaterial(request.app.state.settings, task_id)
+        return BatchMaterial(
+            request.app.state.settings,
+            task_id,
+            actor_id=getattr(
+                getattr(request.state, "local_principal", None), "id", None
+            ),
+        )
     except KeyError as exc:
         raise HTTPException(404, "task not found") from exc
 
@@ -43,6 +50,15 @@ def capabilities():
         "schema_version": "decision_twin.capabilities.v2",
         "replay_schema": HistoricalReplayRequest.model_json_schema(),
         "reconciliation_schema": HistoricalReconciliationRequest.model_json_schema(),
+        "native_event_reference_schema": HistoricalNativeEventReference.model_json_schema(),
+        "native_event_policy": {
+            "subject_binding": "independent_subject_namespace_and_token_columns",
+            "actor_binding": "server_session_signed_proposal",
+            "derived_event_values": "not_accepted",
+            "missing_or_invalid_reference": "blocks_entire_batch",
+            "authenticated_unknown_coverage": "package_failure_action_preserving_population",
+            "read_and_export": "requires_current_source_grants",
+        },
         "workflow_ids": [
             "historical_decision_replay",
             "historical_outcome_reconciliation",
@@ -68,14 +84,22 @@ def reconciliation_proposal(
 ):
     try:
         material = _material(request, task_id)
-        material.load(body.replay_artifact_id)
+        replay = material.load(body.replay_artifact_id)
         material.dataset(body.dataset_id, body.expected_content_hash)
-        return {
+        proposal = {
             "contract": body.model_dump(),
             "proposal_hash": body.contract_hash,
             "origin": "external_history_import",
             "authority": "proposal_only",
         }
+        authorization = replay["payload"].get("event_authorization")
+        if authorization:
+            from marvis.decision_twin.event_batch import EventBatchAuthority
+
+            EventBatchAuthority(material).freeze(
+                proposal, body.contract_hash, "reconcile", authorization["scopes"]
+            )
+        return proposal
     except (ValueError, RuntimeError, KeyError) as exc:
         _error(exc)
 
@@ -99,12 +123,14 @@ def list_receipts(task_id: str, request: Request):
                         "created_at": record["created_at"],
                     }
                 )
-            except (ValueError, RuntimeError, KeyError):
+            except (ValueError, RuntimeError, KeyError) as exc:
                 receipts.append(
                     {
                         "artifact_id": record["content_hash"],
                         "kind": record["kind"],
-                        "status": "integrity_failed",
+                        "status": "unauthorized"
+                        if isinstance(exc, DecisionError) and exc.status in {401, 403}
+                        else "integrity_failed",
                     }
                 )
     return {"task_id": task_id, "artifacts": receipts}

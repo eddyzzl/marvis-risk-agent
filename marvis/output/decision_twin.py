@@ -9,6 +9,43 @@ from openpyxl import Workbook
 from marvis.spreadsheet_safety import safe_xlsx_cell
 
 
+EVENT_COLUMNS = (
+    "scenario",
+    "record_id",
+    "status",
+    "error_code",
+    "event_task_id",
+    "event_request_id",
+    "content_hash",
+    "contract_hash",
+    "snapshot_hash",
+    "decision_at",
+    "knowledge_cutoff",
+    "availability_mode",
+)
+
+
+def _event_rows(payload):
+    for scenario in payload.get("scenarios", []):
+        for row in scenario["decisions"]:
+            evidence = row.get("event_evidence")
+            if evidence:
+                yield (
+                    scenario["name"],
+                    row["record_id"],
+                    evidence["status"],
+                    row.get("error_code"),
+                    evidence["task_id"],
+                    evidence["request_id"],
+                    evidence["content_hash"],
+                    evidence["contract_hash"],
+                    evidence.get("snapshot_hash"),
+                    evidence["decision_at"],
+                    evidence["knowledge_cutoff"],
+                    evidence["availability_mode"],
+                )
+
+
 def _temporal_rows(payload):
     """Project signed values only; rendering never recomputes a drift metric."""
     rows = []
@@ -81,6 +118,7 @@ def render_historical_replay(receipt, format):
     )
     stream = BytesIO()
     temporal_rows = _temporal_rows(payload)
+    event_rows = list(_event_rows(payload))
     if format == "xlsx":
         workbook = Workbook()
         sheet = workbook.active
@@ -136,6 +174,11 @@ def render_historical_replay(receipt, format):
         decisions.append(list(columns))
         for row in rows:
             decisions.append([safe_xlsx_cell(value) for value in row])
+        if event_rows:
+            events = workbook.create_sheet("原生事件证据")
+            events.append(list(EVENT_COLUMNS))
+            for row in event_rows:
+                events.append([safe_xlsx_cell(value) for value in row])
         imported = payload.get("observed_actions", {}).get("records", [])
         if imported:
             observed = workbook.create_sheet("外部历史动作")
@@ -201,6 +244,17 @@ def render_historical_replay(receipt, format):
                 )
                 for cell, value in zip(table.add_row().cells, values, strict=True):
                     cell.text = "unknown" if value is None else str(value)
+        if event_rows:
+            document.add_heading("逐笔原生事件收据引用", 1)
+            document.add_paragraph(
+                "每笔申请绑定原生签名事件收据；unknown 表示来源覆盖不足，触发已批准的复核或拒绝策略。来源为发布者声明，不构成身份或欺诈证明。"
+            )
+            for row in event_rows:
+                document.add_paragraph(
+                    json.dumps(
+                        dict(zip(EVENT_COLUMNS, row, strict=True)), ensure_ascii=False
+                    )
+                )
         # Complete row evidence is retained in the canonical JSON / Excel; the
         # narrative export explicitly states its summary scope.
         document.add_paragraph(
