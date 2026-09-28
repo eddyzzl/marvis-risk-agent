@@ -201,6 +201,7 @@ class BusinessEvidence:
     effect_stage: str | None = None
     labels_mature: bool | None = None
     label_origin: str | None = None
+    label_provenance: dict[str, Any] = field(default_factory=dict)
     baseline_ref: str | None = None
     baseline_metrics: dict[str, Any] = field(default_factory=dict)
     baseline_binding_hash: str | None = None
@@ -248,6 +249,7 @@ def evaluate_business_acceptance(
         "period_end": evidence.period_end,
         "labels_mature": evidence.labels_mature,
         "label_origin": evidence.label_origin,
+        "label_provenance": evidence.label_provenance,
         "claim": objective.claim,
         "baseline_ref": evidence.baseline_ref,
         "baseline_binding_hash": evidence.baseline_binding_hash,
@@ -425,6 +427,7 @@ def require_objective_covers_legacy(objective, criteria):
             or criterion.unit != "ratio"
             or criterion.comparison != "absolute"
             or item.get("aggregate") not in {None, "max"}
+            or (item.get("aggregate") == "max" and "max" in item)
             or not (set(item) & {"min", "max"})
         ):
             raise ValueError(

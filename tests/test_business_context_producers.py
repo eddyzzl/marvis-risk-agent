@@ -199,6 +199,10 @@ def test_business_context_cannot_cross_tasks_or_change_sample_bytes(measured):
 def test_registered_tool_executor_human_context_and_actual_model_verdict(
     measured, drift_kind
 ):
+    _exercise_registered_business_flow(measured, drift_kind)
+
+
+def _exercise_registered_business_flow(measured, drift_kind, *, observed=False):
     import sys
     from pathlib import Path
     from marvis.db import PluginRepository
@@ -261,6 +265,11 @@ def test_registered_tool_executor_human_context_and_actual_model_verdict(
                 inputs={
                     "sample_design_ref": fx["sample_ref"],
                     "declaration": declaration(),
+                    **(
+                        {"labeling_evidence_ref": fx["labeling_ref"]}
+                        if observed
+                        else {}
+                    ),
                 },
                 policy=policy,
                 needs_confirmation=True,
@@ -287,7 +296,7 @@ def test_registered_tool_executor_human_context_and_actual_model_verdict(
                 target_version=trained["model_artifact_id"],
                 period_start="2026-03-01",
                 period_end="2026-03-06",
-                require_mature_labels=False,
+                require_mature_labels=observed,
                 criteria=(
                     BusinessCriterion("oot_ks", "ratio", "risk/oot:labeled", minimum=0),
                 ),
@@ -311,7 +320,22 @@ def test_registered_tool_executor_human_context_and_actual_model_verdict(
     assert result.status == PlanStatus.DONE, result
     review = stored_business_review(plans, plan.id)
     assert review["business_acceptance"]["status"] == "passed", review
-    assert review["business_acceptance"]["evidence"]["label_origin"] == "unknown"
+    assert review["business_acceptance"]["evidence"]["label_origin"] == (
+        "observed" if observed else "unknown"
+    )
+    if observed:
+        assert (
+            review["business_acceptance"]["evidence"]["label_provenance"][
+                "labeling_evidence_ref"
+            ]
+            == fx["labeling_ref"]
+        )
+        assert (
+            review["business_acceptance"]["evidence"]["label_provenance"][
+                "covered_member_count"
+            ]
+            == 6
+        )
     assert review["business_acceptance"]["target"]["id"] == trained["experiment_id"]
     assert all(step.output_ref for step in plans.load_plan(plan.id).steps)
     # Cached output cannot hide changed metrics or unavailable source bytes.
@@ -337,13 +361,16 @@ def test_registered_tool_executor_human_context_and_actual_model_verdict(
     )
 
 
-def test_strategy_adoption_binds_exact_native_development_context(tmp_path):
+@pytest.mark.parametrize("missing_risk_label", [False, True])
+def test_strategy_adoption_binds_exact_native_development_context(
+    tmp_path, missing_risk_label
+):
     from tests.test_strategy_sample_design_execution import _parallel_native_setup
     from marvis.packs.strategy import tools
     from marvis.business_context import authenticated_business_fields
     from marvis.repositories.plans import PlanRepository
 
-    fx = _parallel_native_setup(tmp_path)
+    fx = _parallel_native_setup(tmp_path, missing_risk_label=missing_risk_label)
     ref = {
         "membership_artifact_id": fx["membership"]["id"],
         "expected_membership_artifact_content_hash": fx["membership"]["content_hash"],
@@ -363,7 +390,7 @@ def test_strategy_adoption_binds_exact_native_development_context(tmp_path):
     strategy = tools.tool_build_strategy(
         {
             "strategy_type": "approval",
-            "rules": [{"condition": "feature < 25", "decision": "reject"}],
+            "rules": [{"condition": "feature < 15", "decision": "reject"}],
             "score_col": "feature",
             "default_decision": "approve",
         },
@@ -401,3 +428,39 @@ def test_strategy_adoption_binds_exact_native_development_context(tmp_path):
         )["metrics"]
         == measured["metrics"]
     )
+
+    assert measured["measurement_membership"]["row_count"] == 2
+    assert measured["measurement_membership"]["labeled_count"] == (
+        1 if missing_risk_label else 2
+    )
+    assert measured["labels_mature"] is not missing_risk_label
+    assert measured["period_start"] == "2026-01-02"
+    assert measured["period_end"] == "2026-01-03"
+    # The larger approval population contains a rejected row; the actual risk
+    # backtest approves both members, including any missing-label member.
+    assert measured["metrics"]["approval_rate"] == 1.0
+    assert measured["denominators"]["approval_rate"] == "risk/development:rows"
+    from marvis.business_context import strategy_business_measurement
+
+    stored = fx["runtime"].strategies.get_backtest(backtest["backtest_id"])
+    strategy_record = fx["runtime"].strategies.get_strategy(strategy["strategy_id"])
+    _receipt, metrics, binding, _requirements = tools._strategy_adoption_evidence(
+        fx["runtime"],
+        strategy=strategy_record,
+        backtest=stored,
+        backtest_id=backtest["backtest_id"],
+        task_id=fx["task"].id,
+    )
+    with pytest.raises(ValueError, match="population differs"):
+        strategy_business_measurement(
+            fx["runtime"],
+            fx["task"].id,
+            context_ref=bound["business_context_ref"],
+            sample_binding=binding,
+            strategy_id=strategy["strategy_id"],
+            version=output["version"],
+            backtest_id=backtest["backtest_id"],
+            metrics=metrics,
+            population_count=1,
+            labeled_count=stored.labeled_count,
+        )

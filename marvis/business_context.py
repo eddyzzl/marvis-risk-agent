@@ -57,9 +57,12 @@ def _canonical(value):
 
 
 def bind_business_context(inputs, ctx, runtime):
-    if set(inputs) != {"sample_design_ref", "declaration"}:
+    required = {"sample_design_ref", "declaration"}
+    if not required <= set(inputs) or set(inputs) - required - {
+        "labeling_evidence_ref"
+    }:
         raise ValueError(
-            "business context requires only sample_design_ref and independent declaration"
+            "business context requires sample_design_ref and independent declaration"
         )
     declaration = SampleBusinessDeclaration.model_validate(
         inputs["declaration"]
@@ -73,6 +76,9 @@ def bind_business_context(inputs, ctx, runtime):
         "sample_design_ref": inputs["sample_design_ref"],
         "declaration": declaration,
     }
+    if "labeling_evidence_ref" in inputs:
+        payload["labeling_evidence_ref"] = inputs["labeling_evidence_ref"]
+        _sample_measurement(runtime, payload, sample)
     encoded = _canonical(payload)
     digest = hashlib.sha256(encoded.encode()).hexdigest()
     repo = TaskArtifactRepository(runtime.settings.db_path)
@@ -86,6 +92,8 @@ def bind_business_context(inputs, ctx, runtime):
             require_native_strategy_sample_design_v2_artifact_binding_on_connection(
                 conn, sample
             )
+            if "labeling_evidence_ref" in payload:
+                _sample_measurement(runtime, payload, sample)
             uow.promote_all()
             record = repo.register_on_connection(
                 conn,
@@ -98,6 +106,11 @@ def bind_business_context(inputs, ctx, runtime):
                     "schema_version": CONTEXT_VERSION,
                     "sample_design_ref": inputs["sample_design_ref"],
                     "declaration_hash": payload_hash(declaration),
+                    **(
+                        {"labeling_evidence_ref": payload["labeling_evidence_ref"]}
+                        if "labeling_evidence_ref" in payload
+                        else {}
+                    ),
                 },
             )
         uow.commit()
@@ -144,7 +157,16 @@ def load_business_context(runtime, task_id, reference):
     payload = json.loads(raw)
     if (
         set(payload)
-        != {"schema_version", "task_id", "sample_design_ref", "declaration"}
+        not in (
+            {"schema_version", "task_id", "sample_design_ref", "declaration"},
+            {
+                "schema_version",
+                "task_id",
+                "sample_design_ref",
+                "declaration",
+                "labeling_evidence_ref",
+            },
+        )
         or payload["schema_version"] != CONTEXT_VERSION
         or payload["task_id"] != task_id
     ):
@@ -156,6 +178,11 @@ def load_business_context(runtime, task_id, reference):
         "schema_version": CONTEXT_VERSION,
         "sample_design_ref": payload["sample_design_ref"],
         "declaration_hash": payload_hash(declaration),
+        **(
+            {"labeling_evidence_ref": payload["labeling_evidence_ref"]}
+            if "labeling_evidence_ref" in payload
+            else {}
+        ),
     }:
         raise ValueError("business context provenance drifted")
     sample = load_historical_native_strategy_sample_design_v2_artifacts(
@@ -164,7 +191,7 @@ def load_business_context(runtime, task_id, reference):
     return payload, sample
 
 
-def _sample_measurement(runtime, payload, sample):
+def _sample_measurement(runtime, payload, sample, *, exclude_unlabeled=True):
     declaration = payload["declaration"]
     partition = declaration["partition"]
     mask = np.asarray(sample.membership["masks"][f"risk/{partition}"], dtype=bool)
@@ -179,7 +206,7 @@ def _sample_measurement(runtime, payload, sample):
     frame = runtime.registry.read_authenticated_parquet_snapshot(source.dataset_id)
     if len(frame) != len(mask) or not mask.any():
         raise ValueError("empty or inconsistent business measurement membership")
-    if source.drop_nan_labels:
+    if source.drop_nan_labels and exclude_unlabeled:
         mask &= frame[source.target_col].notna().to_numpy()
     if not mask.any():
         raise ValueError("business measurement has no labeled members")
@@ -193,6 +220,18 @@ def _sample_measurement(runtime, payload, sample):
     risk = next(item for item in sample.bundle["populations"] if item["role"] == "risk")
     count = int(mask.sum())
     labeled = int(frame.loc[mask, source.target_col].notna().sum())
+    label_provenance = None
+    if "labeling_evidence_ref" in payload:
+        from marvis.packs.labeling.evidence import verified_member_labels
+
+        label_provenance = verified_member_labels(
+            runtime,
+            task_id=payload["task_id"],
+            reference=payload["labeling_evidence_ref"],
+            sample=sample,
+            frame=frame,
+            mask=mask,
+        )
     if sha256_file(source.dataset_path) != source.dataset_content_hash:
         raise ValueError("sample dataset changed while measuring business context")
     return {
@@ -204,9 +243,10 @@ def _sample_measurement(runtime, payload, sample):
         "period_end": times.max().date().isoformat(),
         "labels_mature": risk["maturity_evidence"]["status"] == "confirmed_matured"
         and count == labeled,
-        # The native sample producer verifies temporal maturity but currently
-        # has no observed-label provenance chain. A user assertion is not proof.
-        "label_origin": "unknown",
+        "label_origin": label_provenance["label_origin"]
+        if label_provenance
+        else "unknown",
+        **({"label_provenance": label_provenance} if label_provenance else {}),
         "effect_stage": "oot_validated" if partition == "oot" else "backtested",
         "measurement_membership": {
             "mask_name": f"risk/{partition}",
@@ -267,6 +307,8 @@ def strategy_business_measurement(
     version,
     backtest_id,
     metrics,
+    population_count,
+    labeled_count,
 ):
     payload, sample = load_business_context(runtime, task_id, context_ref)
     if (
@@ -289,9 +331,17 @@ def strategy_business_measurement(
         raise ValueError(
             "business context differs from adopted strategy backtest membership"
         )
-    measured = _sample_measurement(runtime, payload, sample)
-    # Approval rates concern the larger approval population and cannot be
-    # declared comparable to risk/development denominators by user text.
+    # The typed strategy producer keeps all risk/development members. Missing
+    # labels affect only bad-rate denominators, unlike model training metrics.
+    measured = _sample_measurement(runtime, payload, sample, exclude_unlabeled=False)
+    members = measured["measurement_membership"]
+    if (
+        population_count != members["row_count"]
+        or labeled_count != members["labeled_count"]
+    ):
+        raise ValueError(
+            "strategy backtest population differs from measured business membership"
+        )
     denominators = {
         "approval_rate": "risk/development:rows",
         "approved_bad_rate": "risk/development:approved_labeled",
@@ -374,6 +424,8 @@ def authenticated_business_fields(plan_repository, task_id, output, target_kind)
             version=output["version"],
             backtest_id=output["backtest_id"],
             metrics=dict(approval_metrics) if approval_metrics is not None else {},
+            population_count=_evidence.get("population_count"),
+            labeled_count=_evidence.get("labeled_count"),
         )
     if expected != measurement:
         raise ValueError(
@@ -391,6 +443,7 @@ def authenticated_business_fields(plan_repository, task_id, output, target_kind)
         "period_end",
         "labels_mature",
         "label_origin",
+        "label_provenance",
         "effect_stage",
     }
     return {key: value for key, value in expected.items() if key in allowed}

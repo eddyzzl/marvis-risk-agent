@@ -252,3 +252,18 @@ def test_multiple_delta_metrics_use_their_own_units_and_denominators():
 def test_malformed_contract_enums_raise_value_error(field):
     with pytest.raises(ValueError):
         BusinessObjective.from_dict({**objective().to_dict(), field: []})
+
+
+def test_candidate_max_upper_bound_cannot_be_replaced_by_adopted_object_bound():
+    from marvis.business_acceptance import bind_business_criteria
+
+    upper = objective(
+        criteria=(BusinessCriterion("oot_ks", "ratio", "mature_loans", maximum=0.5),)
+    )
+    with pytest.raises(ValueError, match="无法映射"):
+        bind_business_criteria(
+            upper, [{"metric": "oot_ks", "max": 0.5, "aggregate": "max"}]
+        )
+    # Adopted KS >= 0.3 does imply the candidate maximum is >= 0.3.
+    lower = {"metric": "oot_ks", "min": 0.3, "aggregate": "max"}
+    assert bind_business_criteria(objective(), [lower])[1] == lower

@@ -65,7 +65,7 @@ def _eq(column: str, value: object) -> dict:
     }
 
 
-def _parallel_native_setup(tmp_path: Path) -> dict:
+def _parallel_native_setup(tmp_path: Path, *, missing_risk_label: bool = False) -> dict:
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     task = TaskRepository(settings.db_path).create_task(
@@ -113,6 +113,8 @@ def _parallel_native_setup(tmp_path: Path) -> dict:
             "feature": [10, 20, 30, 40, 50, 60],
         }
     )
+    if missing_risk_label:
+        frame.loc[frame["row_id"] == "risk-only", "bad"] = float("nan")
     source = tmp_path / "parallel.parquet"
     frame.to_parquet(source, index=False)
     registry = DatasetRegistry(
@@ -222,7 +224,7 @@ def _parallel_native_setup(tmp_path: Path) -> dict:
         "policy": {
             "minimum_partition_count": 1,
             "minimum_bad_count": 0,
-            "minimum_label_coverage": 1.0,
+            "minimum_label_coverage": 0.5 if missing_risk_label else 1.0,
             "minimum_historical_score_coverage": 0.0,
             "maximum_group_coverage_gap": 1.0,
             "diagnostic_severities": {

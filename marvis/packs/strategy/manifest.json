@@ -55,6 +55,16 @@
             ],
             "additionalProperties": false
           },
+          "labeling_evidence_ref": {
+            "type": "object",
+            "description": "Optional task-owned labeling.define_label receipt; producer replay must cover every measured entity/cohort/target before observed labels can be certified.",
+            "properties": {
+              "artifact_id": {"type": "string", "minLength": 1},
+              "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "required": ["artifact_id", "content_hash"],
+            "additionalProperties": false
+          },
           "declaration": {
             "additionalProperties": false,
             "properties": {

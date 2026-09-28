@@ -2748,7 +2748,7 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         business_measurement = strategy_business_measurement(runtime, task_id,
             context_ref=inputs["business_context_ref"], sample_binding=adoption_sample_binding,
             strategy_id=strategy_id, version=version, backtest_id=backtest_id,
-            metrics=dict(approval_metrics) if approval_metrics is not None else {})
+            metrics=dict(approval_metrics) if approval_metrics is not None else {}, population_count=adoption_evidence.get("population_count"), labeled_count=adoption_evidence.get("labeled_count"))
     strategy_dir = Path(runtime.settings.tasks_dir) / task_id / "strategy"
     stem = f"{strategy_id}_v{version}"
 
@@ -2817,7 +2817,7 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
                     source_dataset_hash,
                 )
             if business_measurement is not None:
-                checked = strategy_business_measurement(runtime, task_id, context_ref=inputs["business_context_ref"], sample_binding=adoption_sample_binding, strategy_id=strategy_id, version=version, backtest_id=backtest_id, metrics=dict(approval_metrics) if approval_metrics is not None else {})
+                checked = strategy_business_measurement(runtime, task_id, context_ref=inputs["business_context_ref"], sample_binding=adoption_sample_binding, strategy_id=strategy_id, version=version, backtest_id=backtest_id, metrics=dict(approval_metrics) if approval_metrics is not None else {}, population_count=adoption_evidence.get("population_count"), labeled_count=adoption_evidence.get("labeled_count"))
                 if checked != business_measurement:
                     raise StrategyError("business measurement changed during adoption")
             adopt_result = runtime.strategies.adopt_strategy_with_audit_on_connection(
