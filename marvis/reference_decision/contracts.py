@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from marvis.reference_decision.event_contracts import EventEvidenceReference, EventFeatureBinding
+
 
 def canonical(value: Any) -> str:
     return json.dumps(
@@ -43,7 +45,8 @@ class PackageRequest(BaseModel):
     decision_node: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     score_field: str = Field(min_length=1, max_length=160)
     score_product: Literal["raw_pd", "calibrated_pd", "scorecard_points"] = "raw_pd"
-    raw_schema: list[FeatureField] = Field(min_length=1, max_length=500)
+    raw_schema: list[FeatureField] = Field(max_length=500)
+    event_binding: EventFeatureBinding | None = None
     timeout_seconds: int = Field(default=10, ge=1, le=60)
     # A fallback is part of the package approved through the ordinary promotion.
     failure_action: Literal["review", "reject"] = "review"
@@ -51,6 +54,11 @@ class PackageRequest(BaseModel):
     @model_validator(mode="after")
     def names(self):
         names = [f.name for f in self.raw_schema]
+        event_names = self.event_binding.recipe.field_names if self.event_binding else []
+        if not names and not event_names:
+            raise ValueError("model package requires raw or authenticated event inputs")
+        if set(names) & set(event_names) or self.score_field in event_names:
+            raise ValueError("event features cannot be supplied as raw or model score fields")
         if len(set(names)) != len(names) or self.score_field in names:
             raise ValueError(
                 "raw feature names must be unique and exclude computed score"
@@ -68,6 +76,7 @@ class DecisionRequest(BaseModel):
     decision_node: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     expected_package_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     features: dict[str, Any] = Field(max_length=500)
+    event_evidence: EventEvidenceReference | None = None
 
 
 class RulePackageRequest(BaseModel):
@@ -79,12 +88,15 @@ class RulePackageRequest(BaseModel):
     strategy_version: int = Field(ge=1)
     decision_node: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     raw_schema: list[FeatureField] = Field(max_length=500)
+    event_binding: EventFeatureBinding | None = None
     timeout_seconds: int = Field(default=10, ge=1, le=60)
     failure_action: Literal["review", "reject"] = "review"
 
     @model_validator(mode="after")
     def names(self):
         names = [field.name for field in self.raw_schema]
+        if self.event_binding and set(names) & set(self.event_binding.recipe.field_names):
+            raise ValueError("event features cannot be supplied as raw fields")
         if len(set(names)) != len(names) or any(
             name.startswith("__marvis_") for name in names
         ):

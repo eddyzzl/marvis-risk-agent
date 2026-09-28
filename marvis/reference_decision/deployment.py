@@ -38,7 +38,7 @@ class DecisionDeploymentAdapter(Protocol):
     path supplied over HTTP selects executable code.
     """
 
-    def install(self, promotion_id: str, probe_features: dict) -> dict: ...
+    def install(self, promotion_id: str, probe_features: dict, *, event_evidence=None, actor_id=None) -> dict: ...
     def readback(self, promotion_id: str) -> dict: ...
     def verify(
         self, *, receipt_id: str, context: ActivationVerificationContext
@@ -67,7 +67,9 @@ class LocalReferenceAdapter:
             raise GovernanceConflict("promotion has no frozen decision package")
         return row, package_hash
 
-    def install(self, promotion_id, probe_features):
+    def install(self, promotion_id, probe_features, *, event_evidence=None, actor_id=None):
+        from marvis.reference_decision.event_binding import check_reference
+
         with connect(self.db_path) as conn:
             row, package_hash = self._approved(conn, promotion_id)
             existing = conn.execute(
@@ -77,10 +79,14 @@ class LocalReferenceAdapter:
         if existing:
             return self.readback(promotion_id)
         manifest = self.service.packages.get(package_hash)
+        check_reference(self.service.settings, manifest, event_evidence, actor_id)
         validate_features(probe_features, manifest)
-        probe = self.service.evaluate(
-            package_hash, probe_features, manifest["configuration"]["timeout_seconds"]
-        )
+        args = (package_hash, probe_features, manifest["configuration"]["timeout_seconds"])
+        probe = (self.service.evaluate(*args) if event_evidence is None else
+                 self.service.evaluate(*args, event_evidence=event_evidence, actor_id=actor_id))
+        probe_input = probe_features if event_evidence is None else {
+            "features": probe_features, "event_evidence": event_evidence.model_dump()
+        }
         context = ActivationVerificationContext(
             promotion_request_id=promotion_id,
             environment=ENVIRONMENT,
@@ -95,7 +101,7 @@ class LocalReferenceAdapter:
             receipt_id=f"reference-install:{promotion_id}",
             context=context,
             external_deployment_ref=f"reference-install:{promotion_id}:package:{package_hash}",
-            health_evidence_ref=f"reference-probe:{digest({'input_hash': digest(probe_features), 'output': probe})}",
+            health_evidence_ref=f"reference-probe:{digest({'input_hash': digest(probe_input), 'output': probe})}",
             health_status="healthy",
             verified_at=datetime.now(UTC).isoformat(),
         )
@@ -105,9 +111,11 @@ class LocalReferenceAdapter:
             "adapter_id": ADAPTER_ID,
             "execution_identity": "local_reference_worker.v1",
             "assurance": "local_reference_only",
-            "probe_input_hash": digest(probe_features),
+            "probe_input_hash": digest(probe_input),
             "probe_output_hash": digest(probe),
-            "probe": probe,
+            # Installation audits prove execution but must not distribute an
+            # event subject's assessment to principals without that source grant.
+            "probe": probe if event_evidence is None else {"execution": "completed", "event_assessment": "restricted_to_source_grant"},
             "activation_evidence": asdict(evidence),
         }
         with connect(self.db_path) as conn:
@@ -234,5 +242,7 @@ class LocalReferenceAdapter:
                     raise GovernanceConflict(
                         "reference deployment interface is incompatible"
                     )
+                if bool(manifest["configuration"].get("event_binding")) != bool(old["configuration"].get("event_binding")):
+                    raise GovernanceConflict("reference deployment event interface is incompatible")
         except DecisionError as exc:
             raise GovernanceConflict(exc.code) from exc

@@ -65,7 +65,7 @@ class ReferenceDecisionService:
             "execution_identity": "local_reference_worker.v1",
         }
 
-    def evaluate(self, package_hash, features, timeout):
+    def evaluate(self, package_hash, features, timeout, *, event_evidence=None, actor_id=None):
         job = {
             "protocol_version": PROTOCOL_VERSION,
             "builtin": True,
@@ -79,6 +79,8 @@ class ReferenceDecisionService:
             "memory_limit_mb": 1024,
             "file_size_limit_mb": 1,
         }
+        if event_evidence is not None:
+            job["inputs"].update(event_evidence=event_evidence.model_dump(), actor_id=actor_id)
         try:
             completed = _run_worker(
                 sys.executable, job, timeout=timeout, rss_limit_mb=1024
@@ -91,15 +93,25 @@ class ReferenceDecisionService:
         if completed.returncode or not result or not result.get("ok"):
             # Do not echo raw feature values or worker exception text into logs/API.
             raise DecisionError("scoring_failed", 503)
-        return result["output"]
+        output = result["output"]
+        if "decision_error" in output:
+            raise DecisionError(output["decision_error"], output["status"])
+        return output
 
-    def decide(self, request, *, slot="production"):
+    def decide(self, request, *, slot="production", actor_id=None):
+        from marvis.reference_decision.event_binding import check_reference
+
         started = time.perf_counter()
         ledger_scope = f"{ENVIRONMENT}:{slot}"
         try:
-            input_hash = digest(request.model_dump())
+            input_hash = digest(request.model_dump(exclude={"event_evidence"} if request.event_evidence is None else set()))
         except (ValueError, TypeError, OverflowError) as exc:
             raise DecisionError("invalid_feature_payload") from exc
+        # Check source authority even for a completed idempotent read, without
+        # replaying a snapshot or consuming a new worker slot.
+        if request.event_evidence is not None:
+            check_reference(self.settings, self.packages.get(request.expected_package_hash, verify_files=False),
+                            request.event_evidence, actor_id)
         existing = self.ledger.existing(ledger_scope, request.request_id, input_hash)
         if existing is not None:
             return existing
@@ -112,6 +124,7 @@ class ReferenceDecisionService:
             raise DecisionError("expected_package_mismatch", 409)
         manifest = self.packages.get(package_hash)
         config = manifest["configuration"]
+        check_reference(self.settings, manifest, request.event_evidence, actor_id)
         if request.decision_node != config["decision_node"]:
             raise DecisionError("decision_node_mismatch")
         validate_features(request.features, manifest)
@@ -126,9 +139,11 @@ class ReferenceDecisionService:
             return existing
         worker_started = time.perf_counter()
         try:
-            result = self.evaluate(
-                package_hash, request.features, config["timeout_seconds"]
-            )
+            if request.event_evidence is None:
+                result = self.evaluate(package_hash, request.features, config["timeout_seconds"])
+            else:
+                result = self.evaluate(package_hash, request.features, config["timeout_seconds"],
+                    event_evidence=request.event_evidence, actor_id=actor_id)
             status, error_code = "decided", None
         except DecisionError as exc:
             result = {
@@ -178,7 +193,15 @@ class ReferenceDecisionService:
                 "files": manifest["files"],
             },
         }
+        if request.event_evidence is not None:
+            # Bind unknown/failure receipts to the exact context too, without
+            # persisting the subject token or claiming unverified feature values.
+            response["versions"]["event_contract_hash"] = request.event_evidence.contract.contract_hash
+            response["versions"]["event_evidence_hash"] = request.event_evidence.expected_content_hash
         response["output_hash"] = digest({key: response[key] for key in (
             "action", "matched_rule_id", "score", "score_product", "package_hash", "versions", "status"
         )})
-        return self.ledger.finish(ledger_scope, request.request_id, owner, response)
+        stored = self.ledger.finish(ledger_scope, request.request_id, owner, response)
+        if request.event_evidence is not None:
+            check_reference(self.settings, manifest, request.event_evidence, actor_id)
+        return stored

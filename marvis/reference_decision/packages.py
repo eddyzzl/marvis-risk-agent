@@ -143,6 +143,9 @@ class PackageStore:
         }
 
     def build(self, request: PackageRequest | RulePackageRequest, *, actor_id: str):
+        if request.event_binding:
+            from marvis.reference_decision.event_binding import authorize_binding
+            authorize_binding(self.settings, request.event_binding, actor_id)
         if isinstance(request, RulePackageRequest):
             return self._build_rules(request, actor_id=actor_id)
         repo = ModelingRepository(self.settings.db_path)
@@ -177,7 +180,8 @@ class PackageStore:
             raise DecisionError("calibration_required")
         strategy, spec = self._strategy(request)
         steps = artifact.params.get("preprocessing_steps") or []
-        outputs, derived = feature_outputs([f.name for f in request.raw_schema], steps)
+        events = request.event_binding.recipe.field_names if request.event_binding else []
+        outputs, derived = feature_outputs([f.name for f in request.raw_schema] + events, steps)
         fields = {f for rule in spec.rules for f in _expression_fields(rule.condition)}
         if not set(artifact.feature_list) <= outputs or not fields <= outputs | {
             request.score_field
@@ -225,9 +229,9 @@ class PackageStore:
         if sum(f["size"] for f in files) > 512_000_000:
             raise DecisionError("package_size_limit")
         manifest = {
-            "schema_version": "reference-decision-package.v1",
+            "schema_version": "reference-decision-package.v2" if events else "reference-decision-package.v1",
             "platform_version": __version__,
-            "configuration": request.model_dump(),
+            "configuration": request.model_dump(exclude={"event_binding"} if not events else set()),
             "strategy": strategy,
             "strategy_spec": json.loads(canonical_strategy_json(spec)),
             "model": encode_parameters(asdict(artifact)),
@@ -235,7 +239,7 @@ class PackageStore:
             "files": files,
             "preprocessing_receipt": receipt,
             "model_producer_receipt": producer_record,
-            "derived_fields": sorted(derived),
+            "derived_fields": sorted(derived | set(events)),
             "output_fields": sorted(outputs),
             "assurance": "local_reference_only",
         }
@@ -265,13 +269,15 @@ class PackageStore:
     def _build_rules(self, request, *, actor_id):
         strategy, spec = self._strategy(request)
         outputs = {field.name for field in request.raw_schema}
+        events = request.event_binding.recipe.field_names if request.event_binding else []
+        outputs |= set(events)
         fields = {f for rule in spec.rules for f in _expression_fields(rule.condition)}
         if not fields <= outputs:
             raise DecisionError("strategy_inputs_unbound")
         manifest = {
             "schema_version": "reference-decision-package.v2",
             "platform_version": __version__,
-            "configuration": {**request.model_dump(), "score_product": None},
+            "configuration": {**request.model_dump(exclude={"event_binding"} if not events else set()), "score_product": None},
             "strategy": strategy,
             "strategy_spec": json.loads(canonical_strategy_json(spec)),
             "model": None,
@@ -279,7 +285,7 @@ class PackageStore:
             "files": [],
             "preprocessing_receipt": None,
             "model_producer_receipt": None,
-            "derived_fields": [],
+            "derived_fields": sorted(events),
             "output_fields": sorted(outputs),
             "assurance": "local_reference_only",
         }

@@ -11,6 +11,7 @@ from marvis.reference_decision.contracts import (
     PackageBuildRequest,
 )
 from marvis.reference_decision.readiness import package_readiness, rule_package_readiness
+from marvis.reference_decision.event_contracts import EventEvidenceReference
 
 
 router = APIRouter(prefix="/api/reference-decision", tags=["reference-decision"])
@@ -20,14 +21,17 @@ class InstallRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     promotion_id: str = Field(min_length=1, max_length=160)
     probe_features: dict = Field(max_length=500)
+    event_evidence: EventEvidenceReference | None = None
 
 
 @router.post("/installations", status_code=201)
 def install(payload: InstallRequest, request: Request):
-    if _current_principal(request)["role"] != "admin":
+    actor = _current_principal(request)
+    if actor["role"] != "admin":
         raise HTTPException(403, "only an admin can install an approved package")
     try:
-        return request.app.state.reference_deployment_adapter.install(payload.promotion_id, payload.probe_features)
+        return request.app.state.reference_deployment_adapter.install(payload.promotion_id, payload.probe_features,
+            event_evidence=payload.event_evidence, actor_id=actor["id"])
     except (DecisionError, GovernanceConflict) as exc:
         public_error(exc)
 
@@ -156,8 +160,8 @@ def decide(
     request: Request,
     slot: Literal["production", "shadow"] = "production",
 ):
-    _current_principal(request)
+    actor = _current_principal(request)
     try:
-        return service(request).decide(payload, slot=slot)
+        return service(request).decide(payload, slot=slot, actor_id=actor["id"])
     except DecisionError as exc:
         public_error(exc)
