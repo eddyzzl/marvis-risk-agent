@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "display_name": "Risk source evidence",
   "description": "服务端授权的本地参考来源查询、认证历史导入与同ID只读恢复；不证明机构核验。",
-  "module": "marvis.packs.risk_context.source_tools",
+  "module": "marvis.packs.risk_context.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
     {
@@ -117,6 +117,351 @@
       "policy": {
         "schema_version": "tool-policy.v1",
         "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:dataset",
+        "write:artifact"
+      ]
+    },
+    {
+      "name": "replay_events",
+      "summary": "确认事件来源、时点窗口与关系口径，冻结授权原生证据并注册可重放特征；缺覆盖保持未知。",
+      "entrypoint": "tool_replay_events",
+      "input_schema": {
+        "$defs": {
+          "EventFeatureContract": {
+            "additionalProperties": false,
+            "properties": {
+              "schema_version": {
+                "const": "risk-event.features.v1",
+                "default": "risk-event.features.v1",
+                "title": "Schema Version",
+                "type": "string"
+              },
+              "source_id": {
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                "title": "Source Id",
+                "type": "string"
+              },
+              "source_contract_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Source Contract Hash",
+                "type": "string"
+              },
+              "decision_at": {
+                "title": "Decision At",
+                "type": "string"
+              },
+              "knowledge_cutoff": {
+                "title": "Knowledge Cutoff",
+                "type": "string"
+              },
+              "availability_mode": {
+                "enum": [
+                  "platform_observed",
+                  "retrospective_declared"
+                ],
+                "title": "Availability Mode",
+                "type": "string"
+              },
+              "window_seconds": {
+                "maximum": 3153600000,
+                "minimum": 1,
+                "title": "Window Seconds",
+                "type": "integer"
+              },
+              "interval": {
+                "const": "(t-window,t]",
+                "default": "(t-window,t]",
+                "title": "Interval",
+                "type": "string"
+              },
+              "include_current_event": {
+                "title": "Include Current Event",
+                "type": "boolean"
+              },
+              "current_event_id": {
+                "anyOf": [
+                  {
+                    "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Current Event Id"
+              },
+              "event_types": {
+                "items": {
+                  "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                  "type": "string"
+                },
+                "maxItems": 64,
+                "minItems": 1,
+                "title": "Event Types",
+                "type": "array"
+              },
+              "focus_kind": {
+                "enum": [
+                  "subject",
+                  "device",
+                  "account"
+                ],
+                "title": "Focus Kind",
+                "type": "string"
+              },
+              "focus": {
+                "$ref": "#/$defs/OpaqueIdentity"
+              },
+              "window_features": {
+                "items": {
+                  "$ref": "#/$defs/WindowFeature"
+                },
+                "maxItems": 100,
+                "title": "Window Features",
+                "type": "array"
+              },
+              "relation_features": {
+                "items": {
+                  "$ref": "#/$defs/RelationFeature"
+                },
+                "maxItems": 100,
+                "title": "Relation Features",
+                "type": "array"
+              },
+              "policy_ref": {
+                "maxLength": 500,
+                "minLength": 1,
+                "pattern": "\\S",
+                "title": "Policy Ref",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source_id",
+              "source_contract_hash",
+              "decision_at",
+              "knowledge_cutoff",
+              "availability_mode",
+              "window_seconds",
+              "include_current_event",
+              "current_event_id",
+              "event_types",
+              "focus_kind",
+              "focus",
+              "policy_ref"
+            ],
+            "title": "EventFeatureContract",
+            "type": "object"
+          },
+          "OpaqueIdentity": {
+            "additionalProperties": false,
+            "properties": {
+              "namespace": {
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                "title": "Namespace",
+                "type": "string"
+              },
+              "token": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "namespace",
+              "token"
+            ],
+            "title": "OpaqueIdentity",
+            "type": "object"
+          },
+          "RelationFeature": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                "title": "Name",
+                "type": "string"
+              },
+              "operation": {
+                "enum": [
+                  "neighbor_count",
+                  "shared_neighbor_count"
+                ],
+                "title": "Operation",
+                "type": "string"
+              },
+              "target_kind": {
+                "enum": [
+                  "subject",
+                  "device",
+                  "account"
+                ],
+                "title": "Target Kind",
+                "type": "string"
+              },
+              "via_kind": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "subject",
+                      "device",
+                      "account"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Via Kind"
+              }
+            },
+            "required": [
+              "name",
+              "operation",
+              "target_kind"
+            ],
+            "title": "RelationFeature",
+            "type": "object"
+          },
+          "WindowFeature": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                "title": "Name",
+                "type": "string"
+              },
+              "operation": {
+                "enum": [
+                  "count",
+                  "sum",
+                  "distinct"
+                ],
+                "title": "Operation",
+                "type": "string"
+              },
+              "field": {
+                "anyOf": [
+                  {
+                    "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Field"
+              }
+            },
+            "required": [
+              "name",
+              "operation"
+            ],
+            "title": "WindowFeature",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "proposal_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Proposal Hash",
+            "type": "string"
+          },
+          "contract": {
+            "$ref": "#/$defs/EventFeatureContract"
+          }
+        },
+        "required": [
+          "request_id",
+          "proposal_hash",
+          "contract"
+        ],
+        "title": "EventToolInput",
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "decision_id": {
+            "type": "string"
+          },
+          "contract_hash": {
+            "type": "string"
+          },
+          "snapshot_hash": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "next_action": {
+            "type": "string"
+          },
+          "availability_mode": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "risk-event.summary.v1"
+          },
+          "source_assurance": {
+            "const": "publisher_declared"
+          },
+          "automated_clearance": {
+            "const": false
+          },
+          "features": {
+            "type": "object"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "evidence_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "task_id",
+          "decision_id",
+          "contract_hash",
+          "snapshot_hash",
+          "status",
+          "next_action",
+          "availability_mode",
+          "schema_version",
+          "source_assurance",
+          "automated_clearance",
+          "features",
+          "request_id",
+          "evidence_url"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "memory_limit_mb": 2048,
+      "failure_policy": "fail",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
         "effect_authorization": "none"
       },
       "side_effects": [
