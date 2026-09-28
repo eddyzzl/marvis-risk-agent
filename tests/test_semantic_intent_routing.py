@@ -13,6 +13,7 @@ from marvis.agent.semantic_intent import (
     INTENT_RISK_STANDARD_VINTAGE,
     INTENT_RISK_VTG_TERMINAL,
     INTENT_STRATEGY_SAMPLE_BINDING,
+    INTENT_STRATEGY_WORKFLOW,
     route_semantic_intent,
 )
 from marvis.llm_prompts import TOP_LEVEL_INTENT_REPAIR_SYS
@@ -97,6 +98,23 @@ def test_strategy_binding_change_flag_still_fails_closed():
 
     assert result.accepted is False
     assert result.intent == INTENT_NONE
+
+
+@pytest.mark.parametrize("pass_index", [0, 1])
+@pytest.mark.parametrize("unsafe_flag", ["requests_change", "is_conditional", "withholds_action", "is_question"])
+def test_either_independent_unsafe_flag_still_blocks_new_strategy_requests(pass_index, unsafe_flag):
+    instruction = "请处理当前策略开发请求，实际口径仍需平台验证。"
+    replies = [_reply(intent=INTENT_STRATEGY_WORKFLOW, quote=instruction) for _ in range(2)]
+    replies[pass_index] = _reply(
+        intent=INTENT_STRATEGY_WORKFLOW, quote=instruction, **{unsafe_flag: True},
+    )
+    result = route_semantic_intent(
+        FakeClient(replies), task_type="strategy", instruction=instruction,
+        context={"has_ready_dataset": True},
+        allowed_intents=(INTENT_STRATEGY_WORKFLOW, INTENT_NONE),
+    )
+    assert not result.accepted
+    assert result.failure_code == "semantic_intent_unsafe_decision"
 
 
 def test_missing_field_is_repaired_once_before_independent_review():
