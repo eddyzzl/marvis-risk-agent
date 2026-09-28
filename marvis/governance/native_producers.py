@@ -294,9 +294,42 @@ def verify_native_outcome(settings, event_repository, target, conn):
         return unknown("原生回执、产物完整性或当前来源授权未通过核对。")
 
 
+def _legacy_output_is_sensitive(conn, row):
+    """Classify existing output from frozen invocation inputs, never new inputs.
+
+    Legacy source-scoped output cannot establish today's grant without its
+    authenticated authority receipt. Ordinary pre-event batch plans retain
+    their existing completion behavior.
+    """
+    producer = row["tool_ref"].split("@", 1)[0]
+    if producer == "risk_context.replay_events":
+        return True
+    try:
+        contract = json.loads(row["input_json"])["contract"]
+        if producer == "decision_twin.replay_history":
+            return bool(contract.get("event_mappings"))
+        if producer == "decision_twin.reconcile_history":
+            records = conn.execute(
+                """SELECT provenance_json FROM task_artifacts
+                WHERE task_id=? AND content_hash=? AND kind=? AND origin_tool=?""",
+                (
+                    row["task_id"],
+                    contract["replay_artifact_id"],
+                    *PRODUCERS["decision_twin.replay_history"],
+                ),
+            ).fetchall()
+            return not records or any(
+                json.loads(record["provenance_json"]).get("event_scoped") is True
+                for record in records
+            )
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return True
+    return True
+
+
 def authorize_native_read(settings, event_repository, run_id, conn, actor_id):
     row = conn.execute(
-        "SELECT p.task_id FROM plan_step_runs r JOIN plans p ON p.id=r.plan_id WHERE r.id=?",
+        "SELECT r.*,p.task_id FROM plan_step_runs r JOIN plans p ON p.id=r.plan_id WHERE r.id=?",
         (run_id,),
     ).fetchone()
     if row is None:
@@ -307,8 +340,21 @@ def authorize_native_read(settings, event_repository, run_id, conn, actor_id):
         (row["task_id"], KIND, ORIGIN, str(path)),
     ).fetchone()
     if record is None:
-        # No receipt is not success, but neither is there a source result to
-        # disclose from this producer. The verifier will retain unknown.
+        # A tool without any durable result remains unknown. Completion and
+        # cached-resolution paths can already have output and skip verify(),
+        # so missing authority must not turn those paths into a read bypass.
+        has_output = (
+            row["output_ref"]
+            or conn.execute(
+                """SELECT 1 FROM plan_step_output_versions WHERE step_id=?
+            AND json_extract(evidence_json,'$.step_run_id')=? LIMIT 1""",
+                (row["step_id"], run_id),
+            ).fetchone()
+        )
+        if has_output and _legacy_output_is_sensitive(conn, row):
+            raise PermissionError(
+                "敏感原输出缺少绑定本次调用的读取授权凭据，不能恢复完成。"
+            )
         return
     try:
         body = _authenticated_body(settings, record, path)

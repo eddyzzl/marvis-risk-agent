@@ -16,9 +16,11 @@ from marvis.governance.native_producers import KIND, _path
 from marvis.orchestrator.evidence import payload_hash
 from test_event_runtime import runtime, prepare, gated_plan, approve
 import test_decision_twin_event_batch as batches
+from test_decision_twin_batch import batch as ordinary_batch  # noqa: F401
+from test_reference_decision import packaged  # noqa: F401
 
 
-def _lose_return(app, monkeypatch, tool_ref, on_commit=None):
+def _lose_return(app, monkeypatch, tool_ref, on_commit=None, *, fail=True):
     original = app.state.tool_runner._finalize_effect_result
     observed = {"calls": 0}
 
@@ -29,7 +31,10 @@ def _lose_return(app, monkeypatch, tool_ref, on_commit=None):
             observed["output"] = result.output
             if on_commit is not None:
                 on_commit()
-            raise RuntimeError("synthetic host return lost after actual worker commit")
+            if fail:
+                raise RuntimeError(
+                    "synthetic host return lost after actual worker commit"
+                )
         return result
 
     monkeypatch.setattr(app.state.tool_runner, "_finalize_effect_result", lose)
@@ -44,6 +49,7 @@ def _case(
     before_dispatch=False,
     unbound=False,
     cancelled=False,
+    completion_loss=False,
 ):
     rt = runtime.__wrapped__(tmp_path)
     if kind == "reconciliation":
@@ -112,8 +118,20 @@ def _case(
         assert response.status_code == 200, response.text
 
     observed = _lose_return(
-        rt.app, monkeypatch, tool_ref, cancel_after_commit if cancelled else None
+        rt.app,
+        monkeypatch,
+        tool_ref,
+        cancel_after_commit if cancelled else None,
+        fail=not completion_loss,
     )
+    if completion_loss:
+
+        def lose_completion(*args):
+            raise RuntimeError("synthetic interrupted completion after durable output")
+
+        monkeypatch.setattr(
+            rt.app.state.plan_executor._reviewer, "deterministic_check", lose_completion
+        )
     if before_dispatch or unbound:
         import marvis.plugins.runner as module
 
@@ -123,6 +141,7 @@ def _case(
             if (job["module"], job["entrypoint"]) in {
                 ("marvis.packs.risk_context.tools", "tool_replay_events"),
                 ("marvis.packs.decision_twin.tools", "tool_replay_history"),
+                ("marvis.packs.decision_twin.tools", "tool_reconcile_history"),
             }:
                 if before_dispatch:
                     raise subprocess.TimeoutExpired("synthetic never-started-worker", 1)
@@ -132,11 +151,16 @@ def _case(
         monkeypatch.setattr(module, "_run_worker", changed)
     failed = run()
     assert failed["status"] == ("cancelled" if cancelled else "failed"), failed
-    target = next(t for t in failed["reconciliation"]["targets"] if t["kind"] == "tool")
+    target = next(
+        t
+        for t in failed["reconciliation"]["targets"]
+        if t["kind"] == ("completion" if completion_loss else "tool")
+    )
     assert target["supported"] is True
     step = failed["steps"][0]
     runs = rt.app.state.plan_repo.list_step_runs(step["id"])
-    assert len(runs) == 1 and runs[0]["output_ref"] is None
+    assert len(runs) == 1
+    assert (runs[0]["output_ref"] is not None) == completion_loss
     return SimpleNamespace(
         rt=rt,
         task_id=task_id,
@@ -434,3 +458,86 @@ def test_internal_native_receipt_is_not_a_generic_download(tmp_path, monkeypatch
     read = case.observed["output"]["evidence_url"]
     assert case.rt.maker.get(read).status_code == 200
     assert case.rt.other.get(read).status_code == 403
+
+
+@pytest.mark.parametrize("kind", ["event", "batch", "reconciliation"])
+def test_legacy_sensitive_output_without_invocation_receipt_cannot_skip_read_guard(
+    tmp_path, monkeypatch, kind
+):
+    case = _case(tmp_path, monkeypatch, kind, unbound=True, completion_loss=True)
+    assert _records(case) == []
+    assert case.run["output_ref"] is not None
+    fresh, maker = _fresh(case, monkeypatch)
+    other = TestClient(fresh)
+    other.cookies.update(case.rt.other.cookies)
+    for client in (other, TestClient(fresh), maker):
+        for endpoint in ("reconcile", "resume-completion"):
+            response = client.post(
+                f"/api/plans/{case.plan['id']}/{endpoint}",
+                json={"target_id": case.target["id"]},
+            )
+            assert response.status_code == 403, response.text
+    assert (
+        case.rt.app.state.plan_repo.load_plan(case.plan["id"]).status.value == "failed"
+    )
+
+
+def test_missing_receipt_file_cannot_skip_cached_resolution_read_guard(
+    tmp_path, monkeypatch
+):
+    case = _case(tmp_path, monkeypatch, cancelled=True)
+    response = case.rt.maker.post(
+        f"/api/plans/{case.plan['id']}/reconcile", json={"target_id": case.target["id"]}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["reconciliation_result"]["outcome"] == "applied"
+    assert response.json()["plan"]["status"] == "cancelled"
+    Path(_records(case)[0]["path"]).unlink()
+    for client in (case.rt.other, case.rt.maker):
+        for endpoint in ("reconcile", "resume-completion"):
+            response = client.post(
+                f"/api/plans/{case.plan['id']}/{endpoint}",
+                json={"target_id": case.target["id"]},
+            )
+            assert response.status_code == 403, response.text
+    assert (
+        case.rt.app.state.plan_repo.load_plan(case.plan["id"]).status.value
+        == "cancelled"
+    )
+
+
+def test_ordinary_legacy_batch_without_source_scope_keeps_completion(
+    ordinary_batch, monkeypatch  # noqa: F811
+):
+    app, material, contract, _, _ = ordinary_batch
+    client = TestClient(app)
+    ctx = SimpleNamespace(
+        rt=SimpleNamespace(maker=client), material=material, contract=contract
+    )
+    import marvis.plugins.runner as module
+
+    original = module._run_worker
+
+    def legacy(python, job, **kwargs):
+        return original(
+            python, {k: v for k, v in job.items() if k != "invocation_id"}, **kwargs
+        )
+
+    def interrupted(*args):
+        raise RuntimeError("synthetic interrupted ordinary completion")
+
+    monkeypatch.setattr(module, "_run_worker", legacy)
+    monkeypatch.setattr(
+        app.state.plan_executor._reviewer, "deterministic_check", interrupted
+    )
+    failed = batches.run(ctx, batches.proposal(ctx))
+    assert failed["status"] == "failed", failed
+    target = next(
+        t for t in failed["reconciliation"]["targets"] if t["kind"] == "completion"
+    )
+    fresh = TestClient(create_app(app.state.settings))
+    response = fresh.post(
+        f"/api/plans/{failed['id']}/reconcile", json={"target_id": target["id"]}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["plan"]["status"] == "done", response.text
