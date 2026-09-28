@@ -439,3 +439,27 @@ Vintage 平台原本明确要求回复“材料已上传”，但路由只收到
 `254c305d` 将冻结事件 recipe 接入模型/纯规则包，逐次申请提交完整原生证据引用，主体身份来自实际 session。主 HTTP 在幂等读前检查当前来源授权，准入后 worker 校验签名收据、来源 hash、完整主体/时点合同，并重放原生事件；不能外填派生事件值。未知覆盖按包内 review/reject 降级，安装审计只暴露执行状态/hash，避免给无来源权限的人展示主体评估。
 
 94 项联合检查和最后 2 项真实 HTTP→人工门→ToolRunner→安装激活→决定→CLI 重启→撤权检查通过，日志 `operations-runtime-20260927/reference-decision/event-binding-{final,last}-tests.log`。旧无事件包/请求哈希契约保持。历史批量逐行事件绑定继续开发，未把本地决定称为机构部署或生产 SLO。17 个工作包和 22 项发现未删减，整体保持进行中。
+
+## WP07 清洗和受治理训练共享真实成员边界
+
+`9fa64ed4` 认证既有清洗 producer 的不可变 run、产物、源表和结果绑定，重命名、筛选、转换、去重和逐行派生保留适用的字段时点；填充值没有参数可得时点则保持未知。46 项联合检查通过。`c25441a0` 修复另一训练入口遗漏：受治理 Strategy 训练也用原生 V2 全表成员掩码校验历史预处理拟合成员，不能用源表的 train 标签代替。全量拟合和“源 train 实际属于 V2 验证集”两例先复现成功训练，再验证修复后拒绝；无原生证据的输入不升级为已认证。
+
+新增证据读取曾重新绑定 source_path，导致已冻结样本设计失效；改为保留原文件绑定的认证快照。独立审阅指出临时整表读取会破坏宽表内存边界，最终复用 retained-descriptor 校验读取 Parquet schema，仅投影比对时加载相关列。136 项快照、清洗、时点、拟合成员和原生训练检查通过，Ruff/diff 通过。日志 `feature-time-20260929/{cleaning-joined,governed-red-fixed-fixture,governed-fixed,governed-joined,governed-schema-final}.log` 保留真实失败和修复。普通 JOIN、拟合参数历史时点及真实历史业务验收仍开放。
+
+## WP09–10 纯规则界面、拒绝和影子回滚
+
+`82811b19` 补齐 checker/admin 的终止拒绝与理由审计；拒绝后不能安装、激活。影子与正式回滚绑定各自当前指针和前驱，不互相改变服务。36 项相关检查和主线事件/治理 45 项通过，真实 CLI、原生模型和浏览器十项旅程通过。`0276fd99` 增加纯规则构包，明确字段类型与空值政策，默认动作策略可用空请求合同；全程无需发现模型或请求模型 readiness，score=null 显示不适用。26 项相关检查、真实纯规则构包→审批→worker 安装→激活→决定通过，晚到旧 readiness 不污染切换后的类型。
+
+实际 1440/1600/1920 截图及证据在 `production-ui-20260928/run-1790612756/proof.json`、`rule-run-1790613639/proof.json`，模型兼容复核在 `run-1790613786/proof.json`。使用本机 Python Playwright 承载真实浏览器，未使用不可用的 Browser plugin；仅证明本地参考运行。
+
+## WP12–13 历史事件逐行回放与发现的下载旁路
+
+`3dcc7f83` 将每行原生事件引用与独立主体命名空间/token、决策时点和冻结包 recipe 对齐。HTTP 真实 session actor 写入签名提案，工具仅执行已审核提案；准备、执行、详情和导出重查当前授权。缺引用、主体/时点/hash 错误、撤权及篡改阻断整批；只有认证后的未知覆盖走包内 review/reject，保持原分母，时间稳定性明确未知。97 项联合检查通过，JSON/XLSX/DOCX 实际文件解析通过。日志在 `operations-runtime-20260927/reference-decision/event-batch-20260929/pytest-run1.log`。
+
+来源受限的批量回执由 domain 路由检查权限，两个通用下载路由对无角色、跨 actor、撤权均拒绝。继续沿源链检查却复现既有 `risk_event_features` 原生收据经通用产物路由撤权后仍返回 200；已分配独立权限修复，不能将批量回执私有目录视为该旁路已经关闭。
+
+## WP01 正常策略真实模型首轮失败保留
+
+`5004a46e` 增加独立正常策略 case，通过明确人工样本选择/语义输入、原生 workspace CAS 和既有采纳审批；旧两例、九例、正常建模的 case/expected/数据/预算字节全部保持。70 项 runtime 检查通过，真实 HTTP fixture 两计划九工具和文档交付完成，拒绝采纳时采纳/文档工具均不执行。冻结 cases SHA 为 `1ec965a101a39a82f8673a89307815be50415ff1b50d8a64e48e390fcdba45a3`，expected SHA 为 `65298e9bce23f83906f91ebfeeae68f9ab3371e894790af3df3ef81043d6328e`。
+
+真实模型源 `4de23581` 首轮 0/1，20.979 秒、4 次模型请求；两条明确的策略请求均在独立 reviewer 被标记 requests_change=true，router 则为 false，安全门阻断，零 Plan。报告在 `normal-strategy-20260929/real-model-runs/20260928T165503740738Z-a46a47ac1af9/report.json`。独立固定十例语义诊断同源 7/10，三个肯定请求全失败，七个否定/条件/修改/注入反例均拒绝；该诊断不替换正式 case 分母。正在修复意图定义，失败记录与预算保持原样。全部证据根为 `/Users/eddyz/.codex/work-artifacts`。
