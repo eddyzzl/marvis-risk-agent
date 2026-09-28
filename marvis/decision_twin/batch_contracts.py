@@ -1,8 +1,10 @@
 """Explicit historical contracts; v1's complete observed scenarios stay strict."""
 
+from datetime import datetime
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from marvis.decision_twin._canonical import content_hash, parse_datetime
 
@@ -99,6 +101,73 @@ class HistoricalConstraint(StrictContract):
     unit: str = Field(min_length=1, max_length=80)
 
 
+class HistoricalTimeWindow(StrictContract):
+    name: str = Field(min_length=1, max_length=80)
+    start: str
+    end: str
+
+    @model_validator(mode="after")
+    def ordered(self):
+        if parse_datetime(self.start, "window.start") >= parse_datetime(
+            self.end, "window.end"
+        ):
+            raise ValueError("temporal window must have start < end")
+        return self
+
+
+class TemporalThresholds(StrictContract):
+    max_score_psi: float = Field(ge=0)
+    max_action_psi: float = Field(ge=0)
+    max_absolute_approval_rate_delta: float = Field(ge=0, le=1)
+
+
+class HistoricalTemporalStability(StrictContract):
+    """User-declared, half-open windows for descriptive temporal drift only."""
+
+    timezone: str = Field(min_length=1, max_length=80)
+    reference_window: HistoricalTimeWindow
+    comparison_windows: list[HistoricalTimeWindow] = Field(min_length=1, max_length=24)
+    minimum_reference_rows: int = Field(ge=2)
+    minimum_comparison_rows: int = Field(ge=2)
+    bin_count: int = Field(ge=2, le=20)
+    thresholds: TemporalThresholds
+    policy_source_ref: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def unambiguous(self):
+        try:
+            zone = ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("temporal timezone must be a known IANA timezone") from exc
+        windows = [self.reference_window, *self.comparison_windows]
+        if len({w.name for w in windows}) != len(windows):
+            raise ValueError("temporal window names must be unique")
+        intervals = []
+        for window in windows:
+            bounds = []
+            for value in (window.start, window.end):
+                at = parse_datetime(value, "window boundary")
+                supplied = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                local = at.astimezone(zone)
+                if supplied.utcoffset() != local.utcoffset() or supplied.replace(
+                    tzinfo=None
+                ) != local.replace(tzinfo=None):
+                    raise ValueError(
+                        "temporal boundary offset must match the declared timezone"
+                    )
+                bounds.append(at)
+            intervals.append(tuple(bounds))
+        reference_end = intervals[0][1]
+        if any(start < reference_end for start, _ in intervals[1:]):
+            raise ValueError(
+                "comparison windows must follow the complete reference window"
+            )
+        ordered = sorted(intervals)
+        if any(left[1] > right[0] for left, right in zip(ordered, ordered[1:])):
+            raise ValueError("temporal windows must not overlap")
+        return self
+
+
 class HistoricalReplayRequest(StrictContract):
     schema_version: Literal["decision_twin.batch_request.v2"] = (
         "decision_twin.batch_request.v2"
@@ -117,6 +186,7 @@ class HistoricalReplayRequest(StrictContract):
     capacity: HistoricalCapacity | None = None
     observed_actions: HistoricalActions | None = None
     constraints: list[HistoricalConstraint] = Field(default_factory=list, max_length=20)
+    temporal_stability: HistoricalTemporalStability | None = None
 
     @model_validator(mode="after")
     def unique(self):
@@ -130,7 +200,26 @@ class HistoricalReplayRequest(StrictContract):
             raise ValueError("exactly one baseline and challenger are required")
         if len({s.name for s in self.scenarios}) != len(self.scenarios):
             raise ValueError("scenario names must be unique")
+        if self.temporal_stability:
+            as_of = parse_datetime(self.as_of, "as_of")
+            windows = [
+                self.temporal_stability.reference_window,
+                *self.temporal_stability.comparison_windows,
+            ]
+            if any(parse_datetime(w.end, "window.end") > as_of for w in windows):
+                raise ValueError(
+                    "temporal window extends after the historical as_of cutoff"
+                )
         return self
+
+    @model_serializer(mode="wrap")
+    def historical_wire(self, handler):
+        payload = handler(self)
+        # Preserve every byte-bearing field of previously published v2 contracts.
+        # Absence and explicit null add no temporal assertion or receipt identity.
+        if self.temporal_stability is None:
+            payload.pop("temporal_stability", None)
+        return payload
 
     @property
     def contract_hash(self):

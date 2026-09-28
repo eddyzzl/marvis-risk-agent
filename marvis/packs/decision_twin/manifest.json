@@ -1,6 +1,6 @@
 {
   "name": "decision_twin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "display_name": "Historical Decision Twin",
   "description": "认证历史决策包回放、同人群比较与外部成熟现金流对账。仅证据提案，无部署权限。",
   "module": "marvis.packs.decision_twin.tools",
@@ -129,6 +129,17 @@
                 "maxItems": 20,
                 "title": "Constraints",
                 "type": "array"
+              },
+              "temporal_stability": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HistoricalTemporalStability"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             },
             "required": [
@@ -440,6 +451,121 @@
               "package_hash"
             ],
             "title": "HistoricalScenario",
+            "type": "object"
+          },
+          "HistoricalTemporalStability": {
+            "additionalProperties": false,
+            "description": "User-declared, half-open windows for descriptive temporal drift only.",
+            "properties": {
+              "timezone": {
+                "maxLength": 80,
+                "minLength": 1,
+                "title": "Timezone",
+                "type": "string"
+              },
+              "reference_window": {
+                "$ref": "#/$defs/HistoricalTimeWindow"
+              },
+              "comparison_windows": {
+                "items": {
+                  "$ref": "#/$defs/HistoricalTimeWindow"
+                },
+                "maxItems": 24,
+                "minItems": 1,
+                "title": "Comparison Windows",
+                "type": "array"
+              },
+              "minimum_reference_rows": {
+                "minimum": 2,
+                "title": "Minimum Reference Rows",
+                "type": "integer"
+              },
+              "minimum_comparison_rows": {
+                "minimum": 2,
+                "title": "Minimum Comparison Rows",
+                "type": "integer"
+              },
+              "bin_count": {
+                "maximum": 20,
+                "minimum": 2,
+                "title": "Bin Count",
+                "type": "integer"
+              },
+              "thresholds": {
+                "$ref": "#/$defs/TemporalThresholds"
+              },
+              "policy_source_ref": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Policy Source Ref",
+                "type": "string"
+              }
+            },
+            "required": [
+              "timezone",
+              "reference_window",
+              "comparison_windows",
+              "minimum_reference_rows",
+              "minimum_comparison_rows",
+              "bin_count",
+              "thresholds",
+              "policy_source_ref"
+            ],
+            "title": "HistoricalTemporalStability",
+            "type": "object"
+          },
+          "HistoricalTimeWindow": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "maxLength": 80,
+                "minLength": 1,
+                "title": "Name",
+                "type": "string"
+              },
+              "start": {
+                "title": "Start",
+                "type": "string"
+              },
+              "end": {
+                "title": "End",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "start",
+              "end"
+            ],
+            "title": "HistoricalTimeWindow",
+            "type": "object"
+          },
+          "TemporalThresholds": {
+            "additionalProperties": false,
+            "properties": {
+              "max_score_psi": {
+                "minimum": 0,
+                "title": "Max Score Psi",
+                "type": "number"
+              },
+              "max_action_psi": {
+                "minimum": 0,
+                "title": "Max Action Psi",
+                "type": "number"
+              },
+              "max_absolute_approval_rate_delta": {
+                "maximum": 1,
+                "minimum": 0,
+                "title": "Max Absolute Approval Rate Delta",
+                "type": "number"
+              }
+            },
+            "required": [
+              "max_score_psi",
+              "max_action_psi",
+              "max_absolute_approval_rate_delta"
+            ],
+            "title": "TemporalThresholds",
             "type": "object"
           }
         }

@@ -18,6 +18,7 @@ from marvis.decision_twin._canonical import (
 )
 from marvis.decision_twin.artifacts import ContentAddressedAuditStore
 from marvis.decision_twin.batch_contracts import HistoricalReplayRequest
+from marvis.decision_twin.temporal import bind_temporal_population
 from marvis.reference_decision.contracts import DecisionError
 from marvis.reference_decision.packages import PackageStore
 from marvis.repositories.datasets import DatasetRepository
@@ -233,6 +234,10 @@ class BatchMaterial:
             "package_time_scope": "retrospective_policy_simulation",
             "causal_gain_verified": False,
         }
+        if contract.temporal_stability is not None:
+            proposal["temporal_population"] = bind_temporal_population(
+                records, contract.temporal_stability
+            ).to_dict()
         proposal["proposal_hash"] = content_hash(proposal)
         return binding, records, proposal
 

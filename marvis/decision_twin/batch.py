@@ -24,6 +24,10 @@ from marvis.decision_twin.batch_material import (
     scalar,
     timestamp,
 )
+from marvis.decision_twin.temporal import (
+    bind_temporal_population,
+    measure_temporal_stability,
+)
 from marvis.packs.strategy.economics import pricing_metrics
 from marvis.reference_decision.contracts import DecisionError
 from marvis.reference_decision.evaluation import evaluate
@@ -174,6 +178,11 @@ def replay_batch(
     binding, records, proposal = material.prepare(contract)
     if not hmac.compare_digest(proposal_hash, proposal["proposal_hash"]):
         raise DecisionError("historical_proposal_stale", 409)
+    temporal_population = (
+        None
+        if contract.temporal_stability is None
+        else bind_temporal_population(records, contract.temporal_stability)
+    )
     scenarios = []
     for scenario in contract.scenarios:
         decisions = []
@@ -216,6 +225,15 @@ def replay_batch(
                 ),
                 **contract.capacity.model_dump(),
             }
+        if temporal_population is not None:
+            metrics["stability"] = measure_temporal_stability(
+                records,
+                decisions,
+                contract.temporal_stability,
+                population=temporal_population,
+                package_hash=scenario.package_hash,
+                score_product=manifest["configuration"]["score_product"],
+            )
         scenarios.append(
             {
                 **scenario.model_dump(),

@@ -9,6 +9,40 @@ from openpyxl import Workbook
 from marvis.spreadsheet_safety import safe_xlsx_cell
 
 
+def _temporal_rows(payload):
+    """Project signed values only; rendering never recomputes a drift metric."""
+    rows = []
+    for scenario in payload.get("scenarios", []):
+        result = scenario["metrics"].get("stability", {})
+        if result.get("schema_version") != "decision_twin.temporal_stability.v1":
+            continue
+        reference = result["reference"]["window"]
+        for comparison in result["comparisons"]:
+            window = comparison["window"]
+            for check in comparison["checks"]:
+                rows.append(
+                    (
+                        scenario["name"],
+                        result["verdict"],
+                        reference["name"],
+                        reference["sample_count"],
+                        reference["members_hash"],
+                        window["name"],
+                        window["start"],
+                        window["end"],
+                        window["sample_count"],
+                        window["members_hash"],
+                        check["metric"],
+                        check["value"],
+                        check["threshold"],
+                        check["unit"],
+                        check["status"],
+                        check["reason"],
+                    )
+                )
+    return rows
+
+
 def render_historical_replay(receipt, format):
     payload = receipt["payload"]
     facts = [
@@ -46,6 +80,7 @@ def render_historical_replay(receipt, format):
         "package_hash",
     )
     stream = BytesIO()
+    temporal_rows = _temporal_rows(payload)
     if format == "xlsx":
         workbook = Workbook()
         sheet = workbook.active
@@ -73,6 +108,30 @@ def render_historical_replay(receipt, format):
                             safe_xlsx_cell(encoded[offset : offset + 30_000]),
                         ]
                     )
+        if temporal_rows:
+            temporal = workbook.create_sheet("时间稳定性")
+            temporal.append(
+                [
+                    "scenario",
+                    "verdict",
+                    "reference_window",
+                    "reference_count",
+                    "reference_members_hash",
+                    "comparison_window",
+                    "start",
+                    "end",
+                    "comparison_count",
+                    "comparison_members_hash",
+                    "metric",
+                    "value",
+                    "threshold",
+                    "unit",
+                    "status",
+                    "reason",
+                ]
+            )
+            for row in temporal_rows:
+                temporal.append([safe_xlsx_cell(value) for value in row])
         decisions = workbook.create_sheet("逐笔回放")
         decisions.append(list(columns))
         for row in rows:
@@ -119,6 +178,29 @@ def render_historical_replay(receipt, format):
                     indent=2,
                 )
             )
+        if temporal_rows:
+            document.add_heading("时间稳定性检查", 1)
+            document.add_paragraph(
+                "分箱仅由参考窗拟合；本检查描述历史分布变化，不证明历史部署、样本外效果或因果增益。缺乏支持的检查保留 unknown。"
+            )
+            table = document.add_table(rows=1, cols=6)
+            for cell, value in zip(
+                table.rows[0].cells,
+                ("方案", "对照窗", "指标", "结果", "阈值", "状态 / 原因"),
+                strict=True,
+            ):
+                cell.text = value
+            for row in temporal_rows:
+                values = (
+                    row[0],
+                    row[5],
+                    row[10],
+                    row[11],
+                    row[12],
+                    row[14] + (" / " + row[15] if row[15] else ""),
+                )
+                for cell, value in zip(table.add_row().cells, values, strict=True):
+                    cell.text = "unknown" if value is None else str(value)
         # Complete row evidence is retained in the canonical JSON / Excel; the
         # narrative export explicitly states its summary scope.
         document.add_paragraph(
