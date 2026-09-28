@@ -479,3 +479,7 @@ Vintage 平台原本明确要求回复“材料已上传”，但路由只收到
 代码检查发现步骤审查与最终总结共用仅要求 passed/reasons 的提示词，首轮请求未提供两者各自的结构，错误类型还可能被拆成字符列表。`e9109ecb` 从首轮开始传独立 typed schema，并在解析端拒绝类型错误；最多重试一次，保留旧最小 summary 返回与未配置模型的手动模式。CRITIC_SYS 升至 v2，LLM 仍只能提供解释，不能改写确定性业务验收。17 项新增测试先红，修复后 228 项审查、完成协议、执行器、业务验收及 LLM 传输检查通过，Ruff/diff 通过。首次扩大回归因 basetemp 父目录缺失产生 109 项 setup error；修正运行环境后全过，未把环境失败隐去。日志 `/Users/eddyz/.codex/work-artifacts/reviewer-contract-red.log`、`reviewer-contract-green.log` 和 `reviewer-contract-20260929/green-run2.log`。
 
 独立正常建模案例正在源 `e473f53a` 复跑，未改原案例、预算或 expected；此前 provider 上报 2049/2048 token 的严格预算失败继续保留。主线权限修复另通过 20 项事件/批量回放/来源权限检查，日志 `operations-runtime-20260927/reference-decision/event-batch-20260929/mainline-acl.log`。
+
+正常建模原案例在 `e473f53a` 通过 1/1，12 步 done、13 条断言过，178.146 秒、24 次模型尝试和 127 次 HTTP 均符合原预算。6 次输出上限空响应仍记录；两次运行不能证明普遍性能提升，首轮 0/1 不覆盖。报告 `normal-modeling-20260928/reviewer-schema-real-model-runs/20260928T172915986322Z-53029500cbe3/report.json`，两轮绑定比对 `reviewer-schema-diagnostic.json`。该源码正在执行原九例跨流程回归。
+
+实际 attempt receipt 未带提示词 name/version 的既有缺口由 `1b786c6c` 补齐，首轮和重试均引用注册值，42 项审查/提示词检查通过；这项 telemetry 补充没有合入正在运行的冻结源码，未倒填旧回执。
