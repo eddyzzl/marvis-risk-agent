@@ -1346,12 +1346,12 @@ def test_modeling_rejects_out_of_range_oot_ks_min(client: TestClient, tmp_path: 
 
 
 @pytest.mark.slow
-def test_modeling_fails_final_review_when_oot_ks_min_unmet_in_manual_mode(client: TestClient, tmp_path: Path):
-    """An unreachable oot_ks_min (manual mode: no LLM, so a criteria failure cannot
-    be auto-replanned — the executor's LLMSettingsError fallback lets the plan
-    surface the deterministic failure instead) drives the plan to FAILED with the
-    success-criteria open item, proving the injected criterion is actually
-    evaluated by final_review (not just stored)."""
+def test_modeling_legacy_oot_criterion_stays_unverified_after_execution(client: TestClient, tmp_path: Path):
+    """A legacy candidate-max threshold lacks an adopted business contract.
+
+    Real manual execution may finish, but neither candidate metrics nor a
+    completed plan can turn that unbound criterion into business acceptance.
+    """
     src = _sample_dir(tmp_path, n=300)
     task_id = client.post("/api/tasks", json={
         "model_name": "不可达成功标准",
@@ -1380,11 +1380,22 @@ def test_modeling_fails_final_review_when_oot_ks_min_unmet_in_manual_mode(client
 
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     final_plan = plans[0]
-    assert final_plan.status.value == "failed"
+    assert final_plan.status.value == "done"
+    assert final_plan.success_criteria == [{
+        "metric": "oot_ks", "min": 0.999, "aggregate": "max",
+        "label": "OOT KS", "target_type": "binary",
+    }]
     summary = client.app.state.plan_repo.load_plan_summary(
         client.app.state.plan_repo.latest_plan_summary_ref(final_plan.id)
     )
-    assert any("OOT KS" in item for item in summary["open_items"])
+    assert summary["execution_completed"] is True
+    assert summary["goal_met"] is False
+    business = summary["business_acceptance"]
+    assert business["status"] == "insufficient_evidence"
+    assert business["objective"] is None
+    assert business["target"] is None
+    assert summary["open_items"] == business["reasons"]
+    assert any("旧成功标准" in item for item in summary["open_items"])
 
 
 @pytest.mark.slow
