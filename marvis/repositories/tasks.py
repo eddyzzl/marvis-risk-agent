@@ -348,7 +348,14 @@ class TaskRepository:
 
     def delete_task(self, task_id: str) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            try:
+                cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            except sqlite3.IntegrityError as exc:
+                if str(exc) == "collection_reference_evidence_retained":
+                    raise ConflictError(
+                        "collection_reference_evidence_retained: 此任务包含跨任务频次和容量所需的催收参考证据，不能删除。请保留为历史证据；未完成批次可经审批取消以释放预约，取消后证据仍须保留。"
+                    ) from exc
+                raise
             if cursor.rowcount == 0:
                 raise KeyError(f"Task not found: {task_id}")
 
@@ -458,7 +465,14 @@ class TaskRepository:
         conn.execute("DELETE FROM sub_agents WHERE parent_task_id = ?", (task_id,))
         conn.execute("DELETE FROM draft_runs WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM draft_tools WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        try:
+            conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        except sqlite3.IntegrityError as exc:
+            if str(exc) == "collection_reference_evidence_retained":
+                raise ConflictError(
+                    "collection_reference_evidence_retained: 此任务包含跨任务频次和容量所需的催收参考证据，不能删除。请保留为历史证据；未完成批次可经审批取消以释放预约，取消后证据仍须保留。"
+                ) from exc
+            raise
         cleanup_pending = bool(
             conn.execute(
                 """

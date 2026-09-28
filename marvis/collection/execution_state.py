@@ -65,6 +65,10 @@ def ensure_execution_schema(db_path):
             effect_id TEXT PRIMARY KEY, invocation_id TEXT NOT NULL UNIQUE,
             task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
             batch_id TEXT NOT NULL, payload_json TEXT NOT NULL, signature TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS collection_reference_task_retention
+        BEFORE DELETE ON tasks
+        WHEN EXISTS(SELECT 1 FROM collection_queue_items WHERE task_id=OLD.id)
+        BEGIN SELECT RAISE(ABORT,'collection_reference_evidence_retained'); END;
         """)
         for table in (
             "collection_queue_items",

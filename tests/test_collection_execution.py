@@ -27,6 +27,7 @@ from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.strategy import StrategyRepository
+from marvis.state_machine import ConflictError
 from tests.test_collection_batches import batch as batch
 from tests.test_collection_cashflows import ledger as ledger
 from tests.test_collection_planning import spec
@@ -602,3 +603,205 @@ def test_review_queue_keeps_unestimated_cost_unknown(batch):
             ]
         )
         assert item["estimated_cost_minor"] is None
+
+
+@pytest.mark.parametrize("checkpoint", ["before_native_verify", "after_native_verify"])
+def test_atomic_producer_failure_rolls_back_then_fences_late_worker(
+    batch, monkeypatch, checkpoint
+):
+    import marvis.collection.execution as execution
+
+    c = reserve(governed(batch))
+    original = execution.verify_output
+
+    def fail(*args, **kwargs):
+        if checkpoint == "after_native_verify":
+            original(*args, **kwargs)
+        raise RuntimeError("producer checkpoint failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(execution, "verify_output", fail)
+        with pytest.raises(RuntimeError, match="checkpoint"):
+            _execute(c.inputs, c.ctx, "queue_batch")
+    with connect(c.settings.db_path) as conn:
+        assert (
+            conn.execute("SELECT count(*) FROM collection_queue_items").fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute("SELECT count(*) FROM collection_native_effects").fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM task_artifacts WHERE kind='collection_reference_execution'"
+            ).fetchone()[0]
+            == 0
+        )
+    assert not list(
+        (c.settings.tasks_dir / c.task / "collection").glob("execution-*.json")
+    )
+    assert c.governance.verify_producer_outcome(c.runid)["outcome"] == "unknown"
+    restarted = GovernanceRepository(
+        c.settings.db_path, runtime_generation="after-checkpoint-failure"
+    )
+    restarted.reconcile_startup()
+    assert restarted.verify_producer_outcome(c.runid)["outcome"] == "not_applied_fenced"
+    with pytest.raises(ValueError, match="not_committable"):
+        _execute(c.inputs, c.ctx, "queue_batch")
+
+
+def test_original_collection_receipt_verifier_is_read_only(batch):
+    c = governed(batch)
+    output = apply(c)
+    with connect(c.settings.db_path) as conn:
+        denied = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
+        conn.set_authorizer(
+            lambda op, *args: sqlite3.SQLITE_DENY if op in denied else sqlite3.SQLITE_OK
+        )
+        outcome = c.governance.verify_producer_outcome(c.runid, conn=conn)
+    assert outcome["outcome"] == "applied"
+    assert outcome["output"] == output
+
+
+@pytest.mark.parametrize("committed", [True, False])
+def test_existing_http_reconciler_restores_original_collection_or_fenced_retry(
+    batch, committed
+):
+    from marvis.orchestrator.reconciliation import register_governed_outcome_verifier
+    from tests.test_trusted_reconciliation import _client_for
+    from tests.test_orch_completion import CountingReviewer, _hooks
+    from tests.test_orch_executor import FakeRunner, _executor
+
+    c = governed(batch)
+    if committed:
+        result = invoke(c)
+        assert result.ok, result
+        output = result.output
+    else:
+        reserve(c)
+    restarted = GovernanceRepository(
+        c.settings.db_path, runtime_generation="collection-restart"
+    )
+    restarted.reconcile_startup()
+    c.plans.finish_step_run(
+        c.runid,
+        status="interrupted",
+        error_kind="unknown_effect",
+        error="host lost worker return",
+    )
+    plan = c.plans.load_plan(c.binding.plan_id)
+    step = plan.steps[0]
+    step.status, step.error = (
+        StepStatus.FAILED,
+        "unknown effect requires original producer proof",
+    )
+    c.plans.update_step(step)
+    c.plans.set_plan_status(plan.id, PlanStatus.FAILED)
+    runner = FakeRunner([])
+    executor = _executor(
+        c.plans, runner, hooks=_hooks(c.plans), reviewer=CountingReviewer()
+    )
+    register_governed_outcome_verifier(executor.reconciler.verifiers, restarted)
+    client = _client_for(c.plans, executor)
+    target = client.get("/api/plans/" + plan.id).json()["plan"]["reconciliation"][
+        "targets"
+    ][0]
+    assert target["supported"] is True
+    response = client.post(
+        "/api/plans/" + plan.id + "/reconcile", json={"target_id": target["id"]}
+    )
+    assert response.status_code == 200, response.text
+    if committed:
+        assert response.json()["plan"]["status"] == "done"
+        assert c.plans.load_step_output(step.id) == output
+        assert c.plans.list_step_runs(step.id)[0]["status"] == "succeeded"
+    else:
+        assert (
+            c.plans.latest_failed_step_run_error_kind(step.id)
+            == "execution_not_applied"
+        )
+        assert c.plans.retry_failed_step(plan.id, step.id) == [step.id]
+        assert not c.plans.is_step_confirmed(step.id)
+        assert restarted.get_approval(c.grant.approval.id).state.value == "revoked"
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("state", ["queued", "completed", "cancelled"])
+def test_reference_reservations_survive_attempted_task_deletion(batch, state):
+    from marvis.repositories.tasks import TaskRepository
+
+    c = governed(batch)
+    apply(c)
+    if state != "queued":
+        apply(
+            governed(
+                batch,
+                "execute_reference" if state == "completed" else "cancel_batch",
+                request=c.request,
+            )
+        )
+    repo = TaskRepository(c.settings.db_path)
+    before = c.governance.verify_producer_outcome(c.runid)
+    # Both normal repository paths and direct SQL deletion must fail atomically.
+    for action in (lambda: repo.delete_task(c.task), lambda: repo.purge_task(c.task)):
+        with pytest.raises(
+            (sqlite3.IntegrityError, ConflictError),
+            match="collection_reference_evidence_retained",
+        ):
+            action()
+    with connect(c.settings.db_path) as conn:
+        with pytest.raises(
+            sqlite3.IntegrityError, match="collection_reference_evidence_retained"
+        ):
+            conn.execute("DELETE FROM tasks WHERE id=?", (c.task,))
+        assert (
+            conn.execute("SELECT count(*) FROM collection_queue_items").fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM task_artifacts WHERE task_id=?", (c.task,)
+            ).fetchone()[0]
+            >= 2
+        )
+    assert c.governance.verify_producer_outcome(c.runid) == before
+    other = another_task(batch)
+    second = governed(other, request=other[2])
+    assert apply(second)["action_count"] == (1 if state == "cancelled" else 0)
+
+
+def test_proposal_without_reference_reservations_remains_deletable(batch):
+    from marvis.repositories.tasks import TaskRepository
+
+    store, task, request, actors = batch
+    CollectionExecutor(store.settings)
+    store.prepare(task, request, actors["maker"])
+    TaskRepository(store.settings.db_path).delete_task(task)
+    with connect(store.settings.db_path) as conn:
+        assert (
+            conn.execute("SELECT count(*) FROM collection_batches").fetchone()[0] == 0
+        )
+
+
+def test_failed_purge_cannot_release_capacity_for_another_subject_task(batch):
+    from marvis.repositories.tasks import TaskRepository
+
+    c = governed(batch)
+    apply(c)
+    with pytest.raises(ConflictError, match="collection_reference_evidence_retained"):
+        TaskRepository(c.settings.db_path).purge_task(c.task)
+    other = another_task(batch, token="b" * 64, namespace="independent", capacity=1)
+    second = governed(other, request=other[2])
+    output = apply(second)
+    assert output["action_count"] == 0
+    with connect(c.settings.db_path) as conn:
+        receipt = json.loads(
+            conn.execute(
+                "SELECT payload_json FROM collection_native_effects WHERE invocation_id=?",
+                (second.runid,),
+            ).fetchone()[0]
+        )
+    assert receipt["facts"]["held"] == [
+        {"case_id": "case-1", "reason": "live_queue_capacity"}
+    ]
