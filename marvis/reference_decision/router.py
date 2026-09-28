@@ -10,7 +10,7 @@ from marvis.reference_decision.contracts import (
     DecisionRequest,
     PackageBuildRequest,
 )
-from marvis.reference_decision.readiness import package_readiness
+from marvis.reference_decision.readiness import package_readiness, rule_package_readiness
 
 
 router = APIRouter(prefix="/api/reference-decision", tags=["reference-decision"])
@@ -99,10 +99,18 @@ def build_package(payload: PackageBuildRequest, request: Request):
 
 
 @router.get("/readiness")
-def readiness(request: Request, model_artifact_id: str = Query(min_length=1, max_length=160),
+def readiness(request: Request, model_artifact_id: str | None = Query(default=None, min_length=1, max_length=160),
+              package_kind: Literal["model", "rule_only"] = "model",
               strategy_id: str | None = Query(default=None, min_length=1, max_length=160),
               strategy_version: int | None = Query(default=None, ge=1)):
     _current_principal(request)
+    if package_kind == "rule_only":
+        if model_artifact_id is not None or strategy_id is None or strategy_version is None:
+            raise HTTPException(422, detail={"code": "rule_readiness_requires_strategy_only"})
+        return rule_package_readiness(service(request).packages, strategy_id=strategy_id,
+                                      strategy_version=strategy_version)
+    if model_artifact_id is None:
+        raise HTTPException(422, detail={"code": "model_artifact_id_required"})
     return package_readiness(service(request).packages, model_artifact_id,
                              strategy_id=strategy_id, strategy_version=strategy_version)
 

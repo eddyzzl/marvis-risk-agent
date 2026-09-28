@@ -184,3 +184,23 @@ def test_mismatched_strategy_version_never_advertises_authenticated_package(pack
     )
     assert result["state"] == "blocked"
     assert result["reason_codes"] == ["strategy_not_ready"]
+
+
+def test_rule_readiness_requires_no_model_or_score_and_discovers_fields(packaged, monkeypatch):
+    from marvis.repositories.modeling import ModelingRepository
+
+    app, _, request, *_ = packaged
+    client = TestClient(app)
+    _claim_role(app, client, "maker")
+    monkeypatch.setattr(ModelingRepository, "get_model_artifact", lambda *a: pytest.fail("rule readiness queried model"))
+    params = {"package_kind": "rule_only", "strategy_id": request.strategy_id,
+              "strategy_version": request.strategy_version}
+    response = client.get("/api/reference-decision/readiness", params=params)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] == "authenticated" and body["model"] is None
+    assert body["raw_requirements"] == [{"name": "pd", "type": None, "nullable": None, "declaration_required": True}]
+    assert body["score_field_candidates"] == body["score_products"] == []
+    assert "score_field" not in body["build_requires_explicit_declaration"]
+    assert client.get("/api/reference-decision/readiness", params={**params, "model_artifact_id": "fake"}).status_code == 422
+    assert client.get("/api/reference-decision/readiness", params={**params, "strategy_version": 999}).json()["state"] == "blocked"

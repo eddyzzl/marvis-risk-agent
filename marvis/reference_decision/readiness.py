@@ -13,7 +13,7 @@ from marvis.packs.strategy.dsl import parse_strategy_spec
 from marvis.packs.strategy.evaluator import _expression_fields
 from marvis.production_governance.errors import GovernanceConflict, GovernanceNotFound
 from marvis.production_governance.repository import _strategy_binding_tx
-from marvis.reference_decision.contracts import DecisionError
+from marvis.reference_decision.contracts import DecisionError, RulePackageRequest
 from marvis.reference_decision.features import feature_outputs
 from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.modeling import ModelingRepository
@@ -35,10 +35,8 @@ def required_raw_fields(model_fields, steps, source_names):
     return sorted(required), sorted(outputs), sorted(generated)
 
 
-def package_readiness(
-    store, model_artifact_id, *, strategy_id=None, strategy_version=None
-):
-    result = {
+def _readiness_result():
+    return {
         "schema_version": "reference-decision-readiness.v1",
         "state": "blocked",
         "build_ready": False,
@@ -64,6 +62,12 @@ def package_readiness(
         ],
         "declaration_authority": "package_request_requires_user_confirmation",
     }
+
+
+def package_readiness(
+    store, model_artifact_id, *, strategy_id=None, strategy_version=None
+):
+    result = _readiness_result()
     try:
         repo = ModelingRepository(store.settings.db_path)
         artifact = repo.get_model_artifact(model_artifact_id)
@@ -219,4 +223,33 @@ def package_readiness(
         result["reason_codes"] = ["strategy_not_ready"]
     except (FeatureError, ValueError, RuntimeError, KeyError, OSError, TypeError):
         result["reason_codes"] = ["package_source_evidence_invalid"]
+    return result
+
+
+def rule_package_readiness(store, *, strategy_id, strategy_version):
+    result = _readiness_result()
+    result.update(
+        package_kind="rule_only", producer={"state": "not_required", "artifact_id": None},
+        preprocessing={"state": "not_required", "receipt_ids": [], "source_binding": None},
+        build_requires_explicit_declaration=["raw_schema.types", "raw_schema.nullable", "decision_node"],
+    )
+    try:
+        request = RulePackageRequest(package_kind="rule_only", strategy_id=strategy_id,
+            strategy_version=strategy_version, decision_node="readiness", raw_schema=[])
+        strategy, spec = store._strategy(request)
+        fields = sorted({f for rule in spec.rules for f in _expression_fields(rule.condition)})
+        if any(name.startswith("__marvis_") for name in fields):
+            raise DecisionError("rule_only_platform_inputs_require_native_binding")
+        result.update(
+            state="authenticated", strategy_input_fields=fields,
+            raw_requirements=[{"name": name, "type": None, "nullable": None,
+                               "declaration_required": True} for name in fields],
+            strategy={"id": strategy_id, "version": strategy_version,
+                      "content_hash": strategy["strategy_content_hash"]},
+            reason_codes=["serving_input_contract_requires_declaration"],
+        )
+    except DecisionError as exc:
+        result["reason_codes"] = [exc.code]
+    except (GovernanceConflict, GovernanceNotFound, ValueError):
+        result["reason_codes"] = ["strategy_not_ready"]
     return result
