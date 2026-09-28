@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import BinaryIO
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from marvis.api_task_helpers import get_task_or_404
@@ -73,7 +73,9 @@ def list_strategy_artifacts(task_id: str, request: Request) -> dict:
                     candidate=path,
                     records=registry_records,
                 )
-            if integrity_failures[path] is not None:
+            if integrity_failures[path] is not None or _scoped_artifact_domain(
+                settings=settings, candidate=path, records=registry_records
+            ):
                 path = None
         artifact_id = str(row.get("id") or "")
         filename = _artifact_filename(row.get("path"))
@@ -165,7 +167,9 @@ def list_task_artifacts(task_id: str, request: Request) -> dict:
                     candidate=path,
                     records=registry_records,
                 )
-            if integrity_failures[path] is not None:
+            if integrity_failures[path] is not None or _scoped_artifact_domain(
+                settings=settings, candidate=path, records=registry_records
+            ):
                 path = None
         artifact_id = str(row.get("id") or "")
         content_hash = str(row.get("content_hash") or "")
@@ -206,11 +210,16 @@ def download_task_artifact(
         raise not_found("task artifact not found")
     if expected_content_hash is not None and (
         len(expected_content_hash) != 64
-        or any(character not in "0123456789abcdef" for character in expected_content_hash)
+        or any(
+            character not in "0123456789abcdef" for character in expected_content_hash
+        )
         or not isinstance(row.get("content_hash"), str)
         or not hmac.compare_digest(expected_content_hash, row["content_hash"])
     ):
         raise conflict("task artifact expected content hash changed")
+    domain = _restricted_row_domain(row)
+    if domain:
+        _require_domain_route(domain)
     path = _available_task_artifact_path(
         settings=settings,
         task_id=task_id,
@@ -290,6 +299,11 @@ def _verified_artifact_snapshot(
     required_content_size: object = None,
 ) -> tuple[BinaryIO, int]:
     registry_records = _registered_artifact_records(settings=settings)
+    domain = _scoped_artifact_domain(
+        settings=settings, candidate=candidate, records=registry_records
+    )
+    if domain:
+        _require_domain_route(domain)
     try:
         if required_content_hash is not None and not isinstance(
             required_content_hash,
@@ -375,10 +389,17 @@ def _enforce_registered_artifact_integrity(
 ) -> None:
     """Fail closed when a generic path has an immutable registry identity."""
 
+    records = _registered_artifact_records(settings=settings)
+    domain = _scoped_artifact_domain(
+        settings=settings, candidate=candidate, records=records
+    )
+    if domain:
+        _require_domain_route(domain)
     failure = _artifact_path_integrity_failure(
         settings=settings,
         task_id=task_id,
         candidate=candidate,
+        records=records,
     )
     if failure is not None:
         raise conflict(failure)
@@ -508,12 +529,12 @@ def _registered_artifact_records(*, settings) -> list[dict[str, object]]:
     with connect(settings.db_path) as conn:
         rows = conn.execute(
             """
-            SELECT 'strategy' AS registry, s.task_id, a.path,
+            SELECT 'strategy' AS registry, s.task_id, a.path, a.kind, NULL AS origin_tool,
                    a.content_hash, a.content_size, a.provenance_json
               FROM strategy_artifacts a
               JOIN strategies s ON s.id = a.strategy_id
             UNION ALL
-            SELECT 'task' AS registry, task_id, path, content_hash,
+            SELECT 'task' AS registry, task_id, path, kind, origin_tool, content_hash,
                    NULL AS content_size, provenance_json
               FROM task_artifacts
             """
@@ -532,6 +553,8 @@ def _registered_artifact_records(*, settings) -> list[dict[str, object]]:
         records.append(
             {
                 "registry": str(row["registry"]),
+                "kind": str(row["kind"]),
+                "origin_tool": row["origin_tool"],
                 "task_id": str(row["task_id"]),
                 "content_hash": row["content_hash"],
                 "content_size": row["content_size"],
@@ -540,6 +563,64 @@ def _registered_artifact_records(*, settings) -> list[dict[str, object]]:
             }
         )
     return records
+
+
+def _restricted_row_domain(record: dict) -> str | None:
+    """Source assessments require the domain's current grant, not a file hash.
+
+    Match the producer and kind together. Ordinary artifacts retain their
+    existing download contract, including ordinary historical batch receipts.
+    """
+    pair = (record.get("kind"), record.get("origin_tool"))
+    provenance = record.get("provenance")
+    if provenance is None:
+        try:
+            provenance = json.loads(record.get("provenance_json") or "{}")
+        except (ValueError, TypeError):
+            provenance = {}
+    if not isinstance(provenance, dict):
+        provenance = {}
+    task = quote(str(record.get("task_id") or ""), safe="")
+    if pair in {
+        ("risk_event_features", "risk_context.replay_events.v1"),
+        ("risk_source_receipt", "risk_context.source_query.v1"),
+    }:
+        surface = "risk-events" if pair[0] == "risk_event_features" else "risk-sources"
+        request = quote(str(provenance.get("request_id") or ""), safe="")
+        return f"/api/tasks/{task}/{surface}/requests/{request}/evidence"
+    if (
+        pair[0] in {"decision_twin_batch_replay", "decision_twin_batch_reconciliation"}
+        and pair[1] == "decision_twin.historical_replay.v2"
+        and provenance.get("event_scoped") is True
+    ):
+        identity = quote(str(record.get("content_hash") or ""), safe="")
+        return f"/api/tasks/{task}/decision-twin/{identity}"
+    return None
+
+
+def _scoped_artifact_domain(*, settings, candidate, records=None):
+    # Scope follows every registry alias of the resolved file, just as integrity
+    # does. An ordinary alias cannot downgrade an existing source restriction.
+    for record in _registered_artifact_records_for_path(
+        settings=settings, candidate=candidate, records=records
+    ):
+        domain = _restricted_row_domain(record)
+        if domain:
+            return domain
+    return None
+
+
+def _require_domain_route(domain):
+    # Generic downloads have no reviewed source-grant context. Reuse the existing
+    # domain endpoint rather than inventing a second authorization mechanism.
+    raise HTTPException(
+        403,
+        detail={
+            "code": "source_scoped_artifact_requires_domain_route",
+            "evidence_url": domain,
+            "next_action": "通过证据入口提供当前有效的来源授权后查看或导出",
+        },
+    )
 
 
 def _artifact_filename(stored_path: object) -> str:

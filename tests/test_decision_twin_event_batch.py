@@ -231,7 +231,7 @@ def assert_private(ctx, record, clients):
             "/api/artifacts/" + relative + "/preview",
         ):
             response = client.get(route)
-            assert response.status_code == 404, (
+            assert response.status_code == (403 if route == ordinary else 404), (
                 route,
                 response.status_code,
                 response.text[:100],
