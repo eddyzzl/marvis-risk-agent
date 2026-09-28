@@ -10,6 +10,7 @@ from marvis.reference_decision.contracts import (
     DecisionRequest,
     PackageRequest,
 )
+from marvis.reference_decision.readiness import package_readiness
 
 
 router = APIRouter(prefix="/api/reference-decision", tags=["reference-decision"])
@@ -95,6 +96,15 @@ def build_package(payload: PackageRequest, request: Request):
         }
     except (DecisionError, GovernanceConflict) as exc:
         public_error(exc)
+
+
+@router.get("/readiness")
+def readiness(request: Request, model_artifact_id: str = Query(min_length=1, max_length=160),
+              strategy_id: str | None = Query(default=None, min_length=1, max_length=160),
+              strategy_version: int | None = Query(default=None, ge=1)):
+    _current_principal(request)
+    return package_readiness(service(request).packages, model_artifact_id,
+                             strategy_id=strategy_id, strategy_version=strategy_version)
 
 
 @router.get("/packages")
