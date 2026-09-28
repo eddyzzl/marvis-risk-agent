@@ -193,10 +193,11 @@ def _legacy_rule_projection(rule) -> StrategyRule:
         "limit": "limit",
         "pricing": "price",
         "segment": "segment",
+        "collection": "collection",
     }[action.type]
     value = (
         action.value
-        if action.type in {"limit", "pricing", "segment"}
+        if action.type in {"limit", "pricing", "segment", "collection"}
         else action.output_value
     )
     return StrategyRule(

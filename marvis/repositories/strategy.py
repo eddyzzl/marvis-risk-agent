@@ -2697,6 +2697,37 @@ def _rules_with_spec_identity(
 
 
 def _assert_strategy_matches_spec(strategy: Strategy, spec: StrategySpec) -> None:
+    if spec.schema_version == "strategy.dsl.v2" and spec.strategy_type == "collection":
+        # Collection has no V1 legacy representation. Its display projection must
+        # still match every canonical field, including the complete typed action.
+        from marvis.packs.strategy.strategy import build_strategy_from_spec
+
+        projected = build_strategy_from_spec(spec)
+
+        def payload(value):
+            rules = [asdict(rule) for rule in value.rules]
+            for rule in rules:
+                rule["condition"] = json.loads(rule["condition"])
+            return json.dumps(
+                {
+                    "strategy_type": value.strategy_type,
+                    "default_decision": value.default_decision,
+                    "rules": rules,
+                },
+                sort_keys=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+
+        try:
+            matches = payload(strategy) == payload(projected)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                "strategy compatibility fields do not match canonical DSL"
+            ) from exc
+        if not matches:
+            raise ValueError("strategy compatibility fields do not match canonical DSL")
+        return
     compatibility_source = strategy
     if spec.default_action.type in {"limit", "pricing", "segment"}:
         compatibility_source = Strategy(
