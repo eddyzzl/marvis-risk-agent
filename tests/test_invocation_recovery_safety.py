@@ -47,9 +47,9 @@ def probe(inputs, ctx):
 '''
 
 
-def _runtime(tmp_path, *, effects=("write:artifact",)):
-    client = _client(tmp_path)
-    repo = client.app.state.plan_repo
+def _runtime(tmp_path, *, effects=("write:artifact",), repo=None):
+    client = _client(tmp_path) if repo is None else None
+    repo = client.app.state.plan_repo if repo is None else repo
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     plugin_root = tmp_path / "probe_plugin"
@@ -318,7 +318,20 @@ def test_registry_change_after_real_write_cannot_reclassify_failure_as_safe(tmp_
 def test_migration_36_to_37_does_not_invent_historical_invocation_contract(tmp_path, monkeypatch, old_status):
     with monkeypatch.context() as patch:
         patch.setattr(db_schema, "_MIGRATIONS", [item for item in db_schema._MIGRATIONS if item[0] <= 36])
-        _client_, repo, runner, _registry, effect = _runtime(tmp_path, effects=("read:input",))
+        # Install the real old schema. Modern TaskRepository writes later
+        # columns and cannot be used to manufacture a schema-36 task.
+        db_path = tmp_path / "app.sqlite"
+        db_schema.init_db(db_path)
+        with connect(db_path) as conn:
+            conn.execute(
+                """INSERT INTO tasks
+                   (id,model_name,model_version,validator,source_dir,status,status_message,created_at,updated_at)
+                   VALUES ('task-1','test','v1','qa',?,'draft','','2026-09-20','2026-09-20')""",
+                (str(tmp_path),),
+            )
+        _client_, repo, runner, _registry, effect = _runtime(
+            tmp_path, effects=("read:input",), repo=PlanRepository(db_path)
+        )
         _plan_, step = _create_probe_plan(repo, "read_return", status=StepStatus.RUNNING)
         with connect(repo.db_path) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 36
