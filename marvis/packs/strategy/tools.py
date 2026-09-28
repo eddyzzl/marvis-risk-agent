@@ -1867,6 +1867,17 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
     return payload
 
 
+def _sample_score_direction(inputs, sample_binding, score_col):
+    declared = normalize_score_direction(_optional_str(inputs.get("score_direction")))
+    frozen = sample_binding.score_direction_for(score_col)
+    if frozen is not None and declared is not None and frozen != declared:
+        raise StrategyError(
+            "score_direction contradicts the frozen historical score direction; "
+            "review and materialize a new sample contract before changing it"
+        )
+    return frozen or declared
+
+
 def tool_tradeoff_view(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     task_id = str(ctx.task_id)
@@ -1907,9 +1918,7 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
         target_col,
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
-    score_direction = normalize_score_direction(
-        _optional_str(inputs.get("score_direction"))
-    )
+    score_direction = _sample_score_direction(inputs, sample_binding, score_col)
     effective_direction = score_direction or "higher_is_better"
     points = tradeoff_view(
         frame,
@@ -2015,9 +2024,7 @@ def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
         target_col,
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
-    score_direction = normalize_score_direction(
-        _optional_str(inputs.get("score_direction"))
-    )
+    score_direction = _sample_score_direction(inputs, sample_binding, score_col)
     effective_direction = score_direction or "higher_is_better"
     red_flags: list[dict] = []
     # Direction self-check (S1a): a conflict is a red flag and blocks unless the

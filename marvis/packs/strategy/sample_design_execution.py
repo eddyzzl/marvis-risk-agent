@@ -163,6 +163,22 @@ class StrategyRiskDevelopmentExecutionBinding:
     def to_ref_dict(self) -> dict[str, str]:
         return self.reference.to_ref_dict()
 
+    def score_direction_for(self, score_col: str) -> str | None:
+        """Return the frozen native declaration only for its exact score field.
+
+        Legacy V1 sample contracts have no historical-score declaration. Their
+        existing explicit/default direction behavior therefore stays unchanged.
+        """
+        if self._native is None:
+            return None
+        historical = self._native.bundle["historical_score"]
+        if historical["status"] != "available" or historical["column"] != score_col:
+            return None
+        return {
+            "higher_is_riskier": "higher_is_riskier",
+            "lower_is_riskier": "higher_is_better",
+        }[historical["direction"]]
+
     @property
     def source_ref(self) -> dict[str, str]:
         if self._legacy is not None:
