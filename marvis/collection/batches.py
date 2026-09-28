@@ -111,7 +111,11 @@ class CollectionBatchStore:
         )
         if (
             content_hash(request) != row["request_hash"]
-            or content_hash(preview) != row["preview_hash"]
+            or preview.get("preview_hash") != row["preview_hash"]
+            or content_hash(
+                {key: value for key, value in preview.items() if key != "preview_hash"}
+            )
+            != row["preview_hash"]
             or request["batch_id"] != row["batch_id"]
             or not hmac.compare_digest(
                 row["signature"],
@@ -189,7 +193,7 @@ class CollectionBatchStore:
         )
         request_hash, preview_hash = (
             content_hash(request.model_dump()),
-            content_hash(preview),
+            preview["preview_hash"],
         )
         with connect(self.settings.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")

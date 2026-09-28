@@ -57,6 +57,7 @@ def test_proposal_is_authenticated_idempotent_and_not_an_approval(batch):
     assert result["status"] == "proposed" and result["revision"] == 1
     assert result["execution_authorized"] is False
     assert result["preview"]["live_capacity_reserved"] is False
+    assert result["preview_hash"] == result["preview"]["preview_hash"]
     assert result == store.prepare(task, request, actors["maker"])
     restarted = CollectionBatchStore(store.settings)
     assert result == restarted.read(task, request.batch_id, actors["checker"])
