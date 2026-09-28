@@ -62,6 +62,26 @@ def test_native_schema_remains_provider_field_without_duplicate_system_prompt(mo
     assert sent[0]["response_format"] == {"type": "json_schema", "json_schema": SCHEMA}
 
 
+@pytest.mark.parametrize("format_arg", [None, {"type": "json_object"}])
+def test_plain_text_profile_keeps_explicit_transport_choice(monkeypatch, format_arg):
+    sent = []
+    def provider(request, timeout):
+        body = json.loads(request.data)
+        sent.append(body)
+        if format_arg is None:
+            assert "response_format" not in body, "text-only provider rejects this field"
+        return Reply()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", provider)
+    OpenAICompatibleLLMClient(profile(structured_output="none")).complete(
+        system_prompt="s", user_prompt="u", json_schema=SCHEMA,
+        response_format=format_arg, stream=False,
+    )
+    assert json.loads(sent[0]["messages"][0]["content"].split("\n")[-1]) == SCHEMA
+    if format_arg is not None:
+        assert sent[0]["response_format"] == format_arg
+
+
 @pytest.mark.parametrize("structured_output", ["json_schema", "json_object"])
 def test_schema_counts_towards_context_before_any_provider_request(monkeypatch, structured_output):
     calls = []
