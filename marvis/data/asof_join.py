@@ -16,6 +16,7 @@ import pandas as pd
 from pydantic import Field
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.data.dataset_identity import dataset_identity_equal
 from marvis.data.asof_selection import AsOfSelection, select_asof_rows
 from marvis.data.contracts import Dataset
 from marvis.data.registry import DatasetRegistry
@@ -211,7 +212,7 @@ class AsOfJoinEngine:
         with self.registry.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._verify_sources_on_connection(conn, bindings, datasets)
-            if self.registry._repo.get_dataset_on_connection(conn, dataset_id) != dataset:
+            if not dataset_identity_equal(self.registry._repo.get_dataset_on_connection(conn, dataset_id), dataset):
                 raise ValueError("materialized dataset binding changed during verification")
             self.registry.resolve_verified_path(dataset_id)
             if sha256_file(resolved) != record["content_hash"]:

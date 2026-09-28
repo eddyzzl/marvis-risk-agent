@@ -15,6 +15,7 @@ from typing import Callable
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.data.dataset_identity import dataset_identity_equal
 from marvis.data.backend import DataBackend
 from marvis.data.authenticated_snapshot import (
     AuthenticatedSnapshotError,
@@ -787,7 +788,7 @@ class DatasetRegistry:
             raise DatasetContentDriftError(
                 dataset_id, reason=f"authenticated metadata failed: {exc.reason.value}",
             ) from exc
-        if row_count != dataset.row_count or self.get(dataset_id) != dataset:
+        if row_count != dataset.row_count or not dataset_identity_equal(self.get(dataset_id), dataset):
             raise DatasetContentDriftError(
                 dataset_id, reason="authenticated metadata differs from registration",
             )
