@@ -28,6 +28,38 @@ from marvis.plugins.schema_validation import validate_against_schema
 # constant so existing imports of CRITIC_SYS from here keep working unchanged.
 CRITIC_SYS = _CRITIC_SYS_SPEC.text
 
+# Explicit contracts are sent on the first request, including JSON-object-only
+# providers. The response parser still validates types locally.
+_CRITIQUE_SCHEMA = {
+    "name": "step_critique",
+    "strict": False,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "passed": {"type": "boolean"},
+            "reasons": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["passed", "reasons"],
+        "additionalProperties": False,
+    },
+}
+_NARRATIVE_SCHEMA = {
+    "name": "plan_review_summary",
+    "strict": False,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string", "minLength": 1},
+            "open_items": {"type": "array", "items": {"type": "string"}},
+            "goal_doubt": {"type": "boolean"},
+            "goal_met": {"type": ["boolean", "null"]},
+        },
+        # Keep legacy minimal summaries valid; omitted opinion is unknown.
+        "required": ["summary"],
+        "additionalProperties": False,
+    },
+}
+
 
 @dataclass
 class FinalReview:
@@ -97,6 +129,7 @@ class Reviewer:
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                json_schema=_CRITIQUE_SCHEMA,
                 caller="critic",
                 stream=False,
             )
@@ -110,6 +143,7 @@ class Reviewer:
                         '{"passed": true|false, "reasons": ["..."]}',
                     ),
                     response_format={"type": "json_object"},
+                    json_schema=_CRITIQUE_SCHEMA,
                     caller="critic",
                     stream=False,
                 )
@@ -171,10 +205,11 @@ class Reviewer:
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                json_schema=_NARRATIVE_SCHEMA,
                 caller="reviewer_summary",
                 stream=False,
             )
-            data, error = load_json_object(raw)
+            data = _parse_narrative(raw)
             if data is None:
                 raw = self._llm_factory().complete(
                     system_prompt=CRITIC_SYS,
@@ -184,23 +219,20 @@ class Reviewer:
                         '{"summary": "...", "open_items": [], "goal_doubt": false, "goal_met": true|false}',
                     ),
                     response_format={"type": "json_object"},
+                    json_schema=_NARRATIVE_SCHEMA,
                     caller="reviewer_summary",
                     stream=False,
                 )
-                data, error = load_json_object(raw)
+                data = _parse_narrative(raw)
         except Exception:
             return "Plan execution reviewed.", [], False, None
-        if not isinstance(data, dict) or error is not None:
+        if data is None:
             return "Plan execution reviewed.", [], False, None
-        summary = str(data.get("summary") or "Plan execution reviewed.")
-        open_items = [
-            str(item)
-            for item in data.get("open_items") or []
-            if isinstance(item, str)
-        ]
+        summary = data["summary"]
+        open_items = data.get("open_items", [])
         raw_goal_met = data.get("goal_met")
         llm_goal_met = raw_goal_met if isinstance(raw_goal_met, bool) else None
-        return summary, open_items, bool(data.get("goal_doubt", False)), llm_goal_met
+        return summary, open_items, data.get("goal_doubt", False), llm_goal_met
 
 
 def _is_reviewable_empty_screen_check(step: PlanStep, post_check: PostCheck) -> bool:
@@ -338,7 +370,7 @@ def _dig(value: dict, path: str):
 def _retry_json_prompt(original_prompt: str, raw_reply, expected_shape: str) -> str:
     return (
         f"{original_prompt}\n\n"
-        f"Previous reply was not parseable JSON:\n{raw_reply}\n\n"
+        f"Previous reply was not parseable JSON or did not match the output contract:\n{raw_reply}\n\n"
         f"Return only a JSON object matching this shape: {expected_shape}"
     )
 
@@ -347,17 +379,26 @@ def _parse_soft_verdict(raw) -> tuple[bool, list[str], bool]:
     data, error = load_json_object(raw)
     if data is None:
         return False, ["llm critique returned non-json"], False
-    if not isinstance(data, dict):
-        return False, ["llm critique returned non-object"], False
-    reasons = [
-        str(item)
-        for item in data.get("reasons") or []
-        if isinstance(item, str)
-    ]
-    passed = data.get("passed") is True
+    try:
+        validate_against_schema(data, _CRITIQUE_SCHEMA["schema"], label="step critique")
+    except SchemaValidationError:
+        return False, ["llm critique returned invalid schema"], False
+    reasons = data["reasons"]
+    passed = data["passed"]
     if passed and any(rejects_positive_decision(reason) for reason in reasons):
         passed = False
     return passed, reasons, error is None
+
+
+def _parse_narrative(raw) -> dict | None:
+    data, error = load_json_object(raw)
+    if data is None or error is not None:
+        return None
+    try:
+        validate_against_schema(data, _NARRATIVE_SCHEMA["schema"], label="review summary")
+    except SchemaValidationError:
+        return None
+    return data if data["summary"].strip() else None
 
 
 # AGT-3: final_review/llm_critique previously saw only key names (dict -> {"type":

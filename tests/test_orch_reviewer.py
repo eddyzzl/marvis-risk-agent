@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck, StepStatus
 from marvis.orchestrator.reviewer import FinalReview, Reviewer
@@ -296,3 +298,77 @@ def test_reviewer_llm_critique_retries_after_unparseable_reply():
     assert verdict.reasons == []
     assert len(llm.calls) == 2
     assert "Previous reply was not parseable JSON" in llm.calls[1]["user_prompt"]
+
+
+def test_review_calls_supply_distinct_typed_contracts_from_first_attempt():
+    done = _step([])
+    done.status = StepStatus.DONE
+    critic = SequencedLLM(["invalid", '{"passed": true, "reasons": []}'])
+    narrator = SequencedLLM(["invalid", '{"summary": "Reviewed."}'])
+    Reviewer(lambda: critic).llm_critique(done, {"ks": .42}, "finish")
+    Reviewer(lambda: narrator).final_review(_plan(done), {}, "finish")
+
+    for llm, name, required in (
+        (critic, "step_critique", ["passed", "reasons"]),
+        (narrator, "plan_review_summary", ["summary"]),
+    ):
+        assert len(llm.calls) == 2
+        assert llm.calls[0]["json_schema"] == llm.calls[1]["json_schema"]
+        assert llm.calls[0]["json_schema"]["name"] == name
+        assert llm.calls[0]["json_schema"]["schema"]["required"] == required
+        assert llm.calls[0]["json_schema"]["schema"]["additionalProperties"] is False
+
+
+@pytest.mark.parametrize("bad", [
+    {}, {"passed": "true", "reasons": []}, {"passed": 1, "reasons": []},
+    {"passed": True, "reasons": "needs review"},
+    {"passed": True, "reasons": [1]}, {"passed": True},
+    {"summary": "done"},
+])
+def test_critique_retries_wrong_shape_without_accepting_coerced_values(bad):
+    llm = SequencedLLM([json.dumps(bad), '{"passed": false, "reasons": ["Check evidence"]}'])
+    verdict = Reviewer(lambda: llm).llm_critique(_step([]), {}, "finish")
+    assert len(llm.calls) == 2
+    assert verdict.passed is False
+    assert verdict.reasons == ["Check evidence"]
+
+
+def test_malformed_critique_remains_soft_warning_after_bounded_retry():
+    llm = FakeLLM('{"passed": true, "reasons": "not approved"}')
+    verdict = Reviewer(lambda: llm).llm_critique(_step([]), {}, "finish")
+    assert len(llm.calls) == 2
+    assert verdict.passed is False
+    assert verdict.reasons == ["llm critique returned invalid schema"]
+
+
+@pytest.mark.parametrize("bad", [
+    {"passed": True, "reasons": []}, {"summary": {"ks": .42}},
+    {"summary": "done", "open_items": "needs review"},
+    {"summary": "done", "open_items": [False]},
+    {"summary": "done", "goal_doubt": "false"},
+    {"summary": "done", "goal_met": 1}, {"summary": "   "},
+])
+def test_narrative_retries_wrong_shape_and_preserves_deterministic_acceptance(bad):
+    done = _step([])
+    done.status = StepStatus.DONE
+    llm = SequencedLLM([json.dumps(bad), '{"summary": "Evidence unavailable.", "goal_met": null}'])
+    review = Reviewer(lambda: llm).final_review(_plan(done), {}, "finish")
+    assert len(llm.calls) == 2
+    assert review.summary == "Evidence unavailable."
+    assert review.explanation_status == "available"
+    assert review.llm_goal_met is None
+    assert review.execution_completed is True
+    assert review.goal_met is False
+    assert review.business_acceptance["status"] == "not_configured"
+
+
+def test_invalid_narrative_after_retry_is_unavailable_not_character_list():
+    done = _step([])
+    done.status = StepStatus.DONE
+    llm = FakeLLM('{"summary": "done", "open_items": "review me"}')
+    review = Reviewer(lambda: llm).final_review(_plan(done), {}, "finish")
+    assert len(llm.calls) == 2
+    assert review.explanation_status == "unavailable"
+    assert review.explanation_items == []
+    assert review.execution_completed is True
+    assert review.goal_met is False

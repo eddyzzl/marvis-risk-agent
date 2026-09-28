@@ -23,7 +23,7 @@ _LOCKED_HASHES = {
     "PLAN_SYS": (3, "3c6cfb356d591761"),
     "REPLAN_SYS": (3, "e4122cdc65809ab9"),
     "EXPLORE_SYS": (3, "815e9fe5eac70dbb"),
-    "CRITIC_SYS": (1, "b9aef8096c81cc56"),
+    "CRITIC_SYS": (2, "b3147a519b1572db"),
     "CLASSIFY_SYS": (1, "b74f7d825f9b1b10"),
     "GATE_SYSTEM_TEMPLATE": (1, "7ae1a3768ff2aaa6"),
     "GATE_INSTRUCTION_ROUTER_SYS": (7, "a217f6f1aeaade6a"),
