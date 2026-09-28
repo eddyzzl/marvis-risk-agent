@@ -1147,6 +1147,11 @@ def tool_materialize_project_context(inputs: dict, ctx) -> dict:
     return run_materialize_project_context(normalized, ctx, _runtime(ctx))
 
 
+def tool_bind_business_context(inputs: dict, ctx) -> dict:
+    from marvis.business_context import bind_business_context
+    return bind_business_context(inputs, ctx, _runtime(ctx))
+
+
 def tool_materialize_sample_design(inputs: dict, ctx) -> dict:
     """Freeze the exact active strategy sample boundary as immutable evidence."""
 
@@ -2737,6 +2742,13 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
     if strategy_meta is None:
         raise StrategyError(f"strategy not found: {strategy_id}")
     version = int(strategy_meta["version"])
+    business_measurement = None
+    if inputs.get("business_context_ref") is not None:
+        from marvis.business_context import strategy_business_measurement
+        business_measurement = strategy_business_measurement(runtime, task_id,
+            context_ref=inputs["business_context_ref"], sample_binding=adoption_sample_binding,
+            strategy_id=strategy_id, version=version, backtest_id=backtest_id,
+            metrics=dict(approval_metrics) if approval_metrics is not None else {})
     strategy_dir = Path(runtime.settings.tasks_dir) / task_id / "strategy"
     stem = f"{strategy_id}_v{version}"
 
@@ -2804,6 +2816,10 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
                     runtime.registry.resolve_path(source_dataset_id),
                     source_dataset_hash,
                 )
+            if business_measurement is not None:
+                checked = strategy_business_measurement(runtime, task_id, context_ref=inputs["business_context_ref"], sample_binding=adoption_sample_binding, strategy_id=strategy_id, version=version, backtest_id=backtest_id, metrics=dict(approval_metrics) if approval_metrics is not None else {})
+                if checked != business_measurement:
+                    raise StrategyError("business measurement changed during adoption")
             adopt_result = runtime.strategies.adopt_strategy_with_audit_on_connection(
                 conn,
                 strategy_id,
@@ -2902,6 +2918,7 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
                 "lifecycle_notice": "本地已采纳，不代表生产上线。",
                 "retired_strategy_ids": list(adopt_result["retired_strategy_ids"]),
                 "adoption_evidence": adoption_evidence,
+                **({"business_measurement": business_measurement} if business_measurement is not None else {}),
                 "monitoring_plan_id": plan_record.id,
                 "monitoring_plan_revision": plan_record.revision,
                 "monitoring_plan_hash": plan_record.payload_hash,

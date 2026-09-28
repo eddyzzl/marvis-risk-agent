@@ -698,7 +698,7 @@ def _load_modeling_training_evidence_artifacts(
         raise ModelingError(
             "training-evidence experiment was not found in this task"
         ) from exc
-    if experiment.task_id != normalized_task or experiment.status != "trained":
+    if experiment.task_id != normalized_task or experiment.status not in {"trained", "selected"}:
         raise ModelingError("training-evidence experiment is not trained in this task")
     if experiment.artifact_id != model_artifact_id:
         raise ModelingError("training-evidence experiment model binding changed")
@@ -2116,7 +2116,7 @@ def _require_experiment_row_on_connection(
         "task_id": binding.task_id,
         "recipe_id": binding.experiment.recipe_id,
         "artifact_id": binding.model_artifact.id,
-        "status": "trained",
+        "status": binding.experiment.status,
         "created_at": binding.experiment.created_at,
     }
     if any(str(row[key]) != value for key, value in expected_scalars.items()):

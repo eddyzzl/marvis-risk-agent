@@ -153,6 +153,16 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         artifact,
         base_dir=_artifact_base_dir(runtime.settings, experiment.task_id),
     )
+    business_context_ref = inputs.get("business_context_ref")
+    training_ref = inputs.get("training_evidence_ref")
+    if (business_context_ref is None) != (training_ref is None):
+        raise ModelingError("business_context_ref and training_evidence_ref must be provided together")
+    business_measurement = None
+    if business_context_ref is not None:
+        from marvis.business_context import model_business_measurement
+        business_measurement = model_business_measurement(runtime, ctx.task_id,
+            context_ref=business_context_ref, training_ref=training_ref,
+            experiment_id=selected_id, artifact_id=artifact_id)
     runtime.experiments.set_status(selected_id, "selected")
     pre_refit_metrics = {k: v for k, v in selected.items() if _is_metric_key(k) and v is not None}
     refit_requested = bool(inputs.get("refit_on_train_plus_test", True))
@@ -169,11 +179,15 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         dict.fromkeys([final_experiment_id, *experiment_ids])
     )
     final_metrics = refit_info.get("metrics") or pre_refit_metrics
+    if business_measurement is not None and (final_experiment_id != selected_id or final_artifact_id != artifact_id):
+        # Refit creates another model. Previous held-out evidence cannot certify it.
+        business_measurement = None
     ks_ci_note = _ks_ci_overlap_note(selected, rows, target_type=target_type)
     if ks_ci_note:
         selection_reason = f"{selection_reason} {ks_ci_note}"
     return {
         "selected_experiment_id": final_experiment_id,
+        **({"business_measurement": business_measurement} if business_measurement is not None else {}),
         "report_experiment_ids": report_experiment_ids,
         "artifact_id": final_artifact_id,
         "recipe": selected.get("recipe") or experiment.recipe_id,

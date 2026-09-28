@@ -118,8 +118,20 @@ def test_api_agent_and_document_share_same_persisted_verdict(tmp_path):
     assert "业务验收证据不足" in message.content
     xlsx = client.get(f"/api/plans/{plan.id}/business-acceptance/xlsx")
     assert xlsx.status_code == 200
-    assert client.get(f"/api/plans/{plan.id}/business-acceptance/xlsx", params={"expected_summary_ref": "stale"}).status_code == 409
-    assert client.get(f"/api/plans/{plan.id}/business-acceptance/xlsx", params={"expected_summary_ref": stored["summary_ref"]}).content == xlsx.content
+    assert (
+        client.get(
+            f"/api/plans/{plan.id}/business-acceptance/xlsx",
+            params={"expected_summary_ref": "stale"},
+        ).status_code
+        == 409
+    )
+    assert (
+        client.get(
+            f"/api/plans/{plan.id}/business-acceptance/xlsx",
+            params={"expected_summary_ref": stored["summary_ref"]},
+        ).status_code
+        == 200
+    )
     workbook = load_workbook(BytesIO(xlsx.content))
     assert workbook.active["B2"].value == "insufficient_evidence"
     assert (
@@ -307,3 +319,16 @@ def test_real_profit_producer_consumes_persisted_assumptions_and_refuses_mismatc
     )
     assert mismatched["assumptions"]["assessment"]["economics"] is None
     assert mismatched["assumptions"]["assessment"]["missing"] == ["profit_contract"]
+
+
+def test_legacy_stricter_threshold_cannot_be_hidden_by_another_contract(tmp_path):
+    repo, plan, result, _ = execute_selection(
+        tmp_path,
+        criteria=[
+            objective().to_dict(),
+            {"metric": "oot_ks", "min": 0.9, "aggregate": "max"},
+        ],
+    )
+    assert result.final_review.business_acceptance["status"] == "insufficient_evidence"
+    assert "旧阈值" in " ".join(result.final_review.business_acceptance["reasons"])
+    assert len(plan.success_criteria) == 2

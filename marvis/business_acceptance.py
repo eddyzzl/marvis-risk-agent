@@ -376,3 +376,80 @@ def acceptance_display_rows(result: dict) -> list[dict]:
         }
         for item in result["criteria"]
     ]
+
+
+def task_legacy_business_criteria(task) -> list[dict]:
+    """Keep explicit historic task thresholds visible beside the new contract."""
+    criteria = []
+    if getattr(task, "oot_ks_min", None) is not None:
+        criteria.append({"metric": "oot_ks", "min": task.oot_ks_min})
+    strategy = getattr(task, "strategy_input", None)
+    for field_name, metric, bound in (
+        ("max_bad_rate", "approved_bad_rate", "max"),
+        ("min_approval_rate", "approval_rate", "min"),
+    ):
+        value = getattr(strategy, field_name, None)
+        if value is not None:
+            criteria.append({"metric": metric, bound: value})
+    return criteria
+
+
+def require_objective_covers_legacy(objective, criteria):
+    """Only an explicit, equally strict ratio contract can subsume old limits.
+
+    Unknown units/aggregates and stricter historic limits require clarification;
+    they cannot disappear merely because another business objective exists.
+    """
+    by_metric = {item.metric: item for item in objective.criteria}
+    ratio_metrics = {
+        "oot_ks",
+        "test_ks",
+        "train_ks",
+        "oot_auc",
+        "test_auc",
+        "train_auc",
+        "approved_bad_rate",
+        "rejected_bad_rate",
+        "approval_rate",
+    }
+    for item in criteria:
+        if item.get("schema_version") == OBJECTIVE_VERSION:
+            continue
+        metric = item.get("metric")
+        criterion = by_metric.get(metric)
+        if (
+            set(item) - {"metric", "min", "max", "aggregate", "label", "target_type"}
+            or metric not in ratio_metrics
+            or criterion is None
+            or not objective.applicable
+            or criterion.unit != "ratio"
+            or criterion.comparison != "absolute"
+            or item.get("aggregate") not in {None, "max"}
+            or not (set(item) & {"min", "max"})
+        ):
+            raise ValueError(
+                f"旧阈值 {metric!r} 无法映射到业务验收合同，请明确统一指标、单位和阈值。"
+            )
+        for old_name, new_name, stricter in (
+            ("min", "minimum", lambda old, new: old > new),
+            ("max", "maximum", lambda old, new: old < new),
+        ):
+            if old_name not in item:
+                continue
+            value = _finite(item[old_name], f"legacy {metric}.{old_name}")
+            declared = getattr(criterion, new_name)
+            if declared is None or stricter(value, declared):
+                raise ValueError(
+                    f"旧阈值 {metric}.{old_name}={value:g} 更严格或与业务验收合同冲突，请先统一合同。"
+                )
+
+
+def bind_business_criteria(objective, criteria):
+    legacy = []
+    for item in criteria:
+        if item.get("schema_version") != OBJECTIVE_VERSION and item not in legacy:
+            legacy.append(dict(item))
+    if objective is None:
+        return legacy
+    require_objective_covers_legacy(objective, legacy)
+    return [objective.to_dict(), *legacy]

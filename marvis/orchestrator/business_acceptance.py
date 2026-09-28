@@ -2,8 +2,8 @@
 
 Only built-in adoption outputs identify the evaluated object. Candidate lists,
 LLM summaries and request-supplied evidence never participate in this selection.
-The current producers do not certify business population/period/maturity; those
-fields deliberately remain unavailable until a producer supplies that contract.
+Business facts are reconstructed only from the adopted producer's exact sample,
+training and independently declared context references.
 """
 
 from marvis.business_acceptance import (
@@ -11,7 +11,9 @@ from marvis.business_acceptance import (
     BusinessEvidence,
     BusinessObjective,
     evaluate_business_acceptance,
+    require_objective_covers_legacy,
 )
+from marvis.data.errors import DataLayerError
 from marvis.orchestrator.contracts import StepStatus
 from marvis.orchestrator.evidence import payload_hash
 
@@ -36,6 +38,7 @@ def review_business_acceptance(plan, repository):
         if len(configured) != 1:
             raise ValueError("a plan requires one business objective")
         objective = BusinessObjective.from_dict(configured[0])
+        require_objective_covers_legacy(objective, plan.success_criteria)
     except ValueError as exc:
         result = evaluate_business_acceptance(None, None)
         result.update(
@@ -84,11 +87,21 @@ def adopted_evidence(plan, repository, target_kind):
                     and measured.get("strategy_id") == target_id
                 ):
                     backtests.append(measured)
-            if len(backtests) != 1:
+            if output.get("business_measurement") is not None:
+                # Authenticated adoption below reloads its exact persisted backtest;
+                # a prior-plan backtest is valid without inventing a local candidate.
+                metrics = {}
+            elif len(backtests) == 1:
+                metrics = backtests[0].get("metrics") or backtests[0].get("risk") or {}
+            else:
                 return None
-            metrics = backtests[0].get("metrics") or backtests[0].get("risk") or {}
         if not target_id or target_version is None or not isinstance(metrics, dict):
             return None
+        from marvis.business_context import authenticated_business_fields
+
+        measured = authenticated_business_fields(
+            repository, plan.task_id, output, target_kind
+        )
         # Deliberately do not consume arbitrary measurement_context keys added
         # to an output by a plugin. Receipt authentication proves provenance,
         # not that a producer has measured every business claim.
@@ -98,9 +111,9 @@ def adopted_evidence(plan, repository, target_kind):
             target_version=str(target_version),
             source_ref=step.output_ref,
             source_hash=payload_hash(output),
-            metrics=dict(metrics),
+            **{"metrics": dict(metrics), **measured},
         )
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OSError, DataLayerError):
         return None
 
 

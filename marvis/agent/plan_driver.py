@@ -1637,16 +1637,22 @@ class PlanDriver:
         db_path = getattr(self._repo, "db_path", None)
         if db_path is not None:
             from marvis.repositories.tasks import TaskRepository
-            from marvis.business_acceptance import OBJECTIVE_VERSION
+            from marvis.business_acceptance import OBJECTIVE_VERSION, bind_business_criteria, task_legacy_business_criteria
             try:
-                objective = TaskRepository(db_path).get_task(task_id).business_objective
+                task = TaskRepository(db_path).get_task(task_id)
+                objective = task.business_objective
+                if objective is not None:
+                    plan.success_criteria.extend(task_legacy_business_criteria(task))
             except KeyError:
                 objective = None
             if objective is not None:
                 existing = [item for item in plan.success_criteria if item.get("schema_version") == OBJECTIVE_VERSION]
                 if existing and existing != [objective.to_dict()]:
                     raise DriverError("plan objective conflicts with persisted task contract")
-                plan.success_criteria = [objective.to_dict()]
+                try:
+                    plan.success_criteria = bind_business_criteria(objective, plan.success_criteria)
+                except ValueError as exc:
+                    raise DriverError(str(exc)) from exc
         if self._validator is not None:
             problems = self._validator.validate(plan)
             if problems:

@@ -2659,6 +2659,116 @@
           "eval_metric": {
             "type": "string",
             "minLength": 1
+          },
+          "business_context_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "training_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "sample_design_ref": {
+                "type": "object",
+                "properties": {
+                  "membership_artifact_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "expected_membership_artifact_content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "bundle_artifact_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "expected_bundle_artifact_content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "expected_bundle_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "expected_sample_design_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "expected_sample_design_content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "membership_artifact_id",
+                  "expected_membership_artifact_content_hash",
+                  "bundle_artifact_id",
+                  "expected_bundle_artifact_content_hash",
+                  "expected_bundle_id",
+                  "expected_sample_design_id",
+                  "expected_sample_design_content_hash"
+                ],
+                "additionalProperties": false
+              },
+              "model_binary_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_model_binary_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "evidence_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_evidence_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_experiment_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_model_artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_evidence_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_evidence_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "sample_design_ref",
+              "model_binary_artifact_id",
+              "expected_model_binary_artifact_content_hash",
+              "evidence_artifact_id",
+              "expected_evidence_artifact_content_hash",
+              "expected_experiment_id",
+              "expected_model_artifact_id",
+              "expected_evidence_id",
+              "expected_evidence_content_hash"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -2724,6 +2834,9 @@
           },
           "eval_metric": {
             "type": "string"
+          },
+          "business_measurement": {
+            "type": "object"
           }
         },
         "required": [

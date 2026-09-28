@@ -181,20 +181,22 @@ class ContextBudgetExhaustedError(ReplanError):
 
 
 class Planner:
-    def __init__(self, tool_registry, llm_factory, validator, *, business_objective_loader=None):
+    def __init__(self, tool_registry, llm_factory, validator, *, business_objective_loader=None, business_criteria_loader=None):
         self._tools = tool_registry
         self._llm_factory = llm_factory
         self._validator = validator
         self._business_objective_loader = business_objective_loader
+        self._business_criteria_loader = business_criteria_loader
 
     def _business_criteria(self, task_id, legacy_criteria):
-        from marvis.business_acceptance import OBJECTIVE_VERSION
+        from marvis.business_acceptance import bind_business_criteria
 
-        # The task owner configures the objective. Generated prose cannot relax
-        # thresholds, claim an exemption or substitute a candidate binding.
         objective = self._business_objective_loader(task_id) if self._business_objective_loader else None
-        legacy = [dict(item) for item in legacy_criteria if item.get("schema_version") != OBJECTIVE_VERSION]
-        return [objective.to_dict()] if objective is not None else legacy
+        persisted_limits = self._business_criteria_loader(task_id) if objective is not None and self._business_criteria_loader else []
+        try:
+            return bind_business_criteria(objective, [*legacy_criteria, *persisted_limits])
+        except ValueError as exc:
+            raise PlanningError(str(exc)) from exc
 
     def from_template(
         self,

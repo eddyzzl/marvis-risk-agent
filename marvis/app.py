@@ -820,11 +820,15 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
     intent_router = IntentRouter(router_llm_factory, app.state.tool_registry)
     def business_objective_loader(task_id):
         task = TaskRepository(settings.db_path).get_task(task_id)
-        strategy_input = task.strategy_input
-        return None if strategy_input is None else strategy_input.business_objective
+        return task.business_objective
+
+    def business_criteria_loader(task_id):
+        from marvis.business_acceptance import task_legacy_business_criteria
+        return task_legacy_business_criteria(TaskRepository(settings.db_path).get_task(task_id))
 
     planner = Planner(app.state.tool_registry, planner_llm_factory, plan_validator,
-                      business_objective_loader=business_objective_loader)
+                      business_objective_loader=business_objective_loader,
+                      business_criteria_loader=business_criteria_loader)
     reviewer = Reviewer(reviewer_llm_factory, plan_repository=plan_repo)
     harness_state = HarnessState(plan_repo)
 

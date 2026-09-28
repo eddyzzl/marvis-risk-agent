@@ -126,7 +126,7 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
         raise conflict(ACTIVE_JOB_DETAIL)
 
     try:
-        from marvis.business_acceptance import BusinessObjective, OBJECTIVE_VERSION
+        from marvis.business_acceptance import BusinessObjective, OBJECTIVE_VERSION, bind_business_criteria, task_legacy_business_criteria
 
         explicit_objective = (
             None if body.business_objective is None
@@ -161,7 +161,7 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
             existing = [item for item in plan.success_criteria if item.get("schema_version") == OBJECTIVE_VERSION]
             if existing and existing != [bound_objective.to_dict()]:
                 raise ValueError("plan objective conflicts with the persisted task contract")
-            plan.success_criteria = [bound_objective.to_dict()]
+            plan.success_criteria = bind_business_criteria(bound_objective, [*plan.success_criteria, *task_legacy_business_criteria(task)])
         entry_error = _strategy_plan_entry_error(plan)
         if entry_error is not None:
             raise unprocessable(entry_error)

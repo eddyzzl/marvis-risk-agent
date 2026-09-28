@@ -7,6 +7,186 @@
   "python_requires": ">=3.10,<3.14",
   "tools": [
     {
+      "name": "bind_business_context",
+      "summary": "Bind an explicit human business declaration to authenticated native sample membership; never infer objectives, dates, maturity or observed labels from a declaration.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_membership_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "bundle_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "declaration": {
+            "additionalProperties": false,
+            "properties": {
+              "business_line": {
+                "maxLength": 200,
+                "minLength": 1,
+                "title": "Business Line",
+                "type": "string"
+              },
+              "decision_node": {
+                "maxLength": 200,
+                "minLength": 1,
+                "title": "Decision Node",
+                "type": "string"
+              },
+              "population": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Population",
+                "type": "string"
+              },
+              "responsibility_source": {
+                "maxLength": 500,
+                "minLength": 1,
+                "title": "Responsibility Source",
+                "type": "string"
+              },
+              "partition": {
+                "enum": [
+                  "development",
+                  "validation",
+                  "oot"
+                ],
+                "title": "Partition",
+                "type": "string"
+              },
+              "currency": {
+                "anyOf": [
+                  {
+                    "maxLength": 20,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Currency"
+              },
+              "declared_label_origin": {
+                "default": "unknown",
+                "enum": [
+                  "observed",
+                  "reject_inferred",
+                  "assumed",
+                  "synthetic",
+                  "unknown"
+                ],
+                "title": "Declared Label Origin",
+                "type": "string"
+              }
+            },
+            "required": [
+              "business_line",
+              "decision_node",
+              "population",
+              "responsibility_source",
+              "partition"
+            ],
+            "title": "SampleBusinessDeclaration",
+            "type": "object"
+          }
+        },
+        "required": [
+          "sample_design_ref",
+          "declaration"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "business_context_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "declaration": {
+            "type": "object"
+          },
+          "notice": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "business_context_ref",
+          "declaration",
+          "notice"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_bind_business_context",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:task",
+        "read:dataset",
+        "write:artifact"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "build_scorecard_band_asset",
       "summary": "Build one complete immutable scorecard band asset from exact governed score evidence and sample-design bindings without selecting a cutoff, changing a Strategy Pool, applying, adopting, or deploying.",
       "input_schema": {
@@ -14713,6 +14893,24 @@
           "experiment_id": {
             "type": "string",
             "minLength": 1
+          },
+          "business_context_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "content_hash"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -14731,7 +14929,13 @@
           },
           "strategy_type": {
             "type": "string",
-            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+            "enum": [
+              "approval",
+              "reject",
+              "limit",
+              "pricing",
+              "segmentation"
+            ]
           },
           "backtest_id": {
             "type": "string",
@@ -14775,6 +14979,9 @@
             "items": {
               "type": "object"
             }
+          },
+          "business_measurement": {
+            "type": "object"
           }
         },
         "required": [
@@ -14816,7 +15023,10 @@
               },
               "partition": {
                 "type": "string",
-                "enum": ["development", "risk/development"]
+                "enum": [
+                  "development",
+                  "risk/development"
+                ]
               }
             },
             "required": [
@@ -14836,7 +15046,10 @@
               },
               "backtest_schema_version": {
                 "type": "string",
-                "enum": ["strategy.backtest.v1", "strategy.backtest.v2"]
+                "enum": [
+                  "strategy.backtest.v1",
+                  "strategy.backtest.v2"
+                ]
               },
               "backtest_id": {
                 "type": "string",
@@ -14848,7 +15061,13 @@
               },
               "strategy_type": {
                 "type": "string",
-                "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+                "enum": [
+                  "approval",
+                  "reject",
+                  "limit",
+                  "pricing",
+                  "segmentation"
+                ]
               },
               "source_dataset_id": {
                 "type": "string",
@@ -14856,8 +15075,12 @@
               },
               "source_dataset_content_hash": {
                 "anyOf": [
-                  {"$ref": "#/$defs/sha256"},
-                  {"type": "null"}
+                  {
+                    "$ref": "#/$defs/sha256"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "sample_design_ref": {
@@ -14871,23 +15094,39 @@
               },
               "baseline_effect_hash": {
                 "anyOf": [
-                  {"$ref": "#/$defs/sha256"},
-                  {"type": "null"}
+                  {
+                    "$ref": "#/$defs/sha256"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "target_col": {
-                "type": ["string", "null"]
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "population_count": {
-                "type": ["integer", "null"],
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "minimum": 0
               },
               "labeled_count": {
-                "type": ["integer", "null"],
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "minimum": 0
               },
               "label_coverage": {
-                "type": ["number", "null"],
+                "type": [
+                  "number",
+                  "null"
+                ],
                 "minimum": 0,
                 "maximum": 1
               },
@@ -14896,22 +15135,32 @@
               },
               "breakdown": {
                 "type": "array",
-                "items": {"type": "object"}
+                "items": {
+                  "type": "object"
+                }
               },
               "transitions": {
                 "type": "array",
-                "items": {"type": "object"}
+                "items": {
+                  "type": "object"
+                }
               },
               "economics": {
                 "type": "object",
-                "not": {"required": ["by_row"]}
+                "not": {
+                  "required": [
+                    "by_row"
+                  ]
+                }
               },
               "economics_input_evidence": {
                 "type": "object"
               },
               "warnings": {
                 "type": "array",
-                "items": {"type": "string"}
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": [
@@ -14939,28 +15188,62 @@
               {
                 "if": {
                   "properties": {
-                    "backtest_schema_version": {"const": "strategy.backtest.v1"}
+                    "backtest_schema_version": {
+                      "const": "strategy.backtest.v1"
+                    }
                   },
-                  "required": ["backtest_schema_version"]
+                  "required": [
+                    "backtest_schema_version"
+                  ]
                 },
                 "then": {
                   "properties": {
-                    "strategy_type": {"enum": ["approval", "reject"]},
-                    "baseline_effect_hash": {"type": "null"},
-                    "target_col": {"type": "null"},
-                    "population_count": {"type": "null"},
-                    "labeled_count": {"type": "null"},
-                    "label_coverage": {"type": "null"},
-                    "transitions": {"maxItems": 0},
-                    "economics_input_evidence": {"maxProperties": 0}
+                    "strategy_type": {
+                      "enum": [
+                        "approval",
+                        "reject"
+                      ]
+                    },
+                    "baseline_effect_hash": {
+                      "type": "null"
+                    },
+                    "target_col": {
+                      "type": "null"
+                    },
+                    "population_count": {
+                      "type": "null"
+                    },
+                    "labeled_count": {
+                      "type": "null"
+                    },
+                    "label_coverage": {
+                      "type": "null"
+                    },
+                    "transitions": {
+                      "maxItems": 0
+                    },
+                    "economics_input_evidence": {
+                      "maxProperties": 0
+                    }
                   }
                 },
                 "else": {
                   "properties": {
-                    "source_dataset_content_hash": {"$ref": "#/$defs/sha256"},
-                    "target_col": {"type": "string", "minLength": 1},
-                    "population_count": {"type": "integer", "minimum": 1},
-                    "labeled_count": {"type": "integer", "minimum": 1},
+                    "source_dataset_content_hash": {
+                      "$ref": "#/$defs/sha256"
+                    },
+                    "target_col": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "population_count": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "labeled_count": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
                     "label_coverage": {
                       "type": "number",
                       "exclusiveMinimum": 0,
@@ -14972,59 +15255,128 @@
               {
                 "if": {
                   "properties": {
-                    "strategy_type": {"const": "approval"},
-                    "backtest_schema_version": {"const": "strategy.backtest.v2"}
+                    "strategy_type": {
+                      "const": "approval"
+                    },
+                    "backtest_schema_version": {
+                      "const": "strategy.backtest.v2"
+                    }
                   },
-                  "required": ["strategy_type", "backtest_schema_version"]
+                  "required": [
+                    "strategy_type",
+                    "backtest_schema_version"
+                  ]
                 },
-                "then": {"properties": {"metrics": {"required": ["approve_bad_rate"]}}}
+                "then": {
+                  "properties": {
+                    "metrics": {
+                      "required": [
+                        "approve_bad_rate"
+                      ]
+                    }
+                  }
+                }
               },
               {
                 "if": {
                   "properties": {
-                    "strategy_type": {"const": "reject"},
-                    "backtest_schema_version": {"const": "strategy.backtest.v2"}
+                    "strategy_type": {
+                      "const": "reject"
+                    },
+                    "backtest_schema_version": {
+                      "const": "strategy.backtest.v2"
+                    }
                   },
-                  "required": ["strategy_type", "backtest_schema_version"]
+                  "required": [
+                    "strategy_type",
+                    "backtest_schema_version"
+                  ]
                 },
                 "then": {
                   "properties": {
-                    "metrics": {"required": ["bad_capture_rate", "good_reject_rate"]}
+                    "metrics": {
+                      "required": [
+                        "bad_capture_rate",
+                        "good_reject_rate"
+                      ]
+                    }
                   }
                 }
               },
               {
                 "if": {
-                  "properties": {"strategy_type": {"const": "limit"}},
-                  "required": ["strategy_type"]
+                  "properties": {
+                    "strategy_type": {
+                      "const": "limit"
+                    }
+                  },
+                  "required": [
+                    "strategy_type"
+                  ]
                 },
                 "then": {
                   "properties": {
-                    "metrics": {"required": ["mean_limit"]},
-                    "economics": {"required": ["expected_ead", "expected_loss"]}
+                    "metrics": {
+                      "required": [
+                        "mean_limit"
+                      ]
+                    },
+                    "economics": {
+                      "required": [
+                        "expected_ead",
+                        "expected_loss"
+                      ]
+                    }
                   }
                 }
               },
               {
                 "if": {
-                  "properties": {"strategy_type": {"const": "pricing"}},
-                  "required": ["strategy_type"]
+                  "properties": {
+                    "strategy_type": {
+                      "const": "pricing"
+                    }
+                  },
+                  "required": [
+                    "strategy_type"
+                  ]
                 },
                 "then": {
                   "properties": {
-                    "metrics": {"required": ["mean_rate"]},
-                    "economics": {"required": ["profit", "roa", "expected_loss"]}
+                    "metrics": {
+                      "required": [
+                        "mean_rate"
+                      ]
+                    },
+                    "economics": {
+                      "required": [
+                        "profit",
+                        "roa",
+                        "expected_loss"
+                      ]
+                    }
                   }
                 }
               },
               {
                 "if": {
-                  "properties": {"strategy_type": {"const": "segmentation"}},
-                  "required": ["strategy_type"]
+                  "properties": {
+                    "strategy_type": {
+                      "const": "segmentation"
+                    }
+                  },
+                  "required": [
+                    "strategy_type"
+                  ]
                 },
                 "then": {
                   "properties": {
-                    "metrics": {"required": ["segment_count", "overall_bad_rate"]}
+                    "metrics": {
+                      "required": [
+                        "segment_count",
+                        "overall_bad_rate"
+                      ]
+                    }
                   }
                 }
               }
