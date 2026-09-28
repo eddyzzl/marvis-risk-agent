@@ -355,3 +355,22 @@ WP11 的应用内配置、通知、诊断、已读、重新评估浏览器完整
 `50632c6b` 通过显式 DSL v2 加入 contact/review/hold 结构化动作；默认 v1 及既有规范化结果不变，继续复用同一行/批量策略执行器。业务政策提供币种单位、队列/渠道、时区时段、主体窗口频次、最小间隔及批次预算。联系许可未知、历史覆盖不足、迟到记录或效果未知都不能静默当成可联系或零历史；同一主体的多个案件共享预览频次，优先级和案件 ID 决定稳定分配顺序。预览明确不代表实际授权或实时容量预留。110 项动作与 DSL 检查通过，扩大至现金流/候选/既有 DSL 交付后 203 passed（9.53 秒），Ruff/diff 通过。日志 `/Users/eddyz/.codex/worktrees/audit-fit-provenance/collection-planning-regression.log`，首次误写的不存在测试路径日志仍保留。
 
 审批、实际受治理执行、取消/重启与资金反馈、Agent/界面和独立复核继续开发。通用候选设计仍拒绝 collection，而不是把分群改名充当催收；完成专属候选和闭环后再开放入口。没有真实联系客户、发布或机构部署。冻结 17 个工作包和 22 项发现的要求保持不变，以上均为部分软件进展。
+
+
+## WP12 历史回放工作台与交互验证
+
+`ab87745d` 接入任务内历史回放、明确字段时点与可选业务假设、独立时间窗、提案、原有 manual/Agent 计划、带理由人审、冻结结果和成熟资金对账。修复手动“开始执行”误发 Agent 接口、刷新并行计划 GET 的伪失败以及上一动作收尾时误点 gate。138 项相关测试通过；8 个提取 app 函数的旧测试夹具缺新增 controller stub，补齐后 401 项 driver/UI 回归通过，生产代码未加测试绕过。实际标准 CLI + Python Playwright 在 1440/1600/1920 验证手动和 Agent 两种模式，用实际原生 LR 与两套冻结策略回放；策略 validated 状态仍是明确合成夹具。三种导出读取数值正确、对账不改原回执。证据 `/Users/eddyz/.codex/work-artifacts/historical-ui-20260928/run-1790603565/proof.json` 与 `run-1790603958/proof.json`。root 查看实际 results-1600 截图后要求率使用百分比、差值使用百分点、来源 ID 折叠展示，已窄修。
+
+## WP13 来源查询和事件工作流实际接线
+
+`e38e20e2` 接入独立本地 HTTP reference provider 和历史导入；查询意图先冻结，来源授权和真实用户角色由服务端复核。超时/进程丢失后只对同请求 GET 读回，不能重复 POST；全部 HTTP 尝试统一限流/熔断，原始响应与规范响应分别校验字节指纹。23 项 source 检查、134 项既有 CLI/插件/模板检查和标准 CLI→HTTP→受限 ToolRunner 通过。root 审阅发现大表读完才限行数，以及撤销后仍能返回完整业务数据，`d0fc4fb0` 改为绑定行数读前拒绝、仅投影两列，并在业务证据返回前再次复核授权；失效授权只保留审计收据和 unauthorized 状态。4 项相关反例通过。证据 `/Users/eddyz/.codex/work-artifacts/operations-runtime-20260927/risk-sources/`。
+
+`b1b86aa2`、`00ccdee3`、`10b8a193`、`b341f90e` 将事件请求接入真实 HTTP、原有必需人工 gate、ToolRunner、签名产物及授权回放/export。`4367c53d` 还修复直接删活任务事件导致完整覆盖下假零的问题：6 个删除反例先失败，再验证仅允许整个任务级联删除。95 项事件及 2 项原来源 worker 兼容检查通过；证据 `/Users/eddyz/.codex/work-artifacts/event-runtime-20260928/proof.json`。事件特征与冻结包/在线评分器、界面和 H/P 继续完成。
+
+## WP14 提案认证、载体修正和独立审阅
+
+`c00635ab` 统一工作区相对产物路径，使对账可以走共享 listing/download；保持活任务证据不可直接删除，但整任务删除可以级联；时段 end 支持 24:00，能够明确拆分跨午夜政策。真实 API 下载和午夜反例先失败，修复后的 collection/artifact/task 联合 201 passed（52.09 秒），日志 `collection-carrier-{red,green,regression}.log` 位于 `/Users/eddyz/.codex/worktrees/audit-fit-provenance/`。
+
+独立审阅复现了历史 attempts.case_id 与本批已知主体矛盾时，频次被计给错误主体的问题；`ebae19ae` 直接拒绝冲突，保留批外案件的明确来源声明，审阅者独立确认反例被拒绝。`33b9da67`、`9fc4ded6` 冻结本地参考批次提案，核对真实 maker、同任务案件主体、金额单位、开户时点和源文件字节，HMAC 绑定不可变请求和同一个预览指纹。9 项新提案测试及 collection/DSL 联合 124 项通过；其 scope 只到提案，当前没有审批即执行的入口。受治理队列/参考动作执行、取消/重启及原生效果收据接入继续开发，禁止真实对客发送。
+
+主线 `9fc4ded6` 对来源、事件、collection、历史 UI、插件与并发快照做联合检查：248 passed（101.90 秒），仅既有 Starlette 弃用提醒；证明 `/Users/eddyz/.codex/work-artifacts/audit-integration-20260928/event-collection-ui-proof.json`，所有检查均以明确合成数据运行。未把局部通过计为全量 readiness 或独立真实 Agent/历史/生产验收；17 个工作包和 22 项发现的冻结要求没有删减。
