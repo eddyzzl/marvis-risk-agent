@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 
+from marvis.agent.semantic_diagnostics import (
+    decision_fields,
+    diagnostic,
+    json_error_shape,
+    response_shape,
+)
 from marvis.llm_client import LLMClientError
 from marvis.llm_prompts import (
     GATE_SEMANTIC_AUTHORIZATION_REVIEW_SYS as _REVIEW_PROMPT,
@@ -67,6 +73,11 @@ class SemanticAuthorizationReview:
     is_conditional: bool
     requests_change: bool
     withholds_authorization: bool
+    diagnostics: dict | None = field(default=None, compare=False)
+
+
+class _DuplicateAuthorizationKey(ValueError):
+    pass
 
 
 def review_semantic_authorization(
@@ -78,9 +89,12 @@ def review_semantic_authorization(
 ) -> SemanticAuthorizationReview:
     """Run exactly one independent review and fail closed on every invalid result."""
 
+    request_started = False
     try:
         if not isinstance(instruction, str):
-            return _failed_review()
+            return _failed_review(
+                diagnostic("authorization", failure_code="input_invalid")
+            )
         user_prompt = json.dumps(
             {
                 "gate_context": gate_context,
@@ -92,6 +106,7 @@ def review_semantic_authorization(
             separators=(",", ":"),
             allow_nan=False,
         )
+        request_started = True
         raw = client.complete(
             system_prompt=_REVIEW_PROMPT.text,
             user_prompt=user_prompt,
@@ -105,34 +120,76 @@ def review_semantic_authorization(
             prompt_version=_REVIEW_PROMPT.version,
         )
     except LLMClientError:
-        return _failed_review()
+        return _failed_review(
+            diagnostic("authorization", failure_code="request_failed")
+        )
     except Exception:
-        return _failed_review()
+        return _failed_review(
+            diagnostic(
+                "authorization",
+                failure_code="request_failed" if request_started else "context_invalid",
+            )
+        )
 
     try:
         return _parse_review(raw, instruction=instruction)
     except Exception:
-        return _failed_review()
+        return _failed_review(
+            diagnostic("authorization", failure_code="unexpected_parser_failure")
+        )
 
 
 def _parse_review(raw, *, instruction: str) -> SemanticAuthorizationReview:
+    def failed(code, *, error=None, data=None):
+        return _failed_review(
+            diagnostic(
+                "authorization",
+                failure_code=code,
+                passes=[
+                    {
+                        "stage": "authorization",
+                        "failure_code": code,
+                        "repair_status": "not_attempted",
+                        "attempts": [
+                            {
+                                **response_shape(raw),
+                                **json_error_shape(error),
+                                "failure_code": code,
+                                "parse_valid": False,
+                                "decision": decision_fields(data, instruction),
+                            }
+                        ],
+                    }
+                ],
+            )
+        )
+
     if not isinstance(raw, str):
-        return _failed_review()
+        return failed("non_text")
 
     def unique_object(pairs):
         data = {}
         for key, value in pairs:
             if key in data:
-                raise ValueError(f"duplicate key: {key}")
+                raise _DuplicateAuthorizationKey
             data[key] = value
         return data
 
     try:
         data = json.loads(raw.strip(), object_pairs_hook=unique_object)
-    except (TypeError, ValueError):
-        return _failed_review()
+    except _DuplicateAuthorizationKey:
+        return failed("duplicate_key")
+    except (TypeError, ValueError) as exc:
+        return failed("non_json", error=exc)
     if not isinstance(data, dict) or set(data) != set(_RESPONSE_FIELDS):
-        return _failed_review()
+        code = (
+            "non_object"
+            if not isinstance(data, dict)
+            else "missing_fields"
+            if set(_RESPONSE_FIELDS) - set(data)
+            else "extra_fields"
+        )
+        return failed(code, data=data)
 
     verdict = data["verdict"]
     evidence_quote = data["evidence_quote"]
@@ -153,7 +210,7 @@ def _parse_review(raw, *, instruction: str) -> SemanticAuthorizationReview:
         or confidence not in _CONFIDENCE_LEVELS
         or any(type(flag) is not bool for flag in flags)
     ):
-        return _failed_review()
+        return failed("invalid_field_type", data=data)
 
     authorized = (
         verdict == "authorize"
@@ -172,10 +229,30 @@ def _parse_review(raw, *, instruction: str) -> SemanticAuthorizationReview:
         is_conditional=flags[1],
         requests_change=flags[2],
         withholds_authorization=flags[3],
+        diagnostics=diagnostic(
+            "authorization",
+            failure_code=None if authorized else "unauthorized",
+            accepted=authorized,
+            passes=[
+                {
+                    "stage": "authorization",
+                    "failure_code": None,
+                    "repair_status": "not_attempted",
+                    "attempts": [
+                        {
+                            **response_shape(raw),
+                            "failure_code": None,
+                            "parse_valid": True,
+                            "decision": decision_fields(data, instruction),
+                        }
+                    ],
+                }
+            ],
+        ),
     )
 
 
-def _failed_review() -> SemanticAuthorizationReview:
+def _failed_review(diagnostics=None) -> SemanticAuthorizationReview:
     return SemanticAuthorizationReview(
         authorized=False,
         verdict="ambiguous",
@@ -186,6 +263,7 @@ def _failed_review() -> SemanticAuthorizationReview:
         is_conditional=False,
         requests_change=False,
         withholds_authorization=True,
+        diagnostics=diagnostics,
     )
 
 

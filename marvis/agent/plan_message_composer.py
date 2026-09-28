@@ -19,6 +19,7 @@ from marvis.agent.gate_payloads import build_model_delivery_payload
 from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
 from marvis.agent.gates.adapters import gate_editable_input_schema
 from marvis.agent.plan_utils import downstream_step_ids, find_step
+from marvis.agent.semantic_diagnostics import sanitize_diagnostics
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import (
     Plan,
@@ -544,8 +545,15 @@ class PlanMessageComposer:
         )
 
     def instruction_message(
-        self, plan: Plan, gate: PlanStep | None, *, run_seq, text: str
+        self,
+        plan: Plan,
+        gate: PlanStep | None,
+        *,
+        run_seq,
+        text: str,
+        semantic_diagnostics: dict | None = None,
     ) -> DriverMessage:
+        safe_diagnostics = sanitize_diagnostics(semantic_diagnostics)
         return DriverMessage(
             "gate",
             text,
@@ -554,6 +562,10 @@ class PlanMessageComposer:
                 "step_id": gate.id if gate else None,
                 "run_seq": run_seq,
                 "confirmation_snapshot": self._confirmation_snapshot(plan, gate),
+                **(
+                    {"semantic_diagnostics": safe_diagnostics}
+                    if safe_diagnostics else {}
+                ),
             },
         )
 

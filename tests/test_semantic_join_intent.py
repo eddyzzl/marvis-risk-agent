@@ -370,5 +370,66 @@ def test_join_source_material_change_during_two_pass_review_discards_route(
         last = _last_assistant(response)
         assert last["metadata"]["code"] == "semantic_intent_clarification"
         assert "状态已变化" in last["metadata"]["reason"]
+        assert last["metadata"]["semantic_diagnostics"]["failure_code"] == "snapshot_changed"
+        assert last["metadata"]["semantic_diagnostics"]["accepted"] is False
         assert "join_c1" not in last["metadata"]
         assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+
+
+def test_non_json_semantic_failure_is_persisted_without_workflow_side_effects(
+    tmp_path, monkeypatch
+):
+    from marvis.db import connect
+    from marvis.repositories.tasks import TaskRepository
+
+    source_dir = _join_materials(tmp_path)
+    raw = "```json\nprivate-reply-marker\n```"
+    semantic_client = _StaticSemanticClient([raw])
+    _install_semantic_client(monkeypatch, semantic_client)
+    with TestClient(create_app(tmp_path)) as client:
+        task_id = _create_agent_task(
+            client, source_dir=source_dir, task_type="data_join"
+        )
+        db_path = client.app.state.settings.db_path
+        repo = TaskRepository(db_path)
+        before = repo.get_task(task_id)
+        with connect(db_path) as conn:
+            counts_before = [
+                conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in (
+                    "plan_step_runs",
+                    "effect_executions",
+                    "approval_records",
+                    "decision_records",
+                )
+            ]
+        response = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json={
+                "content": "先核对两张表并准备关联方案。",
+                "model_id": "semantic-test",
+            },
+        )
+        assert response.status_code == 202, response.text
+        assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+        after = repo.get_task(task_id)
+        assert (after.status, after.task_type) == (before.status, before.task_type)
+        with connect(db_path) as conn:
+            assert [
+                conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in (
+                    "plan_step_runs",
+                    "effect_executions",
+                    "approval_records",
+                    "decision_records",
+                )
+            ] == counts_before
+        diag = _last_assistant(response)["metadata"]["semantic_diagnostics"]
+        assert diag["failure_code"] == "semantic_intent_router_non_json"
+        assert diag["passes"][0]["attempts"][0]["code_fence"] is True
+        assert len(semantic_client.calls) == 1
+        stored = [
+            m for m in repo.list_agent_messages(task_id) if m["role"] == "assistant"
+        ][-1]
+        assert stored["metadata"]["semantic_diagnostics"] == diag
+        assert "private-reply-marker" not in json.dumps(stored)

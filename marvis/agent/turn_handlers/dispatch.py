@@ -9,6 +9,7 @@ from marvis.agent.memory_bridge import build_memory_anchor
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_AUTO
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
 from marvis.agent.plan_driver import DriverError
+from marvis.agent.semantic_diagnostics import diagnostic
 from marvis.agent.semantic_intent import INTENT_ADHOC_CONFIRM
 from marvis.agent.semantic_intent import INTENT_ADHOC_QUERY
 from marvis.agent.semantic_intent import INTENT_ADHOC_REJECT
@@ -436,6 +437,7 @@ def dispatch_driver_turn(
                 task,
                 user_text=text,
                 reason=semantic_decision.reason,
+                diagnostics=getattr(semantic_decision, "diagnostics", None),
                 pending_adhoc=pending_adhoc,
             )
         after_snapshot = _safe_semantic_intent_state_snapshot(runtime, repo, task)
@@ -445,6 +447,13 @@ def dispatch_driver_turn(
                 task,
                 user_text=text,
                 reason="语义复核期间任务状态已变化，旧判断已作废。",
+                diagnostics=diagnostic(
+                    "intent",
+                    failure_code="snapshot_changed",
+                    passes=(
+                        getattr(semantic_decision, "diagnostics", None) or {}
+                    ).get("passes", ()),
+                ),
                 pending_adhoc=adhoc_lane._latest_adhoc_pending(
                     repo.list_agent_messages(task.id)
                 ),

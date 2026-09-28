@@ -6,10 +6,17 @@ validators and typed controls continue to own every executable request.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 import json
 from typing import Mapping, Sequence
 
+from marvis.agent.semantic_diagnostics import (
+    decision_fields,
+    diagnostic,
+    json_error_shape,
+    response_shape,
+    sanitize_diagnostics,
+)
 from marvis.llm_prompts import (
     TOP_LEVEL_INTENT_REPAIR_SYS,
     TOP_LEVEL_INTENT_REVIEW_SYS,
@@ -122,6 +129,7 @@ class SemanticIntentDecision:
     requests_change: bool
     withholds_action: bool
     failure_code: str | None = None
+    diagnostics: dict | None = dataclass_field(default=None, compare=False)
 
     def as_metadata(self) -> dict[str, object]:
         return {
@@ -130,6 +138,11 @@ class SemanticIntentDecision:
             "confidence": self.confidence,
             "route_evidence_quote": self.route_evidence_quote,
             "review_evidence_quote": self.review_evidence_quote,
+            **(
+                {"semantic_diagnostics": safe}
+                if (safe := sanitize_diagnostics(self.diagnostics))
+                else {}
+            ),
             **(
                 {"failure_code": self.failure_code}
                 if self.failure_code is not None
@@ -155,12 +168,14 @@ class _ParseOutcome:
     result: _PassResult | None
     failure_code: str | None
     parsed_object: dict[str, object] | None
+    diagnostics: dict | None = dataclass_field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class _PassAttempt:
     result: _PassResult | None
     failure_code: str | None
+    diagnostics: dict | None = dataclass_field(default=None, compare=False)
 
 
 def route_semantic_intent(
@@ -182,7 +197,10 @@ def route_semantic_intent(
         or not allowed
         or any(item not in ALL_SEMANTIC_INTENTS for item in allowed)
     ):
-        return _failed_decision("语义意图分类不可用，已保持当前状态。")
+        return _failed_decision(
+            "语义意图分类不可用，已保持当前状态。",
+            diagnostics=diagnostic("intent_input", failure_code="input_invalid"),
+        )
     try:
         prompt = json.dumps(
             {
@@ -200,7 +218,10 @@ def route_semantic_intent(
             allow_nan=False,
         )
     except Exception:
-        return _failed_decision("语义意图上下文无效，已保持当前状态。")
+        return _failed_decision(
+            "语义意图上下文无效，已保持当前状态。",
+            diagnostics=diagnostic("intent_context", failure_code="context_invalid"),
+        )
 
     schema = _schema(allowed)
     first_attempt = _invoke_and_parse(
@@ -218,6 +239,9 @@ def route_semantic_intent(
         return _failed_decision(
             f"第一遍语义意图分类失败（{code}），已保持当前状态。",
             failure_code=code,
+            diagnostics=diagnostic(
+                "intent", failure_code=code, passes=[first_attempt.diagnostics]
+            ),
         )
     second_attempt = _invoke_and_parse(
         client,
@@ -234,16 +258,31 @@ def route_semantic_intent(
         return _failed_decision(
             f"独立语义意图复核失败（{code}），已保持当前状态。",
             failure_code=code,
+            diagnostics=diagnostic(
+                "intent",
+                failure_code=code,
+                passes=[first_attempt.diagnostics, second_attempt.diagnostics],
+            ),
         )
     if first.intent != second.intent:
         return _failed_decision(
             "两遍语义意图判断不一致，已保持当前状态。",
             failure_code="semantic_intent_pass_disagreement",
+            diagnostics=diagnostic(
+                "intent",
+                failure_code="semantic_intent_pass_disagreement",
+                passes=[first_attempt.diagnostics, second_attempt.diagnostics],
+            ),
         )
     if not (_pass_is_safe(first) and _pass_is_safe(second)):
         return _failed_decision(
             "当前表达仍有疑问、条件、修改或保留，未执行任何动作。",
             failure_code="semantic_intent_unsafe_decision",
+            diagnostics=diagnostic(
+                "intent",
+                failure_code="semantic_intent_unsafe_decision",
+                passes=[first_attempt.diagnostics, second_attempt.diagnostics],
+            ),
         )
     return SemanticIntentDecision(
         accepted=True,
@@ -256,6 +295,11 @@ def route_semantic_intent(
         is_conditional=first.is_conditional or second.is_conditional,
         requests_change=first.requests_change or second.requests_change,
         withholds_action=first.withholds_action or second.withholds_action,
+        diagnostics=diagnostic(
+            "intent",
+            accepted=True,
+            passes=[first_attempt.diagnostics, second_attempt.diagnostics],
+        ),
     )
 
 
@@ -294,6 +338,21 @@ def _invoke_and_parse(
     instruction: str,
     allowed: Sequence[str],
 ) -> _PassAttempt:
+    attempts = []
+    repair_status = "not_attempted"
+
+    def finish(result=None, failure_code=None):
+        return _PassAttempt(
+            result=result,
+            failure_code=failure_code,
+            diagnostics={
+                "stage": caller,
+                "failure_code": failure_code,
+                "repair_status": repair_status,
+                "attempts": attempts,
+            },
+        )
+
     try:
         raw = client.complete(
             system_prompt=system_prompt.text,
@@ -308,17 +367,19 @@ def _invoke_and_parse(
             prompt_version=system_prompt.version,
         )
     except Exception:
-        return _PassAttempt(result=None, failure_code="request_failed")
+        return finish(result=None, failure_code="request_failed")
 
     outcome = _parse(raw, instruction=instruction, allowed=allowed)
+    attempts.append({"stage": caller, **(outcome.diagnostics or {})})
     if outcome.result is not None:
-        return _PassAttempt(result=outcome.result, failure_code=None)
+        return finish(result=outcome.result, failure_code=None)
     if outcome.parsed_object is None or not _repairable_object(
         outcome.parsed_object,
         allowed=allowed,
     ):
-        return _PassAttempt(result=None, failure_code=outcome.failure_code)
+        return finish(result=None, failure_code=outcome.failure_code)
 
+    repair_status = "failed"
     try:
         repair_prompt = _repair_prompt(
             user_prompt=user_prompt,
@@ -327,7 +388,7 @@ def _invoke_and_parse(
             instruction=instruction,
         )
     except (TypeError, ValueError):
-        return _PassAttempt(result=None, failure_code="repair_context_invalid")
+        return finish(result=None, failure_code="repair_context_invalid")
     try:
         repaired_raw = client.complete(
             system_prompt=TOP_LEVEL_INTENT_REPAIR_SYS.text,
@@ -342,14 +403,15 @@ def _invoke_and_parse(
             prompt_version=TOP_LEVEL_INTENT_REPAIR_SYS.version,
         )
     except Exception:
-        return _PassAttempt(result=None, failure_code="repair_request_failed")
+        return finish(result=None, failure_code="repair_request_failed")
     repaired = _parse(
         repaired_raw,
         instruction=instruction,
         allowed=allowed,
     )
+    attempts.append({"stage": f"{caller}_repair", **(repaired.diagnostics or {})})
     if repaired.result is None:
-        return _PassAttempt(
+        return finish(
             result=None,
             failure_code=f"repair_{repaired.failure_code or 'invalid'}",
         )
@@ -358,8 +420,9 @@ def _invoke_and_parse(
         repaired.result,
         instruction=instruction,
     ):
-        return _PassAttempt(result=None, failure_code="repair_semantic_drift")
-    return _PassAttempt(result=repaired.result, failure_code=None)
+        return finish(result=None, failure_code="repair_semantic_drift")
+    repair_status = "succeeded"
+    return finish(result=repaired.result, failure_code=None)
 
 
 class _DuplicateKeyError(ValueError):
@@ -371,10 +434,23 @@ def _reject_nonstandard_json_constant(value: str):
 
 
 def _parse(raw, *, instruction: str, allowed: Sequence[str]) -> _ParseOutcome:
+    def failure(code, *, parsed_object=None, error=None):
+        return _parse_failure(
+            code,
+            parsed_object=parsed_object,
+            diagnostics={
+                **response_shape(raw),
+                **json_error_shape(error),
+                "failure_code": code,
+                "parse_valid": False,
+                "decision": decision_fields(parsed_object, instruction),
+            },
+        )
+
     if not isinstance(raw, str):
-        return _parse_failure("non_text")
+        return failure("non_text")
     if not raw.strip():
-        return _parse_failure("empty_response")
+        return failure("empty_response")
 
     def unique_object(pairs):
         value = {}
@@ -391,17 +467,17 @@ def _parse(raw, *, instruction: str, allowed: Sequence[str]) -> _ParseOutcome:
             parse_constant=_reject_nonstandard_json_constant,
         )
     except _DuplicateKeyError:
-        return _parse_failure("duplicate_key")
-    except (TypeError, ValueError):
-        return _parse_failure("non_json")
+        return failure("duplicate_key")
+    except (TypeError, ValueError) as exc:
+        return failure("non_json", error=exc)
     if not isinstance(data, dict):
-        return _parse_failure("non_object")
+        return failure("non_object")
     missing = set(_FIELDS) - set(data)
     if missing:
-        return _parse_failure("missing_fields", parsed_object=data)
+        return failure("missing_fields", parsed_object=data)
     extra = set(data) - set(_FIELDS)
     if extra:
-        return _parse_failure("extra_fields", parsed_object=data)
+        return failure("extra_fields", parsed_object=data)
     flags = (
         data["is_question"],
         data["is_conditional"],
@@ -409,26 +485,26 @@ def _parse(raw, *, instruction: str, allowed: Sequence[str]) -> _ParseOutcome:
         data["withholds_action"],
     )
     if not isinstance(data["intent"], str):
-        return _parse_failure("invalid_intent_type", parsed_object=data)
+        return failure("invalid_intent_type", parsed_object=data)
     if data["intent"] not in allowed:
-        return _parse_failure("invalid_intent", parsed_object=data)
+        return failure("invalid_intent", parsed_object=data)
     if not isinstance(data["evidence_quote"], str):
-        return _parse_failure("invalid_evidence_quote_type", parsed_object=data)
+        return failure("invalid_evidence_quote_type", parsed_object=data)
     if not data["evidence_quote"].strip():
-        return _parse_failure("empty_evidence_quote", parsed_object=data)
+        return failure("empty_evidence_quote", parsed_object=data)
     if data["evidence_quote"] not in instruction:
-        return _parse_failure(
+        return failure(
             "evidence_quote_not_in_instruction",
             parsed_object=data,
         )
     if not isinstance(data["reason"], str):
-        return _parse_failure("invalid_reason_type", parsed_object=data)
+        return failure("invalid_reason_type", parsed_object=data)
     if not isinstance(data["confidence"], str):
-        return _parse_failure("invalid_confidence_type", parsed_object=data)
+        return failure("invalid_confidence_type", parsed_object=data)
     if data["confidence"] not in {"high", "medium", "low"}:
-        return _parse_failure("invalid_confidence", parsed_object=data)
+        return failure("invalid_confidence", parsed_object=data)
     if any(type(flag) is not bool for flag in flags):
-        return _parse_failure("invalid_flag_type", parsed_object=data)
+        return failure("invalid_flag_type", parsed_object=data)
     return _ParseOutcome(
         result=_PassResult(
             intent=data["intent"],
@@ -442,6 +518,12 @@ def _parse(raw, *, instruction: str, allowed: Sequence[str]) -> _ParseOutcome:
         ),
         failure_code=None,
         parsed_object=data,
+        diagnostics={
+            **response_shape(raw),
+            "failure_code": None,
+            "parse_valid": True,
+            "decision": decision_fields(data, instruction),
+        },
     )
 
 
@@ -449,11 +531,13 @@ def _parse_failure(
     failure_code: str,
     *,
     parsed_object: dict[str, object] | None = None,
+    diagnostics: dict | None = None,
 ) -> _ParseOutcome:
     return _ParseOutcome(
         result=None,
         failure_code=failure_code,
         parsed_object=parsed_object,
+        diagnostics=diagnostics,
     )
 
 
@@ -615,6 +699,7 @@ def _failed_decision(
     reason: str,
     *,
     failure_code: str | None = None,
+    diagnostics: dict | None = None,
 ) -> SemanticIntentDecision:
     return SemanticIntentDecision(
         accepted=False,
@@ -628,6 +713,7 @@ def _failed_decision(
         requests_change=False,
         withholds_action=True,
         failure_code=failure_code,
+        diagnostics=diagnostics,
     )
 
 

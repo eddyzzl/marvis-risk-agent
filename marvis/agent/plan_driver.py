@@ -50,6 +50,7 @@ from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.agent.plan_utils import find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.agent.semantic_authorization import review_semantic_authorization
+from marvis.agent.semantic_diagnostics import diagnostic
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.governance.errors import AuthorizationError
@@ -1237,6 +1238,7 @@ class PlanDriver:
         )
         action = route["action"]
         if action == "confirm":
+            semantic_diagnostics = None
             route_params = dict(route.get("params") or {})
             route_constraint = str(route.get("constraint") or "").strip()
             if route_constraint:
@@ -1305,6 +1307,7 @@ class PlanDriver:
                     instruction=user_text,
                     proposed_params=route_params,
                 )
+                semantic_diagnostics = getattr(review, "diagnostics", None)
                 if review.authorized:
                     # Re-enter the canonical confirmation path instead of
                     # duplicating its monitoring, adoption, selection,
@@ -1349,6 +1352,13 @@ class PlanDriver:
                                     current_gate,
                                     run_seq=run_seq,
                                     text=str(exc),
+                                    semantic_diagnostics=diagnostic(
+                                        "authorization_snapshot",
+                                        failure_code="snapshot_changed",
+                                        passes=(semantic_diagnostics or {}).get(
+                                            "passes", ()
+                                        ),
+                                    ),
                                 )
                             ],
                         )
@@ -1382,6 +1392,7 @@ class PlanDriver:
                         gate,
                         run_seq=run_seq,
                         text=text,
+                        semantic_diagnostics=semantic_diagnostics,
                     )
                 ],
             )

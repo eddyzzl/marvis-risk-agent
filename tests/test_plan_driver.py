@@ -1728,6 +1728,10 @@ def test_semantic_review_fails_closed_when_plan_changes_mid_review(
     changed = repo.load_plan("plan-1")
     assert turn.status == changed.status.value
     assert "语义授权复核期间计划" in turn.messages[-1].content
+    diag = turn.messages[-1].metadata["semantic_diagnostics"]
+    assert diag["stage"] == "authorization_snapshot"
+    assert diag["failure_code"] == "snapshot_changed"
+    assert diag["accepted"] is False
     assert "已变化" in turn.messages[-1].content
     assert all(step.status is StepStatus.PENDING for step in changed.steps)
     assert driver._executor._runner.calls == []
@@ -5783,3 +5787,40 @@ def test_render_tune_leaderboard_includes_full_per_trial_matrix():
         assert col in board["columns"], col
     assert any("0.72" in str(cell) for cell in board["rows"][0])  # AUC reached the top row
     assert any("0.07" in str(cell) for cell in board["rows"][0])  # train-oot gap surfaced
+
+
+def test_semantic_review_diagnostics_leave_validated_plan_and_tools_unchanged(tmp_path):
+    driver, repo = _driver(tmp_path)
+    driver._llm = FakeRouterLLM(
+        '{"action":"confirm","params":{},"constraint":"","reason":"继续",'
+        '"confidence":"high","explicit_authorization":true}',
+        semantic_review_payload="```json\nprivate-authorization-marker\n```",
+    )
+    before = repo.load_plan("plan-1")
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="按照刚才展示的方案继续往下进行。",
+        run_seq=0,
+        confirmation_source="human",
+    )
+    assert repo.load_plan("plan-1") == before
+    assert turn.status == PlanStatus.VALIDATED.value
+    assert driver._executor._runner.calls == []
+    assert len(driver._llm.calls) == 2
+    meta = turn.messages[-1].metadata
+    assert meta["semantic_diagnostics"]["failure_code"] == "non_json"
+    assert (
+        meta["semantic_diagnostics"]["passes"][0]["attempts"][0]["code_fence"] is True
+    )
+    assert "private-authorization-marker" not in json.dumps(meta)
+    assert set(meta) == {
+        "plan_id",
+        "step_id",
+        "run_seq",
+        "confirmation_snapshot",
+        "semantic_diagnostics",
+    }
+    legacy = driver._composer.instruction_message(
+        before, None, run_seq=0, text="unchanged"
+    )
+    assert "semantic_diagnostics" not in legacy.metadata

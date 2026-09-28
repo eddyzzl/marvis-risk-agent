@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from marvis.agent.risk_analysis_setup import latest_risk_analysis_intake
+from marvis.agent.semantic_diagnostics import sanitize_diagnostics
 from marvis.agent.semantic_intent import INTENT_ADHOC_CONFIRM
 from marvis.agent.semantic_intent import INTENT_ADHOC_QUERY
 from marvis.agent.semantic_intent import INTENT_ADHOC_REJECT
@@ -49,9 +50,11 @@ def _semantic_intent_clarification_response(
     user_text: str,
     reason: str,
     pending_adhoc: dict | None = None,
+    diagnostics: dict | None = None,
 ) -> dict:
     """Persist a fail-closed Agent turn without changing workflow state."""
 
+    safe_diagnostics = sanitize_diagnostics(diagnostics)
     repo.add_agent_message(
         task.id,
         role="user",
@@ -81,6 +84,7 @@ def _semantic_intent_clarification_response(
             "kind": "clarification",
             "code": "semantic_intent_clarification",
             "reason": reason,
+            **({"semantic_diagnostics": safe_diagnostics} if safe_diagnostics else {}),
             **(
                 {adhoc_lane._ADHOC_SPEC_META_KEY: dict(pending_adhoc)}
                 if pending_adhoc is not None
