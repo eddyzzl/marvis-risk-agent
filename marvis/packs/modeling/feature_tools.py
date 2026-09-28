@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from marvis.data.data_dictionary import first_data_dictionary_id, load_business_names
-from marvis.feature.candidates import excluded_categorical_columns, suspected_categorical_columns
+from marvis.packs.feature_inputs import (
+    excluded_categorical_for_screen as _excluded_categorical_for_screen,
+    suspected_categorical_for_screen as _suspected_categorical_for_screen,
+)
 from marvis.feature.screen import (
     DEFAULT_SCREEN_BATCH_SIZE,
     screen_features,
@@ -156,52 +159,6 @@ def _screen_dictionary(runtime: "_Runtime", ctx) -> dict:
     if not dictionary_id:
         return {}
     return load_business_names(runtime.backend, runtime.registry, dictionary_id)
-
-
-def _excluded_categorical_for_screen(
-    runtime: "_Runtime",
-    dataset_id: str,
-    requested_features: list,
-    *,
-    target_col: str,
-    split_col: str | None,
-) -> list[dict]:
-    """String/object columns silently dropped by candidate inference (PREP-3/FS-3).
-
-    Only meaningful when ``features`` was NOT explicitly provided — an explicit
-    feature list is the caller's own choice, not an inference the platform made
-    on their behalf, so there is nothing to surface."""
-    if [str(item) for item in requested_features if str(item).strip()]:
-        return []
-    dataset = runtime.registry.get(str(dataset_id))
-    excluded = excluded_categorical_columns(
-        runtime.backend,
-        runtime.registry.resolve_path(dataset.id),
-        target_col=target_col,
-        split_col=split_col,
-    )
-    return [{"column": item.column, "cardinality": item.cardinality} for item in excluded]
-
-
-def _suspected_categorical_for_screen(
-    runtime: "_Runtime",
-    dataset_id: str,
-    *,
-    target_col: str,
-    split_col: str | None,
-) -> list[dict]:
-    """Numeric columns that look like nominal codes rather than continuous measures
-    (PREP-5), e.g. a zip/industry code — surfaced as a screen-gate hint, always (even
-    with an explicit feature list) since these columns keep being modeled as continuous
-    numeric today; nothing about candidate inference or the selected set changes."""
-    dataset = runtime.registry.get(str(dataset_id))
-    suspected = suspected_categorical_columns(
-        runtime.backend,
-        runtime.registry.resolve_path(dataset.id),
-        target_col=target_col,
-        split_col=split_col,
-    )
-    return [{"column": item.column, "cardinality": item.cardinality} for item in suspected]
 
 
 def _screen_features_non_binary(inputs: dict, ctx) -> dict:

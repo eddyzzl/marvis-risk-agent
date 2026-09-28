@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 from marvis.repositories.modeling import ModelingRepository
 from marvis.feature.candidates import candidate_numeric_features
+from marvis.packs.feature_inputs import flatten_feature_cols as _flatten_feature_cols
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.experiment import ExperimentStore
@@ -48,22 +49,6 @@ def _resolve_feature_cols(
     if not inferred:
         raise ModelingError("未找到可用候选特征列;请检查拼接结果或指定特征列。")
     return inferred
-
-
-def _flatten_feature_cols(features) -> list[str]:
-    """Flatten a features input that may be a union of lists (FS-5): a workflow can pass
-    ``features=[<base cols>, <$ref new_columns>]`` which resolves to nested lists; screen
-    them together as one de-duplicated flat set (input order preserved)."""
-    flat: list[str] = []
-    seen: set[str] = set()
-    for item in (features or []):
-        candidates = item if isinstance(item, (list, tuple)) else [item]
-        for candidate in candidates:
-            name = str(candidate).strip()
-            if name and name not in seen:
-                seen.add(name)
-                flat.append(name)
-    return flat
 
 
 def _artifact(runtime: _Runtime, artifact_id: str) -> ModelArtifact:
