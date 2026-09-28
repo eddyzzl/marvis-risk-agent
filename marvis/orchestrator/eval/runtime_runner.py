@@ -827,6 +827,7 @@ class Journey:
         self.task_id = None
         self.approval = None
         self.interventions = 0
+        self.uploaded_samples: list[dict] = []
 
     def request(self, method, path, *, label, **kwargs):
         if (
@@ -918,13 +919,15 @@ class Journey:
                 if material_hash.hexdigest() != material.sha256:
                     raise RuntimeJourneyError("material_identity_mismatch")
                 stream.seek(0)
-                self.json_request(
+                uploaded = self.json_request(
                     "POST",
                     f"/api/tasks/{self.task_id}/datasets/upload",
                     label="upload_material",
                     files={"file": (path.name, stream)},
                     data={"role": material.role},
                 )
+                if material.role == "sample":
+                    self.uploaded_samples.extend(uploaded["datasets"])
         payload = {"acceptance_mode": self.case.acceptance_mode}
         route = "start"
         if self.case.initial_message is not None:
@@ -957,6 +960,8 @@ class Journey:
                 self.wait_idle()
             elif action.kind == "select_recommended_experiment":
                 self.select_recommended_experiment(action)
+            elif action.kind == "bind_single_strategy_sample":
+                self.bind_single_strategy_sample(action)
             elif action.kind in {"approve_step", "reject_step", "retry_step"}:
                 plans = self.plans()
                 match = [
@@ -1017,6 +1022,81 @@ class Journey:
                     label="user_stop",
                     json={},
                 )
+
+    def bind_single_strategy_sample(self, action):
+        """Replay a declared human sample/semantics selection through workspace CAS."""
+        from marvis.api_schemas import (
+            DataWorkspaceSnapshotResponse,
+            DataWorkspaceUpdateRequest,
+        )
+
+        if self.case.task.task_type != "strategy" or len(self.uploaded_samples) != 1:
+            raise RuntimeJourneyError("strategy_sample_binding_not_unique")
+        sample = self.uploaded_samples[0]
+        if sample.get("task_id") != self.task_id or sample.get("role") != "sample":
+            raise RuntimeJourneyError("strategy_sample_binding_wrong_owner")
+        if (
+            action.semantic_mapping is None
+            or action.semantic_mapping.target_col != self.case.task.target_col
+        ):
+            raise RuntimeJourneyError("strategy_sample_binding_target_mismatch")
+        route = f"/api/tasks/{self.task_id}/data-workspace"
+        snapshot = DataWorkspaceSnapshotResponse.model_validate(
+            self.json_request(
+                "GET",
+                route,
+                label="read_strategy_workspace",
+            )
+        )
+        if snapshot.task_id != self.task_id:
+            raise RuntimeJourneyError("strategy_sample_binding_wrong_owner")
+        # A dataset change requires the product's reset payload, then a second
+        # CAS-bound write for the human field mapping. Neither write is retried.
+        self.interventions += 1
+        if (snapshot.active_dataset_id, snapshot.active_dataset_content_hash) != (
+            sample["id"],
+            sample["content_hash"],
+        ):
+            reset = DataWorkspaceUpdateRequest(
+                active_dataset_id=sample["id"],
+                active_dataset_content_hash=sample["content_hash"],
+                page="overview",
+                selected_field=None,
+                semantic_mapping={
+                    "target_col": None,
+                    "field_roles": {},
+                    "business_names": {},
+                },
+            )
+            snapshot = DataWorkspaceSnapshotResponse.model_validate(
+                self.json_request(
+                    "PUT",
+                    route,
+                    label="human_strategy_dataset_selection",
+                    headers={"If-Match": str(snapshot.revision)},
+                    json=reset.model_dump(),
+                )
+            )
+            if snapshot.task_id != self.task_id or (
+                snapshot.active_dataset_id,
+                snapshot.active_dataset_content_hash,
+            ) != (sample["id"], sample["content_hash"]):
+                raise RuntimeJourneyError("strategy_sample_binding_wrong_owner")
+        request = DataWorkspaceUpdateRequest(
+            active_dataset_id=sample["id"],
+            active_dataset_content_hash=sample["content_hash"],
+            page="semantics",
+            selected_field=None,
+            semantic_mapping=action.semantic_mapping,
+        )
+        self.json_request(
+            "PUT",
+            route,
+            label="human_strategy_sample_binding",
+            headers={"If-Match": str(snapshot.revision)},
+            json=request.model_dump(),
+        )
+
     def select_recommended_experiment(self, action):
         """Replay an explicit public human policy using the currently shown gate.
 
@@ -1105,6 +1185,46 @@ def _tool_name(value):
     if isinstance(value, str):
         return value
     return f"{value['plugin']}.{value['tool']}"
+
+
+def _output_identity(output, evidence, tool):
+    """Preserve finite legacy hashes; authenticate native open-ended band output.
+
+    Native Strategy bands legitimately contain infinite interval endpoints. Their
+    persisted producer binding uses the platform payload hash. Do not reclassify
+    that authenticated result as corrupt because case identities use strict JSON.
+    """
+    try:
+        return {"output_sha256": digest(output)}
+    except ValueError:
+        from copy import deepcopy
+        from marvis.orchestrator.evidence import payload_hash
+
+        if tool != "strategy.design_cutoff_bands":
+            raise
+        # Only the native open interval endpoints may be non-finite. A NaN
+        # metric, infinite profit, interior boundary or another tool still fails.
+        finite_check = deepcopy(output)
+        edges = finite_check.get("band_edges", [])
+        bands = finite_check.get("bands", [])
+        if edges:
+            if edges[0] == float("-inf"):
+                edges[0] = None
+            if edges[-1] == float("inf"):
+                edges[-1] = None
+        if bands:
+            if bands[0].get("lo") == float("-inf"):
+                bands[0]["lo"] = None
+            if bands[-1].get("hi") == float("inf"):
+                bands[-1]["hi"] = None
+        digest(finite_check)
+        native_hash = payload_hash(output)
+        if native_hash != evidence.get("output_hash"):
+            raise ValueError("native output hash differs from authenticated evidence") from None
+        return {
+            "output_sha256": native_hash.removeprefix("sha256:"),
+            "output_hash_contract": "marvis.orchestrator.evidence.payload_hash",
+        }
 
 
 def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
@@ -1203,7 +1323,7 @@ def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
                     )
                     ev = bound["evidence"]
                     receipt["binding_verified"] = True
-                    receipt["output_sha256"] = digest(bound["output"])
+                    receipt.update(_output_identity(bound["output"], ev, receipt["tool"]))
                     receipt["producer_invocation_id"] = ev.get("producer_invocation_id")
                     receipt["input_hash"] = ev.get("input_hash")
                     receipt["parent_output_refs"] = ev.get("parent_output_refs", [])
@@ -1226,7 +1346,7 @@ def _receipts(workspace: Path, task_id: str | None) -> tuple[dict, dict]:
                         )
                     receipt["output_files"] = []
                     for key in (
-                        "report_path", "pmml_path", "model_card_path", "approval_package_path"
+                        "report_path", "pmml_path", "model_card_path", "approval_package_path", "doc_path"
                     ):
                         if not isinstance(bound["output"].get(key), str):
                             continue

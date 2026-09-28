@@ -23,10 +23,11 @@ def write_synthetic_suite(
     *,
     include_workflow_families: bool = False,
     normal_modeling_only: bool = False,
+    normal_strategy_only: bool = False,
 ) -> dict[str, Path]:
-    if normal_modeling_only and include_workflow_families:
+    if sum((normal_modeling_only, normal_strategy_only, include_workflow_families)) > 1:
         raise ValueError(
-            "normal modeling is a separate suite, not an addition to the archived nine cases"
+            "normal suites are separate, not additions to the archived nine cases"
         )
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     data = root / "data"
@@ -63,6 +64,10 @@ def write_synthetic_suite(
         from .runtime_family_cases import normal_modeling_frames
 
         frames = normal_modeling_frames()
+    if normal_strategy_only:
+        from .runtime_family_cases import normal_strategy_frames
+
+        frames = normal_strategy_frames()
     materials = {}
     for name, (role, frame) in frames.items():
         frame.to_parquet(data / name, index=False)
@@ -76,6 +81,11 @@ def write_synthetic_suite(
         from .runtime_family_cases import normal_modeling_cases
 
         cases, expected = normal_modeling_cases(materials)
+        return _write_suite_files(root, private, data, cases, expected)
+    if normal_strategy_only:
+        from .runtime_family_cases import normal_strategy_cases
+
+        cases, expected = normal_strategy_cases(materials)
         return _write_suite_files(root, private, data, cases, expected)
     cases = [
         {
@@ -199,10 +209,12 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--include-workflow-families", action="store_true")
     group.add_argument("--normal-modeling-only", action="store_true")
+    group.add_argument("--normal-strategy-only", action="store_true")
     args = parser.parse_args()
     for name, path in write_synthetic_suite(
         args.directory,
         include_workflow_families=args.include_workflow_families,
         normal_modeling_only=args.normal_modeling_only,
+        normal_strategy_only=args.normal_strategy_only,
     ).items():
         print(f"{name}={path}")

@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
-from marvis.api_schemas import PortfolioSetupRequest
+from marvis.api_schemas import DataSemanticMappingRequest, PortfolioSetupRequest
 
 RUNTIME_FINISH_REASONS = frozenset(
     {"stop", "length", "tool_calls", "function_call", "content_filter", "other"}
@@ -103,15 +103,31 @@ class RuntimeTask(StrictModel):
 
 class RuntimeAction(StrictModel):
     kind: Literal[
-        "message", "approve_step", "reject_step", "replay_approval", "retry_step", "stop",
+        "message",
+        "approve_step",
+        "reject_step",
+        "replay_approval",
+        "retry_step",
+        "stop",
         "select_recommended_experiment",
+        "bind_single_strategy_sample",
     ]
     content: str = ""
     tool: str = ""
     portfolio_request: PortfolioSetupRequest | None = None
+    semantic_mapping: DataSemanticMappingRequest | None = None
 
     @model_validator(mode="after")
     def required_fields(self):
+        if self.kind == "bind_single_strategy_sample":
+            if self.tool or not self.content.strip() or self.semantic_mapping is None:
+                raise ValueError(
+                    "sample binding requires explicit human text and field semantics only"
+                )
+        elif self.semantic_mapping is not None:
+            raise ValueError(
+                "field semantics belong to the explicit sample binding action only"
+            )
         if self.kind == "select_recommended_experiment":
             if self.tool != "modeling.select_experiment" or not self.content.strip():
                 raise ValueError(
@@ -119,11 +135,17 @@ class RuntimeAction(StrictModel):
                 )
         if self.portfolio_request is not None and self.kind != "message":
             raise ValueError("portfolio_request belongs to a user message only")
-        if self.kind in {"message", "approve_step", "reject_step"} and not self.content.strip():
+        if (
+            self.kind in {"message", "approve_step", "reject_step"}
+            and not self.content.strip()
+        ):
             raise ValueError(
                 "a user message / approval requires explicit business text"
             )
-        if self.kind in {"approve_step", "reject_step", "retry_step"} and not self.tool.strip():
+        if (
+            self.kind in {"approve_step", "reject_step", "retry_step"}
+            and not self.tool.strip()
+        ):
             raise ValueError("a step action requires a tool reference")
         return self
 
@@ -132,6 +154,8 @@ class RuntimeAction(StrictModel):
         value = handler(self)
         if value.get("portfolio_request") is None:
             value.pop("portfolio_request", None)
+        if value.get("semantic_mapping") is None:
+            value.pop("semantic_mapping", None)
         return value
 
 
@@ -150,6 +174,19 @@ class RuntimeCase(StrictModel):
     actions: list[RuntimeAction] = Field(default_factory=list)
     budget: RuntimeBudget = Field(default_factory=RuntimeBudget)
     business_constraints_source: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def strategy_sample_binding(self):
+        if any(a.kind == "bind_single_strategy_sample" for a in self.actions):
+            if (
+                self.task.task_type != "strategy"
+                or len(self.materials) != 1
+                or self.materials[0].role != "sample"
+            ):
+                raise ValueError(
+                    "strategy sample binding requires exactly one declared strategy sample"
+                )
+        return self
 
 
 class RuntimeSuite(StrictModel):

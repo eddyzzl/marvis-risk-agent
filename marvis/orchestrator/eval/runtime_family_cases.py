@@ -396,3 +396,142 @@ def normal_modeling_cases(materials: dict) -> tuple[list[dict], dict]:
         },
     ]
     return [case], {case["id"]: {"result": "done", "assertions": assertions}}
+
+
+def normal_strategy_frames() -> dict:
+    """Public artificial labels and cohorts, with no financial outcome evidence."""
+    n = 120
+    return {
+        "normal_strategy.parquet": (
+            "sample",
+            pd.DataFrame(
+                {
+                    "synthetic_id": [f"synthetic-strategy-{i:04d}" for i in range(n)],
+                    "y": [int(i % 10 >= 7) for i in range(n)],
+                    "credit_score": [1 - (i % 10 + 0.5) / 10 for i in range(n)],
+                    "apply_date": ["2026-01-15"] * 60
+                    + ["2026-02-15"] * 30
+                    + ["2026-03-15"] * 30,
+                    "apply_month": ["2026-01"] * 60
+                    + ["2026-02"] * 30
+                    + ["2026-03"] * 30,
+                }
+            ),
+        ),
+    }
+
+
+def normal_strategy_cases(materials: dict) -> tuple[list[dict], dict]:
+    case = {
+        "id": "synthetic_normal_strategy",
+        "revision": "1",
+        "family": "strategy",
+        "case_set": "development",
+        "scenario": "normal",
+        "task": {
+            "task_type": "strategy",
+            "target_col": "y",
+            "score_col": "credit_score",
+            "strategy_input": {
+                "entry_mode": "strategy_development",
+                "strategy_type": "approval",
+                "objective": "max_approval",
+                "max_bad_rate": 0.25,
+                "min_approval_rate": 0.4,
+            },
+        },
+        "materials": [materials["normal_strategy.parquet"]],
+        "business_constraints_source": (
+            "Public synthetic 120-row strategy scenario with artificial credit_score/y and three disjoint cohorts. "
+            "Human explicitly binds the sole uploaded sample and field roles. The declared 30-day maturity is "
+            "a synthetic scenario assumption, never verified real historical maturity or point-in-time availability. "
+            "Objective max_approval, approved bad-rate ceiling 0.25, approval floor 0.4. "
+            "No production baseline, financial inputs, realized cashflows or production deployment authority. "
+            "Only local adoption and report delivery are requested; profit and business readiness remain unestablished."
+        ),
+        "actions": [
+            {
+                "kind": "bind_single_strategy_sample",
+                "content": "人工选择本次唯一上传的合成样本，确认 y 为目标、credit_score 为信用分及下列字段角色。",
+                "semantic_mapping": {
+                    "target_col": "y",
+                    "business_names": {},
+                    "field_roles": {
+                        "synthetic_id": "id",
+                        "y": "target",
+                        "credit_score": "score",
+                        "apply_date": "date",
+                        "apply_month": "month",
+                    },
+                },
+            },
+            {
+                "kind": "message",
+                "content": (
+                    "固化 V2 策略样本设计；1 代表坏样本；不丢弃缺失标签；"
+                    "审批总体与风险总体是同批 cohort 的嵌套关系；审批总体无纳排条件；风险总体无纳排条件；"
+                    "按时间范围切分，时间列 apply_date；开发范围 2026-01-01 至 2026-01-31；"
+                    "验证范围 2026-02-01 至 2026-02-28；OOT 范围 2026-03-01 至 2026-03-31；"
+                    "表现窗 30 天；观察窗 2026-01-01 至 2026-04-30；成熟度已确认成熟；"
+                    "成熟表现窗 30 天；成熟度截止日 2026-04-30；实体字段 synthetic_id；"
+                    "时间字段 apply_date；分组字段暂无；月份字段 apply_month；权重字段暂无；"
+                    "放款金额字段暂无；逾期金额字段暂无；历史分 credit_score，越低越风险。"
+                    "上述成熟口径仅为本次公开合成场景声明，不构成真实历史认证或收益证据。"
+                ),
+            },
+            {
+                "kind": "message",
+                "content": "做完整审批策略开发，目标 max_approval，获批坏账率不超过 0.25，通过率至少 0.4。无财务数据，不评价收益；无生产基线。",
+            },
+            {
+                "kind": "approve_step",
+                "tool": "strategy.adopt_strategy",
+                "content": "依据当前展示的合成样本回测与限制，批准本地采纳此候选并生成策略文档。缺少真实财务、生产基线及真实成熟度证据，不能证明收益或生产可用性。",
+            },
+        ],
+        "budget": {
+            "wall_seconds": 300,
+            "max_llm_attempts": 40,
+            "max_http_requests": 240,
+            "max_output_tokens_per_attempt": 2048,
+        },
+    }
+    assertions = [
+        {"kind": "tool_succeeded", "tool": f"strategy.{tool}"}
+        for tool in (
+            "materialize_sample_design_v2_native",
+            "tradeoff_view",
+            "design_cutoff_bands",
+            "build_strategy",
+            "backtest_strategy",
+            "adopt_strategy",
+            "render_strategy_doc",
+        )
+    ] + [
+        {"kind": "http_status", "stage": "human_strategy_sample_binding", "value": 200},
+        {"kind": "http_status", "stage": "human_approval", "value": 202},
+        {
+            "kind": "output_length",
+            "tool": "strategy.backtest_strategy",
+            "path": ["economics"],
+            "value": 0,
+        },
+        {
+            "kind": "output_equals",
+            "tool": "strategy.adopt_strategy",
+            "path": ["asset_status"],
+            "value": "adopted_local",
+        },
+        {
+            "kind": "output_equals",
+            "tool": "strategy.render_challenger_report",
+            "path": ["status"],
+            "value": "no_baseline",
+        },
+        {
+            "kind": "artifact_exists",
+            "tool": "strategy.render_strategy_doc",
+            "path": ["doc_path"],
+        },
+    ]
+    return [case], {case["id"]: {"result": "done", "assertions": assertions}}
