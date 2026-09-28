@@ -166,7 +166,7 @@ class EventService:
         ):
             raise EventError("event_request_receipt_binding_failed")
         artifact = self._publish(body, request, receipt)
-        return self._summary(artifact, receipt)
+        return self._summary(artifact, receipt, request.request_id, request.grant_id)
 
     def _path(self, body):
         task_root = self.settings.tasks_dir / body["task_id"]
@@ -271,12 +271,16 @@ class EventService:
 
     def read(self, task_id, request_id, actor_id, grant_id):
         evidence = self.evidence(task_id, request_id, actor_id, grant_id)
-        return self._summary({"id": evidence["artifact_id"]}, evidence["receipt"])
+        return self._summary(
+            {"id": evidence["artifact_id"]}, evidence["receipt"], request_id, grant_id
+        )
 
-    def _summary(self, artifact, receipt):
+    def _summary(self, artifact, receipt, request_id, grant_id):
         result = receipt["result"]
         return {
             "schema_version": "risk-event.summary.v1",
+            "request_id": request_id,
+            "evidence_url": f"/api/tasks/{receipt['task_id']}/risk-events/requests/{request_id}/evidence?grant_id={grant_id}",
             "artifact_id": artifact["id"],
             "task_id": receipt["task_id"],
             "decision_id": receipt["decision_id"],
