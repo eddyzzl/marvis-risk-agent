@@ -734,7 +734,7 @@ def tool_train_model(inputs: dict, ctx) -> dict:
     )
     if preprocessing_steps:
         train_params["preprocessing_steps"] = preprocessing_steps
-    elif not _preprocessing_chain_traceable(runtime, dataset.id):
+    elif not _preprocessing_chain_traceable(runtime, dataset.id, state=preprocessing_state):
         train_params["preprocessing_chain_traceable"] = False
     if isinstance(governance, dict) and governance:
         train_params[SPECIAL_VALUE_GOVERNANCE_PARAM_KEY] = dict(governance)
@@ -914,7 +914,9 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     )
     training_dataset = None
     training_backend = None
-    preprocessing_chain_traceable = bool(preprocessing_steps) or sidecar_path(dataset_path).exists()
+    preprocessing_chain_traceable = bool(preprocessing_steps) or _preprocessing_chain_traceable(
+        runtime, dataset.id, state=preprocessing_state,
+    )
 
     experiments: list[dict] = []
     failed: list[dict] = []
@@ -1197,12 +1199,16 @@ def _preprocessing_steps_for_training(runtime: "_Runtime", dataset_id: str) -> l
     return load_preprocessing_state(runtime.registry, str(dataset_id)).steps
 
 
-def _preprocessing_chain_traceable(runtime: "_Runtime", dataset_id: str) -> bool:
+def _preprocessing_chain_traceable(runtime: "_Runtime", dataset_id: str, *, state=None) -> bool:
     """Whether the modeling input dataset carries a preprocessing lineage sidecar at
     all (PREP-2). False means the dataset predates this mechanism or was never derived
     through a chain-tracking FEATURE/prepare_modeling_frame call — the model card
     flags this explicitly ("预处理链不可追溯") rather than silently implying the model
     has zero preprocessing."""
+    # A native projection may carry temporal ancestry with zero preprocessing
+    # steps. That certificate does not establish a replayable preprocessing chain.
+    if state is not None and state.artifact_id and not state.steps and state.assurance == "unknown":
+        return False
     try:
         dataset_path = runtime.registry.resolve_path(str(dataset_id))
     except KeyError:

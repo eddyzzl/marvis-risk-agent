@@ -127,6 +127,7 @@ def test_actual_prepare_train_keeps_empty_preprocessing_temporal_chain(scenario)
         trained.output["artifact_id"]
     )
     assert artifact.params["feature_time_evidence"] == evidence
+    assert artifact.params["preprocessing_chain_traceable"] is False
     delivered = runner.invoke(
         ToolRef("modeling", "post_training_action"),
         {

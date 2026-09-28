@@ -12,6 +12,8 @@ import pandas as pd
 
 from marvis.data.asof_join import AsOfJoinEngine
 from marvis.data.preprocessing_evidence import load_preprocessing_state
+from marvis.data.predicate_ast import canonicalize_expression
+from marvis.data.transform_time import transform_time_parent
 from marvis.feature.errors import FeatureError
 from marvis.feature.preprocessing import apply_preprocessing_steps
 from marvis.repositories.task_artifacts import TaskArtifactRepository
@@ -95,6 +97,16 @@ def _fields(registry, dataset_id, seen):
         return fields, [native["artifact_id"]], dataset
     state = load_preprocessing_state(registry, dataset_id)
     if not state.artifact_id:
+        transformed = transform_time_parent(registry, repo, dataset)
+        if transformed:
+            parent, artifacts, _ = _fields(
+                registry, transformed.source_dataset_id, (*seen, dataset_id)
+            )
+            projected = _project_operations(parent, transformed.operations)
+            if set(projected) != set(names):
+                raise FeatureError("temporal transform output schema changed")
+            registry.verify_dataset_binding(binding)
+            return projected, [*artifacts, transformed.result_artifact_id], dataset
         return fields, [], dataset
     record = repo.get_for_task(dataset.task_id, state.artifact_id)
     proof = record["provenance"]
@@ -166,3 +178,35 @@ def _project_step(fields, step):
         del fields[name]
     for name in affected:
         fields[name] = deepcopy(value)
+
+
+def _project_operations(parent, operations):
+    fields = deepcopy(parent)
+    for operation in operations:
+        kind = operation["op"]
+        if kind == "rename_columns":
+            mapping = operation["mapping"]
+            fields = {mapping.get(name, name): value for name, value in fields.items()}
+        elif kind == "drop_columns":
+            for name in operation["columns"]:
+                del fields[name]
+        elif kind == "fill_missing":
+            for item in operation["fills"]:
+                fields[item["column"]] = _unknown(
+                    "fill_parameter_availability_not_recorded"
+                )
+        elif kind == "derive_columns":
+            added = {}
+            for item in operation["derivations"]:
+                expression = canonicalize_expression(
+                    item["expression"], fields, predicate=False
+                )
+                added[item["name"]] = (
+                    _combined(fields[name] for name in expression.required_columns)
+                    if expression.required_columns
+                    else _unknown("derived_without_temporal_inputs")
+                )
+            fields.update(added)
+        elif kind not in {"cast_columns", "filter_rows", "deduplicate"}:
+            raise FeatureError("unsupported temporal cleaning operation")
+    return fields
