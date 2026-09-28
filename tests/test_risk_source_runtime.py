@@ -15,6 +15,7 @@ import httpx
 
 from marvis.app import create_app
 from marvis.db_schema import connect
+from marvis.data.registry import DatasetRegistry
 from marvis.plugins.manifest import ToolRef
 from marvis.risk_context.source_contracts import (
     SourceEnvelope,
@@ -619,3 +620,68 @@ def test_known_adverse_kyc_claims_have_deterministic_reason_codes():
         "kyc.watchlist:hit",
     ]
     assert "kyc.document_status:unknown" in result["missing_reasons"]
+
+
+def test_oversized_history_is_rejected_before_frame_read(
+    runtime, tmp_path, monkeypatch
+):
+    grant = authorize(runtime)
+    path = tmp_path / "large-history.parquet"
+    pd.DataFrame({"id": range(10001), "response": ["{}"] * 10001}).to_parquet(
+        path, index=False
+    )
+    dataset = runtime[2].register_existing(
+        path, task_id=runtime[3].id, role="source_history"
+    )
+    prepare(
+        runtime,
+        grant,
+        historical={
+            "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
+            "row_id_column": "id",
+            "row_id": "one",
+            "response_column": "response",
+        },
+    )
+
+    def forbidden_read(*args, **kwargs):
+        pytest.fail("oversized source was read before row admission")
+
+    monkeypatch.setattr(
+        DatasetRegistry, "read_authenticated_binding_snapshot", forbidden_read
+    )
+    result = runtime[0].state.risk_sources.execute(runtime[3].id, "query-one")
+    assert result["status"] == "historical_source_row_limit"
+
+
+@pytest.mark.parametrize("action", ["revoke", "expire"])
+def test_grant_revocation_or_expiry_retains_audit_but_hides_business_data(
+    runtime, tmp_path, monkeypatch, action
+):
+    with provider(tmp_path / "provider") as (endpoint, token, _):
+        grant = authorize(runtime, endpoint, token)
+        prepare(runtime, grant)
+        result = execute(runtime)
+        assert runtime[4].get(result["evidence_url"]).json()["normalized_source"]
+        if action == "revoke":
+            assert (
+                runtime[5].post(f"/api/risk-sources/grants/{grant}/revoke").status_code
+                == 200
+            )
+        else:
+            after_grant = time.time() + 3601
+            with connect(runtime[0].state.settings.db_path) as conn:
+                conn.execute(
+                    "UPDATE local_principals SET expires_at=? WHERE id=?",
+                    (iso(after_grant + 3600), runtime[7]["id"]),
+                )
+            monkeypatch.setattr(
+                "marvis.risk_context.source_repository.time.time", lambda: after_grant
+            )
+        details = runtime[0].state.risk_sources.evidence(
+            runtime[3].id, "query-one", runtime[7]["id"]
+        )
+        assert details["summary"]["status"] == "unauthorized"
+        assert details["receipt"]["recorded_status"] == "available"
+        assert details["normalized_source"] is None and details["assessment"] is None

@@ -160,9 +160,12 @@ class SourceService:
             expected_task_id=task_id,
             expected_content_hash=history["expected_content_hash"],
         )
-        frame = registry.read_authenticated_binding_snapshot(binding)
-        if len(frame) > 10000:
+        if binding.row_count > 10000:
             raise SourceError("historical_source_row_limit", 422)
+        columns = sorted({history["row_id_column"], history["response_column"]})
+        if set(columns) - set(registry.authenticated_binding_column_names(binding)):
+            raise SourceError("historical_source_columns_missing", 422)
+        frame = registry.read_authenticated_binding_snapshot(binding, columns=columns)
         if {history["row_id_column"], history["response_column"]} - set(frame.columns):
             raise SourceError("historical_source_columns_missing", 422)
         selected = frame.loc[
@@ -452,6 +455,20 @@ class SourceService:
         if hashlib.sha256(wire_data).hexdigest() != receipt["wire_response_hash"]:
             raise SourceError("source_wire_integrity_failed")
         result = ProviderResult.model_validate_json(data)
+        # Historical receipt visibility does not extend a revoked/expired permission
+        # to the underlying business data. Recheck after loading the authenticated copy.
+        try:
+            with connect(self.repo.db_path) as conn:
+                self.repo.grant_tx(conn, task_id, row["grant_id"], actor_id)
+        except SourceError as exc:
+            if exc.code not in {"grant_revoked", "grant_not_current"}:
+                raise
+            return {
+                "summary": {**summary, "status": "unauthorized"},
+                "receipt": receipt,
+                "normalized_source": None,
+                "assessment": None,
+            }
         return {
             "summary": summary,
             "receipt": receipt,
