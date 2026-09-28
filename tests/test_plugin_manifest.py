@@ -302,14 +302,23 @@ def test_required_hook_rejects_producer_without_durable_completion_protocol():
         parse_manifest(_manifest(hooks=[{'event': 'task.created', 'tool': 'echo', 'required': True}]))
 
 
-def test_optional_hook_legacy_canonical_hash_survives_database_upgrade(tmp_path):
+def test_optional_hook_legacy_canonical_hash_survives_database_upgrade(tmp_path, monkeypatch):
     import hashlib
     import json
+    import marvis.db_schema as schema
     from marvis.db import PluginRepository, connect, init_db
     from marvis.plugins.registry import PluginRegistry
 
     db_path = tmp_path / 'legacy.sqlite'
-    init_db(db_path)
+    # Install the actual predecessor through the production migration runner.
+    # Downgrading only user_version on a current DB leaves later indexes and
+    # triggers behind, so it cannot represent an upgrade from schema 35.
+    with monkeypatch.context() as patch:
+        patch.setattr(schema, '_MIGRATIONS', [item for item in schema._MIGRATIONS if item[0] <= 35])
+        init_db(db_path)
+    with connect(db_path) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 35
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name IN ('hook_events', 'idx_effect_invocation')").fetchall() == []
     manifest = parse_manifest(_manifest())
     legacy_wire = manifest_to_dict(manifest)
     for hook in legacy_wire['hooks']:
@@ -319,11 +328,10 @@ def test_optional_hook_legacy_canonical_hash_survives_database_upgrade(tmp_path)
     before = canonical(legacy_wire)
     plugins = PluginRepository(db_path)
     plugins.upsert_plugin(manifest, enabled=True)
-    with connect(db_path) as conn:
-        for table in ('hook_deliveries', 'hook_events', 'hook_completion_checkpoints'):
-            conn.execute(f'DROP TABLE {table}')
-        conn.execute('PRAGMA user_version = 35')
     init_db(db_path)
+    with connect(db_path) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == schema.SCHEMA_VERSION
+        assert {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE name IN ('hook_events', 'idx_effect_invocation')")} == {'hook_events', 'idx_effect_invocation'}
     registry = PluginRegistry(PluginRepository(db_path))
     registry.load_from_db()
     restored = registry.list()[0]
