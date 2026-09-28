@@ -196,6 +196,11 @@ def _run_tool(job: dict) -> dict:
             seed=job.get("seed"),
             datasets_root=Path(job["datasets_root"]),
             workspace=Path(job["workspace"]),
+            invocation_id=(
+                str(job["invocation_id"])
+                if bool(job.get("builtin")) and job.get("invocation_id")
+                else None
+            ),
             effect_execution_id=(
                 str(job["effect_execution_id"])
                 if job.get("effect_execution_id") is not None

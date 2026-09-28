@@ -352,14 +352,14 @@ class ExecutionReconciler:
             "remaining_step_ids": remaining,
         }
 
-    def reconcile(self, plan_id, target_id, *, resume_completion=False):
+    def reconcile(self, plan_id, target_id, *, resume_completion=False, actor_id=None):
         plan = self.repo.load_plan(plan_id)
         tasks = TaskRepository(self.repo.db_path)
         job_id = tasks.start_job(plan.task_id, "plan")
         if not tasks.mark_job_running(job_id):
             raise ConflictError("task already has an active job")
         try:
-            with heartbeat_job(tasks, job_id):
+            with self.verifiers.reader(actor_id), heartbeat_job(tasks, job_id):
                 result = self._reconcile(
                     plan_id, target_id, resume_completion=resume_completion
                 )
@@ -374,8 +374,18 @@ class ExecutionReconciler:
             )
             raise
 
+    def _authorize_reads(self, plan_id, conn=None):
+        if conn is None:
+            with connect(self.repo.db_path) as snapshot:
+                return self._authorize_reads(plan_id, snapshot)
+        for run in conn.execute(
+            "SELECT id,tool_ref FROM plan_step_runs WHERE plan_id=?", (plan_id,)
+        ).fetchall():
+            self.verifiers.authorize_read(run["tool_ref"], run["id"], conn)
+
     def _reconcile(self, plan_id, target_id, *, resume_completion=False):
         plan = self.repo.load_plan(plan_id)
+        self._authorize_reads(plan_id)
         targets = self._targets(plan)
         target = next((item for item in targets if item.id == target_id), None)
         if target is None:
@@ -636,6 +646,7 @@ class ExecutionReconciler:
                 return
         with connect(self.repo.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._authorize_reads(plan_id, conn)
             current_status = conn.execute(
                 "SELECT status FROM plans WHERE id=?", (plan_id,)
             ).fetchone()[0]

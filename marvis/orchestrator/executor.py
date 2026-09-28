@@ -293,11 +293,11 @@ class PlanExecutor:
         from marvis.orchestrator.reconciliation import ExecutionReconciler
         self.reconciler = ExecutionReconciler(self)
 
-    def reconcile_execution(self, plan_id: str, target_id: str) -> dict:
-        return self.reconciler.reconcile(plan_id, target_id)
+    def reconcile_execution(self, plan_id: str, target_id: str, *, actor_id=None) -> dict:
+        return self.reconciler.reconcile(plan_id, target_id, actor_id=actor_id)
 
-    def resume_completion(self, plan_id: str, target_id: str) -> dict:
-        return self.reconciler.reconcile(plan_id, target_id, resume_completion=True)
+    def resume_completion(self, plan_id: str, target_id: str, *, actor_id=None) -> dict:
+        return self.reconciler.reconcile(plan_id, target_id, resume_completion=True, actor_id=actor_id)
 
     def run(self, plan_id: str, *, cancellation_check=None) -> ExecutionResult:
         plan = self._repo.load_plan(plan_id)

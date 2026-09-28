@@ -20,7 +20,8 @@ from marvis.safe_paths import assert_within
 # out-of-band effect execution metadata to ToolContext for governed writes.
 # v5 carries a manifest-owned execution profile.  A promoted Draft must stay
 # on the restricted loader even when it is invoked through the normal runner.
-PROTOCOL_VERSION = 5
+# v6 carries a host-issued invocation id to native atomic producers.
+PROTOCOL_VERSION = 6
 WORKER_RESULT_SENTINEL = "@@MARVIS_PLUGIN_RESULT@@"
 MAX_PROGRESS_BYTES = 64 * 1024
 
@@ -34,6 +35,7 @@ class ToolContext:
     effect_execution_id: str | None = None
     runtime_generation: str | None = None
     progress_path: Path | None = None
+    invocation_id: str | None = None
 
     def load_dataset_path(self, dataset_id: str) -> Path:
         return assert_within(self.datasets_root, self.datasets_root / dataset_id)

@@ -496,6 +496,8 @@ class ToolRunner:
             "builtin": bool(manifest.builtin),
             "execution_profile": execution_profile,
         }
+        if bool(manifest.builtin) and invocation_id is not None:
+            job["invocation_id"] = invocation_id
         if execution_profile == EXECUTION_PROFILE_DRAFT_RESTRICTED_V1:
             try:
                 job["module_path"] = str(

@@ -581,6 +581,10 @@ def _restricted_row_domain(record: dict) -> str | None:
     if not isinstance(provenance, dict):
         provenance = {}
     task = quote(str(record.get("task_id") or ""), safe="")
+    if pair == ("native_tool_producer_receipt", "platform.native_tool_producer.v1"):
+        # Internal invocation proofs include original output and are readable
+        # only by the trusted reconciliation adapter, never generic downloads.
+        return f"/api/tasks/{task}/plans"
     if pair in {
         ("risk_event_features", "risk_context.replay_events.v1"),
         ("risk_source_receipt", "risk_context.source_query.v1"),

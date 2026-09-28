@@ -914,6 +914,8 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
     app.state.plan_executor = plan_executor
     from marvis.orchestrator.reconciliation import register_governed_outcome_verifier
     register_governed_outcome_verifier(plan_executor.reconciler.verifiers, app.state.governance_repo)
+    from marvis.governance.native_producers import register_native_outcome_verifiers
+    register_native_outcome_verifiers(plan_executor.reconciler.verifiers, settings, app.state.risk_events.repo)
 
 
 def _llm_factory(settings: Settings, *, role: str | None = None):

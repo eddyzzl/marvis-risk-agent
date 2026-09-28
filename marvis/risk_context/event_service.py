@@ -144,7 +144,7 @@ class EventService:
             self._access(conn, body, request, actor_id, grant_id, "read")
         return self._proposal(body, request)
 
-    def execute(self, task_id, inputs: EventToolInput):
+    def execute(self, task_id, inputs: EventToolInput, *, invocation=None):
         inputs = EventToolInput.model_validate(inputs.model_dump())
         with connect(self.repo.db_path) as conn:
             body, request = self._intent(conn, task_id, inputs.request_id)
@@ -170,7 +170,7 @@ class EventService:
             or receipt["grant_id"] != request.grant_id
         ):
             raise EventError("event_request_receipt_binding_failed")
-        artifact = self._publish(body, request, receipt)
+        artifact = self._publish(body, request, receipt, invocation=invocation)
         return self._summary(artifact, receipt, request.request_id, request.grant_id)
 
     def _path(self, body):
@@ -185,7 +185,7 @@ class EventService:
             raise EventError("event_artifact_path_invalid")
         return directory / (content_hash(body) + ".json")
 
-    def _publish(self, body, request, receipt):
+    def _publish(self, body, request, receipt, *, invocation=None):
         payload = {"intent": body, "receipt": receipt}
         data = canonical_json(
             {"body": payload, "signature": self.repo._sign(payload)}
@@ -223,6 +223,26 @@ class EventService:
                     origin_tool=ORIGIN,
                     provenance=provenance,
                 )
+                if invocation is not None:
+                    invocation.record(
+                        conn,
+                        uow,
+                        artifact=artifact,
+                        output=self._summary(
+                            artifact, receipt, request.request_id, request.grant_id
+                        ),
+                        authority={
+                            "actor_id": body["actor_id"],
+                            "scopes": [
+                                {
+                                    "task_id": body["task_id"],
+                                    "source_id": request.contract.source_id,
+                                    "source_contract_hash": request.contract.source_contract_hash,
+                                    "grant_id": request.grant_id,
+                                }
+                            ],
+                        },
+                    )
             uow.commit()
         except Exception:
             uow.rollback()

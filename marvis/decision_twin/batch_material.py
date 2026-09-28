@@ -8,6 +8,8 @@ import math
 import pandas as pd
 
 from marvis import __version__
+from marvis.artifacts import ArtifactUnitOfWork
+from marvis.decision_twin.producer_output import tool_result
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.decision_twin._canonical import (
@@ -66,10 +68,11 @@ def record_key(value):
 
 
 class BatchMaterial:
-    def __init__(self, settings, task_id, *, actor_id=None):
+    def __init__(self, settings, task_id, *, actor_id=None, invocation=None):
         TaskRepository(settings.db_path).get_task(task_id)
         self.settings, self.task_id = settings, task_id
         self.actor_id = actor_id
+        self.invocation = invocation
         self.registry = DatasetRegistry(
             DatasetRepository(settings.db_path),
             DataBackend(settings.datasets_dir),
@@ -316,33 +319,49 @@ class BatchMaterial:
         envelope = {"body": body, "signature": self._signature(body)}
         # Publication into the generic registry is the visibility boundary. An interrupted
         # append may leave a recoverable audit entry, but no readable task artifact.
-        with self.artifacts.transaction() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            self.registry.verify_dataset_binding_on_connection(conn, binding)
-            receipt = store.put(
-                kind, envelope, idempotency_key=f"{kind}:{content_hash(payload)}"
-            )
-            record = self.artifacts.register_on_connection(
-                conn,
-                task_id=self.task_id,
-                kind=kind,
-                path=str(store.artifact_path(receipt.artifact_hash)),
-                content_hash=receipt.artifact_hash,
-                origin_tool=PRODUCER,
-                provenance={
-                    "contract_hash": payload["contract_hash"],
+        uow = ArtifactUnitOfWork()
+        try:
+            with self.artifacts.transaction() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self.registry.verify_dataset_binding_on_connection(conn, binding)
+                receipt = store.put(
+                    kind, envelope, idempotency_key=f"{kind}:{content_hash(payload)}"
+                )
+                record = self.artifacts.register_on_connection(
+                    conn,
+                    task_id=self.task_id,
+                    kind=kind,
+                    path=str(store.artifact_path(receipt.artifact_hash)),
+                    content_hash=receipt.artifact_hash,
+                    origin_tool=PRODUCER,
+                    provenance={
+                        "contract_hash": payload["contract_hash"],
+                        "artifact_id": receipt.artifact_hash,
+                        "source_dataset_id": binding.dataset_id,
+                        "source_content_hash": binding.content_hash,
+                        **({"event_scoped": True} if authorization else {}),
+                    },
+                )
+
+                result = {
                     "artifact_id": receipt.artifact_hash,
-                    "source_dataset_id": binding.dataset_id,
-                    "source_content_hash": binding.content_hash,
-                    **({"event_scoped": True} if authorization else {}),
-                },
-            )
-        return {
-            "artifact_id": receipt.artifact_hash,
-            "registry_id": record["id"],
-            "kind": kind,
-            "payload": payload,
-        }
+                    "registry_id": record["id"],
+                    "kind": kind,
+                    "payload": payload,
+                }
+                if self.invocation is not None:
+                    self.invocation.record(
+                        conn,
+                        uow,
+                        artifact=record,
+                        output=tool_result(result, self.task_id),
+                        authority=authorization,
+                    )
+            uow.commit()
+        except BaseException:
+            uow.rollback()
+            raise
+        return result
 
     def load(self, artifact_id, *, kind=REPLAY_KIND):
         records = self.artifacts.list_for_task(self.task_id)

@@ -492,7 +492,13 @@ def retry_step(
 def reconcile_execution(request: Request, plan_id: str, body: ReconcileExecutionRequest) -> dict:
     _load_plan(request, plan_id)
     try:
-        result = request.app.state.plan_executor.reconcile_execution(plan_id, body.target_id)
+        result = request.app.state.plan_executor.reconcile_execution(
+            plan_id,
+            body.target_id,
+            actor_id=getattr(getattr(request.state, "local_principal", None), "id", None),
+        )
+    except PermissionError as exc:
+        raise forbidden(str(exc)) from exc
     except (ConflictError, ValueError, KeyError) as exc:
         raise conflict(str(exc)) from exc
     payload = _load_plan_payload(request, plan_id)
@@ -504,7 +510,13 @@ def reconcile_execution(request: Request, plan_id: str, body: ReconcileExecution
 def resume_completion(request: Request, plan_id: str, body: ReconcileExecutionRequest) -> dict:
     _load_plan(request, plan_id)
     try:
-        result = request.app.state.plan_executor.resume_completion(plan_id, body.target_id)
+        result = request.app.state.plan_executor.resume_completion(
+            plan_id,
+            body.target_id,
+            actor_id=getattr(getattr(request.state, "local_principal", None), "id", None),
+        )
+    except PermissionError as exc:
+        raise forbidden(str(exc)) from exc
     except (ConflictError, ValueError, KeyError) as exc:
         raise conflict(str(exc)) from exc
     payload = _load_plan_payload(request, plan_id)

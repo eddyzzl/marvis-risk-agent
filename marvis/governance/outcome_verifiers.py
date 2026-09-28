@@ -1,5 +1,7 @@
 """Trusted, read-only outcome lookup. These callbacks are platform code, not Tools."""
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import sqlite3
@@ -45,15 +47,44 @@ class OutcomeVerifierRegistry:
     """Only application composition can register a trusted verifier."""
 
     def __init__(self):
-        self._verifiers: dict[tuple[str, str], tuple[str, Callable]] = {}
+        self._verifiers: dict[
+            tuple[str, str], tuple[str, Callable, Callable | None]
+        ] = {}
+        self._reader = ContextVar("reconciliation_reader", default=None)
 
     def register(
-        self, kind: str, producer: str, verifier_id: str, verifier: Callable
+        self,
+        kind: str,
+        producer: str,
+        verifier_id: str,
+        verifier: Callable,
+        *,
+        read_guard: Callable | None = None,
     ) -> None:
         key = (kind, producer)
         if key in self._verifiers:
             raise ValueError("outcome verifier already registered")
-        self._verifiers[key] = (verifier_id, verifier)
+        self._verifiers[key] = (verifier_id, verifier, read_guard)
+
+    @contextmanager
+    def reader(self, actor_id):
+        # Per-request, not a mutable registry global or part of a frozen target.
+        token = self._reader.set(actor_id)
+        try:
+            yield
+        finally:
+            self._reader.reset(token)
+
+    def authorize_read(self, producer, run_id, connection):
+        configured = self._verifiers.get(("tool", producer))
+        if configured is None or configured[2] is None:
+            return
+        prior = connection.execute("PRAGMA query_only").fetchone()[0]
+        connection.execute("PRAGMA query_only = ON")
+        try:
+            configured[2](run_id, connection, self._reader.get())
+        finally:
+            connection.execute(f"PRAGMA query_only = {int(prior)}")
 
     def supports(self, target: VerificationTarget) -> bool:
         return (target.kind, target.producer) in self._verifiers
@@ -66,12 +97,16 @@ class OutcomeVerifierRegistry:
             return "unavailable", OutcomeProof(
                 "unknown", target.id, reason="当前动作未接入可信核对器。"
             )
-        verifier_id, verifier = configured
+        verifier_id, verifier, _ = configured
+        prior = connection.execute("PRAGMA query_only").fetchone()[0]
         connection.execute("PRAGMA query_only = ON")
         try:
+            self.authorize_read(
+                target.producer, target.binding.get("run_id"), connection
+            )
             proof = verifier(target, connection)
         finally:
-            connection.execute("PRAGMA query_only = OFF")
+            connection.execute(f"PRAGMA query_only = {int(prior)}")
         if not isinstance(proof, OutcomeProof) or proof.binding_hash != target.id:
             raise ValueError(
                 "verifier proof does not match the original execution binding"
