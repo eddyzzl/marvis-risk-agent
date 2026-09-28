@@ -1,5 +1,6 @@
 import { createBusinessAcceptanceController } from "./js/business-acceptance.js";
 import { createOperationsController } from "./js/operations-controller.js";
+import { createProductionGovernanceController } from "./js/production-governance-controller.js";
 import { createHistoricalReplayController } from "./js/historical-replay-controller.js";
 import { handleBusinessObjectiveEvent } from "./js/business-objective.js";
 import { api, sleep } from "./js/api.js";
@@ -541,6 +542,11 @@ const historicalReplayController = createHistoricalReplayController({
   },
   refreshPlan: refreshDriverGateState,
 });
+const productionGovernanceController = createProductionGovernanceController({
+  root: $("productionGovernancePanel"),
+  isVisible: () => $("governanceSettingsDialog").open && activeGovernanceNav === "production",
+  openIdentity: () => { closeGovernanceSettingsDialog(); $("operationsOpenButton").click(); },
+});
 const driverGateApi = createDriverGateApi({
   api,
   getLocalBusyAction: (taskId) => taskActivities.action(taskId) || "",
@@ -882,6 +888,7 @@ const governanceSettingsCopy = {
     title: "模型引擎",
     subtitle: "配置 Agent 会话可调用的大模型连接信息。",
   },
+  production: {title:"决策服务与发布", subtitle:"构建冻结方案，通过独立审批、安装证据和治理指针管理本地决策服务。"},
   "memory-policy": {
     title: "记忆",
     subtitle: "控制 Agent 记忆的引用范围与沉淀规则；下方可查看与管理已积累的记忆。",
@@ -929,6 +936,7 @@ function setGovernanceCopy(navKey, button) {
 // Single, context-aware refresh for the dialog title bar. Only panels that load
 // remote data appear here; execution-environment keeps its own 扫描环境 action.
 const governanceRefreshActions = {
+  production: () => productionGovernanceController.refresh(),
   plugins: () => runGovernanceExtensionAction(refreshGovernancePlugins),
   workflows: () => runGovernanceExtensionAction(refreshGovernanceSkills),
   capabilities: () => runGovernanceExtensionAction(refreshGovernanceCapability),
@@ -958,6 +966,7 @@ function setGovernanceSettingsPanel(navKey = "execution-environment", options = 
   const button = activeGovernanceButton(navKey);
   const normalizedNav = button?.dataset?.governanceNav || "execution-environment";
   const panel = button?.dataset?.governancePanel || "execution-environment";
+  if (activeGovernanceNav === "production" && normalizedNav !== "production") productionGovernanceController.leave();
   activeGovernanceNav = normalizedNav;
   syncGovernanceRefreshButton(normalizedNav);
   for (const item of document.querySelectorAll("[data-governance-nav]")) {
@@ -979,6 +988,7 @@ function setGovernanceSettingsPanel(navKey = "execution-environment", options = 
 }
 
 function refreshGovernancePanel(navKey = activeGovernanceNav, options = {}) {
+  if (navKey === "production" && options.load !== false) void productionGovernanceController.refresh();
   const button = activeGovernanceButton(navKey);
   if (button?.dataset?.governancePanel === "execution-environment" && options.load !== false) {
     runAction(loadExecutionEnvironmentSettings, {
@@ -8729,6 +8739,10 @@ $("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernan
 $("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;
 $("closeGovernanceSettingsButton").onclick = closeGovernanceSettingsDialog;
 $("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);
+$("governanceSettingsDialog").addEventListener("close", () => productionGovernanceController.leave());
+for (const type of ["click", "submit", "change", "input"]) {
+  $("productionGovernancePanel").addEventListener(type, event => productionGovernanceController.handle(event));
+}
 $("governanceSettingsDialog").addEventListener("change", handleMemoryPolicyChange);
 $("governanceSettingsSearch").oninput = handleGovernanceSettingsSearch;
 $("governanceRefreshButton").onclick = refreshActiveGovernancePanel;

@@ -1,3 +1,4 @@
+import { projectedStrategyItems } from "./v2/strategy_candidate_lab_contracts.js";
 import { api } from "./api.js";
 import { operationsFormHtml, operationsPayload, selectOptions } from "./operations-form.js";
 import { runtimeHtml, inboxHtml, schedulesHtml, scheduleHtml, periodHtml, evidenceHtml } from "./operations-view.js";
@@ -134,7 +135,7 @@ export function createOperationsController({ root, openButton, apiClient = api,
       const [data, targetData] = await Promise.all([apiClient(`/api/tasks/${path(taskId)}/datasets`), apiClient(targetUrl)]);
       if (!current(ticket) || version !== sourceEpoch || formState !== state) return;
       state.datasets = data.datasets;
-      state.targets = ref === "strategy.run_strategy_monitoring" ? (targetData.strategies || []).map(s => ({id:s.strategy_id, label:`${s.strategy_id} · v${s.version} · ${s.adopted_at ? "已采纳" : s.status}`})) : targetData.experiments.map(e => ({id:e.id,label:`${e.recipe_id} · ${e.id} · ${e.status}`}));
+      state.targets = ref === "strategy.run_strategy_monitoring" ? projectedStrategyItems(targetData).map(s => ({id:s.strategy_id, label:`${s.strategy_id} · v${s.version} · ${s.adopted_at ? "已采纳" : s.status}`})) : targetData.experiments.map(e => ({id:e.id,label:`${e.recipe_id} · ${e.id} · ${e.status}`}));
       form.elements.dataset_id.innerHTML = selectOptions(state.datasets.map(d => ({id:d.id,label:`${d.source_name || d.id} · ${d.row_count ?? "未知"} 行`})), preferred.dataset_id);
       form.elements.target_id.innerHTML = selectOptions(state.targets, preferred.target_id);
       // A retained recheck target must still be present in authoritative history.

@@ -32,6 +32,7 @@
     <link rel="stylesheet" href="static/css/validation-batch-create.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/business-acceptance.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/operations.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/production-governance.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/historical-replay.css?v=__MARVIS_STATIC_VERSION__" />
     <script src="static/js/pet_catalog.js?v=__MARVIS_STATIC_VERSION__"></script>
   </head>
@@ -624,6 +625,7 @@
                 </span>
                 <strong>能力档位</strong>
               </button>
+              <button class="governance-nav-item" type="button" data-governance-nav="production" data-governance-panel="production" aria-selected="false"><span class="governance-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v6H4zM4 15h16v4H4zM8 8h.01M8 17h.01"></path></svg></span><strong>决策服务与发布</strong></button>
               <button class="governance-nav-item" type="button" data-governance-nav="memory-policy" data-governance-panel="memory-policy" aria-selected="false">
                 <span class="governance-nav-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M4 6h8"></path><path d="M16 6h4"></path><circle cx="14" cy="6" r="2"></circle><path d="M4 12h4"></path><path d="M12 12h8"></path><circle cx="10" cy="12" r="2"></circle><path d="M4 18h10"></path><path d="M18 18h2"></path><circle cx="16" cy="18" r="2"></circle></svg>
@@ -720,6 +722,7 @@
               <div id="llmSettingsStatus" class="status" role="status" aria-live="polite"></div>
             </section>
 
+            <section class="governance-panel" data-governance-panel-content="production"><div id="productionGovernancePanel" class="production-workspace"></div></section>
             <section class="governance-panel" data-governance-panel-content="memory-policy">
               <div class="settings-group">
                 <div class="settings-row">
