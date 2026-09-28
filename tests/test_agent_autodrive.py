@@ -217,6 +217,39 @@ def test_agent_mode_vintage_initial_intake_does_not_need_llm(
 
 
 # -- invariant 2: with an LLM, agent mode auto-drives the gates ---------------
+@pytest.mark.parametrize("task_type", ["modeling", "feature_analysis"])
+def test_auto_preserves_business_target_choice_instead_of_confirming_ambiguity(
+    client, tmp_path, monkeypatch, task_type,
+):
+    fake = _FakeLLM(action="confirm", reason="继续")
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda request, task, payload: fake,
+    )
+    source = tmp_path / "ambiguous-target"
+    source.mkdir()
+    pd.DataFrame({
+        "signal": list(range(120)),
+        "label_sqandzy": [0, 1] * 60,
+        "label_sqandzy_new": [1, 0] * 60,
+        "split_tag": ["train"] * 72 + ["test"] * 24 + ["oot"] * 24,
+    }).to_parquet(source / "sample.parquet", index=False)
+    created = client.post("/api/tasks", json={
+        "model_name": "目标口径待确认", "validator": "qa",
+        "source_dir": str(source), "task_type": task_type, "run_mode": "agent",
+    })
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    response = client.post(f"/api/tasks/{task_id}/agent/start",
+                           json={"acceptance_mode": "auto_accept"})
+    assert response.status_code == 202, response.text
+    latest = _last_assistant(response.json()["messages"])
+    assert latest["metadata"]["join_c1"]["target_col"] is None
+    assert not latest["metadata"].get("error")
+    assert fake.calls == []
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
 def test_agent_mode_autodrives_join_to_completion(client: TestClient, tmp_path: Path, monkeypatch):
     fake = _FakeLLM(action="confirm", reason="命中率正常,继续")
     monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)

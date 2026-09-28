@@ -65,6 +65,7 @@ from marvis.agent.workflow_recovery import latest_unresolved_workflow_failure
 from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.domain import TASK_TYPE_FEATURE_ANALYSIS
+from marvis.domain import TASK_TYPE_MODELING
 from marvis.domain import TASK_TYPE_STRATEGY
 from marvis.domain import TaskRecord
 from marvis.llm_client import LLMClientError
@@ -707,6 +708,22 @@ def agent_autodrive_turn(
         gate = shared_lane.latest_open_gate(repo.list_agent_messages(task.id))
         if gate is None:
             return
+        c1 = (gate.get("metadata") or {}).get("join_c1")
+        if (
+            task.task_type in {TASK_TYPE_MODELING, TASK_TYPE_FEATURE_ANALYSIS}
+            and isinstance(c1, dict)
+            and not c1.get("target_col")
+        ):
+            anchor = next(
+                (item for item in c1.get("files", [])
+                 if item.get("dataset_id") == c1.get("anchor_id")),
+                {},
+            )
+            if len(anchor.get("target_candidates") or []) > 1:
+                # A schema ambiguity is a missing business choice, not a low-risk
+                # approval. Preserve the actionable C1 prompt; a bare AUTO
+                # confirm cannot select a target and only appends a false error.
+                return
         processed_gates += 1
         # MEM-1 read side: attach a read-only 【历史同类实验】 anchor to the gate
         # metadata (rendered by auto_drive._format_gate) before the LLM sees it.
