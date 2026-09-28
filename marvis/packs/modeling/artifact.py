@@ -68,6 +68,9 @@ def write_artifact_file(
         writer(artifact.path)
         if validator is not None:
             validator(artifact.path)
+        from marvis.packs.modeling.producer_receipts import capture_file
+
+        capture_file(filename, artifact.path)
         final_path = artifact.promote()
         artifact.commit()
         return final_path

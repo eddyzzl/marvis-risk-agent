@@ -80,8 +80,8 @@ def validate_features(features: dict, manifest: dict) -> None:
             continue
         kind = field["type"]
         valid = (
-            (kind == "number" and type(value) in (int, float) and math.isfinite(value))
-            or (kind == "integer" and type(value) is int)
+            (kind == "number" and type(value) in (int, float) and _finite_number(value))
+            or (kind == "integer" and type(value) is int and -(2**63) <= value < 2**63)
             or (kind == "string" and isinstance(value, str) and len(value) <= 4096)
             or (kind == "boolean" and type(value) is bool)
         )
@@ -89,3 +89,10 @@ def validate_features(features: dict, manifest: dict) -> None:
             raise DecisionError("raw_feature_type_mismatch")
     if len(canonical(features).encode()) > 64_000:
         raise DecisionError("feature_payload_too_large", 413)
+
+
+def _finite_number(value):
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError, ValueError):
+        return False

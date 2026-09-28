@@ -223,6 +223,9 @@ def _save_ensemble_artifact(
         ],
         "weights": list(weights),
     }
+    from marvis.packs.modeling.producer_receipts import capture_members
+
+    capture_members(payload["members"])
     write_artifact_file(out_dir, model_path, lambda path: joblib.dump(payload, path))
     feature_list = member_artifacts[0].feature_list if member_artifacts else tuple(config.features)
     artifact = ModelArtifact(

@@ -1445,7 +1445,16 @@ def _compute_baseline_distributions(
     }
 
 
-def _train_recipe(
+def _train_recipe(recipe, backend, dataset_path, config, *, out_dir):
+    from marvis.packs.modeling.producer_receipts import capture_native_writes, finish_capture
+
+    with capture_native_writes() as writes:
+        result = _train_recipe_impl(recipe, backend, dataset_path, config, out_dir=out_dir)
+        receipt = finish_capture(writes, result.artifact, out_dir)
+    return replace(result, producer_receipt=receipt)
+
+
+def _train_recipe_impl(
     recipe: str,
     backend,
     dataset_path: Path,

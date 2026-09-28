@@ -131,6 +131,7 @@ class TrainResult:
     feature_importance: tuple[tuple[str, float], ...]
     experiment_id: str
     nan_labels_dropped: int = 0
+    producer_receipt: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

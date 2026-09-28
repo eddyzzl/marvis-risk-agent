@@ -5,13 +5,11 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 import hashlib
 import hmac
-import io
 import json
 import math
 from pathlib import Path
 import tempfile
 
-import joblib
 
 from marvis import __version__
 from marvis.artifacts.transactional import ArtifactUnitOfWork
@@ -105,6 +103,43 @@ class PackageStore:
                     raise DecisionError("package_file_integrity_failed", 409)
         return manifest
 
+    def list(self, *, task_id=None, limit=100, offset=0):
+        with connect(self.settings.db_path) as conn:
+            conn.execute("BEGIN")
+            where, args = (" WHERE s.task_id=?", [task_id]) if task_id else ("", [])
+            query = " FROM reference_decision_packages p JOIN strategies s ON s.id=json_extract(p.canonical_json, '$.strategy.id')"
+            total = conn.execute("SELECT count(*)" + query + where, args).fetchone()[0]
+            rows = conn.execute(
+                "SELECT p.*, s.task_id"
+                + query
+                + where
+                + " ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?",
+                [*args, limit, offset],
+            ).fetchall()
+        packages = []
+        for row in rows:
+            manifest = self.get(row["id"], verify_files=False)
+            packages.append(
+                {
+                    "package_hash": row["id"],
+                    "task_id": row["task_id"],
+                    "created_at": row["created_at"],
+                    "strategy_id": manifest["strategy"]["id"],
+                    "strategy_version": manifest["strategy"]["version"],
+                    "model_artifact_id": manifest["model"]["id"],
+                    "decision_node": manifest["configuration"]["decision_node"],
+                    "assurance": manifest["assurance"],
+                    "file_integrity": "verify_on_detail_read",
+                }
+            )
+        return {
+            "packages": packages,
+            "count": total,
+            "next_offset": offset + len(packages)
+            if offset + len(packages) < total
+            else None,
+        }
+
     def build(self, request: PackageRequest, *, actor_id: str):
         repo = ModelingRepository(self.settings.db_path)
         artifact = repo.get_model_artifact(request.model_artifact_id)
@@ -112,7 +147,7 @@ class PackageStore:
         if (
             not experiment
             or experiment.artifact_id != artifact.id
-            or experiment.status != "trained"
+            or experiment.status not in {"trained", "selected"}
         ):
             raise DecisionError("completed_registered_model_required")
         if artifact.algorithm not in {
@@ -168,39 +203,29 @@ class PackageStore:
         receipt = self._preprocessing_receipt(experiment, artifact) if steps else None
         source = _artifact_base_dir(self.settings, experiment.task_id)
         artifacts = [artifact]
-        root_snapshot = safe_file(source, artifact.model_path).read_bytes()
-        if artifact.algorithm == "ensemble":
-            payload = joblib.load(io.BytesIO(root_snapshot))
-            members = payload.get("members") or []
-            if [m["artifact_id"] for m in members] != artifact.params.get(
-                "ensemble_member_artifact_ids"
-            ):
-                raise DecisionError("ensemble_dependency_closure_mismatch")
-            for member in members:
-                if member["algorithm"] not in {"lr", "lgb", "xgb", "catboost", "mlp"}:
-                    raise DecisionError("unsupported_ensemble_member")
-                # The ensemble recipe persists members in its root payload, not
-                # separate DB rows. This is exactly the scorer's dependency list.
-                artifacts.append(
-                    replace(
-                        artifact,
-                        id=member["artifact_id"],
-                        algorithm=member["algorithm"],
-                        model_path=member["model_path"],
-                        params={},
-                        woe_maps=None,
-                        pmml_path=None,
-                    )
+        from marvis.packs.modeling.producer_receipts import load_receipt
+        from marvis.packs.modeling.errors import ModelingError
+
+        try:
+            producer_record, snapshots = load_receipt(
+                self.settings.db_path, experiment, artifact, source
+            )
+        except ModelingError as exc:
+            raise DecisionError(str(exc), 409) from exc
+        for member in producer_record["provenance"]["members"]:
+            if member["algorithm"] not in {"lr", "lgb", "xgb", "catboost", "mlp"}:
+                raise DecisionError("unsupported_ensemble_member")
+            artifacts.append(
+                replace(
+                    artifact,
+                    id=member["artifact_id"],
+                    algorithm=member["algorithm"],
+                    model_path=member["model_path"],
+                    params={},
+                    woe_maps=None,
+                    pmml_path=None,
                 )
-        paths = {a.model_path for a in artifacts}
-        calibration = artifact.params.get("calibration") or {}
-        if calibration.get("path"):
-            paths.add(calibration["path"])
-        snapshots = {
-            name: safe_file(source, name).read_bytes() for name in sorted(paths)
-        }
-        if snapshots[artifact.model_path] != root_snapshot:
-            raise DecisionError("source_artifact_changed")
+            )
         files = [
             {
                 "path": name,
@@ -221,6 +246,7 @@ class PackageStore:
             "members": [encode_parameters(asdict(a)) for a in artifacts[1:]],
             "files": files,
             "preprocessing_receipt": receipt,
+            "model_producer_receipt": producer_record,
             "derived_fields": sorted(derived),
             "output_fields": sorted(outputs),
             "assurance": "local_reference_only",
@@ -242,8 +268,6 @@ class PackageStore:
                     target = stage.path / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(data)
-                if artifact.algorithm == "ensemble":
-                    self._verify_ensemble(stage.path, artifact, artifacts[1:])
                 # Refuse a source mutation during package construction.
                 if any(
                     safe_file(source, f["path"]).read_bytes() != snapshots[f["path"]]
@@ -318,14 +342,3 @@ class PackageStore:
             lineage.append(encode_parameters(record))
             identity = record["provenance"]["parent_artifact_id"]
         return {"assurance": state.assurance, "lineage": lineage}
-
-    @staticmethod
-    def _verify_ensemble(directory, artifact, members):
-        # Only platform-produced registered files enter this trusted packaging path.
-        payload = joblib.load(directory / artifact.model_path)
-        expected = [
-            {"artifact_id": a.id, "algorithm": a.algorithm, "model_path": a.model_path}
-            for a in members
-        ]
-        if payload.get("members") != expected or not expected:
-            raise DecisionError("ensemble_dependency_closure_mismatch")

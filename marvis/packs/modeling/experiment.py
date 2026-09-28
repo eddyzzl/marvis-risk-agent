@@ -46,15 +46,8 @@ class ExperimentStore:
         return self._repo.transaction()
 
     def attach_result(self, experiment_id: str, result: TrainResult) -> None:
-        self.get(experiment_id)
-        artifact = self._prepare_result_artifact(experiment_id, result)
-        self._repo.attach_experiment_result_with_artifact_and_audit(
-            experiment_id,
-            artifact=artifact,
-            metrics=result.metrics,
-            status="trained",
-            audit=_attach_result_audit(experiment_id, artifact),
-        )
+        with self.transaction() as conn:
+            self.attach_result_on_connection(conn, experiment_id, result)
 
     def attach_result_on_connection(self, conn, experiment_id: str, result: TrainResult):
         """Connection-scoped counterpart of ``attach_result`` (LT-5): lets a caller
@@ -76,6 +69,9 @@ class ExperimentStore:
             status="trained",
             audit=_attach_result_audit(experiment_id, artifact),
         )
+        from marvis.packs.modeling.producer_receipts import register_on_connection
+
+        register_on_connection(conn, self._repo.db_path, artifact, result.producer_receipt)
         return artifact
 
     def _prepare_result_artifact(self, experiment_id: str, result: TrainResult):

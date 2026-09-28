@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
+import tempfile
+import uuid
 import joblib
 import numpy as np
 import pandas as pd
@@ -52,6 +55,28 @@ def _calibration_valid_labeled_scores(
 
 
 def tool_calibrate_model(inputs: dict, ctx) -> dict:
+    from marvis.packs.modeling.producer_receipts import load_receipt
+
+    runtime = _runtime(ctx)
+    artifact = _task_artifact(runtime, ctx, inputs["artifact_id"])
+    experiment = _task_experiment(runtime, ctx, artifact.experiment_id)
+    proof = load_receipt(runtime.settings.db_path, experiment, artifact,
+                         _artifact_model_base_dir(runtime, artifact), required=False)
+    if proof is None:
+        # Legacy calibration remains usable, with unknown model origin; it
+        # cannot manufacture a trusted receipt for an old arbitrary pickle.
+        return _calibrate_model(inputs, ctx)
+    record, snapshots = proof
+    with tempfile.TemporaryDirectory(prefix="marvis-calibration-model-") as temp:
+        directory = Path(temp)
+        for name, data in snapshots.items():
+            path = directory / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return _calibrate_model(inputs, ctx, producer_record=record, score_base_dir=directory)
+
+
+def _calibrate_model(inputs: dict, ctx, *, producer_record=None, score_base_dir=None) -> dict:
     """Fit a post-training binary probability calibrator and report Brier/ECE.
 
     DOM-4: when the caller does not explicitly pick a ``split``/``fit_split`` to fit
@@ -97,7 +122,7 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
     )
     scorer = _ModelArtifactScorer(
         artifact,
-        base_dir=_artifact_model_base_dir(runtime, artifact),
+        base_dir=score_base_dir or _artifact_model_base_dir(runtime, artifact),
         load_calibration=False,
     )
 
@@ -201,7 +226,7 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
             eval_sample_count = int(labels.size)
 
     base_dir = _artifact_model_base_dir(runtime, artifact)
-    calibration_path = f"{artifact.id}.calibration.{method}.joblib"
+    calibration_path = f"{artifact.id}.calibration.{method}.{uuid.uuid4().hex}.joblib"
     calibration_payload = {
         "method": method,
         "calibrator": calibrator,
@@ -211,6 +236,7 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
     calibration_artifact = uow.stage_file(base_dir, calibration_path)
     try:
         joblib.dump(calibration_payload, calibration_artifact.path)
+        produced_calibration_bytes = calibration_artifact.path.read_bytes()
     except Exception:
         uow.rollback()
         raise
@@ -263,10 +289,21 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
     )
     transaction = getattr(runtime.modeling_repo, "transaction", None)
     if callable(set_params_on_connection) and callable(transaction):
-        uow.finalize_with_connection(
-            transaction,
-            lambda conn: set_params_on_connection(conn, artifact.id, params, audit=audit),
-        )
+        def publish(conn):
+            set_params_on_connection(conn, artifact.id, params, audit=audit)
+            if producer_record is not None:
+                from marvis.packs.modeling.producer_receipts import metadata_hash, register_on_connection
+
+                old_calibration = (artifact.params.get(CALIBRATION_PARAMS_KEY) or {}).get("path")
+                files = [item for item in producer_record["provenance"]["files"] if item["path"] != old_calibration]
+                files.append({"path": calibration_path, "sha256": hashlib.sha256(produced_calibration_bytes).hexdigest(),
+                              "size": len(produced_calibration_bytes)})
+                register_on_connection(conn, runtime.settings.db_path, updated_artifact, {
+                    "directory": str(base_dir), "files": files, "members": producer_record["provenance"]["members"],
+                    "metadata_hash": metadata_hash(updated_artifact), "anchor": calibration_path,
+                })
+
+        uow.finalize_with_connection(transaction, publish)
     else:
         uow.finalize(
             lambda: runtime.modeling_repo.set_model_artifact_params_with_audit(

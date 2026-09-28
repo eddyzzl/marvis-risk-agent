@@ -131,6 +131,7 @@ def test_package_corruption_rejected_before_deserialization(packaged, monkeypatc
         {"x1": True, "x2": 2},
         {"x1": float("nan"), "x2": 2},
         {"x1": None, "x2": 2},
+        {"x1": 10**400, "x2": 2},
     ],
 )
 def test_invalid_or_forged_features_never_reach_scoring(packaged, features):
@@ -245,7 +246,7 @@ def test_same_request_concurrent_workers_have_one_owner(packaged):
     assert claims.count("decision_in_progress") == 1
 
 
-def test_ensemble_and_calibration_are_in_authenticated_dependency_closure(packaged):
+def test_replacing_trained_model_with_arbitrary_ensemble_is_rejected(packaged):
     from sklearn.isotonic import IsotonicRegression
 
     app, store, request, _, _, artifact, _, _ = packaged
@@ -283,23 +284,13 @@ def test_ensemble_and_calibration_are_in_authenticated_dependency_closure(packag
                 "UPDATE model_artifacts SET algorithm='ensemble', model_path='ensemble-root.joblib', params_json=? WHERE id=?",
                 (json.dumps(params), artifact.id),
             )
-        package_hash, manifest = store.build(
-            request.model_copy(update={"score_product": "calibrated_pd"}),
-            actor_id="test-maker",
-        )
-        assert {f["path"] for f in manifest["files"]} == {
-            *names,
-            "ensemble-root.joblib",
-            "calibration.joblib",
-        }
-        with store.snapshot(package_hash) as (frozen, directory):
-            assert (
-                0 <= evaluate(frozen, directory, {"x1": 0.1, "x2": 0.2})["score"] <= 1
+        with pytest.raises(
+            DecisionError, match="native_model_metadata_authentication_failed"
+        ):
+            store.build(
+                request.model_copy(update={"score_product": "calibrated_pd"}),
+                actor_id="test-maker",
             )
-        target = store.root / package_hash / names[0]
-        target.write_bytes(b"member changed")
-        with pytest.raises(DecisionError, match="package_file_integrity_failed"):
-            store.get(package_hash)
     finally:
         with connect(app.state.settings.db_path) as conn:
             conn.execute(
@@ -345,3 +336,167 @@ def test_new_derived_recipe_inputs_exclude_intermediate_and_population_values():
     } <= output
     with pytest.raises(DecisionError):
         feature_outputs(["a", "b", "g", "date", "a_ratio_b"], steps)
+
+
+def test_selected_exact_final_artifact_can_be_packaged(packaged):
+    app, store, request, package_hash, _, artifact, _, _ = packaged
+    repo = ModelingRepository(app.state.settings.db_path)
+    try:
+        repo.set_experiment_status(artifact.experiment_id, "selected")
+        assert store.build(request, actor_id="maker")[0] == package_hash
+        with connect(app.state.settings.db_path) as conn:
+            conn.execute(
+                "UPDATE experiments SET artifact_id=NULL WHERE id=?",
+                (artifact.experiment_id,),
+            )
+        with pytest.raises(DecisionError, match="completed_registered_model_required"):
+            store.build(request, actor_id="maker")
+    finally:
+        with connect(app.state.settings.db_path) as conn:
+            conn.execute(
+                "UPDATE experiments SET status='trained', artifact_id=? WHERE id=?",
+                (artifact.id, artifact.experiment_id),
+            )
+
+
+def test_source_tampered_before_build_fails_without_deserialization(
+    packaged, monkeypatch
+):
+    app, store, request, _, _, artifact, _, _ = packaged
+    experiment = ModelingRepository(app.state.settings.db_path).get_experiment(
+        artifact.experiment_id
+    )
+    source = (
+        app.state.settings.tasks_dir
+        / experiment.task_id
+        / "modeling_artifacts"
+        / artifact.model_path
+    )
+    original = source.read_bytes()
+    try:
+        source.write_bytes(b"malicious before the package existed")
+        monkeypatch.setattr(
+            joblib,
+            "load",
+            lambda *a, **k: pytest.fail("unverified pickle reached deserializer"),
+        )
+        with pytest.raises(DecisionError, match="native_model_source_integrity_failed"):
+            store.build(request, actor_id="maker")
+    finally:
+        source.write_bytes(original)
+
+
+def test_missing_original_producer_evidence_cannot_be_backfilled(packaged):
+    app, store, request, _, _, artifact, _, _ = packaged
+    with connect(app.state.settings.db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM task_artifacts WHERE kind='modeling_native_model_closure'"
+        ).fetchall()
+        conn.execute(
+            "DELETE FROM task_artifacts WHERE kind='modeling_native_model_closure'"
+        )
+    try:
+        with pytest.raises(DecisionError, match="evidence_unknown_retrain_required"):
+            store.build(request, actor_id="maker")
+    finally:
+        with connect(app.state.settings.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO task_artifacts VALUES (?,?,?,?,?,?,?,?)",
+                [tuple(row) for row in rows],
+            )
+
+
+def test_real_ensemble_and_calibrator_producer_authenticate_all_source_bytes(
+    tmp_path, packaged, monkeypatch
+):
+    from marvis.plugins.manifest import ToolRef
+
+    runner, _, registry, _, settings, task = _runtime(tmp_path)
+    initial, _ = _train_lr_experiment(runner, registry, tmp_path, task)
+    repo = ModelingRepository(settings.db_path)
+    dataset_id = repo.get_experiment(initial.output["experiment_id"]).config.dataset_id
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset_id,
+            "recipe": "ensemble",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"base_recipe": "lr", "n_members": 2},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok, trained.error
+    artifact_id = trained.output["artifact_id"]
+    calibrated = runner.invoke(
+        ToolRef("modeling", "calibrate_model"),
+        {
+            "artifact_id": artifact_id,
+            "dataset_id": dataset_id,
+            "method": "sigmoid",
+            "split": "test",
+            "min_samples": 20,
+            "n_bins": 5,
+        },
+        task_id=task.id,
+    )
+    assert calibrated.ok, calibrated.error
+    strategy = replace(
+        build_strategy_from_spec(
+            packaged[-1], score_col="pd", description="native closure"
+        ),
+        id="online-strategy",
+    )
+    StrategyRepository(settings.db_path).create_strategy(task.id, strategy)
+    with connect(settings.db_path) as conn:
+        conn.execute(
+            "UPDATE strategies SET asset_status='validated', status='validated' WHERE id='online-strategy'"
+        )
+    store = create_app(settings).state.reference_decision.packages
+    request = packaged[2].model_copy(
+        update={"model_artifact_id": artifact_id, "score_product": "calibrated_pd"}
+    )
+    # Package construction has no pickle deserialization at all.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            joblib,
+            "load",
+            lambda *a, **k: pytest.fail("package builder deserialized pickle"),
+        )
+        package_hash, manifest = store.build(request, actor_id="maker")
+    assert len(manifest["files"]) == 4
+    with store.snapshot(package_hash) as (frozen, directory):
+        assert 0 <= evaluate(frozen, directory, {"x1": 0.1, "x2": 0.2})["score"] <= 1
+    source = settings.tasks_dir / task.id / "modeling_artifacts"
+    for entry in manifest["files"]:
+        path = source / entry["path"]
+        original = path.read_bytes()
+        try:
+            path.write_bytes(b"changed before build")
+            with pytest.raises(
+                DecisionError, match="native_model_source_integrity_failed"
+            ):
+                store.build(request, actor_id="maker")
+        finally:
+            path.write_bytes(original)
+    # A second calibration creates a new immutable receipt without destroying
+    # the first package's calibrated artifact or original producer records.
+    repeated = runner.invoke(
+        ToolRef("modeling", "calibrate_model"),
+        {
+            "artifact_id": artifact_id,
+            "dataset_id": dataset_id,
+            "method": "sigmoid",
+            "split": "test",
+            "min_samples": 20,
+            "n_bins": 5,
+        },
+        task_id=task.id,
+    )
+    assert repeated.ok, repeated.error
+    assert repeated.output["calibration_path"] != calibrated.output["calibration_path"]
+    assert store.build(request, actor_id="maker")[0] != package_hash
+    assert store.get(package_hash) == manifest

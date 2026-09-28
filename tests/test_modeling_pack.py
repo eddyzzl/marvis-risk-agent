@@ -631,7 +631,7 @@ def test_calibrate_model_records_diagnostics_and_report_sheet(tmp_path):
     base_dir = Path(settings.tasks_dir) / task.id / "modeling_artifacts"
     assert not (base_dir / ".staging").exists()
     meta = json.loads((base_dir / f"{artifact.id}.model_meta.json").read_text(encoding="utf-8"))
-    assert meta["params"]["calibration"]["path"] == f"{artifact.id}.calibration.sigmoid.joblib"
+    assert meta["params"]["calibration"]["path"] == Path(calibrated.output["calibration_path"]).name
     calibration_audit = PluginRepository(settings.db_path).list_audit(
         kind="modeling.artifact.calibrate",
     )[0]
@@ -750,7 +750,6 @@ def test_calibrate_model_rolls_back_files_and_meta_when_audit_fails(
     base_dir = Path(settings.tasks_dir) / task.id / "modeling_artifacts"
     artifact_meta_path = base_dir / f"{artifact_id}.model_meta.json"
     generic_meta_path = base_dir / "model_meta.json"
-    calibration_path = base_dir / f"{artifact_id}.calibration.sigmoid.joblib"
     original_artifact_meta = artifact_meta_path.read_text(encoding="utf-8")
     original_generic_meta = generic_meta_path.read_text(encoding="utf-8")
     original_artifact = ModelingRepository(settings.db_path).get_model_artifact(artifact_id)
@@ -784,7 +783,7 @@ def test_calibrate_model_rolls_back_files_and_meta_when_audit_fails(
             ),
         )
 
-    assert not calibration_path.exists()
+    assert not list(base_dir.glob(f"{artifact_id}.calibration.*.joblib"))
     assert not (base_dir / ".staging").exists()
     assert artifact_meta_path.read_text(encoding="utf-8") == original_artifact_meta
     assert generic_meta_path.read_text(encoding="utf-8") == original_generic_meta
