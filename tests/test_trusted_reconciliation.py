@@ -630,7 +630,28 @@ def test_upgrade_37_preserves_legacy_effect_without_inventing_invocation(
     tmp_path, monkeypatch
 ):
     import marvis.db_schema as schema
+    from tests import test_strategy_typed_adoption as typed_adoption
     from tests.test_governed_producer_receipt import _case
+
+    def historical_task(task_repo, source_dir, name):
+        # The shared current factory writes columns added after schema 37.
+        # Seed only the predecessor's real task fields, then let the existing
+        # scenario build the actual strategy, plan, approval and invocation.
+        with connect(task_repo.db_path) as conn:
+            assert conn.execute('PRAGMA user_version').fetchone()[0] == 37
+            columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)')}
+            assert 'business_objective_json' not in columns
+            conn.execute(
+                """INSERT INTO tasks(
+                    id,model_name,model_version,validator,source_dir,task_type,
+                    algorithm,run_mode,target_col,status,status_message,
+                    created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ('legacy-task', name, 'dev', 'qa', str(source_dir), 'strategy',
+                 'lr', 'agent', 'bad', 'created', 'created',
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+            )
+        return SimpleNamespace(id='legacy-task')
 
     with monkeypatch.context() as patch:
         patch.setattr(
@@ -638,8 +659,12 @@ def test_upgrade_37_preserves_legacy_effect_without_inventing_invocation(
             "_MIGRATIONS",
             [item for item in schema._MIGRATIONS if item[0] <= 37],
         )
+        patch.setattr(typed_adoption, '_task', historical_task)
         case = _case(tmp_path)
         with connect(case.settings.db_path) as conn:
+            columns = {row[1] for row in conn.execute('PRAGMA table_info(effect_executions)')}
+            assert 'invocation_id' not in columns
+            assert 'invocation_contract_hash' not in columns
             conn.execute(
                 "INSERT INTO effect_executions(id,approval_id,reservation_id,runtime_generation,status,prepared_at,detail_json) VALUES (?,?,?,?,?,?,?)",
                 (
@@ -654,6 +679,7 @@ def test_upgrade_37_preserves_legacy_effect_without_inventing_invocation(
             )
     schema.init_db(case.settings.db_path)
     with connect(case.settings.db_path) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == schema.SCHEMA_VERSION
         row = conn.execute(
             "SELECT * FROM effect_executions WHERE id='legacy-effect'"
         ).fetchone()
