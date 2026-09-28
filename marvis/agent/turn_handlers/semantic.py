@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from marvis.agent.risk_analysis_setup import latest_risk_analysis_intake
+from marvis.agent.risk_analysis_setup import (
+    PROFITABILITY,
+    STANDARD_VINTAGE,
+    VTG_TERMINAL,
+    latest_risk_analysis_intake,
+)
 from marvis.agent.semantic_diagnostics import sanitize_diagnostics
 from marvis.agent.semantic_intent import INTENT_ADHOC_CONFIRM
 from marvis.agent.semantic_intent import INTENT_ADHOC_QUERY
@@ -337,8 +342,25 @@ def _semantic_intent_route_contract(
     )
     risk_phase = str((risk_state or {}).get("phase") or "")
     if task.task_type == TASK_TYPE_VINTAGE and risk_phase != "ready":
+        context = {"risk_setup_phase": risk_phase or "ask_goal"}
+        analysis_kind = (risk_state or {}).get("analysis_kind")
+        if risk_phase in {"request_materials", "await_materials"} and (
+            isinstance(analysis_kind, str)
+            and analysis_kind in {VTG_TERMINAL, PROFITABILITY, STANDARD_VINTAGE}
+        ):
+            context["analysis_kind"] = analysis_kind
+            context["pending_question"] = (
+                "平台正在等待用户确认材料已上传，并补充样本范围和字段口径；"
+                "回答用于检查材料并准备已选分析。后续执行仍受原流程校验与确认门约束。"
+            )
+            semantics = (risk_state or {}).get("label_semantics")
+            if analysis_kind == STANDARD_VINTAGE and semantics in (
+                "incremental",
+                "snapshot",
+            ):
+                context["label_semantics"] = semantics
         return (
-            {"risk_setup_phase": risk_phase or "ask_goal"},
+            context,
             (
                 INTENT_RISK_PROFITABILITY,
                 INTENT_RISK_VTG_TERMINAL,
