@@ -471,3 +471,11 @@ Vintage 平台原本明确要求回复“材料已上传”，但路由只收到
 `7371a761` 让原生样本的历史分方向进入 tradeoff/cutoff 消费端，显式相反方向即使携带确认标志也不能覆盖冻结合同，旧 V1 默认保持。91 项策略检查、原低风险方向 HTTP 旅程通过；高分高风险真实 HTTP 链九工具与 15 断言通过。证据 `normal-strategy-20260929/direction-{regression,low-risk-compat}.log`。主线建模证据后续消费及治理界面另通过 30 项联合检查，见 `feature-time-20260929/native-delivery-joined.log`。
 
 `f3f93d51` 封堵刚复现的通用产物下载旁路：按原生产物 kind+origin 识别来源权限，所有同文件登记别名同样受限，通用下载/预览拒绝并指向既有 domain 证据入口。两项真实 HTTP 红例先确认 200 旁路；后续 43 项相关检查通过，最终两项权限例通过，共验证 44 个不同用例。SourceService 原 maker 撤权后保留不含 normalized_source/assessment 的审计回执，沿用已有 unauthorized 语义；没有把这种审计响应改成泄露敏感字段。日志在 `operations-runtime-20260927/reference-decision/event-batch-20260929/artifact-acl-{before,after,final}.log`。未声称全应用 task ACL 已完成。
+
+## WP01 固定九例回归完成与审查输出契约修复
+
+源 `a1854755` 的第五次固定九例运行通过 9/9，案例、期望、预算和分母均未变。5 例有真实模型与工具联合证据，4 个零模型调用澄清例不计 A；仍为公开开发集，acceptance=not_established。报告 `runtime-family-20260928/intent-v3-real-model-runs/20260928T171200197862Z-1034e5eadb15/report.json` 保留完整运行事实。
+
+代码检查发现步骤审查与最终总结共用仅要求 passed/reasons 的提示词，首轮请求未提供两者各自的结构，错误类型还可能被拆成字符列表。`e9109ecb` 从首轮开始传独立 typed schema，并在解析端拒绝类型错误；最多重试一次，保留旧最小 summary 返回与未配置模型的手动模式。CRITIC_SYS 升至 v2，LLM 仍只能提供解释，不能改写确定性业务验收。17 项新增测试先红，修复后 228 项审查、完成协议、执行器、业务验收及 LLM 传输检查通过，Ruff/diff 通过。首次扩大回归因 basetemp 父目录缺失产生 109 项 setup error；修正运行环境后全过，未把环境失败隐去。日志 `/Users/eddyz/.codex/work-artifacts/reviewer-contract-red.log`、`reviewer-contract-green.log` 和 `reviewer-contract-20260929/green-run2.log`。
+
+独立正常建模案例正在源 `e473f53a` 复跑，未改原案例、预算或 expected；此前 provider 上报 2049/2048 token 的严格预算失败继续保留。主线权限修复另通过 20 项事件/批量回放/来源权限检查，日志 `operations-runtime-20260927/reference-decision/event-batch-20260929/mainline-acl.log`。
