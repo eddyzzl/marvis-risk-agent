@@ -189,7 +189,7 @@ class LocalReferenceAdapter:
                 "files": manifest["files"],
                 "raw_schema": manifest["configuration"]["raw_schema"],
                 "strategy": manifest["strategy"],
-                "model_artifact_id": manifest["model"]["id"],
+                "model_artifact_id": (manifest["model"] or {}).get("id"),
                 "preprocessing_receipt": manifest["preprocessing_receipt"],
             },
         }

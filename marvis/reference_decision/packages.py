@@ -24,6 +24,7 @@ from marvis.production_governance.repository import _strategy_binding_tx
 from marvis.reference_decision.contracts import (
     DecisionError,
     PackageRequest,
+    RulePackageRequest,
     canonical,
     digest,
 )
@@ -126,7 +127,8 @@ class PackageStore:
                     "created_at": row["created_at"],
                     "strategy_id": manifest["strategy"]["id"],
                     "strategy_version": manifest["strategy"]["version"],
-                    "model_artifact_id": manifest["model"]["id"],
+                    "model_artifact_id": (manifest["model"] or {}).get("id"),
+                    "package_kind": manifest["configuration"].get("package_kind", "model"),
                     "decision_node": manifest["configuration"]["decision_node"],
                     "assurance": manifest["assurance"],
                     "file_integrity": "verify_on_detail_read",
@@ -140,7 +142,9 @@ class PackageStore:
             else None,
         }
 
-    def build(self, request: PackageRequest, *, actor_id: str):
+    def build(self, request: PackageRequest | RulePackageRequest, *, actor_id: str):
+        if isinstance(request, RulePackageRequest):
+            return self._build_rules(request, actor_id=actor_id)
         repo = ModelingRepository(self.settings.db_path)
         artifact = repo.get_model_artifact(request.model_artifact_id)
         experiment = repo.get_experiment(artifact.experiment_id) if artifact else None
@@ -171,23 +175,7 @@ class PackageStore:
             "calibration"
         ):
             raise DecisionError("calibration_required")
-        with connect(self.settings.db_path) as conn:
-            strategy = _strategy_binding_tx(
-                conn,
-                strategy_id=request.strategy_id,
-                strategy_version=request.strategy_version,
-            )
-            strategy_row = conn.execute(
-                "SELECT dsl_json, task_id FROM strategies WHERE id = ?",
-                (request.strategy_id,),
-            ).fetchone()
-        spec = parse_strategy_spec(json.loads(strategy_row["dsl_json"]))
-        # Explicit reason codes are required for every outcome, including the default.
-        if any(
-            not action.reason_code
-            for action in [spec.default_action, *(r.action for r in spec.rules)]
-        ):
-            raise DecisionError("strategy_reason_codes_required")
+        strategy, spec = self._strategy(request)
         steps = artifact.params.get("preprocessing_steps") or []
         outputs, derived = feature_outputs([f.name for f in request.raw_schema], steps)
         fields = {f for rule in spec.rules for f in _expression_fields(rule.condition)}
@@ -251,6 +239,53 @@ class PackageStore:
             "output_fields": sorted(outputs),
             "assurance": "local_reference_only",
         }
+        return self._publish(manifest, snapshots, source, actor_id)
+
+    def _strategy(self, request):
+        with connect(self.settings.db_path) as conn:
+            conn.execute("BEGIN")
+            strategy = _strategy_binding_tx(
+                conn,
+                strategy_id=request.strategy_id,
+                strategy_version=request.strategy_version,
+            )
+            strategy_row = conn.execute(
+                "SELECT dsl_json, task_id FROM strategies WHERE id = ?",
+                (request.strategy_id,),
+            ).fetchone()
+        spec = parse_strategy_spec(json.loads(strategy_row["dsl_json"]))
+        # Explicit reason codes are required for every outcome, including the default.
+        if any(
+            not action.reason_code
+            for action in [spec.default_action, *(r.action for r in spec.rules)]
+        ):
+            raise DecisionError("strategy_reason_codes_required")
+        return strategy, spec
+
+    def _build_rules(self, request, *, actor_id):
+        strategy, spec = self._strategy(request)
+        outputs = {field.name for field in request.raw_schema}
+        fields = {f for rule in spec.rules for f in _expression_fields(rule.condition)}
+        if not fields <= outputs:
+            raise DecisionError("strategy_inputs_unbound")
+        manifest = {
+            "schema_version": "reference-decision-package.v2",
+            "platform_version": __version__,
+            "configuration": {**request.model_dump(), "score_product": None},
+            "strategy": strategy,
+            "strategy_spec": json.loads(canonical_strategy_json(spec)),
+            "model": None,
+            "members": [],
+            "files": [],
+            "preprocessing_receipt": None,
+            "model_producer_receipt": None,
+            "derived_fields": [],
+            "output_fields": sorted(outputs),
+            "assurance": "local_reference_only",
+        }
+        return self._publish(manifest, {}, None, actor_id)
+
+    def _publish(self, manifest, snapshots, source, actor_id):
         package_hash = digest(manifest)
         with connect(self.settings.db_path) as conn:
             # Serialize identical concurrent builds before filesystem publication.
@@ -264,6 +299,7 @@ class PackageStore:
             unit = ArtifactUnitOfWork()
             try:
                 stage = unit.stage_directory(self.root, package_hash)
+                stage.path.mkdir(parents=True, exist_ok=True)
                 for name, data in snapshots.items():
                     target = stage.path / name
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -271,7 +307,7 @@ class PackageStore:
                 # Refuse a source mutation during package construction.
                 if any(
                     safe_file(source, f["path"]).read_bytes() != snapshots[f["path"]]
-                    for f in files
+                    for f in manifest["files"]
                 ):
                     raise DecisionError("source_artifact_changed")
                 unit.promote_all()

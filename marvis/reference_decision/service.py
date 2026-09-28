@@ -169,10 +169,10 @@ class ReferenceDecisionService:
             "assurance": "local_reference_only",
             "versions": {
                 "strategy": manifest["strategy"],
-                "model_artifact_id": manifest["model"]["id"],
+                "model_artifact_id": (manifest["model"] or {}).get("id"),
                 "feature_schema_hash": digest(config["raw_schema"]),
                 "preprocessing_hash": digest(
-                    manifest["model"]["params"].get("preprocessing_steps", [])
+                    (manifest["model"] or {}).get("params", {}).get("preprocessing_steps", [])
                 ),
                 "platform": manifest["platform_version"],
                 "files": manifest["files"],

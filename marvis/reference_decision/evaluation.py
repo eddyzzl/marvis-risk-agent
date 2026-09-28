@@ -20,6 +20,18 @@ from marvis.settings import build_settings
 def evaluate(manifest, directory, features):
     started = perf_counter()
     validate_features(features, manifest)
+    if manifest["configuration"].get("package_kind") == "rule_only":
+        decision = evaluate_strategy_row(features, manifest["strategy_spec"])
+        return {
+            **decision.to_dict(),
+            "score": None,
+            "score_product": None,
+            "timing_ms": {
+                "features": 0.0,
+                "scoring": None,
+                "rules": (perf_counter() - started) * 1000,
+            },
+        }
     artifact = ModelArtifact(**decode_parameters(manifest["model"]))
     frame = pd.DataFrame([features])
     frame = apply_preprocessing_steps(

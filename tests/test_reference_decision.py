@@ -60,7 +60,7 @@ def packaged(tmp_path_factory):
     StrategyRepository(settings.db_path).create_strategy(task.id, strategy)
     with connect(settings.db_path) as conn:
         conn.execute(
-            "UPDATE strategies SET asset_status='validated', status='validated' WHERE id='online-strategy'"
+            "UPDATE strategies SET asset_status='validated', status='draft' WHERE id='online-strategy'"
         )
     request = PackageRequest(
         strategy_id="online-strategy",
@@ -453,7 +453,7 @@ def test_real_ensemble_and_calibrator_producer_authenticate_all_source_bytes(
     StrategyRepository(settings.db_path).create_strategy(task.id, strategy)
     with connect(settings.db_path) as conn:
         conn.execute(
-            "UPDATE strategies SET asset_status='validated', status='validated' WHERE id='online-strategy'"
+            "UPDATE strategies SET asset_status='validated', status='draft' WHERE id='online-strategy'"
         )
     store = create_app(settings).state.reference_decision.packages
     request = packaged[2].model_copy(

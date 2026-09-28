@@ -1,14 +1,14 @@
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from marvis.production_governance.errors import GovernanceConflict
 from marvis.production_governance.router import _current_principal
 from marvis.reference_decision.contracts import (
     DecisionError,
     DecisionRequest,
-    PackageRequest,
+    PackageBuildRequest,
 )
 from marvis.reference_decision.readiness import package_readiness
 
@@ -70,7 +70,7 @@ def capabilities(request: Request):
         "environment": "local-reference",
         "deployment_scope": "local_reference_only",
         "request_schema": DecisionRequest.model_json_schema(),
-        "package_schema": PackageRequest.model_json_schema(),
+        "package_schema": TypeAdapter(PackageBuildRequest).json_schema(),
         "admission": {
             "concurrent_per_slot": 4,
             "new_requests_per_minute_per_slot": 120,
@@ -81,7 +81,7 @@ def capabilities(request: Request):
 
 
 @router.post("/packages", status_code=201)
-def build_package(payload: PackageRequest, request: Request):
+def build_package(payload: PackageBuildRequest, request: Request):
     actor = _current_principal(request)
     if actor["role"] != "maker":
         raise HTTPException(403, "only a maker can build a package")

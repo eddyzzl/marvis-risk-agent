@@ -70,6 +70,31 @@ class DecisionRequest(BaseModel):
     features: dict[str, Any] = Field(max_length=500)
 
 
+class RulePackageRequest(BaseModel):
+    """An explicit model-free contract; model scoring fields are not accepted."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    package_kind: Literal["rule_only"]
+    strategy_id: str = Field(min_length=1, max_length=160)
+    strategy_version: int = Field(ge=1)
+    decision_node: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    raw_schema: list[FeatureField] = Field(max_length=500)
+    timeout_seconds: int = Field(default=10, ge=1, le=60)
+    failure_action: Literal["review", "reject"] = "review"
+
+    @model_validator(mode="after")
+    def names(self):
+        names = [field.name for field in self.raw_schema]
+        if len(set(names)) != len(names) or any(
+            name.startswith("__marvis_") for name in names
+        ):
+            raise ValueError("raw fields must be unique and cannot be platform derived")
+        return self
+
+
+PackageBuildRequest = PackageRequest | RulePackageRequest
+
+
 def validate_features(features: dict, manifest: dict) -> None:
     fields = manifest["configuration"]["raw_schema"]
     if set(features) != {f["name"] for f in fields}:
