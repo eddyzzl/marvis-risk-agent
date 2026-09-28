@@ -8,7 +8,9 @@ import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, PluginRepository, init_db
+from marvis.db_schema import connect
+from marvis.domain import TaskCreate
+from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.packs.data_ops import tools as data_ops_tools
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -21,6 +23,13 @@ from tests.xls_fixture import legacy_xls_bytes
 def _runtime(tmp_path):
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
+    # Native JOIN artifacts require a real owning task, as the HTTP entry creates.
+    task = TaskRepository(settings.db_path).create_task(TaskCreate(
+        model_name="JOIN test", model_version="v1", validator="test",
+        source_dir=str(tmp_path), task_type="data_join",
+    ))
+    with connect(settings.db_path) as conn:
+        conn.execute("UPDATE tasks SET id=? WHERE id=?", ("task-1", task.id))
     plugin_repo = PluginRepository(settings.db_path)
     plugin_registry = PluginRegistry(plugin_repo)
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"

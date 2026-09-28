@@ -31,6 +31,8 @@ from marvis.data.errors import (
     KeyDtypeMismatchError,
 )
 from marvis.data.excel_ingest import LONG_ID_FLOAT_THRESHOLD
+from marvis.data.join_evidence import JoinEvidenceWriter, plan_contract
+from marvis.files import sha256_file
 
 
 _ALLOWED_DEDUP_STRATEGIES = frozenset({"abort", "first", "last", "agg_mean", "agg_max"})
@@ -438,6 +440,15 @@ class JoinEngine:
         if any(not join.confirmed for join in plan.joins):
             raise JoinNotConfirmedError("all joins must be confirmed before execute")
 
+        if callable(getattr(self._registry, "authenticated_parquet_column_names", None)):
+            result = self._execute_native_join_plan(plan, out_dir=out_dir, cancel_token=cancel_token)
+            plan.status = "executed"
+            plan.result_dataset_id = result.id
+            return result
+
+        # Compatibility adapter for older injected registry/repository objects.
+        # Every production DatasetRegistry uses the atomic native writer above;
+        # this path cannot create or promote temporal evidence.
         anchor = self._registry.get(plan.anchor_dataset_id)
         target_col = anchor.target_col if anchor.has_target else None
         anchor_rows = anchor.row_count
@@ -546,6 +557,87 @@ class JoinEngine:
         plan.status = "executed"
         plan.result_dataset_id = result.id
         return result
+
+    def _execute_native_join_plan(self, plan, *, out_dir, cancel_token):
+        """Commit the existing JOIN and its immutable evidence in one writer unit."""
+        root = self._registry.datasets_root
+        out_dir = Path(out_dir).resolve()
+        if not out_dir.is_relative_to(root):
+            raise DataBackendError("native JOIN output must remain in the dataset workspace")
+        if not plan.joins:
+            raise DataBackendError("join plan contains no confirmed feature joins")
+        uow = ArtifactUnitOfWork()
+        staged = []
+        try:
+            writer = JoinEvidenceWriter(
+                self._registry, plan, uow, root / plan.task_id / ".join" / uuid.uuid4().hex,
+            )
+            current_path = writer.paths[0]
+            columns = writer.bindings[0]["columns"]
+            anchor = writer.sources[0]
+            store = TransactionalArtifactStore(out_dir)
+            for index, spec in enumerate(plan.joins):
+                if cancel_token is not None:
+                    cancel_token.raise_if_cancelled()
+                if not spec.diagnostics.feature_key_unique and spec.dedup_strategy in (None, "abort"):
+                    raise DedupRequiredError("non-unique JOIN feature requires a reviewed dedup strategy")
+                output = store.stage(f"join_{uuid.uuid4().hex}.parquet")
+                staged.append(output)
+                members = writer.stage_members()
+                rows = self._backend.left_join(
+                    current_path, writer.paths[index + 1], spec.key_pairs,
+                    dedup_strategy=spec.dedup_strategy, out_path=output.path,
+                    membership_path=members.path,
+                )
+                if rows != anchor.row_count:
+                    raise FanOutError("JOIN must retain exactly one output per anchor row")
+                columns = writer.record_step(index, columns, output.path)
+                current_path = output.path
+            final = staged[-1]
+            uow.track(final)
+            for intermediate in staged[:-1]:
+                intermediate.rollback()
+            writer.finish(columns, final.path)
+            output_hash = sha256_file(final.path)
+
+            def commit(conn):
+                conn.execute("BEGIN IMMEDIATE")
+                if plan_contract(self._repo.load_join_plan(plan.id)) != writer.plan:
+                    raise DataBackendError("JOIN reviewed contract changed before commit")
+                writer.verify_sources(conn)
+                if sha256_file(final.final_path) != output_hash:
+                    raise DataBackendError("JOIN result bytes changed before commit")
+                result = self._registry.register_join_result_with_audit_on_connection(
+                    conn, final.final_path, join_plan_id=plan.id,
+                    audit_factory=lambda result: self._audit_payload(
+                        kind="join.executed", target_ref=plan.id, outcome="succeeded",
+                        detail={
+                            "task_id": plan.task_id, "anchor_dataset_id": anchor.id,
+                            "result_dataset_id": result.id, "anchor_rows": anchor.row_count,
+                            "joined_rows": result.row_count,
+                            "feature_dataset_ids": [spec.feature_dataset_id for spec in plan.joins],
+                            "provenance": [{
+                                "feature_dataset_id": step["feature_dataset_id"],
+                                "columns": list(step["feature_columns"].values()),
+                                "source_columns": step["feature_columns"],
+                            } for step in writer.steps],
+                        },
+                    ),
+                    task_id=plan.task_id, role="derived", anchor_target=anchor.id,
+                    target_col_override=anchor.target_col if anchor.has_target else None,
+                )
+                writer.register(conn, result)
+                if sha256_file(final.final_path) != output_hash:
+                    raise DataBackendError("JOIN result bytes changed during registration")
+                return result
+
+            return uow.finalize_with_connection(self._repo.transaction, commit)
+        except Exception as exc:
+            uow.rollback()
+            self._rollback_artifacts(staged)
+            if isinstance(exc, DataBackendError) and "produced" in str(exc) and "anchor" in str(exc):
+                raise FanOutError(str(exc)) from exc
+            raise
 
     def _connection_scoped_join_result(
         self,

@@ -5,6 +5,8 @@ import os
 from collections.abc import Sequence
 from dataclasses import replace
 from numbers import Integral, Real
+from contextlib import ExitStack
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -853,6 +855,7 @@ class DataBackend:
         *,
         dedup_strategy: str | None,
         out_path: Path,
+        membership_path: Path | None = None,
     ) -> int:
         anchor_path = self._resolve_path(anchor_path)
         feature_path = self._resolve_path(feature_path)
@@ -874,6 +877,14 @@ class DataBackend:
             feature_path, feature_key_columns, key_pairs=key_pairs
         ):
             raise DataBackendError("feature keys are not unique")
+
+        if membership_path is not None:
+            return self._left_join_membership(
+                anchor_path, feature_path, key_pairs,
+                dedup_strategy=dedup_strategy, out_path=out_path,
+                membership_path=self._resolve_path(membership_path),
+                anchor_columns=anchor_columns, feature_columns=feature_columns,
+            )
 
         feature_rel = self._dedup_feature_rel(
             feature_path,
@@ -1475,11 +1486,17 @@ class DataBackend:
         dedup_strategy: str | None,
         *,
         key_pairs: Sequence[KeyPair] | None = None,
+        indexed_rel: str | None = None,
+        row_index: str | None = None,
+        member_column: str | None = None,
     ) -> str:
         # T1-B7: read feature key columns as VARCHAR (same reader the anchor + diagnostics use)
         # so the deduped feature that feeds the join types keys identically to the join's ON.
-        rel = self._duckdb_key_rel(feature_path, feature_key_columns)
+        rel = indexed_rel or self._duckdb_key_rel(feature_path, feature_key_columns)
+        selection = ", ".join(_quote_identifier(name) for name in sorted(feature_columns))
         if dedup_strategy in (None, "abort"):
+            if indexed_rel:
+                return f"SELECT {selection}, [{row_index}] AS {member_column} FROM {rel}"
             return f"SELECT * FROM {rel}"
         if key_pairs is not None:
             partition_sql = ", ".join(
@@ -1493,11 +1510,26 @@ class DataBackend:
             )
         if dedup_strategy in {"first", "last"}:
             order = "ASC" if dedup_strategy == "first" else "DESC"
+            if indexed_rel:
+                # Preserve the existing first/last policy, including the rare
+                # real file_row_number-column content-order fallback.
+                ordering = (
+                    ", ".join(f"{_quote_identifier(name)} {order}" for name in sorted(feature_columns)) + ", "
+                    if "file_row_number" in feature_columns else ""
+                ) + f"{row_index} {order}"
+                rank = _unique_internal_name("__marvis_rank", feature_columns | {row_index, member_column})
+                return (
+                    f"SELECT {selection}, [{row_index}] AS {member_column} FROM ("
+                    f"SELECT *, row_number() OVER (PARTITION BY {partition_sql} ORDER BY {ordering}) "
+                    f"AS {rank} FROM {rel}) WHERE {rank}=1"
+                )
             return self._first_last_dedup_sql(feature_path, rel, partition_sql, feature_columns, order)
         if dedup_strategy in {"agg_mean", "agg_max"}:
             numeric = self.numeric_columns(feature_path) if dedup_strategy == "agg_mean" else set()
             return self._agg_dedup_sql(
-                rel, partition_sql, feature_columns, feature_key_columns, dedup_strategy, numeric
+                rel, partition_sql, feature_columns, feature_key_columns, dedup_strategy, numeric,
+                extra_projections=(f"list({row_index} ORDER BY {row_index}) AS {member_column}",)
+                if indexed_rel else (),
             )
         raise DataBackendError(f"unsupported dedup_strategy: {dedup_strategy}")
 
@@ -1549,6 +1581,7 @@ class DataBackend:
         feature_key_columns: Sequence[str],
         dedup_strategy: str,
         numeric_columns: set[str] = frozenset(),
+        extra_projections: Sequence[str] = (),
     ) -> str:
         # key_sql is expressed in the TRANSFORMED key space (matches the actual JOIN
         # condition). Raw key columns can disagree within a transformed-key group (e.g.
@@ -1569,7 +1602,7 @@ class DataBackend:
                 # Non-numeric columns under agg_mean (and all columns under agg_max) take a
                 # deterministic max() rather than being silently NULLed by try_cast(DOUBLE).
                 projections.append(f"max({ident}) AS {alias}")
-        projection_sql = ", ".join(projections)
+        projection_sql = ", ".join([*projections, *extra_projections])
         return f"SELECT {projection_sql} FROM {rel} GROUP BY {key_sql}"
 
     def _join_condition(
@@ -1626,31 +1659,96 @@ class DataBackend:
             ]
         return frame
 
-    def _feature_projection(
-        self,
-        feature_columns: set[str],
-        feature_key_columns: Sequence[str],
-        anchor_columns: set[str],
-    ) -> str:
-        selections = []
-        # Collision-safe aliasing: a feature column that collides with the (accumulating)
-        # anchor is renamed feature_{col}; if THAT is also taken — e.g. a second feature
-        # table in the same plan already contributed a feature_{col} — disambiguate with a
-        # numeric suffix so columns are never silently overwritten or duplicated.
+    @staticmethod
+    def feature_column_mapping(feature_columns, feature_key_columns, anchor_columns):
+        """The exact collision-safe names used by the JOIN projection."""
+        mapping = {}
         taken = set(anchor_columns)
-        for column in sorted(feature_columns - set(feature_key_columns)):
-            source = "b." + sql_identifier(column, feature_columns)
-            if column not in taken:
-                alias = column
-            else:
+        for column in sorted(set(feature_columns) - set(feature_key_columns)):
+            alias = column
+            if alias in taken:
                 alias = f"feature_{column}"
                 suffix = 2
                 while alias in taken:
                     alias = f"feature_{column}_{suffix}"
                     suffix += 1
             taken.add(alias)
-            selections.append(f"{source} AS {_quote_identifier(alias)}")
+            mapping[column] = alias
+        return mapping
+
+    def _feature_projection(
+        self, feature_columns, feature_key_columns, anchor_columns,
+    ) -> str:
+        selections = [
+            f"b.{sql_identifier(column, feature_columns)} AS {_quote_identifier(alias)}"
+            for column, alias in self.feature_column_mapping(
+                feature_columns, feature_key_columns, anchor_columns
+            ).items()
+        ]
         return ", " + ", ".join(selections) if selections else ""
+
+    def _left_join_membership(
+        self, anchor_path, feature_path, key_pairs, *, dedup_strategy, out_path,
+        membership_path, anchor_columns, feature_columns,
+    ):
+        """Capture membership from the same materialized join, with explicit order.
+
+        Registered datasets are parquet. Row ordinals are physical file positions,
+        never an unordered SQL row_number. Both COPYs consume one materialized
+        relation ordered by its unique anchor ordinal, including unmatched rows.
+        """
+        if anchor_path.suffix != ".parquet" or feature_path.suffix != ".parquet":
+            raise DataBackendError("native JOIN membership requires parquet sources")
+        occupied = anchor_columns | feature_columns
+        index = _unique_internal_name("__marvis_source_row", occupied)
+        member = _unique_internal_name("__marvis_right_rows", occupied | {index})
+        left = _unique_internal_name("__marvis_left_row", occupied | {index, member})
+        keys = [pair.feature_col for pair in key_pairs]
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with ExitStack() as stack:
+            temporary = Path(stack.enter_context(tempfile.TemporaryDirectory(
+                prefix="join-members-", dir=out_path.parent,
+            )))
+            anchor_rel = indexed_parquet_relation(anchor_path, index, temporary / "left.parquet")
+            right_rel = indexed_parquet_relation(feature_path, index, temporary / "right.parquet")
+            feature_rel = self._dedup_feature_rel(
+                feature_path, feature_columns, keys, dedup_strategy,
+                key_pairs=key_pairs, indexed_rel=right_rel,
+                row_index=index, member_column=member,
+            )
+            on_sql = " AND ".join(
+                self._join_condition(pair, anchor_columns, feature_columns) for pair in key_pairs
+            )
+            anchor_select = ", ".join(
+                f"a.{_quote_identifier(name)}" for name in self.column_names(anchor_path)
+            )
+            query = (
+                f"SELECT {anchor_select}"
+                f"{self._feature_projection(feature_columns, keys, anchor_columns)}, "
+                f"a.{index} AS {left}, b.{member} AS {member} "
+                f"FROM {anchor_rel} a LEFT JOIN ({feature_rel}) b ON {on_sql}"
+            )
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            membership_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._connect() as conn:
+                conn.execute(f"CREATE TEMP TABLE joined_members AS {query}")
+                result_rows = conn.execute("SELECT count(*) FROM joined_members").fetchone()[0]
+                anchor_rows = self.row_count(anchor_path)
+                if result_rows != anchor_rows:
+                    raise DataBackendError(
+                        f"left_join fan-out: produced {result_rows} rows from {anchor_rows} "
+                        "anchor rows (must be 1:1)"
+                    )
+                conn.execute(
+                    f"COPY (SELECT * EXCLUDE ({left}, {member}) FROM joined_members "
+                    f"ORDER BY {left}) TO {sql_string_literal(out_path.as_posix())} (FORMAT parquet)"
+                )
+                conn.execute(
+                    f"COPY (SELECT row_number() OVER (ORDER BY {left}) - 1 AS output_row, "
+                    f"{left} AS left_row, {member} AS right_rows FROM joined_members "
+                    f"ORDER BY {left}) TO {sql_string_literal(membership_path.as_posix())} (FORMAT parquet)"
+                )
+        return result_rows
 
     def _normalize_value(
         self,
@@ -1949,3 +2047,31 @@ __all__ = [
     "sql_string_literal",
     "transformed_key_names",
 ]
+
+
+def indexed_parquet_relation(path: Path, ordinal: str, fallback_path: Path) -> str:
+    """A physical row ordinal, preserving every original name and integer value."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    parquet = pq.ParquetFile(path)
+    if ordinal in parquet.schema_arrow.names:
+        raise DataBackendError("JOIN membership ordinal collides with source schema")
+    if "file_row_number" not in parquet.schema_arrow.names:
+        return (
+            f"(SELECT * EXCLUDE(file_row_number), file_row_number AS {_quote_identifier(ordinal)} "
+            f"FROM read_parquet({sql_string_literal(path.as_posix())}, file_row_number=true))"
+        )
+    # DuckDB cannot expose file_row_number when it is a real input column.
+    # Append ordinals in bounded Arrow batches instead; never coerce through float.
+    schema = parquet.schema_arrow.append(pa.field(ordinal, pa.int64()))
+    offset = 0
+    with pq.ParquetWriter(fallback_path, schema) as writer:
+        for batch in parquet.iter_batches(batch_size=65536):
+            count = batch.num_rows
+            table = pa.Table.from_batches([batch]).append_column(
+                ordinal, pa.array(range(offset, offset + count), type=pa.int64()),
+            )
+            writer.write_table(table)
+            offset += count
+    return f"read_parquet({sql_string_literal(fallback_path.as_posix())})"

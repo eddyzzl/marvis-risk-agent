@@ -10,8 +10,10 @@ from copy import deepcopy
 
 import pandas as pd
 
+from marvis.data.dataset_identity import dataset_identity_equal
 from marvis.data.asof_join import AsOfJoinEngine
 from marvis.data.preprocessing_evidence import load_preprocessing_state
+from marvis.data.join_evidence import join_time_parent
 from marvis.data.predicate_ast import canonicalize_expression
 from marvis.data.transform_time import transform_time_parent
 from marvis.feature.errors import FeatureError
@@ -42,7 +44,8 @@ def _combined(values):
 def feature_time_evidence(registry, dataset_id, features):
     """Authenticate selected field timing through native row-local transforms.
 
-    An ordinary JOIN or old sidecar cannot acquire a temporal claim. Fitted
+    Ordinary JOIN receipts preserve only verified copies of left-side fields;
+    they cannot certify untimed right-side data or old sidecars. Fitted
     transforms have no recorded fit cutoff yet, so their output timing is
     unknown even when training membership itself is correctly certified.
     """
@@ -106,6 +109,16 @@ def _fields(registry, dataset_id, seen):
                 raise FeatureError("temporal transform output schema changed")
             _verify_dataset_unchanged(registry, dataset)
             return projected, [*artifacts, transformed.result_artifact_id], dataset
+        joined = join_time_parent(registry, repo, dataset)
+        if joined:
+            source_id, copied_columns, artifact_id = joined
+            parent, artifacts, _ = _fields(registry, source_id, (*seen, dataset_id))
+            if set(copied_columns) != set(parent) or not set(copied_columns) <= fields.keys():
+                raise FeatureError("JOIN left fields differ from native source")
+            fields = {name: _unknown("ordinary_join_right_field_availability_unknown") for name in names}
+            fields.update({name: deepcopy(parent[name]) for name in copied_columns})
+            _verify_dataset_unchanged(registry, dataset)
+            return fields, [*artifacts, artifact_id], dataset
         _verify_dataset_unchanged(registry, dataset)
         return fields, [], dataset
     record = repo.get_for_task(dataset.task_id, state.artifact_id)
@@ -145,7 +158,7 @@ def _fields(registry, dataset_id, seen):
 
 
 def _verify_dataset_unchanged(registry, dataset):
-    if registry.get(dataset.id) != dataset:
+    if not dataset_identity_equal(registry.get(dataset.id), dataset):
         raise FeatureError("temporal dataset binding changed during verification")
     registry.resolve_verified_path(dataset.id)
 
