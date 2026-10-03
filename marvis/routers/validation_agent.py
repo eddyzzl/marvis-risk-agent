@@ -1227,9 +1227,14 @@ def draft_agent_report_conclusions(
     repo = agent_repo(request)
     task = get_task_or_404(repo, task_id)
     require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
+    try:
+        snapshot = repo.capture_report_draft_generation(task_id)
+    except ConflictError as exc:
+        raise conflict(str(exc)) from exc
+    task = snapshot.task
     model_profile = resolve_agent_model(request, payload.model_id, payload.effort)
     evidence = agent_evidence(request, task_id)
-    saved_draft = latest_report_draft_context(repo.list_agent_messages(task_id))
+    saved_draft = latest_report_draft_context(list(snapshot.report_messages))
     if saved_draft:
         evidence["report_draft"] = saved_draft
     memory_context = agent_memory_context(
@@ -1245,18 +1250,17 @@ def draft_agent_report_conclusions(
         model_profile=model_profile,
     )
     metadata.update(model_metadata(model_profile))
-    _, report_revision = repo.get_report_values(task_id)
-    message = repo.add_agent_message(
-        task_id,
-        role="assistant",
-        stage="word_conclusion_draft",
-        content=format_conclusion_values(values),
-        metadata={
-            **metadata,
-            "draft_values": values,
-            "report_revision": report_revision,
-        },
-    )
+    metadata["generation_source"] = {
+        "message_id": saved_draft.get("message_id"),
+        "draft_edit_revision": saved_draft.get("draft_edit_revision"),
+        "report_revision": snapshot.task.report_values_revision,
+    }
+    try:
+        message = repo.publish_generated_report_draft(
+            snapshot, content=format_conclusion_values(values), values=values, metadata=metadata,
+        )
+    except ConflictError as exc:
+        raise conflict(str(exc)) from exc
     audit_agent_memory_use(request, message, task_id=task_id)
     return {
         "message": message,

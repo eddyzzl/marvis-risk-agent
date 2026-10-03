@@ -8,8 +8,9 @@ from marvis.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
     RISK_METRIC_INTERPRETATION_GUIDANCE,
     WORD_CONCLUSION_SYSTEM_PROMPT,
-    WORD_CONCLUSION_V2_SYSTEM_PROMPT,
 )
+from marvis.agent.validation_narrative import generate_v2_sections
+from marvis.llm_prompts import AGENT_SYSTEM_PROMPT as _AGENT_PROMPT_SPEC
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.semantic_authorization import review_semantic_authorization
 from marvis.model_algorithms import (
@@ -854,6 +855,9 @@ def summarize_stage(
             max_tokens=STAGE_SUMMARY_MAX_TOKENS.get(stage),
             on_delta=on_delta,
             truncated=truncated,
+            caller=f"validation_stage_{stage}",
+            prompt_name=_AGENT_PROMPT_SPEC.name,
+            prompt_version=_AGENT_PROMPT_SPEC.version,
         )
     except LLMClientError as exc:
         guarded_fallback = (
@@ -879,6 +883,9 @@ def summarize_stage(
                     temperature=0.1,
                     max_tokens=STAGE_SUMMARY_MAX_TOKENS.get(stage),
                     truncated=truncated,
+                    caller=f"validation_stage_{stage}_repair",
+                    prompt_name=_AGENT_PROMPT_SPEC.name,
+                    prompt_version=_AGENT_PROMPT_SPEC.version,
                 )
             except LLMClientError as exc:
                 repaired_content = ""
@@ -1103,19 +1110,30 @@ def generate_word_conclusions(
         user_instruction=user_instruction,
     )
     try:
-        content = _client(model_profile).complete(
-            system_prompt=(
-                WORD_CONCLUSION_V2_SYSTEM_PROMPT
-                if task.validation_workflow_version == 2
-                else WORD_CONCLUSION_SYSTEM_PROMPT
-            ),
-            user_prompt=prompt,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-            stream=False,
-        )
-        values = _parse_conclusion_json(content)
-        values = _with_narrative_report_seeds(task, values)
+        client = _client(model_profile)
+        if task.validation_workflow_version == 2:
+            values = generate_v2_sections(client, prompt)
+            # A section response is a patch for optional narrative fields. Use
+            # the original saved text, not its privacy-filtered prompt copy,
+            # and distinguish an explicit blank from an omitted field.
+            saved = (evidence.get("report_draft") or {}).get("text_values", {})
+            seeds = narrative_report_values(task.model_name)
+            values = {
+                **seeds,
+                **{key: value for key, value in saved.items()
+                   if key in seeds and isinstance(value, str)},
+                **values,
+            }
+        else:
+            content = client.complete(
+                system_prompt=WORD_CONCLUSION_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                temperature=0.2,
+                response_format={"type": "json_object"},
+                stream=False,
+            )
+            values = _parse_conclusion_json(content)
+            values = _with_narrative_report_seeds(task, values)
         values = _with_training_description_seed(task, values, evidence)
         if task.validation_workflow_version == 2:
             _validate_v2_word_conclusions(values)

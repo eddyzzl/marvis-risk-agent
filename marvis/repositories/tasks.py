@@ -2,7 +2,7 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -49,6 +49,13 @@ TASK_FILESYSTEM_PROVISION_AUDIT_KIND = "task.filesystem.provisioned"
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+@dataclass(frozen=True)
+class ReportDraftGenerationSnapshot:
+    task: TaskRecord
+    report_messages: tuple[dict, ...]
+    state_hash: str
 
 
 class TaskRepository:
@@ -1368,6 +1375,64 @@ class TaskRepository:
             })
             saved = conn.execute("SELECT * FROM agent_messages WHERE id = ?", (message_id,)).fetchone()
         return _row_to_agent_message(saved)
+
+    @staticmethod
+    def _report_draft_generation_snapshot_on_connection(conn, task_id):
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task is None:
+            raise ConflictError("任务已不存在，请刷新后重试。")
+        messages = conn.execute(
+            "SELECT * FROM agent_messages WHERE task_id = ? AND role = 'assistant' "
+            "AND stage IN ('word_conclusion_draft', 'word_conclusion_confirmed') "
+            "ORDER BY created_at ASC, id ASC",
+            (task_id,),
+        ).fetchall()
+        jobs = conn.execute(
+            "SELECT id, status, started_at, finished_at FROM jobs WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        ).fetchall()
+        if any(job["status"] in {"queued", "running"} for job in jobs):
+            raise ConflictError("模型正在执行，请等待完成后再生成草稿。")
+        # Include completed jobs too: a job can start and finish while the model
+        # is writing, leaving the task idle again but invalidating its evidence.
+        state_hash = payload_hash({
+            "task": dict(task),
+            "report_messages": [dict(message) for message in messages],
+            "jobs": [dict(job) for job in jobs],
+        })
+        return ReportDraftGenerationSnapshot(
+            task=_row_to_task(task),
+            report_messages=tuple(_row_to_agent_message(message) for message in messages),
+            state_hash=state_hash,
+        )
+
+    def capture_report_draft_generation(self, task_id: str) -> ReportDraftGenerationSnapshot:
+        """Capture one read snapshot; never hold a transaction during model calls."""
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN")
+            return self._report_draft_generation_snapshot_on_connection(conn, task_id)
+
+    def publish_generated_report_draft(
+        self, snapshot: ReportDraftGenerationSnapshot, *, content: str,
+        values: dict[str, str], metadata: dict,
+    ) -> dict:
+        """Atomically reject stale generation and publish against its original state."""
+        _validate_report_values(values)
+        if set(values) - AGENT_REPORT_WRITABLE_KEYS:
+            raise ValueError("报告草稿只能保存可编辑的叙事字段")
+        task_id = snapshot.task.id
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._report_draft_generation_snapshot_on_connection(conn, task_id)
+            if current.state_hash != snapshot.state_hash:
+                raise ConflictError("报告、草稿或执行状态已更新，请查看最新版本后重新生成。")
+            return self.add_agent_message_on_connection(
+                conn, task_id, role="assistant", stage="word_conclusion_draft", content=content,
+                metadata={
+                    **metadata, "draft_values": values,
+                    "report_revision": snapshot.task.report_values_revision,
+                },
+            )
 
     def add_agent_message(
         self,

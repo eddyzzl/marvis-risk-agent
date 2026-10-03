@@ -17,11 +17,14 @@ from test_runtime_agent_benchmark import fixture_model
 
 def _v2_protocol(request, answer, payload):
     if request.get("stage") == "word_conclusion_draft":
-        return {
+        values = {
             "TEXT:pressure_test_summary": "公开合成样本的压力风险应按已展示的确定性分组结果复核。",
             "TEXT:pressure_impact_recommendation": "建议结合各特征类别的实际压力结果持续监测；本次没有真实资金表现证据。",
             "TEXT:final_validation_conclusion": "合成样本指标只能用于技术验证。业务代表性、成熟表现和真实经营收益均未建立，不能据此批准上线。PMML部署可用。",
+            "TEXT:model_training_description": "本次采用公开合成固定逻辑回归模型，不代表实际信贷训练方案。",
         }
+        requested = request.get("requested_fields")
+        return {key: value for key, value in values.items() if requested is None or key in requested}
     return {"summary": "仅根据实际结构化证据解释公开合成样本，不代表业务验收。"}
 
 

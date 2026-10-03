@@ -186,14 +186,14 @@ def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monke
     class CapturingClient:
         def complete(self, **kwargs):
             captured.update(kwargs)
-            return json.dumps(
-                {
-                    "TEXT:pressure_test_summary": "压力测试摘要。",
-                    "TEXT:pressure_impact_recommendation": "压力测试建议。",
-                    "TEXT:final_validation_conclusion": "模型效果良好、稳定性可接受，PMML部署可用。",
-                },
-                ensure_ascii=False,
-            )
+            values = {
+                "TEXT:pressure_test_summary": "压力测试摘要。",
+                "TEXT:pressure_impact_recommendation": "压力测试建议。",
+                "TEXT:final_validation_conclusion": "模型效果良好、稳定性可接受，PMML部署可用。",
+                "TEXT:model_training_description": "本模型采用 LightGBM。",
+            }
+            keys = kwargs["json_schema"]["schema"]["properties"]
+            return json.dumps({k: v for k, v in values.items() if k in keys}, ensure_ascii=False)
 
     monkeypatch.setattr(
         "marvis.agent.service._client",
@@ -201,12 +201,14 @@ def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monke
     )
     task = replace(_task(), validation_workflow_version=2)
 
-    generate_word_conclusions(
+    values, metadata = generate_word_conclusions(
         task=task,
         evidence={},
         model_profile={"api_base_url": "http://llm", "model_name": "m", "api_key": "k"},
     )
 
+    assert metadata["fallback"] is False
+    assert values["TEXT:final_validation_conclusion"] == "模型效果良好、稳定性可接受，PMML部署可用。"
     assert "V2 PMML 打分工作流" in captured["system_prompt"]
     assert "不得使用“可复现”“一致性验证”" in captured["system_prompt"]
     assert "最终验证结论应直接评价模型的区分效果" in captured["system_prompt"]
@@ -231,15 +233,15 @@ def test_v2_word_conclusion_rejects_process_narration(
     final_conclusion,
 ):
     class ProcessNarratingClient:
-        def complete(self, **_kwargs):
-            return json.dumps(
-                {
+        def complete(self, **kwargs):
+            values = {
                     "TEXT:pressure_test_summary": "压力测试摘要。",
                     "TEXT:pressure_impact_recommendation": "压力测试建议。",
                     "TEXT:final_validation_conclusion": final_conclusion,
-                },
-                ensure_ascii=False,
-            )
+                    "TEXT:model_training_description": "本模型采用 LightGBM。",
+                }
+            keys = kwargs["json_schema"]["schema"]["properties"]
+            return json.dumps({k: v for k, v in values.items() if k in keys}, ensure_ascii=False)
 
     monkeypatch.setattr(
         "marvis.agent.service._client",
