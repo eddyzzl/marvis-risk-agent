@@ -112,12 +112,20 @@ def test_legacy_unknown_schema_read_does_not_load_the_whole_frame(scenario, monk
     assert registry.get(source.id) == before
 
 
-def test_actual_prepare_train_keeps_empty_preprocessing_temporal_chain(scenario):
+@pytest.mark.parametrize("fitted_other_field", [False, True])
+def test_actual_prepare_train_keeps_temporal_and_fitting_assurances_separate(scenario, fitted_other_field):
     runner, registry, backend, joined = scenario
+    source_id = joined.dataset.id
+    if fitted_other_field:
+        transformed = runner.invoke(ToolRef("feature", "normalize"),
+            {"dataset_id": source_id, "columns": ["asof__amount_woe"], "method": "zscore", "split_col": "split"},
+            task_id="task-feature")
+        assert transformed.ok, transformed.error
+        source_id = transformed.output["result_dataset_id"]
     prepared = prepare_modeling_frame(
         registry,
         backend,
-        joined.dataset.id,
+        source_id,
         target_col="y",
         feature_cols=["asof__amount"],
         split_col="split",
@@ -126,8 +134,8 @@ def test_actual_prepare_train_keeps_empty_preprocessing_temporal_chain(scenario)
     evidence = feature_time_evidence(registry, prepared.id, ["asof__amount"])
     assert evidence["assurance"] == "verified"
     assert joined.status.artifact_id in evidence["artifact_ids"]
-    assert len(evidence["artifact_ids"]) == 2
-    assert not _preprocessing_chain_traceable(SimpleNamespace(registry=registry), prepared.id)
+    assert len(evidence["artifact_ids"]) >= 2
+    assert _preprocessing_chain_traceable(SimpleNamespace(registry=registry), prepared.id) is fitted_other_field
     trained = runner.invoke(
         ToolRef("modeling", "train_model"),
         {
@@ -146,7 +154,7 @@ def test_actual_prepare_train_keeps_empty_preprocessing_temporal_chain(scenario)
         trained.output["artifact_id"]
     )
     assert artifact.params["feature_time_evidence"] == evidence
-    assert artifact.params["preprocessing_chain_traceable"] is False
+    assert artifact.params.get("preprocessing_chain_traceable", True) is fitted_other_field
     delivered = runner.invoke(
         ToolRef("modeling", "post_training_action"),
         {
@@ -159,7 +167,14 @@ def test_actual_prepare_train_keeps_empty_preprocessing_temporal_chain(scenario)
     assert delivered.ok, delivered.error
     card = json.loads(Path(delivered.output["model_card_path"]).read_text())
     assert card["training"]["feature_time_evidence"] == evidence
-    assert not any("历史可得时间" in item for item in card["limitations"])
+    assert card["training"]["preprocessing_evidence"]["assurance"] == ("training_only" if fitted_other_field else "unknown")
+    assert card["training"]["parameter_time_evidence"]["assurance"] == "unknown"
+    assert any("模型及拟合参数的历史可得时间未验证" in item for item in card["limitations"])
+    assert not any("部分或全部特征缺少" in item for item in card["limitations"])
+    rendered = Path(delivered.output["model_card_markdown_path"]).read_text()
+    assert "字段可得时点: 已验证所选字段的记录时点" in rendered
+    assert "预处理拟合成员范围:" in rendered
+    assert "模型及拟合参数历史可得时间: 未验证" in rendered
 
 
 def test_train_only_fit_is_not_a_recorded_historical_parameter_cutoff(scenario):

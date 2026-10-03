@@ -848,9 +848,28 @@ def _model_card_payload(
         temporal_evidence = {"assurance": "unknown", "fields": {}, "artifact_ids": []}
     if temporal_evidence.get("assurance") != "verified":
         limitations.append(
-            "部分或全部特征缺少可认证的历史可得时间；训练完成和 train-only 拟合记录"
-            "不能证明决策时点无穿越，需补原生时点证据及变换参数的可得时间。"
+            "部分或全部特征缺少可认证的历史可得时间，需补所选字段的原生时点证据。"
         )
+    preprocessing_assurance = (artifact.params or {}).get("preprocessing_assurance", "unknown")
+    if not isinstance(preprocessing_assurance, str) or preprocessing_assurance not in {"unknown", "training_only", "row_local", "exploration"}:
+        preprocessing_assurance = "unknown"
+    preprocessing_evidence = {
+        "assurance": preprocessing_assurance,
+        "scope": "recorded_transforms_and_outer_training_membership",
+    }
+    # Neither field-level as-of evidence nor train-only member receipts establish
+    # when a fitted model/parameter version existed. There is currently no native
+    # authenticated historical parameter-time contract to consume here; do not
+    # promote an arbitrary training-parameter field into such evidence.
+    parameter_time_evidence = {
+        "assurance": "unknown",
+        "scope": "historical_model_and_fitted_parameter_availability",
+        "reasons": ["no_authenticated_historical_parameter_time_contract"],
+    }
+    limitations.append(
+        "模型及拟合参数的历史可得时间未验证；字段时点与仅训练集拟合记录分别覆盖"
+        "字段可得性和样本成员范围，不能代替参数时间证据。"
+    )
     return _json_safe({
         "schema_version": 1,
         "card_version": MODEL_CARD_VERSION,
@@ -873,6 +892,8 @@ def _model_card_payload(
         "training": {
             "sample_weight": sample_weight_policy,
             "feature_time_evidence": _json_safe(temporal_evidence),
+            "preprocessing_evidence": preprocessing_evidence,
+            "parameter_time_evidence": parameter_time_evidence,
         },
         "key_metrics": _model_card_key_metrics(metrics, is_refit=is_refit),
         "governance": {
@@ -1508,6 +1529,15 @@ def _model_card_markdown(card: dict) -> str:
     delivery = card.get("delivery") if isinstance(card.get("delivery"), dict) else {}
     calibration = delivery.get("calibration") if isinstance(delivery.get("calibration"), dict) else {}
     training = card.get("training") if isinstance(card.get("training"), dict) else {}
+    field_time = training.get("feature_time_evidence") or {}
+    preprocessing = training.get("preprocessing_evidence") or {}
+    field_time_label = ("已验证所选字段的记录时点" if isinstance(field_time, dict)
+                        and field_time.get("assurance") == "verified" else "未验证或仅部分字段有证据")
+    preprocessing_label = {
+        "training_only": "已记录仅外层训练成员拟合；不代表内层验证隔离或参数时点已验证",
+        "row_local": "已记录逐行变换；不代表模型内部参数时点已验证",
+        "exploration": "探索性全样本拟合，不能作为独立验证证据",
+    }.get(preprocessing.get("assurance") if isinstance(preprocessing, dict) else None, "未知")
     sample_weight = (
         training.get("sample_weight")
         if isinstance(training.get("sample_weight"), dict)
@@ -1531,6 +1561,12 @@ def _model_card_markdown(card: dict) -> str:
         f"- 特征数: {_md_inline(card.get('feature_count'))}",
         f"- 样本权重: `{_md_inline(card.get('sample_weight_col') or '未使用')}`",
         f"- 概率校准: `{_md_inline(calibration.get('method') if calibration else '未校准')}`",
+        "",
+        "## 时点与拟合证据",
+        "",
+        f"- 字段可得时点: {field_time_label}",
+        f"- 预处理拟合成员范围: {preprocessing_label}",
+        "- 模型及拟合参数历史可得时间: 未验证",
         "",
         "## 关键指标",
         "",
