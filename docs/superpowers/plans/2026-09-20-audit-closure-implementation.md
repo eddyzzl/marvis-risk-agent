@@ -1,6 +1,6 @@
 # 审计整改实施记录：可信评测与代码减法
 
-开始日期：2026-09-20；续作至 2026-09-28。用户已授权开始开发并继续完成全部开发和检查。
+开始日期：2026-09-20；续作至 2026-10-03。用户已授权开始开发并继续完成全部开发和检查。
 
 - 分支：`codex/audit-closure-foundation-20260920`。
 - 开始时的代码：`60d4b1b45fd8161b14be6c7a02c740e16343c0b4`。
@@ -495,3 +495,32 @@ Vintage 平台原本明确要求回复“材料已上传”，但路由只收到
 ## WP02 特征输入重复实现收口
 
 源码 AST 扫描确认 Feature 与 Modeling 中三类 helper 共六份函数体完全相同。`d471b1a3` 将它们收口到共同的 pack 输入适配层：特征列表去重展开、被自动筛除的类别列提示、数值类别编码提示；保留旧导入名，算法内核仍在 feature 层，未合并两包不同的指标/错误语义。63 行新增、129 行移除，净减 66 行。6 对函数体排除文档字符串后 AST 一致，证据 `reviewer-contract-20260929/feature-dedup-body-equivalence.json`；190 项真实能力包、候选列和筛选检查通过（398.63 秒），scoped Ruff/diff 通过，日志 `feature-dedup.log`。未将仅扫描命中或动态入口误判为僵尸代码，剩余大模块和兼容边界仍需复核。
+
+
+## 2026-10-03：验证报告、原始回执权限与催收配置
+
+本节补齐上一批实现至当前主线 `29b46a6d` 的实施事实。下面均为开发检查，17 个工作包和 22 个发现仍未整体关闭；冻结要求 SHA 保持 `05587bd02aec550400a9a6d4ad726766a3ddbf67fe204a2de28c974e26f8cc6b`。WP08 以及已有实现的 F06–F11 状态由 planned 校正为 in_progress，未降低任何验收要求。
+
+| 实现 | 结果与边界 |
+| --- | --- |
+| `95919b83` 样本设计重复函数 | 三份同义读取逻辑回到现有 sample-design owner，旧私有名称保留；净减 51 行，144 项相关检查通过。 |
+| `447317cc`、`c6962853`、`02fd5d70` 原生结果恢复 | 事件、历史批次、现金流对账的原调用身份与产物同事务记录；只有原始回执可恢复，旧敏感结果缺授权不能补造成功。真实旧 schema 迁移和缺回执负例保留。主线联合 64 项通过。 |
+| `8e678577` 当前读取权限 | 计划、历史步骤、消息、业务报告等载体复用来源授权检查；异步返回前重查撤权，原计划完成不回退、不重复执行。独立 10 项真实 HTTP 检查通过；不代表全应用 ACL 已验收。 |
+| `f9250525` 时点证据消费 | 包准备保留 unknown / row-local / training-only 等原证据，不把未知预处理写成不需要；只认证 schema，不改写冻结数据集路径。原生 JOIN/训练/包准备/评分等 47 项通过。 |
+| `c2bc227a`、`bc995da1`、`e6b138c4` 催收业务表单 | 来源、案件、排期、现金流、覆盖与成熟度、对账、常用政策、CSV 映射、类型化有序规则接入已有审批和执行链。原件映射明确、前导零保留、未知时间不填导入时间；分批失败保留成功项，只重试未确认项。复杂嵌套规则继续使用高级 JSON。 |
+| `5bc1f299` 报告分段与版本保护 | 必需段落分开按 schema 生成，全部有效后才合成；V1 生成路径保持。可选字段省略时保留原草稿，显式空值与缺失分开。同步生成前捕获报告/草稿/任务状态，事务内比较并发布；并发保存、确认、生成和新任务均使旧结果返回 409。 |
+| `29b46a6d` 未知业务定义 | V2 prompt 升至 v2，移除默认 DPD30 和从模型名推断 MOB 的旧规则。明确缺少口径保持未知，不能用假设填业务定义；这不是对模型永不幻觉的保证。 |
+
+分段生成初次广泛检查 100 项通过；独立审查复现了可选字段被清空和同步生成覆盖新编辑，已修复。新 provider 适配测试曾因错误要求 JSON 对象键顺序导致 2 失败/55 通过，修正为字段集合后 43 项通过，没有放松实际字段/类型/schema 检查。同步竞态测试修复前 9 失败，最终 23 项及一项旧接口检查通过。最终联合 validation/transport/Agent API/draft 回归 **281 passed**；合并权限、催收规则后的联合 **88 passed**；提示词 v2 与分段检查 **21 passed**。这些存在重叠，不能相加为独立测试数量。
+
+主线日志：`/Users/eddyz/.codex/work-artifacts/report-sections-20261003/{regression,revision-regression,transport-regression,joint-regression,final-integration}.log`。同步竞态红/绿及最终证据为 `review-v2-draft-race-{red,green,final,api}.log`；独立访问权限日志为 `review-access-20261003/native-read-scope.log`。
+
+催收规则独立审查指出 missing=error 在 AND/OR/first-match 短路下并非无条件阻断，已修正文案并增加真实 HTTP 回归。最终 38 项专项检查通过；早先联合运行 91 通过、1 条测试错误断言已修复并重新覆盖，原失败不删除。原生 CLI 与 Playwright 完成 10 条业务旅程、三种桌面宽度、零 page error；root 查看了 1600 规则编辑及 CSV 部分失败截图。证据为 `collection-ui-20261003/rules-run-1790985645/proof.json`、`collection-ui-20260929/csv-run-1790622070/proof.json`；独立短路复现为 `collection-rules-review-cck2evnq/short-circuit-review.json`。这些是公开合成、本地参考执行，没有机构触达或真实回款。
+
+### 正常验证的两条真实模型入口
+
+兼容 Workflow（`26bb7888`）与标准 V2 Agent（`a83a9e9f`）分别计量。兼容入口实跑 Notebook 模型分与 PMML 分一致性；V2 走原生任务 job、静态 Notebook 字段识别、PMML 全量评分和报告草稿确认，没有伪称经过 Plan/ToolRunner。两个入口都验证实际 Word/Excel 文件与下载 hash。
+
+兼容 r2 固定公开用例真实模型 **1/1**，报告 `normal-validation-20260929/compatibility-r2-real-model-runs/20260928T182720934263Z-fb9c1583cb71/report.json`。标准 V2 r2 首次 **0/1**，报告 `v2-agent-r2-real-model-runs/20260928T185903844319Z-32fde5fbb90b/report.json`：PMML/指标完成，报告草稿失败，provider 上报一次 2049 token 超过 2048 冻结上限，严格算失败，没有截去 token 或放宽预算。此时实际存在长报告单次 JSON 请求截断。该失败记录保留，分段修复后的同例实跑待追加。
+
+V2 r2 cases/expected SHA 分别为 `730b2846377ff4603eb5c566704b7edc4e6a48ee72956303ddc303baf2bc4613` / `5eeaef634993bf31830104df983cdfaad0cb4879d0243801cfd1f7fe76c1ed51`，本次再次读回一致。公开开发集不是最终隐藏验收，所有报告 acceptance_claim 保持 not_established。当前仍未收到真实脱敏数据目录，也未具备机构生产验收条件。
