@@ -589,3 +589,21 @@ V2 r2 cases/expected SHA 分别为 `730b2846377ff4603eb5c566704b7edc4e6a48ee7295
 最终联合 **57 passed**（`runtime-archive-validation-20261003/joint.log`）；主线专项 **36 passed**（`main.log`）。root 审阅最终实现并核对真实档案复算结果：`guard-repair-external-revalidation-final.json` 的 180 行评分、2 类压力、完整指标、1,314 Excel 单元格、Word 四段确认文字一致；`custody-external-revalidation-final.json` 的原失败仍在确认阶段 unsupported，报告项目未验证。两份原档前后不变，当前复算源码与原运行不同明确记录；这些不是新增 provider 实跑。
 
 边界：只证明支持范围内的数据一致性，原密钥签名、叙事语义真实性、业务标签/训练有效性、原运行耗时费用、图像与 Word 数字布局均不由此证明。私密副本上限 1 GiB、样本 10 万行；同 UID/root 对抗隔离不在范围。独立代码复查还发现原始留存先于最终预算和评分判定，正在补最终运行清单及直接可用的只读 CLI；旧运行不会倒填成原有最终清单。
+
+### 最终运行记录与可直接使用的复核入口
+
+`fc8ff166` 在新运行结束、report 已保存后新增 final-manifest，绑定完整 case 分母、初始 manifest、最终 execution/score/report、传输 attempts、各案 custody digest，以及冻结案例/expected/价格表/基线/源码摘要。report 不回写，返回值另带最终清单路径与摘要，避免循环绑定。只读 verifier 返回同一份已验 hash 的解析字节；复用实际 runner 的预算终态优先级及 usage_summary，拒绝预算失败却自报通过、空断言通过、遗漏案例等内部矛盾。金额与过去运行真实性仍未重算或认证。评分 KeyboardInterrupt 保留当前失败和后续未运行案例分母。
+
+`9330ec0e` 增加 `scripts/revalidate_runtime_archive.py`：显式提供归档清单 digest、外部 binding 文件及其 digest；可选另提供原始 final-run 目录和清单 digest。只重算所选 case 的领域证据，同时核完整 run 文件一致性，其他 case 的原结果仍保留。退出 0 只表示请求范围检查一致，不是审计关闭。输出文件独占创建、0600，禁止覆盖或写入输入证据；独立审阅发现任意 source 扩展字段可能回显，已改为合法身份字段与整体摘要，并以实际 CLI 敏感字段负例覆盖。
+
+final-manifest 最终专项 **51 passed**，此前联合 **107 passed**、既有预算/失败 **29 passed**（均可能重叠）；主线最终清单与真实 CLI 联合 **72 passed**（`runtime-archive-validation-20261003/final-cli.log`）。其中真实 V2 HTTP fixture 完成材料、评分、确认和报告后，评分器被测试中断：领域复算全过，CLI 仍保持原失败并退出 1。Ruff/diff 检查通过。
+
+原来保留的真实 provider 两份 V2 档案也经新 CLI 直接复核：成功档案 domain_only 退出 0；原失败档案因未确认/缺报告退出 1；两份原件不变，final_runtime_evidence 均 unavailable。证据 `runtime-archive-validation-20261003/cli-retained-20261003/summary.json`；这些不是新 provider 调用，也未倒填当时不存在的 final manifest。独立信任接入、隐藏集和实际业务验收仍未建立。
+
+### 拟合成员、内层验证与时点的新增实际发现
+
+真实 ToolRunner 复现了特征筛选默认纳入 validation/unknown/空分区，以及显式选择 OOT 却仍标 train 的问题。`01a88f94` 复用现有严格 fit_membership，默认仅明确 train，未知分区需先声明，已知评估分区不能指定为训练。root 相关 **34 passed**；`bc87f4d0` 另保留整数/浮点相等数字分区的显式兼容并拒绝 bool/NaN/Inf，agent **20 passed**。原红例和回归保存在 `fitted-parameter-audit-20261003/main-selection.log`、`selection-membership-*-20261003.log`。
+
+继续读代码并用原生工具复现两项不同问题：外层训练 WOE 在内部 CV 切分前已看到验证折标签；训练字段虽然各自合法 as-of，跨行统计仍能使用 1 月 19 日可得的训练输入变换 1 月 10 日的评估行。复现 `fitted-parameter-audit-20261003/result.json`，数据全为合成。前者的守卫提交正在独立审阅，后者已进入专门开发；本节不把它们标为关闭。IV/KS 筛选目前仅返回显式特征列表，缺少训练端认证筛选成员的契约，不能因 WOE 守卫就声称整个选择流程都具备独立内部验证。
+
+`538a9d47` 修复了实际模型卡中的另一处遗漏：字段时点 verified 时不再取消参数时间未知限制。JSON/Markdown 分别展示字段时点、已记录外层预处理成员范围、模型及拟合参数的历史可得时间；当前缺原生历史参数时间契约，后者保持 unknown，不读取用户自报 verified 来升级。两个实际 train/prepare/交付负例修复前失败，最终 **14 passed**；第一轮另有测试错误要求正常可追溯产物必须显式包含 true 字段，已按既有省略即正常契约修正，第二轮两个负例均准确命中缺失证据字段。日志 `model-card-{red,red2,green}.log`。前端构包/交付显示继续接入，尚未宣称浏览器验收。
