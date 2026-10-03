@@ -942,7 +942,8 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         raw_groups = effective_params(item).get("valid_group_cols") or []
         groups = raw_groups if isinstance(raw_groups, list) else [raw_groups]
         group_columns.extend(str(column) for column in groups if str(column))
-    group_columns = list(dict.fromkeys(group_columns))
+    available_columns = set(runtime.backend.column_names(dataset_path))
+    group_columns = [column for column in dict.fromkeys(group_columns) if column in available_columns]
     experiments: list[dict] = []
     failed: list[dict] = []
     last_exc: Exception | None = None

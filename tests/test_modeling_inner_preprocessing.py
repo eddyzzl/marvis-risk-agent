@@ -192,7 +192,7 @@ def test_unneeded_ensemble_guard_does_not_materialize_member_seeds(monkeypatch):
     ))
 
 
-@pytest.mark.parametrize("parameter_form", ["flat", "nested", "later_recipe", "overridden"])
+@pytest.mark.parametrize("parameter_form", ["flat", "nested", "later_recipe", "overridden", "missing_group"])
 def test_batch_training_keeps_exact_group_identity_when_group_is_also_a_feature(tmp_path, parameter_form):
     import joblib
     from marvis.packs.modeling._runtime import _artifact_base_dir
@@ -221,11 +221,17 @@ def test_batch_training_keeps_exact_group_identity_when_group_is_also_a_feature(
     params = group_params if parameter_form == "flat" else {"lgb": group_params}
     if parameter_form == "overridden":
         params = {"lgb": {**group_params, "valid_group_cols": ["unused_missing_group"]}}
+    if parameter_form == "missing_group":
+        params = {"lgb": {**group_params, "valid_group_cols": ["absent"]}}
     result = runner.invoke(ToolRef("modeling", "train_models"), _inputs(
         encoded.output["result_dataset_id"], features=["segment_woe", "group"], recipes=recipes,
         params=params, **({"valid_group_cols": ["group"]} if parameter_form == "overridden" else {}),
     ), task_id="task-feature")
     assert result.ok, result.error
+    if parameter_form == "missing_group":
+        # The established recipe contract falls back to per-row carving when
+        # no configured group field exists. Compact loading must allow it too.
+        return
     modeling = ModelingRepository(repo.db_path)
     trained = next(item for item in result.output["experiments"] if item["recipe"] == "lgb")
     experiment = modeling.get_experiment(trained["experiment_id"])
