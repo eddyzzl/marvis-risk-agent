@@ -26,8 +26,10 @@ def write_synthetic_suite(
     normal_strategy_only: bool = False,
     normal_validation_only: bool = False,
     normal_validation_agent_only: bool = False,
+    normal_labeling_only: bool = False,
 ) -> dict[str, Path]:
-    if sum((normal_modeling_only, normal_strategy_only, normal_validation_only, normal_validation_agent_only, include_workflow_families)) > 1:
+    if sum((normal_modeling_only, normal_strategy_only, normal_validation_only,
+            normal_validation_agent_only, normal_labeling_only, include_workflow_families)) > 1:
         raise ValueError(
             "normal suites are separate, not additions to the archived nine cases"
         )
@@ -80,6 +82,10 @@ def write_synthetic_suite(
         from .runtime_family_cases import normal_strategy_frames
 
         frames = normal_strategy_frames()
+    if normal_labeling_only:
+        from .runtime_labeling_cases import normal_labeling_frames
+
+        frames = normal_labeling_frames()
     materials = {}
     for name, (role, frame) in frames.items():
         frame.to_parquet(data / name, index=False)
@@ -98,6 +104,11 @@ def write_synthetic_suite(
         from .runtime_family_cases import normal_strategy_cases
 
         cases, expected = normal_strategy_cases(materials)
+        return _write_suite_files(root, private, data, cases, expected)
+    if normal_labeling_only:
+        from .runtime_labeling_cases import normal_labeling_cases
+
+        cases, expected = normal_labeling_cases(materials)
         return _write_suite_files(root, private, data, cases, expected)
     cases = [
         {
@@ -224,6 +235,7 @@ if __name__ == "__main__":
     group.add_argument("--normal-strategy-only", action="store_true")
     group.add_argument("--normal-validation-only", action="store_true")
     group.add_argument("--normal-validation-agent-only", action="store_true")
+    group.add_argument("--normal-labeling-only", action="store_true")
     args = parser.parse_args()
     for name, path in write_synthetic_suite(
         args.directory,
@@ -232,5 +244,6 @@ if __name__ == "__main__":
         normal_strategy_only=args.normal_strategy_only,
         normal_validation_only=args.normal_validation_only,
         normal_validation_agent_only=args.normal_validation_agent_only,
+        normal_labeling_only=args.normal_labeling_only,
     ).items():
         print(f"{name}={path}")

@@ -936,13 +936,15 @@ class Journey:
             if self.case.initial_message is not None:
                 route = "messages"
                 payload["content"] = self.case.initial_message
-            self.json_request(
-                "POST",
-                f"/api/tasks/{self.task_id}/agent/{route}",
-                label="agent_initial_turn",
-                json=payload,
-            )
-            self.wait_idle()
+            labeling_entry = bool(self.case.actions and self.case.actions[0].kind == "submit_labeling_request")
+            if not labeling_entry:
+                self.json_request(
+                    "POST",
+                    f"/api/tasks/{self.task_id}/agent/{route}",
+                    label="agent_initial_turn",
+                    json=payload,
+                )
+                self.wait_idle()
         for action in self.case.actions:
             if action.kind == "start_validation_workflow":
                 self.start_validation_workflow(action)
@@ -952,6 +954,12 @@ class Journey:
             elif action.kind == "confirm_current_validation_report":
                 from .runtime_validation_adapter import confirm_current_report
                 confirm_current_report(self, action)
+            elif action.kind == "submit_labeling_request":
+                from .runtime_labeling import submit_labeling_request
+                submit_labeling_request(self, action)
+            elif action.kind == "download_labeling_results":
+                from .runtime_labeling import download_labeling_results
+                download_labeling_results(self)
             elif action.kind == "message":
                 self.interventions += 1
                 message = {
@@ -1503,6 +1511,9 @@ def _receipts(workspace: Path, task_id: str | None, *, case=None, journey=None) 
                             workspace, task_id, bound["output"],
                         )
                     private["outputs"][step.id] = bound["output"]
+                    if tool == "labeling.define_label":
+                        from .runtime_labeling import labeling_receipt
+                        receipt["labeling"] = labeling_receipt(workspace, task_id, bound["output"])
                 except (ValueError, KeyError, OSError):
                     receipt["binding_verified"] = False
             evidence["steps"].append(receipt)

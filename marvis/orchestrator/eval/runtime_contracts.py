@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from marvis.api_schemas import DataSemanticMappingRequest, PortfolioSetupRequest
+from .runtime_labeling import LabelingBusinessInput
 
 RUNTIME_FINISH_REASONS = frozenset(
     {"stop", "length", "tool_calls", "function_call", "content_filter", "other"}
@@ -124,11 +125,14 @@ class RuntimeAction(StrictModel):
         "start_validation_workflow",
         "start_validation_agent",
         "confirm_current_validation_report",
+        "submit_labeling_request",
+        "download_labeling_results",
     ]
     content: str = ""
     tool: str = ""
     portfolio_request: PortfolioSetupRequest | None = None
     semantic_mapping: DataSemanticMappingRequest | None = None
+    labeling_request: LabelingBusinessInput | None = None
 
     @model_validator(mode="after")
     def required_fields(self):
@@ -137,6 +141,13 @@ class RuntimeAction(StrictModel):
             or self.semantic_mapping is not None
         ):
             raise ValueError("validation start accepts explicit human text only, no tool or injected identifiers")
+        if self.kind == "submit_labeling_request":
+            if self.labeling_request is None or not self.content.strip() or self.tool:
+                raise ValueError("labeling requires explicit business fields and human text")
+        elif self.labeling_request is not None:
+            raise ValueError("labeling fields belong only to the labeling proposal action")
+        if self.kind == "download_labeling_results" and (self.tool or not self.content.strip()):
+            raise ValueError("label downloads require explicit human text and no arbitrary tool")
         if self.kind == "bind_single_strategy_sample":
             if self.tool or not self.content.strip() or self.semantic_mapping is None:
                 raise ValueError(
@@ -174,6 +185,8 @@ class RuntimeAction(StrictModel):
             value.pop("portfolio_request", None)
         if value.get("semantic_mapping") is None:
             value.pop("semantic_mapping", None)
+        if value.get("labeling_request") is None:
+            value.pop("labeling_request", None)
         return value
 
 
@@ -214,6 +227,15 @@ class RuntimeCase(StrictModel):
               or any(m.role in {"notebook", "pmml", "dictionary"} for m in self.materials)
               or any(a.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report"} for a in self.actions)):
             raise ValueError("validation files and start action belong only to validation")
+        labeling = [i for i, a in enumerate(self.actions) if a.kind == "submit_labeling_request"]
+        if labeling and (
+            labeling != [0] or self.initial_message is not None
+            or self.task.task_type != "data_join" or len(self.materials) != 1
+            or self.materials[0].role != "sample"
+        ):
+            raise ValueError("labeling starts with one declared data_join sample and proposal")
+        if any(a.kind == "download_labeling_results" for a in self.actions) and not labeling:
+            raise ValueError("label downloads require a declared labeling proposal")
         if any(a.kind == "bind_single_strategy_sample" for a in self.actions):
             if (
                 self.task.task_type != "strategy"

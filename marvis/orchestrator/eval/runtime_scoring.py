@@ -35,6 +35,7 @@ class Assertion(StrictModel):
         "artifact_exists",
         "validation_report_verified",
         "validation_pipeline_equals",
+        "labeling_evidence",
     ]
     tool: str = ""
     path: list[str | int] = Field(default_factory=list)
@@ -134,6 +135,29 @@ def _assertion(assertion, record, private):
         )
     if len(steps) != 1:
         return False
+    if assertion.kind == "labeling_evidence":
+        label = steps[0].get("labeling", {})
+        return (
+            assertion.tool == "labeling.define_label"
+            and label.get("verified") is True
+            and isinstance(assertion.value, str)
+            and len(assertion.value) == 64
+            and all(c in "0123456789abcdef" for c in assertion.value)
+            and label.get("labels_sha256") == assertion.value
+            and any(
+                run.get("invocation_id") == steps[0].get("producer_invocation_id")
+                and run.get("invocation_id") is not None
+                and run.get("status") == "succeeded"
+                for run in steps[0].get("runs", [])
+            )
+            and all(any(
+                event.get("stage") == f"download_labeling_{kind}"
+                and event.get("status_code") == 200
+                and event.get("size_bytes", 0) > 0
+                and event.get("sha256") == label.get(f"{kind}_download_sha256")
+                for event in record["http_events"]
+            ) for kind in ("dataset", "evidence"))
+        )
     if assertion.kind == "dataset_rows":
         datasets = steps[0].get("result_datasets", [])
         return bool(datasets) and all(
