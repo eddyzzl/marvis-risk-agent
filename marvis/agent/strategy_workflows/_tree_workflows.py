@@ -13,7 +13,13 @@ import re
 from typing import Any
 import unicodedata
 
-from ._input_validation import reject_fields_with_metadata as _reject_fields
+from ._input_validation import (
+    column_with_metadata as _column,
+    invalid_fields as _invalid,
+    mapping_keys_are_text as _mapping_keys_are_text,
+    reject_fields_with_metadata as _reject_fields,
+    required_text_with_metadata as _required_text,
+)
 from .contracts import (
     PreparedStrategyPlan,
     StrategyWorkflowPreparationContext,
@@ -1008,17 +1014,6 @@ def _validate_evidence_values(
         )
 
 
-def _mapping_keys_are_text(value: object) -> bool:
-    if isinstance(value, Mapping):
-        return all(
-            isinstance(key, str) and _mapping_keys_are_text(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return all(_mapping_keys_are_text(item) for item in value)
-    return True
-
-
 def _require_dataset_context(
     workflow_id: str,
     context: StrategyWorkflowPreparationContext,
@@ -1065,25 +1060,6 @@ def _node_id(value: object, *, workflow: str) -> str:
             "node_id",
         )
     return node_id
-
-
-def _column(
-    value: object,
-    *,
-    name: str,
-    workflow: str,
-    whitelist: Sequence[str],
-) -> str:
-    column = _required_text(value, name=name, workflow=workflow)
-    if column not in whitelist:
-        _invalid(workflow, f"{name} 使用了数据集中不存在的列「{column}」。", name)
-    return column
-
-
-def _required_text(value: object, *, name: str, workflow: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        _invalid(workflow, f"{name} 必须是非空文本。", name)
-    return value.strip()
 
 
 def _canonical_reason(
@@ -1146,13 +1122,6 @@ def _bounded_number(
             name,
         )
     return number
-
-
-def _invalid(workflow: str, message: str, *fields: str) -> None:
-    raise StrategyWorkflowValidationError(
-        f"{workflow} {message}",
-        fields=fields,
-    )
 
 
 TREE_WORKFLOW_SPECS: tuple[StrategyWorkflowSpec, ...] = (

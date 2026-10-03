@@ -90,3 +90,40 @@ def bounded_number(
             f"{name} 必须是 0 到 {maximum:g} 之间的有限数字。"
         )
     return number
+
+
+def mapping_keys_are_text(value: object) -> bool:
+    if isinstance(value, Mapping):
+        return all(
+            isinstance(key, str) and mapping_keys_are_text(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return all(mapping_keys_are_text(item) for item in value)
+    return True
+
+
+def column_with_metadata(
+    value: object,
+    *,
+    name: str,
+    workflow: str,
+    whitelist: Sequence[str],
+) -> str:
+    column = required_text_with_metadata(value, name=name, workflow=workflow)
+    if column not in whitelist:
+        invalid_fields(workflow, f"{name} 使用了数据集中不存在的列「{column}」。", name)
+    return column
+
+
+def required_text_with_metadata(value: object, *, name: str, workflow: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        invalid_fields(workflow, f"{name} 必须是非空文本。", name)
+    return value.strip()
+
+
+def invalid_fields(workflow: str, message: str, *fields: str) -> None:
+    raise StrategyWorkflowValidationError(
+        f"{workflow} {message}",
+        fields=fields,
+    )
