@@ -3578,6 +3578,9 @@
           },
           "seed": {
             "type": "integer"
+          },
+          "monitoring_binding": {
+            "type": "object"
           }
         },
         "required": [
@@ -3716,6 +3719,9 @@
           },
           "monitoring_policy": {
             "type": "object"
+          },
+          "monitoring_binding": {
+            "type": "object"
           }
         },
         "required": [
@@ -3829,6 +3835,25 @@
               ],
               "additionalProperties": false
             }
+          },
+          "label_mode": {
+            "type": "string",
+            "enum": [
+              "declared_label_column",
+              "unlabeled_drift_only"
+            ]
+          },
+          "label_maturity_assurance": {
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          },
+          "business_acceptance": {
+            "type": "string",
+            "enum": [
+              "not_established"
+            ]
           }
         },
         "required": [

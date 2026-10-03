@@ -69,6 +69,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
+    TASK_TYPE_MODELING,
     TASK_TYPE_PORTFOLIO,
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
@@ -630,6 +631,8 @@ def post_agent_message(
         raise unprocessable("strategy_request 只能用于 strategy 类型任务。")
     if payload.portfolio_request is not None and task.task_type != TASK_TYPE_PORTFOLIO:
         raise unprocessable("portfolio_request 只能用于 portfolio 类型任务。")
+    if payload.model_monitoring_request is not None and task.task_type != TASK_TYPE_MODELING:
+        raise unprocessable("model_monitoring_request 只能用于 modeling 类型任务。")
     if payload.labeling_request is not None and task.task_type != TASK_TYPE_DATA_JOIN:
         raise unprocessable("labeling_request 只能用于 data_join 类型任务。")
     require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
@@ -638,7 +641,7 @@ def post_agent_message(
     if business_objective_provided:
         from marvis.business_acceptance import BusinessObjective
         business_objective = None if payload.business_objective is None else BusinessObjective.from_dict(payload.business_objective)
-        if payload.ui_action is not None or payload.strategy_request is not None or payload.portfolio_request is not None or payload.labeling_request is not None:
+        if payload.ui_action is not None or payload.strategy_request is not None or payload.portfolio_request is not None or payload.labeling_request is not None or payload.model_monitoring_request is not None:
             raise unprocessable("business_objective 不能与确认或其他业务动作同时提交。")
     else:
         business_objective = None
@@ -804,6 +807,15 @@ def post_agent_message(
             )
         if is_stop_validation_intent(content):
             raise unprocessable("停止指令不能与 labeling_request 同时提交。")
+    if payload.model_monitoring_request is not None:
+        mixed = [name for name in (
+            "strategy_input", "strategy_request", "portfolio_request", "labeling_request",
+            "selection", "dedup_strategies", "adjust_params", "expected_step_id", "expected_plan_id",
+            "expected_plan_status", "expected_plan_revision", "expected_plan_fingerprint",
+            "expected_step_fingerprint", "ui_action",
+        ) if getattr(payload, name) is not None]
+        if mixed or is_stop_validation_intent(content):
+            raise unprocessable("模型监控请求不能与其他动作或停止指令同时提交。")
     allowed_ui_actions = {
         "confirm_roles",
         "confirm_dedup",
@@ -880,6 +892,7 @@ def post_agent_message(
                 or payload.strategy_request is not None
                 or payload.portfolio_request is not None
                 or payload.labeling_request is not None
+                or payload.model_monitoring_request is not None
                 or is_labeling_deterministic_turn(
                     repo,
                     request.app.state.plan_repo,
@@ -938,6 +951,10 @@ def post_agent_message(
                     mode="python",
                     exclude_none=True,
                 )
+            ),
+            model_monitoring_request=(
+                None if payload.model_monitoring_request is None
+                else payload.model_monitoring_request.model_dump(exclude_none=True)
             ),
             recovery_model_id=payload.model_id,
             recovery_effort=payload.effort,

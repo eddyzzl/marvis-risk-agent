@@ -19,6 +19,7 @@ from marvis.domain import TASK_TYPE_VALIDATION
 from marvis.business_acceptance import BusinessObjective
 from marvis.agent.strategy_workflows import MANUAL_STANDARD_STRATEGY_WORKFLOWS
 from marvis.packs.labeling.contracts import LabelingRequest as LabelingContractRequest
+from marvis.agent.monitoring_setup import ModelMonitoringSetupRequest
 
 
 StrictJsonScalar = StrictStr | StrictInt | StrictFloat | StrictBool | None
@@ -2272,6 +2273,7 @@ class AgentMessageRequest(BaseModel):
     # This strict, source-bound form builds a read-only proposal first; it never
     # creates a plan until a later explicit human confirmation turn.
     labeling_request: LabelingSetupRequest | None = None
+    model_monitoring_request: ModelMonitoringSetupRequest | None = None
     # Optional edited feature set from the §4 interactive screening table; when a
     # screening gate is confirmed this overrides the screen's proposed `selected`.
     selection: list[str] | None = None

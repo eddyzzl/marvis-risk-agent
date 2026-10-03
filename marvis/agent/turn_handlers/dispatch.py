@@ -122,10 +122,17 @@ def dispatch_driver_turn(
     strategy_request: Mapping[str, object] | None = None,
     portfolio_request: Mapping[str, object] | None = None,
     labeling_request: Mapping[str, object] | None = None,
+    model_monitoring_request: Mapping[str, object] | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     ui_action: str | None = None,
     recovery_bypass: bool = False,
 ) -> dict:
+    if model_monitoring_request is not None:
+        from .model_monitoring import handle_model_monitoring_request
+        return handle_model_monitoring_request(
+            runtime, repo, task, user_text=user_text,
+            model_monitoring_request=model_monitoring_request,
+        )
     if labeling_request is not None:
         return labeling_lane._handle_structured_labeling_request_turn(
             runtime,

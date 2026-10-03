@@ -366,6 +366,7 @@ def dispatch_driver_turn(
     strategy_request: Mapping[str, object] | None = None,
     portfolio_request: Mapping[str, object] | None = None,
     labeling_request: Mapping[str, object] | None = None,
+    model_monitoring_request: Mapping[str, object] | None = None,
     recovery_model_id: str | None = None,
     recovery_effort: str | None = None,
 ) -> dict:
@@ -466,6 +467,7 @@ def dispatch_driver_turn(
             strategy_request=strategy_request,
             portfolio_request=portfolio_request,
             labeling_request=labeling_request,
+            model_monitoring_request=model_monitoring_request,
             ui_action=ui_action,
             confirmation_source=CONFIRMATION_SOURCE_HUMAN,
             recovery_bypass=(
@@ -473,6 +475,7 @@ def dispatch_driver_turn(
                 or strategy_request is not None
                 or portfolio_request is not None
                 or labeling_request is not None
+                or model_monitoring_request is not None
             ),
         )
     except C1TargetValidationError as exc:

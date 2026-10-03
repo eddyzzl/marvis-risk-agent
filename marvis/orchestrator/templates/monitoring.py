@@ -23,6 +23,7 @@ MONITORING_RUN = WorkflowTemplate(
         SlotSpec("dataset_id", True, "task_context", "New dataset id to score and monitor"),
         SlotSpec("target_col", False, "task_context", "Optional label column if the new sample is labeled"),
         SlotSpec("monitoring_policy", False, "task_context", "Optional monitor_run threshold overrides"),
+        SlotSpec("monitoring_binding", False, "task_context", "Frozen selected model, baseline and sample identities"),
     ),
     steps=(
         StepTemplate(
@@ -31,6 +32,7 @@ MONITORING_RUN = WorkflowTemplate(
             inputs_template={
                 "experiment_id": "{slot:experiment_id}",
                 "dataset_id": "{slot:dataset_id}",
+                "monitoring_binding": "{slot:monitoring_binding}",
             },
             depends_on_titles=(),
             post_checks=(
@@ -47,6 +49,7 @@ MONITORING_RUN = WorkflowTemplate(
                 "score_col": "$ref:打分.output.score_col",
                 "target_col": "{slot:target_col}",
                 "monitoring_policy": "{slot:monitoring_policy}",
+                "monitoring_binding": "{slot:monitoring_binding}",
             },
             depends_on_titles=("打分",),
             post_checks=(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import numpy as np
 import pandas as pd
 import uuid
@@ -18,6 +19,54 @@ from marvis.packs.modeling._runtime import (
 )
 from marvis.packs.modeling.delivery_tools import _monitoring_check_status
 from marvis.packs.modeling.scoring import _ModelArtifactScorer
+from marvis.packs.modeling.monitor_binding import (
+    monitoring_binding_hash,
+    monitoring_model_directory,
+    validate_monitoring_binding,
+)
+
+
+def _validate_bound_inputs(inputs, runtime, ctx):
+    binding = inputs.get("monitoring_binding")
+    if binding is None:
+        return None
+    validate_monitoring_binding(
+        runtime.settings, str(ctx.task_id), binding,
+        scored_dataset_id=inputs.get("scored_dataset_id"),
+        score_col=(str(inputs.get("score_col") or "model_score")
+                   if inputs.get("scored_dataset_id") else None),
+    )
+    if inputs.get("experiment_id") != binding["experiment_id"] or (
+        inputs.get("dataset_id") is not None
+        and inputs["dataset_id"] != binding["dataset"]["id"]
+    ):
+        raise ModelingError("monitoring_input_binding_mismatch")
+    return binding
+
+
+def _write_monitor_audit(runtime, inputs, ctx, **audit):
+    if inputs.get("monitoring_binding") is None:
+        runtime.repo.write_audit(**audit)
+        return
+    with runtime.repo.transaction() as conn:
+        _validate_bound_inputs(inputs, runtime, ctx)
+        runtime.repo.write_audit_on_connection(conn, **audit)
+        _validate_bound_inputs(inputs, runtime, ctx)
+
+
+def _validate_loaded_model(binding, experiment, artifact):
+    if binding is not None and (
+        monitoring_binding_hash(asdict(experiment)) != binding["experiment_sha256"]
+        or monitoring_binding_hash(asdict(artifact)) != binding["artifact_sha256"]
+    ):
+        raise ModelingError("monitoring_model_identity_changed")
+
+
+def _validate_loaded_source(binding, dataset):
+    if binding is not None and (
+        monitoring_binding_hash(asdict(dataset)) != binding["dataset"]["identity_sha256"]
+    ):
+        raise ModelingError("monitoring_source_identity_changed")
 
 
 def tool_score_dataset(inputs: dict, ctx) -> dict:
@@ -38,84 +87,91 @@ def tool_score_dataset(inputs: dict, ctx) -> dict:
     re-inferred) and a ``modeling.dataset.scored`` audit entry.
     """
     runtime = _runtime(ctx)
+    binding = _validate_bound_inputs(inputs, runtime, ctx)
     experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
     artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
+    _validate_loaded_model(binding, experiment, artifact)
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
 
     dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
+    _validate_loaded_source(binding, dataset)
     dataset_path = runtime.registry.resolve_path(dataset.id)
-    frame = runtime.backend.read_frame(dataset_path)
+    frame = (
+        runtime.registry.read_authenticated_parquet_snapshot(dataset.id)
+        if binding is not None else runtime.backend.read_frame(dataset_path)
+    )
     row_count = int(len(frame))
 
-    target_type = str(
-        getattr(experiment.config, "target_type", "binary") or "binary"
-    )
-    scorer = _ModelArtifactScorer(artifact, base_dir=base_dir, replay_preprocessing=True)
-    prediction_col = None
-    probability_columns: list[dict] = []
-    if target_type == "multiclass":
-        classes = list((artifact.params or {}).get("classes") or [])
-        probability_names = [
-            f"model_probability_{index}" for index in range(len(classes))
-        ]
-        prediction_col = (
-            str(inputs.get("output_col") or "predicted_class").strip()
-            or "predicted_class"
+    with monitoring_model_directory(runtime.settings, str(ctx.task_id), binding, base_dir) as model_dir:
+        target_type = str(
+            getattr(experiment.config, "target_type", "binary") or "binary"
         )
-        _assert_scoring_output_columns_available(
-            frame,
-            [*probability_names, prediction_col],
-        )
-        probabilities = scorer.predict_proba(frame)
-        for index, class_value in enumerate(classes):
-            column = probability_names[index]
-            frame[column] = probabilities[:, index]
-            probability_columns.append({
-                "class": class_value,
-                "column": column,
-            })
-        predicted_index = np.argmax(probabilities, axis=1)
-        frame[prediction_col] = [
-            classes[int(index)] for index in predicted_index
-        ]
-        score_col = prediction_col
-        score_missing_rate = (
-            float(np.mean(~np.isfinite(probabilities))) if row_count else 0.0
-        )
-    else:
-        default_output_col = (
-            "model_prediction" if target_type == "continuous" else "model_score"
-        )
-        score_col = (
-            str(inputs.get("output_col") or default_output_col).strip()
-            or default_output_col
-        )
-        _assert_scoring_output_columns_available(frame, [score_col])
-        scores = scorer.score(frame)
-        frame[score_col] = scores
-        prediction_col = score_col if target_type == "continuous" else None
-        score_missing_rate = (
-            float(np.mean(~np.isfinite(np.asarray(scores, dtype=float))))
-            if row_count
-            else 0.0
-        )
+        scorer = _ModelArtifactScorer(artifact, base_dir=model_dir, replay_preprocessing=True)
+        prediction_col = None
+        probability_columns: list[dict] = []
+        if target_type == "multiclass":
+            classes = list((artifact.params or {}).get("classes") or [])
+            probability_names = [
+                f"model_probability_{index}" for index in range(len(classes))
+            ]
+            prediction_col = (
+                str(inputs.get("output_col") or "predicted_class").strip()
+                or "predicted_class"
+            )
+            _assert_scoring_output_columns_available(
+                frame,
+                [*probability_names, prediction_col],
+            )
+            probabilities = scorer.predict_proba(frame)
+            for index, class_value in enumerate(classes):
+                column = probability_names[index]
+                frame[column] = probabilities[:, index]
+                probability_columns.append({
+                    "class": class_value,
+                    "column": column,
+                })
+            predicted_index = np.argmax(probabilities, axis=1)
+            frame[prediction_col] = [
+                classes[int(index)] for index in predicted_index
+            ]
+            score_col = prediction_col
+            score_missing_rate = (
+                float(np.mean(~np.isfinite(probabilities))) if row_count else 0.0
+            )
+        else:
+            default_output_col = (
+                "model_prediction" if target_type == "continuous" else "model_score"
+            )
+            score_col = (
+                str(inputs.get("output_col") or default_output_col).strip()
+                or default_output_col
+            )
+            _assert_scoring_output_columns_available(frame, [score_col])
+            scores = scorer.score(frame)
+            frame[score_col] = scores
+            prediction_col = score_col if target_type == "continuous" else None
+            score_missing_rate = (
+                float(np.mean(~np.isfinite(np.asarray(scores, dtype=float))))
+                if row_count
+                else 0.0
+            )
 
-    points_col = None
-    points_missing_rate = None
-    scorecard_points = scorer.scorecard_points(frame)
-    if scorecard_points is not None:
-        points_col = str(inputs.get("points_col") or "scorecard_points").strip() or "scorecard_points"
-        _assert_scoring_output_columns_available(
-            frame,
-            [points_col],
-            generated_columns=[score_col],
-        )
-        frame[points_col] = scorecard_points
-        points_missing_rate = (
-            float(np.mean(~np.isfinite(np.asarray(scorecard_points, dtype=float)))) if row_count else 0.0
-        )
+        points_col = None
+        points_missing_rate = None
+        scorecard_points = scorer.scorecard_points(frame)
+        if scorecard_points is not None:
+            points_col = str(inputs.get("points_col") or "scorecard_points").strip() or "scorecard_points"
+            _assert_scoring_output_columns_available(
+                frame,
+                [points_col],
+                generated_columns=[score_col],
+            )
+            frame[points_col] = scorecard_points
+            points_missing_rate = (
+                float(np.mean(~np.isfinite(np.asarray(scorecard_points, dtype=float)))) if row_count else 0.0
+            )
 
     out_dir = runtime.datasets_root / str(ctx.task_id) / "modeling"
     uow = ArtifactUnitOfWork()
@@ -141,12 +197,17 @@ def tool_score_dataset(inputs: dict, ctx) -> dict:
                     "points_direction": artifact.points_direction,
                     "row_count": row_count,
                     "score_missing_rate": score_missing_rate,
+                    **({
+                        "source_content_hash": dataset.content_hash,
+                        "scored_content_hash": registered_dataset.content_hash,
+                        "monitoring_binding_hash": monitoring_binding_hash(binding),
+                    } if binding is not None else {}),
                 },
             }
 
-        registered = uow.finalize_with_connection(
-            runtime.repo.transaction,
-            lambda conn: runtime.registry.register_existing_with_audit_on_connection(
+        def publish(conn):
+            _validate_bound_inputs(inputs, runtime, ctx)
+            result = runtime.registry.register_existing_with_audit_on_connection(
                 conn,
                 staged.final_path,
                 audit_factory=audit_factory,
@@ -154,7 +215,12 @@ def tool_score_dataset(inputs: dict, ctx) -> dict:
                 role="modeling.scored",
                 anchor_target=dataset.id,
                 seed=_effective_seed(inputs, ctx),
-            ),
+            )
+            _validate_bound_inputs(inputs, runtime, ctx)
+            return result
+
+        registered = uow.finalize_with_connection(
+            runtime.repo.transaction, publish,
         )
     except Exception:
         uow.rollback()
@@ -263,8 +329,15 @@ def tool_monitor_run(inputs: dict, ctx) -> dict:
     """Run the model-monitoring kernel and persist its standalone audit."""
     result = _calculate_monitor_run(inputs, ctx)
     runtime = _runtime(ctx)
+    binding = _validate_bound_inputs(inputs, runtime, ctx)
+    if binding is not None:
+        result.update(
+            label_mode="declared_label_column" if inputs.get("target_col") else "unlabeled_drift_only",
+            label_maturity_assurance="unknown",
+            business_acceptance="not_established",
+        )
     checks = [check for check in result["checks"] if isinstance(check, dict)]
-    runtime.repo.write_audit(
+    _write_monitor_audit(runtime, inputs, ctx,
         kind="modeling.monitor.run",
         target_ref=str(result["experiment_id"]),
         outcome="succeeded",
@@ -273,6 +346,12 @@ def tool_monitor_run(inputs: dict, ctx) -> dict:
             "dataset_id": result["dataset_id"],
             "row_count": result["row_count"],
             "overall_level": result["overall_level"],
+            **({
+                "monitoring_binding_hash": monitoring_binding_hash(binding),
+                "baseline_sha256": binding["baseline_sha256"],
+                "source_dataset_id": binding["dataset"]["id"],
+                "source_content_hash": binding["dataset"]["content_hash"],
+            } if binding is not None else {}),
             "score_psi": next(
                 (
                     check.get("value")
@@ -316,10 +395,12 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
     distribution -- the caller must retrain or supply an explicit baseline.
     """
     runtime = _runtime(ctx)
+    binding = _validate_bound_inputs(inputs, runtime, ctx)
     experiment = _task_experiment(runtime, ctx, inputs["experiment_id"])
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
     artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
+    _validate_loaded_model(binding, experiment, artifact)
     baseline = artifact.baseline_distributions
     if not baseline:
         raise ModelingError(
@@ -350,7 +431,10 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
         available = set(runtime.backend.column_names(dataset_path))
         columns = _unique_columns([score_col, target_col, *artifact.feature_list])
         columns = [column for column in columns if column in available]
-        frame = runtime.backend.read_frame(dataset_path, columns=columns)
+        frame = (
+            runtime.registry.read_authenticated_parquet_snapshot(dataset.id, columns=columns)
+            if binding is not None else runtime.backend.read_frame(dataset_path, columns=columns)
+        )
         if score_col not in frame.columns:
             raise ModelingError(
                 f"scored dataset {dataset.id!r} has no column {score_col!r}; "
@@ -359,6 +443,7 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
         scores = pd.to_numeric(frame[score_col], errors="coerce").to_numpy(dtype=float)
     else:
         dataset = _task_dataset(runtime, ctx, dataset_id)
+        _validate_loaded_source(binding, dataset)
         dataset_path = runtime.registry.resolve_path(dataset.id)
         # LT-6: NOT column-projected, unlike the scored_dataset_id branch above --
         # replay_preprocessing=True means the preprocessing chain may reference raw
@@ -368,9 +453,13 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
         # (see marvis.feature.preprocessing.apply_preprocessing_steps). Projecting here
         # could silently drop a preprocessing step instead of erroring, corrupting the
         # replayed scores/CSI -- exactly the drift the task's hard constraint forbids.
-        frame = runtime.backend.read_frame(dataset_path)
-        scorer = _ModelArtifactScorer(artifact, base_dir=base_dir, replay_preprocessing=True)
-        scores = np.asarray(scorer.score(frame), dtype=float)
+        frame = (
+            runtime.registry.read_authenticated_parquet_snapshot(dataset.id)
+            if binding is not None else runtime.backend.read_frame(dataset_path)
+        )
+        with monitoring_model_directory(runtime.settings, str(ctx.task_id), binding, base_dir) as model_dir:
+            scorer = _ModelArtifactScorer(artifact, base_dir=model_dir, replay_preprocessing=True)
+            scores = np.asarray(scorer.score(frame), dtype=float)
 
     monitoring_policy_source = inputs.get("monitoring_policy") if isinstance(inputs.get("monitoring_policy"), dict) else {}
     thresholds = _monitor_run_thresholds(monitoring_policy_source.get("thresholds"))
@@ -388,6 +477,7 @@ def _calculate_monitor_run(inputs: dict, ctx) -> dict:
     recommendation = _monitor_run_recommendation(overall_level)
 
     row_count = int(len(frame))
+    _validate_bound_inputs(inputs, runtime, ctx)
     return {
         "experiment_id": experiment.id,
         "artifact_id": artifact.id,
