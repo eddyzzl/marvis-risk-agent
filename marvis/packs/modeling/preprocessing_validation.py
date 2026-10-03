@@ -30,7 +30,7 @@ def validate_inner_preprocessing(registry, config, *, cv_folds=None, tuning=Fals
         from marvis.packs.modeling.recipes.ensemble import DEFAULT_ENSEMBLE_N_MEMBERS, _member_seed
         recipe = str(config.params.get("base_recipe") or "lgb").strip()
         count = int(config.params.get("n_members") or DEFAULT_ENSEMBLE_N_MEMBERS)
-        seeds = [_member_seed(config.seed, index) for index in range(count)]
+        seeds = (_member_seed(config.seed, index) for index in range(count))
     tree = recipe in {"lgb", "xgb", "catboost"} or recipe.startswith(("lgb_", "xgb_"))
     early_stop = tree and (tuning or bool(config.early_stopping_rounds))
     private_early_stop = (recipe == "mlp" or recipe.startswith("mlp_")) and bool(config.params.get("early_stopping"))

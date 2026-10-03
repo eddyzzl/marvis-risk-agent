@@ -986,19 +986,16 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             })
             continue
         if training_backend is None:
+            group_columns = [str(column) for column in (control_params.get("valid_group_cols") or []) if str(column)]
             training_dataset = TrainingDataset.load_compact(
                 runtime.backend,
                 dataset_path,
-                features=features,
+                features=[feature for feature in features if feature not in group_columns],
                 target_col=target_col,
                 split_col=split_col,
                 extra_columns=[
                     str(control_params.get("sample_weight_col") or ""),
-                    *[
-                        str(column)
-                        for column in (control_params.get("valid_group_cols") or [])
-                        if str(column)
-                    ],
+                    *group_columns,
                 ],
             )
             training_backend = training_dataset.backend_adapter(runtime.backend)

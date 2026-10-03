@@ -173,3 +173,57 @@ def test_learner_private_validation_cannot_bypass_supervised_membership_check(sc
     ), task_id="task-feature")
     assert not result.ok
     assert "early-stopping membership is unknown" in str(result.error)
+
+
+def test_unneeded_ensemble_guard_does_not_materialize_member_seeds(monkeypatch):
+    from marvis.packs.modeling.contracts import TrainConfig
+    from marvis.packs.modeling.preprocessing_validation import validate_inner_preprocessing
+    from marvis.packs.modeling.recipes import ensemble
+
+    def unexpected_seed(*args):
+        pytest.fail("no seed should be derived without an inner holdout")
+
+    monkeypatch.setattr(ensemble, "_member_seed", unexpected_seed)
+    validate_inner_preprocessing(None, TrainConfig(
+        dataset_id="raw", features=("x",), target_col="y", split_col="split",
+        split_values={"train": "train", "test": "test"},
+        params={"base_recipe": "lgb", "n_members": 10**12}, seed=7,
+        early_stopping_rounds=None, recipe_id="ensemble",
+    ))
+
+
+def test_batch_training_keeps_exact_group_identity_when_group_is_also_a_feature(tmp_path):
+    import joblib
+    from marvis.packs.modeling._runtime import _artifact_base_dir
+    from marvis.repositories.modeling import ModelingRepository
+    from marvis.settings import build_settings
+
+    runner, registry, repo, _ = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "segment": [f"g{i % 5}" for i in range(180)], "y": [i % 2 for i in range(180)],
+        "group": [16777216 + i for i in range(180)],
+        "split": ["train"] * 120 + ["test"] * 30 + ["oot"] * 30,
+    })
+    fit, _ = carve_early_stop_fold(frame[frame.split == "train"], seed=7, group_cols=["group"])
+    frame["fit_split"] = "test"
+    frame.loc[fit.index, "fit_split"] = "train"
+    path = tmp_path / "groups.csv"
+    frame.to_csv(path, index=False)
+    source = registry.register_from_upload("task-feature", path, role="sample")
+    encoded = runner.invoke(ToolRef("feature", "woe_encode_categorical"), {
+        "dataset_id": source.id, "features": ["segment"], "target_col": "y",
+        "split_col": "fit_split", "min_count": 1,
+    }, task_id="task-feature")
+    assert encoded.ok, encoded.error
+    result = runner.invoke(ToolRef("modeling", "train_models"), _inputs(
+        encoded.output["result_dataset_id"], features=["segment_woe", "group"], recipes=["lgb"],
+        params={"num_boost_round": 4, "valid_group_cols": ["group"]},
+    ), task_id="task-feature")
+    assert result.ok, result.error
+    modeling = ModelingRepository(repo.db_path)
+    experiment = modeling.get_experiment(result.output["experiments"][0]["experiment_id"])
+    artifact = modeling.get_model_artifact(experiment.artifact_id)
+    model = joblib.load(_artifact_base_dir(build_settings(registry.datasets_root.parent), "task-feature") / artifact.model_path)
+    group_info = model.booster_.dump_model()["feature_infos"]["group"]
+    assert group_info["max_value"] == fit.group.max()
+    assert group_info["min_value"] == fit.group.min()
