@@ -152,6 +152,7 @@ def run_eval_agent_cli(args) -> dict:
             model=model, model_source=args.model_source,
             price_book_path=args.price_book, secret_env=secret_env,
             baseline_path=args.baseline,
+            evidence_custody_dir=getattr(args, "evidence_custody_dir", None),
         )
     except (ValueError, OSError) as exc:
         # Pydantic errors can echo an input, including an accidentally supplied

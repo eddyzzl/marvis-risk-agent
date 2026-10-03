@@ -162,6 +162,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     eval_agent_parser.add_argument("--model-source", choices=("real_model", "fixture_model"), default="real_model", help="Fixture calls only establish runtime regression evidence")
     eval_agent_parser.add_argument("--price-book", type=Path, default=None, help="Dated provider/model rates with source; missing usage or rates stay unknown")
     eval_agent_parser.add_argument("--baseline", type=Path, default=None, help="Previous runtime report; changed corpus/answers or previously passing cases that now fail reject the regression gate")
+    eval_agent_parser.add_argument("--evidence-custody-dir", type=Path, default=None, help="Opt-in separate private directory for post-stop original evidence; excludes credentials and establishes no acceptance or signed-receipt authority")
 
     backup_parser = subparsers.add_parser(
         "backup",

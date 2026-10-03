@@ -721,6 +721,7 @@ def _application(
     source_sha256: str,
     forbidden_inputs: tuple[Path, ...],
     price_bytes: bytes | None = None,
+    process_state: dict | None = None,
 ):
     deadline = time.monotonic() + case.budget.wall_seconds
     with _model_gateway(
@@ -734,7 +735,8 @@ def _application(
         price_bytes=price_bytes,
     ) as child_profile:
         with _application_process(
-            root, case, child_profile, source_sha256, deadline, forbidden_inputs
+            root, case, child_profile, source_sha256, deadline, forbidden_inputs,
+            process_state=process_state,
         ) as app:
             yield app
 
@@ -747,6 +749,7 @@ def _application_process(
     source_sha256: str,
     deadline: float,
     forbidden_inputs: tuple[Path, ...],
+    process_state: dict | None = None,
 ):
     workspace = root / "workspace"
     workspace.mkdir(mode=0o700)
@@ -794,6 +797,8 @@ def _application_process(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        if process_state is not None:
+            process_state["started"] = True
         try:
             base_url = f"http://127.0.0.1:{config['port']}"
             with httpx.Client(base_url=base_url, trust_env=False) as client:
@@ -817,6 +822,8 @@ def _application_process(
                     raise RuntimeJourneyError("isolated_model_profile_changed")
         finally:
             _terminate(proc)
+            if process_state is not None:
+                process_state["stopped"] = True
 
 
 class Journey:
@@ -1535,6 +1542,7 @@ def _read_attempts(path: Path) -> list[dict]:
 def _run_case(
     case, dataset_root, profile, case_dir, secret_env, source_sha256, forbidden_inputs,
     price_bytes=None,
+    custody_run_dir=None, custody_bindings=None,
 ):
     started = time.monotonic()
     record = {
@@ -1555,6 +1563,8 @@ def _run_case(
     journey = None
     workspace = None
     private = {"outputs": {}, "messages": []}
+    process_state = {"started": False, "stopped": False}
+    custody_seconds = 0
     with tempfile.TemporaryDirectory(prefix="marvis-runtime-case-") as tmp:
         root = Path(tmp)
         try:
@@ -1567,6 +1577,7 @@ def _run_case(
                 source_sha256,
                 forbidden_inputs,
                 price_bytes,
+                process_state=process_state,
             ) as (client, workspace, deadline):
                 journey = Journey(client, case, deadline)
                 try:
@@ -1617,6 +1628,34 @@ def _run_case(
             record["runtime_status"] = "receipt_error"
         record["http_events"] = journey.events if journey else []
         record["human_interventions"] = journey.interventions if journey else 0
+        if custody_run_dir is not None:
+            from .runtime_custody import capture_case, CustodyError
+
+            custody_started = time.monotonic()
+            try:
+                record["evidence_custody"] = capture_case(
+                    run_dir=custody_run_dir, workspace=workspace, dataset_root=dataset_root,
+                    case=case, private=private,
+                    bindings={**(custody_bindings or {}), "execution_before_scoring": record},
+                    owned_processes_stopped=process_state["stopped"],
+                    forbidden_secrets=tuple(secret_env.values()) + (profile.get("api_key", ""),),
+                )
+            except KeyboardInterrupt:
+                record["evidence_custody"] = {
+                    "status": "failed", "error_code": "operator_interrupt",
+                    "acceptance_claim": "not_established",
+                }
+                record.update(runtime_status="interrupted", error_code="operator_interrupt")
+            except Exception as exc:
+                record["evidence_custody"] = {
+                    "status": "failed", "error_code": str(exc) if isinstance(exc, CustodyError) else type(exc).__name__,
+                    "acceptance_claim": "not_established",
+                }
+                record["runtime_status_before_custody_failure"] = record["runtime_status"]
+                record.update(runtime_status="receipt_error", error_code="evidence_custody_failed")
+            finally:
+                custody_seconds = time.monotonic() - custody_started
+                record["evidence_custody"]["duration_ms"] = int(custody_seconds * 1000)
     if case.task.task_type == "validation":
         from .runtime_validation_adapter import validation_entry
         record["runtime_entry"] = validation_entry(case)
@@ -1642,7 +1681,7 @@ def _run_case(
         record.update(
             runtime_status="error", error_code="model_gateway_rejected_request"
         )
-    record["duration_ms"] = int((time.monotonic() - started) * 1000)
+    record["duration_ms"] = int((time.monotonic() - started - custody_seconds) * 1000)
     record["llm_events"] = attempts
     record["isolated_workspace_removed"] = not workspace.exists()
     return record, private
@@ -1712,6 +1751,7 @@ def run_runtime_suite(
     price_book_path: Path | None = None,
     secret_env: dict | None = None,
     baseline_path: Path | None = None,
+    evidence_custody_dir: Path | None = None,
 ) -> dict:
     """All cases enter the denominator, including infrastructure/scorer failures.
 
@@ -1741,6 +1781,15 @@ def run_runtime_suite(
     )
     run_dir = output_dir.resolve() / run_id
     run_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
+    custody_run_dir = None
+    if evidence_custody_dir is not None:
+        from .runtime_custody import prepare_custody_run
+
+        custody_run_dir = prepare_custody_run(
+            evidence_custody_dir, run_id,
+            forbidden=(output_dir, dataset_root, cases_path, expected_path,
+                       Path(__file__).resolve().parents[3]),
+        )
     report = {
         "schema_version": 1,
         "run_id": run_id,
@@ -1806,6 +1855,11 @@ def run_runtime_suite(
                 report["source"]["source_sha256"],
                 forbidden_inputs,
                 price_bytes,
+                custody_run_dir=custody_run_dir,
+                custody_bindings={key: report[key] for key in (
+                    "run_id", "source", "cases_sha256", "expected_sha256",
+                    "model_connection_sha256", "model_source", "model_id", "model_name",
+                )} if custody_run_dir is not None else None,
             )
             interrupted = record["runtime_status"] == "interrupted"
         # Commit the original execution outcome before attempting any scoring.
