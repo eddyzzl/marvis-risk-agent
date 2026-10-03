@@ -10,8 +10,12 @@ from pathlib import Path
 import numpy as np
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.data.authenticated_snapshot import authenticated_file_snapshot
+from marvis.data.preprocessing_evidence import (
+    load_preprocessing_state,
+    register_preprocessing_evidence,
+)
 from marvis.feature.preprocessing import (
-    read_preprocessing_chain,
     sidecar_path,
     write_preprocessing_chain,
 )
@@ -278,13 +282,16 @@ def _write_masked_dataset(
         sidecar_path(Path(out_name)).name,
     )
     try:
-        _stream_mask_to_parquet(
-            runtime.backend,
-            dataset_path,
-            artifact.path,
-            mask_values,
-        )
-        source_chain = read_preprocessing_chain(dataset_path)
+        source_state = load_preprocessing_state(runtime.registry, dataset.id)
+        with authenticated_file_snapshot(
+            dataset_path, root=runtime.registry.datasets_root,
+            expected_sha256=dataset.content_hash,
+        ) as source_stream:
+            _stream_mask_to_parquet(
+                runtime.backend, dataset_path, artifact.path, mask_values,
+                source_stream=source_stream,
+            )
+        output_hash = sha256_file(artifact.path)
         sentinel_step = {
             "kind": "sentinel",
             "columns": sorted(mask_values),
@@ -293,10 +300,8 @@ def _write_masked_dataset(
                 for column in sorted(mask_values)
             },
         }
-        write_preprocessing_chain(
-            sidecar_artifact.path,
-            [*source_chain, sentinel_step],
-        )
+        steps = [*source_state.steps, sentinel_step]
+        write_preprocessing_chain(sidecar_artifact.path, steps)
 
         def audit_factory(registered):
             return {
@@ -317,9 +322,11 @@ def _write_masked_dataset(
         )
         transaction = getattr(runtime.registry, "transaction", None)
         if callable(register_on_connection) and callable(transaction):
-            return uow.finalize_with_connection(
-                transaction,
-                lambda conn: register_on_connection(
+            def commit(conn):
+                conn.execute("BEGIN IMMEDIATE")
+                if sha256_file(artifact.final_path) != output_hash:
+                    raise ModelingError("masked dataset changed before registration")
+                registered = register_on_connection(
                     conn,
                     artifact.final_path,
                     audit_factory=audit_factory,
@@ -327,8 +334,19 @@ def _write_masked_dataset(
                     role="derived",
                     anchor_target=dataset.id,
                     seed=seed,
-                ),
-            )
+                )
+                register_preprocessing_evidence(
+                    runtime.registry, conn, dataset=registered, source=dataset,
+                    path=sidecar_artifact.final_path, steps=steps,
+                    source_state=source_state,
+                    # A confirmed value-to-null rule is applied row by row;
+                    # it learns no population parameters or fit membership.
+                    fit=[],
+                )
+                if sha256_file(artifact.final_path) != output_hash:
+                    raise ModelingError("masked dataset changed before commit")
+                return registered
+            return uow.finalize_with_connection(transaction, commit)
         return uow.finalize(
             lambda: runtime.registry.register_existing_with_audit(
                 artifact.final_path,
@@ -349,6 +367,8 @@ def _stream_mask_to_parquet(
     source_path: Path,
     out_path: Path,
     mask_values: dict[str, list[float]],
+    *,
+    source_stream=None,
 ) -> None:
     source_path = Path(source_path)
     if source_path.suffix.lower() != ".parquet":
@@ -362,7 +382,7 @@ def _stream_mask_to_parquet(
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
-    parquet_file = pq.ParquetFile(source_path)
+    parquet_file = pq.ParquetFile(source_stream if source_stream is not None else source_path)
     raw_names = [str(name) for name in parquet_file.schema_arrow.names]
     canonical_names = [str(name) for name in backend.column_names(source_path)]
     canonical_to_raw = dict(zip(canonical_names, raw_names, strict=True))

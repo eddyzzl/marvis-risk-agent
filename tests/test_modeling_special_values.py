@@ -192,6 +192,18 @@ def test_mask_writes_real_derived_dataset_and_exact_replay_step(tmp_path):
     }
     assert result.output["governance"]["x1"]["action"] == "mask"
     assert result.output["governance"]["x1"]["fingerprint"].startswith("sha256:")
+    from marvis.data.preprocessing_evidence import KIND, load_preprocessing_state
+    from marvis.repositories.task_artifacts import TaskArtifactRepository
+
+    state = load_preprocessing_state(registry, result.output["result_dataset_id"])
+    assert state.steps == chain
+    assert state.assurance == "row_local"
+    records = [r for r in TaskArtifactRepository(_settings.db_path).list_for_task(task.id) if r["kind"] == KIND]
+    assert len(records) == 1
+    assert records[0]["id"] == state.artifact_id
+    assert records[0]["provenance"]["fit"] == []
+    assert records[0]["provenance"]["source_dataset_id"] == dataset.id
+    pd.testing.assert_frame_equal(derived[["x2", "y", "split"]], pd.read_parquet(registry.resolve_path(dataset.id))[["x2", "y", "split"]])
 
 
 def test_explicit_retain_freezes_fingerprint_without_rewriting_dataset(tmp_path):
