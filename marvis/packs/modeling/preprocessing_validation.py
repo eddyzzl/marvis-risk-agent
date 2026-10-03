@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from marvis.data.labels import resolve_modeling_splits
+from marvis.data.fitted_input_time import validate_fitted_input_time
 from marvis.data.preprocessing_validation import selected_supervised_fit_members
 from marvis.packs.modeling.contracts import TrainConfig
 from marvis.packs.modeling.recipes.common import _resolve_valid_group_cols, carve_early_stop_fold, split_modeling_frame
@@ -21,6 +22,45 @@ def validate_tuning_preprocessing(registry, inputs):
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     validate_inner_preprocessing(registry, config, cv_folds=inputs.get("cv_folds"), tuning=True)
+    return validate_model_fitted_inputs(registry, config)
+
+
+def validate_model_fitted_inputs(registry, config, *, frame=None, row_positions=None, include_test=True):
+    """Include all actual training inputs, including recipe-internal transforms."""
+    if frame is None:
+        frame = registry.read_authenticated_parquet_snapshot(
+            config.dataset_id, columns=[config.target_col, config.split_col],
+        ).reset_index(drop=True)
+    elif row_positions is not None:
+        frame = frame.set_axis(row_positions)
+    else:
+        # Champion refit retains every source row, in source order; its private
+        # split labels change without creating a new dataset identity.
+        if len(frame) != registry.get(config.dataset_id).row_count:
+            raise ValueError("fitted input time subset requires native row positions")
+        frame = frame.reset_index(drop=True)
+    train, test, oot = split_modeling_frame(frame, config)
+    if config.target_type == "multiclass":
+        from marvis.packs.modeling.recipes.nonbinary_common import resolve_multiclass_splits
+        resolver = resolve_multiclass_splits
+    else:
+        resolver = resolve_modeling_splits
+    train, test, oot, _, _ = resolver(
+        train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
+    )
+    fit = np.zeros(registry.get(config.dataset_id).row_count, dtype=bool)
+    evaluation = fit.copy()
+    fit[train.index] = True
+    if include_test:
+        evaluation[test.index] = True
+    if oot is not None:
+        evaluation[oot.index] = True
+    return validate_fitted_input_time(
+        registry, config.dataset_id, config.features, fit_mask=fit,
+        evaluation_mask=evaluation, requires_labels=True,
+        evaluation_roles=(["test"] if include_test else []) + (["oot"] if oot is not None else []),
+        excluded_evaluation_roles=[] if include_test else ["refit_holdout_non_independent_diagnostic"],
+    )
 
 
 def validate_inner_preprocessing(registry, config, *, cv_folds=None, tuning=False, frame=None):

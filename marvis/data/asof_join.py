@@ -17,7 +17,7 @@ from pydantic import Field
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.dataset_identity import dataset_identity_equal
-from marvis.data.asof_selection import AsOfSelection, select_asof_rows
+from marvis.data.asof_selection import AsOfSelection, _times, select_asof_rows
 from marvis.data.contracts import Dataset
 from marvis.data.registry import DatasetRegistry
 from marvis.data.time_contracts import (
@@ -237,6 +237,38 @@ class AsOfJoinEngine:
                 }
                 for name in evidence.spec.feature_columns
             },
+        }
+
+    def row_input_time_evidence(self, dataset_id: str) -> dict | None:
+        """Read recorded times through the authenticated native row membership.
+
+        Unknown/inferred declarations stay unknown. This is input visibility,
+        never proof that a fitted parameter or model existed historically.
+        """
+        status, evidence = self._dataset_time_evidence(dataset_id)
+        if evidence is None:
+            return None
+        task_id = self.registry.get(dataset_id).task_id
+        dc, fc = evidence.decision_contract, evidence.feature_contract
+        columns = (dc.decision_at, fc.available_at)
+        times = []
+        for contract, column in zip((dc, fc), columns, strict=True):
+            if column is None or column.evidence.basis != "recorded":
+                times.append(None)
+                continue
+            binding = self.registry.authenticate_dataset_binding(
+                contract.dataset_id, expected_task_id=task_id,
+                expected_content_hash=contract.content_hash,
+            )
+            frame = self.registry.read_authenticated_binding_snapshot(binding, columns=[column.column])
+            times.append(_times(frame, column))
+            self.registry.verify_dataset_binding(binding)
+        decisions, available = times
+        return {
+            "artifact_id": status.artifact_id,
+            "decision_at": tuple(decisions[i] if decisions else None for i, _ in evidence.memberships),
+            "available_at": tuple(available[j] if available and j is not None else None for _, j in evidence.memberships),
+            "features": tuple(evidence.spec.feature_prefix + name for name in evidence.spec.feature_columns),
         }
 
 

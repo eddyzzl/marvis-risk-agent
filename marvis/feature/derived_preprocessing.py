@@ -17,7 +17,7 @@ from marvis.feature.errors import FeatureError
 from marvis.feature.fit_scope import fit_membership
 
 
-def derive_with_parameters(frame, recipe, *, dataset_id, target_col=None):
+def derive_with_parameters(frame, recipe, *, dataset_id, target_col=None, before_fit=None):
     out, columns, steps, fits = frame.copy(), [], [], []
     for item in recipe:
         kind = item.get("kind")
@@ -30,6 +30,8 @@ def derive_with_parameters(frame, recipe, *, dataset_id, target_col=None):
             mask, _ = fit_membership(
                 out, item, tool="aggregate_feature", dataset_id=dataset_id
             )
+            if before_fit is not None:
+                before_fit(out, mask, inputs, steps, fits)
             params = fit_aggregate_parameters(
                 out,
                 str(item["group"]),
@@ -55,6 +57,8 @@ def derive_with_parameters(frame, recipe, *, dataset_id, target_col=None):
                     mask, _ = fit_membership(
                         out, item, tool="rank", dataset_id=dataset_id
                     )
+                    if before_fit is not None:
+                        before_fit(out, mask, [str(item["col"])], steps, fits)
                     params = fit_rank_parameters(out, str(item["col"]), mask)
                     out, produced = apply_rank_parameters(out, params)
                     steps.append(

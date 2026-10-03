@@ -1089,6 +1089,7 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
     for feature, column_sentinels in sentinel_values.items():
         out[feature] = mask_sentinel_values(out[feature], column_sentinels)
     fit_frame, fit_split = _woe_fit_frame(out, inputs, dataset.id)
+    _check_fit_input_time(runtime, dataset.id, frame.index.isin(fit_frame.index), features, requires_labels=True)
     nan_labels_dropped = require_labels_confirmed(
         fit_frame,
         target_col,
@@ -1155,6 +1156,7 @@ def tool_woe_encode_categorical(inputs: dict, ctx) -> dict:
     _assert_columns(frame, required_columns)
     out = frame.copy()
     fit_frame, fit_split = _woe_fit_frame(out, inputs, dataset.id, tool="woe_encode_categorical")
+    _check_fit_input_time(runtime, dataset.id, frame.index.isin(fit_frame.index), features, requires_labels=True)
     nan_labels_dropped = require_labels_confirmed(
         fit_frame,
         target_col,
@@ -1202,6 +1204,7 @@ def tool_onehot_encode(inputs: dict, ctx) -> dict:
     columns = [str(item) for item in inputs["columns"]]
     _assert_columns(frame, columns)
     fit_mask, fit_split = fit_membership(frame, inputs, tool="onehot_encode", dataset_id=dataset.id)
+    _check_fit_input_time(runtime, dataset.id, fit_mask, columns)
     encoded, mapping = onehot_encode(
         frame,
         columns,
@@ -1230,6 +1233,7 @@ def tool_normalize(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "normalize", dataset.id)
+    _check_fit_input_time(runtime, dataset.id, fit_mask, columns)
     sentinel_values = _sentinel_values_for(inputs, columns)
     for col in columns:
         column_sentinels = sentinel_values.get(col)
@@ -1280,6 +1284,7 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "impute_missing", dataset.id)
+    _check_fit_input_time(runtime, dataset.id, fit_mask, columns)
     sentinel_values = _sentinel_values_for(inputs, columns)
     add_indicators = bool(inputs.get("add_indicators"))
     indicator_columns: list[str] = []
@@ -1340,6 +1345,7 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "cap_outliers", dataset.id)
+    _check_fit_input_time(runtime, dataset.id, fit_mask, columns)
     sentinel_values = _sentinel_values_for(inputs, columns)
     for column in columns:
         column_sentinels = sentinel_values.get(column)
@@ -1433,11 +1439,27 @@ def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str
     return fit_membership(frame, inputs, tool=tool, dataset_id=dataset_id)
 
 
+def _check_fit_input_time(runtime, dataset_id, fit_mask, columns, *, requires_labels=False):
+    from marvis.data.fitted_input_time import validate_fitted_input_time
+    return validate_fitted_input_time(
+        runtime.registry, dataset_id, columns, fit_mask=fit_mask,
+        evaluation_mask=~np.asarray(fit_mask, dtype=bool), requires_labels=requires_labels,
+    )
+
+
 def tool_cross_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
+    def before_fit(current, mask, columns, steps, fits):
+        from marvis.data.fitted_input_time import validate_fitted_input_time
+        validate_fitted_input_time(
+            runtime.registry, dataset.id, columns, fit_mask=mask, evaluation_mask=~mask,
+            pending_steps=steps,
+            pending_fit=[fitting_evidence(current, item, tool=tool, dataset_id=dataset.id) for tool, item in fits],
+        )
     derived, new_columns, steps, fits = derive_with_parameters(
         frame, list(inputs["recipe"]), dataset_id=dataset.id, target_col=dataset.target_col,
+        before_fit=before_fit,
     )
     result = _register_frame(
         runtime, derived, dataset, ctx, "cross", preprocessing_steps=steps,

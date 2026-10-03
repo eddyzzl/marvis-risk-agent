@@ -26,7 +26,7 @@ from marvis.packs.modeling.special_value_tools import (
     special_value_decision_fingerprint,
 )
 from marvis.packs.modeling.training_dataset import TrainingDataset
-from marvis.packs.modeling.preprocessing_validation import validate_inner_preprocessing, validate_tuning_preprocessing
+from marvis.packs.modeling.preprocessing_validation import validate_inner_preprocessing, validate_model_fitted_inputs, validate_tuning_preprocessing
 from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET
 from marvis.packs.modeling.tune_checkpoint import (
     TUNE_CHECKPOINT_DIR_NAME,
@@ -384,7 +384,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
             recipe_seed = _recipe_seed(seed, item)
             # Validate before checkpoint reuse: an old successful CV cache cannot
             # turn an outer supervised fit into independent inner validation.
-            validate_tuning_preprocessing(runtime.registry, {
+            base_params["fitted_input_time_evidence"] = validate_tuning_preprocessing(runtime.registry, {
                 **inputs, "recipe": item, "seed": recipe_seed,
                 "features": requested_features, "base_params": base_params,
             })
@@ -764,6 +764,7 @@ def tool_train_model(inputs: dict, ctx) -> dict:
         recipe = config.recipe_id or recipe
 
     validate_inner_preprocessing(runtime.registry, config)
+    config.params["fitted_input_time_evidence"] = validate_model_fitted_inputs(runtime.registry, config)
     experiment_id = runtime.experiments.create(ctx.task_id, recipe, config)
     artifact_dir = _artifact_base_dir(runtime.settings, ctx.task_id)
     meta_snapshot = _snapshot_latest_model_meta(artifact_dir)
@@ -981,6 +982,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             drop_nan_labels=drop_nan,
         )
         validate_inner_preprocessing(runtime.registry, config)
+        config.params["fitted_input_time_evidence"] = validate_model_fitted_inputs(runtime.registry, config)
         artifact_dir = _artifact_base_dir(runtime.settings, ctx.task_id)
         reusable = _reusable_trained_experiment(
             runtime,
@@ -1334,6 +1336,9 @@ def _refit_champion_on_train_plus_test(
             scaled = max(1, round(int(raw) * (1.0 / max(1e-6, 1.0 - test_fraction))))
             frozen_params[key] = scaled
 
+    frozen_params["fitted_input_time_evidence"] = validate_model_fitted_inputs(
+        runtime.registry, replace(config, split_values=scratch_split_values), frame=frame, include_test=False,
+    )
     scratch_dir = _artifact_base_dir(runtime.settings, task_id) / "_refit_scratch"
     scratch_dir.mkdir(parents=True, exist_ok=True)
     scratch_path = scratch_dir / f"{uuid.uuid4().hex}.parquet"

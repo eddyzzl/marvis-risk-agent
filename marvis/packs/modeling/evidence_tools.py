@@ -417,8 +417,11 @@ def run_train_model_with_evidence_v2(
             risk_frame,
             config=config,
         )
-        from marvis.packs.modeling.preprocessing_validation import validate_inner_preprocessing
+        from marvis.packs.modeling.preprocessing_validation import validate_inner_preprocessing, validate_model_fitted_inputs
         validate_inner_preprocessing(runtime.registry, config, frame=risk_frame)
+        config.params["fitted_input_time_evidence"] = validate_model_fitted_inputs(
+            runtime.registry, config, frame=risk_frame, row_positions=np.flatnonzero(risk_mask),
+        )
         single_class_oot = _has_labeled_single_class_oot(
             risk_frame,
             config=config,
