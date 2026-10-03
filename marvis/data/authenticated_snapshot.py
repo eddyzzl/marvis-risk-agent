@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from contextlib import contextmanager
 import os
 import stat
 import tempfile
@@ -55,6 +56,22 @@ def read_authenticated_parquet_metadata(
 def _read_authenticated_parquet(
     path, *, root, expected_sha256, columns, metadata_only,
 ):
+    try:
+        with authenticated_file_snapshot(path, root=root, expected_sha256=expected_sha256) as snapshot:
+            if metadata_only:
+                import pyarrow.parquet as pq
+
+                parquet = pq.ParquetFile(snapshot)
+                return tuple(parquet.schema_arrow.names), parquet.metadata.num_rows
+            return pd.read_parquet(snapshot, columns=None if columns is None else list(columns))
+    except AuthenticatedSnapshotError:
+        raise
+    except Exception as exc:
+        raise AuthenticatedSnapshotError(SnapshotFailureReason.READ_FAILED, "authenticated snapshot could not be read") from exc
+
+
+@contextmanager
+def authenticated_file_snapshot(path: Path, *, root: Path, expected_sha256: str):
     """Share retained-descriptor checks for schema and projected data reads.
 
     The source must be a regular file below ``root`` without symlink traversal.
@@ -66,6 +83,7 @@ def _read_authenticated_parquet(
     absolute_path, resolved_root = _governed_path(path, root=root)
     source_fd = -1
     snapshot = None
+    consumer_active = False
     try:
         before = os.lstat(absolute_path)
         if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
@@ -126,14 +144,9 @@ def _read_authenticated_parquet(
             )
 
         snapshot.seek(0)
-        if metadata_only:
-            import pyarrow.parquet as pq
-
-            parquet = pq.ParquetFile(snapshot)
-            result = (tuple(parquet.schema_arrow.names), parquet.metadata.num_rows)
-        else:
-            selected_columns = None if columns is None else list(columns)
-            result = pd.read_parquet(snapshot, columns=selected_columns)
+        consumer_active = True
+        yield snapshot
+        consumer_active = False
         try:
             current = os.lstat(absolute_path)
         except OSError as exc:
@@ -153,10 +166,12 @@ def _read_authenticated_parquet(
                 SnapshotFailureReason.SOURCE_CHANGED_DURING_READ,
                 "authenticated snapshot source changed during read",
             )
-        return result
     except AuthenticatedSnapshotError:
         raise
     except Exception as exc:
+        if consumer_active:
+            # A consumer's domain gate is not a file authentication failure.
+            raise
         raise AuthenticatedSnapshotError(
             SnapshotFailureReason.READ_FAILED,
             "authenticated snapshot could not be read",

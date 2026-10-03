@@ -598,6 +598,24 @@
           },
           "note": {
             "type": "string"
+          },
+          "selection_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "content_hash"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -617,7 +635,8 @@
       "failure_policy": "fail",
       "entrypoint": "tool_screen_features",
       "side_effects": [
-        "read:dataset"
+        "read:dataset",
+        "write:artifact"
       ],
       "memory_limit_mb": 4096
     },
@@ -875,6 +894,24 @@
               "train",
               "full"
             ]
+          },
+          "selection_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "content_hash"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -890,7 +927,8 @@
       "failure_policy": "fail",
       "entrypoint": "tool_select_features",
       "side_effects": [
-        "read:dataset"
+        "read:dataset",
+        "write:artifact"
       ],
       "memory_limit_mb": 4096
     },

@@ -14,6 +14,7 @@ from marvis.feature.screen import (
 from marvis.modeling_limits import normalize_n_trials
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.select import select_features
+from marvis.packs.modeling.selection_evidence import run_recorded_selection
 from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET
 
 from marvis.packs.modeling._common import PMML_SUPPORTED_ALGORITHMS, _disabled_algorithms, _effective_seed, _eligible_algorithms, _jsonable, _metric_policy_for_target_type, _normalize_modeling_target_type, _normalize_recipe_list, _optional_int, _optional_str, _target_type_from_recipes, _training_params, _unique_strings
@@ -37,9 +38,8 @@ def tool_select_features(inputs: dict, ctx) -> dict:
     )
     split_col = _optional_str(inputs.get("split_col"))
     holdout = inputs.get("holdout_values")
-    result = select_features(
-        runtime.backend,
-        runtime.registry.resolve_path(dataset.id),
+    result, selection_ref = run_recorded_selection(
+        runtime, ctx, dataset, select_features,
         features=features,
         target_col=str(inputs["target_col"]),
         target_type=str(inputs.get("target_type", "binary")),
@@ -67,6 +67,7 @@ def tool_select_features(inputs: dict, ctx) -> dict:
         "warnings": list(result.warnings),
         "fit_rows": result.fit_rows,
         "fit_split": result.fit_split,
+        "selection_evidence_ref": selection_ref,
     }
 
 
@@ -99,9 +100,8 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         split_col=_optional_str(inputs.get("split_col")),
     )
     holdout = inputs.get("holdout_values")
-    result = screen_features(
-        runtime.backend,
-        runtime.registry.resolve_path(dataset.id),
+    result, selection_ref = run_recorded_selection(
+        runtime, ctx, dataset, screen_features,
         features=features,
         target_col=str(inputs["target_col"]),
         split_col=_optional_str(inputs.get("split_col")),
@@ -116,6 +116,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     payload = {
+        "selection_evidence_ref": selection_ref,
         "selected": list(result.selected),
         "ranked": [[feature, ks] for feature, ks in result.ranked],
         "leakage": [[feature, ks, reason] for feature, ks, reason in result.leakage],
@@ -176,9 +177,8 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         split_col=_optional_str(inputs.get("split_col")),
     )
     holdout = inputs.get("holdout_values")
-    result = screen_features_non_binary(
-        runtime.backend,
-        runtime.registry.resolve_path(dataset.id),
+    result, selection_ref = run_recorded_selection(
+        runtime, ctx, dataset, screen_features_non_binary,
         features=features,
         target_col=str(inputs["target_col"]),
         target_type=str(inputs.get("target_type") or "continuous"),
@@ -189,6 +189,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         top_k=_optional_int(inputs.get("top_k")),
     )
     payload = {
+        "selection_evidence_ref": selection_ref,
         "selected": list(result.selected),
         "ranked": [[feature, ks] for feature, ks in result.ranked],
         "leakage": [

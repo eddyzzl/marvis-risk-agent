@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Real
 from pathlib import Path
 from typing import Any
@@ -14,6 +14,7 @@ from marvis.feature.correlation import correlation_matrix, find_collinear_pairs,
 from marvis.feature.encode import woe_encode
 from marvis.feature.errors import FeatureError
 from marvis.feature.fit_scope import fit_membership
+from marvis.feature.selection_scope import SelectionScope
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import DEFAULT_IV_BINS, feature_ks, feature_metrics
 from marvis.packs.modeling.prepare import SPLIT_COLUMN
@@ -33,6 +34,7 @@ class SelectionResult:
     warnings: tuple[str, ...] = ()
     fit_rows: int = 0
     fit_split: str = "train"
+    selection_scope: SelectionScope | None = None
 
 
 def select_features(
@@ -63,7 +65,7 @@ def select_features(
     del seed  # Selection is deterministic; seed is reserved for API symmetry.
     dataset_columns = set(backend.column_names(dataset_path))
     resolved_split_col = split_col or (SPLIT_COLUMN if SPLIT_COLUMN in dataset_columns else None)
-    frame, fit_rows, fit_split = _read_selection_fit_frame(
+    frame, fit_rows, fit_split, scope = _read_selection_fit_frame(
         backend,
         dataset_path,
         features=features,
@@ -91,17 +93,17 @@ def select_features(
             target_col,
             drop_nan_labels=drop_nan_labels,
         )
-        return _select_features_passthrough(
+        return replace(_select_features_passthrough(
             features, top_k=top_k, nan_labels_dropped=nan_labels_dropped,
             fit_rows=fit_rows, fit_split=fit_split,
-        )
+        ), selection_scope=scope)
     nan_labels_dropped = require_labels_confirmed(
         frame, target_col, drop_nan_labels=drop_nan_labels,
     )
     target = frame[target_col].to_numpy(dtype=float)
     normalized_space = str(space or "raw").strip().lower()
     if normalized_space == "woe":
-        return _select_features_woe(
+        return replace(_select_features_woe(
             frame,
             features,
             target_col=target_col,
@@ -118,10 +120,10 @@ def select_features(
             fit_rows=fit_rows,
             fit_split=fit_split,
             multivariate_sample_rows=multivariate_sample_rows,
-        )
+        ), selection_scope=scope)
     if normalized_space != "raw":
         raise FeatureError("select_features space must be 'raw' or 'woe'")
-    return _select_features_raw(
+    return replace(_select_features_raw(
         frame,
         features,
         target=target,
@@ -133,7 +135,7 @@ def select_features(
         fit_rows=fit_rows,
         fit_split=fit_split,
         multivariate_sample_rows=multivariate_sample_rows,
-    )
+    ), selection_scope=scope)
 
 
 def _selection_fit_mask(
@@ -170,7 +172,7 @@ def _read_selection_fit_frame(
     holdout_values: tuple[str, ...],
     allow_full_fit: bool,
     batch_size: int,
-) -> tuple[pd.DataFrame, int, str]:
+) -> tuple[pd.DataFrame, int, str, SelectionScope]:
     """Read only fit rows and bounded feature batches for wide-table selection."""
 
     base_columns = _unique([target_col, resolved_split_col])
@@ -210,7 +212,7 @@ def _read_selection_fit_frame(
         feature_chunks.append(raw_chunk.loc[fit_mask, batch].copy())
 
     frame = pd.concat([*feature_chunks, fit_base], axis=1)
-    return frame, int(len(fit_base)), fit_split
+    return frame, int(len(fit_base)), fit_split, SelectionScope.capture(fit_mask)
 
 
 def _select_features_raw(

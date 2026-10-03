@@ -32,6 +32,7 @@ from marvis.feature.metrics import (
     feature_psi,
 )
 from marvis.feature.transform import detect_sentinel_values
+from marvis.feature.selection_scope import SelectionScope
 
 # Columns whose names strongly suggest a model output / score that would leak the
 # target (an earlier model's prediction). These are *soft* flags surfaced for
@@ -160,6 +161,7 @@ class ScreenResult:
     only after the caller confirms ``drop_nan_labels=True`` — otherwise the gate raises
     ``NanLabelNotConfirmedError`` before screening (INV-1/INV-2: a NaN label carries no
     supervision signal and must never silently shrink the ranking/leakage basis)."""
+    selection_scope: SelectionScope | None = None
 
 
 def _dev_mask(
@@ -671,6 +673,13 @@ def screen_features(
         ks_decay_watch=tuple(sorted(ks_decay_watch, key=lambda z: z[1])),
         psi_watch=tuple(sorted(psi_watch, key=lambda z: z[1], reverse=True)),
         nan_labels_dropped=nan_labels_dropped,
+        selection_scope=SelectionScope.capture(
+            dev,
+            label_diagnostics=(train_mask | test_mask)
+            if any("ks_test" in item for item in scores.values()) else None,
+            value_diagnostics=(psi_train_mask | psi_holdout_mask)
+            if any("psi_split" in item for item in scores.values()) else None,
+        ),
     )
 
 
@@ -779,6 +788,7 @@ def screen_features_non_binary(
         scores=scores,
         n_screened=len(all_feature_names),
         nan_labels_dropped=nan_labels_dropped,
+        selection_scope=SelectionScope.capture(dev),
     )
 
 

@@ -1,0 +1,198 @@
+"""Capture native feature-selection provenance without certifying independence.
+
+One authenticated private snapshot serves all column batches. Receipts describe
+the actual candidate algorithm's source-row scope and exposed diagnostics; they
+do not infer an upstream selection, human reasoning or historical availability.
+"""
+
+import base64
+import hashlib
+import inspect
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+from filelock import FileLock, Timeout as FileLockTimeout
+
+from marvis.artifacts import ArtifactUnitOfWork
+from marvis.data.authenticated_snapshot import authenticated_file_snapshot
+from marvis.data.preprocessing_evidence import verify_source_on_connection
+from marvis.feature.errors import FeatureError
+from marvis.packs.modeling._common import _jsonable
+from marvis.repositories.task_artifacts import TaskArtifactRepository
+
+
+KIND = "modeling_feature_selection"
+VERSION = "marvis.feature_selection.v1"
+MAX_RECEIPT_BYTES = 16 * 1024**2
+_ORIGINS = frozenset({"modeling.select_features", "modeling.screen_features", "modeling.screen_features_non_binary"})
+
+
+class _SnapshotBackend:
+    def __init__(self, stream):
+        self.stream = stream
+        parquet = pq.ParquetFile(stream)
+        self.names = tuple(parquet.schema_arrow.names)
+        self.row_count = parquet.metadata.num_rows
+
+    def column_names(self, _path):
+        return self.names
+
+    def read_frame(self, _path, *, columns=None):
+        self.stream.seek(0)
+        return pd.read_parquet(self.stream, columns=columns)
+
+
+def _membership(raw, row_count):
+    if len(raw) != (row_count + 7) // 8:
+        raise FeatureError("selection membership length differs from source")
+    mask = np.unpackbits(np.frombuffer(raw, dtype=np.uint8), bitorder="little")
+    if mask[row_count:].any():
+        raise FeatureError("selection membership contains out-of-range rows")
+    return {
+        "membership": base64.b64encode(raw).decode("ascii"),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "rows": int(mask[:row_count].sum()),
+    }
+
+
+def run_recorded_selection(runtime, ctx, dataset, function, **parameters):
+    # Only platform-selected functions arrive here, never a function named by
+    # an evidence file. Freeze their effective defaults alongside user options.
+    bound = inspect.signature(function).bind(None, Path("snapshot.parquet"), **parameters)
+    bound.apply_defaults()
+    effective = {key: _jsonable(value) for key, value in bound.arguments.items()
+                 if key not in {"backend", "dataset_path"}}
+    path = runtime.registry.resolve_verified_path(dataset.id)
+    with authenticated_file_snapshot(
+        path, root=runtime.registry.datasets_root, expected_sha256=dataset.content_hash,
+    ) as stream:
+        backend = _SnapshotBackend(stream)
+        if backend.row_count != dataset.row_count:
+            raise FeatureError("selection source row count changed")
+        result = function(backend, path, **parameters)
+    scope = result.selection_scope
+    if scope is None or scope.row_count != dataset.row_count:
+        raise FeatureError("native selection did not capture its source membership")
+    payload = {
+        "schema_version": VERSION,
+        "tool": f"modeling.{function.__name__}",
+        "dataset_id": dataset.id, "source_content_hash": dataset.content_hash,
+        "source_target": [dataset.has_target, dataset.target_col],
+        "row_count": dataset.row_count,
+        "parameters": effective,
+        "candidates": list(parameters["features"]),
+        "selected": list(result.selected),
+        "memberships": {
+            "fit": _membership(scope.fit, scope.row_count),
+            "label_diagnostics": _membership(scope.label_diagnostics, scope.row_count),
+            "value_diagnostics": _membership(scope.value_diagnostics, scope.row_count),
+        },
+        "scope": "core_candidate_algorithm_and_ks_psi_diagnostics",
+        "auxiliary_diagnostics": {
+            "assurance": "unknown",
+            "excluded": ["candidate_inference", "categorical_hints", "dictionary", "human_decisions"],
+            "zero_membership_means": "no_recorded_core_diagnostic_use_only",
+        },
+        "upstream_selection": "unknown",
+        "independent_inner_validation": "not_established",
+        "historical_availability": "unknown",
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False).encode()
+    if len(raw) > MAX_RECEIPT_BYTES:
+        raise FeatureError("selection receipt exceeds size limit")
+    content_hash = hashlib.sha256(raw).hexdigest()
+    root = runtime.registry.datasets_root
+    repo = TaskArtifactRepository(runtime.registry._repo.db_path)
+    destination = root / ctx.task_id / "selection" / f"{content_hash}.json"
+    relative = destination.relative_to(root.parent).as_posix()
+    # Serialize the full filesystem + DB unit, including rollback. A DB lock
+    # acquired only after promotion cannot stop a failed publisher from deleting
+    # an identical receipt another publisher has already committed.
+    task_dir = root / ctx.task_id
+    if task_dir.resolve(strict=True) != task_dir or not task_dir.is_dir():
+        raise FeatureError("selection evidence task path is invalid")
+    lock_path = task_dir / ".selection-evidence.lock"
+    if lock_path.is_symlink():
+        raise FeatureError("selection evidence lock path is invalid")
+    lock = FileLock(str(lock_path), mode=0o600)
+    try:
+        lock.acquire(timeout=30)
+    except FileLockTimeout as exc:
+        raise FeatureError("selection evidence publication is busy; retry this task") from exc
+    try:
+        return result, _publish_receipt(runtime, ctx, dataset, repo, destination, relative,
+                                       payload, raw, content_hash)
+    finally:
+        # Keep the lock file: deleting it can give concurrent processes different
+        # inodes and therefore different locks for the same publication.
+        lock.release()
+
+
+def _publish_receipt(runtime, ctx, dataset, repo, destination, relative, payload, raw, content_hash):
+    existing = repo.get_for_task_kind_path(ctx.task_id, KIND, relative)
+    if existing is not None:
+        reference = {"artifact_id": existing["id"], "content_hash": content_hash}
+        load_selection_evidence(runtime.registry, ctx.task_id, reference)
+        return reference
+    uow = ArtifactUnitOfWork()
+    artifact = uow.stage_file(destination.parent, destination.name)
+    artifact.path.write_bytes(raw)
+    artifact.path.chmod(0o600)
+    try:
+        def commit(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            verify_source_on_connection(runtime.registry, conn, dataset)
+            if artifact.final_path.read_bytes() != raw:
+                raise FeatureError("selection receipt changed before registration")
+            record = repo.register_on_connection(
+                conn, task_id=ctx.task_id, kind=KIND,
+                path=relative,
+                content_hash=content_hash, origin_tool=payload["tool"],
+                provenance={"schema_version": VERSION, "dataset_id": dataset.id,
+                            "source_content_hash": dataset.content_hash},
+            )
+            verify_source_on_connection(runtime.registry, conn, dataset)
+            return record
+
+        record = uow.finalize_with_connection(repo.transaction, commit)
+    except Exception:
+        uow.rollback()
+        raise
+    return {"artifact_id": record["id"], "content_hash": record["content_hash"]}
+
+
+def load_selection_evidence(registry, task_id, reference):
+    if not isinstance(reference, dict) or set(reference) != {"artifact_id", "content_hash"}:
+        raise FeatureError("selection evidence reference is invalid")
+    record = TaskArtifactRepository(registry._repo.db_path).get_for_task(task_id, reference["artifact_id"])
+    if (record is None or record["kind"] != KIND or record["content_hash"] != reference["content_hash"]
+            or record["origin_tool"] not in _ORIGINS
+            or record["provenance"].get("schema_version") != VERSION):
+        raise FeatureError("selection evidence identity mismatch")
+    path = registry.datasets_root.parent / record["path"]
+    if (path.resolve(strict=True) != path or not path.is_relative_to(registry.datasets_root)
+            or not path.is_file() or path.stat().st_size > MAX_RECEIPT_BYTES):
+        raise FeatureError("selection evidence path is invalid")
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_RECEIPT_BYTES + 1)
+    if len(raw) > MAX_RECEIPT_BYTES or hashlib.sha256(raw).hexdigest() != reference["content_hash"]:
+        raise FeatureError("selection evidence content changed")
+    payload = json.loads(raw)
+    if (payload.get("schema_version") != VERSION or payload.get("tool") != record["origin_tool"]
+            or payload.get("dataset_id") != record["provenance"].get("dataset_id")
+            or payload.get("source_content_hash") != record["provenance"].get("source_content_hash")):
+        raise FeatureError("selection evidence producer binding changed")
+    source = registry.get(payload["dataset_id"])
+    if (source.task_id != task_id or source.content_hash != payload["source_content_hash"]
+            or source.row_count != payload["row_count"]
+            or [source.has_target, source.target_col] != payload["source_target"]):
+        raise FeatureError("selection evidence source changed")
+    registry.resolve_verified_path(source.id)
+    for entry in payload["memberships"].values():
+        raw_mask = base64.b64decode(entry["membership"], validate=True)
+        if _membership(raw_mask, source.row_count) != entry:
+            raise FeatureError("selection evidence membership changed")
+    return payload
