@@ -17,7 +17,9 @@ from marvis.model_algorithms import (
     is_platform_default_training_description,
     model_training_report_text,
 )
-from marvis.repositories.tasks import AGENT_REPORT_CONCLUSION_KEYS, AGENT_REPORT_WRITABLE_KEYS
+from marvis.repositories.tasks import (
+    AGENT_REPORT_CONCLUSION_KEYS, AGENT_REPORT_NARRATIVE_KEYS, AGENT_REPORT_WRITABLE_KEYS,
+)
 from marvis.domain import TaskRecord
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.report_texts import report_text_values_from_results
@@ -827,6 +829,17 @@ def latest_report_draft_context(messages: list[dict]) -> dict:
     return {}
 
 
+def saved_report_narrative_context(values: dict, revision: int) -> dict:
+    """Saved wording is a revision baseline, never measured validation evidence."""
+    return {
+        "report_revision": revision,
+        "text_values": {
+            key: value for key, value in values.items()
+            if key in AGENT_REPORT_WRITABLE_KEYS and isinstance(value, str)
+        },
+    }
+
+
 def summarize_stage(
     *,
     task: TaskRecord,
@@ -1113,17 +1126,6 @@ def generate_word_conclusions(
         client = _client(model_profile)
         if task.validation_workflow_version == 2:
             values = generate_v2_sections(client, prompt)
-            # A section response is a patch for optional narrative fields. Use
-            # the original saved text, not its privacy-filtered prompt copy,
-            # and distinguish an explicit blank from an omitted field.
-            saved = (evidence.get("report_draft") or {}).get("text_values", {})
-            seeds = narrative_report_values(task.model_name)
-            values = {
-                **seeds,
-                **{key: value for key, value in saved.items()
-                   if key in seeds and isinstance(value, str)},
-                **values,
-            }
         else:
             content = client.complete(
                 system_prompt=WORD_CONCLUSION_SYSTEM_PROMPT,
@@ -1133,7 +1135,7 @@ def generate_word_conclusions(
                 stream=False,
             )
             values = _parse_conclusion_json(content)
-            values = _with_narrative_report_seeds(task, values)
+        values = _with_narrative_report_seeds(task, values, evidence)
         values = _with_training_description_seed(task, values, evidence)
         if task.validation_workflow_version == 2:
             _validate_v2_word_conclusions(values)
@@ -1163,7 +1165,7 @@ def fallback_word_conclusions(
     if deterministic is not None:
         return _with_training_description_seed(
             task,
-            _with_narrative_report_seeds(task, deterministic),
+            _with_narrative_report_seeds(task, deterministic, evidence),
             evidence,
         )
     if task.validation_workflow_version == 2:
@@ -1185,6 +1187,7 @@ def fallback_word_conclusions(
                         "因此不能形成模型可用性结论。PMML部署可用。"
                     ),
                 },
+                evidence,
             ),
             evidence,
         )
@@ -1207,6 +1210,7 @@ def fallback_word_conclusions(
                     "压力测试明细和验证人员复核意见为准。建议在确认 Word 结论前重点核对 OOT 区分效果、PSI 稳定性和关键变量压力表现。"
                 ),
             },
+            evidence,
         ),
         evidence,
     )
@@ -1496,6 +1500,12 @@ def _stage_prompt(
             "按照 user_instruction 修改指定段落。草稿中的数值不是平台指标证据，"
             "指标与通过判断仍只能依据确定性验证结果。"
         )
+    if stage == "word_conclusion_draft" and evidence.get("saved_report_narrative"):
+        payload["instructions"] += (
+            "evidence.saved_report_narrative.text_values 是已保存报告文字，仅用于修订参考，"
+            "不是本次指标证据；report_draft 中的当前编辑优先于已保存文字。"
+            "未要求修改的业务定义和主动清空字段应保留；不得据旧报告中的数值改写平台指标。"
+        )
     payload = add_memory_to_prompt_payload(payload, memory_context)
     return json.dumps(
         payload,
@@ -1777,6 +1787,9 @@ def _word_conclusion_stage_evidence(
     report_draft = evidence.get("report_draft")
     if isinstance(report_draft, dict):
         scoped["report_draft"] = report_draft
+    saved_narrative = evidence.get("saved_report_narrative")
+    if isinstance(saved_narrative, dict):
+        scoped["saved_report_narrative"] = saved_narrative
 
     visible_summaries = _compact_visible_stage_summaries(
         evidence.get("visible_stage_summaries")
@@ -2587,16 +2600,24 @@ def _parse_conclusion_json(content: str) -> dict[str, str]:
         raise ValueError("word conclusion response missing keys: " + ", ".join(missing))
     for key in AGENT_REPORT_WRITABLE_KEYS - AGENT_REPORT_CONCLUSION_KEYS:
         extra = str(payload.get(key) or "").strip()
-        if extra:
+        if extra or (key in AGENT_REPORT_NARRATIVE_KEYS and isinstance(payload.get(key), str)):
             values[key] = extra
     return values
 
 
-def _with_narrative_report_seeds(task: TaskRecord, values: dict[str, str]) -> dict[str, str]:
-    merged = dict(values)
-    for key, seed in narrative_report_values(task.model_name).items():
-        if not str(merged.get(key) or "").strip():
-            merged[key] = seed
+def _with_narrative_report_seeds(
+    task: TaskRecord, values: dict[str, str], evidence: dict | None = None,
+) -> dict[str, str]:
+    # Model output is a patch for optional narratives. Preserve raw saved text
+    # rather than its privacy-filtered prompt copy, including deliberate blanks.
+    merged = narrative_report_values(task.model_name)
+    for name in ("saved_report_narrative", "report_draft"):
+        context = evidence.get(name) if isinstance(evidence, dict) else None
+        saved = context.get("text_values") if isinstance(context, dict) else None
+        if isinstance(saved, dict):
+            merged.update({key: value for key, value in saved.items()
+                           if key in AGENT_REPORT_NARRATIVE_KEYS and isinstance(value, str)})
+    merged.update(values)
     return merged
 
 

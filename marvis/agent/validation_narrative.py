@@ -22,9 +22,10 @@ def _section_payload(original, keys):
     payload["instructions"] = (
         "本次只生成 requested_fields 的报告文字，其他段落由独立调用完成。"
         "保持本模型专属的证据解读和完整句子，直接输出 JSON，不输出推导过程。"
-        "所有数值和判断依据来自平台 evidence；当前草稿及历史记忆仅辅助修订和比较。"
+        "指标和通过判断只依据平台 evidence.validation_results；已保存报告文字、当前草稿及历史记忆仅辅助修订和比较。"
+        "evidence.saved_report_narrative 是已有报告文字，report_draft 中的当前编辑优先；二者均不能替代本次指标证据。"
         "如有 user_instruction，以当前草稿为起点修改指定内容，保留未要求改写的事实及主动清空字段。"
-        "已有草稿中的可选字段只在用户明确要求修改时返回；未修改字段请省略，平台会原样保留。"
+        "已有报告或草稿中的可选字段只在用户明确要求修改时返回；未修改字段请省略，平台会原样保留。"
     )
     evidence = payload.get("evidence", {})
     # Stage narratives and execution bookkeeping are not additional measured

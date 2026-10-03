@@ -12,6 +12,7 @@ from marvis.agent.service import (
     is_agent_report_revision_intent,
     is_continue_validation_intent,
     is_stop_validation_intent,
+    saved_report_narrative_context,
     summarize_stage,
 )
 from marvis.agent.plan_message_composer import PlanMessageComposer
@@ -1241,6 +1242,9 @@ def draft_agent_report_conclusions(
     task = snapshot.task
     model_profile = resolve_agent_model(request, payload.model_id, payload.effort)
     evidence = agent_evidence(request, task_id)
+    evidence["saved_report_narrative"] = saved_report_narrative_context(
+        snapshot.report_values, snapshot.task.report_values_revision,
+    )
     saved_draft = latest_report_draft_context(list(snapshot.report_messages))
     if saved_draft:
         evidence["report_draft"] = saved_draft

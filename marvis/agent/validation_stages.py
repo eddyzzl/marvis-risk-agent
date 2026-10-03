@@ -8,6 +8,7 @@ from marvis.agent.service import (
     REQUIRED_AGENT_REPORT_KEYS,
     agent_conclusions_confirmed,
     latest_report_draft_context,
+    saved_report_narrative_context,
 )
 from marvis.agent.validation_messages import (
     add_and_stream_agent_message,
@@ -612,6 +613,7 @@ def run_agent_word_conclusion_stage(
     _require_ready_contract_for_v2(settings, task)
     evidence = deps.agent_evidence_from_settings(settings, task_id)
     evidence = _word_conclusion_evidence_with_stage_summaries(repo, task_id, evidence)
+    report_revision = evidence["saved_report_narrative"]["report_revision"]
     memory_store = AgentMemoryStore(settings.db_path)
     memory_context = agent_memory_context_from_store(
         memory_store,
@@ -623,7 +625,6 @@ def run_agent_word_conclusion_stage(
     draft_result: dict[str, object] = {}
 
     def produce_draft(_on_delta):
-        _, report_revision = repo.get_report_values(task_id)
         values, metadata = deps.generate_word_conclusions(
             task=task,
             evidence=evidence,
@@ -700,6 +701,8 @@ def _word_conclusion_evidence_with_stage_summaries(
     evidence: object,
 ) -> dict:
     payload = dict(evidence) if isinstance(evidence, dict) else {}
+    values, revision = repo.get_report_values(task_id)
+    payload["saved_report_narrative"] = saved_report_narrative_context(values, revision)
     messages = repo.list_agent_messages(task_id)
     summaries = _visible_stage_summaries_for_word_conclusion(messages)
     if summaries:
@@ -776,9 +779,8 @@ def generate_agent_report_from_conclusions(
     ):
         raise RuntimeError("agent report narratives are incomplete; cannot generate report")
     conclusion_values = {
-        key: str(values.get(key) or "").strip()
-        for key in AGENT_REPORT_WRITABLE_KEYS
-        if str(values.get(key) or "").strip()
+        key: value for key, value in values.items()
+        if key in AGENT_REPORT_WRITABLE_KEYS and isinstance(value, str)
     }
     for key in REQUIRED_AGENT_REPORT_KEYS:
         conclusion_values[key] = str(values.get(key) or "").strip()

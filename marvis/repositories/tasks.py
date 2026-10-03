@@ -54,6 +54,7 @@ def _now() -> str:
 @dataclass(frozen=True)
 class ReportDraftGenerationSnapshot:
     task: TaskRecord
+    report_values: dict[str, str]
     report_messages: tuple[dict, ...]
     state_hash: str
 
@@ -1402,6 +1403,7 @@ class TaskRepository:
         })
         return ReportDraftGenerationSnapshot(
             task=_row_to_task(task),
+            report_values=_load_json_dict(task["report_values_json"]),
             report_messages=tuple(_row_to_agent_message(message) for message in messages),
             state_hash=state_hash,
         )
