@@ -1,6 +1,9 @@
 import { escapeHtml } from "../ui-utils.js";
 import { getDataWorkspace, listDatasets, putDataWorkspace, uploadDataset } from "./api_v2.js";
 
+const TERMINAL_PLAN_STATUSES = new Set(["done", "failed", "cancelled"]);
+const ACTIVE_PLAN_NOTICE = "当前任务已有待确认或执行中的计划。请先在对话中确认并完成，或取消计划，再生成监控计划。";
+
 export function createModelMonitoringPanel(dependencies = {}) {
   const get = dependencies.getElementById || (id => document.getElementById(id));
   const api = dependencies.api;
@@ -15,10 +18,33 @@ export function createModelMonitoringPanel(dependencies = {}) {
     "Panel", "Form", "Model", "Dataset", "Target", "File", "Refresh", "Submit", "Status", "Limits",
   ].map(name => [name, get(`modelMonitoring${name}`)]));
   let taskId = "", version = 0, pending = false, snapshot = null, datasets = [], models = [], stale = false;
+  let plans = null, feedback = { message: "", kind: "" };
+
+  const hasActivePlan = () => plans?.some(plan => !TERMINAL_PLAN_STATUSES.has(plan.status));
+
+  function renderStatus() {
+    const blocked = !pending && hasActivePlan() && feedback.kind !== "error";
+    el.Status.textContent = blocked ? ACTIVE_PLAN_NOTICE : feedback.message;
+    el.Status.className = `model-monitoring-status ${blocked ? "warning" : feedback.kind}`;
+  }
 
   function status(message, kind = "") {
-    el.Status.textContent = message;
-    el.Status.className = `model-monitoring-status ${kind}`;
+    feedback = { message, kind };
+    renderStatus();
+  }
+
+  async function readPlans(id) {
+    const result = await api(`api/tasks/${encodeURIComponent(id)}/plans`);
+    if (!Array.isArray(result.plans)) throw new Error("无法读取当前计划，请刷新选项。");
+    return result.plans.filter(plan => plan.task_id === id);
+  }
+
+  function acceptPlan(plan) {
+    if (!plans || !plan || plan.task_id !== taskId) return;
+    const wasActive = hasActivePlan();
+    plans = [...plans.filter(item => item.id !== plan.id), plan];
+    if (wasActive && !hasActivePlan()) status("当前计划已结束，可选择本期数据并生成新的监控计划。");
+    availability();
   }
 
   function availability() {
@@ -28,14 +54,15 @@ export function createModelMonitoringPanel(dependencies = {}) {
     if ((visible ? selected.id : "") !== taskId) {
       taskId = visible ? selected.id : "";
       version += 1;
-      snapshot = null; datasets = []; models = []; pending = false; stale = false;
+      snapshot = null; datasets = []; models = []; plans = null; pending = false; stale = false;
       el.Model.innerHTML = ""; el.Dataset.innerHTML = ""; el.Target.innerHTML = "";
       el.File.value = "";
       status(visible ? "展开后读取已选模型与本任务的数据。" : "");
       if (visible && el.Panel.open) void reload();
     }
     for (const name of ["Refresh", "File", "Model", "Dataset", "Target"]) el[name].disabled = pending || !visible;
-    el.Submit.disabled = pending || stale || !snapshot || !models.length || !datasets.length || !visible;
+    el.Submit.disabled = pending || stale || !snapshot || !plans || hasActivePlan() || !models.length || !datasets.length || !visible;
+    renderStatus();
     return visible;
   }
 
@@ -60,13 +87,14 @@ export function createModelMonitoringPanel(dependencies = {}) {
     const view = capture(), id = taskId, operation = ++version;
     pending = true; availability(); status("正在读取已选模型与数据…");
     try {
-      const [experiments, data, state] = await Promise.all([
-        api(`api/tasks/${encodeURIComponent(id)}/experiments`), list(id), workspace(id),
+      const [experiments, data, state, currentPlans] = await Promise.all([
+        api(`api/tasks/${encodeURIComponent(id)}/experiments`), list(id), workspace(id), readPlans(id),
       ]);
       if (!current(view) || operation !== version) return false;
       models = (experiments.experiments || []).filter(item => item.task_id === id && item.status === "selected" && item.artifact_id);
       datasets = (data.datasets || []).filter(item => item.task_id === id && item.content_hash && item.role !== "modeling.scored");
       snapshot = state; stale = false;
+      plans = currentPlans;
       el.Model.innerHTML = models.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.recipe_id || item.recipe || "模型")} · ${escapeHtml(item.id.slice(-8))}（已选）</option>`).join("");
       el.Dataset.innerHTML = '<option value="">请选择本期数据</option>' + datasets.map(item => (
         `<option value="${escapeHtml(item.id)}">${escapeHtml(String(item.source_path || item.id).split(/[\\/]/).pop())} · ${item.row_count} 行</option>`
@@ -77,7 +105,7 @@ export function createModelMonitoringPanel(dependencies = {}) {
       status(models.length ? "选择本期数据，生成计划后在对话中确认执行。" : "尚无已选模型。请先完成模型选择，再刷新此处。", models.length ? "" : "warning");
       return true;
     } catch (error) {
-      if (current(view) && operation === version) { snapshot = null; status(error.message || "读取失败，请刷新。", "error"); }
+      if (current(view) && operation === version) { snapshot = null; plans = null; status(error.message || "读取失败，请刷新。", "error"); }
       return false;
     } finally {
       if (operation === version) pending = false;
@@ -88,6 +116,7 @@ export function createModelMonitoringPanel(dependencies = {}) {
   async function submit(event) {
     event?.preventDefault?.();
     if (pending || stale || !snapshot || !availability()) return false;
+    if (!plans || hasActivePlan()) return false;
     const id = taskId, view = capture(), operation = ++version;
     const dataset = datasets.find(item => item.id === el.Dataset.value);
     const model = models.find(item => item.id === el.Model.value);
@@ -121,15 +150,28 @@ export function createModelMonitoringPanel(dependencies = {}) {
       });
       if (!current(view) || operation !== version) return false;
       if (Array.isArray(result.messages)) dependencies.onMessages?.(result.messages, view);
+      plans = null;
       status("监控计划已生成，尚未运行。请在对话中审阅并确认计划。", "success");
-      await dependencies.onSubmitted?.(result, view);
+      try {
+        const currentPlans = await readPlans(id);
+        if (!current(view) || operation !== version) return false;
+        plans = currentPlans;
+      } catch {
+        if (!current(view) || operation !== version) return false;
+        status("监控计划已生成，尚未运行。暂时无法读取计划状态，请在对话中审阅；再次生成前请刷新选项。", "warning");
+      }
+      try {
+        await dependencies.onSubmitted?.(result, view);
+      } catch {
+        if (current(view) && operation === version) status("监控计划已生成，尚未运行。界面刷新失败，请刷新后在对话中审阅计划。", "warning");
+      }
       return true;
     } catch (error) {
       if (current(view) && operation === version) {
         stale = [409, 412].includes(Number(error.status));
-        status(stale
-          ? "当前任务或数据状态已变化。请刷新选项后重新选择，旧请求不会自动重试。"
-          : error.message || "提交失败。", "error");
+        status(Number(error.status) === 412
+          ? "当前数据工作区已变化。请刷新选项后重新选择，旧请求不会自动重试。"
+          : error.message || "提交失败，请刷新选项后重试。", "error");
       }
       return false;
     } finally {
@@ -169,5 +211,5 @@ export function createModelMonitoringPanel(dependencies = {}) {
   el.File.addEventListener("change", uploadFile);
   el.Panel.addEventListener("toggle", () => { if (el.Panel.open && !snapshot) void reload(); });
   availability();
-  return { renderAvailability: availability, reload, submit, uploadFile };
+  return { renderAvailability: availability, reload, submit, uploadFile, acceptPlan };
 }

@@ -506,7 +506,11 @@ const draftToolsPanel = createDraftToolsPanelController({
 const planRailController = createPlanRailController({
   $,
   requestOwner: taskRequests,
-  onPlanProjection: (view, taskId, plan) => taskSession.acceptPlan(view, taskId, plan),
+  onPlanProjection: (view, taskId, plan) => {
+    if (!taskSession.acceptPlan(view, taskId, plan)) return false;
+    modelMonitoringPanel.acceptPlan(plan);
+    return true;
+  },
   captureView: () => taskRequests.capture(),
   isCurrentView: (view) => taskRequests.current(view),
   beginActivity: (operation, taskId, message) => claimBusy(
