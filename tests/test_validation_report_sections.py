@@ -268,7 +268,7 @@ def test_only_invalid_topic_is_repaired_once_with_unchanged_measured_evidence():
         def complete(self, **kwargs):
             calls.append(kwargs)
             payload = json.loads(kwargs["user_prompt"])
-            if payload["narrative_topic"] == "stability" and "format_repair" not in payload:
+            if payload["narrative_topic"] == "stability" and "response_repair" not in payload:
                 return '{"TEXT:final_validation_conclusion":"invalid-raw-sentinel'
             return json.dumps(reply_for(kwargs))
 
@@ -278,7 +278,8 @@ def test_only_invalid_topic_is_repaired_once_with_unchanged_measured_evidence():
     initial = next(call for call in calls if call["caller"] == "validation_report_stability")
     assert retry["max_tokens"] == initial["max_tokens"] == 2048
     retry_payload, initial_payload = (json.loads(call["user_prompt"]) for call in (retry, initial))
-    assert "format_repair" in retry_payload and "format_repair" not in initial_payload
+    assert retry_payload["response_repair"]["reason"] == "json_text_contract"
+    assert "response_repair" not in initial_payload
     assert retry_payload["evidence"] == initial_payload["evidence"]
     assert "invalid-raw-sentinel" not in retry["user_prompt"]
 
@@ -296,3 +297,33 @@ def test_persistent_invalid_topic_exhausts_one_repair_and_never_starts_later_top
     assert [call["caller"] for call in calls] == [
         "validation_report_pressure", "validation_report_pressure_repair",
     ]
+
+
+def test_final_topic_repairs_process_narration_without_weakening_existing_guard():
+    calls = []
+
+    class Client:
+        def complete(self, **kwargs):
+            payload = json.loads(kwargs["user_prompt"])
+            calls.append(payload)
+            value = reply_for(kwargs)
+            if payload["narrative_topic"] == "overall" and "response_repair" not in payload:
+                value["TEXT:final_validation_conclusion"] += "报告已生成，可直接投产。"
+            return json.dumps(value)
+
+    assert generate_v2_sections(Client(), json.dumps({"evidence": {}})) == ASSEMBLED
+    repair = [p for p in calls if "response_repair" in p]
+    assert len(calls) == 8 and len(repair) == 1
+    assert repair[0]["narrative_topic"] == "overall"
+    assert repair[0]["response_repair"]["reason"] == "forbidden_process_narration"
+
+
+def test_persistent_process_narration_reports_the_topic_and_never_publishes(monkeypatch):
+    def bad_overall(n, value):
+        if n in (6, 7):
+            value["TEXT:final_validation_conclusion"] = "可直接投产。"
+        return value
+    calls, (values, metadata) = run(monkeypatch, bad_overall)
+    assert len(calls) == 7 and values == {} and metadata["confirmable"] is False
+    assert "report topic overall" in metadata["llm_error"]
+    assert "forbidden process narration" in metadata["llm_error"]

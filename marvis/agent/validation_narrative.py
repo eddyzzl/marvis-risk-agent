@@ -3,12 +3,21 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 
 from marvis.llm_prompts import WORD_CONCLUSION_V2_SYSTEM_PROMPT
 from marvis.repositories.tasks import AGENT_REPORT_NARRATIVE_KEYS
 
 
 _FINAL = "TEXT:final_validation_conclusion"
+_FINAL_FORBIDDEN_PATTERNS = (
+    re.compile(r"材料(?:扫描|识别|完备)"),
+    re.compile(r"验证输入契约"),
+    re.compile(r"PMML\s*(?:全量)?(?:打分|评分)(?:测试|完成|通过|成功|覆盖|样本|耗时)?", re.IGNORECASE),
+    re.compile(r"报告(?:已|进入|生成|产出|定稿)"),
+    re.compile(r"最终定稿|建议(?:在)?投产前审阅|建议审阅(?:报告|结论)|确认\s*Word", re.IGNORECASE),
+    re.compile(r"可直接(?:部署|投产)"),
+)
 _TOPICS = {
     "pressure": "解释高、中、低风险数据源及基线和剔除后 KS/PSI；缺失分层明确未知。",
     "recommendation": "围绕已测出的风险给出监控、替代、降级和使用限制建议。",
@@ -56,7 +65,7 @@ def _topic_metrics(metrics, topic):
     return scoped
 
 
-def _section_payload(original, topic, keys, *, repair=False):
+def _section_payload(original, topic, keys, *, repair_reason=None):
     payload = deepcopy(original)
     payload["requested_fields"] = list(keys)
     payload["narrative_topic"] = topic
@@ -80,15 +89,17 @@ def _section_payload(original, topic, keys, *, repair=False):
     # another paragraph. The response schema alone restricts the writable keys.
     if "validation_results" in evidence:
         evidence["validation_results"] = _topic_metrics(evidence["validation_results"], topic)
-    if repair:
+    if repair_reason:
         # Do not feed incomplete/unvalidated model text back as evidence. The
         # only repair input is the same frozen task and measured observations.
-        payload["format_repair"] = {
-            "reason": "previous_response_did_not_satisfy_json_text_contract",
+        payload["response_repair"] = {
+            "reason": repair_reason,
             "instruction": (
-                "这是唯一一次格式修复。直接返回符合 schema 的完整 JSON；"
+                "这是当前主题唯一一次修复。直接返回符合 schema 的完整 JSON；"
                 "每个必需字段用约 100 至 200 字完成当前主题，不展开推导、不重复其他主题；"
                 "保留关键指标、风险与证据限制，未要求修改的可选字段省略。"
+                "最终结论只能解释模型效果与风险，不写材料检查、验证输入契约、PMML打分过程、"
+                "报告生成/定稿状态或投产前审阅安排，不声称可直接部署或投产。"
             ),
         }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -103,21 +114,26 @@ def _generate_section(client, original, topic, keys, *, truncated=False):
         "additionalProperties": False,
     }
     kind = "metrics" if original.get("stage") == "metrics" else "report"
+    repair_reason = None
     for attempt in range(2):
         repair = attempt == 1
         content = client.complete(
             system_prompt=spec.text,
-            user_prompt=_section_payload(original, topic, keys, repair=repair),
+            user_prompt=_section_payload(original, topic, keys, repair_reason=repair_reason),
             json_schema={"name": f"validation_{kind}_{topic}", "strict": False, "schema": schema},
             temperature=0.1 if repair else 0.2, stream=False, max_tokens=2048, truncated=truncated,
             caller=f"validation_{kind}_{topic}" + ("_repair" if repair else ""),
             prompt_name=spec.name, prompt_version=spec.version,
         )
         try:
-            return _parse_section(content, keys, kind=kind, topic=topic)
-        except ValueError:
+            repair_reason = "json_text_contract"
+            section = _parse_section(content, keys, kind=kind, topic=topic)
+            repair_reason = "forbidden_process_narration"
+            validate_v2_word_conclusions(section)
+            return section
+        except ValueError as exc:
             if repair:
-                raise
+                raise ValueError(f"{kind} topic {topic}: {exc}") from exc
     raise AssertionError("unreachable")
 
 
@@ -131,6 +147,14 @@ def _parse_section(content, keys, *, kind, topic):
             or any(not isinstance(value, str) for value in section.values())):
         raise ValueError(f"{kind} topic {topic} violates its text contract")
     return {key: value.strip() for key, value in section.items()}
+
+
+def validate_v2_word_conclusions(values):
+    """One unchanged guard for individual topics and the assembled report."""
+    conclusion = values.get(_FINAL, "")
+    for pattern in _FINAL_FORBIDDEN_PATTERNS:
+        if pattern.search(conclusion):
+            raise ValueError("V2 final validation conclusion contains forbidden process narration")
 
 
 def generate_v2_sections(client, prompt):

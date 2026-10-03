@@ -9,7 +9,10 @@ from marvis.agent.prompts import (
     RISK_METRIC_INTERPRETATION_GUIDANCE,
     WORD_CONCLUSION_SYSTEM_PROMPT,
 )
-from marvis.agent.validation_narrative import generate_v2_metrics_summary, generate_v2_sections
+from marvis.agent.validation_narrative import (
+    generate_v2_metrics_summary, generate_v2_sections,
+    validate_v2_word_conclusions as _validate_v2_word_conclusions,
+)
 from marvis.llm_prompts import AGENT_SYSTEM_PROMPT as _AGENT_PROMPT_SPEC
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.semantic_authorization import review_semantic_authorization
@@ -42,14 +45,6 @@ from marvis.agent_memory.prompting import (
 
 
 REQUIRED_AGENT_REPORT_KEYS = tuple(sorted(AGENT_REPORT_CONCLUSION_KEYS))
-_V2_FINAL_CONCLUSION_FORBIDDEN_PATTERNS = (
-    re.compile(r"材料(?:扫描|识别|完备)"),
-    re.compile(r"验证输入契约"),
-    re.compile(r"PMML\s*(?:全量)?(?:打分|评分)(?:测试|完成|通过|成功|覆盖|样本|耗时)?", re.IGNORECASE),
-    re.compile(r"报告(?:已|进入|生成|产出|定稿)"),
-    re.compile(r"最终定稿|建议(?:在)?投产前审阅|建议审阅(?:报告|结论)|确认\s*Word", re.IGNORECASE),
-    re.compile(r"可直接(?:部署|投产)"),
-)
 _V2_PMML_SCORING_LEGACY_PATTERN = re.compile(
     r"可复现(?:性)?|(?:分数|评分|部署)?一致性|Notebook\s*模型|代码模型|原始代码模型",
     re.IGNORECASE,
@@ -2660,12 +2655,3 @@ def _training_description_from_evidence(
         return model_training_report_text(algorithm, hyperparameters)
     except ValueError:
         return ""
-
-
-def _validate_v2_word_conclusions(values: dict[str, str]) -> None:
-    conclusion = values.get("TEXT:final_validation_conclusion", "")
-    for pattern in _V2_FINAL_CONCLUSION_FORBIDDEN_PATTERNS:
-        if pattern.search(conclusion):
-            raise ValueError(
-                "V2 final validation conclusion contains forbidden process narration"
-            )
