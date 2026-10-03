@@ -1681,27 +1681,11 @@ def _run_case(
         from .runtime_validation_adapter import validation_entry
         record["runtime_entry"] = validation_entry(case)
     attempts = _read_attempts(case_dir / "llm-attempts.jsonl")
-    if any(
-        item["event"] == "budget_blocked"
-        or item.get("output_limit_exceeded") is True
-        or item.get("aggregate_budget_violation") is True
-        or (
-            item["event"] == "finished"
-            and item.get("error_type") == "RuntimeBudgetExceeded"
-        )
-        or (
-            item["event"] == "measurement_closed"
-            and item.get("reason") == "wall_deadline"
-        )
-        for item in attempts
-    ):
-        record.update(
-            runtime_status="budget_exceeded", error_code="llm_attempt_or_wall_budget"
-        )
-    elif any(item["event"] == "transport_rejected" for item in attempts):
-        record.update(
-            runtime_status="error", error_code="model_gateway_rejected_request"
-        )
+    from .runtime_run_manifest import _transport_runtime_failure
+
+    transport_failure = _transport_runtime_failure(attempts)
+    if transport_failure is not None:
+        record.update(transport_failure)
     record["duration_ms"] = int((time.monotonic() - started - custody_seconds) * 1000)
     record["llm_events"] = attempts
     record["isolated_workspace_removed"] = not workspace.exists()
@@ -1845,6 +1829,7 @@ def run_runtime_suite(
     _write_new(
         run_dir / "manifest.json", {k: v for k, v in report.items() if k != "cases"}
     )
+    initial_manifest_sha256 = digest((run_dir / "manifest.json").read_bytes())
     price_bytes = price_book_path.read_bytes() if price_book_path else None
     from .runtime_scoring import compare_baseline, score_case, summarize
 
@@ -1897,6 +1882,13 @@ def run_runtime_suite(
                 model_source=model_source,
                 price_bytes=price_bytes,
             )
+        except KeyboardInterrupt:
+            interrupted = True
+            scored = {
+                "passed": False,
+                "scorer_error": "KeyboardInterrupt",
+                "a_evidence_eligible": False,
+            }
         except Exception as exc:
             scored = {
                 "passed": False,
@@ -1920,7 +1912,16 @@ def run_runtime_suite(
     )
     report["report_path"] = str(run_dir / "report.json")
     _write_new(run_dir / "report.json", report)
-    return report
+    from .runtime_run_manifest import _finalize_run_manifest
+
+    # Bind the immutable report bytes; returning the new identity separately
+    # avoids a report/manifest self-reference and never backfills an older run.
+    final_identity = _finalize_run_manifest(
+        run_dir, initial_manifest_sha256=initial_manifest_sha256,
+        price_book_sha256=digest(price_bytes) if price_bytes is not None else None,
+        baseline_sha256=digest(baseline_bytes) if baseline_bytes is not None else None,
+    )
+    return {**report, **final_identity}
 
 
 def main():
