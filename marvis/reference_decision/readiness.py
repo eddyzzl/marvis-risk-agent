@@ -59,6 +59,13 @@ def _readiness_result():
             "fields": {},
             "artifact_ids": [],
         },
+        # There is no native historical parameter-time contract yet. Neither
+        # producer authenticity nor arbitrary artifact params fill this gap.
+        "parameter_time_evidence": {
+            "assurance": "unknown",
+            "scope": "historical_model_and_fitted_parameter_availability",
+            "reasons": ["no_authenticated_historical_parameter_time_contract"],
+        },
         "raw_requirements": [],
         "score_products": [],
         "strategy": None,
@@ -259,6 +266,7 @@ def rule_package_readiness(store, *, strategy_id, strategy_version):
         package_kind="rule_only", producer={"state": "not_required", "artifact_id": None},
         preprocessing={"state": "not_required", "receipt_ids": [], "source_binding": None},
         feature_time_evidence=None,
+        parameter_time_evidence=None,
         build_requires_explicit_declaration=["raw_schema.types", "raw_schema.nullable", "decision_node"],
     )
     try:

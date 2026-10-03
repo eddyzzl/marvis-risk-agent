@@ -29,6 +29,14 @@ def test_readiness_authenticates_native_closure_without_deserializing_or_guessin
     )
     assert result["state"] == "authenticated" and result["build_ready"] is False
     assert result["producer"]["state"] == "authenticated"
+    assert result["scope"] == "local_reference_package_preparation"
+    assert result["feature_time_evidence"]["assurance"] == "unknown"
+    assert result["preprocessing"]["state"] == "unknown"
+    assert result["parameter_time_evidence"] == {
+        "assurance": "unknown",
+        "scope": "historical_model_and_fitted_parameter_availability",
+        "reasons": ["no_authenticated_historical_parameter_time_contract"],
+    }
     assert result["raw_requirements"] == [
         {"name": "x1", "type": None, "nullable": None, "declaration_required": True},
         {"name": "x2", "type": None, "nullable": None, "declaration_required": True},
@@ -199,6 +207,8 @@ def test_rule_readiness_requires_no_model_or_score_and_discovers_fields(packaged
     assert response.status_code == 200
     body = response.json()
     assert body["state"] == "authenticated" and body["model"] is None
+    assert body["feature_time_evidence"] is body["parameter_time_evidence"] is None
+    assert body["preprocessing"]["state"] == "not_required"
     assert body["raw_requirements"] == [{"name": "pd", "type": None, "nullable": None, "declaration_required": True}]
     assert body["score_field_candidates"] == body["score_products"] == []
     assert "score_field" not in body["build_requires_explicit_declaration"]

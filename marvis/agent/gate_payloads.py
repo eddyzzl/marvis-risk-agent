@@ -1259,6 +1259,8 @@ def _delivery_readiness(
             "artifact": challenger_comparison_markdown_path or challenger_comparison_path,
             "reason": str(challenger_comparison.get("recommendation") or "Champion/Challenger 对比已生成"),
         })
+    if native_path or model_card_path or model_card or output.get("artifact_id"):
+        readiness.extend(_model_time_readiness(model_card))
     if isinstance(policy_signals, dict) and policy_signals:
         decision_readiness = _policy_decision_readiness(policy_decision or {})
         status = decision_readiness[0] if decision_readiness else str(policy_signals.get("approval_status") or "neutral")
@@ -1271,6 +1273,51 @@ def _delivery_readiness(
             "reason": reason,
         })
     return readiness
+
+
+def _model_time_readiness(model_card: dict) -> list[dict]:
+    """Expose bounded statements, independently of artifact delivery status."""
+    training = model_card.get("training")
+    training = training if isinstance(training, dict) else {}
+    field = training.get("feature_time_evidence")
+    field = field if isinstance(field, dict) else {}
+    field_status = field.get("assurance", "unknown")
+    if not isinstance(field_status, str) or field_status not in {"verified", "inferred", "unknown"}:
+        field_status = "unknown"
+    preprocessing = training.get("preprocessing_evidence")
+    preprocessing = preprocessing if isinstance(preprocessing, dict) else {}
+    preprocessing_status = preprocessing.get("assurance", "unknown")
+    if not isinstance(preprocessing_status, str) or preprocessing_status not in {"training_only", "row_local", "exploration", "unknown"}:
+        preprocessing_status = "unknown"
+    return [
+        {
+            "id": "feature_time_evidence",
+            "label": "字段时点",
+            "status": field_status,
+            "reason": {
+                "verified": "仅核验所选字段在记录决策时点的可得性，不涵盖模型参数历史时间。",
+                "inferred": "字段时点只有推断信息，尚未核验。",
+            }.get(field_status, "模型卡未记录完整的原生字段时点证据。"),
+        },
+        {
+            "id": "preprocessing_evidence",
+            "label": "预处理范围",
+            "status": preprocessing_status,
+            "reason": {
+                "training_only": "拟合成员仅限外层训练集；不证明交叉验证折内独立拟合或参数历史可得时间。",
+                "row_local": "仅覆盖已记录的逐行变换，不证明参数历史可得时间。",
+                "exploration": "预处理处于探索范围，未证明训练集独立拟合。",
+            }.get(preprocessing_status, "模型卡未记录可核验的预处理范围证据。"),
+        },
+        {
+            "id": "parameter_time_evidence",
+            "label": "参数历史时间",
+            # No native contract exists yet. Never accept a self-reported
+            # verified status from older or caller-supplied model cards.
+            "status": "unknown",
+            "reason": "模型及拟合参数在历史决策时是否已可得，尚未核验。",
+        },
+    ]
 
 
 __all__ = [

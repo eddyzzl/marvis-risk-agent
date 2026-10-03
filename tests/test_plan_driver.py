@@ -3697,6 +3697,9 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
         "succeeded",
         "succeeded",
         "succeeded",
+        "unknown",
+        "unknown",
+        "unknown",
         "ready",
     ]
     assert delivery["readiness"][2]["id"] == "approval_package"

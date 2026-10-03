@@ -26,7 +26,7 @@ export function readinessHtml(r, kind = "model") {
   const ruleOnly = kind === "rule_only";
   if (r.state !== "authenticated")
     return `<p class="production-error">当前来源未通过认证，不能构包：${esc((r.reason_codes || []).join("、"))}</p>${jsonDetails("查看来源缺口", r)}`;
-  return `<p class="production-note">${ruleOnly ? "策略表达式来源已认证。纯规则包不含模型和分数；请声明请求字段、失败动作与超时。" : "原生训练来源已认证。请复核以下字段、分数产品、请求失败动作和超时口径。"}</p>${jsonDetails(ruleOnly ? "策略来源认证证据" : "来源与预处理认证证据", r)}<h4>原始请求字段</h4><div class="production-grid">${r.raw_requirements.length ? rawFieldsHtml(r.raw_requirements) : '<p class="production-note">此策略不引用请求字段；请求合同为空。</p>'}</div><div class="production-grid">${
+  return `<p class="production-note">${ruleOnly ? "策略表达式来源已认证，仅用于本地参考构包。纯规则包不含模型和分数；请声明请求字段、失败动作与超时。" : "原生训练来源已认证，仅用于本地参考构包。请复核以下证据范围、字段、分数产品、请求失败动作和超时口径。"}</p>${timeEvidenceHtml(r, ruleOnly)}${jsonDetails(ruleOnly ? "策略来源认证证据" : "查看来源与证据明细", r)}<h4>原始请求字段</h4><div class="production-grid">${r.raw_requirements.length ? rawFieldsHtml(r.raw_requirements) : '<p class="production-note">此策略不引用请求字段；请求合同为空。</p>'}</div><div class="production-grid">${
     ruleOnly
       ? ""
       : `${select(
@@ -54,6 +54,29 @@ export function readinessHtml(r, kind = "model") {
     ],
     "required",
   )}</div>${ruleOnly ? "" : `<p class="production-note">分数字段候选仅表示策略尚未绑定的字段。请明确哪一个接收模型分数；其余字段须声明外部输入合同。</p><div class="production-grid" data-production-extra-fields></div>`}<button type="submit" class="button compact primary">确认合同并构建冻结包</button>`;
+}
+
+function timeEvidenceHtml(r, ruleOnly) {
+  if (ruleOnly) return '<p class="production-note" data-model-time-evidence="not_applicable">字段时点、预处理范围、参数历史时间：模型证据不适用（纯规则包，无模型）。本地构包不代表业务验收完成。</p>';
+  const field = {
+    __proto__: null,
+    verified: ["已核验记录时点", "仅覆盖所选字段在记录决策时点的可得性，不涵盖模型参数历史时间。"],
+    inferred: ["仅推断", "字段时点只有推断信息，尚未核验。"],
+  }[r.feature_time_evidence?.assurance] || ["未知", "未记录完整的原生字段时点证据。"];
+  const preprocessing = {
+    __proto__: null,
+    training_only: ["仅外层训练成员", "拟合成员限定在外层训练集；不证明交叉验证折内独立拟合或参数历史可得时间。"],
+    row_local: ["已记录逐行变换", "仅覆盖已记录的逐行变换，不证明参数历史可得时间。"],
+    exploration: ["探索范围", "预处理处于探索范围，未证明训练集独立拟合。"],
+  }[r.preprocessing?.state] || ["未知", "未记录可核验的预处理范围证据。"];
+  // No native parameter-time contract exists; a caller-provided status must
+  // not turn provenance or a legacy record into historical timing assurance.
+  const items = [
+    ["feature_time_evidence", "字段时点", ...field],
+    ["preprocessing_evidence", "预处理范围", ...preprocessing],
+    ["parameter_time_evidence", "参数历史时间", "未知", "模型及拟合参数在历史决策时是否已可得，尚未核验。"],
+  ];
+  return `<h4>模型证据范围</h4><div class="production-grid">${items.map(([id, label, status, reason]) => `<fieldset class="production-field" data-model-time-evidence="${id}"><legend>${label}</legend><strong>${status}</strong><p class="production-note">${reason}</p></fieldset>`).join("")}</div><p class="production-note">未知项可继续研究或本地构包；业务验收与生产认证尚未由此确认。</p>`;
 }
 export function collectPackage(
   values,

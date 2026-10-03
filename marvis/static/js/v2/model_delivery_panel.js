@@ -68,7 +68,8 @@ export function renderModelDeliveryPanel(message, options = {}) {
   ].filter(([, value]) => value !== "-" || !compact).map(([label, value]) => (
     `<div class="model-delivery-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`
   )).join("");
-  const readinessHtml = readinessCards(delivery.readiness);
+  const readiness = visibleReadiness(delivery);
+  const readinessHtml = readinessCards(readiness);
   const businessHtml = businessSignalSummary(delivery.business_signals);
   const policyHtml = policySignalSummary(delivery.policy_signals);
   const policyDecisionHtml = policyDecisionSummary(delivery.policy_decision);
@@ -90,7 +91,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
   return `<div class="model-delivery-panel" data-model-delivery-source="${escapeHtml(sourceTool)}">
     <div class="model-delivery-head">
       <span>${escapeHtml(title)}</span>
-      <small>${escapeHtml(readinessHeadline(delivery.readiness))}</small>
+      <small>${escapeHtml(readinessHeadline(readiness))}</small>
     </div>
     ${chips ? `<div class="model-delivery-chip-grid">${chips}</div>` : ""}
     ${reason ? `<div class="model-delivery-reason">${escapeHtml(reason)}</div>` : ""}
@@ -106,6 +107,23 @@ export function renderModelDeliveryPanel(message, options = {}) {
   </div>`;
 }
 
+function visibleReadiness(delivery) {
+  const items = Array.isArray(delivery.readiness) ? delivery.readiness.filter((item) => item && typeof item === "object") : [];
+  const hasModel = delivery.native_model_path || delivery.artifact_id
+    || delivery.model_card_path || Object.keys(delivery.model_card || {}).length || delivery.selected_experiment_id;
+  if (!hasModel || delivery.package_kind === "rule_only") return items;
+  // Persisted messages predate these cards. Missing evidence must stay visible
+  // even when every artifact in the old message was marked ready.
+  const missing = [
+    ["feature_time_evidence", "字段时点"],
+    ["preprocessing_evidence", "预处理范围"],
+    ["parameter_time_evidence", "参数历史时间"],
+  ].filter(([id]) => !items.some((item) => item.id === id)).map(([id, label]) => ({
+    id, label, status: "unknown", reason: "旧交付记录未提供此项证据，不能据产物就绪推定通过。",
+  }));
+  return [...items, ...missing];
+}
+
 function readinessCards(items) {
   const rows = Array.isArray(items) ? items.filter((item) => item && typeof item === "object") : [];
   if (!rows.length) return "";
@@ -114,7 +132,7 @@ function readinessCards(items) {
     const artifact = String(item.artifact || "");
     const reason = String(item.reason || "");
     const kind = statusKind(status);
-    return `<div class="model-delivery-readiness-card" data-readiness-kind="${escapeHtml(kind)}">
+    return `<div class="model-delivery-readiness-card" data-readiness-kind="${escapeHtml(kind)}" data-readiness-id="${escapeHtml(String(item.id || ""))}">
       <span>${escapeHtml(String(item.label || item.id || "交付项"))}</span>
       <strong>${signalGlyph(kind)}${escapeHtml(statusLabel(status))}</strong>
       ${artifact ? `<code>${escapeHtml(shortArtifact(artifact))}</code>` : ""}
@@ -412,9 +430,10 @@ function readinessHeadline(items) {
   const rows = Array.isArray(items) ? items : [];
   if (!rows.length) return "等待交付状态";
   const bad = rows.filter((item) => (
-    ["unsupported", "skipped", "missing", "failed", "partial", "warn", "fail", "error"].includes(String(item?.status || "").toLowerCase())
+    ["unsupported", "skipped", "missing", "failed", "partial", "warn", "fail", "error", "needs_policy", "inferred", "exploration"].includes(String(item?.status || "").toLowerCase())
   )).length;
-  return bad ? `${bad} 项需处理/不支持` : "交付项已就绪";
+  const unknown = rows.filter((item) => String(item?.status || "").toLowerCase() === "unknown").length;
+  return [unknown ? `${unknown} 项证据未知` : "", bad ? `${bad} 项需处理/不支持` : "", !unknown && !bad ? "交付产物已就绪" : "", "业务验收未在此确认"].filter(Boolean).join("；");
 }
 
 function sortedMetricKeys(keys) {
@@ -441,7 +460,7 @@ function shortArtifact(value) {
 function statusKind(status) {
   const normalized = String(status || "").toLowerCase();
   if (["succeeded", "ready", "supported", "pass"].includes(normalized)) return "ready";
-  if (["skipped", "unsupported", "missing", "partial", "warn", "needs_policy"].includes(normalized)) return "warning";
+  if (["skipped", "unsupported", "missing", "partial", "warn", "needs_policy", "unknown", "inferred", "exploration"].includes(normalized)) return "warning";
   if (["failed", "error", "fail"].includes(normalized)) return "error";
   return "neutral";
 }
@@ -489,6 +508,12 @@ function statusLabel(status) {
     missing: "缺失",
     failed: "失败",
     error: "失败",
+    unknown: "未知",
+    inferred: "仅推断",
+    verified: "已核验记录时点",
+    training_only: "仅外层训练成员",
+    row_local: "已记录逐行变换",
+    exploration: "探索范围",
   };
   return labels[normalized] || (status ? String(status) : "待确认");
 }

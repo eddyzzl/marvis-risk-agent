@@ -1109,6 +1109,20 @@ def test_modeling_business_materials_flow_into_report_and_delivery(client: TestC
     assert Path(delivery_output["approval_package_markdown_path"]).exists()
     assert Path(delivery_output["model_card_markdown_path"]).exists()
     assert delivery_output["model_card"]["delivery"]["validation_handoff_status"] == "succeeded"
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    delivery = next(
+        message["metadata"]["model_delivery"]
+        for message in reversed(messages)
+        if message.get("metadata", {}).get("model_delivery", {}).get("source_tool")
+        == "post_training_action"
+    )
+    readiness = {item["id"]: item for item in delivery["readiness"]}
+    assert readiness["native_model"]["status"] == "ready"
+    assert readiness["model_card"]["status"] == "ready"
+    # Real HTTP delivery can finish while historical timing remains unknown.
+    assert readiness["feature_time_evidence"]["status"] == "unknown"
+    assert readiness["parameter_time_evidence"]["status"] == "unknown"
+    assert readiness["preprocessing_evidence"]["status"] == "unknown"
 
 
 def test_modeling_business_materials_without_split_survive_auto_split(client: TestClient, tmp_path: Path):
