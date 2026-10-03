@@ -223,6 +223,9 @@ def _runtime(tmp_path: Path, monkeypatch):
     from marvis.data.preprocessing_evidence import PreprocessingState
     monkeypatch.setattr(train_tools, "training_preprocessing_state",
                         lambda *args, **kwargs: PreprocessingState([], "unknown"))
+    monkeypatch.setattr(train_tools, "feature_time_evidence",
+                        lambda *args, **kwargs: {"status": "unknown"})
+    monkeypatch.setattr(train_tools, "validate_tuning_preprocessing", lambda *args, **kwargs: None)
     dataset_path = tmp_path / "dataset.parquet"
     dataset_path.write_bytes(b"stable dataset bytes")
     return SimpleNamespace(

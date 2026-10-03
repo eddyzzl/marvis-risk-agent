@@ -234,10 +234,12 @@ def tool_tune_one_recipe_isolated(inputs: dict, ctx) -> dict:
     from marvis.packs.modeling._common import _jsonable
     from marvis.packs.modeling._runtime import _runtime, _task_dataset
     from marvis.packs.modeling.tune import tune_hyperparameters
+    from marvis.packs.modeling.preprocessing_validation import validate_tuning_preprocessing
 
     runtime = _runtime(ctx)
     dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     dataset_path = runtime.registry.resolve_path(dataset.id)
+    validate_tuning_preprocessing(runtime.registry, inputs)
     result = tune_hyperparameters(
         runtime.backend,
         dataset_path,

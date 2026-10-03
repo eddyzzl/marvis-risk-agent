@@ -417,6 +417,8 @@ def run_train_model_with_evidence_v2(
             risk_frame,
             config=config,
         )
+        from marvis.packs.modeling.preprocessing_validation import validate_inner_preprocessing
+        validate_inner_preprocessing(runtime.registry, config, frame=risk_frame)
         single_class_oot = _has_labeled_single_class_oot(
             risk_frame,
             config=config,
