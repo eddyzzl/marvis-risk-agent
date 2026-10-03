@@ -73,7 +73,7 @@ def test_unchanged_snapshot_publishes_initial_or_revised_draft(flow, version, ha
     assert message["metadata"]["fallback"] is False
     assert repo.get_report_values(task_id) == before
     assert repo.get_active_job_kind(task_id) is None
-    assert control["calls"] == (4 if version == 2 else 1)
+    assert control["calls"] == (7 if version == 2 else 1)
     if original:
         assert control["prompts"][0]["evidence"]["report_draft"]["message_id"] == original["id"]
         assert message["id"] != original["id"]

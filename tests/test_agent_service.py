@@ -208,7 +208,7 @@ def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monke
     )
 
     assert metadata["fallback"] is False
-    assert values["TEXT:final_validation_conclusion"] == "模型效果良好、稳定性可接受，PMML部署可用。"
+    assert values["TEXT:final_validation_conclusion"] == "\n\n".join(["模型效果良好、稳定性可接受，PMML部署可用。"] * 4)
     assert "V2 PMML 打分工作流" in captured["system_prompt"]
     assert "不得使用“可复现”“一致性验证”" in captured["system_prompt"]
     assert "最终验证结论应直接评价模型的区分效果" in captured["system_prompt"]

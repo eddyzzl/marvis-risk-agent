@@ -9,7 +9,7 @@ from marvis.agent.prompts import (
     RISK_METRIC_INTERPRETATION_GUIDANCE,
     WORD_CONCLUSION_SYSTEM_PROMPT,
 )
-from marvis.agent.validation_narrative import generate_v2_sections
+from marvis.agent.validation_narrative import generate_v2_metrics_summary, generate_v2_sections
 from marvis.llm_prompts import AGENT_SYSTEM_PROMPT as _AGENT_PROMPT_SPEC
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.semantic_authorization import review_semantic_authorization
@@ -861,18 +861,23 @@ def summarize_stage(
     truncated = memory_context_was_truncated(normalize_memory_context(memory_context))
     client = _client(model_profile)
     try:
-        content = client.complete(
-            system_prompt=AGENT_SYSTEM_PROMPT,
-            user_prompt=prompt,
-            temperature=0.2,
-            max_tokens=STAGE_SUMMARY_MAX_TOKENS.get(stage),
-            on_delta=on_delta,
-            truncated=truncated,
-            caller=f"validation_stage_{stage}",
-            prompt_name=_AGENT_PROMPT_SPEC.name,
-            prompt_version=_AGENT_PROMPT_SPEC.version,
-        )
-    except LLMClientError as exc:
+        if stage == "metrics" and task.validation_workflow_version == 2:
+            content = generate_v2_metrics_summary(client, prompt, truncated=truncated)
+            if on_delta:
+                on_delta(content)
+        else:
+            content = client.complete(
+                system_prompt=AGENT_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                temperature=0.2,
+                max_tokens=STAGE_SUMMARY_MAX_TOKENS.get(stage),
+                on_delta=on_delta,
+                truncated=truncated,
+                caller=f"validation_stage_{stage}",
+                prompt_name=_AGENT_PROMPT_SPEC.name,
+                prompt_version=_AGENT_PROMPT_SPEC.version,
+            )
+    except (LLMClientError, ValueError) as exc:
         guarded_fallback = (
             _sectioned_metrics_summary(fallback, fallback)
             if stage == "metrics"
