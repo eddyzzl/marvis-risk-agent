@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -180,7 +181,13 @@ def _read_selection_fit_frame(
         # flag or an inferred training partition. Shared membership still rejects
         # missing identities, known evaluation names and overlapping holdouts.
         if type(split_value) in (int, float) and np.isfinite(split_value):
-            train_values = (str(split_value),)
+            train_values = tuple(dict.fromkeys(
+                str(value) for value in base[explicit_split_col].unique()
+                if isinstance(value, Real) and not isinstance(value, (bool, np.bool_))
+                and np.isfinite(value) and value == split_value
+            ))
+            if not train_values:
+                raise FeatureError("split_value does not match an explicit numeric training partition")
         elif isinstance(split_value, str):
             train_values = (split_value,)
         else:

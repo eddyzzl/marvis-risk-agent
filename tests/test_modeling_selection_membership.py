@@ -77,8 +77,13 @@ def test_declared_custom_holdout_does_not_become_a_training_member(tmp_path):
     assert result.output["fit_rows"] == 20
 
 
-def test_explicit_legacy_numeric_training_alias_remains_supported(tmp_path):
-    result, _ = _select(tmp_path, [0, 1, 2], split_value=0, holdout_values=["1", "2"])
+@pytest.mark.parametrize(("partitions", "value", "holdouts"), [
+    ([0, 1, 2], 0, ["1", "2"]),
+    ([0, 1, 2], 0.0, ["1", "2"]),
+    ([0.0, 1.0, 2.0], 0, ["1.0", "2.0"]),
+])
+def test_explicit_legacy_numeric_training_alias_remains_supported(tmp_path, partitions, value, holdouts):
+    result, _ = _select(tmp_path, partitions, split_value=value, holdout_values=holdouts)
     assert result.ok, result.error
     assert result.output["fit_rows"] == 20
 
@@ -87,3 +92,15 @@ def test_boolean_split_value_cannot_silently_select_a_numeric_partition(tmp_path
     result, _ = _select(tmp_path, [0, 1], split_value=False, holdout_values=["1"])
     assert not result.ok
     assert "explicit training partition" in str(result.error)
+
+
+def test_numeric_split_value_cannot_silently_select_a_boolean_partition(tmp_path):
+    result, _ = _select(tmp_path, [False, True], split_value=0, holdout_values=["True"])
+    assert not result.ok
+    assert "explicit numeric training partition" in str(result.error)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_nonfinite_split_value_cannot_name_training_partition(tmp_path, value):
+    result, _ = _select(tmp_path, [0, 1], split_value=value, holdout_values=["1"])
+    assert not result.ok
