@@ -11,7 +11,8 @@ from marvis.data.labels import non_binary_target_values, require_labels_confirme
 from marvis.feature.binning import chimerge_edges, monotonic_direction, monotonic_edges
 from marvis.feature.correlation import correlation_matrix, find_collinear_pairs, vif
 from marvis.feature.encode import woe_encode
-from marvis.feature.errors import FeatureError, FitRequiresSplitError
+from marvis.feature.errors import FeatureError
+from marvis.feature.fit_scope import fit_membership
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import DEFAULT_IV_BINS, feature_ks, feature_metrics
 from marvis.packs.modeling.prepare import SPLIT_COLUMN
@@ -141,24 +142,19 @@ def _selection_fit_mask(
     holdout_values: tuple[str, ...],
     allow_full_fit: bool,
     dataset_path: Path,
+    train_values: tuple[str, ...] = ("train",),
 ) -> tuple[Any, str]:
-    """Rows used to fit selection statistics (IV/corr/VIF/WOE) — excludes holdout
-    (default test+OOT) so selection never peeks at evaluation labels (FS-2).
+    """Use the shared explicit fit membership for IV/corr/VIF/WOE selection.
 
-    ``split_col`` is already resolved by the caller (explicit input, else the
-    platform-standard ``marvis.packs.modeling.prepare.SPLIT_COLUMN`` when present in
-    the dataset). No split column at all is a typed-error stop unless the caller
-    explicitly confirms a full-pool fit via ``allow_full_fit``.
+    Declaring fewer holdouts must not promote other partitions to training.
+    With no split, an explicit full-pool acknowledgement remains exploration.
     """
-    if not split_col:
-        if allow_full_fit:
-            return frame.index.notna(), "full"
-        raise FitRequiresSplitError(tool="select_features", dataset_id=str(dataset_path))
-    holdout = tuple(str(value) for value in (holdout_values or ("test", "oot")))
-    mask = ~frame[str(split_col)].astype(str).isin(holdout)
-    if not mask.any():
-        raise FeatureError("select_features fit frame is empty after excluding holdout rows")
-    return mask, "train"
+    return fit_membership(
+        frame,
+        {"split_col": split_col, "train_values": train_values,
+         "holdout_values": holdout_values, "allow_full_fit": allow_full_fit},
+        tool="select_features", dataset_id=str(dataset_path),
+    )
 
 
 def _read_selection_fit_frame(
@@ -178,21 +174,25 @@ def _read_selection_fit_frame(
 
     base_columns = _unique([target_col, resolved_split_col])
     base = backend.read_frame(dataset_path, columns=base_columns)
+    train_values = ("train",)
     if explicit_split_col and split_value is not None:
-        fit_mask = base[str(explicit_split_col)] == split_value
-        if not fit_mask.any():
-            raise FeatureError(
-                f"feature selection split has no rows: {explicit_split_col}={split_value}"
-            )
-        fit_split = "train"
-    else:
-        fit_mask, fit_split = _selection_fit_mask(
-            base,
-            split_col=resolved_split_col,
-            holdout_values=holdout_values,
-            allow_full_fit=allow_full_fit,
-            dataset_path=dataset_path,
-        )
+        # Legacy numeric partition aliases remain explicit names, not a truthy
+        # flag or an inferred training partition. Shared membership still rejects
+        # missing identities, known evaluation names and overlapping holdouts.
+        if type(split_value) in (int, float) and np.isfinite(split_value):
+            train_values = (str(split_value),)
+        elif isinstance(split_value, str):
+            train_values = (split_value,)
+        else:
+            raise FeatureError("split_value must name an explicit training partition")
+    fit_mask, fit_split = _selection_fit_mask(
+        base,
+        split_col=resolved_split_col,
+        holdout_values=holdout_values,
+        allow_full_fit=allow_full_fit,
+        dataset_path=dataset_path,
+        train_values=train_values,
+    )
 
     fit_base = base.loc[fit_mask, base_columns].copy()
     width = max(1, int(batch_size))
