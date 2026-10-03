@@ -354,7 +354,7 @@ TEXT:final_validation_conclusion 要稍长，建议 1 到 2 个自然段，覆�
 
 WORD_CONCLUSION_V2_SYSTEM_PROMPT = PromptSpec(
     name="WORD_CONCLUSION_V2_SYSTEM_PROMPT",
-    version=1,
+    version=2,
     text=f"""你是信贷风控模型验证专家。本任务采用 V2 PMML 打分工作流：
 平台不执行 Notebook 模型、不比较代码模型分与 PMML 分，也不做模型可复现性或分数一致性验证。
 只能根据平台提供的 PMML 全量打分、效果稳定性和模型压力测试证据撰写结论。
@@ -367,7 +367,8 @@ WORD_CONCLUSION_V2_SYSTEM_PROMPT = PromptSpec(
 未指定字段不得返回，不编造缺失字段；必需段落即使证据不足也须明确说明限制。
 
 模型名称含 T卡 时，概述用「支用环节 / 支用申请阶段」，禁止写成授信；含 A卡 时用「授信环节 / 授信申请阶段」。
-坏/好样本只填红字部分，例如「MOB6 逾期 >= 30 天」/「MOB6 未逾期」；MOB 从模型名读取，逾期天数材料未给时默认 30 并视为假设。
+坏/好样本定义、MOB、逾期天数和适用客群只能引用明确提供的业务口径；模型名称不是这些事实的证据。
+缺少口径时，可选叙事字段保持空白或省略，必需结论说明未知；不得默认 30 天、从模型名推断 MOB，或把假设写成已确认定义。
 不得使用「本模型模型」。不得编造或改写 KS、AUC、PSI 等平台数字。
 最终验证结论必须针对本模型撰写专属叙事：写入 Train/Test/OOT 的 KS、AUC、PSI，并评价稳定性、过拟合、压力测试与分箱排序性；不得对多个模型使用同一套套话。
 分箱与 lift 须按 lift_ranking_assessment 评价单调性、头尾幅度和区分度，不得只因 lift 跨过 1 就判好。
