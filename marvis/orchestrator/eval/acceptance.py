@@ -234,6 +234,7 @@ def check_ledger(
     receipt_verifiers: Mapping[str, Verifier] | None = None,
     review_verifier: Verifier | None = None,
     trusted_spec: Mapping[str, Any] | None = None,
+    trusted_environment=None,
 ) -> dict[str, Any]:
     """Report open work and reject unsupported closure claims without mutation."""
     errors: list[str] = []
@@ -243,6 +244,8 @@ def check_ledger(
         return {"valid": False, "complete": False, "errors": ["invalid ledger schema"], "findings": []}
     if not isinstance(ledger.get("overall_status"), str) or ledger["overall_status"] not in STATUSES:
         errors.append("invalid overall status")
+    environment_errors = trusted_environment.begin(ledger) if trusted_environment is not None else []
+    errors.extend(environment_errors)
     requirements: dict[str, dict] = {}
     if trusted_spec is not None:
         spec_findings = trusted_spec.get("findings")
@@ -284,6 +287,7 @@ def check_ledger(
         if not isinstance(finding.get("status"), str) or finding["status"] not in STATUSES:
             errors.append(f"{finding_id}: invalid status")
         verified: set[str] = set()
+        tier_outcomes: dict[str, list[bool]] = {}
         records: list[dict[str, Any]] = []
         references = finding.get("evidence")
         if not isinstance(references, list):
@@ -296,22 +300,37 @@ def check_ledger(
                 record = _read_bound_json(evidence_root, reference.get("path"), reference.get("sha256"))
                 if not isinstance(record, dict):
                     raise ValueError("evidence record must be an object")
+                # The CLI composition selects installed callbacks using the
+                # original, externally pinned record bytes, never its labels.
+                configured_receipts, configured_review = (
+                    ({}, None) if environment_errors else
+                    trusted_environment.verifiers_for(reference) if trusted_environment is not None
+                    else (receipt_verifiers, review_verifier)
+                )
                 check = validate_evidence(
                     record, finding, source_root=source_root, evidence_root=evidence_root,
-                    expected_commit=expected_commit, receipt_verifiers=receipt_verifiers,
-                    review_verifier=review_verifier,
+                    expected_commit=expected_commit, receipt_verifiers=configured_receipts,
+                    review_verifier=configured_review,
                 )
                 records.append({
                     "run_id": record.get("run_id"), "verified": check.verified,
                     "integrity_errors": list(check.integrity_errors),
                     "verification_errors": list(check.verification_errors),
                 })
+                if trusted_environment is not None and isinstance(record.get("evidence_tier"), str):
+                    tier_outcomes.setdefault(record["evidence_tier"], []).append(check.verified)
                 if check.verified:
                     verified.add(record["evidence_tier"])
                 if check.integrity_errors:
                     errors.append(f"{finding_id}: invalid evidence bundle")
             except (OSError, ValueError) as exc:
                 errors.append(f"{finding_id}: {exc}")
+        if trusted_environment is not None:
+            # Every externally frozen required record belongs to the denominator.
+            # A later success cannot erase a failed/unverified C/R/H observation.
+            # Formal A uses no such inferred aggregate policy: its installed
+            # adapter remains unavailable until the frozen benchmark is wired.
+            verified = {tier for tier, outcomes in tier_outcomes.items() if all(outcomes)}
         missing = sorted(set(required) - verified)
         if finding.get("status") == "closed" and (missing or not required):
             errors.append(f"{finding_id}: unsupported closure claim")
@@ -328,8 +347,15 @@ def check_ledger(
     )
     if ledger.get("overall_status") == "closed" and not complete:
         errors.append("unsupported overall closure claim")
-    return {
+    if trusted_environment is not None:
+        # Detect source/record-set changes across verification as well. Privacy
+        # does not claim protection against an adversarial same-UID process.
+        errors.extend(error for error in trusted_environment.inventory_errors(ledger) if error not in errors)
+    result = {
         "valid": not errors, "complete": complete and not errors,
         "requirements_verified": trusted_spec is not None and not errors,
         "errors": errors, "findings": results,
     }
+    if trusted_environment is not None:
+        result["trusted_environment"] = trusted_environment.report()
+    return result

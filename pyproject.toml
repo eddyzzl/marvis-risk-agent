@@ -52,6 +52,7 @@ marvis = "marvis.__main__:main"
 marvis-risk-agent = "marvis.__main__:main"
 
 [project.optional-dependencies]
+audit = ["cryptography>=50.0.1,<51"]
 dev = [
   "pytest>=8,<10",
   "pytest-asyncio>=1,<2",
