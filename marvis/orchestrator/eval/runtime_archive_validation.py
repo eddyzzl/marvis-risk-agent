@@ -147,6 +147,16 @@ def _require_equal(actual, expected):
         raise ValueError("recomputed value differs")
 
 
+def _public_source_identity(source):
+    # A separately supplied binding may contain accidental credentials or
+    # institution metadata. Compare its complete contents internally, but never
+    # echo arbitrary extensions in a review result (including mismatch results).
+    patterns = {"commit": r"[0-9a-f]{40}", "source_sha256": r"[0-9a-f]{64}",
+                "dirty_diff_sha256": r"[0-9a-f]{64}"}
+    return {key: source[key] for key, pattern in patterns.items()
+            if isinstance(source.get(key), str) and re.fullmatch(pattern, source[key])}
+
+
 def _original_path(archive, original_root, absolute):
     root, path = Path(original_root), Path(absolute)
     if not root.is_absolute() or not path.is_absolute() or ".." in path.parts:
@@ -386,7 +396,8 @@ def revalidate_validation_archive(
     verifier_source = _source_identity()
     result = {"schema": "marvis.runtime-validation-revalidation.v1", "case_id": binding.case.id,
         "algorithm": "installed_platform_v2_deterministic_recomputation.v1",
-        "verifier_source": verifier_source, "original_source_binding": binding.source,
+        "verifier_source": verifier_source, "original_source_binding": _public_source_identity(binding.source),
+        "original_source_binding_sha256": digest(binding.source),
         "verifier_source_matches_original": verifier_source["source_sha256"] == binding.source["source_sha256"],
         "recomputation_isolation": "private_authenticated_copy; excludes_adversarial_same_uid_or_root_access",
         "source_authentication": "not_established", "acceptance_claim": "not_established",
