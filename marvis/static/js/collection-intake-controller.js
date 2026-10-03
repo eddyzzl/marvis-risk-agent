@@ -1,3 +1,9 @@
+import {
+  featureHtml,
+  ruleHtml,
+  conditionHtml,
+  queueHtml,
+} from "./collection-rules-form.js";
 import { createCollectionCsvController } from "./collection-csv-controller.js";
 import { escapeHtml as esc } from "./ui-utils.js";
 import {
@@ -145,6 +151,7 @@ export function createCollectionIntakeController({
               ),
               values: valuesOf(row),
               attempts: collectRows(row, "attempt"),
+              features: collectRows(row, "feature"),
             })),
           ),
         ]);
@@ -155,6 +162,23 @@ export function createCollectionIntakeController({
           rows: collectRows(form, "installment"),
           coverage: collectRows(form, "coverage"),
           windows: collectRows(form, "window"),
+          channels: [
+            ...form.querySelectorAll('[name="policy_channel"]:checked'),
+          ].map((e) => e.value),
+          queues: [
+            ...form.querySelectorAll("[data-collection-extra-queue]"),
+          ].map((row) => ({
+            values: valuesOf(row),
+            channels: [
+              ...row.querySelectorAll('[name="extra_channel"]:checked'),
+            ].map((e) => e.value),
+          })),
+          rules: [...form.querySelectorAll("[data-collection-rule]")].map(
+            (row) => ({
+              values: valuesOf(row),
+              conditions: collectRows(row, "condition"),
+            }),
+          ),
         };
         collectIntake(d.kind, values, {
           ...context,
@@ -173,10 +197,14 @@ export function createCollectionIntakeController({
               installments: context.rows,
               coverage: context.coverage,
               windows: context.windows,
+              channels: context.channels,
+              queues: context.queues,
+              rules: context.rules,
               cases: cases.map((c) => ({
                 case_id: c.record.case_id,
                 values: c.values,
                 attempts: c.attempts,
+                features: c.features,
               })),
             },
           });
@@ -279,6 +307,27 @@ export function createCollectionIntakeController({
               ? "所选案件的货币单位定义不一致，请分批配置。"
               : `本批金额单位：${selected[0].unit.currency} / ${selected[0].unit.minor_unit_exponent} 位小数 · ${selected[0].unit.definition_source}`;
       }
+      if (event.target.name === "rule_kind") {
+        const row = event.target.closest("[data-collection-rule]"),
+          hold = event.target.value === "hold",
+          contact = event.target.value === "contact";
+        for (const name of ["rule_queue", "rule_priority", "rule_channel", "rule_cost"]) {
+          const input = row.querySelector(`[name="${name}"]`),
+            applicable = ["rule_queue", "rule_priority"].includes(name) ? !hold : contact;
+          input.disabled = !applicable;
+          input.required = applicable;
+        }
+      }
+      if (event.target.name === "condition_operator") {
+        const row = event.target.closest("[data-collection-condition]"),
+          nullOp = ["is_null", "is_not_null"].includes(event.target.value);
+        for (const name of ["condition_value", "condition_missing"]) {
+          const input = row.querySelector(`[name="${name}"]`);
+          input.disabled = nullOp;
+          input.required = !nullOp;
+          if (nullOp) input.value = "";
+        }
+      }
       if (event.target.name === "action_kind") {
         const hold = event.target.value === "hold",
           contact = event.target.value === "contact";
@@ -307,6 +356,12 @@ export function createCollectionIntakeController({
         "add-coverage",
         "add-window",
         "add-attempt",
+        "add-feature",
+        "add-rule",
+        "add-condition",
+        "add-queue",
+        "rule-up",
+        "rule-down",
         "remove-row",
         "close-intake",
         "export-reconciliation",
@@ -331,10 +386,16 @@ export function createCollectionIntakeController({
       if (action === "remove-row")
         control
           .closest(
-            "[data-collection-installment],[data-collection-coverage],[data-collection-window],[data-collection-attempt]",
+            "[data-collection-installment],[data-collection-coverage],[data-collection-window],[data-collection-attempt],[data-collection-feature],[data-collection-condition],[data-collection-rule],[data-collection-extra-queue]",
           )
           ?.remove();
-      else {
+      else if (action === "rule-up" || action === "rule-down") {
+        const rule = control.closest("[data-collection-rule]");
+        if (action === "rule-up" && rule.previousElementSibling)
+          rule.previousElementSibling.before(rule);
+        if (action === "rule-down" && rule.nextElementSibling)
+          rule.nextElementSibling.after(rule);
+      } else {
         const [selector, html] = {
           "add-installment": [
             "[data-collection-installments]",
@@ -343,10 +404,15 @@ export function createCollectionIntakeController({
           "add-coverage": ["[data-collection-coverages]", coverageHtml],
           "add-window": ["[data-collection-windows]", windowHtml],
           "add-attempt": ["[data-collection-attempts]", attemptHtml],
+          "add-feature": ["[data-collection-features]", featureHtml],
+          "add-rule": ["[data-collection-rules]", ruleHtml],
+          "add-condition": ["[data-collection-conditions]", conditionHtml],
+          "add-queue": ["[data-collection-extra-queues]", queueHtml],
         }[action];
-        const target =
-          action === "add-attempt"
-            ? control.closest("[data-collection-case]").querySelector(selector)
+        const target = ["add-attempt", "add-feature"].includes(action)
+          ? control.closest("[data-collection-case]").querySelector(selector)
+          : action === "add-condition"
+            ? control.closest("[data-collection-rule]").querySelector(selector)
             : form?.querySelector(selector);
         target?.insertAdjacentHTML("beforeend", html());
       }

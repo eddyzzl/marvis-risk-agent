@@ -190,3 +190,13 @@
 .collection-csv-mapping > [hidden] {
   display: none;
 }
+
+.collection-rule-section {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin: 12px 0;
+}
+.collection-rule-section > summary {
+  font-weight: 600;
+  cursor: pointer;
+}

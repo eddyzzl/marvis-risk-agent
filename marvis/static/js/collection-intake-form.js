@@ -1,9 +1,13 @@
+import {
+  layeredHtml,
+  featureSection,
+  collectFeatures,
+  collectRules,
+  collectExtraQueues,
+  channelChoices,
+} from "./collection-rules-form.js";
 import { escapeHtml as esc } from "./ui-utils.js";
-import { button, money } from "./collection-workspace-view.js";
-export const field = (name, label, type = "text", extra = "", value = "") =>
-  `<label>${esc(label)}<input name="${name}" type="${type}" value="${esc(value)}" ${extra}></label>`;
-export const select = (name, label, options, extra = "required") =>
-  `<label>${esc(label)}<select name="${name}" ${extra}><option value="">请选择</option>${options.map(([value, text]) => `<option value="${value}">${esc(text)}</option>`).join("")}</select></label>`;
+import { button, money, field, select } from "./collection-workspace-view.js";
 const identity = (name, label) =>
   field(name, label, "text", 'required pattern="[A-Za-z0-9_.:-]{1,128}"');
 const integer = (name, label, min = 0, max = 1e15) =>
@@ -100,7 +104,7 @@ function batchCases(cases) {
             ["unknown", "未知"],
           ],
           "",
-        )}${time("history_from", "历史覆盖开始", false)}${time("history_through", "历史覆盖结束", false)}${time("history_available", "历史声明可用时间", false)}</div><p class="collection-note">未知覆盖保留证据不足。声明完整且没有填写历史动作，表示明确声明该窗口内没有历史触达。</p><div data-collection-attempts></div>${button("add-attempt", "添加历史动作")}</fieldset>`,
+        )}${time("history_from", "历史覆盖开始", false)}${time("history_through", "历史覆盖结束", false)}${time("history_available", "历史声明可用时间", false)}</div><p class="collection-note">未知覆盖保留证据不足。声明完整且没有填写历史动作，表示明确声明该窗口内没有历史触达。</p><div data-collection-attempts></div>${button("add-attempt", "添加历史动作")}${featureSection()}</fieldset>`,
     )
     .join("");
 }
@@ -134,9 +138,9 @@ export function intakeHtml(kind, cases = []) {
   }
   if (kind === "batch") {
     label = "校验并冻结批次提案";
-    body = `<p class="collection-note">为所选案件明确同一批次动作。平台计算政策指纹并生成规则合同；复杂分层规则可用高级合同导入。</p><p data-collection-unit class="collection-note">请在下方选择案件；预算和单次成本采用案件的最小货币单位。</p><div class="collection-grid">${identity("batch_id", "批次编号")}${time("as_of", "参考决策时点")}${time("knowledge_cutoff", "知识截止")}${identity("policy_id", "政策编号")}${identity("revision", "政策版本")}${time("valid_from", "政策有效期开始")}${time("valid_until", "政策有效期结束")}${field("timezone", "政策时区（IANA）", "text", 'required placeholder="Asia/Shanghai"')}${select(
+    body = `<p class="collection-note">明确默认动作，并可添加有序分层规则。平台计算政策指纹并生成规则合同；更复杂嵌套合同可用高级导入。</p><p data-collection-unit class="collection-note">请在下方选择案件；预算和单次成本采用案件的最小货币单位。</p><div class="collection-grid">${identity("batch_id", "批次编号")}${time("as_of", "参考决策时点")}${time("knowledge_cutoff", "知识截止")}${identity("policy_id", "政策编号")}${identity("revision", "政策版本")}${time("valid_from", "政策有效期开始")}${time("valid_until", "政策有效期结束")}${field("timezone", "政策时区（IANA）", "text", 'required placeholder="Asia/Shanghai"')}${select(
       "action_kind",
-      "本批统一动作",
+      "未命中规则时的默认动作",
       [
         ["contact", "本地参考触达"],
         ["review", "转人工队列"],
@@ -152,7 +156,7 @@ export function intakeHtml(kind, cases = []) {
         ["letter", "信函"],
       ],
       "",
-    )}${field("estimated_cost_minor", "单次预计成本（触达必填，最小单位）", "number", 'min="0" max="1000000000000000" step="1"')}${integer("max_batch_actions", "单批队列容量", 1, 10000)}${integer("max_active_actions", "当前活动队列容量上限", 1, 10000)}${integer("frequency_window_seconds", "主体频次窗口（秒）", 1, 31622400)}${integer("max_contacts_per_subject_window", "窗口内每主体最多次数", 1, 10000)}${integer("min_contact_interval_seconds", "同主体最小间隔（秒）", 0, 31622400)}${integer("max_estimated_batch_cost_minor", "单批预计成本上限（最小单位）")}${integer("max_estimated_active_cost_minor", "当前活动预计成本上限（最小单位）")}</div><h4>允许联系时段</h4><p class="collection-note">采用政策时区，时间区间含开始、不含结束；跨夜分两段声明。</p><div data-collection-windows>${windowHtml()}</div>${button("add-window", "添加允许时段")}<h4>案件与历史声明</h4>${batchCases(cases)}`;
+    )}${field("estimated_cost_minor", "单次预计成本（触达必填，最小单位）", "number", 'min="0" max="1000000000000000" step="1"')}${integer("max_batch_actions", "单批队列容量", 1, 10000)}${integer("max_active_actions", "当前活动队列容量上限", 1, 10000)}${integer("frequency_window_seconds", "主体频次窗口（秒）", 1, 31622400)}${integer("max_contacts_per_subject_window", "窗口内每主体最多次数", 1, 10000)}${integer("min_contact_interval_seconds", "同主体最小间隔（秒）", 0, 31622400)}${integer("max_estimated_batch_cost_minor", "单批预计成本上限（最小单位）")}${integer("max_estimated_active_cost_minor", "当前活动预计成本上限（最小单位）")}</div><h4>默认政策队列允许的渠道</h4><div class="collection-actions" data-collection-policy-channels>${channelChoices("policy_channel")}</div><p class="collection-note">渠道仅在勾选后允许用于该队列；默认动作或规则触达均须符合此范围。</p><h4>允许联系时段</h4><p class="collection-note">采用政策时区，时间区间含开始、不含结束；跨夜分两段声明。</p><div data-collection-windows>${windowHtml()}</div>${button("add-window", "添加允许时段")}${layeredHtml()}<h4>案件与历史声明</h4>${batchCases(cases)}`;
   }
   return `<form data-collection-form="${kind}"><h4>${label}</h4>${commonNote}${body}${source()}<div class="collection-actions">${submit(label)}${button("close-intake", "收起表单")}</div></form>`;
 }
@@ -185,7 +189,17 @@ export const valuesOf = (form) =>
 export function collectIntake(
   kind,
   v,
-  { record, refs, rows = [], coverage = [], windows = [], cases = [] } = {},
+  {
+    record,
+    refs,
+    rows = [],
+    coverage = [],
+    windows = [],
+    cases = [],
+    rules = [],
+    channels,
+    queues = [],
+  } = {},
 ) {
   if (kind !== "case" && kind !== "batch" && !record)
     throw new Error("请选择已登记案件");
@@ -308,7 +322,7 @@ export function collectIntake(
       queues: [
         {
           queue_id: text(v.queue_id, "政策队列编号"),
-          channels: contact ? [text(v.channel, "参考渠道")] : [],
+          channels: channels ?? (contact ? [text(v.channel, "参考渠道")] : []),
           max_batch_actions: number(v.max_batch_actions, "单批容量", 1, 10000),
           max_active_actions: number(
             v.max_active_actions,
@@ -317,6 +331,7 @@ export function collectIntake(
             10000,
           ),
         },
+        ...collectExtraQueues(queues),
       ],
       frequency_window_seconds: number(
         v.frequency_window_seconds,
@@ -347,8 +362,10 @@ export function collectIntake(
       basis_artifact_id: refs.source_artifact_id,
       basis_artifact_hash: refs.source_artifact_hash,
     };
+    if (contact && !policy.queues[0].channels.includes(v.channel))
+      throw new Error("默认动作渠道须在政策队列中明确勾选允许");
     const histories = [];
-    const inputs = cases.map(({ record: r, values: c, attempts }) => {
+    const inputs = cases.map(({ record: r, values: c, attempts, features }) => {
       if (
         !["allowed", "prohibited", "unknown"].includes(c.contact_permission) ||
         !["complete", "partial", "unknown"].includes(c.history_coverage)
@@ -380,13 +397,14 @@ export function collectIntake(
         subject_namespace: r.subject_namespace,
         subject_token: r.subject_token,
         contact_permission: c.contact_permission,
-        features: {},
+        features: collectFeatures(features),
         ...refs,
       };
     });
     return {
       batch_id: text(v.batch_id, "批次编号"),
       policy,
+      ...(rules.length ? { rules: collectRules(rules, inputs, policy) } : {}),
       action: {
         kind: actionKind,
         queue_id: hold ? null : v.queue_id,

@@ -130,3 +130,40 @@ def test_material_permission_failure_keeps_form_values_and_releases_pending():
     node(INTAKE_ASYNC + r'''
 intake.open('case');const form=formOf(caseValues),html=root.querySelector('[data-collection-editor]').innerHTML;submit(form);await tick();calls[0].reject({status:403,detail:{code:'collection_owner_required'}});await tick();assert.match(messages.at(-1),/collection_owner_required/);assert.equal(root.querySelector('[data-collection-editor]').innerHTML,html);assert.equal(form.querySelectorAll('[name]').find(x=>x.name==='opening_balance_minor').value,'10000');assert.equal(owner.pending,false);assert.equal(calls.length,1);assert.equal(refreshes,0);
 ''')
+
+
+def test_layered_rule_form_keeps_declared_types_missing_policy_and_action_constraints():
+    node(r'''
+import {collectRules,collectFeatures,collectExtraQueues} from './marvis/static/js/collection-rules-form.js';
+const features=collectFeatures([{feature_name:'dpd',feature_type:'number',feature_value:'30'},{feature_name:'known',feature_type:'unknown',feature_value:''},{feature_name:'vip',feature_type:'boolean',feature_value:'false'}]);assert.deepEqual(features,{dpd:30,known:null,vip:false});
+assert.throws(()=>collectFeatures([{feature_name:'dpd',feature_type:'unknown',feature_value:'0'}]),/未知/);
+const policy={queues:[{queue_id:'q',channels:['sms']}]};
+const values={rule_id:'high-dpd',rule_combination:'all',rule_kind:'contact',rule_queue:'q',rule_priority:'20',rule_channel:'sms',rule_cost:'0'};
+const conditions=[{condition_field:'dpd',condition_type:'number',condition_operator:'>=',condition_value:'30',condition_missing:'error'}];
+const cases=[{case_id:'c',features}];const result=collectRules([{values,conditions}],cases,policy)[0];assert.equal(result.conditions[0].value,30);assert.equal(result.conditions[0].missing,'error');assert.equal(Object.hasOwn(result.action,'policy_hash'),false);assert.equal(result.action.estimated_cost_minor,0);
+assert.throws(()=>collectRules([{values:{...values,rule_channel:'phone'},conditions}],cases,policy),/明确允许/);
+assert.throws(()=>collectRules([{values,conditions}],[{case_id:'c',features:{dpd:'30'}}],policy),/类型/);
+assert.throws(()=>collectRules([{values,conditions}],[{case_id:'c',features:{}}],policy),/尚未声明/);
+assert.throws(()=>collectRules([{values,conditions:[{...conditions[0],condition_missing:''}]}],cases,policy),/缺失/);
+const extra=collectExtraQueues([{values:{extra_id:'q2',extra_batch:'2',extra_active:'4'},channels:['phone']}]);assert.equal(extra[0].max_active_actions,4);
+''')
+
+
+def test_background_list_refresh_cannot_clear_newer_form_or_action_notice():
+    node(HARNESS+r'''
+c.render();const loading=c.load();click('queue');const notice=panel.querySelector('[data-collection-message]').textContent;assert.match(notice,/当前批次/);calls[0].resolve({id:'maker',role:'maker',display_name:'M'});await tick();for(const call of calls.slice(1))call.resolve(call.url.endsWith('cases')?{cases:[]}:call.url.endsWith('batches')?{batches:[]}:{});await loading;assert.equal(panel.querySelector('[data-collection-message]').textContent,notice);
+''')
+
+
+
+def test_null_rule_input_is_explicit_and_text_values_are_preserved():
+    node(r'''
+import {collectRules,collectFeatures} from './marvis/static/js/collection-rules-form.js';
+const features=collectFeatures([{feature_name:'segment',feature_type:'text',feature_value:' 01 '}]);assert.equal(features.segment,' 01 ');
+const values={rule_id:'unknown-case',rule_combination:'all',rule_kind:'hold'};
+const condition={condition_field:'dpd',condition_type:'number',condition_operator:'is_null',condition_value:'',condition_missing:''};
+const rows=[{values,conditions:[condition]}],cases=[{case_id:'c',features:{dpd:null}}];
+assert.equal(collectRules(rows,cases,{queues:[]})[0].conditions[0].missing,null);
+assert.throws(()=>collectRules([...rows,{values:{...values,rule_id:'other-type'},conditions:[{...condition,condition_type:'text'}]}],cases,{queues:[]}),/不同类型/);
+assert.throws(()=>collectRules([{values,conditions:[{...condition,condition_missing:'error'}]}],cases,{queues:[]}),/空值判断/);
+''')

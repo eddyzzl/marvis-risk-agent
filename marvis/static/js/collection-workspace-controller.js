@@ -63,12 +63,14 @@ export function createCollectionWorkspaceController({
   },
 } = {}) {
   let state = null,
-    serial = 0;
+    serial = 0,
+    messageVersion = 0;
   const q = (s) => getElement()?.querySelector(s),
     current = (o) =>
       o === state && isCurrentView(o.view) && getTask()?.id === o.taskId;
   const base = (o) => `/api/tasks/${path(o.taskId)}/collection`;
   const message = (text = "") => {
+    messageVersion++;
     const el = q("[data-collection-message]");
     if (el) el.textContent = text;
   };
@@ -131,6 +133,7 @@ export function createCollectionWorkspaceController({
   async function load({ preserveDetail = false } = {}) {
     const owner = state;
     if (!owner) return;
+    const noticeVersion = messageVersion;
     const version = ++owner.loadVersion,
       detailVersion = owner.detailVersion,
       batchId = owner.batch?.batch_id;
@@ -166,8 +169,16 @@ export function createCollectionWorkspaceController({
         cases.cases,
         batches.batches,
       );
-      message("");
-      if (preserveDetail && batchId && detailVersion === owner.detailVersion)
+      const editorOpen = !!q("[data-collection-form]");
+      const unchangedNotice = noticeVersion === messageVersion;
+      if (unchangedNotice && !editorOpen) message("");
+      if (
+        preserveDetail &&
+        batchId &&
+        detailVersion === owner.detailVersion &&
+        unchangedNotice &&
+        !editorOpen
+      )
         await read("batch", batchId);
     } catch (e) {
       if (current(owner) && version === owner.loadVersion) {
@@ -187,7 +198,8 @@ export function createCollectionWorkspaceController({
   async function read(kind, id) {
     const owner = state;
     if (!owner) return;
-    const version = ++owner.detailVersion;
+    const version = ++owner.detailVersion,
+      noticeVersion = messageVersion;
     owner.batch = null;
     q("[data-collection-detail]").innerHTML =
       '<p class="collection-note">正在重新核对当前记录…</p>';
@@ -207,7 +219,8 @@ export function createCollectionWorkspaceController({
         q("[data-collection-detail]").innerHTML =
           `<h4>案件 · ${esc(id)}</h4>${details("案件与来源合同", result)}`;
       lock();
-      message("");
+      if (noticeVersion === messageVersion && !q("[data-collection-form]"))
+        message("");
     } catch (e) {
       if (current(owner) && version === owner.detailVersion) message(error(e));
     }
