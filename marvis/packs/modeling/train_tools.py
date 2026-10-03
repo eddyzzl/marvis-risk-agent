@@ -926,18 +926,28 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         runtime, dataset.id, state=preprocessing_state,
     )
 
+    def effective_params(recipe):
+        if per_recipe_params is not None:
+            return {**per_recipe_params.get(recipe, {}), **control_params}
+        elif recipe == "lgb":
+            # legacy flat-params shape: only the lgb slot consumes it (unchanged
+            # single-recipe / lgb-only-tuned back-compat behaviour).
+            return {**tuned_params, **control_params}
+        return dict(control_params)
+
+    # Every recipe shares this frame. Preserve controls needed by later recipes
+    # as well as the first recipe, using the same effective parameter precedence.
+    group_columns = []
+    for item in recipes:
+        raw_groups = effective_params(item).get("valid_group_cols") or []
+        groups = raw_groups if isinstance(raw_groups, list) else [raw_groups]
+        group_columns.extend(str(column) for column in groups if str(column))
+    group_columns = list(dict.fromkeys(group_columns))
     experiments: list[dict] = []
     failed: list[dict] = []
     last_exc: Exception | None = None
     for recipe in recipes:
-        if per_recipe_params is not None:
-            recipe_params = {**per_recipe_params.get(recipe, {}), **control_params}
-        elif recipe == "lgb":
-            # legacy flat-params shape: only the lgb slot consumes it (unchanged
-            # single-recipe / lgb-only-tuned back-compat behaviour).
-            recipe_params = {**tuned_params, **control_params}
-        else:
-            recipe_params = dict(control_params)
+        recipe_params = effective_params(recipe)
         recipe_params["preprocessing_assurance"] = preprocessing_state.assurance
         recipe_params["feature_time_evidence"] = temporal_evidence
         recipe_params["preprocessing_evidence"] = {
@@ -986,7 +996,6 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             })
             continue
         if training_backend is None:
-            group_columns = [str(column) for column in (control_params.get("valid_group_cols") or []) if str(column)]
             training_dataset = TrainingDataset.load_compact(
                 runtime.backend,
                 dataset_path,

@@ -192,7 +192,8 @@ def test_unneeded_ensemble_guard_does_not_materialize_member_seeds(monkeypatch):
     ))
 
 
-def test_batch_training_keeps_exact_group_identity_when_group_is_also_a_feature(tmp_path):
+@pytest.mark.parametrize("parameter_form", ["flat", "nested", "later_recipe", "overridden"])
+def test_batch_training_keeps_exact_group_identity_when_group_is_also_a_feature(tmp_path, parameter_form):
     import joblib
     from marvis.packs.modeling._runtime import _artifact_base_dir
     from marvis.repositories.modeling import ModelingRepository
@@ -215,13 +216,19 @@ def test_batch_training_keeps_exact_group_identity_when_group_is_also_a_feature(
         "split_col": "fit_split", "min_count": 1,
     }, task_id="task-feature")
     assert encoded.ok, encoded.error
+    group_params = {"num_boost_round": 4, "valid_group_cols": ["group"]}
+    recipes = ["lr", "lgb"] if parameter_form == "later_recipe" else ["lgb"]
+    params = group_params if parameter_form == "flat" else {"lgb": group_params}
+    if parameter_form == "overridden":
+        params = {"lgb": {**group_params, "valid_group_cols": ["unused_missing_group"]}, "valid_group_cols": ["group"]}
     result = runner.invoke(ToolRef("modeling", "train_models"), _inputs(
-        encoded.output["result_dataset_id"], features=["segment_woe", "group"], recipes=["lgb"],
-        params={"num_boost_round": 4, "valid_group_cols": ["group"]},
+        encoded.output["result_dataset_id"], features=["segment_woe", "group"], recipes=recipes,
+        params=params,
     ), task_id="task-feature")
     assert result.ok, result.error
     modeling = ModelingRepository(repo.db_path)
-    experiment = modeling.get_experiment(result.output["experiments"][0]["experiment_id"])
+    trained = next(item for item in result.output["experiments"] if item["recipe"] == "lgb")
+    experiment = modeling.get_experiment(trained["experiment_id"])
     artifact = modeling.get_model_artifact(experiment.artifact_id)
     model = joblib.load(_artifact_base_dir(build_settings(registry.datasets_root.parent), "task-feature") / artifact.model_path)
     group_info = model.booster_.dump_model()["feature_infos"]["group"]
