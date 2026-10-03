@@ -567,3 +567,22 @@
     grid-template-columns: repeat(2, minmax(140px, 1fr));
   }
 }
+
+/* Model monitoring uses the existing plan overview as its execution gate. */
+.model-monitoring-panel { margin: 12px 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 14px 16px; }
+.model-monitoring-panel[hidden] { display: none; }
+.model-monitoring-panel summary { cursor: pointer; font-weight: 650; }
+.model-monitoring-panel summary span { margin-left: 10px; color: var(--text-muted); font-size: 12px; font-weight: 400; }
+.model-monitoring-panel form { margin-top: 16px; }
+.model-monitoring-tools, .model-monitoring-panel footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.model-monitoring-tools label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+.model-monitoring-tools input { max-width: 250px; }
+.model-monitoring-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.model-monitoring-fields label { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.model-monitoring-fields select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 7px; padding: 8px; background: var(--surface); color: var(--text); }
+.model-monitoring-limits, .model-monitoring-status, .model-monitoring-panel small { font-size: 12px; line-height: 1.6; color: var(--text-muted); overflow-wrap: anywhere; }
+.model-monitoring-panel footer { margin-top: 10px; }
+.model-monitoring-status { flex: 1; margin: 0; min-width: 200px; }
+.model-monitoring-status.error { color: var(--danger, #b42318); }
+.model-monitoring-status.success { color: var(--success, #18734b); }
+@media (max-width: 900px) { .model-monitoring-fields { grid-template-columns: 1fr; } }

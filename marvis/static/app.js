@@ -151,6 +151,7 @@ import {
   submitModelingWeightAdjust as submitModelingWeightAdjustController,
 } from "./js/v2/modeling_setup_panel.js";
 import { renderModelDeliveryPanel } from "./js/v2/model_delivery_panel.js";
+import { createModelMonitoringPanel } from "./js/v2/model_monitoring_panel.js";
 import {
   hideSupersededTuningThinking,
   normalizeModelTuningProgress,
@@ -465,6 +466,22 @@ const portfolioSetupPanel = createPortfolioSetupPanel({
   },
   onError: (error) => {
     setActionStatus("组合分析口径提交失败。", "error", String(error?.message || error || ""));
+  },
+});
+const modelMonitoringPanel = createModelMonitoringPanel({
+  getElementById: $, api,
+  workspaceController: dataWorkspaceController,
+  getSelectedTask: () => taskSession.task,
+  captureView: () => taskRequests.capture(),
+  isCurrentView: view => taskRequests.current(view),
+  beginActivity: (operation, taskId) => claimBusy("driver_execute", "正在生成监控计划…", taskId, operation),
+  endActivity: releaseBusy,
+  onMessages: (messages, view) => taskSession.replaceMessages(view, messages),
+  onSubmitted: async (_result, view) => {
+    if (!taskRequests.current(view)) return;
+    renderAll();
+    await reloadDataWorkspace(taskSession.taskId, { silent: true });
+    if (taskRequests.current(view)) setActionStatus("监控计划已生成，请在对话中确认。", "success");
   },
 });
 const agentMemoryPanel = createAgentMemoryPanelController({
@@ -4466,6 +4483,7 @@ function selectTask(task) {
     strategyCandidateLabController.renderAvailability();
     labelingSetupPanel.renderAvailability();
     portfolioSetupPanel.renderAvailability();
+    modelMonitoringPanel.renderAvailability();
     if (task.task_type === "strategy") {
       void strategyCandidateLabController.refresh(task.id, { silent: true });
     }
@@ -5411,6 +5429,7 @@ function renderAll() {
   strategyCandidateLabController.renderAvailability();
   labelingSetupPanel.renderAvailability();
   portfolioSetupPanel.renderAvailability();
+  modelMonitoringPanel.renderAvailability();
   historicalReplayController.render();
   collectionWorkspaceController.render();
   renderPetState();
@@ -5432,6 +5451,7 @@ function renderChangedValidationViews() {
   strategyCandidateLabController.renderAvailability();
   labelingSetupPanel.renderAvailability();
   portfolioSetupPanel.renderAvailability();
+  modelMonitoringPanel.renderAvailability();
   historicalReplayController.render();
   collectionWorkspaceController.render();
   renderPetState();

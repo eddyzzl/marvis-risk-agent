@@ -1548,6 +1548,23 @@
                   </div>
                 </footer>
               </section>
+              <details id="modelMonitoringPanel" class="model-monitoring-panel" hidden>
+                <summary>模型监控 <span>用本期数据检查已选模型的变化</span></summary>
+                <form id="modelMonitoringForm" novalidate>
+                  <div class="model-monitoring-tools">
+                    <label>上传本期数据<input id="modelMonitoringFile" type="file" accept=".csv,.parquet,.xlsx,.xls" /></label>
+                    <button id="modelMonitoringRefresh" class="button compact secondary" type="button">刷新选项</button>
+                  </div>
+                  <div class="model-monitoring-fields">
+                    <label>已选模型<select id="modelMonitoringModel" aria-label="监控模型"></select></label>
+                    <label>本期数据<select id="modelMonitoringDataset" aria-label="监控数据"></select></label>
+                    <label>可选标签<select id="modelMonitoringTarget" aria-label="监控标签"></select></label>
+                  </div>
+                  <p id="modelMonitoringLimits" class="model-monitoring-limits">缺少标签时仅检查漂移；标签成熟度未知，默认技术阈值不代表业务验收目标。</p>
+                  <small>选中的本期数据将设为当前数据集。生成计划不会执行评分；请在对话中审阅并确认计划。</small>
+                  <footer><p id="modelMonitoringStatus" class="model-monitoring-status" role="status" aria-live="polite"></p><button id="modelMonitoringSubmit" class="button compact primary" type="submit">生成监控计划</button></footer>
+                </form>
+              </details>
               <section
                 id="labelingSetupPanel"
                 class="labeling-setup-panel"
