@@ -19,7 +19,13 @@ def handle_model_monitoring_request(runtime, repo, task, *, user_text, model_mon
     try:
         proposal = prepare_model_monitoring(runtime.settings, task.id, contract)
     except (ValueError, KeyError, DataLayerError, OSError) as exc:
-        raise DriverError(str(exc)) from exc
+        messages = {
+            "monitoring_binding_authentication_failed": "模型或数据的来源证明无法验证。请重新导入数据；早期模型请重新训练并选定后再监控。",
+            "monitoring_selected_task_experiment_required": "所选模型已变化或不属于本任务，请刷新后重新选择。",
+            "monitoring_baseline_required": "所选模型缺少训练期分布基线，请重新训练并选定后再监控。",
+            "monitoring_binary_baseline_required": "当前监控需要有训练期分布基线的二分类模型，请选择适用模型。",
+        }
+        raise DriverError(messages.get(str(exc), str(exc))) from exc
     proposal_hash = payload_hash(proposal)
     label_text = (
         "未提供标签，仅运行漂移检查，KS/AUC 明确不可用。"

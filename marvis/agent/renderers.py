@@ -2545,6 +2545,10 @@ def _render_monitor_run(o: dict):
     if amber_flags:
         names = "、".join(str(c.get("label") or c.get("id")) for c in amber_flags)
         text += f" 黄旗:{names}。"
+    if o.get("label_maturity_assurance") == "unknown":
+        if o.get("label_mode") == "unlabeled_drift_only":
+            text += " 本期没有提供标签，仅检查分数与特征漂移，KS/AUC 不可用。"
+        text += " 标签成熟度尚未验证；以上为技术监控结果，不能据此宣称业务验收通过。"
     rows = [
         [
             str(c.get("label") or c.get("id") or ""),
