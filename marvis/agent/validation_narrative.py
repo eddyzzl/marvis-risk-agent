@@ -41,7 +41,10 @@ def _topic_metrics(metrics, topic):
     effectiveness = metrics.get("effectiveness")
     if isinstance(effectiveness, dict):
         keys = ["overall"]
-        if topic == "stability":
+        # Overall judgements and recommendations must see adverse periods even
+        # when aggregate split metrics hide them. Other generated prose is never
+        # substituted for these deterministic observations.
+        if topic in {"stability", "overall", "recommendation"}:
             keys += ["monthly_ks", "monthly_psi", "psi_stability_table"]
         if topic in {"ranking", "overall", "recommendation"}:
             keys += ["lift_ranking_assessment"]

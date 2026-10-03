@@ -181,7 +181,7 @@ def test_topics_keep_exact_evidence_and_memory_without_repeating_raw_bin_tables(
     metrics = {
         "algorithm": "logistic", "basic_info": {"hyperparameters": {"C": 0.25}},
         "effectiveness": {"overall": [{"split": "oot", "ks": 0.31, "auc": 0.71}],
-                          "monthly_psi": [{"month": "2026-01", "psi": 0.06}],
+                          "monthly_psi": [{"month": "2026-01", "psi": 0.36}],
                           "lift_ranking_assessment": {"splits": {"oot": {"status": "weak"}}},
                           "bin_tables": {"oot": [{"private_bulk": "x" * 10000}]}},
         "stress_test": {"baseline": {"ks": 0.31}, "per_category": [{"ks": 0.19}]},
@@ -205,7 +205,8 @@ def test_topics_keep_exact_evidence_and_memory_without_repeating_raw_bin_tables(
     assert original == before
     for topic in ("performance", "stability", "ranking", "overall"):
         assert seen[topic]["effectiveness"]["overall"] == metrics["effectiveness"]["overall"]
-    assert seen["stability"]["effectiveness"]["monthly_psi"] == metrics["effectiveness"]["monthly_psi"]
+    for topic in ("stability", "overall", "recommendation"):
+        assert seen[topic]["effectiveness"]["monthly_psi"] == metrics["effectiveness"]["monthly_psi"]
     assert "monthly_psi" not in seen["performance"]["effectiveness"]
     assert seen["ranking"]["effectiveness"]["lift_ranking_assessment"] == metrics["effectiveness"]["lift_ranking_assessment"]
     assert "stress_test" not in seen["ranking"]
