@@ -220,10 +220,10 @@ def test_batch_training_keeps_exact_group_identity_when_group_is_also_a_feature(
     recipes = ["lr", "lgb"] if parameter_form == "later_recipe" else ["lgb"]
     params = group_params if parameter_form == "flat" else {"lgb": group_params}
     if parameter_form == "overridden":
-        params = {"lgb": {**group_params, "valid_group_cols": ["unused_missing_group"]}, "valid_group_cols": ["group"]}
+        params = {"lgb": {**group_params, "valid_group_cols": ["unused_missing_group"]}}
     result = runner.invoke(ToolRef("modeling", "train_models"), _inputs(
         encoded.output["result_dataset_id"], features=["segment_woe", "group"], recipes=recipes,
-        params=params,
+        params=params, **({"valid_group_cols": ["group"]} if parameter_form == "overridden" else {}),
     ), task_id="task-feature")
     assert result.ok, result.error
     modeling = ModelingRepository(repo.db_path)
