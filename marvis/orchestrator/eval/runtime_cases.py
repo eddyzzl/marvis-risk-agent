@@ -27,9 +27,12 @@ def write_synthetic_suite(
     normal_validation_only: bool = False,
     normal_validation_agent_only: bool = False,
     normal_labeling_only: bool = False,
+    normal_monitoring_only: bool = False,
+    normal_monitoring_workflow_only: bool = False,
 ) -> dict[str, Path]:
     if sum((normal_modeling_only, normal_strategy_only, normal_validation_only,
-            normal_validation_agent_only, normal_labeling_only, include_workflow_families)) > 1:
+            normal_validation_agent_only, normal_labeling_only, normal_monitoring_only,
+            normal_monitoring_workflow_only, include_workflow_families)) > 1:
         raise ValueError(
             "normal suites are separate, not additions to the archived nine cases"
         )
@@ -86,6 +89,9 @@ def write_synthetic_suite(
         from .runtime_labeling_cases import normal_labeling_frames
 
         frames = normal_labeling_frames()
+    if normal_monitoring_only or normal_monitoring_workflow_only:
+        from .runtime_monitoring_cases import normal_monitoring_frames
+        frames = normal_monitoring_frames()
     materials = {}
     for name, (role, frame) in frames.items():
         frame.to_parquet(data / name, index=False)
@@ -109,6 +115,10 @@ def write_synthetic_suite(
         from .runtime_labeling_cases import normal_labeling_cases
 
         cases, expected = normal_labeling_cases(materials)
+        return _write_suite_files(root, private, data, cases, expected)
+    if normal_monitoring_only or normal_monitoring_workflow_only:
+        from .runtime_monitoring_cases import normal_monitoring_cases
+        cases, expected = normal_monitoring_cases(materials, manual=normal_monitoring_workflow_only)
         return _write_suite_files(root, private, data, cases, expected)
     cases = [
         {
@@ -236,6 +246,8 @@ if __name__ == "__main__":
     group.add_argument("--normal-validation-only", action="store_true")
     group.add_argument("--normal-validation-agent-only", action="store_true")
     group.add_argument("--normal-labeling-only", action="store_true")
+    group.add_argument("--normal-monitoring-only", action="store_true")
+    group.add_argument("--normal-monitoring-workflow-only", action="store_true")
     args = parser.parse_args()
     for name, path in write_synthetic_suite(
         args.directory,
@@ -245,5 +257,7 @@ if __name__ == "__main__":
         normal_validation_only=args.normal_validation_only,
         normal_validation_agent_only=args.normal_validation_agent_only,
         normal_labeling_only=args.normal_labeling_only,
+        normal_monitoring_only=args.normal_monitoring_only,
+        normal_monitoring_workflow_only=args.normal_monitoring_workflow_only,
     ).items():
         print(f"{name}={path}")

@@ -36,6 +36,7 @@ class Assertion(StrictModel):
         "validation_report_verified",
         "validation_pipeline_equals",
         "labeling_evidence",
+        "monitoring_evidence",
     ]
     tool: str = ""
     path: list[str | int] = Field(default_factory=list)
@@ -71,6 +72,12 @@ def _at(value, path):
 
 
 def _assertion(assertion, record, private):
+    if assertion.kind == "monitoring_evidence":
+        monitoring = record.get("execution", {}).get("monitoring", {})
+        return (assertion.tool == "modeling.monitor_run" and monitoring.get("verified") is True
+                and monitoring.get("runtime_entry") == assertion.value
+                and any(e.get("stage") == "human_monitoring_plan_start" and e.get("status_code") == 202
+                        for e in record.get("http_events", [])))
     if assertion.kind == "validation_pipeline_equals" or (
             assertion.kind == "validation_report_verified" and not assertion.tool):
         if record.get("runtime_entry") != "standard_validation_agent_v2":
@@ -351,7 +358,9 @@ def score_case(
         and model_source == "real_model"
         and usage["transport_attempts"] > 0
         and usage["trace_complete"]
-        and (observed_tools or observed_native_pipeline),
+        and (observed_tools or observed_native_pipeline)
+        and record.get("runtime_entry") != "manual_monitoring_workflow"
+        and record.get("execution", {}).get("runtime_entry") != "manual_monitoring_workflow",
         "acceptance_claim": "not_established",
         "evidence_scope": "runtime_regression"
         if model_source == "fixture_model"
@@ -412,6 +421,8 @@ def runtime_task_coverage(records):
                 r for r in records
                 if r.get("task_type") == task_type and r["scenario"] == scenario
                 and (task_type != "validation" or r.get("runtime_entry") == "standard_validation_agent_v2")
+                and r.get("runtime_entry") != "manual_monitoring_workflow"
+                and r.get("execution", {}).get("runtime_entry") != "manual_monitoring_workflow"
             ]
             cells[task_type][scenario] = {
                 **_rate(members),
@@ -426,6 +437,10 @@ def runtime_task_coverage(records):
         "scope": "supported_http_intake_types; not all product workflows or acceptance",
         "cells": cells,
         "missing_cells": missing,
+        "monitoring_entries": {
+            entry: [r["case_id"] for r in records if r.get("runtime_entry", r.get("execution", {}).get("runtime_entry")) == entry]
+            for entry in ("standard_model_monitoring_agent", "manual_monitoring_workflow")
+        },
         "manual_compatibility_case_ids": [
             r["case_id"] for r in records
             if r.get("runtime_entry") == "manual_compatibility_workflow"

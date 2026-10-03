@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_valid
 
 from marvis.api_schemas import DataSemanticMappingRequest, PortfolioSetupRequest
 from .runtime_labeling import LabelingBusinessInput
+from .runtime_monitoring import MonitoringBusinessInput
 
 RUNTIME_FINISH_REASONS = frozenset(
     {"stop", "length", "tool_calls", "function_call", "content_filter", "other"}
@@ -127,15 +128,26 @@ class RuntimeAction(StrictModel):
         "confirm_current_validation_report",
         "submit_labeling_request",
         "download_labeling_results",
+        "submit_model_monitoring_request",
+        "start_model_monitoring_workflow",
+        "confirm_model_monitoring_plan",
     ]
     content: str = ""
     tool: str = ""
     portfolio_request: PortfolioSetupRequest | None = None
     semantic_mapping: DataSemanticMappingRequest | None = None
     labeling_request: LabelingBusinessInput | None = None
+    monitoring_request: MonitoringBusinessInput | None = None
 
     @model_validator(mode="after")
     def required_fields(self):
+        if self.kind in {"submit_model_monitoring_request", "start_model_monitoring_workflow"}:
+            if self.monitoring_request is None or not self.content.strip() or self.tool:
+                raise ValueError("monitoring requires declared data/label choices and human text")
+        elif self.monitoring_request is not None:
+            raise ValueError("monitoring fields belong only to its declared start action")
+        if self.kind == "confirm_model_monitoring_plan" and (self.tool or not self.content.strip()):
+            raise ValueError("monitoring confirmation needs human text and its current proposal")
         if self.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report"} and (
             self.tool or not self.content.strip() or self.portfolio_request is not None
             or self.semantic_mapping is not None
@@ -185,6 +197,8 @@ class RuntimeAction(StrictModel):
             value.pop("portfolio_request", None)
         if value.get("semantic_mapping") is None:
             value.pop("semantic_mapping", None)
+        if value.get("monitoring_request") is None:
+            value.pop("monitoring_request", None)
         if value.get("labeling_request") is None:
             value.pop("labeling_request", None)
         return value
@@ -227,6 +241,17 @@ class RuntimeCase(StrictModel):
               or any(m.role in {"notebook", "pmml", "dictionary"} for m in self.materials)
               or any(a.kind in {"start_validation_workflow", "start_validation_agent", "confirm_current_validation_report"} for a in self.actions)):
             raise ValueError("validation files and start action belong only to validation")
+        monitor = [i for i, a in enumerate(self.actions) if a.monitoring_request is not None]
+        confirms = [i for i, a in enumerate(self.actions) if a.kind == "confirm_model_monitoring_plan"]
+        if monitor or confirms:
+            if (len(monitor) != 1 or confirms != [monitor[0] + 1]
+                    or self.task.task_type != "modeling" or monitor[0] == 0
+                    or len(self.materials) != 2
+                    or len({m.path for m in self.materials}) != 2
+                    or len([m for m in self.materials if m.role == "sample"]) != 1
+                    or not any(m.path == self.actions[monitor[0]].monitoring_request.material_path
+                               and m.role == "unknown" for m in self.materials)):
+                raise ValueError("monitoring follows modeling with one separate declared new dataset and confirmation")
         labeling = [i for i, a in enumerate(self.actions) if a.kind == "submit_labeling_request"]
         if labeling and (
             labeling != [0] or self.initial_message is not None

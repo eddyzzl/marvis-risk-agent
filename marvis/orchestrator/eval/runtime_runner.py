@@ -913,7 +913,11 @@ class Journey:
             body.update(source_dir=str(source), run_mode="agent")
             task = self.json_request("POST", "/api/tasks", label="create_task", json=body)
             self.task_id = task["id"]
+            from .runtime_monitoring import monitoring_materials
+            delayed_materials = monitoring_materials(self.case)
             for material in self.case.materials:
+                if material.path in delayed_materials:
+                    continue
                 path = (dataset_root / material.path).resolve()
                 if not path.is_relative_to(dataset_root.resolve()):
                     raise RuntimeJourneyError("material_identity_mismatch")
@@ -953,7 +957,13 @@ class Journey:
                 )
                 self.wait_idle()
         for action in self.case.actions:
-            if action.kind == "start_validation_workflow":
+            if action.kind in {"submit_model_monitoring_request", "start_model_monitoring_workflow"}:
+                from .runtime_monitoring import start_monitoring
+                start_monitoring(self, action, dataset_root)
+            elif action.kind == "confirm_model_monitoring_plan":
+                from .runtime_monitoring import confirm_monitoring
+                confirm_monitoring(self, action)
+            elif action.kind == "start_validation_workflow":
                 self.start_validation_workflow(action)
             elif action.kind == "start_validation_agent":
                 from .runtime_validation_adapter import start_agent
@@ -1524,6 +1534,17 @@ def _receipts(workspace: Path, task_id: str | None, *, case=None, journey=None) 
                 except (ValueError, KeyError, OSError):
                     receipt["binding_verified"] = False
             evidence["steps"].append(receipt)
+    from .runtime_monitoring import monitoring_entry, monitoring_receipt
+    from marvis.data.errors import DataLayerError
+    if case is not None and monitoring_entry(case):
+        evidence["runtime_entry"] = monitoring_entry(case)
+        try:
+            evidence["monitoring"] = monitoring_receipt(
+                workspace, task_id, evidence, private["outputs"],
+                getattr(journey, "monitoring_submission", None),
+            )
+        except (ValueError, KeyError, TypeError, OSError, AttributeError, DataLayerError):
+            evidence["monitoring"] = {"verified": False, "runtime_entry": monitoring_entry(case)}
     return evidence, private
 
 
@@ -1862,6 +1883,9 @@ def run_runtime_suite(
                 )} if custody_run_dir is not None else None,
             )
             interrupted = record["runtime_status"] == "interrupted"
+        from .runtime_monitoring import monitoring_entry
+        if monitoring_entry(case) is not None:
+            record["runtime_entry"] = monitoring_entry(case)
         # Commit the original execution outcome before attempting any scoring.
         _write_new(case_dir / "execution.json", record)
         try:
