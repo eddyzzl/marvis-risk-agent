@@ -187,6 +187,8 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         holdout_values=tuple(str(v) for v in holdout) if holdout else ("oot",),
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
         top_k=_optional_int(inputs.get("top_k")),
+        batch_size=int(inputs.get("batch_size", DEFAULT_SCREEN_BATCH_SIZE)),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     payload = {
         "selection_evidence_ref": selection_ref,
@@ -200,6 +202,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         "scores": _jsonable(result.scores),
         "n_screened": result.n_screened,
         "note": "非二分类目标：跳过统计型泄漏KS筛选；语义/时序泄漏与控制列仍硬剔除",
+        "nan_labels_dropped": result.nan_labels_dropped,
         "sentinel_columns": {},
         "sentinel_notice": "",
     }

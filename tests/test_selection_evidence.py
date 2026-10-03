@@ -90,6 +90,30 @@ def test_continuous_screen_has_native_training_members_without_binary_diagnostic
     assert not _mask(payload, "label_diagnostics").any()
 
 
+def test_continuous_screen_honors_confirmed_missing_labels_and_batch_size(tmp_path):
+    runner, registry, _, _ = _source(tmp_path)
+    rng = np.random.default_rng(71)
+    frame = pd.DataFrame({"x": rng.normal(size=120), "z": rng.normal(size=120),
+                          "y": rng.normal(size=120), "split": np.repeat(["train", "test", "oot"], 40)})
+    frame.loc[[1, 8], "y"] = np.nan
+    path = tmp_path / "missing-continuous.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+    unconfirmed = _run(runner, dataset, target_type="continuous", batch_size=1)
+    assert not unconfirmed.ok
+    confirmed = _run(runner, dataset, target_type="continuous", batch_size=1, drop_nan_labels=True)
+    assert confirmed.ok, confirmed.error
+    payload = load_selection_evidence(registry, "task-feature", confirmed.output["selection_evidence_ref"])
+    assert payload["parameters"]["batch_size"] == 1
+    assert payload["parameters"]["drop_nan_labels"] is True
+    assert confirmed.output["nan_labels_dropped"] == 2
+    # Missing labels are excluded from association, while their feature values
+    # still participate in train-only missingness/constant checks.
+    assert _mask(payload, "fit").sum() == 40
+    expected = abs(frame.loc[:39, ["x", "y"]].dropna().corr(method="spearman").loc["x", "y"])
+    assert confirmed.output["scores"]["x"]["assoc_score"] == pytest.approx(expected)
+
+
 @pytest.mark.parametrize("oot_varies", [False, True])
 def test_auxiliary_oot_categorical_hint_is_not_certified_by_empty_core_diagnostics(tmp_path, oot_varies):
     runner, registry, _, _ = _source(tmp_path)
