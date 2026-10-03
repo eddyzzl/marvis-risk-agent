@@ -56,7 +56,7 @@ def _topic_metrics(metrics, topic):
     return scoped
 
 
-def _section_payload(original, topic, keys):
+def _section_payload(original, topic, keys, *, repair=False):
     payload = deepcopy(original)
     payload["requested_fields"] = list(keys)
     payload["narrative_topic"] = topic
@@ -80,6 +80,17 @@ def _section_payload(original, topic, keys):
     # another paragraph. The response schema alone restricts the writable keys.
     if "validation_results" in evidence:
         evidence["validation_results"] = _topic_metrics(evidence["validation_results"], topic)
+    if repair:
+        # Do not feed incomplete/unvalidated model text back as evidence. The
+        # only repair input is the same frozen task and measured observations.
+        payload["format_repair"] = {
+            "reason": "previous_response_did_not_satisfy_json_text_contract",
+            "instruction": (
+                "这是唯一一次格式修复。直接返回符合 schema 的完整 JSON；"
+                "每个必需字段用约 100 至 200 字完成当前主题，不展开推导、不重复其他主题；"
+                "保留关键指标、风险与证据限制，未要求修改的可选字段省略。"
+            ),
+        }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -92,13 +103,25 @@ def _generate_section(client, original, topic, keys, *, truncated=False):
         "additionalProperties": False,
     }
     kind = "metrics" if original.get("stage") == "metrics" else "report"
-    content = client.complete(
-        system_prompt=spec.text,
-        user_prompt=_section_payload(original, topic, keys),
-        json_schema={"name": f"validation_{kind}_{topic}", "strict": False, "schema": schema},
-        temperature=0.2, stream=False, max_tokens=2048, truncated=truncated,
-        caller=f"validation_{kind}_{topic}", prompt_name=spec.name, prompt_version=spec.version,
-    )
+    for attempt in range(2):
+        repair = attempt == 1
+        content = client.complete(
+            system_prompt=spec.text,
+            user_prompt=_section_payload(original, topic, keys, repair=repair),
+            json_schema={"name": f"validation_{kind}_{topic}", "strict": False, "schema": schema},
+            temperature=0.1 if repair else 0.2, stream=False, max_tokens=2048, truncated=truncated,
+            caller=f"validation_{kind}_{topic}" + ("_repair" if repair else ""),
+            prompt_name=spec.name, prompt_version=spec.version,
+        )
+        try:
+            return _parse_section(content, keys, kind=kind, topic=topic)
+        except ValueError:
+            if repair:
+                raise
+    raise AssertionError("unreachable")
+
+
+def _parse_section(content, keys, *, kind, topic):
     try:
         section = json.loads(content)
     except (ValueError, TypeError) as exc:

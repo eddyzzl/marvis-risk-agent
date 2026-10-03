@@ -256,3 +256,43 @@ def test_v2_metrics_incomplete_json_is_not_exposed_as_a_partial_summary(monkeypa
     assert deltas == [] and "overall" not in content
     with pytest.raises(ValueError, match="recommendation"):
         generate_v2_metrics_summary(Client(), json.dumps({"stage": "metrics", "evidence": {}}))
+
+
+def test_only_invalid_topic_is_repaired_once_with_unchanged_measured_evidence():
+    calls = []
+    source = {"stage": "word_conclusion_draft", "evidence": {
+        "validation_results": {"effectiveness": {"overall": [{"ks": 0.31}]}}}}
+    before = deepcopy(source)
+
+    class Client:
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            payload = json.loads(kwargs["user_prompt"])
+            if payload["narrative_topic"] == "stability" and "format_repair" not in payload:
+                return '{"TEXT:final_validation_conclusion":"invalid-raw-sentinel'
+            return json.dumps(reply_for(kwargs))
+
+    assert generate_v2_sections(Client(), json.dumps(source)) == ASSEMBLED
+    assert source == before and len(calls) == 8
+    retry = next(call for call in calls if call["caller"].endswith("_repair"))
+    initial = next(call for call in calls if call["caller"] == "validation_report_stability")
+    assert retry["max_tokens"] == initial["max_tokens"] == 2048
+    retry_payload, initial_payload = (json.loads(call["user_prompt"]) for call in (retry, initial))
+    assert "format_repair" in retry_payload and "format_repair" not in initial_payload
+    assert retry_payload["evidence"] == initial_payload["evidence"]
+    assert "invalid-raw-sentinel" not in retry["user_prompt"]
+
+
+def test_persistent_invalid_topic_exhausts_one_repair_and_never_starts_later_topics():
+    calls = []
+
+    class Client:
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            return '{"TEXT:pressure_test_summary":'
+
+    with pytest.raises(ValueError, match="pressure is not valid JSON"):
+        generate_v2_sections(Client(), json.dumps({"evidence": {}}))
+    assert [call["caller"] for call in calls] == [
+        "validation_report_pressure", "validation_report_pressure_repair",
+    ]
