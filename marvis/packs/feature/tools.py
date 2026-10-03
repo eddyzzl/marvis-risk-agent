@@ -1284,7 +1284,9 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "impute_missing", dataset.id)
-    _check_fit_input_time(runtime, dataset.id, fit_mask, columns)
+    strategy = str(inputs["strategy"])
+    if strategy != "constant":
+        _check_fit_input_time(runtime, dataset.id, fit_mask, columns)
     sentinel_values = _sentinel_values_for(inputs, columns)
     add_indicators = bool(inputs.get("add_indicators"))
     indicator_columns: list[str] = []
@@ -1292,7 +1294,7 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
         column_sentinels = sentinel_values.get(column)
         _filled_fit, value = impute_missing(
             out.loc[fit_mask, column],
-            strategy=str(inputs["strategy"]),
+            strategy=strategy,
             fill_value=inputs.get("fill_value"),
             sentinel_values=column_sentinels,
         )
@@ -1318,7 +1320,8 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
         preprocessing_steps.append(
             {"kind": "missing_indicator", "columns": list(indicators), "params": _jsonable(indicators)}
         )
-    preprocessing_steps.append({"kind": "impute", "columns": columns, "params": _jsonable(fill_values)})
+    preprocessing_steps.append({"kind": "impute", "columns": columns,
+                                "params": _jsonable(fill_values), "strategy": strategy})
     result = _register_frame(
         runtime,
         out,
@@ -1571,6 +1574,7 @@ def _register_frame(
                         "kind": str(step["kind"]),
                         "columns": [str(c) for c in step["columns"]],
                         "params": step["params"],
+                        **({"strategy": step["strategy"]} if "strategy" in step else {}),
                     },
                 ]
             sidecar_name = sidecar_path(Path(out_path.name)).name

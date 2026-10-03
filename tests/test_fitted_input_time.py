@@ -12,7 +12,7 @@ from tests.test_data_time_contracts import contracts, spec
 from tests.test_feature_pack import _runtime
 
 
-def scenario(tmp_path, *, future=True, available=True):
+def scenario(tmp_path, *, future=True, available=True, decision_extra=None):
     runner, registry, repo, _ = _runtime(tmp_path)
     decisions = pd.DataFrame(
         {
@@ -24,6 +24,8 @@ def scenario(tmp_path, *, future=True, available=True):
             "split": ["train"] * 24 + ["test"] * 8 + ["oot"] * 8,
         }
     )
+    for name, values in (decision_extra or {}).items():
+        decisions[name] = values
     features = pd.DataFrame(
         {
             "id": [f"f{i}" for i in range(40)],
@@ -348,3 +350,146 @@ def test_refit_records_only_formal_oot_as_its_independent_time_window(tmp_path):
     assert evidence["evaluation_roles"] == []
     assert evidence["evaluation_rows"] == 0
     assert evidence["feature_input_assurance"] == "unknown"
+
+
+def nested_asof(registry, repo, joined, sources):
+    frame = registry.read_authenticated_parquet_snapshot(sources[1].id)
+    frame['event'] = '2026-01-01T00:00:00Z'
+    frame['available'] = frame.event
+    path = registry.datasets_root / 'second-features.parquet'
+    frame.to_parquet(path, index=False)
+    with repo.transaction() as conn:
+        second_source = registry.register_existing_on_connection(
+            conn, path, task_id='task-feature', role='features'
+        )
+    dc, fc = contracts()
+    dc = DatasetTimeContract.model_validate({
+        **dc.model_dump(), 'dataset_id': joined.dataset.id,
+        'content_hash': joined.dataset.content_hash,
+    })
+    fc = DatasetTimeContract.model_validate({
+        **fc.model_dump(), 'dataset_id': second_source.id,
+        'content_hash': second_source.content_hash,
+    })
+    return AsOfJoinEngine(
+        registry, TaskArtifactRepository(repo.db_path),
+        workspace_root=registry.datasets_root.parent,
+    ).execute(task_id='task-feature', decision_contract=dc, feature_contract=fc,
+              spec=spec(feature_prefix='second__'))
+
+
+@pytest.mark.parametrize('corrupt_ancestor', [False, True])
+def test_nested_asof_retained_field_cannot_hide_known_future_or_corrupt_evidence(
+    tmp_path, corrupt_ancestor
+):
+    runner, registry, repo, joined, sources = scenario(tmp_path)
+    second = nested_asof(registry, repo, joined, sources)
+    if corrupt_ancestor:
+        joined.evidence_path.chmod(0o600)
+        joined.evidence_path.write_bytes(joined.evidence_path.read_bytes() + b'\n ')
+    result = runner.invoke(
+        ToolRef('modeling', 'train_model'), model_inputs(second.dataset.id),
+        task_id='task-feature',
+    )
+    assert not result.ok
+    assert ('content changed' if corrupt_ancestor else
+            'fitted input is available after evaluation decision') in str(result.error)
+
+
+def test_nested_asof_keeps_safe_retained_field_visibility(tmp_path):
+    runner, registry, repo, joined, sources = scenario(tmp_path, future=False)
+    second = nested_asof(registry, repo, joined, sources)
+    result = runner.invoke(
+        ToolRef('modeling', 'train_model'), model_inputs(second.dataset.id),
+        task_id='task-feature',
+    )
+    assert result.ok, result.error
+    artifact = ModelingRepository(repo.db_path).get_model_artifact(result.output['artifact_id'])
+    evidence = artifact.params['fitted_input_time_evidence']
+    assert evidence['feature_input_assurance'] == 'verified'
+    assert evidence['assurance'] == 'unknown'
+    assert len(evidence['artifact_ids']) == 2
+
+
+def test_constant_imputation_is_row_local_and_retains_known_training_conflict(tmp_path):
+    from marvis.data.fitted_input_time import _row_times
+
+    runner, registry, _, joined, _ = scenario(tmp_path)
+    result = runner.invoke(
+        ToolRef('feature', 'impute_missing'), {
+            'dataset_id': joined.dataset.id, 'columns': ['asof__amount'],
+            'split_col': 'split', 'strategy': 'constant', 'fill_value': 0,
+        }, task_id='task-feature',
+    )
+    assert result.ok, result.error
+    original, _, _ = _row_times(registry, joined.dataset.id, ())
+    projected, _, _ = _row_times(registry, result.output['result_dataset_id'], ())
+    assert projected['asof__amount'] == original['asof__amount']
+    trained = runner.invoke(
+        ToolRef('modeling', 'train_model'), model_inputs(result.output['result_dataset_id']),
+        task_id='task-feature',
+    )
+    assert not trained.ok
+    assert 'fitted input is available after evaluation decision' in str(trained.error)
+
+
+@pytest.mark.parametrize('future', [False, True])
+def test_nested_feature_parent_preserves_dependency_times_and_real_row_mapping(tmp_path, future):
+    from marvis.data.fitted_input_time import _row_times
+
+    runner, registry, repo, joined, sources = scenario(
+        tmp_path, future=future, decision_extra={
+            'event': '2026-01-01T00:00:00Z',
+            'available': '2026-01-01T00:00:00Z', 'version': 1,
+        },
+    )
+    # Reverse decision order to exercise the feature-side membership mapping;
+    # the outer snapshot clock alone is earlier than its native dependency.
+    decisions = registry.read_authenticated_parquet_snapshot(sources[0].id).iloc[::-1]
+    path = registry.datasets_root / 'reversed-decisions.parquet'
+    decisions.to_parquet(path, index=False)
+    with repo.transaction() as conn:
+        reversed_source = registry.register_existing_on_connection(
+            conn, path, task_id='task-feature', role='decisions', target_col_override='y',
+        )
+    dc, fc = contracts()
+    dc = DatasetTimeContract.model_validate({
+        **dc.model_dump(), 'dataset_id': reversed_source.id,
+        'content_hash': reversed_source.content_hash,
+    })
+    fc = DatasetTimeContract.model_validate({
+        **fc.model_dump(), 'dataset_id': joined.dataset.id,
+        'content_hash': joined.dataset.content_hash,
+    })
+    second = AsOfJoinEngine(
+        registry, TaskArtifactRepository(repo.db_path),
+        workspace_root=registry.datasets_root.parent,
+    ).execute(task_id='task-feature', decision_contract=dc, feature_contract=fc,
+              spec=spec(feature_columns=('asof__amount',), feature_prefix='second__'))
+    before, _, _ = _row_times(registry, joined.dataset.id, ())
+    after, _, _ = _row_times(registry, second.dataset.id, ())
+    assert after['second__asof__amount'].times == before['asof__amount'].times[::-1]
+    trained = runner.invoke(
+        ToolRef('modeling', 'train_model'),
+        model_inputs(second.dataset.id, features=['second__asof__amount']),
+        task_id='task-feature',
+    )
+    if future:
+        assert not trained.ok
+        assert 'available after evaluation decision' in str(trained.error)
+    else:
+        assert trained.ok, trained.error
+        evidence = ModelingRepository(repo.db_path).get_model_artifact(
+            trained.output['artifact_id']
+        ).params['fitted_input_time_evidence']
+        assert evidence['feature_input_assurance'] == 'verified'
+        assert evidence['assurance'] == 'unknown'
+    joined.evidence_path.chmod(0o600)
+    joined.evidence_path.write_bytes(joined.evidence_path.read_bytes() + b'\n ')
+    corrupted = runner.invoke(
+        ToolRef('modeling', 'train_model'),
+        model_inputs(second.dataset.id, features=['second__asof__amount']),
+        task_id='task-feature',
+    )
+    assert not corrupted.ok
+    assert 'content changed' in str(corrupted.error)

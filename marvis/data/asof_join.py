@@ -269,6 +269,15 @@ class AsOfJoinEngine:
             "decision_at": tuple(decisions[i] if decisions else None for i, _ in evidence.memberships),
             "available_at": tuple(available[j] if available and j is not None else None for _, j in evidence.memberships),
             "features": tuple(evidence.spec.feature_prefix + name for name in evidence.spec.feature_columns),
+            "feature_inputs": {
+                evidence.spec.feature_prefix + name: name
+                for name in evidence.spec.feature_columns
+            },
+            "memberships": evidence.memberships,
+            "parents": {
+                role: {"dataset_id": contract.dataset_id, "content_hash": contract.content_hash}
+                for role, contract in (("decision", dc), ("feature", fc))
+            },
         }
 
 

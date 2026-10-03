@@ -151,12 +151,24 @@ def _combine(bounds):
     return _Bound(times, complete, True)
 
 
-def _row_times(registry, dataset_id, seen):
+def _row_times(registry, dataset_id, seen, cache=None):
     if dataset_id in seen or len(seen) >= 64:
         raise FeatureError(
             "fitted input time lineage is cyclic or exceeds 64 transforms"
         )
     dataset = registry.get(dataset_id)
+    cache = {} if cache is None else cache
+    if dataset_id in cache:
+        value, frozen = cache[dataset_id]
+        _verify_dataset_unchanged(registry, frozen)
+        return value
+
+    def checked(fields, decisions, artifacts):
+        _verify_dataset_unchanged(registry, dataset)
+        value = fields, decisions, sorted(set(artifacts))
+        cache[dataset_id] = value, dataset
+        return value
+
     names = registry.authenticated_parquet_column_names(dataset_id)
     unknown = _Bound((None,) * dataset.row_count, False)
     fields = dict.fromkeys(names, unknown)
@@ -165,29 +177,52 @@ def _row_times(registry, dataset_id, seen):
         registry, repo, workspace_root=registry.datasets_root.parent
     ).row_input_time_evidence(dataset_id)
     if native:
-        available = native["available_at"]
-        fields.update(
-            dict.fromkeys(
-                native["features"],
-                _Bound(
-                    available,
-                    all(time is not None for time in available),
-                    any(time is not None for time in available),
-                ),
+        parents = {}
+        artifacts = [native["artifact_id"]]
+        for role, source in native["parents"].items():
+            binding = registry.authenticate_dataset_binding(
+                source["dataset_id"], expected_task_id=dataset.task_id,
+                expected_content_hash=source["content_hash"],
             )
+            parent, _, parent_artifacts = _row_times(
+                registry, source["dataset_id"], (*seen, dataset_id), cache
+            )
+            registry.verify_dataset_binding(binding)
+            parents[role] = parent
+            artifacts.extend(parent_artifacts)
+        decision_positions, feature_positions = zip(*native["memberships"], strict=True)
+        mapped = {}
+        for name, bound in parents["decision"].items():
+            if name in fields:
+                if id(bound) not in mapped:
+                    mapped[id(bound)] = _map_bound(bound, decision_positions) if bound.known else unknown
+                fields[name] = mapped[id(bound)]
+        available = native["available_at"]
+        declared = _Bound(
+            available, all(time is not None for time in available),
+            any(time is not None for time in available),
         )
-        return fields, native["decision_at"], [native["artifact_id"]]
+        projected = {}
+        for name, source_name in native["feature_inputs"].items():
+            parent = parents["feature"][source_name]
+            if id(parent) not in projected:
+                inherited = _map_bound(parent, feature_positions) if parent.known else unknown
+                # A recorded feature snapshot can time a previously untimed raw
+                # field. It cannot erase a known later native dependency.
+                projected[id(parent)] = _combine((declared, inherited)) if inherited.known else declared
+            fields[name] = projected[id(parent)]
+        return checked(fields, native["decision_at"], artifacts)
     state = load_preprocessing_state(registry, dataset_id)
     if not state.artifact_id:
         # Existing readers still authenticate complex JOIN/cleaning lineage and
         # reject corruption. They do not provide a native row-position mapping
         # for this narrower cross-row proof, so no timestamps are inferred.
         feature_time_evidence(registry, dataset_id, names)
-        return fields, unknown.times, []
+        return checked(fields, unknown.times, [])
     proof = repo.get_for_task(dataset.task_id, state.artifact_id)["provenance"]
     source_id = proof["source_dataset_id"]
     parent_state = load_preprocessing_state(registry, source_id)
-    parent, decisions, artifacts = _row_times(registry, source_id, (*seen, dataset_id))
+    parent, decisions, artifacts = _row_times(registry, source_id, (*seen, dataset_id), cache)
     local = state.steps[len(parent_state.steps) :]
     components = proof["fit"]
     components = (
@@ -208,10 +243,15 @@ def _row_times(registry, dataset_id, seen):
                 dataset_id, columns=retained
             )
             if not before.reset_index(drop=True).equals(after.reset_index(drop=True)):
-                return fields, unknown.times, [*artifacts, state.artifact_id]
+                return checked(fields, unknown.times, [*artifacts, state.artifact_id])
     fields.update({name: projected[name] for name in names if name in projected})
-    registry.resolve_verified_path(dataset_id)
-    return fields, decisions, [*artifacts, state.artifact_id]
+    return checked(fields, decisions, [*artifacts, state.artifact_id])
+
+
+def _map_bound(bound, positions):
+    times = tuple(bound.times[i] if i is not None else None for i in positions)
+    return _Bound(times, bound.complete and all(time is not None for time in times),
+                  any(time is not None for time in times))
 
 
 def _project_steps(parent, local, components, row_count):
@@ -224,6 +264,9 @@ def _project_steps(parent, local, components, row_count):
     fit_index = 0
     for step in local:
         fitted_step = step in fitted
+        # Constant imputation keeps its existing authenticated membership slot
+        # for compatibility, but its fixed value is not learned across rows.
+        # Older receipts without an explicit strategy remain conservative.
         component = (
             components[fit_index]
             if fitted_step and len(components) == len(fitted)
@@ -233,7 +276,9 @@ def _project_steps(parent, local, components, row_count):
             if not inputs <= projected.keys():
                 raise FeatureError("fitted input time dependency is missing")
             bound = _combine(projected[name] for name in inputs)
-            if fitted_step:
+            if fitted_step and not (
+                step["kind"] == "impute" and step.get("strategy") == "constant"
+            ):
                 if not bound.known:
                     projected[output] = bound
                     continue
