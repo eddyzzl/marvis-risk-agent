@@ -154,3 +154,21 @@ def test_instantiated_workflows_forward_exact_selection_refs(
             input_schema,
             label="inputs",
         )
+
+
+@pytest.mark.parametrize("template_id", ["modeling", "modeling_with_join"])
+def test_fold_workflows_freeze_full_candidates_and_forward_final_results(template_id):
+    load_builtin_templates()
+    steps = {step.title: step for step in get_template(template_id).steps}
+    tune = steps["调参"].inputs_template
+    train = steps["训练模型"].inputs_template
+    assert steps["配置调参"].inputs_template["cv_folds"] == 3
+    assert tune["fold_selection"] == {
+        "source_dataset_id": "$ref:切分样本.output.result_dataset_id",
+        "candidates": "$ref:选择建模规格.output.feature_cols",
+    }
+    assert tune["cv_folds"] == "$ref:配置调参.output.cv_folds"
+    assert train["features_by_recipe"] == "$ref:调参.output.features_by_recipe"
+    assert train["fold_tuning_evidence_refs"] == "$ref:调参.output.fold_tuning_evidence_refs"
+    assert train["seed"] == tune["seed"]
+    assert train["recipes"] == tune["recipes"]

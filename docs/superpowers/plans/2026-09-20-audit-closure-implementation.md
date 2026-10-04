@@ -639,3 +639,13 @@ A 正式基准聚合仍明确 unavailable，正在接冻结样例与门槛；其
 原生/回放/特征/治理相关 **56 passed**；后续联合检查 **129 passed, 1 failed**，唯一失败为已有 `strategy` sidecar 字段未被旧测试期望包含，已核对 HEAD 并修正测试。独立另发现 UInt 填 `-1` 的兼容回归，修复后受影响检查 **37 passed**。这些组有重叠，不累加为唯一检查数。独立 8 个真实 signed/unsigned、无 pandas metadata、含空值、原生/回放/治理/cap/WOE/provider 场景通过；原 nullable/inexact 反例继续通过，最后 17 个整数提升/边界/回放场景通过，无剩余审核阻断。Ruff/diff 通过，原失败日志保留于 `fitted-parameter-audit-20261003/integer-declaration-{before,core,paths,final,repair}.log`。
 
 `a1ba7b9e` 保存此前开发的 `FoldSelectionSession` 数值模块：同一认证快照、分批列读取、实际原生行成员、完整已给定候选集的 fit-only 重筛和冻结特殊值策略。当前只证明这个数值模块的成员范围，尚未接入实际调参，不证明候选集来源独立、盲 OOT、标签成熟或历史参数存在。下一阶段继续实际 CV/缓存/训练接线；本节不关闭 WP07 或任何整体验收项。
+
+### 实际每折筛选、调参与最终训练接线（2026-10-04）
+
+实际 `tune_hyperparameters`、隔离子进程和两套建模工作流现使用原生 split 来源与完整声明候选集，在每折真实 fit 成员内重新筛选；树模型提前划出 early-stop 成员，分组保持隔离。固定特殊值策略和两个原生筛选来源绑定同一计划。二分类、连续和多分类调用同一成员约束。auto 正负权重按每折 fit 标签/权重求值；搜索保留参数意图，粗搜/细搜均复用；最终 outer-train 重新筛选，按最终特征展开约束，以各折正整数轮数的向上取整中位数冻结轮数。CatBoost 最终禁用 `use_best_model`，禁止调用方绕过平台注入 early-stop 控制。
+
+原生 fold receipt v2 绑定完整搜索身份（折数、seed、预算、惩罚、参数、数据和数值依赖指纹）及完整可复用结果摘要。独立真实反例曾通过修改普通缓存及重算 checksum 伪造 KS，或将三折 receipt 移植到四折请求；现两者均在缓存命中前拒绝。补齐 selector/WOE/标签数值依赖指纹。最终单模型和批量训练验证实际 recipe、特征、参数、seed、split、标签政策和来源，保存原生 fold 引用；受治理入口拒绝调用方自填三个证明字段。模型交付重新认证来源；冻结候选不执行会改变成员/轮数的旧式可选 train+test 重训。场景不能在冻结校验后修改 learner 参数：实际 `income` 反例现于创建实验前失败，正常路径仍可交付。
+
+作者实际 LR 三种目标、LightGBM、CatBoost、连续 LightGBM/XGBoost 的子进程、缓存、训练、轮数/约束、模型产物和工作流联合检查 **61 passed**；新增场景检查 **1 passed**。兼容检查 **52 passed, 1 failed**，唯一失败为新子进程返回了两个空 fold 字段，已改为仅 fold 模式返回，保留旧协议形状，修复后实际隔离进程等价性检查 **1 passed**。独立缓存双反例、单模型连续树训练/交付、伪造参数拒绝、冻结 refit 与场景拒绝复验通过。日志位于 `fitted-parameter-audit-20261003/fold-{runtime-complete,final-integration,scenario,compatibility,legacy-shape-fixed}.log`，各组有重叠，不累加为唯一测试数；原失败记录保留。
+
+本阶段只证明给定候选算法的每折隔离及冻结训练接线。候选来源、人为选择、历史可得性仍 unknown。`oot_evaluation=not_used_for_selection_or_tuning` 表示 OOT 未参与筛选与调参，**不表示物理未读取**：当前 Arrow batch 仍可先解码共享 Parquet 的 OOT 行再投影。独立 OOT 文件封存、最终模型字节冻结与一次评估继续待实现；不升级为盲 OOT、真实历史比较、正式业务验收或 WP07 关闭。

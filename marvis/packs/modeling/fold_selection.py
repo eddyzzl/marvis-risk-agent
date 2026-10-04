@@ -34,6 +34,13 @@ class FoldSelectionResult:
     evidence: dict
 
 
+@dataclass(frozen=True)
+class FinalSelectionResult:
+    features: tuple[str, ...]
+    train: pd.DataFrame
+    evidence: dict
+
+
 def _positions(value, row_count, *, role):
     positions = np.asarray(value)
     if (positions.ndim != 1 or positions.dtype.kind not in "iu"
@@ -204,9 +211,33 @@ class FoldSelectionSession:
         if (not fit <= train or fit & valid or train & test
                 or not ((valid <= train and train == fit | valid) or (valid == test and fit == train))):
             raise ModelingError("fold fit, early-stopping and validation memberships overlap or disagree")
+        features, parameters = self._select_fit(roles["fit"])
+        columns = self._model_columns(features)
+        train_frame = _ProjectedBackend(self._parquet, roles["train"], columns, self.policies).read_frame(None)
+        test_frame = _ProjectedBackend(self._parquet, roles["test"], columns, self.policies).read_frame(None)
+        valid_frame = train_frame.loc[roles["valid"]] if valid <= train else test_frame.loc[roles["valid"]]
+        evidence = self._evidence(features, parameters, roles)
+        return FoldSelectionResult(features, train_frame,
+                                   train_frame.loc[roles["fit"]], valid_frame, test_frame, evidence)
+
+    def prepare_final_fit(self, positions):
+        """Refit the frozen selection algorithm on outer train, without a holdout read."""
+        if self._parquet is None:
+            raise ModelingError("fold selection requires an open authenticated session")
+        positions = _positions(positions, self.source.row_count, role="final_fit")
+        features, parameters = self._select_fit(positions)
+        frame = _ProjectedBackend(self._parquet, positions,
+            self._model_columns(features), self.policies).read_frame(None)
+        return FinalSelectionResult(features, frame,
+            self._evidence(features, parameters, {"fit": positions, "train": positions}))
+
+    def _model_columns(self, features):
+        return list(dict.fromkeys([*features, self.target_col, *([self.weight_col] if self.weight_col else [])]))
+
+    def _select_fit(self, positions):
         candidates = [name for name in self.candidates if self.policies.get(name, {}).get("action") != "drop"]
         controls = [self.target_col, *([self.weight_col] if self.weight_col else [])]
-        backend = _ProjectedBackend(self._parquet, roles["fit"], [*candidates, *controls], {})
+        backend = _ProjectedBackend(self._parquet, positions, [*candidates, *controls], {})
         parameters = dict(self.screen_parameters)
         if self.target_type == "binary":
             screen = screen_features
@@ -232,16 +263,16 @@ class FoldSelectionSession:
         selected = select_features(backend, None, **selection_arguments)
         if not selected.selected:
             raise ModelingError("fold selection produced no usable features")
-        columns = list(dict.fromkeys([*selected.selected, *controls]))
-        train_frame = _ProjectedBackend(self._parquet, roles["train"], columns, self.policies).read_frame(None)
-        test_frame = _ProjectedBackend(self._parquet, roles["test"], columns, self.policies).read_frame(None)
-        valid_frame = train_frame.loc[roles["valid"]] if valid <= train else test_frame.loc[roles["valid"]]
+        return tuple(selected.selected), {
+            "screen_parameters": _effective_parameters(screen, screen_arguments),
+            "selection_parameters": _effective_parameters(select_features, selection_arguments),
+        }
+
+    def _evidence(self, features, parameters, roles):
         evidence = {
             "schema_version": "marvis.fold_selection.v1", "source_dataset_id": self.source.id,
             "source_content_hash": self.source.content_hash, "row_count": self.source.row_count,
-            "candidates": list(self.candidates), "selected": list(selected.selected),
-            "screen_parameters": _effective_parameters(screen, screen_arguments),
-            "selection_parameters": _effective_parameters(select_features, selection_arguments),
+            "candidates": list(self.candidates), "selected": list(features), **parameters,
             "special_value_policy": self.policies,
             "memberships": {role: _members(positions, self.source.row_count) for role, positions in roles.items()},
             "scope": "supplied_candidate_algorithm_fit_only",
@@ -250,5 +281,4 @@ class FoldSelectionSession:
         # Returned reports must not be able to mutate this session's next fold.
         evidence = json.loads(json.dumps(evidence, allow_nan=False))
         evidence["sha256"] = hashlib.sha256(json.dumps(evidence, sort_keys=True, allow_nan=False).encode()).hexdigest()
-        return FoldSelectionResult(tuple(selected.selected), train_frame,
-                                   train_frame.loc[roles["fit"]], valid_frame, test_frame, evidence)
+        return evidence

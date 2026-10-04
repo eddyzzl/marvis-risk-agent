@@ -171,6 +171,8 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         runtime.registry, ctx.task_id, experiment.config.dataset_id, experiment.config.features,
         experiment.config.target_col, (artifact.params or {}).get("selection_evidence_refs"),
     )
+    from marvis.packs.modeling.fold_tuning_evidence import validate_fold_experiment
+    fold_evidence = validate_fold_experiment(runtime.registry, ctx.task_id, experiment, artifact)
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
     capabilities = _artifact_capabilities(artifact, base_dir=base_dir)
     selection_policy_decision = _approval_policy_decision(inputs.get("selection_policy_decision"))
@@ -269,6 +271,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
 
     model_card = _model_card_payload(
         selection_evidence=selection_evidence,
+        fold_evidence=fold_evidence,
         experiment=experiment,
         artifact=artifact,
         capabilities=capabilities,
@@ -829,6 +832,7 @@ def _model_card_payload(
     monitoring_policy: dict,
     challenger_comparison: dict,
     selection_evidence: dict | None = None,
+    fold_evidence: dict | None = None,
 ) -> dict:
     config = experiment.config
     metrics = _json_safe(experiment.metrics) or {}
@@ -853,12 +857,15 @@ def _model_card_payload(
     selection_evidence = selection_evidence or unknown_selection_evidence(
         getattr(config, "dataset_id", ""), getattr(config, "features", ()),
     )
-    limitations.append(
-        ("特征选择仅记录核心算法的样本曝光；外层筛选后的内层CV属于给定特征集的条件验证，"
-         if selection_evidence.get("core_evidence_assurance") == "recorded"
-         else "未提供已认证的特征选择来源；")
-        + "未证明完整选择流程独立，辅助提示和人工选择仍未知。"
-    )
+    if fold_evidence:
+        limitations.append("每折按完整已声明候选集重新筛选；最终参数与特征已冻结。候选来源和历史可得性仍未知；OOT未参与调参，但共享文件读取尚未物理隔离。冻结模型不执行改变样本与轮数的旧式可选重训。")
+    else:
+        limitations.append(
+            ("特征选择仅记录核心算法的样本曝光；外层筛选后的内层CV属于给定特征集的条件验证，"
+             if selection_evidence.get("core_evidence_assurance") == "recorded"
+             else "未提供已认证的特征选择来源；")
+            + "未证明完整选择流程独立，辅助提示和人工选择仍未知。"
+        )
     temporal_evidence = (artifact.params or {}).get("feature_time_evidence")
     if not isinstance(temporal_evidence, dict):
         temporal_evidence = {"assurance": "unknown", "fields": {}, "artifact_ids": []}
@@ -911,6 +918,7 @@ def _model_card_payload(
             "preprocessing_evidence": preprocessing_evidence,
             "parameter_time_evidence": parameter_time_evidence,
             "selection_evidence": _json_safe(selection_evidence),
+            "fold_tuning_evidence": _json_safe(fold_evidence),
         },
         "key_metrics": _model_card_key_metrics(metrics, is_refit=is_refit),
         "governance": {

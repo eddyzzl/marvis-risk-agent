@@ -239,13 +239,26 @@ def tool_tune_one_recipe_isolated(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     dataset_path = runtime.registry.resolve_path(dataset.id)
-    input_time = validate_tuning_preprocessing(runtime.registry, inputs)
+    from contextlib import ExitStack
+    from marvis.packs.modeling.fold_policy import build_fold_selection_plan, selection_session
+    from marvis.packs.modeling._common import _target_type_from_recipes
+    from marvis.packs.modeling.tune import _group_cols_from_params
+
+    fold_plan = build_fold_selection_plan(runtime.registry, ctx.task_id, inputs)
+    if fold_plan is not None and fold_plan != inputs.get("_fold_plan"):
+        raise ModelingError("isolated fold selection plan differs from its parent binding")
+    input_time = (None if fold_plan is not None else validate_tuning_preprocessing(runtime.registry, inputs))
     from marvis.packs.modeling.selection_evidence import selection_evidence_for_training
     selection = selection_evidence_for_training(
         runtime.registry, ctx.task_id, dataset.id, inputs["features"], inputs["target_col"],
         inputs.get("selection_evidence_refs"),
     )
-    result = tune_hyperparameters(
+    with ExitStack() as stack:
+        session = (stack.enter_context(selection_session(runtime.registry, fold_plan,
+            target_type=_target_type_from_recipes([str(inputs["recipe"])]),
+            group_columns=_group_cols_from_params(inputs.get("base_params")) or []))
+            if fold_plan is not None else None)
+        result = tune_hyperparameters(
         runtime.backend,
         dataset_path,
         features=[str(item) for item in inputs["features"]],
@@ -272,7 +285,9 @@ def tool_tune_one_recipe_isolated(inputs: dict, ctx) -> dict:
             inputs.get("_progress_journal_path"),
             event,
         ),
-    )
+        fold_selection_session=session,
+        fold_selection_plan=fold_plan,
+        )
     return {
         # Internal lifecycle evidence only; the aggregate tool never copies it
         # into its public output.  Keeping the PID alongside the protocol result
@@ -284,6 +299,9 @@ def tool_tune_one_recipe_isolated(inputs: dict, ctx) -> dict:
         "n_trials": int(result.n_trials),
         "trials": _jsonable(result.trials),
         "nan_labels_dropped": int(result.nan_labels_dropped),
+        **({"selected_features": list(result.selected_features),
+            "fold_selection_evidence": _jsonable(result.fold_selection_evidence)}
+           if result.fold_selection_evidence else {}),
     }
 
 

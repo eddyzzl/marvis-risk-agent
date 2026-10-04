@@ -1445,6 +1445,29 @@
           "cv_folds": {
             "type": "integer",
             "minimum": 2
+          },
+          "fold_selection": {
+            "type": "object",
+            "properties": {
+              "source_dataset_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "source_dataset_id",
+              "candidates"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -1483,6 +1506,41 @@
             "type": "object",
             "additionalProperties": {
               "type": "object"
+            }
+          },
+          "features_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "fold_tuning_evidence_refs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "content_hash"
+              ],
+              "additionalProperties": false
             }
           }
         },
@@ -1633,6 +1691,26 @@
               "continuous",
               "multiclass"
             ]
+          },
+          "fold_tuning_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "content_hash": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "content_hash"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -2554,6 +2632,41 @@
           "eval_metric": {
             "type": "string",
             "minLength": 1
+          },
+          "features_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "fold_tuning_evidence_refs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "content_hash"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [

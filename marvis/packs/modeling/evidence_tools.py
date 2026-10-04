@@ -1753,6 +1753,9 @@ def _load_sample(
 def _reject_caller_owned_platform_params(value: object, path: str = "params") -> None:
     calibration_fragments = ("calibrat", "isotonic", "platt")
     platform_owned = {
+        "fold_tuning_evidence",
+        "fold_tuning_evidence_ref",
+        "fold_selection_plan",
         "selection_evidence",
         "selection_evidence_refs",
         "preprocessing_steps",

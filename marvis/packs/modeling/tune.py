@@ -389,6 +389,8 @@ class TuneResult:
     nan_labels_dropped: int = 0
     """Rows excluded by the NaN-label gate (train/test/oot), for audit (mirrors TrainResult)."""
     recipe: str = "lgb"
+    selected_features: tuple[str, ...] = field(default_factory=tuple)
+    fold_selection_evidence: dict = field(default_factory=dict)
 
 
 def _split(frame: pd.DataFrame, split_col: str, split_values: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
@@ -1816,6 +1818,8 @@ def tune_hyperparameters(
     coarse_fraction: float = 0.6,
     cv_folds: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
+    fold_selection_session=None,
+    fold_selection_plan=None,
 ) -> TuneResult:
     """Deterministic two-stage random search for ``recipe``; selects by test KS
     minus in-time overfit penalty. ``recipe`` defaults to ``"lgb"`` and its search
@@ -1859,6 +1863,17 @@ def tune_hyperparameters(
     recipe = str(recipe or "lgb")
     if recipe not in DEFAULT_TRIAL_BUDGET:
         raise ModelingError(f"tune_hyperparameters does not support recipe: {recipe}")
+    if fold_selection_session is not None or fold_selection_plan is not None:
+        if fold_selection_session is None or fold_selection_plan is None:
+            raise ModelingError("fold tuning requires an authenticated session and frozen plan")
+        from marvis.packs.modeling.fold_tuning import tune_fold_selection
+
+        return tune_fold_selection(fold_selection_session, fold_selection_plan,
+            recipe=recipe, seed=seed, cv_folds=cv_folds, n_trials=n_trials,
+            base_params=base_params, early_stopping_rounds=early_stopping_rounds,
+            max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
+            drop_nan_labels=drop_nan_labels, coarse_fraction=coarse_fraction,
+            progress_callback=progress_callback)
     if recipe in _NONBINARY_TUNING_RECIPES:
         return _tune_nonbinary_hyperparameters(
             backend,

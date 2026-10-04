@@ -289,8 +289,10 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     """
     recipe = str(inputs.get("recipe") or "lgb")
     recipes = _normalize_recipe_list(inputs.get("recipes") or [recipe])
-    _validated_target_type(recipes, inputs.get("target_type"))
+    target_type = _validated_target_type(recipes, inputs.get("target_type"))
     configured_params = dict(inputs.get("params") or {})
+    for key in ("fold_tuning_evidence", "fold_tuning_evidence_ref", "fold_selection_plan"):
+        configured_params.pop(key, None)
     control_params = _training_control_params(inputs, configured_params)
     base_params = {**configured_params, **control_params}
     sentinel_columns = inputs.get("sentinel_columns")
@@ -319,6 +321,8 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     except ValueError as exc:
         raise ModelingError(str(exc)) from exc
     cv_folds = _optional_int(inputs.get("cv_folds"))
+    if inputs.get("fold_selection") is not None and cv_folds is None:
+        cv_folds = 3
     if cv_folds is not None and cv_folds < 2:
         raise ModelingError("cv_folds must be at least 2")
     runtime = runtime or _runtime(ctx)
@@ -329,6 +333,15 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     )
     base_params["selection_evidence"] = selection_evidence
     base_params["selection_evidence_refs"] = selection_evidence["references"]
+    from marvis.packs.modeling.fold_policy import build_fold_selection_plan, selection_session
+    from marvis.packs.modeling.fold_tuning import prepare_fold_layout
+    from marvis.packs.modeling.fold_tuning_evidence import publish_fold_tuning, validate_fold_cache
+    from marvis.packs.modeling.tune import _group_cols_from_params
+
+    fold_plan = build_fold_selection_plan(runtime.registry, ctx.task_id,
+        {**inputs, "sample_weight_col": control_params.get("sample_weight_col", "")})
+    if fold_plan is not None:
+        base_params["fold_selection_plan"] = fold_plan
 
     def _budget_for(item: str) -> int:
         if item in explicit_budgets:
@@ -338,6 +351,8 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
         return DEFAULT_TRIAL_BUDGET.get(item, 1)
 
     non_tunable = [item for item in recipes if item not in DEFAULT_TRIAL_BUDGET]
+    if fold_plan is not None and non_tunable:
+        raise ModelingError("fold selection cannot silently fall back for an unsupported tuning recipe")
     tunable = [item for item in recipes if item in DEFAULT_TRIAL_BUDGET]
     budgets = {item: _budget_for(item) for item in tunable}
     total_trials = sum(budgets.values())
@@ -388,19 +403,29 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
             checkpoint_store = TuneCheckpointStore(
                 _artifact_base_dir(settings, str(ctx.task_id)) / TUNE_CHECKPOINT_DIR_NAME
             )
-            dataset_content_hash = dataset_content_identity(dataset, dataset_path)
+        dataset_content_hash = dataset_content_identity(dataset, dataset_path)
         completed_before = 0
         for algorithm_offset, item in enumerate(tunable):
             algorithm_index = algorithm_offset + 1
             recipe_seed = _recipe_seed(seed, item)
             # Validate before checkpoint reuse: an old successful CV cache cannot
             # turn an outer supervised fit into independent inner validation.
-            base_params["fitted_input_time_evidence"] = validate_tuning_preprocessing(runtime.registry, {
-                **inputs, "recipe": item, "seed": recipe_seed,
-                "features": requested_features, "base_params": base_params,
-            })
+            if fold_plan is not None:
+                with selection_session(runtime.registry, fold_plan, target_type=target_type,
+                    group_columns=_group_cols_from_params(base_params) or []) as session:
+                    layout = prepare_fold_layout(session, fold_plan, recipe=item, seed=recipe_seed,
+                        cv_folds=cv_folds, base_params=base_params, drop_nan_labels=drop_nan_labels)[-1]
+                base_params["fitted_input_time_evidence"] = {
+                    "assurance": "unknown", "scope": "actual_cv_folds",
+                    "folds": [entry[-1] for entry in layout],
+                }
+            else:
+                base_params["fitted_input_time_evidence"] = validate_tuning_preprocessing(runtime.registry, {
+                    **inputs, "recipe": item, "seed": recipe_seed,
+                    "features": requested_features, "base_params": base_params,
+                })
             checkpoint_identity = None
-            if checkpoint_store is not None:
+            if checkpoint_store is not None or fold_plan is not None:
                 checkpoint_identity = build_tune_checkpoint_identity(
                     task_id=str(ctx.task_id),
                     dataset_id=dataset.id,
@@ -481,6 +506,13 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
                 else None
             )
             if cached is not None:
+                if fold_plan is not None:
+                    if not cached.get("fold_tuning_evidence_ref"):
+                        cached = None
+                    else:
+                        validate_fold_cache(runtime.registry, ctx.task_id, cached,
+                            search_identity=checkpoint_identity, plan=fold_plan, recipe=item)
+            if cached is not None:
                 per_recipe[item] = cached
                 cached_best = _tuning_progress_best(cached)
                 best_by_algorithm[item] = cached_best
@@ -552,6 +584,9 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
                     "selection_evidence_refs": selection_evidence["references"],
                     "drop_nan_labels": drop_nan_labels,
                     "cv_folds": cv_folds,
+                    **({"fold_selection": inputs["fold_selection"], "_fold_plan": fold_plan,
+                        "special_value_governance": inputs.get("special_value_governance", {})}
+                       if fold_plan is not None else {}),
                 },
                 ctx=ctx,
                 progress_callback=on_trial,
@@ -564,6 +599,16 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
                 "trials": _jsonable(isolated["trials"]),
                 "nan_labels_dropped": int(isolated.get("nan_labels_dropped") or 0),
             }
+            if fold_plan is not None:
+                current_plan = build_fold_selection_plan(runtime.registry, ctx.task_id,
+                    {**inputs, "sample_weight_col": control_params.get("sample_weight_col", "")})
+                if current_plan != fold_plan:
+                    raise ModelingError("fold selection plan changed while tuning")
+                per_recipe[item]["selected_features"] = isolated["selected_features"]
+                reference = publish_fold_tuning(runtime, ctx, plan=fold_plan, recipe=item,
+                    result={**isolated, "best_params": _jsonable(best_params)}, train_seed=seed,
+                    search_identity=checkpoint_identity, reusable_result=per_recipe[item])
+                per_recipe[item]["fold_tuning_evidence_ref"] = reference
             if item not in best_by_algorithm:
                 best_by_algorithm[item] = {
                     "selection_score": None,
@@ -618,6 +663,9 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
         (int(item.get("nan_labels_dropped") or 0) for item in per_recipe.values()),
         default=0,
     )
+    fold_outputs = ({"features_by_recipe": {item: per_recipe[item]["selected_features"] for item in recipes},
+        "fold_tuning_evidence_refs": {item: per_recipe[item]["fold_tuning_evidence_ref"] for item in recipes}}
+        if fold_plan is not None else {})
     if len(recipes) == 1:
         # Single-recipe back-compat shape: flat best_params/trials, exactly like
         # the historical lgb-only contract.
@@ -629,6 +677,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
             "trials": only["trials"],
             "nan_labels_dropped": only.get("nan_labels_dropped", 0),
             "per_recipe": _jsonable(per_recipe),
+            **fold_outputs,
         }
     return {
         "best_params": {item: per_recipe[item]["best_params"] for item in recipes},
@@ -637,6 +686,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
         "trials": [trial for item in recipes for trial in per_recipe[item]["trials"]],
         "nan_labels_dropped": total_nan_dropped,
         "per_recipe": _jsonable(per_recipe),
+        **fold_outputs,
     }
 
 
@@ -729,6 +779,16 @@ def tool_train_model(inputs: dict, ctx) -> dict:
     recipe = str(inputs["recipe"])
     target_type = _validated_target_type([recipe], inputs.get("target_type"))
     train_params = _training_params(inputs)
+    fold_reference = inputs.get("fold_tuning_evidence_ref")
+    if fold_reference is not None:
+        from marvis.packs.modeling.fold_tuning_evidence import validate_fold_training
+        fold_evidence = validate_fold_training(runtime.registry, ctx.task_id, inputs, recipe,
+            inputs["features"], train_params, fold_reference)
+        train_params["fold_tuning_evidence"] = fold_evidence
+        train_params["fold_tuning_evidence_ref"] = fold_reference
+    else:
+        for key in ("fold_tuning_evidence", "fold_tuning_evidence_ref", "fold_selection_plan"):
+            train_params.pop(key, None)
     train_params["selection_evidence"] = selection_evidence_for_training(
         runtime.registry, ctx.task_id, dataset.id, inputs["features"], inputs["target_col"],
         inputs.get("selection_evidence_refs"),
@@ -770,7 +830,7 @@ def tool_train_model(inputs: dict, ctx) -> dict:
         split_values=dict(inputs["split_values"]),
         params=train_params,
         seed=int(inputs["seed"]),
-        early_stopping_rounds=_optional_int(inputs.get("early_stopping_rounds")),
+        early_stopping_rounds=None if fold_reference is not None else _optional_int(inputs.get("early_stopping_rounds")),
         recipe_id=recipe,
         target_type=target_type,
         eval_metric=str(inputs.get("eval_metric") or "ks_auc").strip() or "ks_auc",
@@ -778,6 +838,8 @@ def tool_train_model(inputs: dict, ctx) -> dict:
     )
     if inputs.get("scenario"):
         config = apply_scenario(config, str(inputs["scenario"]))
+        if fold_reference is not None and (config.params != train_params or config.recipe_id != recipe):
+            raise ModelingError("scenario changes frozen fold parameters; apply it before tuning")
         recipe = config.recipe_id or recipe
 
     validate_inner_preprocessing(runtime.registry, config)
@@ -912,6 +974,14 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     control_params = _training_control_params(inputs, tuned_params)
     per_recipe_params = _params_by_recipe(tuned_params, recipes)
     features = tuple(str(item) for item in inputs["features"])
+    fold_references = inputs.get("fold_tuning_evidence_refs")
+    features_by_recipe = inputs.get("features_by_recipe")
+    if fold_references is not None or features_by_recipe is not None:
+        if (not isinstance(fold_references, dict) or not isinstance(features_by_recipe, dict)
+                or set(fold_references) != set(recipes) or set(features_by_recipe) != set(recipes)
+                or any(not isinstance(value, list) or not value for value in features_by_recipe.values())):
+            raise ModelingError("fold training requires exact feature and evidence entries for every recipe")
+        features = tuple(dict.fromkeys(feature for item in recipes for feature in features_by_recipe[item]))
     target_col = str(inputs["target_col"])
     split_col = str(inputs["split_col"])
     split_values = dict(inputs["split_values"])
@@ -950,7 +1020,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     def effective_params(recipe):
         if per_recipe_params is not None:
             return {**per_recipe_params.get(recipe, {}), **control_params}
-        elif recipe == "lgb":
+        elif recipe == "lgb" or (fold_references is not None and len(recipes) == 1):
             # legacy flat-params shape: only the lgb slot consumes it (unchanged
             # single-recipe / lgb-only-tuned back-compat behaviour).
             return {**tuned_params, **control_params}
@@ -970,6 +1040,19 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     last_exc: Exception | None = None
     for recipe in recipes:
         recipe_params = effective_params(recipe)
+        recipe_features = tuple(features_by_recipe[recipe]) if fold_references is not None else features
+        if fold_references is not None:
+            from marvis.packs.modeling.fold_tuning_evidence import validate_fold_training
+            fold_evidence = validate_fold_training(runtime.registry, ctx.task_id, inputs, recipe,
+                recipe_features, recipe_params, fold_references[recipe])
+            recipe_params["fold_tuning_evidence"] = fold_evidence
+            recipe_params["fold_tuning_evidence_ref"] = fold_references[recipe]
+            temporal_evidence = feature_time_evidence(runtime.registry, dataset.id, recipe_features)
+            selection_evidence = selection_evidence_for_training(runtime.registry, ctx.task_id,
+                dataset.id, recipe_features, target_col, inputs.get("selection_evidence_refs"))
+        else:
+            for key in ("fold_tuning_evidence", "fold_tuning_evidence_ref", "fold_selection_plan"):
+                recipe_params.pop(key, None)
         recipe_params["preprocessing_assurance"] = preprocessing_state.assurance
         recipe_params["feature_time_evidence"] = temporal_evidence
         recipe_params["selection_evidence"] = selection_evidence
@@ -986,12 +1069,12 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             recipe_params[SPECIAL_VALUE_GOVERNANCE_PARAM_KEY] = dict(governance)
         early_stopping_rounds = (
             _TRAIN_MODELS_EARLY_STOPPING_ROUNDS
-            if recipe in _EARLY_STOPPED_TREE_RECIPES
+            if recipe in _EARLY_STOPPED_TREE_RECIPES and fold_references is None
             else None
         )
         config = TrainConfig(
             dataset_id=dataset.id,
-            features=features,
+            features=recipe_features,
             target_col=target_col,
             split_col=split_col,
             split_values=split_values,
@@ -1284,6 +1367,15 @@ def _refit_champion_on_train_plus_test(
     an enhancement, never a hard blocker.
     """
     config = experiment.config
+    if config.params.get("fold_tuning_evidence_ref") is not None:
+        from marvis.packs.modeling.fold_tuning_evidence import validate_fold_experiment
+        artifact = runtime.modeling_repo.get_model_artifact(experiment.artifact_id)
+        if artifact is None:
+            raise ModelingError("fold-frozen model artifact is missing")
+        validate_fold_experiment(runtime.registry, task_id, experiment, artifact)
+        # This optional legacy refit changes membership and rescales rounds.
+        # A fold-frozen candidate keeps its authenticated final fit unchanged.
+        return None
     dataset_id = getattr(config, "dataset_id", "") or ""
     split_values = dict(getattr(config, "split_values", {}) or {})
     if not dataset_id or "train" not in split_values or "test" not in split_values:
