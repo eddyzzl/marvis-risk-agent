@@ -18,6 +18,7 @@ from filelock import FileLock, Timeout as FileLockTimeout
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.authenticated_snapshot import authenticated_file_snapshot
+from marvis.data.dataset_identity import dataset_identity_equal
 from marvis.data.preprocessing_evidence import verify_source_on_connection
 from marvis.feature.errors import FeatureError
 from marvis.packs.modeling._common import _jsonable
@@ -196,3 +197,165 @@ def load_selection_evidence(registry, task_id, reference):
         if _membership(raw_mask, source.row_count) != entry:
             raise FeatureError("selection evidence membership changed")
     return payload
+
+
+CONSUMPTION_VERSION = 'marvis.selection_consumption.v1'
+
+
+def selection_evidence_for_training(registry, task_id, dataset_id, features, target_col, references):
+    """Authenticate selection exposure without certifying inner validation.
+
+    A receipt records only the core algorithm. Human choices, candidate inference
+    and auxiliary hints remain unknown even when all source memberships map.
+    """
+    references = normalize_selection_references(references)
+    evidence = unknown_selection_evidence(dataset_id, features)
+    if not references:
+        return evidence
+    dataset = registry.get(dataset_id)
+    if dataset.task_id != task_id:
+        raise FeatureError('selection training source belongs to another task')
+    _verify_selection_dataset(registry, dataset)
+    sources = []
+    for reference in references:
+        source = load_selection_evidence(registry, task_id, reference)
+        if source['parameters'].get('target_col') != target_col:
+            raise FeatureError('selection evidence target differs from training target')
+        mapped = _selection_source_mapping(registry, dataset_id, source['dataset_id'], ())
+        if mapped is None:
+            raise FeatureError('selection evidence is not from the training source or an authenticated ancestor')
+        positions, artifacts = mapped
+        memberships = None
+        if positions is not None:
+            memberships = {}
+            for role, entry in source['memberships'].items():
+                original = np.unpackbits(np.frombuffer(base64.b64decode(entry['membership']), dtype=np.uint8),
+                                         bitorder='little', count=source['row_count']).astype(bool)
+                mask = np.zeros(len(positions), dtype=bool)
+                present = positions >= 0
+                mask[present] = original[positions[present]]
+                memberships[role] = _membership(np.packbits(mask, bitorder='little').tobytes(), dataset.row_count)
+        sources.append({
+            'reference': dict(reference), 'tool': source['tool'],
+            'source_dataset_id': source['dataset_id'], 'source_content_hash': source['source_content_hash'],
+            'source_row_count': source['row_count'], 'memberships': source['memberships'],
+            'candidates': source['candidates'], 'selected': source['selected'], 'parameters': source['parameters'],
+            'current_row_mapping': 'recorded' if positions is not None else 'unknown',
+            'current_memberships': memberships, 'mapping_artifact_ids': artifacts,
+            'current_features_within_recorded_selection': set(features) <= set(source['selected']),
+            'auxiliary_diagnostics': source['auxiliary_diagnostics'],
+        })
+    _verify_selection_dataset(registry, dataset)
+    evidence.update({
+        'dataset_content_hash': dataset.content_hash, 'references': references, 'sources': sources,
+        'core_evidence_assurance': 'recorded',
+        'current_row_mapping': 'recorded' if all(s['current_row_mapping'] == 'recorded' for s in sources) else 'unknown',
+        'inner_validation': {'assurance': 'not_established', 'mode': 'conditional_on_outer_selection'},
+        'reasons': ['outer_selection_is_not_fold_local', 'auxiliary_and_human_selection_not_certified'],
+    })
+    if not all(s['current_features_within_recorded_selection'] for s in sources):
+        evidence['reasons'].append('training_features_differ_from_recorded_selection')
+    return evidence
+
+
+def normalize_selection_references(value):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 16:
+        raise FeatureError('selection_evidence_refs must be a list of at most 16 native references')
+    result = []
+    for item in value:
+        if (not isinstance(item, dict) or set(item) != {'artifact_id', 'content_hash'}
+                or not isinstance(item['artifact_id'], str) or not item['artifact_id'].strip()
+                or not isinstance(item['content_hash'], str) or len(item['content_hash']) != 64
+                or any(c not in '0123456789abcdef' for c in item['content_hash'])):
+            raise FeatureError('selection evidence reference is invalid')
+        if item not in result:
+            result.append(dict(item))
+    return result
+
+
+def unknown_selection_evidence(dataset_id='', features=()):
+    return {
+        'schema_version': CONSUMPTION_VERSION,
+        'scope': 'recorded_core_selection_input_exposure',
+        'dataset_id': dataset_id, 'features': list(features),
+        'assurance': 'unknown', 'core_evidence_assurance': 'unknown',
+        'current_row_mapping': 'unknown', 'references': [], 'sources': [],
+        'auxiliary_diagnostics': {'assurance': 'unknown'},
+        'inner_validation': {'assurance': 'not_established', 'mode': 'unknown'},
+        'reasons': ['selection_evidence_not_recorded'],
+    }
+
+
+def _selection_source_mapping(registry, current_id, source_id, seen):
+    """Return current-to-source positions only for authenticated native maps."""
+    if current_id in seen or len(seen) >= 64:
+        raise FeatureError('selection source lineage is cyclic or exceeds 64 transforms')
+    dataset = registry.get(current_id)
+    _verify_selection_dataset(registry, dataset)
+    result = _selection_source_mapping_checked(registry, dataset, source_id, seen)
+    _verify_selection_dataset(registry, dataset)
+    return result
+
+
+def _verify_selection_dataset(registry, dataset):
+    # Evidence reads must preserve paths already frozen in SampleDesign.
+    if not dataset_identity_equal(registry.get(dataset.id), dataset):
+        raise FeatureError('selection dataset binding changed during verification')
+    registry.resolve_verified_path(dataset.id)
+    if not dataset_identity_equal(registry.get(dataset.id), dataset):
+        raise FeatureError('selection dataset binding changed during verification')
+
+
+def _selection_source_mapping_checked(registry, dataset, source_id, seen):
+    from marvis.data.asof_join import AsOfJoinEngine
+    from marvis.data.preprocessing_evidence import load_preprocessing_state
+    from marvis.data.join_evidence import join_time_parent
+    from marvis.data.transform_time import transform_time_parent
+
+    current_id = dataset.id
+    if current_id == source_id:
+        return np.arange(dataset.row_count), []
+    repo = TaskArtifactRepository(registry._repo.db_path)
+    state = load_preprocessing_state(registry, current_id)
+    if state.artifact_id:
+        proof = repo.get_for_task(dataset.task_id, state.artifact_id)['provenance']
+        result = _selection_source_mapping(registry, proof['source_dataset_id'], source_id, (*seen, current_id))
+        if result is None:
+            return None
+        positions, artifacts = result
+        return positions, [*artifacts, state.artifact_id]
+    native = AsOfJoinEngine(registry, repo, workspace_root=registry.datasets_root.parent).row_input_time_evidence(current_id)
+    if native:
+        matches = []
+        for index, role in enumerate(('decision', 'feature')):
+            parent = native['parents'][role]
+            source = registry.get(parent['dataset_id'])
+            if source.task_id != dataset.task_id or source.content_hash != parent['content_hash']:
+                raise FeatureError('selection ancestor identity changed')
+            result = _selection_source_mapping(registry, parent['dataset_id'], source_id, (*seen, current_id))
+            _verify_selection_dataset(registry, source)
+            if result is None:
+                continue
+            positions, artifacts = result
+            mapped = None
+            if positions is not None:
+                mapped = np.array([positions[pair[index]] if pair[index] is not None else -1
+                                   for pair in native['memberships']], dtype=np.int64)
+            matches.append((mapped, [*artifacts, native['artifact_id']]))
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            return None, sorted({item for _, artifacts in matches for item in artifacts})
+        return None
+    transformed = transform_time_parent(registry, repo, dataset)
+    joined = join_time_parent(registry, repo, dataset) if transformed is None else None
+    parent_id = transformed.source_dataset_id if transformed else joined[0] if joined else None
+    if parent_id:
+        result = _selection_source_mapping(registry, parent_id, source_id, (*seen, current_id))
+        if result is not None:
+            # Existing readers certify producer ancestry, but do not expose an
+            # unambiguous physical row map for this consumer's narrower scope.
+            return None, [*result[1], transformed.result_artifact_id if transformed else joined[2]]
+    return None

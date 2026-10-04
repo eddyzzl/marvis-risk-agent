@@ -46,6 +46,7 @@ from marvis.artifacts import (
 from marvis.files import sha256_file
 from marvis.data.feature_time import feature_time_evidence
 from marvis.data.preprocessing_evidence import training_preprocessing_state_for_membership
+from marvis.packs.modeling.selection_evidence import normalize_selection_references, selection_evidence_for_training
 from marvis.packs.modeling._common import BINARY_MODELING_RECIPES
 from marvis.packs.modeling._runtime import _artifact_base_dir, _runtime
 from marvis.packs.modeling.contracts import Experiment, ModelArtifact, TrainConfig
@@ -1439,6 +1440,11 @@ def _training_config(
     if split_values != _INTERNAL_SPLIT_VALUES:
         raise ModelingError("internal governed split values are invalid")
     params = dict(request["params"])
+    params["selection_evidence"] = selection_evidence_for_training(
+        runtime.registry, sample.source_binding.task_id, sample.source_binding.dataset_id,
+        request["features"], target_col, request.get("selection_evidence_refs"),
+    )
+    params["selection_evidence_refs"] = params["selection_evidence"]["references"]
     weight_col = params.get("sample_weight_col")
     governed_weight_col = design["sample_semantics"]["field_bindings"][
         "weight_field"
@@ -1637,6 +1643,7 @@ def _validate_governed_training_weights(
 def _validate_inputs(value: object) -> dict[str, Any]:
     obj = _object(value, "train_model_with_evidence_v2 inputs")
     _preflight_json(obj, "train_model_with_evidence_v2 inputs")
+    references = normalize_selection_references(obj.pop("selection_evidence_refs", None))
     _exact_fields(obj, _INPUT_FIELDS, "train_model_with_evidence_v2 inputs")
     recipe = _text(obj["recipe"], "recipe")
     if recipe not in BINARY_MODELING_RECIPES:
@@ -1670,6 +1677,7 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     )
     return {
         "sample_design_ref": _sample_ref(obj["sample_design_ref"]),
+        "selection_evidence_refs": references,
         "recipe": recipe,
         "features": features,
         "params": params,
@@ -1745,6 +1753,8 @@ def _load_sample(
 def _reject_caller_owned_platform_params(value: object, path: str = "params") -> None:
     calibration_fragments = ("calibrat", "isotonic", "platt")
     platform_owned = {
+        "selection_evidence",
+        "selection_evidence_refs",
         "preprocessing_steps",
         "preprocessing_chain_traceable",
         "preprocessing_assurance",

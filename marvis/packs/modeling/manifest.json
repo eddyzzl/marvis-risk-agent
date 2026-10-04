@@ -1314,6 +1314,30 @@
             },
             "minItems": 1
           },
+          "selection_evidence_refs": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "content_hash"
+              ],
+              "additionalProperties": false
+            }
+          },
           "target_col": {
             "type": "string",
             "minLength": 1
@@ -1518,6 +1542,30 @@
             },
             "minItems": 1
           },
+          "selection_evidence_refs": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "content_hash"
+              ],
+              "additionalProperties": false
+            }
+          },
           "target_col": {
             "type": "string",
             "minLength": 1
@@ -1710,6 +1758,30 @@
             "minItems": 1,
             "maxItems": 10000,
             "uniqueItems": true
+          },
+          "selection_evidence_refs": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "content_hash"
+              ],
+              "additionalProperties": false
+            }
           },
           "params": {
             "type": "object"
@@ -2403,6 +2475,30 @@
               "minLength": 1
             },
             "minItems": 1
+          },
+          "selection_evidence_refs": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "content_hash"
+              ],
+              "additionalProperties": false
+            }
           },
           "target_col": {
             "type": "string",

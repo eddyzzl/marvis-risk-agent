@@ -240,6 +240,11 @@ def tool_tune_one_recipe_isolated(inputs: dict, ctx) -> dict:
     dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     dataset_path = runtime.registry.resolve_path(dataset.id)
     input_time = validate_tuning_preprocessing(runtime.registry, inputs)
+    from marvis.packs.modeling.selection_evidence import selection_evidence_for_training
+    selection = selection_evidence_for_training(
+        runtime.registry, ctx.task_id, dataset.id, inputs["features"], inputs["target_col"],
+        inputs.get("selection_evidence_refs"),
+    )
     result = tune_hyperparameters(
         runtime.backend,
         dataset_path,
@@ -254,7 +259,8 @@ def tool_tune_one_recipe_isolated(inputs: dict, ctx) -> dict:
         max_boost_round=int(inputs["max_boost_round"]),
         overfit_penalty=float(inputs["overfit_penalty"]),
         sample_weight_col=str(inputs.get("sample_weight_col") or ""),
-        base_params={**dict(inputs.get("base_params") or {}), "fitted_input_time_evidence": input_time},
+        base_params={**dict(inputs.get("base_params") or {}), "fitted_input_time_evidence": input_time,
+                     "selection_evidence": selection, "selection_evidence_refs": selection["references"]},
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
         cv_folds=(
             int(inputs["cv_folds"])

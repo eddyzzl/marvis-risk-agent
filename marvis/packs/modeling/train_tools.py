@@ -26,6 +26,7 @@ from marvis.packs.modeling.special_value_tools import (
     special_value_decision_fingerprint,
 )
 from marvis.packs.modeling.training_dataset import TrainingDataset
+from marvis.packs.modeling.selection_evidence import selection_evidence_for_training
 from marvis.packs.modeling.preprocessing_validation import validate_inner_preprocessing, validate_model_fitted_inputs, validate_tuning_preprocessing
 from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET
 from marvis.packs.modeling.tune_checkpoint import (
@@ -319,6 +320,15 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     cv_folds = _optional_int(inputs.get("cv_folds"))
     if cv_folds is not None and cv_folds < 2:
         raise ModelingError("cv_folds must be at least 2")
+    runtime = runtime or _runtime(ctx)
+    dataset = dataset or _task_dataset(runtime, ctx, inputs["dataset_id"])
+    selection_evidence = selection_evidence_for_training(
+        runtime.registry, ctx.task_id, dataset.id, inputs["features"], inputs["target_col"],
+        inputs.get("selection_evidence_refs"),
+    )
+    base_params["selection_evidence"] = selection_evidence
+    base_params["selection_evidence_refs"] = selection_evidence["references"]
+
     def _budget_for(item: str) -> int:
         if item in explicit_budgets:
             return explicit_budgets[item]
@@ -538,6 +548,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
                     "overfit_penalty": overfit_penalty,
                     "sample_weight_col": control_params.get("sample_weight_col", ""),
                     "base_params": _jsonable(base_params),
+                    "selection_evidence_refs": selection_evidence["references"],
                     "drop_nan_labels": drop_nan_labels,
                     "cv_folds": cv_folds,
                 },
@@ -717,6 +728,11 @@ def tool_train_model(inputs: dict, ctx) -> dict:
     recipe = str(inputs["recipe"])
     target_type = _validated_target_type([recipe], inputs.get("target_type"))
     train_params = _training_params(inputs)
+    train_params["selection_evidence"] = selection_evidence_for_training(
+        runtime.registry, ctx.task_id, dataset.id, inputs["features"], inputs["target_col"],
+        inputs.get("selection_evidence_refs"),
+    )
+    train_params["selection_evidence_refs"] = train_params["selection_evidence"]["references"]
     preprocessing_state = training_preprocessing_state(
         runtime.registry, dataset.id, split_col=inputs["split_col"],
         train_values=inputs["split_values"]["train"],
@@ -913,6 +929,9 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     preprocessing_steps = preprocessing_state.steps
     governance = inputs.get("special_value_governance")
     temporal_evidence = feature_time_evidence(runtime.registry, dataset.id, features)
+    selection_evidence = selection_evidence_for_training(
+        runtime.registry, ctx.task_id, dataset.id, features, target_col, inputs.get("selection_evidence_refs"),
+    )
     _assert_sentinel_preprocessing_governed(
         dataset_id=dataset.id,
         dataset_content_hash=sha256_file(dataset_path),
@@ -952,6 +971,8 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         recipe_params = effective_params(recipe)
         recipe_params["preprocessing_assurance"] = preprocessing_state.assurance
         recipe_params["feature_time_evidence"] = temporal_evidence
+        recipe_params["selection_evidence"] = selection_evidence
+        recipe_params["selection_evidence_refs"] = selection_evidence["references"]
         recipe_params["preprocessing_evidence"] = {
             "artifact_id": preprocessing_state.artifact_id,
             "content_hash": preprocessing_state.content_hash,
@@ -1327,6 +1348,11 @@ def _refit_champion_on_train_plus_test(
     }
 
     frozen_params = dict(config.params)
+    frozen_params["selection_evidence"] = selection_evidence_for_training(
+        runtime.registry, task_id, dataset_id, config.features, config.target_col,
+        config.params.get("selection_evidence_refs"),
+    )
+    frozen_params["selection_evidence_refs"] = frozen_params["selection_evidence"]["references"]
     resolved_artifact = runtime.modeling_repo.get_model_artifact(experiment.artifact_id)
     if resolved_artifact is not None:
         for key in ("num_boost_round", "iterations"):

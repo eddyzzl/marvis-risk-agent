@@ -95,6 +95,7 @@ STANDARD_MODELING = WorkflowTemplate(
                 "dataset_id": "$ref:准备建模样本.output.result_dataset_id",
                 "recipe": "{slot:recipe}",
                 "features": "$ref:筛选特征.output.selected",
+                "selection_evidence_refs": ["$ref:筛选特征.output.selection_evidence_ref"],
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
                 "split_values": "{slot:split_values}",
@@ -372,6 +373,10 @@ MODELING = WorkflowTemplate(
             inputs_template={
                 "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "features": "$ref:精选特征.output.selected",
+                "selection_evidence_refs": [
+                    "$ref:特征筛选.output.selection_evidence_ref",
+                    "$ref:精选特征.output.selection_evidence_ref",
+                ],
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",
@@ -408,6 +413,10 @@ MODELING = WorkflowTemplate(
                 "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "recipes": "$ref:选择建模规格.output.recipes",
                 "features": "$ref:精选特征.output.selected",
+                "selection_evidence_refs": [
+                    "$ref:特征筛选.output.selection_evidence_ref",
+                    "$ref:精选特征.output.selection_evidence_ref",
+                ],
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",
@@ -689,6 +698,10 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             inputs_template={
                 "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "features": "$ref:精选特征.output.selected",
+                "selection_evidence_refs": [
+                    "$ref:特征筛选.output.selection_evidence_ref",
+                    "$ref:精选特征.output.selection_evidence_ref",
+                ],
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",
@@ -723,6 +736,10 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "dataset_id": "$ref:治理特殊值.output.result_dataset_id",
                 "recipes": "$ref:选择建模规格.output.recipes",
                 "features": "$ref:精选特征.output.selected",
+                "selection_evidence_refs": [
+                    "$ref:特征筛选.output.selection_evidence_ref",
+                    "$ref:精选特征.output.selection_evidence_ref",
+                ],
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",

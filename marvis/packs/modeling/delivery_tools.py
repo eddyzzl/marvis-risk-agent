@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.packs.modeling.artifact import export_pmml, load_model, persist_model_meta, validate_scorecard_pmml_payload
+from marvis.packs.modeling.selection_evidence import selection_evidence_for_training, unknown_selection_evidence
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.handoff import create_challenger_backtest_task, handoff_to_validation
@@ -166,6 +167,10 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
     artifact = _task_artifact(runtime, ctx, experiment.artifact_id)
+    selection_evidence = selection_evidence_for_training(
+        runtime.registry, ctx.task_id, experiment.config.dataset_id, experiment.config.features,
+        experiment.config.target_col, (artifact.params or {}).get("selection_evidence_refs"),
+    )
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
     capabilities = _artifact_capabilities(artifact, base_dir=base_dir)
     selection_policy_decision = _approval_policy_decision(inputs.get("selection_policy_decision"))
@@ -263,6 +268,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
             })
 
     model_card = _model_card_payload(
+        selection_evidence=selection_evidence,
         experiment=experiment,
         artifact=artifact,
         capabilities=capabilities,
@@ -822,6 +828,7 @@ def _model_card_payload(
     selection_policy_decision: dict,
     monitoring_policy: dict,
     challenger_comparison: dict,
+    selection_evidence: dict | None = None,
 ) -> dict:
     config = experiment.config
     metrics = _json_safe(experiment.metrics) or {}
@@ -842,6 +849,15 @@ def _model_card_payload(
         monitoring_policy=monitoring_policy,
         challenger_comparison=challenger_comparison,
         is_refit=is_refit,
+    )
+    selection_evidence = selection_evidence or unknown_selection_evidence(
+        getattr(config, "dataset_id", ""), getattr(config, "features", ()),
+    )
+    limitations.append(
+        ("特征选择仅记录核心算法的样本曝光；外层筛选后的内层CV属于给定特征集的条件验证，"
+         if selection_evidence.get("core_evidence_assurance") == "recorded"
+         else "未提供已认证的特征选择来源；")
+        + "未证明完整选择流程独立，辅助提示和人工选择仍未知。"
     )
     temporal_evidence = (artifact.params or {}).get("feature_time_evidence")
     if not isinstance(temporal_evidence, dict):
@@ -894,6 +910,7 @@ def _model_card_payload(
             "feature_time_evidence": _json_safe(temporal_evidence),
             "preprocessing_evidence": preprocessing_evidence,
             "parameter_time_evidence": parameter_time_evidence,
+            "selection_evidence": _json_safe(selection_evidence),
         },
         "key_metrics": _model_card_key_metrics(metrics, is_refit=is_refit),
         "governance": {
@@ -1531,6 +1548,12 @@ def _model_card_markdown(card: dict) -> str:
     training = card.get("training") if isinstance(card.get("training"), dict) else {}
     field_time = training.get("feature_time_evidence") or {}
     preprocessing = training.get("preprocessing_evidence") or {}
+    selection = training.get("selection_evidence") or {}
+    selection_label = (
+        "已记录核心选择来源；外层筛选后的内层CV仅为条件验证，完整独立性未建立"
+        if selection.get("core_evidence_assurance") == "recorded"
+        else "未知；缺少已认证的特征选择来源，内层验证独立性未建立"
+    )
     field_time_label = ("已验证所选字段的记录时点" if isinstance(field_time, dict)
                         and field_time.get("assurance") == "verified" else "未验证或仅部分字段有证据")
     preprocessing_label = {
@@ -1567,6 +1590,15 @@ def _model_card_markdown(card: dict) -> str:
         f"- 字段可得时点: {field_time_label}",
         f"- 预处理拟合成员范围: {preprocessing_label}",
         "- 模型及拟合参数历史可得时间: 未验证",
+        f"- 特征选择来源: {selection_label}",
+        "- 辅助诊断及人工选择: 未认证",
+        *[
+            f"- 核心选择记录 {index} 原来源范围: 拟合 {source['memberships']['fit']['rows']} 行，"
+            f"标签诊断 {source['memberships']['label_diagnostics']['rows']} 行，"
+            f"值诊断 {source['memberships']['value_diagnostics']['rows']} 行；"
+            + ("已记录当前行对应关系" if source['current_row_mapping'] == 'recorded' else "当前行对应关系未知")
+            for index, source in enumerate(selection.get('sources') or [], start=1)
+        ],
         "",
         "## 关键指标",
         "",
