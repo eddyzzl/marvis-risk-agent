@@ -48,8 +48,10 @@ from marvis.feature.preprocessing import (
 from marvis.feature.transform import (
     apply_scaler,
     cap_outliers,
+    fill_missing_value,
     impute_missing,
     mask_sentinel_values,
+    normalize_sentinel_value,
     minmax_normalize,
     zscore_standardize,
 )
@@ -985,6 +987,7 @@ def tool_bin_feature(inputs: dict, ctx) -> dict:
         ctx,
         str(inputs["dataset_id"]),
         [str(inputs["feature"]), str(inputs["target_col"])],
+        preserve_integer_values=bool(inputs.get("sentinel_values")),
     )
     nan_labels_dropped = require_labels_confirmed(
         frame,
@@ -997,7 +1000,7 @@ def tool_bin_feature(inputs: dict, ctx) -> dict:
     sentinel_values = inputs.get("sentinel_values")
     if sentinel_values:
         frame = frame.copy()
-        frame[feature] = mask_sentinel_values(frame[feature], [float(v) for v in sentinel_values])
+        frame[feature] = mask_sentinel_values(frame[feature], sentinel_values)
     values = frame[feature].to_numpy(dtype=float)
     edges = _edges_for(frame, inputs, ctx)
     before = None
@@ -1079,7 +1082,8 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     features = [str(item) for item in inputs["features"]]
     target_col = str(inputs["target_col"])
-    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]),
+                                 preserve_integer_values=bool(inputs.get("sentinel_values")))
     required_columns = [*features, target_col]
     if inputs.get("split_col"):
         required_columns.append(str(inputs["split_col"]))
@@ -1226,7 +1230,8 @@ def tool_onehot_encode(inputs: dict, ctx) -> dict:
 
 def tool_normalize(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]),
+                                 preserve_integer_values=bool(inputs.get("sentinel_values")))
     method = str(inputs["method"])
     out = frame.copy()
     params = {}
@@ -1277,7 +1282,8 @@ def tool_normalize(inputs: dict, ctx) -> dict:
 
 def tool_impute_missing(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]),
+                                 preserve_integer_values=bool(inputs.get("sentinel_values")))
     out = frame.copy()
     fill_values = {}
     indicators = {}
@@ -1307,7 +1313,7 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
             out[indicator_name] = masked.isna().astype(int)
             indicators[column] = indicator_name
             indicator_columns.append(indicator_name)
-        out[column] = masked.fillna(value)
+        out[column] = fill_missing_value(masked, value)
         fill_values[column] = value
     preprocessing_steps = []
     sentinel_step = _sentinel_step(sentinel_values)
@@ -1342,7 +1348,8 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
 
 def tool_cap_outliers(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]))
+    dataset, frame = _read_frame(runtime, ctx, str(inputs["dataset_id"]),
+                                 preserve_integer_values=bool(inputs.get("sentinel_values")))
     out = frame.copy()
     bounds = {}
     columns = [str(column) for column in inputs["columns"]]
@@ -1352,13 +1359,12 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
     sentinel_values = _sentinel_values_for(inputs, columns)
     for column in columns:
         column_sentinels = sentinel_values.get(column)
-        fit_values = out.loc[fit_mask, column].to_numpy(dtype=float)
+        fit_values = mask_sentinel_values(out.loc[fit_mask, column], column_sentinels).to_numpy(dtype=float)
         _capped_fit, params = cap_outliers(
             fit_values,
             method=str(inputs.get("method") or "iqr"),
             lower_q=float(inputs.get("lower_q", 0.01)),
             upper_q=float(inputs.get("upper_q", 0.99)),
-            sentinel_values=column_sentinels,
         )
         all_values = mask_sentinel_values(out[column], column_sentinels).to_numpy(dtype=float)
         mask = np.isfinite(all_values)
@@ -1401,11 +1407,11 @@ def _sentinel_values_for(inputs: dict, columns: list[str]) -> dict[str, list[flo
         return {}
     if isinstance(raw, dict):
         return {
-            str(column): [float(v) for v in values]
+            str(column): [normalize_sentinel_value(v) for v in values]
             for column, values in raw.items()
             if str(column) in columns and values
         }
-    flat = [float(v) for v in raw]
+    flat = [normalize_sentinel_value(v) for v in raw]
     return {column: flat for column in columns} if flat else {}
 
 
@@ -1532,9 +1538,13 @@ def _read_frame(
     ctx,
     dataset_id: str,
     columns: list[str] | None = None,
+    *,
+    preserve_integer_values: bool = False,
 ):
     dataset = _task_dataset(runtime, ctx, dataset_id)
-    frame = runtime.registry.read_authenticated_parquet_snapshot(dataset.id, columns=columns)
+    frame = runtime.registry.read_authenticated_parquet_snapshot(
+        dataset.id, columns=columns, preserve_integer_values=preserve_integer_values,
+    )
     return dataset, frame
 
 

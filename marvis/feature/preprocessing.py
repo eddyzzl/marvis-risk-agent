@@ -65,7 +65,7 @@ from marvis.feature.contracts import CategoricalWOECategory, CategoricalWOEResul
 from marvis.feature.encode import apply_categorical_woe, apply_onehot_mapping, woe_encode
 from marvis.feature.errors import FeatureError
 from marvis.feature.derived_preprocessing import replay_derived_step
-from marvis.feature.transform import apply_scaler, mask_sentinel_values
+from marvis.feature.transform import apply_scaler, fill_missing_value, mask_sentinel_values
 
 
 _SIDECAR_SUFFIX = ".preprocessing.json"
@@ -163,7 +163,7 @@ def apply_preprocessing_steps(frame: pd.DataFrame, steps: list[dict[str, Any]]) 
 
 
 def _apply_sentinel(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
-    """Replay sentinel masking (PREP-4 / A3): ``params[column]`` is a ``list[float]``
+    """Replay sentinel masking (PREP-4 / A3): ``params[column]`` is a numeric list
     of sentinel values to treat as missing. Masks each column's sentinel rows to NaN
     (via the same ``mask_sentinel_values`` the tools use at fit time) so every
     downstream step in the chain sees NaN, not the raw sentinel. Must run *before*
@@ -177,7 +177,7 @@ def _apply_sentinel(frame: pd.DataFrame, columns: list[str], params: dict) -> pd
         values = params.get(column)
         if not values:
             continue
-        out[column] = mask_sentinel_values(out[column], [float(v) for v in values])
+        out[column] = mask_sentinel_values(out[column], values)
     return out
 
 
@@ -189,7 +189,7 @@ def _apply_impute(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.D
         value = params.get(column)
         if isinstance(value, dict) and "value" in value:
             value = value["value"]
-        out[column] = out[column].fillna(value)
+        out[column] = fill_missing_value(out[column], value)
     return out
 
 

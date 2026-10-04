@@ -130,14 +130,58 @@ def apply_scaler(values: np.ndarray, params: dict, *, kind: str) -> np.ndarray:
     raise FeatureError("kind must be 'minmax' or 'zscore'")
 
 
-def mask_sentinel_values(series: pd.Series, sentinel_values: list[float] | None) -> pd.Series:
+def normalize_sentinel_value(value) -> int | float:
+    """Keep integer declarations exact across JSON policy and replay boundaries."""
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    number = float(value)
+    if not np.isfinite(number):
+        raise ValueError("special values must be finite")
+    return number
+
+
+def sentinel_value_mask(series: pd.Series, sentinel_values: list[int | float] | None) -> pd.Series:
+    """Compare declared numeric values without rounding them to a column dtype.
+
+    In particular, an integer or float32 column must not turn -999.5 or
+    -999.00001 into -999. Keep integral comparisons integral so adjacent large
+    identifiers do not collapse through a shared float64 comparison dtype.
+    """
+    numeric = pd.to_numeric(series, errors="coerce")
+    values = [normalize_sentinel_value(value) for value in (sentinel_values or [])]
+    dtype = getattr(numeric.dtype, "numpy_dtype", numeric.dtype)
+    if pd.api.types.is_integer_dtype(dtype):
+        limits = np.iinfo(dtype)
+        values = [int(value) for value in values
+                  if (isinstance(value, int) or value.is_integer())
+                  and limits.min <= int(value) <= limits.max]
+    elif pd.api.types.is_float_dtype(dtype):
+        with np.errstate(over="ignore", invalid="ignore"):
+            exact = []
+            for value in values:
+                try:
+                    converted = float(np.asarray(value, dtype=dtype))
+                except OverflowError:
+                    continue
+                if converted == value:
+                    exact.append(converted)
+            values = exact
+    return numeric.isin(values)
+
+
+def mask_sentinel_values(series: pd.Series, sentinel_values: list[int | float] | None) -> pd.Series:
     """Treat ``sentinel_values`` (PREP-4) as missing: return ``series`` with those
     values replaced by NaN, leaving already-missing rows untouched. A no-op when
     ``sentinel_values`` is empty/None."""
     if not sentinel_values:
         return series
-    numeric = pd.to_numeric(series, errors="coerce")
-    mask = numeric.isin([float(value) for value in sentinel_values])
+    mask = sentinel_value_mask(series, sentinel_values)
+    if mask.any() and pd.api.types.is_integer_dtype(series.dtype):
+        # Introducing nulls into numpy integers would otherwise round every
+        # unmasked large integer through pandas' implicit float64 conversion.
+        dtype = getattr(series.dtype, "numpy_dtype", series.dtype)
+        prefix = "U" if pd.api.types.is_unsigned_integer_dtype(dtype) else ""
+        series = series.astype(f"{prefix}Int{np.dtype(dtype).itemsize * 8}")
     return series.mask(mask)
 
 
@@ -164,7 +208,34 @@ def impute_missing(
         value = modes.iloc[0] if not modes.empty else fill_value
     else:
         raise FeatureError("strategy must be mean, median, mode, or constant")
-    return series.fillna(value), value
+    return fill_missing_value(series, value), value
+
+
+def fill_missing_value(series: pd.Series, value) -> pd.Series:
+    """Allow fitted fills without wrapping or narrowing retained integers."""
+    if pd.api.types.is_integer_dtype(series.dtype) and series.isna().any():
+        if isinstance(value, (int, np.integer)) or (
+            isinstance(value, (float, np.floating)) and float(value).is_integer()
+        ):
+            fill = int(value)
+            present = series.dropna()
+            lower = min(fill, int(present.min())) if len(present) else fill
+            upper = max(fill, int(present.max())) if len(present) else fill
+            dtype = getattr(series.dtype, "numpy_dtype", series.dtype)
+            bounds = np.iinfo(dtype)
+            if not bounds.min <= lower <= upper <= bounds.max:
+                if np.iinfo(np.int64).min <= lower <= upper <= np.iinfo(np.int64).max:
+                    series = series.astype("Int64")
+                elif 0 <= lower <= upper <= np.iinfo(np.uint64).max:
+                    series = series.astype("UInt64")
+                else:
+                    raise FeatureError("fill and retained values cannot share an exact 64-bit integer dtype")
+            value = fill
+        elif isinstance(value, (float, np.floating)):
+            series = series.astype(float)
+        else:
+            series = series.astype(object)
+    return series.fillna(value)
 
 
 def cap_outliers(
@@ -175,10 +246,7 @@ def cap_outliers(
     upper_q: float = 0.99,
     sentinel_values: list[float] | None = None,
 ) -> tuple[np.ndarray, dict]:
-    arr = np.asarray(values, dtype=float)
-    if sentinel_values:
-        arr = arr.copy()
-        arr[np.isin(arr, [float(value) for value in sentinel_values])] = np.nan
+    arr = mask_sentinel_values(pd.Series(values), sentinel_values).to_numpy(dtype=float, na_value=np.nan)
     finite = arr[np.isfinite(arr)]
     if finite.size == 0:
         return arr.copy(), {"lower": float("nan"), "upper": float("nan"), "method": method}

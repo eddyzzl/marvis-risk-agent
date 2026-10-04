@@ -1408,7 +1408,7 @@ def test_impute_cap_normalize_onehot_persist_preprocessing_chain_sidecar(tmp_pat
     assert imputed.ok is True, imputed.error
     imputed_chain = read_preprocessing_chain(registry.resolve_path(imputed.output["result_dataset_id"]))
     assert imputed_chain == [
-        {"kind": "impute", "columns": ["missing"], "params": imputed.output["fill_values"]}
+        {"kind": "impute", "columns": ["missing"], "params": imputed.output["fill_values"], "strategy": "median"}
     ]
 
     capped = runner.invoke(
@@ -1427,7 +1427,7 @@ def test_impute_cap_normalize_onehot_persist_preprocessing_chain_sidecar(tmp_pat
     capped_chain = read_preprocessing_chain(registry.resolve_path(capped.output["result_dataset_id"]))
     # Chain accumulates: impute step from the source dataset + this new cap step.
     assert capped_chain == [
-        {"kind": "impute", "columns": ["missing"], "params": imputed.output["fill_values"]},
+        {"kind": "impute", "columns": ["missing"], "params": imputed.output["fill_values"], "strategy": "median"},
         {"kind": "cap", "columns": ["amount"], "params": capped.output["bounds"]},
     ]
 

@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from marvis.feature.preprocessing import sidecar_path
+from marvis.feature.transform import normalize_sentinel_value
 from marvis.data.preprocessing_evidence import load_preprocessing_state, training_preprocessing_state
 from marvis.data.feature_time import feature_time_evidence
 from marvis.files import sha256_file
@@ -119,7 +120,7 @@ def _assert_sentinel_preprocessing_governed(
             normalized: set[float] = set()
             for value in values if isinstance(values, (list, tuple)) else [values]:
                 try:
-                    normalized.add(float(value))
+                    normalized.add(normalize_sentinel_value(value))
                 except (TypeError, ValueError):
                     continue
             governed.setdefault(str(column), []).append(normalized)
@@ -139,7 +140,7 @@ def _assert_sentinel_preprocessing_governed(
         ]
         expected_fingerprint = special_value_decision_fingerprint(evidence)
         evidence_values = {
-            float(value)
+            normalize_sentinel_value(value)
             for value in evidence.get("detected_values") or []
         }
         if str(evidence.get("policy_version") or "") != SPECIAL_VALUE_POLICY_VERSION:
@@ -186,7 +187,7 @@ def _sentinel_values(rows) -> set[float]:
     for row in rows if isinstance(rows, (list, tuple)) else []:
         value = row[0] if isinstance(row, (list, tuple)) and row else row
         try:
-            values.add(float(value))
+            values.add(normalize_sentinel_value(value))
         except (TypeError, ValueError):
             continue
     return values

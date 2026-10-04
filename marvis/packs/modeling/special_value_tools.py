@@ -2,15 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import uuid
-from decimal import Decimal
 from pathlib import Path
 
-import numpy as np
-
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.data.authenticated_snapshot import authenticated_file_snapshot
+from marvis.data.authenticated_snapshot import authenticated_file_snapshot, arrow_integer_dtype
 from marvis.data.preprocessing_evidence import (
     load_preprocessing_state,
     register_preprocessing_evidence,
@@ -19,6 +15,7 @@ from marvis.feature.preprocessing import (
     sidecar_path,
     write_preprocessing_chain,
 )
+from marvis.feature.transform import mask_sentinel_values, normalize_sentinel_value, sentinel_value_mask
 from marvis.files import sha256_file
 from marvis.packs.modeling._common import _effective_seed, _jsonable
 from marvis.packs.modeling._runtime import _runtime, _task_dataset
@@ -154,10 +151,8 @@ def _relevant_sentinel_columns(value, *, features: list[str]) -> dict[str, list[
             raw_value = row[0] if isinstance(row, (list, tuple)) and row else row
             share = row[1] if isinstance(row, (list, tuple)) and len(row) > 1 else None
             try:
-                number = float(raw_value)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(number):
+                number = normalize_sentinel_value(raw_value)
+            except (TypeError, ValueError, OverflowError):
                 continue
             normalized_rows.append(
                 [number, float(share)]
@@ -374,7 +369,7 @@ def _stream_mask_to_parquet(
     if source_path.suffix.lower() != ".parquet":
         frame = backend.read_frame(source_path)
         for column, values in mask_values.items():
-            frame.loc[frame[column].isin(values), column] = np.nan
+            frame[column] = mask_sentinel_values(frame[column], values)
         frame.to_parquet(out_path, index=False)
         return
 
@@ -400,11 +395,13 @@ def _stream_mask_to_parquet(
             for raw_name, array in zip(raw_names, batch.columns, strict=True):
                 values = raw_to_values.get(raw_name)
                 if values:
-                    value_set = pa.array(
-                        [_arrow_scalar_value(value, array.type) for value in values],
-                        type=array.type,
-                    )
-                    is_sentinel = pc.is_in(array, value_set=value_set)
+                    # Share the scoring-time predicate; narrowing a requested
+                    # value into the physical Arrow dtype can mask a different
+                    # value. Keep the original arrays/dtype and bound pandas
+                    # conversion to this one column of the current 4096-row batch.
+                    is_sentinel = pa.array(sentinel_value_mask(
+                        array.to_pandas(types_mapper=arrow_integer_dtype), values,
+                    ))
                     array = pc.if_else(
                         is_sentinel,
                         pa.scalar(None, type=array.type),
@@ -437,20 +434,8 @@ def _stream_mask_to_parquet(
             writer.close()
 
 
-def _arrow_scalar_value(value: float, arrow_type):
-    import pyarrow as pa
-
-    if pa.types.is_integer(arrow_type):
-        return int(value)
-    if pa.types.is_decimal(arrow_type):
-        return Decimal(str(value))
-    if pa.types.is_floating(arrow_type):
-        return float(value)
-    return value
-
-
 def _detected_values(rows: list[list[float]]) -> list[float]:
-    return sorted({float(row[0]) for row in rows if row})
+    return sorted({normalize_sentinel_value(row[0]) for row in rows if row})
 
 
 def _normalized_numeric_values(values) -> list[float]:
@@ -458,10 +443,7 @@ def _normalized_numeric_values(values) -> list[float]:
         values = [values]
     normalized = []
     for value in values:
-        number = float(value)
-        if not math.isfinite(number):
-            raise ValueError("special values must be finite")
-        normalized.append(number)
+        normalized.append(normalize_sentinel_value(value))
     return sorted(set(normalized))
 
 

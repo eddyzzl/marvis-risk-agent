@@ -13,6 +13,22 @@ from typing import Sequence
 import pandas as pd
 
 
+def arrow_integer_dtype(arrow_type):
+    """Pandas conversion callback that keeps nullable Arrow integers exact.
+
+    Arrow's default null-containing integer conversion uses float64. Selection
+    membership, grouping and fixed-value transforms must retain original values
+    before any explicit model-input conversion.
+    """
+    import pyarrow as pa
+
+    if pa.types.is_unsigned_integer(arrow_type):
+        return pd.UInt64Dtype()
+    if pa.types.is_integer(arrow_type):
+        return pd.Int64Dtype()
+    return None
+
+
 class SnapshotFailureReason(StrEnum):
     PATH_OUTSIDE_ROOT = "path_outside_root"
     SOURCE_NOT_REGULAR = "source_not_regular"
@@ -35,11 +51,12 @@ def read_authenticated_parquet_snapshot(
     root: Path,
     expected_sha256: str,
     columns: Sequence[str] | None = None,
+    preserve_integer_values: bool = False,
 ) -> pd.DataFrame:
     """Read one immutable, hash-authenticated Parquet snapshot."""
     return _read_authenticated_parquet(
         path, root=root, expected_sha256=expected_sha256,
-        columns=columns, metadata_only=False,
+        columns=columns, metadata_only=False, preserve_integer_values=preserve_integer_values,
     )
 
 
@@ -54,7 +71,7 @@ def read_authenticated_parquet_metadata(
 
 
 def _read_authenticated_parquet(
-    path, *, root, expected_sha256, columns, metadata_only,
+    path, *, root, expected_sha256, columns, metadata_only, preserve_integer_values=False,
 ):
     try:
         with authenticated_file_snapshot(path, root=root, expected_sha256=expected_sha256) as snapshot:
@@ -63,6 +80,12 @@ def _read_authenticated_parquet(
 
                 parquet = pq.ParquetFile(snapshot)
                 return tuple(parquet.schema_arrow.names), parquet.metadata.num_rows
+            if preserve_integer_values:
+                import pyarrow.parquet as pq
+
+                return pq.read_table(snapshot, columns=None if columns is None else list(columns)).to_pandas(
+                    types_mapper=arrow_integer_dtype,
+                )
             return pd.read_parquet(snapshot, columns=None if columns is None else list(columns))
     except AuthenticatedSnapshotError:
         raise

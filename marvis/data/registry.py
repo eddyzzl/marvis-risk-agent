@@ -799,6 +799,7 @@ class DatasetRegistry:
         dataset_id: str,
         *,
         columns: list[str] | tuple[str, ...] | None = None,
+        preserve_integer_values: bool = False,
     ) -> pd.DataFrame:
         """Return bytes authenticated against the registered dataset identity.
 
@@ -825,6 +826,7 @@ class DatasetRegistry:
                 root=self._root,
                 expected_sha256=expected_hash,
                 columns=columns,
+                preserve_integer_values=preserve_integer_values,
             )
         except AuthenticatedSnapshotError as exc:
             raise DatasetContentDriftError(
