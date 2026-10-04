@@ -753,6 +753,7 @@ def screen_features_non_binary(
     scores: dict[str, dict[str, float | None]] = {}
     unusable: list[tuple[str, str]] = list(hard_unusable)
     clean: list[tuple[str, None]] = []
+    sentinel_columns: dict[str, list[tuple[float, float]]] = {}
     width = max(1, int(batch_size))
     for start in range(0, len(feats), width):
         batch = feats[start : start + width]
@@ -763,6 +764,9 @@ def screen_features_non_binary(
             finite = np.isfinite(v_dev)
             missing_rate = float(1.0 - finite.mean()) if v_dev.size else 1.0
             unique = int(np.unique(v_dev[finite]).size)
+            sentinel_hits = detect_sentinel_values(v_dev)
+            if sentinel_hits:
+                sentinel_columns[col] = sentinel_hits
             scores[col] = {"ks": None, "missing_rate": missing_rate, "unique_count": unique}
             if missing_rate >= max_missing_rate:
                 unusable.append((col, "high_missing"))
@@ -789,6 +793,7 @@ def screen_features_non_binary(
         n_screened=len(all_feature_names),
         nan_labels_dropped=nan_labels_dropped,
         selection_scope=SelectionScope.capture(dev),
+        sentinel_columns=sentinel_columns,
     )
 
 

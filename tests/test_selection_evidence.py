@@ -114,6 +114,25 @@ def test_continuous_screen_honors_confirmed_missing_labels_and_batch_size(tmp_pa
     assert confirmed.output["scores"]["x"]["assoc_score"] == pytest.approx(expected)
 
 
+@pytest.mark.parametrize("target_type", ["continuous", "multiclass"])
+def test_nonbinary_screen_exposes_only_fit_sentinels(tmp_path, target_type):
+    runner, registry, _, _ = _source(tmp_path)
+    rng = np.random.default_rng(131)
+    frame = pd.DataFrame({"x": rng.normal(size=120), "z": rng.normal(size=120),
+        "y": rng.normal(size=120) if target_type == "continuous" else np.arange(120) % 3,
+        "split": np.repeat(["train", "test", "oot"], 40)})
+    frame.loc[0:10, "x"] = -999
+    frame.loc[80:100, "z"] = -999
+    path = tmp_path / "nonbinary-sentinels.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+    result = _run(runner, dataset, target_type=target_type)
+    assert result.ok, result.error
+    assert result.output["sentinel_columns"]["x"][0][0] == -999
+    assert "z" not in result.output["sentinel_columns"]
+    assert result.output["sentinel_notice"]
+
+
 @pytest.mark.parametrize("oot_varies", [False, True])
 def test_auxiliary_oot_categorical_hint_is_not_certified_by_empty_core_diagnostics(tmp_path, oot_varies):
     runner, registry, _, _ = _source(tmp_path)

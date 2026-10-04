@@ -203,8 +203,8 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         "n_screened": result.n_screened,
         "note": "非二分类目标：跳过统计型泄漏KS筛选；语义/时序泄漏与控制列仍硬剔除",
         "nan_labels_dropped": result.nan_labels_dropped,
-        "sentinel_columns": {},
-        "sentinel_notice": "",
+        "sentinel_columns": _jsonable(result.sentinel_columns) or {},
+        "sentinel_notice": sentinel_screen_notice(result.sentinel_columns) if result.sentinel_columns else "",
     }
     dictionary = _screen_dictionary(runtime, ctx)
     if dictionary:
