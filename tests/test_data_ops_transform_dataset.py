@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
@@ -436,8 +437,10 @@ def test_task_purge_counts_and_removes_transform_lineage_before_datasets(tmp_pat
         assert conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("late_start", [False, True], ids=["overlap", "late-replay"])
 def test_concurrent_identical_transform_attempts_cannot_corrupt_winner_artifacts(
     tmp_path,
+    late_start,
 ):
     settings, runner, _backend, registry = _runtime(tmp_path)
     source = _source_dataset(tmp_path, registry)
@@ -458,23 +461,49 @@ def test_concurrent_identical_transform_attempts_cannot_corrupt_winner_artifacts
             for _ in range(2)
         ]
         results = [future.result(timeout=30) for future in futures]
+        if late_start:
+            # Re-run the old input after activation to exercise the same
+            # preflight rejection that a delayed worker can see on CI.
+            results.append(
+                runner.invoke(
+                    ToolRef("data_ops", "transform_dataset"),
+                    inputs,
+                    task_id="task-1",
+                )
+            )
 
     succeeded = [result for result in results if result.ok]
     failed = [result for result in results if not result.ok]
     assert succeeded, [result.error for result in results]
-    assert all(
-        result.error
-        == (
+    # Both rejection points are valid: a worker that reads before activation
+    # loses the commit revision check; a later worker rejects the old dataset
+    # at preflight. The winner's exact files and single activation stay fixed.
+    expected_errors = {
+        (
             "stale data workspace revision: "
             f"expected {workspace.revision}, found {workspace.revision + 1}"
-        )
-        for result in failed
-    )
+        ),
+        "dataset is not the active data-workspace dataset",
+    }
+    assert all(result.error in expected_errors for result in failed), [
+        result.error for result in failed
+    ]
+    if late_start:
+        assert results[-1].ok is False
+        assert results[-1].error == "dataset is not the active data-workspace dataset"
     repo = DataTransformRepository(settings.db_path)
     lineage = repo.list_lineage("task-1")
     assert len(lineage) == 1
     record = repo.get_for_task("task-1", lineage[0]["transform_run_id"])
     assert record is not None
+    assert all(result.output["run_id"] == record.id for result in succeeded)
+    active = DataWorkspaceRepository(settings.db_path).get_or_default("task-1")
+    assert active.revision == workspace.revision + 1
+    assert active.analysis_generation == workspace.analysis_generation + 1
+    assert active.active_dataset_id == record.result_dataset_id
+    assert active.active_dataset_content_hash == record.result_content_hash
+    with connect(settings.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0] == 2
     registry.resolve_verified_path(record.result_dataset_id)
     artifact = TaskArtifactRepository(settings.db_path).get_for_task(
         "task-1",
