@@ -30,6 +30,7 @@ from test_strategy_pool_scorecard import (
     _selection as _scorecard_selection,
 )
 from test_strategy_pool_tools import _add_inputs, _setup
+from tests.schema_fixture_support import install_historical_schema
 
 
 def _materialization_input(added: dict) -> dict:
@@ -711,10 +712,11 @@ def test_migration_022_is_registered_and_recreates_the_guarded_ledger(
     tmp_path,
 ) -> None:
     db_path = tmp_path / "migration.sqlite"
-    init_db(db_path)
     with connect(db_path) as conn:
-        conn.execute("DROP TABLE strategy_pool_materializations")
-        conn.execute("PRAGMA user_version = 21")
+        install_historical_schema(conn, 21)
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'strategy_pool_materializations'"
+        ).fetchone() is None
 
     init_db(db_path)
 

@@ -42,6 +42,8 @@ from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.data.schema_infer import infer_dataset_schema
 from marvis.db import DatasetRepository, init_db
+from marvis.domain import TaskCreate
+from marvis.repositories.tasks import TaskRepository
 from marvis.feature.screen import screen_features
 from marvis.packs.modeling import tools as modeling_tools
 from marvis.settings import build_settings
@@ -171,18 +173,22 @@ def test_train_models_multi_recipe_reads_dataset_exactly_once(tmp_path, monkeypa
     data_repo = DatasetRepository(settings.db_path)
     backend = DataBackend(settings.datasets_dir)
     registry = DatasetRegistry(data_repo, backend, settings.datasets_dir)
+    task = TaskRepository(settings.db_path).create_task(TaskCreate(
+        model_name="multi-recipe read guard", model_version="v1", validator="test", source_dir=str(tmp_path),
+        task_type="modeling", run_mode="manual",
+    ))
 
     n_rows, n_features = 20_000, 15
     frame = _synthetic_training_frame(n_rows, n_features, seed=11)
     path = settings.datasets_dir / "modeling.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, index=False)
-    dataset = registry.register_existing(path, task_id="task-1", role="modeling_sample")
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
 
     ctx = SimpleNamespace(
         workspace=settings.workspace,
         datasets_root=settings.datasets_dir,
-        task_id="task-1",
+        task_id=task.id,
         seed=7,
     )
 
@@ -241,14 +247,13 @@ def test_train_models_multi_recipe_reads_dataset_exactly_once(tmp_path, monkeypa
     # Deterministic counting guard: however many recipes ran, the modeling
     # projection is built once through the bounded compact reader. The parquet
     # implementation deliberately bypasses the legacy full-frame reader.
-    dataset_reads = [call for call in read_calls if call == path]
-    dataset_compact_reads = [call for call in compact_calls if call == path]
-    assert dataset_reads == []
-    assert len(dataset_compact_reads) == 1, (
+    assert read_calls == []
+    assert len(compact_calls) == 1, (
         "expected exactly 1 DataBackend.read_compact_numeric_frame call for the "
         f"shared modeling dataset across {len(recipes)} recipes, got "
-        f"{len(dataset_compact_reads)} -- PERF-10 regression"
+        f"{len(compact_calls)} -- PERF-10 regression"
     )
+    assert compact_calls[0] == registry.resolve_path(dataset.id)
 
     assert len(out["experiment_ids"]) == len(recipes)
     assert out["best_experiment_id"] in out["experiment_ids"]

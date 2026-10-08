@@ -347,3 +347,61 @@ def test_missing_code_score_for_sampled_row_fails_clearly():
 def test_scores_match_at_precision_uses_rounding():
     assert scores_match_at_precision(0.1234564, 0.1234561, 6) is True
     assert scores_match_at_precision(0.1234564, 0.1234554, 6) is False
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+@pytest.mark.parametrize("carrier", ["series", "dataframe"])
+def test_invalid_code_scores_are_rejected_before_submitted_model_is_called(value, carrier):
+    sample = pd.DataFrame({"x1": [1.], "x2": [2.]})
+    code_scores = pd.Series([value]) if carrier == "series" else pd.DataFrame({"row_index": [0], "code_model_score": [value]})
+
+    class NeverScorer:
+        def score(self, _frame):
+            pytest.fail("invalid code scores must fail before PMML scoring")
+
+    with pytest.raises(ValueError, match="non-finite"):
+        run_reproducibility(sample=sample, config=_config(random_sample_size=1),
+                            code_scores=code_scores, submitted_pmml_scorer=NeverScorer())
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_non_finite_submitted_score_is_an_unavailable_mismatch(value):
+    result = run_reproducibility(sample=pd.DataFrame({"x1": [1.], "x2": [2.]}),
+                                config=_config(random_sample_size=1), code_scores=pd.Series([.5]),
+                                submitted_pmml_scorer=_FakeScorer({0: value}))
+    assert result.summary.status is ConsistencyStatus.FAIL
+    assert result.summary.match_count == 0 and result.summary.mismatch_count == 1
+    assert result.summary.max_abs_diff == 0
+    assert result.rows[0].score_submitted_pmml is None
+    assert result.rows[0].abs_diff is None and result.rows[0].matched is False
+    assert scores_match_at_precision(value, value, 6) is False
+
+
+@pytest.mark.parametrize("sample_count,take", [(0, 1), (1, 0)])
+def test_empty_comparison_cannot_produce_a_passing_verdict(sample_count, take):
+    class NeverScorer:
+        def score(self, _frame):
+            pytest.fail("empty comparisons must be rejected before PMML scoring")
+
+    with pytest.raises(ValueError, match="at least one sampled row"):
+        run_reproducibility(sample=pd.DataFrame({"x1": [1.] * sample_count}),
+                            config=_config(random_sample_size=take), code_scores=pd.Series([.5] * sample_count),
+                            submitted_pmml_scorer=NeverScorer())
+
+
+@pytest.mark.parametrize("code_score,submitted_score", [(1e308, -1e308), (-1e308, 1e308)])
+def test_finite_scores_with_overflowing_difference_cannot_produce_nonfinite_results(code_score, submitted_score):
+    with pytest.raises(ValueError, match="score difference is non-finite"):
+        run_reproducibility(sample=pd.DataFrame({"x1": [1.]}), config=_config(random_sample_size=1),
+                            code_scores=pd.Series([code_score]), submitted_pmml_scorer=_FakeScorer({0: submitted_score}))
+
+
+def test_large_equal_finite_scores_remain_valid_and_strictly_serializable():
+    import json
+    from dataclasses import asdict
+
+    result = run_reproducibility(sample=pd.DataFrame({"x1": [1.]}), config=_config(random_sample_size=1),
+                                code_scores=pd.Series([1e308]), submitted_pmml_scorer=_FakeScorer({0: 1e308}))
+    assert result.summary.status is ConsistencyStatus.PASS
+    assert result.summary.max_abs_diff == 0
+    json.dumps(asdict(result), allow_nan=False)

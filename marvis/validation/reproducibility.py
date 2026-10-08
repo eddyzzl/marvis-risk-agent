@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 import pandas as pd
 
-from marvis.validation.in_memory_scores import _row_index_values
+from marvis.validation.in_memory_scores import _row_index_values, require_finite_code_model_scores
 from marvis.validation.config import ValidationConfig
 from marvis.validation.results import (
     ConsistencyStatus,
@@ -18,7 +19,8 @@ _REVIEW_MAX_ABS_DIFF_THRESHOLD = 1e-4
 
 
 def scores_match_at_precision(left: float, right: float, decimals: int) -> bool:
-    return round(float(left), decimals) == round(float(right), decimals)
+    left, right = float(left), float(right)
+    return math.isfinite(left) and math.isfinite(right) and round(left, decimals) == round(right, decimals)
 
 
 def _nullable_score(value: object) -> float | None:
@@ -30,9 +32,18 @@ def _nullable_score(value: object) -> float | None:
         if pd.isna(value):
             return None
         raise
-    if pd.isna(number):
+    if not math.isfinite(number):
         return None
     return number
+
+
+def score_absolute_difference(code_score: float, submitted_score: float | None) -> float | None:
+    if submitted_score is None:
+        return None
+    difference = abs(code_score - submitted_score)
+    if not math.isfinite(difference):
+        raise ValueError("score difference is non-finite")
+    return difference
 
 
 def _code_scores_by_row_index(
@@ -43,14 +54,14 @@ def _code_scores_by_row_index(
     if isinstance(code_scores, pd.DataFrame):
         if "row_index" not in code_scores.columns or "code_model_score" not in code_scores.columns:
             raise ValueError("code scores dataframe must contain row_index and code_model_score")
-        return pd.Series(
+        return require_finite_code_model_scores(pd.Series(
             code_scores["code_model_score"].astype(float).to_numpy(),
             index=_row_index_values(code_scores["row_index"]),
-        )
+        ))
     series = code_scores.astype(float)
     if expected_len is not None and len(series) == int(expected_len):
         series = pd.Series(series.to_numpy(), index=range(len(series)))
-    return series
+    return require_finite_code_model_scores(series)
 
 
 def run_reproducibility(
@@ -63,6 +74,8 @@ def run_reproducibility(
     original_len = len(sample)
     sample = sample.reset_index(drop=True)
     take = min(config.random_sample_size, len(sample))
+    if take <= 0:
+        raise ValueError("score comparison requires at least one sampled row")
     drawn = sample.sample(n=take, random_state=config.random_seed)
 
     code_scores_by_index = _code_scores_by_row_index(code_scores, expected_len=original_len)
@@ -87,11 +100,7 @@ def run_reproducibility(
     for row_index, code_score, pmml_score in zip(drawn.index, scores_code, scores_pmml):
         code_score_float = float(code_score)
         pmml_score_float = _nullable_score(pmml_score)
-        abs_diff = (
-            None
-            if pmml_score_float is None
-            else abs(code_score_float - pmml_score_float)
-        )
+        abs_diff = score_absolute_difference(code_score_float, pmml_score_float)
         matched = (
             False
             if pmml_score_float is None
@@ -141,9 +150,11 @@ def _consistency_status(
     max_abs_diff: float,
     unknown_diff_mismatch_count: int,
 ) -> ConsistencyStatus:
+    if sample_size <= 0:
+        return ConsistencyStatus.FAIL
     if mismatch_count == 0:
         return ConsistencyStatus.PASS
-    if sample_size <= 0 or unknown_diff_mismatch_count > 0:
+    if unknown_diff_mismatch_count > 0:
         return ConsistencyStatus.FAIL
     match_ratio = (sample_size - mismatch_count) / sample_size
     if max_abs_diff > _REVIEW_MAX_ABS_DIFF_THRESHOLD:

@@ -727,9 +727,16 @@ def test_join_engine_uses_connection_scoped_artifact_unit_of_work(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    from marvis.domain import TaskCreate
+    from marvis.repositories.tasks import TaskRepository
+
     db_path = tmp_path / "app.sqlite"
     datasets_root = tmp_path / "datasets"
     init_db(db_path)
+    task = TaskRepository(db_path).create_task(TaskCreate(
+        model_name="JOIN transaction", model_version="v1", validator="test",
+        source_dir=str(tmp_path), task_type="data_join",
+    ))
     repo = DatasetRepository(db_path)
     backend = DataBackend(datasets_root)
     registry = DatasetRegistry(repo, backend, datasets_root)
@@ -738,9 +745,9 @@ def test_join_engine_uses_connection_scoped_artifact_unit_of_work(
     feature_csv = tmp_path / "feature.csv"
     anchor_csv.write_text("customer_id,bad_flag\nA,0\nB,1\n", encoding="utf-8")
     feature_csv.write_text("customer_id,score\nA,10\nB,20\n", encoding="utf-8")
-    anchor = registry.register_from_upload("task-1", anchor_csv, role="sample")
-    feature = registry.register_from_upload("task-1", feature_csv, role="feature")
-    plan = engine.propose_join_plan(anchor.id, [feature.id], "task-1")
+    anchor = registry.register_from_upload(task.id, anchor_csv, role="sample")
+    feature = registry.register_from_upload(task.id, feature_csv, role="feature")
+    plan = engine.propose_join_plan(anchor.id, [feature.id], task.id)
     engine.confirm_join_spec(plan.id, feature.id, dedup_strategy=None)
 
     def fail_old_registration_path(*args, **kwargs):
@@ -748,7 +755,7 @@ def test_join_engine_uses_connection_scoped_artifact_unit_of_work(
 
     monkeypatch.setattr(repo, "record_join_result_with_audit", fail_old_registration_path)
 
-    result = engine.execute_join_plan(plan.id, out_dir=datasets_root / "task-1" / "joins")
+    result = engine.execute_join_plan(plan.id, out_dir=datasets_root / task.id / "joins")
 
     loaded = repo.load_join_plan(plan.id)
     assert loaded.status == "executed"

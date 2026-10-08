@@ -157,7 +157,7 @@ def _write_red_flags(workbook: Workbook, red_flags: list[dict]) -> None:
 def _write_rows(sheet, rows: list[tuple]) -> None:
     for row_index, row in enumerate(rows, start=1):
         for col_index, value in enumerate(row, start=1):
-            sheet.cell(row=row_index, column=col_index, value=_cell(value))
+            _write_cell(sheet, row_index, col_index, value)
     _style_header(sheet)
 
 
@@ -171,11 +171,21 @@ def _write_dict_table(sheet, rows: list[dict], *, start_row: int = 1) -> None:
             if key not in headers:
                 headers.append(key)
     for col_index, header in enumerate(headers, start=1):
-        sheet.cell(row=start_row, column=col_index, value=str(header))
+        _write_cell(sheet, start_row, col_index, str(header))
     for row_index, row in enumerate(rows, start=start_row + 1):
         for col_index, header in enumerate(headers, start=1):
-            sheet.cell(row=row_index, column=col_index, value=_cell(row.get(header)))
+            _write_cell(sheet, row_index, col_index, row.get(header))
     _style_header(sheet, row=start_row)
+
+
+def _write_cell(sheet, row: int, column: int, value: Any) -> None:
+    value = _cell(value)
+    cell = sheet.cell(row=row, column=column, value=value)
+    # Portfolio reports carry already computed values. Source labels (including
+    # formula-like and Excel error strings) remain literal without an added
+    # apostrophe or a change to the original business label.
+    if isinstance(value, str):
+        cell.data_type = "s"
 
 
 def _cell(value: Any):

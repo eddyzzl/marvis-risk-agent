@@ -3,6 +3,7 @@
 用 bucket_migration 的 avg_matrix 作为月度桶间转移矩阵，把 loss_state 当作吸收态，
 求各状态在 horizon 步内被吸收到 loss_state 的概率（马尔可夫吸收链，确定性线性代数，
 无迭代随机）。再按各状态当前余额分布估计逐月/总预期损失 EL = balance * P(loss) * lgd。
+选定迁移窗口中的每个快照对必须相隔一个日历月；存在整月缺口时拒绝月度推算。
 
 链式近似：P_h = (T^h)[:, loss]，其中 T 为强制 loss 行吸收后的方阵（去掉 exited 列，
 把概率质量重新归一到 states 内），T^h 通过矩阵幂逐步相乘得到（h 次矩阵乘法）。
@@ -16,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from marvis.data.performance import parse_snapshot_month, validate_performance_frame
+from marvis.data.errors import PerformanceFrameError
 from marvis.packs.analysis.errors import AnalysisError
 from marvis.packs.analysis.flow import bucket_migration
 
@@ -86,6 +88,15 @@ def expected_loss_estimate(
         balance_col=None,  # transition probabilities are count-based, not balance-weighted
         window=window,
     )
+
+    selected_gaps = [flag for flag in migration.red_flags
+                     if flag.get("kind") == "month_gap" and flag.get("month") in migration.window_months]
+    if selected_gaps:
+        raise PerformanceFrameError(
+            reason="所选迁移窗口包含非连续月快照，不能把跨期转移当作月度概率；请补齐月份或选择实际连续月份的迁移窗口。",
+            problem="non_monthly_migration", column=snapshot_col,
+            samples=[f"{flag['month']} -> {flag['to_month']}" for flag in selected_gaps[:5]],
+        )
 
     transition, was_absorbing = _absorbing_transition(migration.avg_matrix, state_order, resolved_loss)
     powered = _matrix_power(transition, horizon_months)

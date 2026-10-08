@@ -84,6 +84,35 @@ def test_standard_v2_agent_executes_pmml_stages_draft_confirmation_and_downloads
     assert case["execution"]["steps"] == []
     assert case["execution"]["validation_pipeline"]["notebook_consistency"] == "not_in_v2_entry"
     assert case["human_interventions"] == 3
+    process = case["process_observation"]
+    assert process["llm_transport"]["complete"] is True
+    assert process["llm_transport"]["measured_attempts"] == len(calls)
+    assert process["llm_transport"]["known_busy_duration_ns"] > 0
+    assert process["formal_timing_complete"] is False
+    assert process["backend"]["journal_complete"] is True
+    for scope in ("validation_scan", "validation_pmml", "validation_metrics", "validation_report", "queue"):
+        timing = process["backend"]["scopes"][scope]
+        assert timing["complete"] is True, (scope, timing)
+        assert timing["measured_intervals"] >= 1, (scope, timing)
+        assert timing["known_busy_duration_ns"] > 0
+    assert process["overlapping_scopes"] is True
+    assert process["revisions"]["complete"] is True
+    assert process["revisions"]["plan_denominator"] == 0
+    assert process["revisions"]["known_counts"] == {
+        "structural_replan": 0, "explore_append": 0, "upstream_revision": 0,
+    }
+    waiting = process["backend"]["scopes"]["report_confirmation_wait"]
+    assert waiting["complete"] and waiting["measured_intervals"] == 1
+    assert waiting["intervals"][0]["outcome"] == "resumed"
+    assert waiting["known_busy_duration_ns"] > 0
+    assert [a["kind"] for a in process["human_actions"]] == [
+        "validation_material_selection", "start_validation_agent", "confirm_current_validation_report",
+    ]
+    from marvis.orchestrator.eval.runtime_process import material_selection_identity
+    definition = RuntimeCase.model_validate(json.loads(paths["cases"].read_text())["cases"][0])
+    assert [a["action_sha256"] for a in process["human_actions"]] == [
+        material_selection_identity(definition), *(digest(a.model_dump()) for a in definition.actions),
+    ]
     assert report["runtime_task_coverage"]["cells"]["validation"]["normal"]["passed"] == 1
     assert report["a_evidence_case_count"] == 0
     assert report["acceptance_claim"] == "not_established"

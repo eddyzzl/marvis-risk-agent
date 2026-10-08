@@ -335,10 +335,10 @@ REVIEWER_CASES: tuple[TouchpointCase, ...] = (
         touchpoint="reviewer",
         degradation="key_casing",
         raw_output='{"Passed": true, "Reasons": []}',
-        expected={"passed": False, "reasons": []},
+        expected={"passed": False, "reasons": ["llm critique returned invalid schema"]},
         notes=(
             "A missing exact-case passed boolean fails closed instead of "
-            "defaulting an unrecognized payload to success."
+            "defaulting an unrecognized payload to success; schema rejection is explicit."
         ),
     ),
     TouchpointCase(

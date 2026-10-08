@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from marvis.runtime_observations import measured
+
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -155,6 +157,7 @@ def scan_hook_payload(payload: dict) -> dict:
     }
 
 
+@measured("validation_scan")
 def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     # source_dir is normalized at task-create time, so pipeline and /scan agree.
     source_dir = Path(task.source_dir).resolve()

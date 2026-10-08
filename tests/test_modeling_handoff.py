@@ -518,7 +518,10 @@ def test_post_training_action_writes_sample_weight_governance_artifacts(tmp_path
     assert sample_weight["approval_policy"]["requires_manual_review"] is True
     assert sample_weight["monitoring_defaults"]["checks"][0]["id"] == "sample_weight_availability"
     assert output["monitoring_policy"]["sample_weight_policy"] == sample_weight
-    assert "样本权重业务口径" in output["model_card"]["next_review_actions"][1]
+    assert any(
+        "样本权重业务口径" in action
+        for action in output["model_card"]["next_review_actions"]
+    )
 
     approval_payload = json.loads(Path(output["approval_package_path"]).read_text(encoding="utf-8"))
     monitoring_payload = json.loads(Path(output["monitoring_policy_path"]).read_text(encoding="utf-8"))

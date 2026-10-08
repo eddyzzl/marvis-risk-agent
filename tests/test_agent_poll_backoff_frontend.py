@@ -8,6 +8,17 @@ import pytest
 APP_JS = Path(__file__).resolve().parents[1] / "marvis" / "static" / "app.js"
 
 
+def _session(parent_id, child_id=""):
+    module = APP_JS.parent / "js" / "task-session.js"
+    return "\n".join([
+        f"import {{ createTaskSession }} from {json.dumps(module.as_uri())};",
+        "const taskSession = createTaskSession();",
+        "const taskRequests = taskSession.requests;",
+        f"taskSession.selectTask({{ id: {json.dumps(parent_id)} }});",
+        f"taskSession.selectModel({json.dumps(child_id)});",
+    ])
+
+
 def _function(source: str, signature: str) -> str:
     start = source.index(signature)
     # The poller has a destructured default argument (`{ preserveOptimistic }
@@ -53,9 +64,8 @@ def test_agent_message_polling_backs_off_and_resets_after_progress(parent_id, ch
             "const AGENT_STREAM_POLL_LONG_INTERVAL_MS = 3000;",
             "const AGENT_STREAM_POLL_IDLE_AFTER_MS = 2000;",
             "const AGENT_STREAM_POLL_LONG_AFTER_MS = 15000;",
-            f"let selectedTaskId = {json.dumps(parent_id)};",
-            f"let projectedValidationChildTaskId = {json.dumps(child_id)};",
-            "let agentMessages = [{ id: 'thinking', role: 'assistant', content: '', metadata: { streaming: true } }];",
+            _session(parent_id, child_id),
+            "taskSession.replaceMessages(taskRequests.capture(), [{ id: 'thinking', role: 'assistant', content: '', metadata: { streaming: true } }]);",
             "const delays = [];",
             "let loads = 0;",
             "let resetExpectedAt = -1;",
@@ -65,7 +75,7 @@ def test_agent_message_polling_backs_off_and_resets_after_progress(parent_id, ch
             "async function loadAgentMessages() {",
             "  loads += 1;",
             "  if (loads === 15) {",
-            "    agentMessages = [{ id: 'progress', role: 'assistant', content: '', metadata: { kind: 'tool_progress', progress: { kind: 'model_tuning', algorithm: 'xgb', trial: 2, trial_total: 40 } } }];",
+            "    taskSession.replaceMessages(taskRequests.capture(), [{ id: 'progress', role: 'assistant', content: '', metadata: { kind: 'tool_progress', progress: { kind: 'model_tuning', algorithm: 'xgb', trial: 2, trial_total: 40 } } }]);",
             "    resetExpectedAt = delays.length;",
             "  }",
             "  if (loads === 43) resolvePending();",
@@ -106,9 +116,7 @@ def test_agent_message_polling_stops_immediately_when_request_settles_during_wai
             "const AGENT_STREAM_POLL_LONG_INTERVAL_MS = 3000;",
             "const AGENT_STREAM_POLL_IDLE_AFTER_MS = 2000;",
             "const AGENT_STREAM_POLL_LONG_AFTER_MS = 15000;",
-            f"let selectedTaskId = {json.dumps(parent_id)};",
-            f"let projectedValidationChildTaskId = {json.dumps(child_id)};",
-            "let agentMessages = [];",
+            _session(parent_id, child_id),
             "let loads = 0;",
             "let resolvePending;",
             "const pending = new Promise((resolve) => { resolvePending = resolve; });",
@@ -144,8 +152,7 @@ def test_agent_poll_backoff_constants_keep_fast_first_paint_and_cap_long_jobs():
 def test_batch_auto_run_releases_lock_after_settlement(reject):
     source = APP_JS.read_text(encoding="utf-8")
     function = _function(source, "async function continueAgentValidationBatch")
-    payload = _run(f"""
-let selectedTask = {{}};
+    payload = _run(_session("task-A") + f"""
 let agentBatchAutoRunPromise = null;
 let calls = 0;
 let settle;

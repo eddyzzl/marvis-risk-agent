@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
+import math
 
 import pandas as pd
 
@@ -53,8 +55,9 @@ def validate_performance_frame(
 
     - ``id_col`` / ``snapshot_col`` / ``bucket_col`` 三列必须存在（``balance_col`` 若给定也必须存在）；
     - ``snapshot_col`` 每行都能解析成 ``YYYY-MM`` 快照月；
-    - ``bucket_col`` 每个非空取值都落在 ``states`` 枚举内；
-    - ``balance_col`` 若给定，每行都能解析成数值。
+    - 贷款 ID 非空且表示类型一致，每个贷款/规范快照月只有一条记录；
+    - ``bucket_col`` 每行均非空并落在 ``states`` 枚举内；
+    - ``balance_col`` 若给定，每行都是可解析、有限且非负的金额。
 
     任一条不满足抛 :class:`PerformanceFrameError`，``to_detail()`` 携带
     ``reason`` / ``missing_columns`` / 样例值等结构化诊断（中文文案 + 截断样例）。
@@ -71,6 +74,14 @@ def validate_performance_frame(
             problem="duplicate_states",
             samples=[state for state in state_order if state_order.count(state) > 1][:_MAX_SAMPLES],
         )
+    if any(not state.strip() for state in state_order):
+        raise PerformanceFrameError(reason="桶状态不能为空白。", problem="blank_state")
+    reserved = [state for state in state_order if state in {"exited", "from"}]
+    if reserved:
+        raise PerformanceFrameError(
+            reason="states 使用了迁移输出的保留名称（exited 为退出观察状态，from 为来源桶列）；请为实际业务桶使用独立名称。",
+            problem="reserved_state", samples=reserved,
+        )
 
     required = [id_col, snapshot_col, bucket_col]
     if balance_col:
@@ -84,6 +95,7 @@ def validate_performance_frame(
         )
 
     row_count = int(len(df))
+    identity = _loan_identity_keys(df[id_col], id_col)
 
     # snapshot 列逐行必须可解析成 YYYY-MM。
     bad_snapshots = _unparseable_snapshots(df[snapshot_col])
@@ -93,6 +105,26 @@ def validate_performance_frame(
             problem="bad_snapshot",
             column=snapshot_col,
             samples=[_truncate(value) for value in bad_snapshots[:_MAX_SAMPLES]],
+        )
+
+    # Match the exact identity/month normalization used by the alignment
+    # kernel. Two dates in the same calendar month are duplicate snapshots too;
+    # row order must never pick a winner while EL separately sums both rows.
+    normalized = pd.DataFrame({"loan": identity, "month": df[snapshot_col].map(parse_snapshot_month).tolist()})
+    duplicates = normalized.duplicated(["loan", "month"], keep=False).to_numpy()
+    if duplicates.any():
+        raise PerformanceFrameError(
+            reason="同一贷款在同一快照月存在多条记录；请明确去重或汇总口径后重试，平台不会按行顺序覆盖记录。",
+            problem="duplicate_loan_snapshot", column=id_col,
+            samples=[f"row {i + 1}" for i, duplicate in enumerate(duplicates) if duplicate][:_MAX_SAMPLES],
+        )
+
+    missing_buckets = df[bucket_col].isna().to_numpy()
+    if missing_buckets.any():
+        raise PerformanceFrameError(
+            reason=f"逾期桶列 `{bucket_col}` 含缺失状态；请补充实际状态，不能将空值当成已声明的桶。",
+            problem="missing_bucket", column=bucket_col,
+            samples=[f"row {i + 1}" for i, missing in enumerate(missing_buckets) if missing][:_MAX_SAMPLES],
         )
 
     # bucket 列每个非空取值必须在 states 内。
@@ -112,7 +144,7 @@ def validate_performance_frame(
         bad_balances = _unparseable_balances(df[balance_col])
         if bad_balances:
             raise PerformanceFrameError(
-                reason=f"余额列 `{balance_col}` 有 {len(bad_balances)} 行不可解析为数值。",
+                reason=f"余额列 `{balance_col}` 有 {len(bad_balances)} 行不是有限非负金额；缺失值、布尔值及负数不能当作余额。",
                 problem="bad_balance",
                 column=balance_col,
                 samples=[_truncate(value) for value in bad_balances[:_MAX_SAMPLES]],
@@ -129,8 +161,38 @@ def validate_performance_frame(
     )
 
 
+def _loan_identity_keys(series: pd.Series, column: str) -> list[str]:
+    values = series.tolist()
+    kinds, bad_rows = set(), []
+    for index, value in enumerate(values):
+        if type(value) is str:
+            valid = bool(value.strip())
+        elif type(value) is int:
+            valid = True
+        elif type(value) is float:
+            valid = math.isfinite(value)
+        else:
+            valid = False
+        if not valid:
+            bad_rows.append(f"row {index + 1}")
+        kinds.add(type(value))
+    if bad_rows:
+        raise PerformanceFrameError(
+            reason=f"贷款 ID 列 `{column}` 含空白、缺失或不支持的标识；请提供有效且一致的文本或数值 ID。",
+            problem="bad_loan_id", column=column, samples=bad_rows[:_MAX_SAMPLES],
+        )
+    if len(kinds) > 1:
+        raise PerformanceFrameError(
+            reason=f"贷款 ID 列 `{column}` 混用了不同表示类型；请先明确统一 ID，不能通过转成文本合并可能不同的贷款。",
+            problem="mixed_loan_id_types", column=column,
+        )
+    return series.astype(str).tolist()
+
+
 def parse_snapshot_month(value) -> str | None:
     """把一个快照值规范化成 ``YYYY-MM``；不可解析返回 ``None``（不抛异常）。"""
+    if not pd.api.types.is_scalar(value):
+        return None
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     if pd.isna(value):
@@ -148,12 +210,14 @@ def parse_snapshot_month(value) -> str | None:
     if len(text) == 6 and text.isdigit():
         year, month = int(text[:4]), int(text[4:])
         return f"{year:04d}-{month:02d}" if _valid_month(year, month) else None
-    if len(text) >= 7 and text[4] == "-" and text[:4].isdigit() and text[5:7].isdigit():
+    if len(text) == 7 and text[4] == "-" and text[:4].isdigit() and text[5:7].isdigit():
         year, month = int(text[:4]), int(text[5:7])
         return f"{year:04d}-{month:02d}" if _valid_month(year, month) else None
     try:
         parsed = pd.to_datetime(text, errors="raise")
     except (ValueError, TypeError):
+        return None
+    if pd.isna(parsed):
         return None
     return pd.Timestamp(parsed).strftime("%Y-%m")
 
@@ -165,9 +229,6 @@ def _valid_month(year: int, month: int) -> bool:
 def _unparseable_snapshots(series: pd.Series) -> list:
     bad: list = []
     for value in series.tolist():
-        if value is None or (not isinstance(value, str) and pd.isna(value)):
-            bad.append(value)
-            continue
         if parse_snapshot_month(value) is None:
             bad.append(value)
     return bad
@@ -198,13 +259,15 @@ def _observed_states(series: pd.Series, states: tuple[str, ...]) -> tuple[str, .
 
 def _unparseable_balances(series: pd.Series) -> list:
     numeric = pd.to_numeric(series, errors="coerce")
-    original_na = series.isna().to_numpy()
-    coerced_na = numeric.isna().to_numpy()
     bad: list = []
-    values = series.tolist()
-    for index in range(len(values)):
-        if coerced_na[index] and not original_na[index]:
-            bad.append(values[index])
+    for value, number in zip(series.tolist(), numeric.tolist()):
+        try:
+            valid = (not isinstance(value, (bool, date, datetime))
+                     and math.isfinite(number) and number >= 0)
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            bad.append(value)
     return bad
 
 

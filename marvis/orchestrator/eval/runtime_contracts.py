@@ -128,6 +128,8 @@ class RuntimeAction(StrictModel):
         "confirm_current_validation_report",
         "submit_labeling_request",
         "download_labeling_results",
+        "download_portfolio_report",
+        "download_feature_report",
         "submit_model_monitoring_request",
         "start_model_monitoring_workflow",
         "confirm_model_monitoring_plan",
@@ -160,6 +162,8 @@ class RuntimeAction(StrictModel):
             raise ValueError("labeling fields belong only to the labeling proposal action")
         if self.kind == "download_labeling_results" and (self.tool or not self.content.strip()):
             raise ValueError("label downloads require explicit human text and no arbitrary tool")
+        if self.kind in {"download_portfolio_report", "download_feature_report"} and (self.tool or not self.content.strip()):
+            raise ValueError("report download requires explicit human text and no arbitrary tool")
         if self.kind == "bind_single_strategy_sample":
             if self.tool or not self.content.strip() or self.semantic_mapping is None:
                 raise ValueError(
@@ -261,6 +265,15 @@ class RuntimeCase(StrictModel):
             raise ValueError("labeling starts with one declared data_join sample and proposal")
         if any(a.kind == "download_labeling_results" for a in self.actions) and not labeling:
             raise ValueError("label downloads require a declared labeling proposal")
+        downloads = [i for i, a in enumerate(self.actions) if a.kind == "download_portfolio_report"]
+        if downloads:
+            declarations = [i for i, a in enumerate(self.actions) if a.portfolio_request is not None]
+            if (self.task.task_type != "portfolio" or len(self.materials) != 1
+                    or self.materials[0].role != "sample" or len(declarations) != 1
+                    or any(i <= declarations[0] for i in downloads)):
+                raise ValueError("portfolio download follows one declared portfolio request and sample")
+        if any(a.kind == "download_feature_report" for a in self.actions) and self.task.task_type != "feature_analysis":
+            raise ValueError("feature report download requires a feature analysis task")
         if any(a.kind == "bind_single_strategy_sample" for a in self.actions):
             if (
                 self.task.task_type != "strategy"

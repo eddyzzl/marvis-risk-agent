@@ -91,7 +91,7 @@ export function createModelMonitoringPanel(dependencies = {}) {
         api(`api/tasks/${encodeURIComponent(id)}/experiments`), list(id), workspace(id), readPlans(id),
       ]);
       if (!current(view) || operation !== version) return false;
-      models = (experiments.experiments || []).filter(item => item.task_id === id && item.status === "selected" && item.artifact_id);
+      models = (experiments.experiments || []).filter(item => item.task_id === id && ["selected", "handed_off", "validated"].includes(item.status) && item.artifact_id);
       datasets = (data.datasets || []).filter(item => item.task_id === id && item.content_hash && item.role !== "modeling.scored");
       snapshot = state; stale = false;
       plans = currentPlans;

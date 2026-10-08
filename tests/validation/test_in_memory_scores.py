@@ -36,3 +36,11 @@ def test_load_code_model_scores_keeps_string_row_index(tmp_path: Path):
     scores = load_code_model_scores(path)
 
     assert scores.index.tolist() == ["row-a", "row-b"]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_load_code_model_scores_rejects_non_finite_artifacts(tmp_path, value):
+    path = tmp_path / "scores.csv"
+    pd.DataFrame({"row_index": [0, 1], "code_model_score": [.5, value]}).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="non-finite"):
+        load_code_model_scores(path)

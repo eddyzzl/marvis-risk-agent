@@ -293,7 +293,7 @@ def normal_modeling_cases(materials: dict) -> tuple[list[dict], dict]:
         },
         "materials": [materials["normal_modeling.parquet"]],
         "initial_message": "请按已上传的合成样本建立二分类模型，目标列 y，使用现有 split 的 train/test/oot，特征为 signal、affordability、noise。只训练逻辑回归 lr，调参 1 轮。",
-        "business_constraints_source": "Public synthetic 600-row fixed-seed logistic sample, 360/120/120 train/test/OOT. Human explicitly chooses the platform-displayed recommended experiment and authorizes local reports/delivery. No real customers, loan economics, MOB maturity, feature dictionary, production Champion or business acceptance threshold supplied; previous_selected_experiment is only the current synthetic task's pre-refit candidate, never a production Champion; missing evidence must remain visible. Execution completion is not production or business approval.",
+        "business_constraints_source": "Public synthetic 600-row fixed-seed logistic sample, 360/120/120 train/test/OOT. Human explicitly chooses the platform-displayed recommended experiment and authorizes local reports/delivery. No real customers, loan economics, MOB maturity, feature dictionary, production Champion or business acceptance threshold supplied; fold-frozen training retains the authenticated selected candidate without legacy refit; missing evidence must remain visible. Execution completion is not production or business approval.",
         "actions": [
             {
                 "kind": "approve_step",
@@ -390,9 +390,9 @@ def normal_modeling_cases(materials: dict) -> tuple[list[dict], dict]:
         },
         {
             "kind": "output_equals",
-            "tool": "modeling.post_training_action",
-            "path": ["challenger_comparison", "champion", "label"],
-            "value": "previous_selected_experiment",
+            "tool": "modeling.select_experiment",
+            "path": ["refit", "applied"],
+            "value": False,
         },
     ]
     return [case], {case["id"]: {"result": "done", "assertions": assertions}}

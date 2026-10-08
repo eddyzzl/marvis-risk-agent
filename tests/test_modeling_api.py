@@ -1248,11 +1248,13 @@ def test_modeling_persists_explicit_target_type_and_defaults_recipe(client: Test
     spec_step = next(step for step in plans[0].steps if step.title == "选择建模规格")
     train_step = next(step for step in plans[0].steps if step.title == "训练模型")
     screen_step = next(step for step in plans[0].steps if step.title == "特征筛选")
+    config_step = next(step for step in plans[0].steps if step.title == "配置调参")
     assert spec_step.inputs["target_type"] == "continuous"
     assert spec_step.inputs["recipes"] == ["lgb_regressor"]
     assert screen_step.inputs["target_type"] == f"$ref:{spec_step.id}.output.target_type"
     assert train_step.inputs["target_type"] == f"$ref:{spec_step.id}.output.target_type"
-    assert train_step.inputs["recipes"] == f"$ref:{spec_step.id}.output.recipes"
+    assert config_step.inputs["recipes"] == f"$ref:{spec_step.id}.output.recipes"
+    assert train_step.inputs["recipes"] == f"$ref:{config_step.id}.output.recipes"
 
 
 def test_modeling_persists_sample_weight_col_and_passes_to_plan(client: TestClient, tmp_path: Path):
@@ -1292,7 +1294,7 @@ def test_modeling_persists_sample_weight_col_and_passes_to_plan(client: TestClie
     assert spec_step.inputs["sample_weight_col"] == "sample_weight"
     assert config_step.inputs["sample_weight_col"] == f"$ref:{spec_step.id}.output.sample_weight_col"
     assert tune_step.inputs["sample_weight_col"] == f"$ref:{config_step.id}.output.sample_weight_col"
-    assert train_step.inputs["sample_weight_col"] == f"$ref:{spec_step.id}.output.sample_weight_col"
+    assert train_step.inputs["sample_weight_col"] == f"$ref:{config_step.id}.output.sample_weight_col"
 
 
 def test_modeling_persists_oot_ks_min_and_injects_success_criteria(client: TestClient, tmp_path: Path):

@@ -225,3 +225,17 @@ def test_render_feature_report_omits_binning_sheet_when_user_skips(tmp_path):
     out = tmp_path / "feature_report_without_bins.xlsx"
     render_feature_report([{"feature": "x1", "iv": 0.23}], out, binning=[])
     assert load_workbook(out).sheetnames == ["特征指标"]
+
+
+def test_feature_report_preserves_excel_error_like_labels_as_plain_text(tmp_path):
+    from openpyxl import load_workbook
+
+    path = tmp_path / "feature.xlsx"
+    render_feature_report([{"feature": "#N/A", "iv": .3, "recommendation_reason": "#VALUE!"}], path)
+    book = load_workbook(path, data_only=False)
+    try:
+        cells = [cell for sheet in book for row in sheet for cell in row if cell.value in {"#N/A", "#VALUE!"}]
+        assert len(cells) == 2
+        assert all(cell.data_type == "s" for cell in cells)
+    finally:
+        book.close()

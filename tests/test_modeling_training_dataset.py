@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 
 from marvis.data.backend import DataBackend
+from marvis.data.registry import DatasetRegistry
+from marvis.db_schema import init_db
+from marvis.repositories.datasets import DatasetRepository
 from marvis.packs.modeling import tools as modeling_tools
 from marvis.packs.modeling import train_tools as modeling_train_tools
 from marvis.packs.modeling._common import _training_control_params
@@ -32,16 +35,13 @@ class _CountingBackend:
         return [str(column) for column in self.frame.columns]
 
 
-class _FakeRegistry:
-    def __init__(self, path: Path, *, task_id: str = "task-1"):
-        self.path = path
-        self.task_id = task_id
-
-    def get(self, dataset_id: str):
-        return SimpleNamespace(id=dataset_id, task_id=self.task_id)
-
-    def resolve_path(self, dataset_id: str):
-        return self.path
+def _register_training_frame(path, frame):
+    frame.to_parquet(path, index=False)
+    db_path = path.parent / "app.sqlite"
+    init_db(db_path)
+    registry = DatasetRegistry(DatasetRepository(db_path), DataBackend(path.parent), path.parent)
+    dataset = registry.register_existing(path, task_id="task-1", role="sample")
+    return registry, dataset
 
 
 class _FakeExperiments:
@@ -110,13 +110,12 @@ def test_train_models_uses_training_dataset_cache_for_multiple_recipes(tmp_path,
     })
     backend = _CountingBackend(frame)
     dataset_path = tmp_path / "modeling.parquet"
-    # Production registry entries always resolve to a real material.  Keep the
-    # lightweight backend mock, but provide bytes for the immutable content-hash
-    # guard exercised by train_models.
-    dataset_path.write_bytes(b"modeling-cache-fixture")
+    # Use native registered bytes for provenance, keeping the counting backend
+    # to verify that recipe workers share a single projected frame.
+    registry, dataset = _register_training_frame(dataset_path, frame)
     experiments = _FakeExperiments()
     runtime = SimpleNamespace(
-        registry=_FakeRegistry(dataset_path),
+        registry=registry,
         backend=backend,
         experiments=experiments,
         settings=SimpleNamespace(tasks_dir=tmp_path / "tasks"),
@@ -151,7 +150,7 @@ def test_train_models_uses_training_dataset_cache_for_multiple_recipes(tmp_path,
 
     out = modeling_tools.tool_train_models(
         {
-            "dataset_id": "dataset-1",
+            "dataset_id": dataset.id,
             "recipes": ["lgb", "lr"],
             "features": ["x1"],
             "target_col": "y",
@@ -191,10 +190,10 @@ def test_training_controls_normalize_and_project_group_columns_without_feature_l
     })
     backend = _CountingBackend(frame)
     dataset_path = tmp_path / "group_projection.parquet"
-    dataset_path.write_bytes(b"group-projection-fixture")
+    registry, dataset = _register_training_frame(dataset_path, frame)
     experiments = _FakeExperiments()
     runtime = SimpleNamespace(
-        registry=_FakeRegistry(dataset_path),
+        registry=registry,
         backend=backend,
         experiments=experiments,
         settings=SimpleNamespace(tasks_dir=tmp_path / "tasks"),
@@ -227,7 +226,7 @@ def test_training_controls_normalize_and_project_group_columns_without_feature_l
 
     result = modeling_tools.tool_train_models(
         {
-            "dataset_id": "dataset-1",
+            "dataset_id": dataset.id,
             "recipes": ["lgb"],
             "features": ["x1"],
             "target_col": "y",
@@ -285,8 +284,9 @@ def test_multi_recipe_tuning_does_not_retain_outer_compact_frame(tmp_path, monke
     })
     backend = _CountingBackend(frame)
     dataset_path = tmp_path / "modeling.parquet"
+    registry, dataset = _register_training_frame(dataset_path, frame)
     runtime = SimpleNamespace(
-        registry=_FakeRegistry(dataset_path),
+        registry=registry,
         backend=backend,
     )
     calls = []
@@ -318,7 +318,7 @@ def test_multi_recipe_tuning_does_not_retain_outer_compact_frame(tmp_path, monke
 
     result = modeling_train_tools.tool_tune_hyperparameters(
         {
-            "dataset_id": "dataset-1",
+            "dataset_id": dataset.id,
             "recipes": ["lgb", "xgb"],
             "features": ["x1"],
             "target_col": "y",
@@ -331,8 +331,8 @@ def test_multi_recipe_tuning_does_not_retain_outer_compact_frame(tmp_path, monke
 
     assert backend.read_count == 0
     assert calls == [
-        ("task-1", "dataset-1", "lgb"),
-        ("task-1", "dataset-1", "xgb"),
+        ("task-1", dataset.id, "lgb"),
+        ("task-1", dataset.id, "xgb"),
     ]
     assert result["n_trials"] == 2
     trial_events = [event for event in progress if event.get("trial") == 1]

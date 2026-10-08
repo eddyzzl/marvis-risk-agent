@@ -61,17 +61,18 @@ def read_authenticated_parquet_snapshot(
 
 
 def read_authenticated_parquet_metadata(
-    path: Path, *, root: Path, expected_sha256: str,
+    path: Path, *, root: Path, expected_sha256: str, canonical_names: bool = False,
 ) -> tuple[tuple[str, ...], int]:
     """Read authenticated schema and row count without decoding sample rows."""
     return _read_authenticated_parquet(
         path, root=root, expected_sha256=expected_sha256,
-        columns=None, metadata_only=True,
+        columns=None, metadata_only=True, canonical_names=canonical_names,
     )
 
 
 def _read_authenticated_parquet(
     path, *, root, expected_sha256, columns, metadata_only, preserve_integer_values=False,
+    canonical_names=False,
 ):
     try:
         with authenticated_file_snapshot(path, root=root, expected_sha256=expected_sha256) as snapshot:
@@ -79,7 +80,22 @@ def _read_authenticated_parquet(
                 import pyarrow.parquet as pq
 
                 parquet = pq.ParquetFile(snapshot)
-                return tuple(parquet.schema_arrow.names), parquet.metadata.num_rows
+                names = tuple(parquet.schema_arrow.names)
+                if canonical_names and (
+                    any(not name for name in names)
+                    or len({name.casefold() for name in names}) != len(names)
+                ):
+                    import duckdb
+                    import pyarrow as pa
+
+                    # Ask the same Parquet reader used by modeling for aliases,
+                    # using only the authenticated schema and no sample rows.
+                    with tempfile.TemporaryDirectory(dir=root) as temporary:
+                        schema_path = Path(temporary) / "schema.parquet"
+                        pq.write_table(pa.Table.from_batches([], schema=parquet.schema_arrow), schema_path)
+                        with duckdb.connect() as connection:
+                            names = tuple(connection.from_parquet(str(schema_path)).columns)
+                return names, parquet.metadata.num_rows
             if preserve_integer_values:
                 import pyarrow.parquet as pq
 

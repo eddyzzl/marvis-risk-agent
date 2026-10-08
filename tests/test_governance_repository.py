@@ -27,7 +27,6 @@ from marvis.orchestrator.contracts import (
 )
 from marvis.repositories.plans import PlanRepository
 from marvis.state_machine import ConflictError
-from tests.schema_fixture_support import install_v1_plan_step_runs_predecessor
 
 
 class _Clock:
@@ -272,18 +271,29 @@ def test_expired_local_session_cannot_resolve_or_authorize(tmp_path):
 
 def test_migration_backfills_pre_v5_confirmation_gates_as_required(tmp_path):
     db_path = tmp_path / "app.sqlite"
+    from marvis.db_schema import _MIGRATIONS, SCHEMA_VERSION
+
     with connect(db_path) as conn:
-        install_v1_plan_step_runs_predecessor(conn)
-        conn.execute(
-            "CREATE TABLE plan_steps (id TEXT PRIMARY KEY, needs_confirmation INTEGER NOT NULL)"
-        )
-        conn.execute("INSERT INTO plan_steps VALUES ('legacy-gate', 1)")
-        conn.execute("INSERT INTO plan_steps VALUES ('legacy-auto', 0)")
+        # A real v4 database includes all baseline tables. A two-table database
+        # stamped v4 cannot exercise the later append-only migration chain.
+        for version, migration in _MIGRATIONS:
+            if version > 4:
+                break
+            migration(conn)
         conn.execute("PRAGMA user_version = 4")
+        assert "policy_json" not in {row[1] for row in conn.execute("PRAGMA table_info(plan_steps)")}
+        conn.execute("""INSERT INTO plans(id, task_id, goal, source, autonomy_level, status, created_at, updated_at)
+            VALUES ('legacy-plan', 'legacy-task', 'legacy', 'template', 0, 'awaiting_confirm', '2026-01-01', '2026-01-01')""")
+        conn.executemany("""INSERT INTO plan_steps(id, plan_id, idx, title, tool_plugin, tool_name,
+            inputs_json, depends_on_json, post_checks_json, needs_confirmation, status)
+            VALUES (?, 'legacy-plan', ?, 'legacy', '_sample', 'echo', '{}', '[]', '[]', ?, 'pending')""",
+            [("legacy-gate", 0, 1), ("legacy-auto", 1, 0)],
+        )
 
     init_db(db_path)
 
     with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         rows = {
             row["id"]: row["policy_json"]
             for row in conn.execute(

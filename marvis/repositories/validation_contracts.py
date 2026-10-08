@@ -130,6 +130,8 @@ def require_confirmed_validation_input_contract(
 
 
 def _start_ready_job(db_path: Path, task_id: str, kind: str) -> str:
+    from marvis.runtime_observations import observe_queue, end_confirmation_wait
+
     job_id = uuid.uuid4().hex
     now = _now()
     with connect(db_path) as conn:
@@ -163,6 +165,8 @@ def _start_ready_job(db_path: Path, task_id: str, kind: str) -> str:
             raise ValidationContractActiveJobConflict(
                 f"task {task_id} already has an active job"
             ) from exc
+    observe_queue(job_id)
+    end_confirmation_wait(task_id)
     return job_id
 
 

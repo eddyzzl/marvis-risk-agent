@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hmac
 import re
 import shutil
@@ -342,7 +342,14 @@ class DatasetRegistry:
         anchor_target: str | None = None,
         target_col_override: str | None | object = _INFER_TARGET,
         seed: int = 0,
+        upload_source: Path | None = None,
+        sheet: str | None = None,
+        artifact_uow: ArtifactUnitOfWork | None = None,
     ) -> Dataset:
+        if upload_source is not None and (not sheet or artifact_uow is None):
+            raise DataBackendError("original workbook registration requires sheet and artifact transaction")
+        if upload_source is None and (sheet is not None or artifact_uow is not None):
+            raise DataBackendError("workbook provenance requires original upload")
         parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
         dataset = self._dataset_from_existing(
             parquet_path,
@@ -352,6 +359,15 @@ class DatasetRegistry:
             target_col_override=target_col_override,
             seed=seed,
         )
+        if upload_source is not None:
+            dataset = replace(dataset, sheet=sheet)
+            identity_path = self._source_identity_path(task_id, dataset.id)
+            identity = artifact_uow.stage_file(identity_path.parent, identity_path.name)
+            write_json_atomic(identity.path, _source_file_identity(Path(upload_source)))
+            # The caller has already promoted sheet files and opened its DB
+            # transaction. Track this late-created identity in that same unit
+            # so a later sheet failure or DB commit failure rolls it back too.
+            identity.promote()
         create_on_connection = getattr(self._repo, "create_dataset_on_connection", None)
         if not callable(create_on_connection):
             raise DataBackendError("dataset repository does not support connection-scoped dataset writes")
@@ -777,12 +793,13 @@ class DatasetRegistry:
         )
 
     def authenticated_parquet_column_names(self, dataset_id: str) -> tuple[str, ...]:
-        """Authenticate physical schema without repinning a producer's dataset."""
+        """Authenticate modeling's canonical schema without repinning the dataset."""
         dataset = self.get(dataset_id)
         path = self.resolve_verified_path(dataset_id)
         try:
             names, row_count = read_authenticated_parquet_metadata(
                 path, root=self._root, expected_sha256=dataset.content_hash,
+                canonical_names=True,
             )
         except AuthenticatedSnapshotError as exc:
             raise DatasetContentDriftError(

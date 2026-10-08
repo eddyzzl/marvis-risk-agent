@@ -34,6 +34,11 @@ def test_browser_stylesheet_bundle_is_ordered_unique_and_complete() -> None:
         "static/css/v2-task-setup.css",
         "static/css/validation-batch.css",
         "static/css/validation-batch-create.css",
+        "static/css/business-acceptance.css",
+        "static/css/operations.css",
+        "static/css/production-governance.css",
+        "static/css/historical-replay.css",
+        "static/css/collection-workspace.css",
     )
     assert len(hrefs) == len(set(hrefs))
     assert all("?v=__MARVIS_STATIC_VERSION__" in href for href in hrefs)

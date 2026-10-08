@@ -583,8 +583,11 @@ def upload_task_dataset(
                             parquet_path,
                             task_id=task_id,
                             role=role,
+                            upload_source=upload_path,
+                            sheet=report.sheet,
+                            artifact_uow=uow,
                         )
-                        for parquet_path, _report in staged_sheets
+                        for parquet_path, report in staged_sheets
                     ],
                 )
             except Exception:

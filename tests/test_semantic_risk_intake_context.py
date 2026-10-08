@@ -79,8 +79,8 @@ def test_actual_api_intake_context_never_overrides_independent_review_flags(
 
     llm = Client()
     _install_semantic_client(monkeypatch, llm)
-    source = tmp_path / "source"
-    source.mkdir()
+    source = tmp_path / "workspace" / "materials"
+    source.mkdir(parents=True)
     pd.DataFrame(
         {
             "cohort": ["2025-01", "2025-01", "2025-02", "2025-02"],
@@ -89,10 +89,11 @@ def test_actual_api_intake_context_never_overrides_independent_review_flags(
         }
     ).to_csv(source / "panel.csv", index=False)
     with TestClient(create_app(tmp_path / "workspace")) as client:
-        task = client.post(
+        created = client.post(
             "/api/tasks",
             json={
                 "model_name": "intake",
+                "model_version": "v1",
                 "validator": "qa",
                 "source_dir": str(source),
                 "task_type": "vintage",
@@ -100,7 +101,9 @@ def test_actual_api_intake_context_never_overrides_independent_review_flags(
                 "target_col": "bad",
                 "time_col": "cohort",
             },
-        ).json()
+        )
+        assert created.status_code == 200, created.text
+        task = created.json()
         url = f"/api/tasks/{task['id']}/agent"
         assert client.post(url + "/start", json={}).status_code == 202
         first = client.post(

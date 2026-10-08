@@ -1,6 +1,13 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+
+
+def require_finite_code_model_scores(scores: pd.Series) -> pd.Series:
+    if not np.isfinite(scores.to_numpy(dtype=float, na_value=np.nan)).all():
+        raise ValueError("code-model scores contain non-finite values")
+    return scores
 
 
 def _row_index_values(values: pd.Series) -> list[object]:
@@ -22,8 +29,8 @@ def load_code_model_scores(path: Path) -> pd.Series:
         raise ValueError("code-model score artifact must contain row_index and code_model_score")
     if scores["row_index"].duplicated().any():
         raise ValueError("code-model score artifact contains duplicate row_index values")
-    return pd.Series(
+    return require_finite_code_model_scores(pd.Series(
         pd.to_numeric(scores["code_model_score"], errors="raise").to_numpy(dtype=float),
         index=_row_index_values(scores["row_index"]),
         name="code_model_score",
-    )
+    ))

@@ -15,6 +15,7 @@ from marvis.orchestrator.plan_recovery import PlanStepRecovery
 from marvis.orchestrator.completion import complete_workflow, pending_workflow_completion
 from marvis.pipeline import METRICS_STAGE_FAILURE_PREFIX
 from marvis.repositories.tasks import _now
+from marvis.runtime_observations import observing_runtime, queue_terminal_on_commit
 from marvis.state_machine import ConflictError
 
 
@@ -389,6 +390,11 @@ def _fail_interrupted_jobs(conn, *, task_ids: list[str], cutoff: str) -> None:
     else:
         scope = "created_at <= ?"
         params.append(cutoff)
+    queued = []
+    if observing_runtime():
+        queued = conn.execute(
+            f"SELECT id FROM jobs WHERE status='queued' AND {scope}", params[1:],
+        ).fetchall()
     conn.execute(
         f"""
         UPDATE jobs
@@ -401,6 +407,8 @@ def _fail_interrupted_jobs(conn, *, task_ids: list[str], cutoff: str) -> None:
         """,
         params,
     )
+    for row in queued:
+        queue_terminal_on_commit(conn, row["id"], "failed")
 
 
 def _finalize_interrupted_agent_messages(
@@ -638,9 +646,11 @@ def _fail_orphan_task_jobs(task_repo, task_id: str) -> None:
     so the task isn't wedged behind a 409 after the restart notice invites a
     retry."""
     with connect(task_repo.db_path) as conn:
+        if observing_runtime():
+            conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             """
-            SELECT id
+            SELECT id, status
               FROM jobs
              WHERE task_id = ?
                AND status IN ('queued', 'running')
@@ -648,7 +658,7 @@ def _fail_orphan_task_jobs(task_repo, task_id: str) -> None:
             (task_id,),
         ).fetchall()
         for row in rows:
-            conn.execute(
+            changed = conn.execute(
                 """
                 UPDATE jobs
                    SET status = 'failed',
@@ -660,6 +670,8 @@ def _fail_orphan_task_jobs(task_repo, task_id: str) -> None:
                 """,
                 (_now(), row["id"]),
             )
+            if changed.rowcount == 1 and row["status"] == "queued":
+                queue_terminal_on_commit(conn, row["id"], "failed")
 
 
 def _add_plan_restart_notice(

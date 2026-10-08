@@ -62,7 +62,7 @@ class AttemptObserver:
     """Append-only transport receipts, including retries and interrupted attempts."""
 
     def __init__(self, path: Path, *, max_attempts: int, deadline: float,
-                 aggregate_budget: AggregateBudget | None = None):
+                 aggregate_budget: AggregateBudget | None = None, origin_ns=None):
         self.path = path
         self.max_attempts = max_attempts
         self.deadline = deadline
@@ -71,6 +71,7 @@ class AttemptObserver:
         self.failed = False
         self.lock = threading.Lock()
         self.aggregate_budget = aggregate_budget
+        self.origin_ns = time.monotonic_ns() if origin_ns is None else origin_ns
         self.path.touch(exist_ok=False, mode=0o600)
         if aggregate_budget is not None and aggregate_budget.configured:
             self._append({"event": "aggregate_budget_policy", **aggregate_budget.policy()})
@@ -126,6 +127,7 @@ class AttemptObserver:
                     "ordinal": self.count,
                     **metadata,
                     **reservation,
+                    "elapsed_ns": time.monotonic_ns() - self.origin_ns,
                 }
             )
             return ticket
@@ -134,7 +136,8 @@ class AttemptObserver:
         with self.lock:
             if not self.closed:
                 settlement = self.aggregate_budget.settle(ticket, result) if self.aggregate_budget else {}
-                self._append({"event": "finished", "attempt_id": ticket, **result, **settlement})
+                self._append({"event": "finished", "attempt_id": ticket, **result, **settlement,
+                              "elapsed_ns": time.monotonic_ns() - self.origin_ns})
 
     def seal(self, reason="case_closed"):
         with self.lock:
@@ -142,7 +145,8 @@ class AttemptObserver:
                 try:
                     if self.aggregate_budget is not None and self.aggregate_budget.configured:
                         self._append({"event": "aggregate_budget_snapshot", **self.aggregate_budget.snapshot()})
-                    self._append({"event": "measurement_closed", "reason": reason})
+                    self._append({"event": "measurement_closed", "reason": reason,
+                                  "elapsed_ns": time.monotonic_ns() - self.origin_ns})
                 finally:
                     self.closed = True
 
@@ -306,7 +310,7 @@ class _CompletionObservation:
 @contextmanager
 def _model_gateway(
     profile, secret_env, attempt_path, *, max_attempts, deadline, max_output_tokens=2048,
-    budget=None, price_bytes=None,
+    budget=None, price_bytes=None, origin_ns=None,
 ):
     """One credential-owning, metered endpoint shared by the app and all workers.
 
@@ -330,7 +334,8 @@ def _model_gateway(
             price_hash=digest(price_bytes) if price is not None else None,
         )
     observer = AttemptObserver(
-        attempt_path, max_attempts=max_attempts, deadline=deadline, aggregate_budget=aggregate_budget
+        attempt_path, max_attempts=max_attempts, deadline=deadline, aggregate_budget=aggregate_budget,
+        origin_ns=origin_ns,
     )
     token = uuid.uuid4().hex + uuid.uuid4().hex
     provider_key = profile.get("api_key") or secret_env.get(profile.get("api_key_env"))
@@ -656,14 +661,20 @@ def _serve(config_path: Path):
         settings_dir / "llm.json",
         {"default_model_id": profile["model_id"], "models": [profile]},
     )
-    app = create_app(workspace)
-    uvicorn.run(
-        app,
-        host="127.0.0.1",
-        port=config["port"],
-        log_level="warning",
-        access_log=False,
-    )
+    from marvis.runtime_observations import observe_runtime
+
+    with observe_runtime(workspace.parent / "process-observations.jsonl", config["origin_ns"]) as observer:
+        app = create_app(workspace)
+        # Uvicorn re-raises SIGTERM after its lifespan exits; seal during that
+        # lifespan, after application shutdown handlers, before signal replay.
+        app.router.add_event_handler("shutdown", observer.seal)
+        uvicorn.run(
+            app,
+            host="127.0.0.1",
+            port=config["port"],
+            log_level="warning",
+            access_log=False,
+        )
 
 
 def _free_port() -> int:
@@ -722,6 +733,7 @@ def _application(
     forbidden_inputs: tuple[Path, ...],
     price_bytes: bytes | None = None,
     process_state: dict | None = None,
+    origin_ns: int | None = None,
 ):
     deadline = time.monotonic() + case.budget.wall_seconds
     with _model_gateway(
@@ -733,10 +745,11 @@ def _application(
         max_output_tokens=case.budget.max_output_tokens_per_attempt,
         budget=case.budget,
         price_bytes=price_bytes,
+        origin_ns=origin_ns,
     ) as child_profile:
         with _application_process(
             root, case, child_profile, source_sha256, deadline, forbidden_inputs,
-            process_state=process_state,
+            process_state=process_state, origin_ns=origin_ns,
         ) as app:
             yield app
 
@@ -750,6 +763,7 @@ def _application_process(
     deadline: float,
     forbidden_inputs: tuple[Path, ...],
     process_state: dict | None = None,
+    origin_ns: int | None = None,
 ):
     workspace = root / "workspace"
     workspace.mkdir(mode=0o700)
@@ -757,6 +771,7 @@ def _application_process(
         "workspace": str(workspace),
         "profile": profile,
         "port": _free_port(),
+        "origin_ns": time.monotonic_ns() if origin_ns is None else origin_ns,
     }
     config_path = root / "runtime-config.json"
     _write_new(config_path, config)
@@ -827,14 +842,28 @@ def _application_process(
 
 
 class Journey:
-    def __init__(self, client, case, deadline):
+    def __init__(self, client, case, deadline, *, origin_ns=None):
         self.client, self.case, self.deadline = client, case, deadline
         self.events: list[dict] = []
         self.count = 0
         self.task_id = None
         self.approval = None
         self.interventions = 0
+        self.origin_ns = time.monotonic_ns() if origin_ns is None else origin_ns
+        self.human_actions = []
         self.uploaded_samples: list[dict] = []
+
+    def record_human_action(self, action, *, phase="dispatch"):
+        from .runtime_process import material_selection_identity
+
+        self.interventions += 1
+        self.human_actions.append({
+            "ordinal": self.interventions,
+            "action_sha256": digest(action.model_dump()) if action is not None else material_selection_identity(self.case),
+            "kind": action.kind if action is not None else "validation_material_selection",
+            "phase": phase,
+            "elapsed_ns": time.monotonic_ns() - self.origin_ns,
+        })
 
     def request(self, method, path, *, label, **kwargs):
         if (
@@ -976,9 +1005,15 @@ class Journey:
                 submit_labeling_request(self, action)
             elif action.kind == "download_labeling_results":
                 from .runtime_labeling import download_labeling_results
-                download_labeling_results(self)
+                download_labeling_results(self, action)
+            elif action.kind == "download_portfolio_report":
+                from .runtime_portfolio import download_portfolio_report
+                download_portfolio_report(self, action)
+            elif action.kind == "download_feature_report":
+                from .runtime_portfolio import download_registered_report
+                download_registered_report(self, action, family="feature")
             elif action.kind == "message":
-                self.interventions += 1
+                self.record_human_action(action)
                 message = {
                     "content": action.content,
                     "acceptance_mode": self.case.acceptance_mode,
@@ -1018,7 +1053,7 @@ class Journey:
                     )
                 plan, step = match[0]
                 prefix = f"/api/plans/{plan['id']}/steps/{step['id']}"
-                self.interventions += 1
+                self.record_human_action(action)
                 if action.kind in {"approve_step", "reject_step"}:
                     approval = {
                         "decision": "approve" if action.kind == "approve_step" else "reject",
@@ -1042,7 +1077,7 @@ class Journey:
             elif action.kind == "replay_approval":
                 if self.approval is None:
                     raise RuntimeJourneyError("no_prior_approval_to_replay")
-                self.interventions += 1
+                self.record_human_action(action)
                 self.request(
                     "POST",
                     self.approval[0],
@@ -1051,7 +1086,7 @@ class Journey:
                 )
                 self.wait_idle()
             elif action.kind == "stop":
-                self.interventions += 1
+                self.record_human_action(action)
                 self.json_request(
                     "POST",
                     f"/api/tasks/{self.task_id}/agent/stop",
@@ -1099,7 +1134,7 @@ class Journey:
         body.update(source_dir=str(source_dir), run_mode="manual" if compatibility else "agent")
         task = self.json_request("POST", "/api/tasks", label="create_task", json=body)
         self.task_id = task["id"]
-        self.interventions += 1
+        self.record_human_action(None)
         self.json_request(
             "PUT", f"/api/tasks/{self.task_id}/materials",
             label="human_validation_material_selection",
@@ -1127,7 +1162,7 @@ class Journey:
                 ]
                 or any(step["inputs"] != {"task_id": self.task_id} for step in plan["steps"])):
             raise RuntimeJourneyError("validation_workflow_contract_changed")
-        self.interventions += 1
+        self.record_human_action(action)
         confirmed = self.json_request(
             "POST", f"/api/plans/{plan['id']}/confirm", label="human_validation_workflow_start",
             json=plan["confirmation_snapshot"],
@@ -1167,7 +1202,7 @@ class Journey:
             raise RuntimeJourneyError("strategy_sample_binding_wrong_owner")
         # A dataset change requires the product's reset payload, then a second
         # CAS-bound write for the human field mapping. Neither write is retried.
-        self.interventions += 1
+        self.record_human_action(action)
         if (snapshot.active_dataset_id, snapshot.active_dataset_content_hash) != (
             sample["id"],
             sample["content_hash"],
@@ -1290,7 +1325,7 @@ class Journey:
             **snapshot,
         }
         route = f"/api/tasks/{self.task_id}/agent/messages"
-        self.interventions += 1
+        self.record_human_action(action)
         self.json_request("POST", route, label="human_recommended_selection", json=body)
         self.approval = (route, body)
         self.wait_idle(changed_step=step["id"])
@@ -1448,6 +1483,7 @@ def _receipts(workspace: Path, task_id: str | None, *, case=None, journey=None) 
                 "status": plan.status.value,
                 "template_id": plan.template_id,
                 "source": plan.source,
+                "replan_count": plan.replan_count,
             }
         )
         for step in plan.steps:
@@ -1565,7 +1601,8 @@ def _run_case(
     price_bytes=None,
     custody_run_dir=None, custody_bindings=None,
 ):
-    started = time.monotonic()
+    origin_ns = time.monotonic_ns()
+    started = origin_ns / 1_000_000_000
     record = {
         "case_id": case.id,
         "family": case.family,
@@ -1599,8 +1636,9 @@ def _run_case(
                 forbidden_inputs,
                 price_bytes,
                 process_state=process_state,
+                origin_ns=origin_ns,
             ) as (client, workspace, deadline):
-                journey = Journey(client, case, deadline)
+                journey = Journey(client, case, deadline, origin_ns=origin_ns)
                 try:
                     journey.run(dataset_root, workspace)
                 except BaseException:
@@ -1647,6 +1685,8 @@ def _run_case(
         except Exception as exc:
             record["receipt_error"] = type(exc).__name__
             record["runtime_status"] = "receipt_error"
+        from .runtime_process import read_backend_events
+        record["backend_events"] = read_backend_events(root / "process-observations.jsonl")
         record["http_events"] = journey.events if journey else []
         record["human_interventions"] = journey.interventions if journey else 0
         if custody_run_dir is not None:
@@ -1688,6 +1728,11 @@ def _run_case(
         record.update(transport_failure)
     record["duration_ms"] = int((time.monotonic() - started - custody_seconds) * 1000)
     record["llm_events"] = attempts
+    from .runtime_process import process_observation
+    record["process_observation"] = process_observation(
+        attempts, journey.human_actions if journey else [], record["backend_events"],
+        plan_states=record.get("execution", {}).get("plans"),
+    )
     record["isolated_workspace_removed"] = not workspace.exists()
     return record, private
 

@@ -4713,14 +4713,18 @@ def sqlite_health(db_path: Path) -> dict[str, object]:
 
 @contextmanager
 def connect(db_path: Path):
+    from marvis.runtime_observations import observe_transaction_commit, discard_transaction_observations
+
     conn = sqlite3.connect(db_path, timeout=5.0, isolation_level="DEFERRED")
     conn.row_factory = sqlite3.Row
     try:
         _configure_connection(conn, db_key=str(db_path))
         yield conn
         conn.commit()
+        observe_transaction_commit(conn)
     except Exception:
         conn.rollback()
         raise
     finally:
+        discard_transaction_observations(conn)
         conn.close()

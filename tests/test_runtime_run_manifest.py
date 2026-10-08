@@ -97,6 +97,71 @@ def test_actual_final_records_are_bound_after_custody_and_scoring(actual_run):
     assert before == {p.relative_to(root): digest(p.read_bytes()) for p in root.rglob("*") if p.is_file()}
 
 
+def test_rehashed_summary_cannot_change_original_measured_time(actual_run, tmp_path):
+    root, _, case_id = _copy(actual_run, tmp_path)
+    execution_path = root / case_id / "execution.json"
+    execution = json.loads(execution_path.read_bytes())
+    assert execution["process_observation"]["llm_transport"]["complete"]
+    execution["process_observation"]["llm_transport"]["known_busy_duration_ns"] += 1
+    execution_path.write_text(json.dumps(execution))
+    report_path = root / "report.json"
+    report = json.loads(report_path.read_bytes())
+    report["cases"][0].update(execution)
+    report["cases"][0]["execution_sha256"] = digest(execution_path.read_bytes())
+    report_path.write_text(json.dumps(report))
+    new_digest = _rewrite_inventory(root)
+    with pytest.raises(RunManifestError, match="invalid_original_process_observation"):
+        verify_run_manifest(root, expected_manifest_sha256=new_digest)
+
+
+@pytest.mark.parametrize("change", ["summary", "snapshot"])
+def test_rehashed_revision_claim_cannot_change_native_observation(actual_run, tmp_path, change):
+    root, _, case_id = _copy(actual_run, tmp_path)
+    execution_path = root / case_id / "execution.json"
+    execution = json.loads(execution_path.read_bytes())
+    assert execution["process_observation"]["revisions"]["complete"]
+    if change == "summary":
+        execution["process_observation"]["revisions"]["known_counts"]["structural_replan"] += 1
+    else:
+        execution["execution"]["plans"].append({"id": "not-observed", "replan_count": 0})
+    execution_path.write_text(json.dumps(execution))
+    report_path = root / "report.json"
+    report = json.loads(report_path.read_bytes())
+    report["cases"][0].update(execution)
+    report["cases"][0]["execution_sha256"] = digest(execution_path.read_bytes())
+    report_path.write_text(json.dumps(report))
+    new_digest = _rewrite_inventory(root)
+    with pytest.raises(RunManifestError, match="invalid_original_process_observation"):
+        verify_run_manifest(root, expected_manifest_sha256=new_digest)
+
+
+@pytest.mark.parametrize("change", ["summary", "binding", "missing_end"])
+def test_rehashed_confirmation_wait_claim_cannot_change_native_observation(actual_run, tmp_path, change):
+    root, _, case_id = _copy(actual_run, tmp_path)
+    execution_path = root / case_id / "execution.json"
+    execution = json.loads(execution_path.read_bytes())
+    waiting = execution["process_observation"]["backend"]["scopes"]["report_confirmation_wait"]
+    assert waiting["complete"] and waiting["measured_intervals"] == 1
+    if change == "summary":
+        waiting["known_busy_duration_ns"] += 1
+    else:
+        endpoint = next(row for row in execution["backend_events"]
+                        if row.get("scope") == "report_confirmation_wait" and row["event"] == "resumed")
+        if change == "binding":
+            endpoint["binding_sha256"] = "a" * 64
+        else:
+            execution["backend_events"].remove(endpoint)
+    execution_path.write_text(json.dumps(execution))
+    report_path = root / "report.json"
+    report = json.loads(report_path.read_bytes())
+    report["cases"][0].update(execution)
+    report["cases"][0]["execution_sha256"] = digest(execution_path.read_bytes())
+    report_path.write_text(json.dumps(report))
+    new_digest = _rewrite_inventory(root)
+    with pytest.raises(RunManifestError, match="invalid_original_process_observation"):
+        verify_run_manifest(root, expected_manifest_sha256=new_digest)
+
+
 @pytest.mark.parametrize("file", ["report.json", "manifest.json", "execution.json", "score.json", "llm-attempts.jsonl"])
 def test_original_bytes_cannot_change_under_external_digest(actual_run, tmp_path, file):
     root, expected_digest, case_id = _copy(actual_run, tmp_path)

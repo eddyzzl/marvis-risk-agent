@@ -742,7 +742,20 @@ def configure_runtime_bundle(bundle, actual_archive):
         "path": "run/final-manifest.json",
         "sha256": digest((copied_run / "final-manifest.json").read_bytes()),
     }
-    bundle.source = Path(__file__).resolve().parents[1]
+    # Runtime copies only the marvis package into its isolated worker. Freeze
+    # those exact current bytes in a dedicated checkout, rather than treating
+    # a developer's unrelated local files/symlinks as this fixture's carrier.
+    # Keep the real source commit, including dirty package bytes, so the normal
+    # inventory and original runtime digest checks still run without stubbing.
+    live_source = Path(__file__).resolve().parents[1]
+    bundle.source = bundle.trust.parent / "runtime-source"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--shared", "--no-checkout", str(live_source), str(bundle.source)],
+        check=True, capture_output=True,
+    )
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=bundle.source).decode().strip() == binding.source["commit"]
+    shutil.copytree(live_source / "marvis", bundle.source / "marvis",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     bundle.finding.update(
         source_paths=["marvis/orchestrator/eval/runtime_runner.py"],
         required_evidence_tiers=["R"],

@@ -203,11 +203,13 @@ class JoinEngine:
                 seed=seed, current_match_rate=match_rate,
             )
 
-        anchor_column_names = {column.name for column in anchor.columns}
+        # Every non-key feature column is projected, including collision-renamed
+        # columns. Counting only names absent from the anchor understates output.
+        feature_key_names = {pair.feature_col for pair in key_pairs}
         new_columns = len([
             column
             for column in feature.columns
-            if column.name not in anchor_column_names
+            if column.name not in feature_key_names
         ])
         # T1-A6: flag any key column that is float64-stored AND holds ids large enough that
         # float precision may already be lost -- the join can silently mis-match those rows.

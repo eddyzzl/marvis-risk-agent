@@ -22,7 +22,7 @@ from tests.validation_builders import (
     make_ready_contract,
     make_validation_confirmation,
 )
-from tests.schema_fixture_support import install_v1_plan_step_runs_predecessor
+from tests.schema_fixture_support import install_historical_schema
 
 
 def _create_material_task(tmp_path):
@@ -80,7 +80,8 @@ def test_validation_workflow_versions_are_server_assigned_and_immutable(tmp_path
 def test_migration_versions_only_historical_validation_rows(tmp_path):
     db_path = tmp_path / "schema-v2.sqlite"
     with sqlite3.connect(db_path) as conn:
-        install_v1_plan_step_runs_predecessor(conn)
+        install_historical_schema(conn, 2)
+        conn.execute("DROP TABLE tasks")
         conn.execute(
             "CREATE TABLE tasks (id TEXT PRIMARY KEY, task_type TEXT NOT NULL, "
             "validation_workflow_version INTEGER NOT NULL DEFAULT 0)"
@@ -110,7 +111,8 @@ def test_migration_versions_only_historical_validation_rows(tmp_path):
 def test_migration_adds_missing_workflow_version_column(tmp_path):
     db_path = tmp_path / "schema-v2-without-version-column.sqlite"
     with sqlite3.connect(db_path) as conn:
-        install_v1_plan_step_runs_predecessor(conn)
+        install_historical_schema(conn, 2)
+        conn.execute("DROP TABLE tasks")
         conn.execute(
             "CREATE TABLE tasks (id TEXT PRIMARY KEY, task_type TEXT NOT NULL)"
         )

@@ -217,3 +217,22 @@ def test_scoring_loads_frozen_bytes_despite_transient_source_replacement(scenari
     assert seen and not seen[0].exists()
     validate_monitoring_binding(s.settings, s.task.id, s.binding,
                                 scored_dataset_id=result["result_dataset_id"])
+
+
+@pytest.mark.parametrize("status", ["handed_off", "validated"])
+def test_selected_model_remains_monitorable_after_local_delivery(scenario, status):
+    s = scenario
+    ExperimentStore(s.settings.db_path).set_status(s.experiment_id, status)
+    binding = capture_monitoring_binding(
+        s.settings, s.task.id, s.experiment_id, s.dataset.id, s.dataset.content_hash,
+    )
+    assert binding["experiment_status"] == status
+    validate_monitoring_binding(s.settings, s.task.id, binding)
+    # A later transition back to trained invalidates selection history.
+    store = ExperimentStore(s.settings.db_path)
+    store.set_status(s.experiment_id, "trained")
+    store.set_status(s.experiment_id, status)
+    with pytest.raises(ModelingError, match="monitoring_selected_task_experiment_required"):
+        capture_monitoring_binding(
+            s.settings, s.task.id, s.experiment_id, s.dataset.id, s.dataset.content_hash,
+        )

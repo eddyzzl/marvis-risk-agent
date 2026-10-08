@@ -20,7 +20,8 @@ from test_runtime_workflow_families import _business_protocol
 
 
 def _modeling_protocol(request, answer, payload):
-    if "【当前节点】" in payload["messages"][-1]["content"]:
+    from test_runtime_workflow_families import _gate_route_request
+    if _gate_route_request(payload):
         return {
             "action": "adjust",
             "params": {"recipes": ["lr"], "n_trials": 1, "target_type": "binary"},

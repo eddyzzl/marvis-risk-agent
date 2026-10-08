@@ -133,7 +133,7 @@ def latest_driver_report_artifacts(state, task_id: str) -> list[DriverReportArti
                 try:
                     path.relative_to(outputs_dir)
                 except ValueError:
-                    registered = _registered_portfolio_report(
+                    registered = _registered_driver_report(
                         state,
                         task_id=task_id,
                         task_root=task_root,
@@ -221,7 +221,7 @@ def _driver_report_candidates(output: Any) -> list[dict[str, Any]]:
     return [dict(output)] if report_path else []
 
 
-def _registered_portfolio_report(
+def _registered_driver_report(
     state,
     *,
     task_id: str,
@@ -231,14 +231,11 @@ def _registered_portfolio_report(
     declared_path: Path,
     resolved_path: Path,
 ) -> dict[str, Any] | None:
-    """Resolve the one governed report kind allowed outside ``outputs``.
-
-    Portfolio reports predate the shared ``outputs`` convention and live under
-    ``tasks/<task>/portfolio``.  They are admitted only through their immutable
-    task-artifact identity; arbitrary task-owned files remain unavailable.
-    """
-
-    if step.tool_ref.plugin != "analysis" or step.tool_ref.tool != "portfolio_report":
+    """Resolve an explicitly registered report without falling back to a path."""
+    origin = f"{step.tool_ref.plugin}.{step.tool_ref.tool}"
+    kind = {"analysis.portfolio_report": "portfolio_report_xlsx",
+            "feature.generate_feature_report": "feature_report_xlsx"}.get(origin)
+    if kind is None:
         return None
     if declared_path.is_symlink() or resolved_path.suffix.lower() != ".xlsx":
         return None
@@ -263,8 +260,8 @@ def _registered_portfolio_report(
     if record is None:
         return None
     if (
-        record.get("kind") != "portfolio_report_xlsx"
-        or record.get("origin_tool") != "analysis.portfolio_report"
+        record.get("kind") != kind
+        or record.get("origin_tool") != origin
         or not hmac.compare_digest(str(record.get("content_hash") or ""), expected_hash)
     ):
         return None

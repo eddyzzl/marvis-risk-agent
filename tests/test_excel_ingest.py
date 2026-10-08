@@ -335,6 +335,34 @@ def test_header_detection_and_duplicate_disambiguation():
     assert data.to_dict("records")[0] == {"id": 1, "id_2": 2, "group": "A"}
 
 
+def test_categorical_first_data_row_is_not_consumed_as_a_second_header(tmp_path):
+    source = pd.DataFrame({
+        "loan_id": ["a", "a", "b", "b"],
+        "snapshot_month": ["2025-01", "2025-02", "2025-01", "2025-02"],
+        "bucket": ["current", "M1", "M1", "charged_off"],
+        "balance": [100, 90, 200, 180], "segment": ["new", "new", "existing", "existing"],
+    })
+    path = tmp_path / "portfolio.xlsx"
+    source.to_excel(path, index=False, sheet_name="Portfolio")
+    parquet, report = ingest_sheet(path, "Portfolio", tmp_path / "out")
+    assert report.header_rows == 1
+    pd.testing.assert_frame_equal(pd.read_parquet(parquet), source, check_dtype=False)
+
+
+def test_explicit_multirow_header_remains_available_for_complete_unmerged_titles(tmp_path):
+    path = tmp_path / "declared.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Declared"
+    sheet.append(["Customer", "Balance"])
+    sheet.append(["ID", "Amount"])
+    sheet.append(["a", 100])
+    workbook.save(path)
+    parquet, report = ingest_sheet(path, "Declared", tmp_path / "out", header_rows=2)
+    assert report.header_rows == 2
+    assert pd.read_parquet(parquet).to_dict("records") == [{"Customer_ID": "a", "Balance_Amount": 100}]
+
+
 def test_ingest_sheet_rejects_empty_sheet(tmp_path):
     workbook_path = tmp_path / "empty.xlsx"
     workbook = Workbook()

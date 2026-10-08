@@ -9,6 +9,7 @@ import math
 import re
 from typing import Any
 import uuid
+from marvis.runtime_observations import measured
 
 from marvis.agent.json_reply import load_json_object
 from marvis.llm_client import DEFAULT_CONTEXT_WINDOW, estimate_tokens
@@ -368,6 +369,7 @@ class Planner:
             validation_problems=last_validation_problems,
         )
 
+    @measured("replan_attempt")
     def replan(
         self,
         plan: Plan,
@@ -493,6 +495,7 @@ class Planner:
             )
         raise ReplanError(f"replan could not produce valid plan: {last_error}")
 
+    @measured("explore_attempt")
     def next_explore_segment(
         self,
         plan: Plan,

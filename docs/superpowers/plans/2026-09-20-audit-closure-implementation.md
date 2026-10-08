@@ -649,11 +649,3 @@ A 正式基准聚合仍明确 unavailable，正在接冻结样例与门槛；其
 作者实际 LR 三种目标、LightGBM、CatBoost、连续 LightGBM/XGBoost 的子进程、缓存、训练、轮数/约束、模型产物和工作流联合检查 **61 passed**；新增场景检查 **1 passed**。兼容检查 **52 passed, 1 failed**，唯一失败为新子进程返回了两个空 fold 字段，已改为仅 fold 模式返回，保留旧协议形状，修复后实际隔离进程等价性检查 **1 passed**。独立缓存双反例、单模型连续树训练/交付、伪造参数拒绝、冻结 refit 与场景拒绝复验通过。日志位于 `fitted-parameter-audit-20261003/fold-{runtime-complete,final-integration,scenario,compatibility,legacy-shape-fixed}.log`，各组有重叠，不累加为唯一测试数；原失败记录保留。
 
 本阶段只证明给定候选算法的每折隔离及冻结训练接线。候选来源、人为选择、历史可得性仍 unknown。`oot_evaluation=not_used_for_selection_or_tuning` 表示 OOT 未参与筛选与调参，**不表示物理未读取**：当前 Arrow batch 仍可先解码共享 Parquet 的 OOT 行再投影。独立 OOT 文件封存、最终模型字节冻结与一次评估继续待实现；不升级为盲 OOT、真实历史比较、正式业务验收或 WP07 关闭。
-
-### Notebook 本地进程网络边界（2026-10-05）
-
-macOS 上的直接 Notebook kernel 与隔离执行 worker 均由 OS 网络策略启动：允许 loopback，拒绝其他 socket 网络；原生库和 exec 子进程继承该边界。固定使用安装的 Jupyter LocalProvisioner，远程/自定义 provisioner 及自定义配置在任何启动 hook 前拒绝，避免跳过 kernel 命令包装。不支持该策略的主机明确失败，不降级成仅 Python socket 拦截。
-
-合成原生 libc、Notebook 内原生子进程、独立 worker、Python 子进程、本地 Java 子进程和旧 Notebook 契约/步骤/取消/文件 IO 联合 **91 passed**，Ruff 与 diff 检查通过。Java 与 Python 实际访问回环服务成功，公网测试地址的 connect 返回权限拒绝；无业务数据或外部 LLM 请求。证据 `outbound-guard-20261004/network-final.log`。先前旧 Notebook 单组 **84 passed** 包含在此次联合检查内，不累加。
-
-此边界只约束所启动的本机进程树 socket，不是整机防火墙、恶意代码完整隔离或文件/IPC 防护，也不证明本地代理不会转发；Linux/Windows 尚无对应已验证实现。统一 LLM 外发结构仍在修正和迁移，未完成验收；真实数据试验须继续等待该前置保护验证，本节不关闭 WP07 或整体目标。

@@ -33,6 +33,27 @@ def _registry(settings):
     )
 
 
+def _has_selected_delivery_lineage(repo, experiment) -> bool:
+    if experiment.status == "selected":
+        return True
+    if experiment.status not in {"handed_off", "validated"}:
+        return False
+    # Handoff changes lifecycle status after selection. Require its committed
+    # selection audit; a delivered arbitrary trained candidate is insufficient.
+    rows = _list_audit_rows(
+        repo.db_path, kind="modeling.experiment.status", target_ref=experiment.id,
+    )
+    for row in reversed(rows):
+        status = row.get("detail", {}).get("status")
+        if row.get("outcome") != "succeeded":
+            continue
+        if status == "selected":
+            return True
+        if status not in {"handed_off", "validated"}:
+            return False
+    return False
+
+
 def capture_monitoring_binding(
     settings, task_id: str, experiment_id: str, dataset_id: str,
     expected_content_hash: str,
@@ -43,7 +64,7 @@ def capture_monitoring_binding(
         experiment = repo.get_experiment(experiment_id)
         if (
             experiment is None or experiment.task_id != task_id
-            or experiment.status != "selected" or not experiment.artifact_id
+            or not _has_selected_delivery_lineage(repo, experiment) or not experiment.artifact_id
         ):
             raise ModelingError("monitoring_selected_task_experiment_required")
         artifact = repo.get_model_artifact(experiment.artifact_id)

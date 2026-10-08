@@ -1,8 +1,9 @@
 """桶流量 / 桶迁徙内核 (flow_rate + bucket_migration).
 
 两个工具共用同一个"相邻快照对齐"内核 ``_aligned_transitions``：对每笔贷款按
-快照月排序，取相邻月对 (from_month -> to_month)，统计 from 桶 -> to 桶 的转移。
-缺失下月快照的贷款计入显式的 ``exited`` 伪状态（显式列出，不静默丢弃）。
+快照月排序，取面板相邻可用快照对 (from_month -> to_month)，统计桶间转移。
+某贷款缺失下一面板快照时计入显式的 ``exited`` 伪状态。整个面板缺月则
+明确记录 ``month_gap`` 和实际月间隔；不把跨期观测冒认为单月迁移。
 
 - ``flow_rate``：逐相邻月对给出 NxN 转移占比矩阵 + into_bad/out_of_bad 净流量。
 - ``bucket_migration``：把窗口内各月对聚合成平均迁徙率矩阵 + 逐单元格最差月矩阵。
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from marvis.data.errors import PerformanceFrameError
 from marvis.data.performance import parse_snapshot_month, validate_performance_frame
 from marvis.packs.analysis.errors import AnalysisError
 
@@ -88,6 +90,18 @@ def flow_rate(
     for from_month in months:
         month_pairs = [pair for pair in pairs if pair["from_month"] == from_month]
         to_month = month_pairs[0]["to_month"] if month_pairs else ""
+        start_year, start_month = map(int, from_month.split("-"))
+        end_year, end_month = map(int, to_month.split("-"))
+        interval_months = (end_year - start_year) * 12 + end_month - start_month
+        if interval_months != 1:
+            red_flags.append({
+                "kind": "month_gap", "month": from_month, "to_month": to_month,
+                "interval_months": interval_months,
+                "message": (
+                    f"快照 {from_month} 至 {to_month} 间隔 {interval_months} 个月；"
+                    "该转移是跨期观测，不能作为单月迁移概率用于月度预期损失。"
+                ),
+            })
         matrix, base, into_bad, out_of_bad = _month_matrix(
             month_pairs, state_order, to_states, bad_set, use_balance=bool(balance_col)
         )
@@ -312,6 +326,12 @@ def _resolve_window(
     if not window:
         return list(months)
     requested = [str(month) for month in window]
+    missing = [month for month in requested if month not in months]
+    if missing:
+        raise PerformanceFrameError(
+            reason="所选迁移窗口含没有后续快照的起始月，不能静默删除这些月份或以空矩阵估计风险。",
+            problem="unavailable_migration_window", samples=[month[:40] for month in missing[:5]],
+        )
     return [month for month in months if month in requested]
 
 

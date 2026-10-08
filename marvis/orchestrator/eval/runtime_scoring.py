@@ -37,6 +37,8 @@ class Assertion(StrictModel):
         "validation_pipeline_equals",
         "labeling_evidence",
         "monitoring_evidence",
+        "portfolio_report_download",
+        "feature_report_download",
     ]
     tool: str = ""
     path: list[str | int] = Field(default_factory=list)
@@ -142,6 +144,28 @@ def _assertion(assertion, record, private):
         )
     if len(steps) != 1:
         return False
+    if assertion.kind in {"portfolio_report_download", "feature_report_download"}:
+        family = assertion.kind.split("_", 1)[0]
+        if assertion.tool != {"portfolio": "analysis.portfolio_report", "feature": "feature.generate_feature_report"}[family]:
+            return False
+        output = private.get("outputs", {}).get(steps[0]["id"], {})
+        content_hash = output.get("artifact_content_hash")
+        artifact_id = output.get("artifact_id")
+        return (
+            isinstance(content_hash, str) and len(content_hash) == 64
+            and all(c in "0123456789abcdef" for c in content_hash)
+            and isinstance(artifact_id, str) and bool(artifact_id)
+            and any(f.get("field") == "report_path" and f.get("sha256") == content_hash
+                    and f.get("size_bytes", 0) > 0 and f.get("suffix") == ".xlsx"
+                    and any(e.get("stage") == f"download_{family}_report"
+                            and e.get("status_code") == 200
+                            and e.get("step_id") == steps[0]["id"]
+                            and e.get("artifact_id") == artifact_id
+                            and e.get("sha256") == content_hash
+                            and e.get("size_bytes") == f["size_bytes"]
+                            for e in record.get("http_events", []))
+                    for f in steps[0].get("output_files", []))
+        )
     if assertion.kind == "labeling_evidence":
         label = steps[0].get("labeling", {})
         return (

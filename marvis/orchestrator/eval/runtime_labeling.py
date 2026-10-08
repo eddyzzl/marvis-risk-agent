@@ -49,7 +49,7 @@ def submit_labeling_request(journey, action):
     )
     if snapshot.task_id != journey.task_id:
         raise RuntimeJourneyError("labeling_sample_binding_wrong_owner")
-    journey.interventions += 1  # Explicit human dataset selection.
+    journey.record_human_action(action, phase="dataset_selection")
     if (snapshot.active_dataset_id, snapshot.active_dataset_content_hash) != (
         sample["id"],
         sample["content_hash"],
@@ -86,7 +86,7 @@ def submit_labeling_request(journey, action):
         workspace_revision=snapshot.revision,
         analysis_generation=snapshot.analysis_generation,
     )
-    journey.interventions += 1  # Separate human declaration of label semantics.
+    journey.record_human_action(action, phase="label_declaration")
     journey.json_request(
         "POST",
         f"/api/tasks/{journey.task_id}/agent/messages",
@@ -119,7 +119,7 @@ def submit_labeling_request(journey, action):
         raise RuntimeJourneyError("labeling_proposal_contract_mismatch")
 
 
-def download_labeling_results(journey):
+def download_labeling_results(journey, action):
     from .runtime_contracts import digest
     from marvis.packs.labeling.tools import _task_artifact_download_url
     from .runtime_runner import RuntimeJourneyError, _tool_name
@@ -136,7 +136,7 @@ def download_labeling_results(journey):
     output = journey.json_request(
         "GET", f"/api/step-outputs/{matches[0]['id']}", label="read_labeling_output"
     )
-    journey.interventions += 1  # The declared result-download action.
+    journey.record_human_action(action)
     for kind in ("dataset", "evidence"):
         route = _task_artifact_download_url(
             journey.task_id,

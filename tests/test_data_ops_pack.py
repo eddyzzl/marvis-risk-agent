@@ -71,7 +71,8 @@ def test_data_ops_ingest_excel_and_infer_schema_via_runner(tmp_path):
     assert ingest.ok is True
     assert len(ingest.output["datasets"]) == 1
     dataset_id = ingest.output["datasets"][0]["id"]
-    assert repo.get_dataset(dataset_id) is not None
+    assert repo.get_dataset(dataset_id).sheet == "Sheet1"
+    assert _registry.source_identity(dataset_id)["sha256"] == hashlib.sha256(workbook_path.read_bytes()).hexdigest()
 
     schema = runner.invoke(
         ToolRef("data_ops", "infer_schema"),
@@ -213,6 +214,7 @@ def test_data_ops_ingest_excel_second_db_insert_failure_rolls_back_everything(
     assert not list(task_dataset_dir.rglob("*.parquet"))
     assert not list(task_dataset_dir.rglob(".staging"))
     assert not list(task_dataset_dir.rglob(".excel_ingest_*"))
+    assert not list((task_dataset_dir / ".source-identities").glob("*.json"))
 
 
 def test_data_ops_ingest_excel_rejects_paths_outside_material_roots(tmp_path):

@@ -3201,7 +3201,9 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
     assert delivery["readiness"][0]["status"] == "ready"
     assert delivery["readiness"][1]["status"] == "ready"
     assert delivery["readiness"][2]["status"] == "ready"
-    assert delivery["readiness"][3] == {
+    readiness = {row["id"]: row for row in delivery["readiness"]}
+    assert readiness["feature_time_evidence"]["status"] == "unknown"
+    assert readiness["approval_policy"] == {
         "id": "approval_policy",
         "label": "审批策略",
         "status": "ready",

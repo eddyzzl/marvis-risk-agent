@@ -807,3 +807,23 @@ def test_align_records_dtype_divergence_on_built_key_pair(tmp_path):
     assert mobile_pair.dtype_divergent is True
     assert mobile_pair.anchor_dtype in {"int64", "Int64"}
     assert mobile_pair.feature_dtype in {"object", "string", "str"}
+
+
+@pytest.mark.parametrize("key_name", ["id", "key"])
+@pytest.mark.parametrize("value_name", ["balance", "amount"])
+def test_join_diagnostics_count_collision_renamed_columns_and_exclude_differently_named_key(tmp_path, key_name, value_name):
+    engine, registry, _ = _engine(tmp_path)
+    anchor = _write_parquet_dataset(registry, tmp_path, "anchor", pd.DataFrame({"id": ["a", "b"], "balance": [10, 20]}))
+    feature = _write_parquet_dataset(registry, tmp_path, "feature", pd.DataFrame({key_name: ["a", "b"], value_name: [30, 40]}))
+    pair = KeyPair(anchor_col="id", feature_col=key_name, match_method="exact", transform_side="both",
+                   match_rate=1.0, resolved_by="test")
+    diagnostics = engine.diagnose_join(anchor, registry.resolve_path(anchor.id),
+                                       feature, registry.resolve_path(feature.id), [pair], seed=0)
+    assert diagnostics.new_columns == 1
+    output = tmp_path / "joined.parquet"
+    DataBackend(tmp_path).left_join(registry.resolve_path(anchor.id), registry.resolve_path(feature.id),
+                                   [pair], dedup_strategy=None, out_path=output)
+    frame = pd.read_parquet(output)
+    projected = "feature_balance" if value_name == "balance" else "amount"
+    assert list(frame.columns) == ["id", "balance", projected]
+    assert frame[projected].tolist() == [30, 40]

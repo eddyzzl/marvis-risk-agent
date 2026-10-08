@@ -38,6 +38,7 @@ from marvis.redaction import redact_value
 from marvis.repositories.audit import _list_audit_rows, _write_audit_row
 from marvis.repositories.datasets import DatasetRepository
 from marvis.state_machine import ConflictError
+from marvis.runtime_observations import observing_runtime, plan_revision_on_commit, plan_state_on_commit
 
 
 def _now() -> str:
@@ -186,6 +187,8 @@ class PlanRepository:
             )
             if on_connection is not None:
                 on_connection(conn)
+            plan_revision_on_commit(conn, plan.id, "created", payload["replan_count"])
+            plan_state_on_commit(conn, self.db_path, plan_id=plan.id)
 
     def load_plan(self, plan_id: str) -> Plan:
         with connect(self.db_path) as conn:
@@ -349,6 +352,7 @@ class PlanRepository:
             )
         )["steps"][0]
         with connect(self.db_path) as conn:
+            plan_state_on_commit(conn, self.db_path, step_id=step.id)
             cursor = conn.execute(
                 """
                 UPDATE plan_steps
@@ -380,6 +384,7 @@ class PlanRepository:
 
     def set_plan_status(self, plan_id: str, status: PlanStatus) -> None:
         with connect(self.db_path) as conn:
+            plan_state_on_commit(conn, self.db_path, plan_id=plan_id)
             row = conn.execute(
                 "SELECT status FROM plans WHERE id = ?",
                 (plan_id,),
@@ -419,6 +424,7 @@ class PlanRepository:
 
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=plan_id)
             plan_row, step_rows = _load_plan_snapshot_rows(conn, plan_id)
             _assert_expected_plan_snapshot(
                 plan_row,
@@ -465,6 +471,7 @@ class PlanRepository:
     ) -> None:
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, step_id=step_id)
             link = conn.execute(
                 "SELECT plan_id FROM plan_steps WHERE id = ?",
                 (step_id,),
@@ -551,6 +558,7 @@ class PlanRepository:
             raise ValueError("input_updates must be a non-empty object")
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, step_id=step_id)
             link = conn.execute(
                 "SELECT plan_id FROM plan_steps WHERE id = ?",
                 (step_id,),
@@ -624,6 +632,7 @@ class PlanRepository:
         the user asks for an adjustment at a gate."""
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, step_id=step_id)
             _assert_no_unreconciled_step_effects(conn, [step_id])
             if inputs is not None:
                 conn.execute(
@@ -691,6 +700,7 @@ class PlanRepository:
 
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=plan_id)
             plan_row, step_rows = _load_plan_snapshot_rows(conn, plan_id)
             _assert_expected_plan_snapshot(
                 plan_row,
@@ -784,6 +794,7 @@ class PlanRepository:
         """
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=plan_id)
             plan_row = conn.execute(
                 "SELECT status FROM plans WHERE id = ?",
                 (plan_id,),
@@ -976,6 +987,7 @@ class PlanRepository:
             # Serialize the validation and mutation. A concurrent retry/replan
             # must win or lose as a whole; it may never leave a half-reset DAG.
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=plan_id)
             plan_row = conn.execute(
                 "SELECT status, replan_count, loop_events_json FROM plans WHERE id = ?",
                 (plan_id,),
@@ -1108,6 +1120,7 @@ class PlanRepository:
             )
             if cursor.rowcount == 0:
                 raise ConflictError(f"plan {plan_id} changed while rolling back")
+            plan_revision_on_commit(conn, plan_id, "upstream_revision", next_revision)
             _write_audit_row(
                 conn,
                 kind="plan.step.rollback",
@@ -1869,6 +1882,7 @@ class PlanRepository:
         payload = plan_to_dict(new_plan)
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=plan_id)
             affected = conn.execute(
                 "SELECT id FROM plan_steps WHERE plan_id = ? AND status NOT IN ('done', 'skipped')",
                 (plan_id,),
@@ -1932,6 +1946,9 @@ class PlanRepository:
                 outcome="succeeded",
                 detail={"step_count": len(payload["steps"])},
             )
+            if observing_runtime():
+                revision = conn.execute("SELECT replan_count FROM plans WHERE id=?", (plan_id,)).fetchone()[0]
+                plan_revision_on_commit(conn, plan_id, "structural_replan", revision)
 
     def append_steps(
         self,
@@ -1942,6 +1959,7 @@ class PlanRepository:
     ) -> None:
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=plan_id)
             _assert_no_unreconciled_step_effects(conn, (), plan_id=plan_id)
             loop_events = _load_plan_loop_events(conn, plan_id)
             _append_normalized_loop_event(loop_events, loop_event)
@@ -1979,6 +1997,9 @@ class PlanRepository:
                 """,
                 (_dump_json_any(loop_events), _now(), plan_id),
             )
+            if observing_runtime():
+                revision = conn.execute("SELECT replan_count FROM plans WHERE id=?", (plan_id,)).fetchone()[0]
+                plan_revision_on_commit(conn, plan_id, "explore_append", revision)
 
     def append_loop_event(self, plan_id: str, loop_event: dict) -> None:
         with connect(self.db_path) as conn:

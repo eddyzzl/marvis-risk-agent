@@ -343,7 +343,7 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     assert tune.inputs["params"] == f"$ref:{tuning_config.id}.output.params"
     assert train.inputs["features"] == f"$ref:{refine.id}.output.selected"
     assert train.inputs["params"] == f"$ref:{tune.id}.output.best_params"
-    assert train.inputs["recipes"] == f"$ref:{spec.id}.output.recipes"
+    assert train.inputs["recipes"] == f"$ref:{tuning_config.id}.output.recipes"
     assert train.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
     assert compare.inputs == {
         "experiment_ids": f"$ref:{train.id}.output.experiment_ids"

@@ -1,7 +1,7 @@
 import pytest
 
 from marvis.db import PlanRepository, connect, init_db
-from marvis.orchestrator.contracts import LoopEvent, Plan, PlanStatus, PlanStep, StepStatus
+from marvis.orchestrator.contracts import LoopEvent, Plan, PlanStatus, PlanStep, StepStatus, plan_to_dict
 from marvis.plugins.manifest import EffectTargetPolicy, GovernancePolicy, ToolRef
 from marvis.state_machine import ConflictError
 
@@ -301,12 +301,19 @@ def test_replan_still_rejects_unsafe_mandatory_gate_deletion(
         stored.status = StepStatus.PENDING
         repo.update_step(stored)
 
-    with pytest.raises(ConflictError, match="mandatory governance policy"):
+    before = plan_to_dict(repo.load_plan("plan-1"))
+    before_runs = repo.list_step_runs("step-2")
+    # An unresolved actual run is rejected before policy-removal analysis. This
+    # priority is intentional: rewriting display status cannot erase effects.
+    rejection = "执行或完成动作结果尚未核对" if seed_run else "mandatory governance policy"
+    with pytest.raises(ConflictError, match=rejection):
         repo.replace_remaining_steps(
             "plan-1",
             _plan(_step("step-1", 0)),
             loop_event=loop_event,
         )
+    assert plan_to_dict(repo.load_plan("plan-1")) == before
+    assert repo.list_step_runs("step-2") == before_runs
 
 
 def test_plan_repository_appends_steps_and_lists_recent_failed_refs(tmp_path):

@@ -112,7 +112,10 @@ def _risk_direction(values: np.ndarray, target: np.ndarray) -> str:
 def _interval_text(lower: float, upper: float, *, missing: bool = False) -> str:
     if missing:
         return "缺失值"
-    return f"({_number_text(lower)}, {_number_text(upper)}]"
+    # assign_bins places a value equal to an interior edge in the next bin.
+    # Finite lower bounds are inclusive; every upper bound is exclusive.
+    opening = "(" if lower == float("-inf") else "["
+    return f"{opening}{_number_text(lower)}, {_number_text(upper)})"
 
 
 def _number_text(value: float) -> str:

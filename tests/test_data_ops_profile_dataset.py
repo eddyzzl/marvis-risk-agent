@@ -106,7 +106,7 @@ def test_data_ops_pack_permissions_match_current_governed_tools():
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.7.0"
     assert set(manifest["permissions"]) == {
         "read:dataset",
         "read:task",

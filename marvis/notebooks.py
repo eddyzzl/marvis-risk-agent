@@ -315,9 +315,6 @@ class NotebookExecutionSession:
             _call_kernel_method(kernel_manager, "shutdown_kernel", now=True)
 
     def _build_client(self):
-        from marvis.local_execution import notebook_kernel_manager_class
-
-        kernel_manager_class = notebook_kernel_manager_class()
         callbacks = {
             "on_cell_start": self._record_cell_start,
             "on_cell_error": self._record_cell_error,
@@ -329,7 +326,6 @@ class NotebookExecutionSession:
                 self.notebook,
                 timeout=self.timeout,
                 kernel_name=self.kernel_name,
-                kernel_manager_class=kernel_manager_class,
                 **callbacks,
             )
         except TypeError as exc:
@@ -342,7 +338,6 @@ class NotebookExecutionSession:
             )
             for name, callback in callbacks.items():
                 setattr(client, name, callback)
-            client.kernel_manager_class = kernel_manager_class
             return client
 
     def _run_with_result(self, execute, *, log_path: Path) -> NotebookRunResult:
@@ -1052,10 +1047,8 @@ def _run_notebook_in_subprocess(
         "resource_poll_interval_seconds": float(resource_poll_interval_seconds),
     }
     started = datetime.now(timezone.utc).isoformat()
-    from marvis.local_execution import loopback_only_command
-
     process = subprocess.Popen(
-        loopback_only_command(_notebook_worker_command()),
+        _notebook_worker_command(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

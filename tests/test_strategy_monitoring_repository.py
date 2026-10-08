@@ -19,7 +19,7 @@ from marvis.repositories.strategy_monitoring import (
     StrategyMonitoringRepository,
     validate_monitoring_run_result,
 )
-from tests.schema_fixture_support import install_v1_plan_step_runs_predecessor
+from tests.schema_fixture_support import install_historical_schema
 
 
 def _sha(value: str) -> str:
@@ -85,10 +85,7 @@ def _plan(*, revision: int = 1, supersedes: str | None = None) -> MonitoringPlan
 def test_migration_008_upgrades_and_is_idempotent(tmp_path):
     db_path = tmp_path / "v7.sqlite"
     with connect(db_path) as conn:
-        install_v1_plan_step_runs_predecessor(conn)
-        conn.execute("CREATE TABLE strategies(id TEXT PRIMARY KEY)")
-        conn.execute("CREATE TABLE datasets(id TEXT PRIMARY KEY)")
-        conn.execute("PRAGMA user_version = 7")
+        install_historical_schema(conn, 7)
 
     init_db(db_path)
     init_db(db_path)

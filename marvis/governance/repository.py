@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from marvis.runtime_observations import plan_state_on_commit
 from marvis.db_schema import connect
 from marvis.governance.contracts import (
     ApprovalRecord,
@@ -450,6 +451,7 @@ class GovernanceRepository:
         now = self._now()
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=binding.plan_id)
             self._require_active_principal(conn, principal, now)
             if snapshot_bound:
                 plan, step, step_row = _load_authorization_snapshot_tx(
@@ -612,6 +614,7 @@ class GovernanceRepository:
         now = self._now()
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            plan_state_on_commit(conn, self.db_path, plan_id=binding.plan_id)
             self._require_active_principal(conn, principal, now)
             plan_row = conn.execute(
                 """

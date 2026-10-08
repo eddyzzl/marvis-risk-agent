@@ -55,7 +55,7 @@ def payload_too_large(detail: str) -> HTTPException:
     return HTTPException(status_code=413, detail=detail)
 
 
-def forbidden(detail: str) -> HTTPException:
+def forbidden(detail: object) -> HTTPException:
     """403 -- caller is not permitted to perform the action. ``detail`` verbatim."""
     return HTTPException(status_code=403, detail=detail)
 

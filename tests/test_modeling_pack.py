@@ -459,7 +459,7 @@ def test_train_model_persists_preprocessing_chain_and_flags_pmml_boundary(tmp_pa
     artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
     assert artifact is not None
     assert artifact.params["preprocessing_steps"] == [
-        {"kind": "impute", "columns": ["x1"], "params": imputed.output["fill_values"]}
+        {"kind": "impute", "columns": ["x1"], "params": imputed.output["fill_values"], "strategy": "median"}
     ]
 
     post_training = runner.invoke(

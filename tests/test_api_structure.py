@@ -38,10 +38,13 @@ def test_task_payload_helpers_live_in_dedicated_module():
 #   plans.py   -- detail is a structured dict ({"problems": [...]}), which the
 #                 string-detail factories intentionally do not accept.
 #   drafts.py  -- detail is a structured dict ({"check": ...}), same reason.
+#   decision_twin.py -- propagates the domain's status code and structured
+#                       diagnostic without changing its HTTP contract.
 _ARCH7_BARE_RAISE_WHITELIST = {
     "plugins.py": 1,
     "plans.py": 1,
     "drafts.py": 1,
+    "decision_twin.py": 1,
 }
 
 

@@ -554,6 +554,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     )
 
     assert tool_names == {
+        "bind_business_context",
         "vintage_curve",
         "roll_rate_matrix",
         "profit_calc",

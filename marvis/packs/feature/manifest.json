@@ -114,6 +114,8 @@
         "type": "object",
         "properties": {
           "report_path": {"type": "string"},
+          "artifact_id": {"type": "string", "minLength": 1},
+          "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "feature_count": {"type": "integer", "minimum": 0},
           "metrics": {"type": "array", "items": {"type": "object"}},
           "collinear": {"type": "object"},

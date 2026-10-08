@@ -209,6 +209,13 @@ def probe_sheet_row_count(
 def detect_header_rows(raw: pd.DataFrame) -> int:
     if raw.empty:
         raise DataIngestError("cannot detect headers for an empty sheet")
+    # A complete first row is a usable flat header even when subsequent records
+    # are mostly categorical. The numeric/date ratio of a later record is not
+    # evidence that preceding records belong to a multirow header. Automatic
+    # flattening remains available for sparse/merged title rows; callers can
+    # explicitly declare header_rows for complete, unmerged multirow titles.
+    if all(pd.notna(value) and str(value).strip() for value in raw.iloc[0]):
+        return 1
     limit = min(MAX_HEADER_ROWS, len(raw))
     for index in range(1, limit):
         if _looks_like_data_row(raw.iloc[index]):

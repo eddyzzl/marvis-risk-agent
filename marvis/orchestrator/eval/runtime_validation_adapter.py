@@ -25,7 +25,7 @@ def start_agent(journey, action):
         raise RuntimeJourneyError("validation_agent_start_not_declared")
     if journey.plans():
         raise RuntimeJourneyError("validation_agent_must_not_use_plan")
-    journey.interventions += 1
+    journey.record_human_action(action)
     response = journey.json_request(
         "POST", f"/api/tasks/{journey.task_id}/agent/start", label="agent_initial_turn",
         json={"acceptance_mode": journey.case.acceptance_mode},
@@ -56,7 +56,7 @@ def confirm_current_report(journey, action):
             or type(draft["draft_edit_revision"]) is not int or draft["draft_edit_revision"] < 0
             or type(draft["report_revision"]) is not int or draft["report_revision"] < 0):
         raise RuntimeJourneyError("validation_report_draft_not_confirmable")
-    journey.interventions += 1
+    journey.record_human_action(action)
     journey.validation_confirmation = {
         "draft_message_id": draft["message_id"], "draft_edit_revision": draft["draft_edit_revision"],
         "revision": draft["report_revision"], "values_sha256": digest(draft["values"]),

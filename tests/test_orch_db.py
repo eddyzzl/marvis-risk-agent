@@ -25,7 +25,7 @@ from marvis.plugins.manifest import ToolRef
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.tasks import TaskRepository
 from marvis.state_machine import ConflictError
-from tests.schema_fixture_support import install_v1_plan_step_runs_predecessor
+from tests.schema_fixture_support import install_historical_schema
 
 
 def test_plan_repository_is_reexported_from_db_for_compatibility():
@@ -978,8 +978,7 @@ def test_bound_step_result_receipt_is_immutable_and_plan_purge_cascades(
 def test_migration_008_adds_step_run_progress_columns_to_v7_database(tmp_path):
     db_path = tmp_path / "legacy.sqlite"
     with connect(db_path) as conn:
-        install_v1_plan_step_runs_predecessor(conn)
-        conn.execute("PRAGMA user_version = 7")
+        install_historical_schema(conn, 7)
 
     init_db(db_path)
 

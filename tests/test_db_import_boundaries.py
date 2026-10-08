@@ -119,7 +119,12 @@ from pathlib import Path
 import marvis.db_schema as schema
 
 db_path = Path(sys.argv[1])
-schema.init_db(db_path)
+with schema.connect(db_path) as conn:
+    for version, migration in schema._MIGRATIONS:
+        if version > 17:
+            break
+        migration(conn)
+    conn.execute("PRAGMA user_version = 17")
 canonical_dsl = (
     '{"default_action":{"reason_code":null,"stop":true,"type":"approval",'
     '"value":"approve"},"match_policy":"first_match","metadata":'
@@ -152,9 +157,6 @@ with sqlite3.connect(db_path) as conn:
             "strategy.dsl.v1",
         ),
     )
-    conn.execute("DROP TABLE strategy_pool_materializations")
-    conn.execute("ALTER TABLE strategies DROP COLUMN dsl_content_hash")
-    conn.execute("PRAGMA user_version = 17")
 
 schema.init_db(db_path)
 loaded = sorted(

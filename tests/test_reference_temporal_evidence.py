@@ -221,9 +221,11 @@ def test_native_timing_scope_survives_delivery_package_and_readiness(
     assert delivered.ok, delivered.error
     card = json.loads(Path(delivered.output["model_card_path"]).read_text())
     assert card["training"]["feature_time_evidence"] == evidence
-    assert any("历史可得时间" in item for item in card["limitations"]) is (
+    assert any("特征缺少可认证的历史可得时间" in item for item in card["limitations"]) is (
         expected != "verified"
     )
+    assert card["training"]["parameter_time_evidence"]["assurance"] == "unknown"
+    assert any("模型及拟合参数的历史可得时间未验证" in item for item in card["limitations"])
 
 
 def test_edited_unknown_timing_cannot_be_displayed_as_authenticated(packaged):

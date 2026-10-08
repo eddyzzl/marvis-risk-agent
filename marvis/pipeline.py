@@ -28,6 +28,8 @@ the codebase and test suite.
 """
 from __future__ import annotations
 
+from marvis.runtime_observations import measured
+
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -236,6 +238,7 @@ def legacy_live_notebook_execution_allowed(settings: PipelineSettings) -> bool:
     return _truthy_env(LEGACY_LIVE_NOTEBOOK_ENV_VAR)
 
 
+@measured("validation_notebook")
 def run_notebook_stage(
     *,
     task_id: str,
@@ -616,6 +619,7 @@ def _remove_empty_directory_chain(path: Path, *, stop_at: Path) -> None:
         current = current.parent
 
 
+@measured("validation_pmml")
 def run_pmml_scoring_stage(
     *,
     task_id: str,
@@ -754,6 +758,7 @@ def _execute_pmml_scoring_stage(
         _remove_empty_directory_chain(working_score.parent, stop_at=work_root)
 
 
+@measured("validation_metrics")
 def run_metrics_stage(
     *,
     task_id: str,
@@ -1256,6 +1261,7 @@ def _run_legacy_metrics_stage(
         _remove_dir_if_exists(metrics_work_dir)
 
 
+@measured("validation_report")
 def run_report_stage(
     *,
     task_id: str,

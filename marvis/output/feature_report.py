@@ -181,6 +181,13 @@ def render_feature_report(
         _append_psi_detail_sheet(workbook, rows)
     if binning:
         _append_binning_sheet(workbook, binning)
+    # The workbook contains values, never executable formulas. Excel error-like
+    # business labels (for example #N/A) must remain literal strings as well.
+    for worksheet in workbook:
+        for row in worksheet:
+            for cell in row:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"
     try:
         workbook.save(artifact.path)
         artifact.promote()

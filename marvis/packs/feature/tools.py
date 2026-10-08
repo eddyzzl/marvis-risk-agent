@@ -56,7 +56,6 @@ from marvis.feature.transform import (
     zscore_standardize,
 )
 from marvis.plugins.sdk import PackRuntime
-from marvis.settings import build_settings
 
 
 def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
@@ -910,18 +909,16 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
 
 def tool_generate_feature_report(inputs: dict, ctx) -> dict:
     """Write the per-feature metrics into a downloadable Excel report (FEATURE form A)."""
-    from marvis.output.feature_report import render_feature_report
+    from marvis.packs.feature.report import registered_feature_report
 
     metrics = [item for item in (inputs.get("metrics") or []) if isinstance(item, dict)]
     collinear = inputs.get("collinear") if isinstance(inputs.get("collinear"), dict) else None
     binning = [item for item in (inputs.get("binning") or []) if isinstance(item, dict)]
-    settings = build_settings(ctx.workspace)
-    out_path = Path(settings.tasks_dir) / ctx.task_id / "outputs" / "feature_report.xlsx"
-    render_feature_report(metrics, out_path, collinear=collinear, binning=binning)
+    artifact = registered_feature_report(inputs, ctx, metrics=metrics, collinear=collinear, binning=binning)
     # Echo metrics (+ optional collinear) so the driver renders the wide table, the VIF
     # section, and the report link together.
     out = {
-        "report_path": str(out_path),
+        **artifact,
         "feature_count": len(metrics),
         "metrics": metrics,
         "binning": binning,

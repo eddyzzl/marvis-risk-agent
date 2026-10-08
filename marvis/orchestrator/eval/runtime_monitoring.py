@@ -46,7 +46,7 @@ def start_monitoring(journey, action, dataset_root):
         if sha.hexdigest() != material.sha256:
             raise RuntimeJourneyError("monitoring_material_identity_mismatch")
         stream.seek(0)
-        journey.interventions += 1
+        journey.record_human_action(action, phase="material_upload")
         datasets = journey.json_request(
             "POST", f"/api/tasks/{journey.task_id}/datasets/upload", label="upload_monitoring_material",
             files={"file": (path.name, stream)}, data={"role": material.role},
@@ -57,7 +57,7 @@ def start_monitoring(journey, action, dataset_root):
     experiments = journey.json_request(
         "GET", f"/api/tasks/{journey.task_id}/experiments", label="read_monitoring_experiments",
     )["experiments"]
-    selected = [e for e in experiments if e["status"] == "selected" and e["artifact_id"]]
+    selected = [e for e in experiments if e["status"] in {"selected", "handed_off", "validated"} and e["artifact_id"]]
     if len(selected) != 1 or selected[0]["task_id"] != journey.task_id:
         raise RuntimeJourneyError("monitoring_selected_experiment_not_unique")
     route = f"/api/tasks/{journey.task_id}/data-workspace"
@@ -77,7 +77,7 @@ def start_monitoring(journey, action, dataset_root):
         expected_content_hash=sample["content_hash"], workspace_revision=workspace.revision,
         analysis_generation=workspace.analysis_generation, target_col=action.monitoring_request.target_col,
     )
-    journey.interventions += 1
+    journey.record_human_action(action, phase="monitoring_proposal")
     if action.kind == "submit_model_monitoring_request":
         journey.json_request(
             "POST", f"/api/tasks/{journey.task_id}/agent/messages", label="human_monitoring_proposal",
@@ -109,7 +109,7 @@ def confirm_monitoring(journey, action):
     plan = journey.json_request("GET", f"/api/plans/{submission['plan_id']}", label="read_monitoring_plan")["plan"]
     if plan["status"] != "validated" or plan["task_id"] != journey.task_id:
         raise RuntimeJourneyError("monitoring_proposal_is_stale")
-    journey.interventions += 1
+    journey.record_human_action(action)
     # Agent tasks reject the generic /plan/confirm bypass even if a human
     # created the workflow through /plans. Both entries use its existing gate.
     journey.json_request(

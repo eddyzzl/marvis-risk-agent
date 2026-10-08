@@ -183,8 +183,10 @@ def test_driver_report_downloads_reject_symlinked_outputs_directory(tmp_path: Pa
     assert legacy.content != b"OUTSIDE_REPORT_SECRET"
 
 
-def test_registered_portfolio_report_outside_outputs_downloads_only_while_hash_matches(
+@pytest.mark.parametrize("family", ["portfolio", "feature"])
+def test_registered_report_outside_outputs_downloads_only_while_hash_matches(
     tmp_path: Path,
+    family: str,
 ):
     client = TestClient(create_app(tmp_path / "workspace"))
     materials = client.app.state.settings.workspace / "portfolio-materials"
@@ -195,14 +197,14 @@ def test_registered_portfolio_report_outside_outputs_downloads_only_while_hash_m
             "model_name": "组合报告下载",
             "validator": "qa",
             "source_dir": str(materials),
-            "task_type": "portfolio",
+            "task_type": "portfolio" if family == "portfolio" else "feature_analysis",
             "run_mode": "agent",
         },
     )
     assert response.status_code == 200, response.text
     task_id = response.json()["id"]
 
-    report_dir = client.app.state.settings.tasks_dir / task_id / "portfolio"
+    report_dir = client.app.state.settings.tasks_dir / task_id / ("portfolio" if family == "portfolio" else "feature_reports")
     report_dir.mkdir(parents=True)
     report_path = report_dir / "portfolio_report.xlsx"
     report_bytes = b"PK-portfolio-report"
@@ -212,10 +214,10 @@ def test_registered_portfolio_report_outside_outputs_downloads_only_while_hash_m
         client.app.state.settings.db_path
     ).register(
         task_id=task_id,
-        kind="portfolio_report_xlsx",
+        kind=f"{family}_report_xlsx",
         path=str(report_path),
         content_hash=content_hash,
-        origin_tool="analysis.portfolio_report",
+        origin_tool="analysis.portfolio_report" if family == "portfolio" else "feature.generate_feature_report",
         provenance={"schema_version": "portfolio-report-artifact.v1"},
     )
 
@@ -226,7 +228,7 @@ def test_registered_portfolio_report_outside_outputs_downloads_only_while_hash_m
         plan_id=plan_id,
         index=0,
         title="生成组合报告",
-        tool_ref=ToolRef("analysis", "portfolio_report"),
+        tool_ref=ToolRef("analysis", "portfolio_report") if family == "portfolio" else ToolRef("feature", "generate_feature_report"),
         inputs={},
         depends_on=[],
         post_checks=[],

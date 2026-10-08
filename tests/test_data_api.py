@@ -522,6 +522,11 @@ def test_dataset_upload_sanitize_colliding_sheet_names_keep_distinct_files(
     ]
     datasets = payload["datasets"]
     assert len(datasets) == 2
+    assert [dataset["sheet"] for dataset in datasets] == ["Risk Sheet", "Risk_Sheet"]
+    for dataset in datasets:
+        identity = json.loads((settings.datasets_dir / task.id / ".source-identities" / f"{dataset['id']}.json").read_text())
+        assert identity["sha256"] == hashlib.sha256(workbook_bytes).hexdigest()
+        assert identity["suffix"] == ".xlsx"
     assert len({dataset["source_path"] for dataset in datasets}) == 2
     assert len({dataset["content_hash"] for dataset in datasets}) == 2
     assert all(
@@ -1174,6 +1179,9 @@ def test_dataset_upload_excel_multi_sheet_rolls_back_when_registration_fails(
     assert not list(excel_dir.glob("*.parquet"))
     assert not (excel_dir / ".staging").exists()
     assert not list(excel_dir.glob(".excel_ingest_*"))
+    identity_dir = settings.datasets_dir / task.id / ".source-identities"
+    assert not list(identity_dir.glob("*.json"))
+    assert not (identity_dir / ".staging").exists()
 
 
 def test_join_api_propose_confirm_execute_flow(tmp_path):

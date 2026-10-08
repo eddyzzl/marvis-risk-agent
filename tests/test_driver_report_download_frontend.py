@@ -67,8 +67,8 @@ def test_driver_report_download_button_lives_in_middle_panel_with_handler():
 
     # the handler navigates to the driver-report download endpoint
     assert "function handleDriverReportDownloadClick" in app_js
-    assert "`api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`" in app_js
-    assert "`/api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`" not in app_js
+    assert "`api/tasks/${encodeURIComponent(taskSession.taskId)}/driver-report/download`" in app_js
+    assert "`/api/tasks/${encodeURIComponent(taskSession.taskId)}/driver-report/download`" not in app_js
     # Completion messages also carry their own center-stream download card, so
     # users do not depend on a rail poll or have to hunt elsewhere on the page.
     manual_js = _read("js/v2/driver_manual_analysis.js")
@@ -91,7 +91,7 @@ def test_agent_message_report_download_renders_every_report_link():
       import assert from "node:assert/strict";
       import {{ safeSameOriginApiHref }} from "./marvis/static/js/url-safety.js";
       const escapeHtml = (value) => String(value);
-      let selectedTask = {{ task_type: "modeling" }};
+      const taskSession = {{ task: {{ task_type: "modeling" }} }};
       {function_source}
       const html = agentMessageReportDownloadHtml({{
         metadata: {{
@@ -121,7 +121,7 @@ def test_agent_message_report_download_renders_every_report_link():
       assert.equal(html.includes("legacy primary"), false);
       assert.equal(html.includes("已生成 2 份分析报告"), true);
 
-      selectedTask = {{ task_type: "portfolio" }};
+      taskSession.task = {{ task_type: "portfolio" }};
       const historical = agentMessageReportDownloadHtml({{
         metadata: {{
           report_download: {{

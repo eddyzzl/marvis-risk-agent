@@ -89,6 +89,7 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
         "min_approval_rate": None,
         "baseline_strategy_id": None,
         "profit": None,
+        "business_objective": None,
     }
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})

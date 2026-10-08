@@ -9,12 +9,12 @@ import test_reference_decision as package_fixtures
 from test_operations_api import _claim_role
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def packaged(tmp_path_factory):
     return package_fixtures.packaged.__wrapped__(tmp_path_factory)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def governed(packaged):
     app = packaged[0]
     clients = [TestClient(app) for _ in range(3)]
@@ -70,6 +70,11 @@ def _install_activate(governed, promotion):
     return receipt, activated.json()
 
 
+def _activate_baseline(packaged, governed):
+    promotion = _promotion(governed, packaged[3])
+    return _install_activate(governed, promotion)
+
+
 def test_approved_install_is_real_idempotent_and_recovers_after_lost_response(
     packaged, governed, monkeypatch
 ):
@@ -112,6 +117,7 @@ def test_approved_install_is_real_idempotent_and_recovers_after_lost_response(
 def test_application_http_decisions_are_pinned_logged_and_idempotent(
     packaged, governed
 ):
+    _activate_baseline(packaged, governed)
     app, _, _, package_hash, _, _, _, _ = packaged
     admin = governed[-1]
     request = {
@@ -147,7 +153,16 @@ def test_application_http_decisions_are_pinned_logged_and_idempotent(
 def test_shadow_switch_and_rollback_change_real_serving_head_without_resetting_decisions(
     packaged, governed
 ):
+    _activate_baseline(packaged, governed)
     app, store, request, old_hash, _, _, _, _ = packaged
+    original = DecisionRequest(
+        request_id="application-1",
+        decision_node="underwriting",
+        expected_package_hash=old_hash,
+        features={"x1": 0.1, "x2": 0.2},
+    )
+    original_result = app.state.reference_decision.decide(original)
+    assert original_result["package_hash"] == old_hash
     newer, _ = store.build(
         request.model_copy(update={"failure_action": "reject"}), actor_id="test-maker"
     )
@@ -159,13 +174,7 @@ def test_shadow_switch_and_rollback_change_real_serving_head_without_resetting_d
     _, active = _install_activate(governed, promotion)
     assert app.state.reference_decision.head()["package_hash"] == newer
     # Same request returns its original result even after a package switch.
-    original = DecisionRequest(
-        request_id="application-1",
-        decision_node="underwriting",
-        expected_package_hash=old_hash,
-        features={"x1": 0.1, "x2": 0.2},
-    )
-    assert app.state.reference_decision.decide(original)["package_hash"] == old_hash
+    assert app.state.reference_decision.decide(original) == original_result
     admin = governed[-1]
     url = f"/api/production-governance/environments/local-reference/deployments/{active['id']}/rollback"
     payload = {
@@ -183,6 +192,7 @@ def test_shadow_switch_and_rollback_change_real_serving_head_without_resetting_d
 def test_timeout_fallback_is_explicit_approved_and_durable(
     packaged, governed, monkeypatch
 ):
+    _activate_baseline(packaged, governed)
     app, _, _, package_hash, _, _, _, _ = packaged
 
     def timeout(*args):
@@ -233,6 +243,7 @@ def test_package_binding_and_approval_are_required_before_install(packaged, gove
 def test_incompatible_schema_or_tampered_installed_package_cannot_activate(
     packaged, governed
 ):
+    _activate_baseline(packaged, governed)
     app, store, request, _, _, _, _, _ = packaged
     incompatible = request.model_copy(update={"decision_node": "collections"})
     package_hash, manifest = store.build(incompatible, actor_id="test-maker")
@@ -261,6 +272,7 @@ def test_incompatible_schema_or_tampered_installed_package_cannot_activate(
 def test_governance_discovery_is_role_gated_paginated_and_uses_existing_heads(
     packaged, governed
 ):
+    _activate_baseline(packaged, governed)
     app, _, _, package_hash, _, artifact, _, _ = packaged
     stranger = TestClient(app)
     endpoints = [

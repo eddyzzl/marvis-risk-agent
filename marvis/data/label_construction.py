@@ -71,7 +71,9 @@ class BadDefinition:
     def label_expression(self) -> str:
         """人读的定坏口径表达式，如 ``90+@mob6 (obs=0, perf=6)``。"""
         if self.threshold_kind == "dpd":
-            head = f"DPD{int(self.threshold)}+@mob{self.at_mob}"
+            value = float(self.threshold)
+            threshold = str(int(value)) if value.is_integer() else str(value)
+            head = f"DPD{threshold}+@mob{self.at_mob}"
         else:
             head = f"{self.threshold}+@mob{self.at_mob}"
         return f"{head} (obs={self.observation_window}, perf={self.performance_window})"

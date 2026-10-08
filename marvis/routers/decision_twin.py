@@ -16,6 +16,7 @@ from marvis.decision_twin.batch_material import (
 from marvis.decision_twin.event_batch_contracts import HistoricalNativeEventReference
 from marvis.output.decision_twin import render_historical_replay
 from marvis.reference_decision.contracts import DecisionError
+from marvis.errors import not_found
 
 
 router = APIRouter(prefix="/api", tags=["decision-twin"])
@@ -31,7 +32,7 @@ def _material(request, task_id):
             ),
         )
     except KeyError as exc:
-        raise HTTPException(404, "task not found") from exc
+        raise not_found("task not found") from exc
 
 
 def _load(material, artifact_id):
@@ -41,7 +42,7 @@ def _load(material, artifact_id):
         except DecisionError as exc:
             if exc.status != 404:
                 raise
-    raise HTTPException(404, "historical artifact not found")
+    raise not_found("historical artifact not found")
 
 
 @router.get("/decision-twin/capabilities")

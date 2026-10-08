@@ -5,6 +5,17 @@ from __future__ import annotations
 import sqlite3
 
 
+def install_historical_schema(conn: sqlite3.Connection, version: int) -> None:
+    """Install every frozen migration up to the historical version under test."""
+    from marvis.db_schema import _MIGRATIONS
+
+    for migration_version, migration in _MIGRATIONS:
+        if migration_version > version:
+            break
+        migration(conn)
+    conn.execute(f"PRAGMA user_version = {int(version)}")
+
+
 def install_v1_plan_step_runs_predecessor(conn: sqlite3.Connection) -> None:
     """Install the v1 ``plan_step_runs`` shape required by later migrations.
 

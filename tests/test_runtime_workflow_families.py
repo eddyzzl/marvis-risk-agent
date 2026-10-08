@@ -35,7 +35,7 @@ def _business_protocol(request, answer, payload):
             "risk_setup_phase"
         ) == "ask_goal" and "标准 Vintage" in request.get("instruction", ""):
             answer["intent"] = "risk_standard_vintage"
-    elif "【当前节点】" in payload["messages"][-1]["content"]:
+    elif _gate_route_request(payload):
         return {
             "action": "confirm",
             "params": {},
@@ -56,6 +56,13 @@ def _business_protocol(request, answer, payload):
             "withholds_authorization": False,
         }
     return answer
+
+
+def _gate_route_request(payload):
+    # Route/review share the structural user envelope. Distinguish their actual
+    # system contracts, not the retired free-text gate-context formatting.
+    from marvis.llm_prompts import GATE_INSTRUCTION_ROUTER_SYS
+    return payload["messages"][0]["content"].startswith(GATE_INSTRUCTION_ROUTER_SYS.text)
 
 
 def test_typed_business_message_preserves_old_contract_and_rejects_hidden_actions():

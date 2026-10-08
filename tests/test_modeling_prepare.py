@@ -3,6 +3,7 @@ import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
+from marvis.data.feature_time import feature_time_evidence
 from marvis.db import DatasetRepository, init_db
 import marvis.repositories.datasets as dataset_repo_module
 from marvis.packs.modeling.prepare import ModelingError, _make_split, prepare_modeling_frame
@@ -124,6 +125,10 @@ def test_prepare_modeling_frame_reads_duckdb_canonical_name_for_blank_parquet_co
     )
     backend, registry, dataset = _register_frame(tmp_path, frame)
     assert backend.column_names(registry.resolve_path(dataset.id))[0] == "C0"
+    evidence = feature_time_evidence(registry, dataset.id, ["C0"])
+    assert evidence["assurance"] == "unknown"
+    assert evidence["artifact_ids"] == []
+    assert evidence["fields"]["C0"]["reasons"] == ["no_field_availability_evidence"]
 
     original_read_frame = backend.read_frame
 

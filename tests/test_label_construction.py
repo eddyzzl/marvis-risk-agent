@@ -79,6 +79,14 @@ def test_construct_label_carries_bad_definition_metadata():
     assert payload["at_mob"] == 6
 
 
+def test_fractional_threshold_metadata_agrees_with_actual_classification():
+    frame = pd.DataFrame({"loan_id": ["below", "at"], "mob": [3, 3], "dpd": [90.1234566, 90.1234567]})
+    result = construct_label(frame, id_col="loan_id", mob_col="mob", observation_window=0,
+                             performance_window=3, dpd_col="dpd", threshold_dpd=90.1234567)
+    assert result.frame["target"].tolist() == [0.0, 1.0]
+    assert result.definition.label_expression() == "DPD90.1234567+@mob3 (obs=0, perf=3)"
+
+
 def test_construct_label_at_mob_overrides_window_end():
     # 90+@mob3: 判定点在 mob3, A 的命中在 mob4 -> 落在 (0, 3] 窗口外 -> A 变好客户.
     result = construct_label(

@@ -49,3 +49,11 @@ def test_bin_analysis_keeps_interval_order_but_ranks_risk_up_from_high_values():
     assert highest_value_bin["cumulative_bad_rate"] == pytest.approx(
         highest_value_bin["bad_rate"]
     )
+
+
+def test_bin_intervals_describe_actual_inclusive_lower_and_exclusive_upper_edges():
+    result = feature_bin_analysis(np.array([0., 1., 2., 3.]), np.array([0, 1, 0, 1]), feature="x", requested_bins=3)
+    rows = result["rows"]
+    assert [row["count"] for row in rows] == [1, 1, 2]
+    assert [row["bad_count"] for row in rows] == [0, 1, 1]
+    assert [row["interval"] for row in rows] == ["(-inf, 1)", "[1, 2)", "[2, inf)"]

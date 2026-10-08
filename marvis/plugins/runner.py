@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from marvis.runtime_observations import measured
+
 from dataclasses import dataclass
 import hashlib
 import json
@@ -237,6 +239,7 @@ class ToolRunner:
         _require_tool_permissions(manifest, tool.side_effects)
         return invocation_contract(manifest, tool, ref)
 
+    @measured("plugin")
     def invoke(
         self,
         ref: ToolRef,
@@ -902,6 +905,7 @@ class ToolRunner:
         state = getattr(current, "state", None)
         return str(getattr(state, "value", state) or "") == "committed"
 
+    @measured("adhoc")
     def invoke_adhoc(
         self,
         *,

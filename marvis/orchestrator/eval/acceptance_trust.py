@@ -33,7 +33,11 @@ MAX_SOURCE_BYTES = 512 * 1024**2
 MAX_FILES = 30_000
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-_ADAPTERS = {"code_checks.v1": {"C"}, "runtime_validation_v2.v1": {"R", "A", "H"}}
+_ADAPTERS = {
+    "code_checks.v1": {"C"},
+    "runtime_validation_v2.v1": {"R", "A", "H"},
+    "formal_benchmark.v1": {"A"},
+}
 
 
 class TrustInputError(ValueError):
@@ -184,26 +188,30 @@ def verify_junit(raw: bytes, *, expected_test_ids: list[str]) -> dict:
         raise TrustInputError("junit_dtd_or_entity_forbidden")
 
     depth, elements = 0, 0
+    tree = ElementTree.TreeBuilder()
 
-    def start(*_):
+    def start(name, attributes):
         nonlocal depth, elements
         depth += 1
         elements += 1
         _require(depth <= 64 and elements <= MAX_FILES * 8, "junit_structure_limit")
+        tree.start(name, attributes)
 
-    def end(*_):
+    def end(name):
         nonlocal depth
+        tree.end(name)
         depth -= 1
 
     try:
         parser = expat.ParserCreate()
         parser.StartElementHandler = start
         parser.EndElementHandler = end
+        parser.CharacterDataHandler = tree.data
         parser.StartDoctypeDeclHandler = forbidden
         parser.EntityDeclHandler = forbidden
         parser.ExternalEntityRefHandler = forbidden
         parser.Parse(raw, True)
-        root = ElementTree.fromstring(raw)
+        root = tree.close()
     except (expat.ExpatError, ElementTree.ParseError) as exc:
         raise TrustInputError("invalid_junit_xml") from exc
     _require(root.tag in {"testsuite", "testsuites"}, "invalid_junit_root")
@@ -671,6 +679,12 @@ class TrustedAcceptanceEnvironment:
                 facts = _code_checks(
                     entry["inputs"], execution, self.evidence_root, record
                 )
+            elif entry["adapter"] == "formal_benchmark.v1":
+                from .formal_acceptance import verify_formal_benchmark
+
+                facts = verify_formal_benchmark(
+                    entry["inputs"], execution, self.evidence_root, record, self.config
+                )
             else:
                 facts = _runtime_validation(
                     entry["inputs"], execution, self.evidence_root, record, self.config
@@ -703,8 +717,17 @@ class TrustedAcceptanceEnvironment:
                 "review_scope_mismatch",
             )
             required = {"frozen_criteria", "complete_run_denominator"}
-            if entry["adapter"] == "runtime_validation_v2.v1":
+            if entry["adapter"] in {"runtime_validation_v2.v1", "formal_benchmark.v1"}:
                 required.add("narrative_semantics")
+            if entry["adapter"] == "formal_benchmark.v1":
+                required.update(
+                    {
+                        "frozen_before_execution",
+                        "expected_answers_isolated",
+                        "fixed_hardware_load",
+                        "repair_classification",
+                    }
+                )
             if record["evidence_tier"] == "A":
                 required.add("blind_real_model_execution")
             if record["evidence_tier"] == "H":
@@ -900,12 +923,93 @@ def _runtime_validation(inputs, execution, root, record, config):
         return {**failed, "reason": "runtime_domain_evidence_unavailable"}
 
 
+def _original_case_binding(item, root, record, run, binding_type):
+    """Shared original-identity checks; callers own tier/cohort decisions."""
+    frozen = run["manifest"]["frozen"]
+    _keys(item, {"case_id", "archive", "manifest_sha256", "binding"})
+    binding_path = _path(root, item["binding"]["path"])
+    archive = _path(root, item["archive"], directory=True)
+    _require(
+        not binding_path.is_relative_to(archive),
+        "binding_must_be_external_to_archive",
+    )
+    binding = binding_type.model_validate_json(_bound(root, item["binding"]))
+    _require(
+        record["input_hashes"].get(item["binding"]["path"])
+        == item["binding"]["sha256"],
+        "case_input_not_record_bound",
+    )
+    case_id = item["case_id"]
+    _require(
+        binding.case.id == case_id and binding.run_id == run["manifest"]["run_id"],
+        "case_binding_mismatch",
+    )
+    _require(
+        all(
+            getattr(binding, key) == frozen[key]
+            for key in (
+                "cases_sha256",
+                "expected_sha256",
+                "source",
+                "model_connection_sha256",
+            )
+        ),
+        "frozen_runtime_binding_mismatch",
+    )
+    observed = run["executions"][case_id]
+    _require(
+        observed.get("materials")
+        == [
+            {"sha256": m.sha256, "source_kind": m.source_kind, "role": m.role}
+            for m in binding.case.materials
+        ],
+        "final_material_binding_mismatch",
+    )
+    _require(
+        observed.get("case_sha256") == digest(binding.case.model_dump())
+        and observed.get("budget") == binding.case.budget.model_dump(),
+        "final_case_binding_mismatch",
+    )
+    custody = observed.get("evidence_custody", {})
+    _require(
+        custody.get("status") == "retained"
+        and custody.get("manifest_sha256") == item["manifest_sha256"],
+        "final_custody_binding_mismatch",
+    )
+    _require(observed.get("execution", {}).get("task_id") == binding.task_id, "final_task_binding_mismatch")
+    return archive, binding, observed
+
+
+def _validation_case_binding(item, root, record, run):
+    from .runtime_archive_validation import FrozenValidationBinding
+
+    archive, binding, observed = _original_case_binding(item, root, record, run, FrozenValidationBinding)
+    pipeline = observed.get("execution", {}).get("validation_pipeline", {})
+    _require(
+        observed.get("execution", {}).get("task_id") == binding.task_id
+        and all(
+            pipeline.get(key) == getattr(binding, key)
+            for key in (
+                "input_contract_sha256",
+                "confirmed_draft_sha256",
+                "report_revision",
+            )
+        ),
+        "final_task_binding_mismatch",
+    )
+    reports = pipeline.get("report_files", [])
+    _require(
+        isinstance(reports, list)
+        and len({r["kind"] for r in reports}) == len(reports)
+        and {r["kind"]: r["sha256"] for r in reports} == binding.report_sha256,
+        "final_report_binding_mismatch",
+    )
+    return archive, binding, observed
+
+
 def _runtime_validation_checks(inputs, execution, root, record, config, run):
     # Imported from installed code, never from the candidate's paths or config.
-    from .runtime_archive_validation import (
-        FrozenValidationBinding,
-        revalidate_validation_archive,
-    )
+    from .runtime_archive_validation import revalidate_validation_archive
 
     _keys(inputs, {"run_dir", "final_manifest_sha256", "cases"})
     _keys(execution, {"case_ids", "environment_id", "model", "historical_data"})
@@ -960,39 +1064,8 @@ def _runtime_validation_checks(inputs, execution, root, record, config, run):
         _bound(root, historical["label_contract"])
     cases, data_hashes = [], set()
     for item in inputs["cases"]:
-        _keys(item, {"case_id", "archive", "manifest_sha256", "binding"})
-        binding_path = _path(root, item["binding"]["path"])
-        archive = _path(root, item["archive"], directory=True)
-        _require(
-            not binding_path.is_relative_to(archive),
-            "binding_must_be_external_to_archive",
-        )
-        binding = FrozenValidationBinding.model_validate_json(
-            _bound(root, item["binding"])
-        )
-        _require(
-            record["input_hashes"].get(item["binding"]["path"])
-            == item["binding"]["sha256"],
-            "case_input_not_record_bound",
-        )
+        archive, binding, observed = _validation_case_binding(item, root, record, run)
         case_id = item["case_id"]
-        _require(
-            binding.case.id == case_id and binding.run_id == record["run_id"],
-            "case_binding_mismatch",
-        )
-        _require(
-            all(
-                getattr(binding, key) == frozen[key]
-                for key in (
-                    "cases_sha256",
-                    "expected_sha256",
-                    "source",
-                    "model_connection_sha256",
-                )
-            ),
-            "frozen_runtime_binding_mismatch",
-        )
-        observed = run["executions"][case_id]
         row_materials = [
             m
             for m in binding.case.materials
@@ -1007,45 +1080,6 @@ def _runtime_validation_checks(inputs, execution, root, record, config, run):
                 ),
                 "historical_material_source_mismatch",
             )
-        _require(
-            observed.get("materials")
-            == [
-                {"sha256": m.sha256, "source_kind": m.source_kind, "role": m.role}
-                for m in binding.case.materials
-            ],
-            "final_material_binding_mismatch",
-        )
-        _require(
-            observed.get("case_sha256") == digest(binding.case.model_dump())
-            and observed.get("budget") == binding.case.budget.model_dump(),
-            "final_case_binding_mismatch",
-        )
-        custody = observed.get("evidence_custody", {})
-        _require(
-            custody.get("status") == "retained"
-            and custody.get("manifest_sha256") == item["manifest_sha256"],
-            "final_custody_binding_mismatch",
-        )
-        pipeline = observed.get("execution", {}).get("validation_pipeline", {})
-        _require(
-            observed.get("execution", {}).get("task_id") == binding.task_id
-            and all(
-                pipeline.get(key) == getattr(binding, key)
-                for key in (
-                    "input_contract_sha256",
-                    "confirmed_draft_sha256",
-                    "report_revision",
-                )
-            ),
-            "final_task_binding_mismatch",
-        )
-        reports = pipeline.get("report_files", [])
-        _require(
-            isinstance(reports, list)
-            and len({r["kind"] for r in reports}) == len(reports)
-            and {r["kind"]: r["sha256"] for r in reports} == binding.report_sha256,
-            "final_report_binding_mismatch",
-        )
         recomputed = revalidate_validation_archive(
             archive,
             expected_manifest_sha256=item["manifest_sha256"],

@@ -20,6 +20,7 @@ dependencies = [
   "ipykernel>=6.23.2,<8",
   "ipython>=8.20,<10",
   "jupyter-client>=8.6,<9",
+  "tornado>=6.5.10,<7",
   "psutil>=5.9,<8",
   "openpyxl>=3.1,<4",
   "xlrd>=2.0,<3",

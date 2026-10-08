@@ -49,6 +49,16 @@ def test_normal_labeling_real_http_agent_tools_and_actual_downloads(
     assert report["acceptance_claim"] == "not_established"
     assert case["human_interventions"] == 6
     assert case["execution"]["plans"][0]["template_id"] == "label_construction"
+    assert case["execution"]["plans"][0]["replan_count"] == 0
+    revisions = case["process_observation"]["revisions"]
+    assert revisions["complete"] and revisions["plan_denominator"] == 1
+    assert revisions["plans"][0]["initial_revision"] == revisions["plans"][0]["final_revision"] == 0
+    assert sum(revisions["known_counts"].values()) == 0
+    assert case["process_observation"]["backend"]["scopes"]["plugin"]["measured_intervals"] > 0
+    waits = [case["process_observation"]["backend"]["scopes"][key]
+             for key in ("plan_confirmation_wait", "workflow_confirmation_wait")]
+    assert sum(row["measured_intervals"] for row in waits) >= 1
+    assert all(row["complete"] and row["right_censored_intervals"] == 0 for row in waits)
     label = next(
         s for s in case["execution"]["steps"] if s["tool"] == "labeling.define_label"
     )

@@ -111,8 +111,11 @@ def tool_ingest_excel(inputs: dict, ctx) -> dict:
                     task_id=ctx.task_id,
                     role=role,
                     seed=_seed(ctx),
+                    upload_source=path,
+                    sheet=report.sheet,
+                    artifact_uow=uow,
                 )
-                for parquet_path, _report in staged_sheets
+                for parquet_path, report in staged_sheets
             ],
         )
     except Exception:

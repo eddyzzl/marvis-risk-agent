@@ -7,14 +7,15 @@ from pathlib import Path
 from typing import BinaryIO
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from marvis.api_task_helpers import get_task_or_404
+from marvis.api_task_payloads import task_report_download_filename
 from marvis.db_schema import connect
 from marvis.repositories.strategy import StrategyRepository
 from marvis.repositories.tasks import TaskRepository
-from marvis.errors import conflict, not_found
+from marvis.errors import conflict, forbidden, not_found
 from marvis.download_snapshot import (
     attachment_response as _attachment_response,
     SnapshotIntegrityError,
@@ -204,7 +205,7 @@ def download_task_artifact(
     expected_content_hash: str | None = None,
 ) -> Response:
     settings = request.app.state.settings
-    get_task_or_404(TaskRepository(settings.db_path), task_id)
+    task = get_task_or_404(TaskRepository(settings.db_path), task_id)
     row = TaskArtifactRepository(settings.db_path).get_for_task(task_id, artifact_id)
     if row is None:
         raise not_found("task artifact not found")
@@ -238,7 +239,11 @@ def download_task_artifact(
         raise conflict("task artifact integrity check failed") from exc
     return _attachment_response(
         snapshot,
-        filename=path.name,
+        filename=(
+            task_report_download_filename(task, path.suffix)
+            if row.get("kind") == "feature_report_xlsx"
+            else path.name
+        ),
         media_type=_STRATEGY_ARTIFACT_MEDIA_TYPES[path.suffix.lower()],
         content_length=content_length,
         range_header=request.headers.get("range"),
@@ -617,9 +622,8 @@ def _scoped_artifact_domain(*, settings, candidate, records=None):
 def _require_domain_route(domain):
     # Generic downloads have no reviewed source-grant context. Reuse the existing
     # domain endpoint rather than inventing a second authorization mechanism.
-    raise HTTPException(
-        403,
-        detail={
+    raise forbidden(
+        {
             "code": "source_scoped_artifact_requires_domain_route",
             "evidence_url": domain,
             "next_action": "通过证据入口提供当前有效的来源授权后查看或导出",

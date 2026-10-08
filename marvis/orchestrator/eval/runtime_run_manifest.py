@@ -279,6 +279,17 @@ def _validate_records(manifest, originals):
         failure = _transport_runtime_failure(observed)
         if failure is not None and any(execution.get(key) != value for key, value in failure.items()):
             raise RunManifestError("transport_failure_contradicts_final_status")
+        if "process_observation" in execution:
+            from .runtime_process import validate_process_observation
+            try:
+                validate_process_observation(
+                    execution["process_observation"], observed,
+                    backend_events=execution.get("backend_events"),
+                    plan_states=execution.get("execution", {}).get("plans"),
+                    interventions=execution.get("human_interventions"), duration_ms=execution.get("duration_ms"),
+                )
+            except (ValueError, TypeError, KeyError) as exc:
+                raise RunManifestError("invalid_original_process_observation") from exc
         if score["passed"] and execution["runtime_status"] != "completed":
             raise RunManifestError("passing_score_contradicts_runtime_status")
         if score["passed"] and "scorer_error" in score:

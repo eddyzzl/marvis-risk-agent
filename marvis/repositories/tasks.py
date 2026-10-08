@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from marvis.db_schema import connect
+from marvis.runtime_observations import observe_queue, observing_runtime, queue_terminal_on_commit, end_confirmation_wait
+from marvis.runtime_waits import refresh_confirmation_wait, job_finished
 from marvis.orchestrator.evidence import payload_hash
 from marvis.business_acceptance import BusinessObjective
 from marvis.domain import (
@@ -789,6 +791,8 @@ class TaskRepository:
             raise ConflictError(
                 f"task {task_id} already has an active job"
             ) from exc
+        observe_queue(job_id)
+        end_confirmation_wait(task_id)
         return job_id
 
     def mark_job_running(self, job_id: str) -> bool:
@@ -810,6 +814,8 @@ class TaskRepository:
                 """,
                 (now, now, job_id),
             )
+        if cursor.rowcount > 0:
+            observe_queue(job_id, running=True)
         return cursor.rowcount > 0
 
     def touch_job_heartbeat(self, job_id: str) -> bool:
@@ -925,6 +931,8 @@ class TaskRepository:
                 )
                 if cursor.rowcount == 0:
                     continue
+                if previous_status == "queued":
+                    queue_terminal_on_commit(conn, job_id, "failed")
                 released.append(
                     {
                         "id": job_id,
@@ -1058,7 +1066,7 @@ class TaskRepository:
         traceback: str | None = None,
     ) -> None:
         with connect(self.db_path) as conn:
-            self.finish_job_on_connection(
+            changed = self.finish_job_on_connection(
                 conn,
                 job_id,
                 status=status,
@@ -1066,6 +1074,8 @@ class TaskRepository:
                 error_value=error_value,
                 traceback=traceback,
             )
+        if changed:
+            job_finished(self, job_id)
 
     def finish_job_on_connection(
         self,
@@ -1082,6 +1092,10 @@ class TaskRepository:
 
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
+        observed_queued = False
+        if observing_runtime():
+            previous = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            observed_queued = previous is not None and previous["status"] == "queued"
         if expected_status is None:
             cursor = conn.execute(
                 """
@@ -1118,6 +1132,8 @@ class TaskRepository:
                     expected_status,
                 ),
             )
+        if cursor.rowcount == 1 and observed_queued:
+            queue_terminal_on_commit(conn, job_id, status)
         return cursor.rowcount == 1
 
     def task_has_active_job(self, task_id: str) -> bool:
@@ -1375,6 +1391,7 @@ class TaskRepository:
                            "keys": sorted(values)},
             })
             saved = conn.execute("SELECT * FROM agent_messages WHERE id = ?", (message_id,)).fetchone()
+        refresh_confirmation_wait(self, task_id)
         return _row_to_agent_message(saved)
 
     @staticmethod
@@ -1428,13 +1445,15 @@ class TaskRepository:
             current = self._report_draft_generation_snapshot_on_connection(conn, task_id)
             if current.state_hash != snapshot.state_hash:
                 raise ConflictError("报告、草稿或执行状态已更新，请查看最新版本后重新生成。")
-            return self.add_agent_message_on_connection(
+            message = self.add_agent_message_on_connection(
                 conn, task_id, role="assistant", stage="word_conclusion_draft", content=content,
                 metadata={
                     **metadata, "draft_values": values,
                     "report_revision": snapshot.task.report_values_revision,
                 },
             )
+        refresh_confirmation_wait(self, task_id)
+        return message
 
     def add_agent_message(
         self,
@@ -1517,6 +1536,9 @@ class TaskRepository:
                     metadata={"revision": revision, "confirmed_keys": sorted(values)},
                 )
                 confirmed.append({"task_id": task_id, "job_id": job_id, "revision": revision})
+        for item in confirmed:
+            observe_queue(item["job_id"])
+            end_confirmation_wait(item["task_id"])
         return confirmed
 
     def add_agent_message_on_connection(

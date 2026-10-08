@@ -601,11 +601,14 @@ def test_concurrent_same_input_has_one_winner_and_one_exact_replay(tmp_path):
 
 def test_migration_017_is_additive_idempotent_and_guards_column_collision(tmp_path):
     db_path = tmp_path / "legacy_v16.sqlite"
-    init_db(db_path)
-    _seed_task(db_path, "preserved-task")
     with connect(db_path) as conn:
-        conn.execute("DROP TABLE strategy_automatic_tree_apply_runs")
+        for version, migration in db_schema_module._MIGRATIONS:
+            if version > 16:
+                break
+            migration(conn)
         conn.execute("PRAGMA user_version = 16")
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'strategy_automatic_tree_apply_runs'").fetchone() is None
+    _seed_task(db_path, "preserved-task")
 
     init_db(db_path)
     init_db(db_path)
