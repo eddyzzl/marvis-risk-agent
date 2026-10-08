@@ -80,4 +80,3 @@ def _source_input(archive, manifest, binding, source, source_frame, scratch, mat
     else:
         raise _Unsupported("source file format is not supported by archive reader")
     pd.testing.assert_frame_equal(original, source_frame, check_dtype=False, check_exact=True)
-

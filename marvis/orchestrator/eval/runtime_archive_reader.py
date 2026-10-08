@@ -72,5 +72,3 @@ def _original_path(archive, original_root, absolute):
     # This maps immutable identities to retained bytes; it does not rewrite DB,
     # signatures or the old directory, and never opens the former absolute path.
     return _file(archive, Path("workspace") / relative)
-
-
