@@ -29,6 +29,7 @@ from marvis.db import DatasetRepository, TaskRepository, connect, init_db
 from marvis.db_schema import SCHEMA_VERSION
 from marvis.domain import TASK_TYPE_VINTAGE, TaskCreate
 from marvis.settings import build_settings
+from tests.schema_fixture_support import install_historical_schema
 
 
 FIXED_NOW = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
@@ -122,10 +123,12 @@ def test_task_purge_atomically_enqueues_typed_filesystem_targets(tmp_path):
 
 def test_schema_30_upgrades_a_version_29_database_with_task_fs_ledger(tmp_path):
     db_path = tmp_path / "workspace" / "marvis.sqlite"
-    init_db(db_path)
+    db_path.parent.mkdir(parents=True)
     with connect(db_path) as conn:
-        conn.execute("DROP TABLE task_fs_gc_queue")
-        conn.execute("PRAGMA user_version = 29")
+        install_historical_schema(conn, 29)
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='task_fs_gc_queue'"
+        ).fetchone() is None
 
     init_db(db_path)
 
@@ -156,9 +159,10 @@ def test_schema_34_preserves_existing_gc_rows_and_extends_target_constraint(
     tmp_path,
 ):
     db_path = tmp_path / "workspace" / "marvis.sqlite"
-    init_db(db_path)
+    db_path.parent.mkdir(parents=True)
     timestamp = FIXED_NOW.isoformat().replace("+00:00", "Z")
     with connect(db_path) as conn:
+        install_historical_schema(conn, 33)
         conn.execute("DROP TABLE task_fs_gc_queue")
         conn.execute(
             """
@@ -259,6 +263,8 @@ def test_schema_34_rebuilds_partial_queue_without_false_completion(
 ):
     db_path = tmp_path / "partial-v33.sqlite"
     with connect(db_path) as conn:
+        install_historical_schema(conn, 33)
+        conn.execute("DROP TABLE task_fs_gc_queue")
         conn.execute(
             f"""
             CREATE TABLE task_fs_gc_queue (
@@ -324,8 +330,8 @@ def test_schema_upgrade_skips_dataset_lookup_index_for_partial_legacy_schema(
     datasets_ddl,
 ):
     db_path = tmp_path / "partial-v28.sqlite"
-    init_db(db_path)
     with connect(db_path) as conn:
+        install_historical_schema(conn, 28)
         conn.execute("DROP TABLE datasets")
         if datasets_ddl is not None:
             conn.execute(datasets_ddl)
