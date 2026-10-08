@@ -7722,7 +7722,7 @@
       "test_name": "hardcoded_sql_expressions"
     },
     {
-      "code": "313                 sample_rows = conn.execute(\n314                     \"WITH duplicate_keys AS (\"\n315                     # duplicate_groups already projects the transformed keys under their\n316                     # aliases, so re-select the aliases here (not the raw expressions again \u2014\n317                     # the raw source column no longer exists in this subquery's output).\n318                     f\"SELECT {keys_select_sql} FROM ({duplicate_groups}) ORDER BY {keys_select_sql} \"\n319                     f\"LIMIT {int(sample_key_limit)}\"\n320                     \"), feature_with_keys AS (\"\n321                     f\"SELECT f.*, {keys_sql} FROM {rel} f\"\n322                     \") \"\n323                     f\"SELECT f_key.* EXCLUDE ({', '.join(key_aliases)}) \"\n324                     \"FROM feature_with_keys f_key \"\n325                     f\"JOIN duplicate_keys d ON {join_condition} \"\n326                     f\"LIMIT {int(row_limit)}\"\n327                 ).df()\n",
+      "code": "313                 sample_rows = conn.execute(\n314                     \"WITH duplicate_keys AS (\"\n315                     # duplicate_groups already projects the transformed keys under their\n316                     # aliases, so re-select the aliases here (not the raw expressions again —\n317                     # the raw source column no longer exists in this subquery's output).\n318                     f\"SELECT {keys_select_sql} FROM ({duplicate_groups}) ORDER BY {keys_select_sql} \"\n319                     f\"LIMIT {int(sample_key_limit)}\"\n320                     \"), feature_with_keys AS (\"\n321                     f\"SELECT f.*, {keys_sql} FROM {rel} f\"\n322                     \") \"\n323                     f\"SELECT f_key.* EXCLUDE ({', '.join(key_aliases)}) \"\n324                     \"FROM feature_with_keys f_key \"\n325                     f\"JOIN duplicate_keys d ON {join_condition} \"\n326                     f\"LIMIT {int(row_limit)}\"\n327                 ).df()\n",
       "col_offset": 20,
       "end_col_offset": 29,
       "filename": "marvis/data/backend.py",
@@ -9496,6 +9496,587 @@
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b313-b320-xml-bad-sax",
       "test_id": "B317",
       "test_name": "blacklist"
+    },
+    {
+      "code": "81             conn.execute(\n82                 f\"CREATE TRIGGER IF NOT EXISTS {table}_no_delete BEFORE DELETE ON {table} WHEN EXISTS(SELECT 1 FROM tasks WHERE id=OLD.task_id) BEGIN SELECT RAISE(ABORT,'collection execution evidence is immutable'); END\"\n83             )\n",
+      "col_offset": 18,
+      "end_col_offset": 47,
+      "filename": "marvis/collection/execution_state.py",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 89,
+        "link": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "issue_severity": "MEDIUM",
+      "issue_text": "Possible SQL injection vector through string-based query construction.",
+      "line_number": 82,
+      "line_range": [
+        82
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+      "test_id": "B608",
+      "test_name": "hardcoded_sql_expressions"
+    },
+    {
+      "candidates": [
+        {
+          "code": "265                 relation = f\"read_parquet({sql_string_literal(member.as_posix())})\"\n266                 schema = [(r[0], r[1]) for r in conn.execute(f\"DESCRIBE SELECT * FROM {relation}\").fetchall()]\n267                 if schema != [(\"output_row\", \"BIGINT\"), (\"left_row\", \"BIGINT\"), (\"right_rows\", \"BIGINT[]\")]:\n",
+          "col_offset": 63,
+          "end_col_offset": 86,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 266,
+          "line_range": [
+            266
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "269                 invalid = conn.execute(\n270                     f\"SELECT count(*) != ? OR count(DISTINCT output_row) != ? OR \"\n271                     f\"count(DISTINCT left_row) != ? OR coalesce(bool_or(output_row < 0 OR output_row >= ? \"\n272                     f\"OR left_row < 0 OR left_row >= ? OR output_row IS NULL OR left_row IS NULL), false) FROM {relation}\",\n273                     [count] * 5,\n",
+          "col_offset": 22,
+          "end_col_offset": 111,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 270,
+          "line_range": [
+            270,
+            271,
+            272
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "276                 invalid_right = conn.execute(\n277                     f\"SELECT EXISTS (SELECT 1 FROM {relation} WHERE len(right_rows)=0) OR EXISTS \"\n278                     f\"(SELECT 1 FROM {relation}, UNNEST(right_rows) t(n) WHERE n IS NULL OR n<0 OR n>=?)\",\n279                     [sources[index + 1].row_count],\n",
+          "col_offset": 22,
+          "end_col_offset": 51,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 277,
+          "line_range": [
+            277,
+            278
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "294             matched, bad = conn.execute(\n295                 f\"SELECT count(*), coalesce(bool_or({different}), false) FROM {chain} \"\n296                 f\"JOIN {left} a ON a.{ordinal}=m0.left_row \"\n297                 f\"JOIN {result} z ON z.{ordinal}=m{len(members)-1}.output_row\"\n298             ).fetchone()\n",
+          "col_offset": 18,
+          "end_col_offset": 52,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 295,
+          "line_range": [
+            295,
+            296,
+            297
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        }
+      ],
+      "code": "265                 relation = f\"read_parquet({sql_string_literal(member.as_posix())})\"\n266                 schema = [(r[0], r[1]) for r in conn.execute(f\"DESCRIBE SELECT * FROM {relation}\").fetchall()]\n267                 if schema != [(\"output_row\", \"BIGINT\"), (\"left_row\", \"BIGINT\"), (\"right_rows\", \"BIGINT[]\")]:\n",
+      "col_offset": 63,
+      "end_col_offset": 86,
+      "filename": "marvis/data/join_evidence.py",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 89,
+        "link": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "issue_severity": "MEDIUM",
+      "issue_text": "Possible SQL injection vector through string-based query construction.",
+      "line_number": 266,
+      "line_range": [
+        266
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+      "test_id": "B608",
+      "test_name": "hardcoded_sql_expressions"
+    },
+    {
+      "candidates": [
+        {
+          "code": "265                 relation = f\"read_parquet({sql_string_literal(member.as_posix())})\"\n266                 schema = [(r[0], r[1]) for r in conn.execute(f\"DESCRIBE SELECT * FROM {relation}\").fetchall()]\n267                 if schema != [(\"output_row\", \"BIGINT\"), (\"left_row\", \"BIGINT\"), (\"right_rows\", \"BIGINT[]\")]:\n",
+          "col_offset": 63,
+          "end_col_offset": 86,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 266,
+          "line_range": [
+            266
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "269                 invalid = conn.execute(\n270                     f\"SELECT count(*) != ? OR count(DISTINCT output_row) != ? OR \"\n271                     f\"count(DISTINCT left_row) != ? OR coalesce(bool_or(output_row < 0 OR output_row >= ? \"\n272                     f\"OR left_row < 0 OR left_row >= ? OR output_row IS NULL OR left_row IS NULL), false) FROM {relation}\",\n273                     [count] * 5,\n",
+          "col_offset": 22,
+          "end_col_offset": 111,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 270,
+          "line_range": [
+            270,
+            271,
+            272
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "276                 invalid_right = conn.execute(\n277                     f\"SELECT EXISTS (SELECT 1 FROM {relation} WHERE len(right_rows)=0) OR EXISTS \"\n278                     f\"(SELECT 1 FROM {relation}, UNNEST(right_rows) t(n) WHERE n IS NULL OR n<0 OR n>=?)\",\n279                     [sources[index + 1].row_count],\n",
+          "col_offset": 22,
+          "end_col_offset": 51,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 277,
+          "line_range": [
+            277,
+            278
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "294             matched, bad = conn.execute(\n295                 f\"SELECT count(*), coalesce(bool_or({different}), false) FROM {chain} \"\n296                 f\"JOIN {left} a ON a.{ordinal}=m0.left_row \"\n297                 f\"JOIN {result} z ON z.{ordinal}=m{len(members)-1}.output_row\"\n298             ).fetchone()\n",
+          "col_offset": 18,
+          "end_col_offset": 52,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 295,
+          "line_range": [
+            295,
+            296,
+            297
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        }
+      ],
+      "code": "269                 invalid = conn.execute(\n270                     f\"SELECT count(*) != ? OR count(DISTINCT output_row) != ? OR \"\n271                     f\"count(DISTINCT left_row) != ? OR coalesce(bool_or(output_row < 0 OR output_row >= ? \"\n272                     f\"OR left_row < 0 OR left_row >= ? OR output_row IS NULL OR left_row IS NULL), false) FROM {relation}\",\n273                     [count] * 5,\n",
+      "col_offset": 22,
+      "end_col_offset": 111,
+      "filename": "marvis/data/join_evidence.py",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 89,
+        "link": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "issue_severity": "MEDIUM",
+      "issue_text": "Possible SQL injection vector through string-based query construction.",
+      "line_number": 270,
+      "line_range": [
+        270,
+        271,
+        272
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+      "test_id": "B608",
+      "test_name": "hardcoded_sql_expressions"
+    },
+    {
+      "candidates": [
+        {
+          "code": "265                 relation = f\"read_parquet({sql_string_literal(member.as_posix())})\"\n266                 schema = [(r[0], r[1]) for r in conn.execute(f\"DESCRIBE SELECT * FROM {relation}\").fetchall()]\n267                 if schema != [(\"output_row\", \"BIGINT\"), (\"left_row\", \"BIGINT\"), (\"right_rows\", \"BIGINT[]\")]:\n",
+          "col_offset": 63,
+          "end_col_offset": 86,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 266,
+          "line_range": [
+            266
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "269                 invalid = conn.execute(\n270                     f\"SELECT count(*) != ? OR count(DISTINCT output_row) != ? OR \"\n271                     f\"count(DISTINCT left_row) != ? OR coalesce(bool_or(output_row < 0 OR output_row >= ? \"\n272                     f\"OR left_row < 0 OR left_row >= ? OR output_row IS NULL OR left_row IS NULL), false) FROM {relation}\",\n273                     [count] * 5,\n",
+          "col_offset": 22,
+          "end_col_offset": 111,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 270,
+          "line_range": [
+            270,
+            271,
+            272
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "276                 invalid_right = conn.execute(\n277                     f\"SELECT EXISTS (SELECT 1 FROM {relation} WHERE len(right_rows)=0) OR EXISTS \"\n278                     f\"(SELECT 1 FROM {relation}, UNNEST(right_rows) t(n) WHERE n IS NULL OR n<0 OR n>=?)\",\n279                     [sources[index + 1].row_count],\n",
+          "col_offset": 22,
+          "end_col_offset": 51,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 277,
+          "line_range": [
+            277,
+            278
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "294             matched, bad = conn.execute(\n295                 f\"SELECT count(*), coalesce(bool_or({different}), false) FROM {chain} \"\n296                 f\"JOIN {left} a ON a.{ordinal}=m0.left_row \"\n297                 f\"JOIN {result} z ON z.{ordinal}=m{len(members)-1}.output_row\"\n298             ).fetchone()\n",
+          "col_offset": 18,
+          "end_col_offset": 52,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 295,
+          "line_range": [
+            295,
+            296,
+            297
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        }
+      ],
+      "code": "276                 invalid_right = conn.execute(\n277                     f\"SELECT EXISTS (SELECT 1 FROM {relation} WHERE len(right_rows)=0) OR EXISTS \"\n278                     f\"(SELECT 1 FROM {relation}, UNNEST(right_rows) t(n) WHERE n IS NULL OR n<0 OR n>=?)\",\n279                     [sources[index + 1].row_count],\n",
+      "col_offset": 22,
+      "end_col_offset": 51,
+      "filename": "marvis/data/join_evidence.py",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 89,
+        "link": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "issue_severity": "MEDIUM",
+      "issue_text": "Possible SQL injection vector through string-based query construction.",
+      "line_number": 277,
+      "line_range": [
+        277,
+        278
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+      "test_id": "B608",
+      "test_name": "hardcoded_sql_expressions"
+    },
+    {
+      "candidates": [
+        {
+          "code": "265                 relation = f\"read_parquet({sql_string_literal(member.as_posix())})\"\n266                 schema = [(r[0], r[1]) for r in conn.execute(f\"DESCRIBE SELECT * FROM {relation}\").fetchall()]\n267                 if schema != [(\"output_row\", \"BIGINT\"), (\"left_row\", \"BIGINT\"), (\"right_rows\", \"BIGINT[]\")]:\n",
+          "col_offset": 63,
+          "end_col_offset": 86,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 266,
+          "line_range": [
+            266
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "269                 invalid = conn.execute(\n270                     f\"SELECT count(*) != ? OR count(DISTINCT output_row) != ? OR \"\n271                     f\"count(DISTINCT left_row) != ? OR coalesce(bool_or(output_row < 0 OR output_row >= ? \"\n272                     f\"OR left_row < 0 OR left_row >= ? OR output_row IS NULL OR left_row IS NULL), false) FROM {relation}\",\n273                     [count] * 5,\n",
+          "col_offset": 22,
+          "end_col_offset": 111,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 270,
+          "line_range": [
+            270,
+            271,
+            272
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "276                 invalid_right = conn.execute(\n277                     f\"SELECT EXISTS (SELECT 1 FROM {relation} WHERE len(right_rows)=0) OR EXISTS \"\n278                     f\"(SELECT 1 FROM {relation}, UNNEST(right_rows) t(n) WHERE n IS NULL OR n<0 OR n>=?)\",\n279                     [sources[index + 1].row_count],\n",
+          "col_offset": 22,
+          "end_col_offset": 51,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 277,
+          "line_range": [
+            277,
+            278
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "294             matched, bad = conn.execute(\n295                 f\"SELECT count(*), coalesce(bool_or({different}), false) FROM {chain} \"\n296                 f\"JOIN {left} a ON a.{ordinal}=m0.left_row \"\n297                 f\"JOIN {result} z ON z.{ordinal}=m{len(members)-1}.output_row\"\n298             ).fetchone()\n",
+          "col_offset": 18,
+          "end_col_offset": 52,
+          "filename": "marvis/data/join_evidence.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 295,
+          "line_range": [
+            295,
+            296,
+            297
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        }
+      ],
+      "code": "294             matched, bad = conn.execute(\n295                 f\"SELECT count(*), coalesce(bool_or({different}), false) FROM {chain} \"\n296                 f\"JOIN {left} a ON a.{ordinal}=m0.left_row \"\n297                 f\"JOIN {result} z ON z.{ordinal}=m{len(members)-1}.output_row\"\n298             ).fetchone()\n",
+      "col_offset": 18,
+      "end_col_offset": 52,
+      "filename": "marvis/data/join_evidence.py",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 89,
+        "link": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "issue_severity": "MEDIUM",
+      "issue_text": "Possible SQL injection vector through string-based query construction.",
+      "line_number": 295,
+      "line_range": [
+        295,
+        296,
+        297
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+      "test_id": "B608",
+      "test_name": "hardcoded_sql_expressions"
+    },
+    {
+      "candidates": [
+        {
+          "code": "207     ):\n208         if table in tables and conn.execute(f\"SELECT 1 FROM {table} WHERE {condition} LIMIT 1\").fetchone():\n209             # Do not change native audit records or copy an unconsumed capability.\n",
+          "col_offset": 46,
+          "end_col_offset": 60,
+          "filename": "marvis/orchestrator/eval/runtime_custody.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 208,
+          "line_range": [
+            208
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "218                 if conn.execute(\n219                     f\"SELECT 1 FROM {quoted_table} WHERE {quoted_column} IS NOT NULL AND {quoted_column} != '' LIMIT 1\"\n220                 ).fetchone():\n",
+          "col_offset": 22,
+          "end_col_offset": 36,
+          "filename": "marvis/orchestrator/eval/runtime_custody.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 219,
+          "line_range": [
+            219
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        }
+      ],
+      "code": "207     ):\n208         if table in tables and conn.execute(f\"SELECT 1 FROM {table} WHERE {condition} LIMIT 1\").fetchone():\n209             # Do not change native audit records or copy an unconsumed capability.\n",
+      "col_offset": 46,
+      "end_col_offset": 60,
+      "filename": "marvis/orchestrator/eval/runtime_custody.py",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 89,
+        "link": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "issue_severity": "MEDIUM",
+      "issue_text": "Possible SQL injection vector through string-based query construction.",
+      "line_number": 208,
+      "line_range": [
+        208
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+      "test_id": "B608",
+      "test_name": "hardcoded_sql_expressions"
+    },
+    {
+      "candidates": [
+        {
+          "code": "207     ):\n208         if table in tables and conn.execute(f\"SELECT 1 FROM {table} WHERE {condition} LIMIT 1\").fetchone():\n209             # Do not change native audit records or copy an unconsumed capability.\n",
+          "col_offset": 46,
+          "end_col_offset": 60,
+          "filename": "marvis/orchestrator/eval/runtime_custody.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 208,
+          "line_range": [
+            208
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        },
+        {
+          "code": "218                 if conn.execute(\n219                     f\"SELECT 1 FROM {quoted_table} WHERE {quoted_column} IS NOT NULL AND {quoted_column} != '' LIMIT 1\"\n220                 ).fetchone():\n",
+          "col_offset": 22,
+          "end_col_offset": 36,
+          "filename": "marvis/orchestrator/eval/runtime_custody.py",
+          "issue_confidence": "MEDIUM",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 219,
+          "line_range": [
+            219
+          ],
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        }
+      ],
+      "code": "218                 if conn.execute(\n219                     f\"SELECT 1 FROM {quoted_table} WHERE {quoted_column} IS NOT NULL AND {quoted_column} != '' LIMIT 1\"\n220                 ).fetchone():\n",
+      "col_offset": 22,
+      "end_col_offset": 36,
+      "filename": "marvis/orchestrator/eval/runtime_custody.py",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 89,
+        "link": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "issue_severity": "MEDIUM",
+      "issue_text": "Possible SQL injection vector through string-based query construction.",
+      "line_number": 219,
+      "line_range": [
+        219
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+      "test_id": "B608",
+      "test_name": "hardcoded_sql_expressions"
+    },
+    {
+      "code": "33             row = conn.execute(\n34                 f\"\"\"SELECT d.*, h.revision, m.canonical_json\n35                 FROM production_environment_heads h\n36                 JOIN production_deployments d ON d.id=h.{column}\n37                 JOIN production_deployment_manifests m ON m.id=d.manifest_hash\n38                 WHERE h.environment=?\"\"\",\n39                 (ENVIRONMENT,),\n",
+      "col_offset": 20,
+      "end_col_offset": 56,
+      "filename": "marvis/reference_decision/service.py",
+      "issue_confidence": "MEDIUM",
+      "issue_cwe": {
+        "id": 89,
+        "link": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "issue_severity": "MEDIUM",
+      "issue_text": "Possible SQL injection vector through string-based query construction.",
+      "line_number": 34,
+      "line_range": [
+        34,
+        35,
+        36,
+        37,
+        38
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+      "test_id": "B608",
+      "test_name": "hardcoded_sql_expressions"
     }
   ]
 }
