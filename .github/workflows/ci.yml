@@ -54,7 +54,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     name: fast_tests (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 80
+    # Clean Linux shards have reached 77 minutes; keep room for runner variance.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

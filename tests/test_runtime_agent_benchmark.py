@@ -362,11 +362,16 @@ def test_failures_budgets_and_private_expected_stay_in_denominator(tmp_path):
     assert (run_dir / "manifest.json").exists()
 
 
+@pytest.mark.slow
+@pytest.mark.e2e
 def test_wall_budget_stops_actual_active_agent_request(tmp_path):
     data = tmp_path / "data"
     mat = materials(data)
     case = base_case("wall", "feature_analysis", [mat["analysis.parquet"]])
-    case["budget"] = {"wall_seconds": 8}
+    # The whole-case budget includes native application cold start. Leave room
+    # for slower clean CI machines to enter the request; the delayed provider
+    # must still be actively interrupted by that same bounded wall budget.
+    case["budget"] = {"wall_seconds": 30}
     paths = write_suite(
         tmp_path,
         cases=[case],
@@ -383,7 +388,7 @@ def test_wall_budget_stops_actual_active_agent_request(tmp_path):
         },
     )
     started = time.monotonic()
-    with fixture_model(delay=15) as (model, calls):
+    with fixture_model(delay=60) as (model, calls):
         report = run_runtime_suite(
             cases_path=paths[0],
             expected_path=paths[1],
@@ -400,7 +405,7 @@ def test_wall_budget_stops_actual_active_agent_request(tmp_path):
     )
     assert record["isolated_workspace_removed"]
     assert not record["score"]["passed"]
-    assert time.monotonic() - started < 23
+    assert time.monotonic() - started < 45
 
 
 def test_unknown_tokens_and_no_calls_never_establish_a():

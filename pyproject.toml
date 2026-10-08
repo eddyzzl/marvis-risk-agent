@@ -46,6 +46,7 @@ dependencies = [
   "lightgbm>=4.0,<5",
   "catboost>=1.2,<2",
   "jsonschema>=4.0,<5",
+  "defusedxml>=0.7.1,<1",
 ]
 
 [project.scripts]
