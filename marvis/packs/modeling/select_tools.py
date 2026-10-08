@@ -175,6 +175,8 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     ) if target_type == "binary" else {"applied": False, "requested": refit_requested, "reason": "非二分类任务暂不支持全量重训。"}
     final_artifact_id = refit_info.get("artifact_id") or artifact_id
     final_experiment_id = refit_info.get("experiment_id") or selected_id
+    if final_experiment_id != selected_id:
+        runtime.experiments.set_status(final_experiment_id, "selected")
     report_experiment_ids = list(
         dict.fromkeys([final_experiment_id, *experiment_ids])
     )

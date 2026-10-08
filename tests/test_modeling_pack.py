@@ -4470,3 +4470,22 @@ def test_modeling_screen_features_gate_raises_without_confirmation(tmp_path):
     )
     assert confirmed.ok is True, confirmed.error
     assert confirmed.output["nan_labels_dropped"] == 1
+
+
+@pytest.mark.slow
+def test_refitted_champion_has_selection_lineage_after_handoff(
+    refit_champion_scenario, refit_post_training_scenario,
+):
+    from marvis.packs.modeling.monitor_binding import capture_monitoring_binding
+
+    scenario = refit_champion_scenario
+    selected_id = scenario.selected["selected_experiment_id"]
+    assert selected_id != scenario.trained["experiment_id"]
+    repo = ModelingRepository(scenario.settings.db_path)
+    assert repo.get_experiment(selected_id).status == "handed_off"
+    binding = capture_monitoring_binding(
+        scenario.settings, scenario.task_id, selected_id,
+        scenario.dataset.id, scenario.dataset.content_hash,
+    )
+    assert binding["artifact_id"] == scenario.selected["artifact_id"]
+    assert binding["experiment_status"] == "handed_off"
