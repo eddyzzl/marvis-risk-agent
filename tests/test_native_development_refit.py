@@ -411,6 +411,8 @@ def test_actual_process_crash_reconciles_only_owned_publication(
     settings, runtime, identity = _copied_runtime(trained, tmp_path, remove_child=True)
     directory = settings.tasks_dir / "task-feature/modeling_artifacts"
     before = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+    lock = directory / ".development-refit.lock"
+    assert before.get(lock.name, b"") == b""
     script = """
 from pathlib import Path
 from types import SimpleNamespace
@@ -443,6 +445,8 @@ development_refit(runtime,experiment=runtime.experiments.get(sys.argv[2]),recipe
         text=True,
     )
     assert result.returncode == 23, result.stderr
+    assert lock.is_file() and not lock.is_symlink()
+    assert lock.read_bytes() == b""
     journals = list(directory.glob(".development-refit-*.pending.json"))
     assert len(journals) == 1
     body = json.loads(journals[0].read_bytes())
@@ -471,9 +475,13 @@ development_refit(runtime,experiment=runtime.experiments.get(sys.argv[2]),recipe
             and len(runtime.experiments.list_for_task("task-feature")) == 2
         )
     else:
+        # FileLock releases may unlink their control file, but a hard process
+        # exit leaves the empty lock. All original bytes and every other name
+        # must still match; no other publication residue is permitted.
+        expected = before | {lock.name: b""}
         assert {
             p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()
-        } == before
+        } == expected
         assert len(runtime.experiments.list_for_task("task-feature")) == 1
         replay = development_refit(
             runtime,
