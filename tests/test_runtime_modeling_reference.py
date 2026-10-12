@@ -109,17 +109,33 @@ def test_archive_pickle_cannot_invoke_arbitrary_globals(tmp_path):
     assert not target.exists()
 
 
-def test_archive_joblib_nested_object_array_cannot_execute_pickle(tmp_path):
+@pytest.mark.parametrize("structured", [False, True])
+def test_archive_joblib_nested_object_array_cannot_execute_pickle(tmp_path, structured):
     import joblib
     target = tmp_path / "nested-array-executed"
     class Evil:
         def __reduce__(self):
             return Path.write_text, (target, "executed")
     file = tmp_path / "object-array.joblib"
-    joblib.dump(np.array([Evil()], dtype=object), file)
+    values = (np.array([(Evil(),)], dtype=[("payload", object)]) if structured
+        else np.array([Evil()], dtype=object))
+    joblib.dump(values, file)
+    assert not target.exists(), "serialization must not execute the callback"
     with pytest.raises(_Unsupported):
         read_linear_reference(file, "lr", ["x"])
     assert not target.exists()
+
+
+def test_archive_joblib_object_metadata_keeps_restricted_reader(tmp_path):
+    import joblib
+    from marvis.orchestrator.eval.runtime_modeling_native_reference import _LinearUnpickler
+
+    values = np.array(["feature-name", None], dtype=object)
+    file = tmp_path / "object-metadata.joblib"
+    joblib.dump(values, file)
+    with file.open("rb") as stream:
+        restored = _LinearUnpickler(str(file), stream, ensure_native_byte_order=True).load()
+    np.testing.assert_array_equal(restored, values)
 
 
 def test_archive_joblib_declared_shape_is_bounded_before_allocation(tmp_path):

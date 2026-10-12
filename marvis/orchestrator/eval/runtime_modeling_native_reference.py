@@ -8,6 +8,7 @@ import math
 
 import numpy as np
 from joblib.numpy_pickle import NumpyArrayWrapper, NumpyUnpickler
+from joblib.numpy_pickle_utils import Unpickler, _ensure_native_byte_order
 
 from .runtime_archive_reader import _Unsupported
 
@@ -31,6 +32,16 @@ _GLOBALS = {
 
 
 class _BoundedArrayWrapper(NumpyArrayWrapper):
+    def read_array(self, unpickler, ensure_native_byte_order):
+        if not self.dtype.hasobject:
+            return super().read_array(unpickler, ensure_native_byte_order)
+        # Older supported joblib versions use plain pickle.load for object
+        # arrays. Keep the outer allowlist on the nested stream as well.
+        inner = Unpickler(unpickler.file_handle)
+        inner.find_class = unpickler.find_class
+        array = inner.load()
+        return _ensure_native_byte_order(array) if ensure_native_byte_order else array
+
     def read(self, unpickler, ensure_native_byte_order):
         if (not isinstance(self.shape, tuple) or len(self.shape) > 8
                 or any(type(v) is not int or v < 0 for v in self.shape)):
