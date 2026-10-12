@@ -1103,6 +1103,16 @@ def tool_measure_candidate_monthly_stability(inputs: dict, ctx) -> dict:
     return run_measure_candidate_monthly_stability(inputs, ctx, _runtime(ctx))
 
 
+def tool_freeze_candidate_asset_stability(inputs: dict, ctx) -> dict:
+    from marvis.packs.strategy.asset_stability_tools import run_freeze_candidate_asset_stability
+    return run_freeze_candidate_asset_stability(inputs, ctx, _runtime(ctx))
+
+
+def tool_measure_candidate_asset_stability(inputs: dict, ctx) -> dict:
+    from marvis.packs.strategy.asset_stability_tools import run_measure_candidate_asset_stability
+    return run_measure_candidate_asset_stability(inputs, ctx, _runtime(ctx))
+
+
 def tool_measure_strategy_pool_validation(inputs: dict, ctx) -> dict:
     """Replay the exact current Pool on governed validation or OOT rows."""
 

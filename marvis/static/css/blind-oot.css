@@ -1,0 +1,7 @@
+.blind-oot-panel { margin: 12px 0; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.blind-oot-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.blind-oot-header .production-state { margin: 6px 0 12px; }
+.blind-oot-metrics { width: 100%; border-collapse: collapse; font-size: 13px; }
+.blind-oot-metrics th, .blind-oot-metrics td { padding: 8px; border-bottom: 1px solid var(--border); text-align: left; }
+.blind-oot-metrics td { text-align: right; font-variant-numeric: tabular-nums; }
+.blind-oot-panel code { display: block; overflow-wrap: anywhere; font-size: 11px; margin: 8px 0; }

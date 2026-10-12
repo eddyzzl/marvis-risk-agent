@@ -4,7 +4,8 @@ import pandas as pd
 import uuid
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.direction import normalize_score_direction
-from marvis.packs.modeling.prepare import SPLIT_COLUMN, prepare_modeling_frame
+from marvis.packs.modeling.prepare import prepare_modeling_frame
+from marvis.modeling_split import effective_split_column, existing_split_values, validate_split_configuration
 from marvis.packs.modeling.readiness import check_data_quality, modeling_readiness
 from marvis.packs.modeling.reject_inference import reject_inference
 
@@ -102,8 +103,8 @@ def tool_reject_inference(inputs: dict, ctx) -> dict:
 def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
-    split_col = _optional_str(inputs.get("split_col"))
-    split_config = inputs.get("split_config") or {}
+    split_col = inputs.get("split_col")
+    split_config = validate_split_configuration(inputs.get("split_config"), split_col=split_col)
     feature_cols = _resolve_feature_cols(
         runtime,
         dataset.id,
@@ -124,18 +125,19 @@ def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
         audit_kind="modeling.dataset.derived",
         audit_detail={"tool": "prepare_modeling_frame"},
     )
-    split_col = SPLIT_COLUMN if split_config else (split_col or SPLIT_COLUMN)
+    split_col = effective_split_column(split_col, split_config)
     frame = runtime.backend.read_frame(runtime.registry.resolve_path(result.id), columns=[split_col])
     counts = {
         str(key): int(value)
         for key, value in frame[split_col].value_counts().sort_index().items()
     }
+    split_values = _result_split_values(counts, split_config, split_col)
     return {
         "result_dataset_id": result.id,
         "split_counts": counts,
         "split_col": split_col,
-        "split_values": {key: key for key in counts},
-        "holdout_values": ["oot"] if "oot" in counts else [],
+        "split_values": split_values,
+        "holdout_values": [split_values["oot"]] if "oot" in split_values else [],
         "feature_cols": feature_cols,
     }
 
@@ -151,8 +153,8 @@ def tool_make_split(inputs: dict, ctx) -> dict:
     # it for review); absent → generate from split_config (rules / time-OOT / grouped-random
     # fallback). prepare_modeling_frame keeps the passed-through column's name, and names a
     # generated column SPLIT_COLUMN, so the effective name is one or the other.
-    split_col = str(inputs["split_col"]) if inputs.get("split_col") else None
-    split_config = inputs.get("split_config") or {}
+    split_col = inputs.get("split_col")
+    split_config = validate_split_configuration(inputs.get("split_config"), split_col=split_col)
     dataset = _task_dataset(runtime, ctx, inputs["dataset_id"])
     feature_cols = _resolve_feature_cols(
         runtime,
@@ -174,7 +176,7 @@ def tool_make_split(inputs: dict, ctx) -> dict:
         audit_kind="modeling.dataset.derived",
         audit_detail={"tool": "make_split"},
     )
-    effective_split_col = SPLIT_COLUMN if split_config else (split_col or SPLIT_COLUMN)
+    effective_split_col = effective_split_column(split_col, split_config)
     split_frame = runtime.backend.read_frame(
         runtime.registry.resolve_path(result.id), columns=[effective_split_col]
     )
@@ -188,15 +190,32 @@ def tool_make_split(inputs: dict, ctx) -> dict:
     )
     sample_analysis = _split_sample_analysis(split_frame[effective_split_col], source_frame)
     split_counts = sample_analysis["split_counts"]
+    split_values = _result_split_values(split_counts, split_config, split_col)
     return {
         "result_dataset_id": result.id,
         "split_col": effective_split_col,
-        "split_values": {key: key for key in split_counts},
-        "holdout_values": ["oot"] if "oot" in split_counts else [],
+        "split_values": split_values,
+        "holdout_values": [split_values["oot"]] if "oot" in split_values else [],
         "feature_cols": feature_cols,
         "available_columns": [str(column) for column in source_columns],
         "sample_analysis": _json_safe(sample_analysis),
     }
+
+
+def _result_split_values(counts, split_config, split_col):
+    if split_config.get("method") == "existing":
+        return existing_split_values(counts)
+    if not split_config and split_col:
+        # Auto-detected passthrough partitions have the same original alias
+        # literals as explicit existing. Bind those exact values downstream.
+        # The legacy empty-config Tool contract also permits custom partitions.
+        from marvis.modeling_split import SplitConfigurationError
+
+        try:
+            return existing_split_values(counts)
+        except SplitConfigurationError:
+            pass
+    return {key: key for key in counts}
 
 
 _GROUP_COLUMN_HINTS = ("month", "channel", "渠道", "月", "split_month")

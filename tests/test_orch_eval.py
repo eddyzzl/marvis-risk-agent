@@ -169,7 +169,7 @@ def test_score_case_rejects_forbidden_tool_even_when_required_tools_are_present(
 
 
 def test_score_case_rejects_forbidden_dataset_nested_in_plan_inputs():
-    stale_dataset_id = "fixture://risk-analysis/previous-snapshot"
+    stale_dataset_id = "fixture-risk-analysis-previous-snapshot"
     case = EvalCase(
         id="forbidden-dataset",
         goal="Use only the active risk-analysis snapshot.",
@@ -262,7 +262,7 @@ def test_score_case_relaxes_only_explicit_contains_text_inputs():
                     "tool": "drafts.draft_script",
                     "inputs": {
                         "goal": {"$contains_text": "risk monitoring"},
-                        "dataset_id": "fixture://approved-snapshot",
+                        "dataset_id": "fixture-approved-snapshot",
                     },
                 }
             ],
@@ -292,13 +292,13 @@ def test_score_case_relaxes_only_explicit_contains_text_inputs():
 
     accepted = score_case(
         case,
-        draft_trace("fixture://approved-snapshot"),
+        draft_trace("fixture-approved-snapshot"),
         model_id="model-a",
         tier="balanced",
     )
     drifted = score_case(
         case,
-        draft_trace("fixture://different-snapshot"),
+        draft_trace("fixture-different-snapshot"),
         model_id="model-a",
         tier="balanced",
     )
@@ -1225,7 +1225,7 @@ _PLAN_GEN_SCRIPT = [
             "id": "step-1",
             "title": "readiness",
             "tool": {"plugin": "modeling", "tool": "modeling_readiness"},
-            "inputs": {"dataset_id": "fixture://modeling/application_sample", "target_col": "bad_flag"},
+            "inputs": {"dataset_id": "fixture-modeling-application-sample", "target_col": "bad_flag"},
             "depends_on": [],
             "post_checks": [{"kind": "nonempty", "spec": {"field": "ready"}}],
         },
@@ -1234,7 +1234,7 @@ _PLAN_GEN_SCRIPT = [
             "title": "frame",
             "tool": {"plugin": "modeling", "tool": "prepare_modeling_frame"},
             "inputs": {
-                "dataset_id": "fixture://modeling/application_sample",
+                "dataset_id": "fixture-modeling-application-sample",
                 "target_col": "bad_flag",
                 "feature_cols": ["income", "age", "debt_ratio"],
                 "split_col": "sample_set",
@@ -1308,7 +1308,7 @@ _STRATEGY_REPLAN_SCRIPT = [
             "title": "backtest",
             "tool": {"plugin": "strategy", "tool": "backtest_strategy"},
             "inputs": {
-                "dataset_id": "fixture://strategy/score_distribution",
+                "dataset_id": "fixture-strategy-score-distribution",
                 "strategy_id": "$ref:step-1.output.strategy_id",
                 "target_col": "bad_flag",
             },
@@ -1326,7 +1326,7 @@ _STRATEGY_REPLAN_SCRIPT = [
             "title": "tradeoff",
             "tool": {"plugin": "strategy", "tool": "tradeoff_view"},
             "inputs": {
-                "dataset_id": "fixture://strategy/score_distribution",
+                "dataset_id": "fixture-strategy-score-distribution",
                 "score_col": "score",
                 "target_col": "bad_flag",
                 "sample_design_ref": {
@@ -1347,7 +1347,7 @@ _STRATEGY_REPLAN_SCRIPT = [
             "title": "tradeoff",
             "tool": {"plugin": "strategy", "tool": "tradeoff_view"},
             "inputs": {
-                "dataset_id": "fixture://strategy/score_distribution",
+                "dataset_id": "fixture-strategy-score-distribution",
                 "score_col": "score",
                 "target_col": "bad_flag",
                 "sample_design_ref": {
@@ -1371,7 +1371,7 @@ _FEATURE_REPLAN_SCRIPT = [
             "title": "metrics",
             "tool": {"plugin": "feature", "tool": "compute_feature_metrics"},
             "inputs": {
-                "dataset_id": "fixture://feature/application_features",
+                "dataset_id": "fixture-feature-application-features",
                 "features": ["income", "age"],
                 "target_col": "bad_flag",
             },
@@ -1383,7 +1383,7 @@ _FEATURE_REPLAN_SCRIPT = [
             "title": "bin",
             "tool": {"plugin": "feature", "tool": "bin_feature"},
             "inputs": {
-                "dataset_id": "fixture://feature/application_features",
+                "dataset_id": "fixture-feature-application-features",
                 "feature": "income",
                 "target_col": "bad_flag",
                 "method": "chimerge",
@@ -1399,7 +1399,7 @@ _FEATURE_REPLAN_SCRIPT = [
             "title": "bin2",
             "tool": {"plugin": "feature", "tool": "bin_feature"},
             "inputs": {
-                "dataset_id": "fixture://feature/application_features",
+                "dataset_id": "fixture-feature-application-features",
                 "feature": "age",
                 "target_col": "bad_flag",
                 "method": "chimerge",
@@ -1417,7 +1417,7 @@ _FEATURE_REPLAN_SCRIPT = [
             "title": "bin2",
             "tool": {"plugin": "feature", "tool": "bin_feature"},
             "inputs": {
-                "dataset_id": "fixture://feature/application_features",
+                "dataset_id": "fixture-feature-application-features",
                 "feature": "age",
                 "target_col": "bad_flag",
                 "method": "chimerge",
@@ -1512,7 +1512,7 @@ _MODELING_AMBIGUOUS_TARGET_SCRIPT = [
             "id": "step-1",
             "title": "inspect-target-candidates",
             "tool": {"plugin": "data_ops", "tool": "infer_schema"},
-            "inputs": {"dataset_id": "fixture://modeling/ambiguous-target"},
+            "inputs": {"dataset_id": "fixture-modeling-ambiguous-target"},
             "depends_on": [],
             "post_checks": [{"kind": "nonempty", "spec": {"field": "columns"}}],
         },
@@ -1526,7 +1526,7 @@ _FEATURE_NEGATED_AUTO_DROP_SCRIPT = [
             "title": "metrics-without-mutation",
             "tool": {"plugin": "feature", "tool": "compute_feature_metrics"},
             "inputs": {
-                "dataset_id": "fixture://feature/no-auto-drop",
+                "dataset_id": "fixture-feature-no-auto-drop",
                 "features": ["income", "age"],
                 "target_col": "bad_flag",
             },
@@ -1562,7 +1562,7 @@ _STRATEGY_STALE_EVIDENCE_REPLAN_SCRIPT = [
             "title": "refresh-backtest-evidence",
             "tool": {"plugin": "strategy", "tool": "backtest_strategy"},
             "inputs": {
-                "dataset_id": "fixture://strategy/current-snapshot",
+                "dataset_id": "fixture-strategy-current-snapshot",
                 "strategy_id": "$ref:step-1.output.strategy_id",
                 "target_col": "bad_flag",
             },
@@ -1607,7 +1607,7 @@ _VINTAGE_LONG_CONTEXT_SCRIPT = [
             },
             "inputs": {
                 "analysis_kind": "vtg_terminal",
-                "dataset_id": "fixture://risk-analysis/current-snapshot",
+                "dataset_id": "fixture-risk-analysis-current-snapshot",
                 "column_map": {
                     "cohort": "loan_month",
                     "mob": "mob",
@@ -1660,7 +1660,9 @@ def test_validation_missing_materials_case_scans_and_stops_through_real_planner(
     )
 
     prompt = json.loads(llm.calls[0]["user_prompt"])
-    assert prompt["task_context"]["missing_materials"] == ["model.pmml", "sample.csv"]
+    assert "missing_materials" not in prompt["task_context"]
+    assert "model.pmml" in prompt["goal"]  # The active user's exact instruction.
+    assert "sample.csv" in prompt["goal"]
     assert trace.tools == ("v1_compat.scan_materials",)
     assert trace.plan_valid is True
     assert result.passed is True
@@ -1725,15 +1727,13 @@ def test_strategy_stale_evidence_case_replans_from_current_evidence():
 
     initial_prompt = json.loads(llm.calls[0]["user_prompt"])
     replan_prompt = json.loads(llm.calls[1]["user_prompt"])
-    stale_evidence = initial_prompt["task_context"]["stale_evidence_ref"]
-    assert stale_evidence["__omitted_context__"] == "context_budget"
-    assert stale_evidence["original_type"] == "str"
-    assert set(stale_evidence) == {"__omitted_context__", "original_type"}
+    assert "stale_evidence_ref" not in initial_prompt["task_context"]
+    assert "evidence://rev-17" not in llm.calls[0]["user_prompt"]
     assert initial_prompt["task_context"]["active_dataset_id"] == (
-        "fixture://strategy/current-snapshot"
+        "fixture-strategy-current-snapshot"
     )
     assert initial_prompt["task_context"]["dataset_id"] == (
-        "fixture://strategy/current-snapshot"
+        "fixture-strategy-current-snapshot"
     )
     assert replan_prompt["observation"]["dataset_revision"] == 18
     assert trace.replan_count == 1
@@ -1812,7 +1812,7 @@ def test_eval_replan_forwards_expected_as_explicit_planner_constraints(monkeypat
                 RequiredLiteralInput(
                     tool_ref=ToolRef("feature", "bin_feature"),
                     inputs={
-                        "dataset_id": "fixture://feature/application_features",
+                        "dataset_id": "fixture-feature-application-features",
                         "feature": "income",
                         "target_col": "bad_flag",
                         "method": "chimerge",
@@ -1821,7 +1821,7 @@ def test_eval_replan_forwards_expected_as_explicit_planner_constraints(monkeypat
                 RequiredLiteralInput(
                     tool_ref=ToolRef("feature", "compute_feature_metrics"),
                     inputs={
-                        "dataset_id": "fixture://feature/application_features",
+                        "dataset_id": "fixture-feature-application-features",
                         "features": ["income", "age"],
                         "target_col": "bad_flag",
                     },
@@ -1915,10 +1915,10 @@ def test_vintage_long_context_case_binds_only_current_snapshot():
     prompt = json.loads(llm.calls[0]["user_prompt"])
     context = prompt["task_context"]
     omission = context["historical_context"]
-    assert omission["__omitted_context__"] == "context_budget"
+    assert omission["__omitted_context__"] == "outbound_policy"
     assert omission["original_type"] == "str"
     assert set(omission) == {"__omitted_context__", "original_type"}
-    assert context["dataset_id"] == "fixture://risk-analysis/current-snapshot"
+    assert context["dataset_id"] == "fixture-risk-analysis-current-snapshot"
     assert trace.tools == ("risk_analysis.generate_risk_analysis_report",)
     assert trace.plan_valid is True
     assert trace.plan is not None
@@ -1927,8 +1927,8 @@ def test_vintage_long_context_case_binds_only_current_snapshot():
         ensure_ascii=False,
         sort_keys=True,
     )
-    assert "fixture://risk-analysis/previous-snapshot" not in serialized_inputs
-    assert "fixture://risk-analysis/current-snapshot" in serialized_inputs
+    assert "fixture-risk-analysis-previous-snapshot" not in serialized_inputs
+    assert "fixture-risk-analysis-current-snapshot" in serialized_inputs
     assert result.metrics["forbidden_dataset_ids_absent"] == 1.0
     assert result.passed is True
 
@@ -1939,7 +1939,8 @@ def test_explore_case_exposes_typed_completion_context_and_creates_draft():
     )
 
     prompt = json.loads(llm.calls[0]["user_prompt"])
-    assert prompt["task_context"] == case.task_context
+    assert prompt["task_context"] == {"workflow_family": "novel", "novel_mode": "explore"}
+    assert case.task_context["completion_condition"] not in llm.calls[0]["user_prompt"]
     assert trace.tools == ("drafts.web_search", "drafts.draft_script")
     assert result.metrics["required_tools_present"] == 1.0
     assert result.metrics["required_tool_inputs_present"] == 1.0
@@ -2088,12 +2089,12 @@ def test_fixed_standard_modeling_uses_production_template_contract():
     compared = by_tool["modeling.compare_experiments"]
 
     assert readiness.inputs == {
-        "dataset_id": "fixture://modeling/application_sample",
+        "dataset_id": "fixture-modeling-application-sample",
         "target_col": "bad_flag",
         "split_col": "sample_set",
     }
     assert prepared.inputs == {
-        "dataset_id": "fixture://modeling/application_sample",
+        "dataset_id": "fixture-modeling-application-sample",
         "target_col": "bad_flag",
         "feature_cols": ["income", "age", "debt_ratio"],
         "split_col": "sample_set",

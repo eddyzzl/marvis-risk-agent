@@ -14,6 +14,10 @@ from marvis.data.preprocessing_evidence import load_preprocessing_state, registe
 from marvis.data.feature_time import feature_time_evidence
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.errors import ModelingError
+from marvis.modeling_split import (
+    SplitConfigurationError, effective_split_column, existing_split_values,
+    validate_split_configuration,
+)
 
 
 DEFAULT_TEST_SIZE = 0.30
@@ -40,7 +44,10 @@ def prepare_modeling_frame(
 ):
     dataset = registry.get(dataset_id)
     dataset_path = registry.resolve_path(dataset.id)
-    split_config = dict(split_config or {})
+    split_config = _admit_split_configuration(
+        split_config, columns={profile.name for profile in dataset.columns},
+        split_col=split_col, require_existing_binding=True,
+    )
     if not feature_cols:
         feature_cols = candidate_numeric_features(
             backend,
@@ -60,15 +67,15 @@ def prepare_modeling_frame(
     requested = _requested_columns(feature_cols, target_col, split_col, split_config, passthrough)
     _assert_columns_exist(dataset, requested)
 
-    # A non-empty split_config is an explicit UI/Agent override of an uploaded
-    # split column.  Keep the zero-config fast projection path for the common
-    # pass-through case, but generate the canonical ``split`` column whenever a
-    # user selected time OOT, random OOT, no OOT, grouping, or rules.
-    override_existing_split = bool(split_col and split_config)
-    effective_split_col = SPLIT_COLUMN if override_existing_split else (split_col or SPLIT_COLUMN)
+    # Only new partition controls override uploaded membership. An explicit
+    # existing descriptor retains the same streaming projection as empty config.
+    override_existing_split = bool(split_config and split_config.get("method") != "existing")
+    effective_split_col = effective_split_column(split_col, split_config)
     prepared_columns = _unique([*feature_cols, *passthrough, target_col, effective_split_col])
     prepared = None
     if split_col and not override_existing_split:
+        if split_config.get("method") == "existing":
+            _validate_existing_split(backend, dataset_path, split_col)
         # An existing train/test/OOT column only needs a projection.  Stream it
         # directly to parquet so wide production datasets are not materialized
         # twice in a worker process merely to preserve an unchanged split.
@@ -121,7 +128,7 @@ def prepare_modeling_frame(
                 "source_dataset_id": dataset.id,
                 "target_col": target_col,
                 "feature_count": len(feature_cols),
-                "split_col": split_col or SPLIT_COLUMN,
+                "split_col": effective_split_col,
                 **dict(audit_detail or {}),
             }
             def audit_factory(registered):
@@ -180,8 +187,17 @@ def _make_split(df: pd.DataFrame, split_config: dict[str, Any] | None, seed: int
     never straddle train/test — the anti-leakage guardrail (spec §2). Fixed seed →
     reproducible. Empties that were expected are blocked with a clear error.
     """
-    config = dict(split_config or {})
+    config = _admit_split_configuration(
+        split_config, columns=df.columns, split_col=SPLIT_COLUMN,
+        require_existing_binding=True,
+    )
     out = df.copy()
+    if config.get("method") == "existing":
+        try:
+            existing_split_values(out[SPLIT_COLUMN].unique().tolist())
+        except SplitConfigurationError as exc:
+            raise ModelingError(str(exc)) from exc
+        return out
     out[SPLIT_COLUMN] = "train"
     rng = np.random.RandomState(int(seed))
     group_cols = _valid_group_cols(out, config.get("group_cols"))
@@ -198,7 +214,7 @@ def _make_split(df: pd.DataFrame, split_config: dict[str, Any] | None, seed: int
     time_col = config.get("oot_by_time")
     oot_size = float(config.get("oot_size", DEFAULT_OOT_SIZE))
     expect_oot = bool(rule_mask.any() and (out.loc[rule_mask, SPLIT_COLUMN] == "oot").any())
-    if time_col:
+    if time_col and oot_size > 0:
         time_col = str(time_col)
         if time_col not in out.columns:
             raise ModelingError(f"missing columns: {time_col}")
@@ -235,6 +251,35 @@ def _make_split(df: pd.DataFrame, split_config: dict[str, Any] | None, seed: int
         _guard_group_disjoint(out, groups)
     _guard_non_empty(out, expect_test=expect_test, expect_oot=expect_oot)
     return out
+
+
+def _admit_split_configuration(value, **bindings):
+    try:
+        return validate_split_configuration(value, **bindings)
+    except SplitConfigurationError as exc:
+        raise ModelingError(str(exc)) from exc
+
+
+def _validate_existing_split(backend, path, column):
+    # Read only the partition column. Keep the existing streaming projection
+    # contract for wide Parquet sources; backend resolution authenticates access.
+    path = backend._resolve_path(path)
+    values = set()
+    if path.suffix.lower() == ".parquet":
+        import pyarrow.parquet as pq
+
+        parquet = pq.ParquetFile(path)
+        canonical_to_raw = dict(zip(backend.column_names(path), parquet.schema_arrow.names, strict=True))
+        for batch in parquet.iter_batches(columns=[canonical_to_raw[column]], batch_size=65536):
+            values.update(batch.column(0).unique().to_pylist())
+            if len(values) > 3:
+                raise ModelingError("现有切分成员标签无效，请确认后再建模。")
+    else:
+        values.update(backend.read_frame(path, columns=[column])[column].unique().tolist())
+    try:
+        existing_split_values(values)
+    except SplitConfigurationError as exc:
+        raise ModelingError(str(exc)) from exc
 
 
 def _apply_rules(out: pd.DataFrame, rules) -> np.ndarray:

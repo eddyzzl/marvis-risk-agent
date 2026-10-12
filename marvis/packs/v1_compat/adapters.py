@@ -36,12 +36,15 @@ def load_v1_task_context(ctx, task_id: str) -> V1TaskContext:
     except KeyError as exc:
         raise KeyError(f"Task not found: {task_id}") from exc
     task_dir = settings.tasks_dir / task_id
+    environment = load_execution_environment(settings.workspace)
     pipeline_settings = PipelineSettings(
         workspace=settings.workspace,
         db_path=settings.db_path,
         report_template_path=settings.report_template_path,
         feature_columns=list(task.feature_columns),
-        notebook_kernel_name=load_execution_environment(settings.workspace).kernel_name,
+        notebook_kernel_name=environment.kernel_name,
+        notebook_memory_limit_mb=environment.notebook_memory_limit_mb,
+        notebook_network_mode=environment.notebook_network_mode,
     )
     return V1TaskContext(
         task_id=task_id,

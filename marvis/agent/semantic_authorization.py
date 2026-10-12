@@ -95,17 +95,8 @@ def review_semantic_authorization(
             return _failed_review(
                 diagnostic("authorization", failure_code="input_invalid")
             )
-        user_prompt = json.dumps(
-            {
-                "gate_context": gate_context,
-                "instruction": instruction,
-                "proposed_params": proposed_params,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+        from marvis.llm_outbound import gate_instruction_prompt
+        user_prompt = gate_instruction_prompt(gate_context, instruction, proposed_params=proposed_params)
         request_started = True
         raw = client.complete(
             system_prompt=_REVIEW_PROMPT.text,

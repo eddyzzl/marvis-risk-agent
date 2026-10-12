@@ -1156,7 +1156,7 @@ def test_recovery_chat_replaces_unsupported_execution_promise() -> None:
 def test_recovery_chat_replaces_future_execution_promise_variants(promise: str) -> None:
     content, metadata = answer_workflow_recovery_message(
         user_message="请先说明重试方案。",
-        diagnostic={"summary": "调参未完成。", "cause": "memory limit", "retryable": True},
+        diagnostic={"code": "workflow_execution_failed", "summary": "调参未完成。", "cause": "memory limit", "retryable": True},
         client=_StaticRecoveryLLM(promise),
     )
 
@@ -1168,7 +1168,7 @@ def test_recovery_chat_allows_conditional_retry_notice() -> None:
     notice = "当前尚未启动重试；你明确授权后才会重试。"
     content, metadata = answer_workflow_recovery_message(
         user_message="请先说明重试方案。",
-        diagnostic={"summary": "调参未完成。", "cause": "memory limit", "retryable": True},
+        diagnostic={"code": "workflow_execution_failed", "summary": "调参未完成。", "cause": "memory limit", "retryable": True},
         client=_StaticRecoveryLLM(notice),
     )
 

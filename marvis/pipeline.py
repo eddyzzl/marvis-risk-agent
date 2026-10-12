@@ -175,6 +175,7 @@ class PipelineSettings:
     # None = no soft RSS cap on the notebook kernel (the new default; real
     # datasets are large). The execution-environment setting overrides this.
     notebook_memory_limit_mb: int | None = None
+    notebook_network_mode: str = "trusted_local"
     notebook_isolated_execution: bool = True
     allow_legacy_live_notebook_execution: bool = False
     bin_count: int = 10
@@ -330,6 +331,7 @@ def run_notebook_stage(
                     notebook_steps_path=execution_dir / "notebook_steps.json",
                     kernel_name=kernel_name,
                     notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
+                    notebook_network_mode=settings.notebook_network_mode,
                     stage_claimed=stage_claimed,
                     cancellation_token=cancellation_token,
                     keep_alive=False,
@@ -400,6 +402,7 @@ def run_notebook_stage(
                 notebook_steps_path=execution_dir / "notebook_steps.json",
                 kernel_name=kernel_name,
                 notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
+                notebook_network_mode=settings.notebook_network_mode,
                 stage_claimed=stage_claimed,
                 cancellation_token=cancellation_token,
                 keep_alive=True,
@@ -674,6 +677,9 @@ def _execute_pmml_scoring_stage(
     raise_if_cancelled(cancellation_check)
     try:
         materials = resolve_selected_validation_materials(task)
+        from marvis.modeling_holdout.guards import record_exposure
+        record_exposure(settings.db_path, settings.workspace, materials.sample)
+        record_exposure(settings.db_path, settings.workspace, materials.dictionary)
         record = require_confirmed_validation_input_contract(
             ValidationContractRepository(settings.db_path), task_id
         )
@@ -858,6 +864,9 @@ def _execute_v2_metrics_stage(
     raise_if_cancelled(cancellation_check)
     try:
         materials = resolve_selected_validation_materials(task)
+        from marvis.modeling_holdout.guards import record_exposure
+        record_exposure(settings.db_path, settings.workspace, materials.sample)
+        record_exposure(settings.db_path, settings.workspace, materials.dictionary)
         record = require_confirmed_validation_input_contract(
             ValidationContractRepository(settings.db_path), task_id
         )
@@ -1115,6 +1124,7 @@ def _run_legacy_metrics_stage(
                             notebook_steps_path=metrics_steps_path,
                             kernel_name=_execution_kernel_name(settings),
                             notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
+                            notebook_network_mode=settings.notebook_network_mode,
                             stage_claimed=True,
                             cancellation_token=cancellation_token,
                             keep_alive=False,
@@ -1917,6 +1927,7 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             notebook_steps_path=notebook_steps_path,
             kernel_name=kernel_name,
             notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
+            notebook_network_mode=settings.notebook_network_mode,
             keep_alive=True,
         )
         if live_session is None:
@@ -2214,6 +2225,7 @@ def _notebook_step_v3(
     notebook_steps_path: Path,
     kernel_name: str,
     notebook_memory_limit_mb: int | None = None,
+    notebook_network_mode: str = "trusted_local",
     stage_claimed: bool = False,
     cancellation_token: NotebookCancellationToken | None = None,
     keep_alive: bool = False,
@@ -2223,6 +2235,11 @@ def _notebook_step_v3(
     cancel_message: str = "notebook cancelled",
     cancel_resume_status: TaskStatus = TaskStatus.SCANNED,
 ) -> NotebookExecutionSession | None:
+    from marvis.modeling_holdout.guards import reject_arbitrary_execution
+    reject_arbitrary_execution(repo.db_path, task.id)
+    from marvis.modeling_holdout.guards import record_exposure
+    if getattr(repo, 'db_path', None) is not None:
+        record_exposure(repo.db_path, Path(repo.db_path).parent, sample_path)
     prepared = execution_dir / "prepared.ipynb"
     executed = execution_dir / "executed.ipynb"
     log = execution_dir / "notebook.log"
@@ -2265,6 +2282,7 @@ def _notebook_step_v3(
             execution_cwd=source_notebook.parent,
             cancellation_token=cancellation_token,
             memory_limit_mb=notebook_memory_limit_mb,
+            network_mode=notebook_network_mode,
             allow_appended_execution=True,
             appended_execution_policy=V1_VALIDATION_APPENDED_EXECUTION_POLICY,
         )
@@ -2279,8 +2297,10 @@ def _notebook_step_v3(
             execution_cwd=source_notebook.parent,
             cancellation_token=cancellation_token,
             memory_limit_mb=notebook_memory_limit_mb,
+            network_mode=notebook_network_mode,
             isolated=isolated,
         )
+    write_json_atomic(execution_dir / "notebook_execution.json", result.execution_policy or {})
     _notebook_step_elapsed_s = time.monotonic() - _notebook_step_started_at
     if result.step_events is not None:
         write_json_atomic(notebook_steps_path, result.step_events)
@@ -2303,6 +2323,8 @@ def _notebook_step_v3(
         raise PipelineError(
             f"notebook failed at cell {result.failed_cell_index}: "
             f"{result.error_name}: {result.error_value}"
+            + (f"；{result.execution_policy['next_action']}"
+               if result.execution_policy and result.execution_policy.get("next_action") else "")
         )
     if not contract_meta_path.exists():
         raise PipelineError("notebook runtime contract did not produce metadata")

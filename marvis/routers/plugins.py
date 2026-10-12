@@ -8,7 +8,7 @@ import re
 import tempfile
 
 from fastapi import APIRouter, HTTPException, Request
-from marvis.errors import bad_request, conflict, forbidden, not_found, unprocessable
+from marvis.errors import bad_request, conflict, domain_error, forbidden, not_found, unprocessable
 
 from marvis.plugins.errors import (
     DuplicatePluginError,
@@ -16,8 +16,10 @@ from marvis.plugins.errors import (
     PluginError,
     PluginNotFoundError,
 )
+from marvis.plugins.publisher_trust import CapabilityError
 from marvis.plugins.loader import install_plugin
 from marvis.plugins.manifest import PluginManifest, ToolSpec
+from marvis.routers.governed_capabilities import governance_router
 
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
@@ -77,6 +79,8 @@ async def upload_plugin(request: Request) -> dict:
         upload_path.write_bytes(content)
         try:
             manifest = install_plugin(upload_path, settings.plugins_dir, registry)
+        except CapabilityError as exc:
+            raise domain_error(exc.status, exc.code) from exc
         except DuplicatePluginError as exc:
             raise conflict(str(exc)) from exc
         except ManifestError as exc:
@@ -112,6 +116,8 @@ def remove_plugin(request: Request, name: str) -> dict:
         request.app.state.plugin_registry.remove(name)
     except PluginNotFoundError as exc:
         raise not_found(str(exc)) from exc
+    except CapabilityError as exc:
+        raise domain_error(exc.status, exc.code) from exc
     except ValueError as exc:
         raise bad_request(str(exc)) from exc
     request.app.state.hook_dispatcher.rebuild_index()
@@ -122,6 +128,8 @@ def remove_plugin(request: Request, name: str) -> dict:
 def list_plugin_tools(request: Request, name: str) -> dict:
     try:
         manifest = request.app.state.plugin_registry.get(name)
+    except CapabilityError as exc:
+        raise domain_error(exc.status, exc.code) from exc
     except PluginNotFoundError as exc:
         raise not_found(str(exc)) from exc
     return {
@@ -135,6 +143,8 @@ def list_plugin_tools(request: Request, name: str) -> dict:
 def _set_enabled(request: Request, name: str, enabled: bool) -> dict:
     try:
         request.app.state.plugin_registry.set_enabled(name, enabled)
+    except CapabilityError as exc:
+        raise domain_error(exc.status, exc.code) from exc
     except PluginNotFoundError as exc:
         raise not_found(str(exc)) from exc
     request.app.state.hook_dispatcher.rebuild_index()
@@ -209,3 +219,6 @@ def _filename_from_content_disposition(header_blob: bytes) -> str | None:
     if match is None:
         return None
     return Path(match.group(1)).name
+
+
+router.include_router(governance_router())

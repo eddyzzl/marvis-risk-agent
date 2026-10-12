@@ -95,6 +95,95 @@
 .candidate-lab-launcher[hidden] { display: none; }
 .candidate-lab-empty-results > summary { padding: 12px 0; cursor: pointer; font-size: 13px; color: var(--text-secondary); }
 
+/* Evidence forms share the workspace controls and keep checkbox hit areas local. */
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) > details > summary {
+  padding: 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--surface-soft);
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) > details[open] {
+  padding-bottom: 12px;
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) label {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  margin: 10px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) :is(select, textarea, input:not([type="checkbox"])) {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-color, var(--border));
+  border-radius: var(--radius-control, 6px);
+  background: var(--surface);
+  color: var(--text-primary, var(--text));
+  font: inherit;
+}
+#strategyAssetStabilityPanel label:has(input[type="checkbox"]) {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+#strategyAssetStabilityPanel input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  flex: 0 0 16px;
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) button {
+  min-height: 32px;
+  margin: 4px 0 4px 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color, var(--border));
+  border-radius: var(--radius-control, 6px);
+  font: inherit;
+  font-size: 12px;
+  background: var(--surface-soft);
+  color: var(--text-primary, var(--text));
+  cursor: pointer;
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) :is(p, [role="status"], [data-hm-draft], [data-hm-preview], [data-asset-results]) {
+  margin: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) :is(th, td) {
+  padding: 7px;
+  border-bottom: 1px solid var(--border-color, var(--border));
+  vertical-align: top;
+}
+:is(#strategyHistoryMappingPanel, #strategyAssetStabilityPanel) th {
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+}
+#strategyAssetStabilityPanel [data-asset-stability-body] > details {
+  margin: 10px 12px;
+  font-size: 12px;
+}
+#strategyAssetStabilityPanel code {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#strategyHistoryMappingPanel [hidden] { display: none; }
+
 .candidate-lab-launcher {
   min-width: 0;
   border: 1px solid var(--border-color, var(--border));

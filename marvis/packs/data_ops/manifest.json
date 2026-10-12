@@ -355,6 +355,69 @@
                   "type": "string",
                   "minLength": 1
                 }
+              },
+              "risk_directions": {
+                "type": "object",
+                "maxProperties": 10000,
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "direction": {
+                      "type": "string",
+                      "minLength": 1,
+                      "enum": [
+                        "unknown",
+                        "higher_is_riskier",
+                        "lower_is_riskier",
+                        "non_monotonic"
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1,
+                      "enum": [
+                        "user_confirmed"
+                      ]
+                    },
+                    "actor_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "confirmed_at": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "dataset_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "dataset_content_hash": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "source_semantic_mapping_hash": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "source_workspace_revision": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "direction",
+                    "source",
+                    "actor_id",
+                    "confirmed_at",
+                    "dataset_id",
+                    "dataset_content_hash",
+                    "source_semantic_mapping_hash",
+                    "source_workspace_revision"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [

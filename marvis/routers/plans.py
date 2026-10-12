@@ -670,6 +670,13 @@ def _attach_failure_envelopes(payload: dict, repo=None) -> None:
             continue
         reset_steps = _downstream_step_ids(steps, str(step.get("id") or ""))
         reconciliation_required = bool(blocked.intersection(reset_steps))
+        native_error_kind = None
+        native_failure = getattr(repo, "latest_failed_step_run_error_kind", None)
+        if not reconciliation_required and callable(native_failure):
+            native_error_kind = native_failure(str(step.get("id") or ""))
+        execution_halt = {"search_paused": "paused", "search_cancelled": "cancelled"}.get(native_error_kind)
+        if execution_halt:
+            step["execution_halt"] = execution_halt
         detail = f"「{step.get('title') or step.get('id') or '步骤'}」失败:{step.get('error') or '执行中断。'}"
         step["failure_envelope"] = build_failure_envelope(
             plan_id=str(payload.get("id") or ""),
@@ -678,10 +685,10 @@ def _attach_failure_envelopes(payload: dict, repo=None) -> None:
             message=detail,
             step_inputs=step.get("inputs") if not reconciliation_required and isinstance(step.get("inputs"), dict) else None,
             downstream_reset_steps=tuple(reset_steps) if not reconciliation_required else (),
-            error_kind="completion_reconciliation" if reconciliation_required else "execution",
-            retryable=not reconciliation_required,
+            error_kind="completion_reconciliation" if reconciliation_required else native_error_kind if execution_halt else "execution",
+            retryable=not reconciliation_required and not execution_halt,
         ).to_dict()
-        if reconciliation_required:
+        if reconciliation_required or execution_halt:
             step["failure_envelope"]["suggested_actions"] = ["halt"]
 
 

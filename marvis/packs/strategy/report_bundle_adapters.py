@@ -3128,7 +3128,8 @@ def _history_section(
     source_ref: Mapping[str, str],
 ) -> dict[str, Any]:
     histories = revision["state"]["historical_strategy_reviews"]
-    if not histories:
+    mapping = _confirmed_history_mapping(revision)
+    if not histories and mapping is None:
         return _absent_section(
             "historical_versions",
             "unavailable",
@@ -3191,14 +3192,59 @@ def _history_section(
                 _present_field(len(histories), source_ref),
             )
         ],
-        tables=[table],
+        tables=[table, *(_history_mapping_tables(mapping) if mapping is not None else [])],
         red_flags=[
             flag
             for history in histories
             for flag in history["red_flags"]
         ],
-        source_refs=[source_ref],
+        source_refs=[source_ref, *([mapping["source_ref"]] if mapping is not None else [])],
     )
+
+
+def _confirmed_history_mapping(revision):
+    for item in revision["state"]["current_project_snapshot"]["user_context_fields"]:
+        field = item["field"]
+        if item["field_path"] != "history_mapping.confirmed" or field["origin"] != "uploaded_file" or field["availability"] != "present":
+            continue
+        value = field["value"]
+        refs = field["source_refs"]
+        if not isinstance(value, dict) or value.get("validation_status") != "historical_reported_unvalidated" or len(refs) != 1 or refs[0]["kind"] != "strategy_history_mapping" or refs[0]["ref_id"] != value.get("artifact_id") or refs[0]["content_hash"] != value.get("content_hash"):
+            raise StrategyError("confirmed history mapping projection is invalid")
+        return {**value, "source_ref": refs[0]}
+    return None
+
+
+def _history_mapping_tables(mapping):
+    source_ref = mapping["source_ref"]
+    bindings = mapping["bindings"]
+    by_key = {item["binding_key"]: item for item in bindings}
+    def declared(value):
+        return build_report_field(value=value, availability="present", origin="uploaded_file", source_refs=[source_ref],
+                                  note="历史来源声明，未经平台复算或独立验证。") if value is not None else _absent_field("unavailable", note="未知；未猜测或填零。")
+    rows = []
+    for binding in bindings:
+        target = binding["target"]
+        related_period = by_key.get(binding["period_key"])
+        related_version = by_key.get(binding["version_key"])
+        value = binding["value"] if binding["availability"] == "present" else None
+        if isinstance(value, dict):
+            value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        period_value = related_period["value"] if related_period else None
+        if isinstance(period_value, dict):
+            period_value = json.dumps(period_value, ensure_ascii=False, sort_keys=True)
+        rows.append({"row_id": binding["binding_key"], "cells": {
+            "kind": declared({"field": "字段", "metric": "指标", "period": "期间", "strategy_version": "策略版本"}[target["kind"]]),
+            "name": declared(target["name"]), "value": declared(value),
+            "unit": declared(target["unit"] if target["unit"] != "unknown" else None),
+            "period": declared(period_value), "version": declared(related_version["value"] if related_version else None),
+            "source": declared(json.dumps({"source_artifact_id": binding["source_id"], "source_hash": binding["source_hash"], "locator": binding["locator"]}, ensure_ascii=False, sort_keys=True)),
+            "status": declared("历史报告值 · 未复算验证"),
+        }})
+    return [build_strategy_report_table(table_id="confirmed_history_mapping", title="已确认的历史来源映射（历史报告值，未复算验证）",
+        sheet_key="02_history", granularity="aggregate", content_class="lineage",
+        columns=[_column(key, label) for key, label in (("kind", "类型"), ("name", "口径名称"), ("value", "来源值"), ("unit", "单位"), ("period", "明确关联期间"), ("version", "明确关联版本"), ("source", "精确来源位置"), ("status", "证据边界"))],
+        rows=rows, source_refs=[source_ref])]
 
 
 def _sample_section(

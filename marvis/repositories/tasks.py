@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from marvis.db_schema import connect
+from marvis.institution.policy import guard_repository as _guard_repository
 from marvis.runtime_observations import observe_queue, observing_runtime, queue_terminal_on_commit, end_confirmation_wait
 from marvis.runtime_waits import refresh_confirmation_wait, job_finished
 from marvis.orchestrator.evidence import payload_hash
@@ -61,6 +62,7 @@ class ReportDraftGenerationSnapshot:
     state_hash: str
 
 
+@_guard_repository
 class TaskRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -181,10 +183,23 @@ class TaskRepository:
 
     def get_task(self, task_id: str) -> TaskRecord:
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn, 'task', task_id)
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             raise KeyError(f"Task not found: {task_id}")
         return _row_to_task(row)
+
+    def committed_validation_source_directories(self) -> set[Path]:
+        """Host startup recovery metadata only; no task payload or sample read.
+
+        Recovery must not impersonate an institution actor or grant itself row
+        access merely to protect the existing committed filesystem ledger.
+        """
+        with connect(self.db_path) as conn:
+            return {Path(row['source_dir']).resolve(strict=False) for row in conn.execute(
+                'SELECT source_dir FROM tasks WHERE task_type=? AND source_dir<>\'\'',
+                (TASK_TYPE_VALIDATION,))}
 
     def update_algorithm(self, task_id: str, algorithm: str) -> TaskRecord:
         normalized = normalize_algorithm(algorithm, allow_empty=True)
@@ -531,6 +546,13 @@ class TaskRepository:
             )
         )
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import visible_task_ids
+            visible = visible_task_ids(conn)
+            if visible is not None:
+                rows = conn.execute(f"SELECT * FROM tasks {where_clause} ORDER BY created_at DESC,id DESC").fetchall()
+                rows = [row for row in rows if row['id'] in visible]
+                rows = rows[bounded_offset:None if bounded_limit is None else bounded_offset+bounded_limit]
+                return [_row_to_task(row) for row in rows]
             if bounded_limit is not None:
                 rows = conn.execute(
                     f"""
@@ -1190,6 +1212,9 @@ class TaskRepository:
             return {}
         placeholders = ",".join("?" for _ in task_ids)
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            for task_id in task_ids:
+                authorize_on_connection(conn,'task',task_id)
             rows = conn.execute(
                 f"""
                 SELECT task_id, kind
@@ -1881,6 +1906,8 @@ def _insert_task_record_row(
     *,
     report_values: dict[str, str] | None,
 ) -> None:
+    from marvis.institution.policy import bind_new_task
+    bind_new_task(conn, record.id)
     conn.execute(
         """
         INSERT INTO tasks

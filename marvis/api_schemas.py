@@ -83,6 +83,7 @@ class DataSemanticMappingRequest(BaseModel):
     target_col: StrictCanonicalNonEmptyStr | None
     field_roles: dict[StrictCanonicalNonEmptyStr, StrictCanonicalNonEmptyStr]
     business_names: dict[StrictCanonicalNonEmptyStr, StrictCanonicalNonEmptyStr]
+    risk_directions: dict[StrictCanonicalNonEmptyStr, dict] | None = None
 
 
 class DataWorkspaceUpdateRequest(BaseModel):
@@ -242,6 +243,8 @@ class ValidationInputConfirmationRequest(BaseModel):
 
 
 class ExecutionEnvironmentRequest(BaseModel):
+    worker_isolation_mode: Literal["trusted_local", "os_sandbox"] = "trusted_local"
+    notebook_network_mode: Literal["trusted_local", "loopback_only"] = "trusted_local"
     execution_mode: str = "jupyter_kernel"
     kernel_name: str = "python3"
     conda_env_name: str = ""

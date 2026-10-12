@@ -155,12 +155,13 @@ def test_recommend_feature_crosses_filters_invalid_llm_output_and_ignores_metric
     assert not hasattr(recs[0], "iv")
 
 
-def test_recommend_feature_crosses_returns_empty_on_llm_failure():
+def test_recommend_feature_crosses_reports_llm_failure_without_claiming_empty_success():
     class BrokenLLM:
         def complete(self, **_kwargs):
             raise RuntimeError("unavailable")
 
-    assert recommend_feature_crosses({}, {}, llm_factory=BrokenLLM) == []
+    with pytest.raises(FeatureError, match="未完成"):
+        recommend_feature_crosses({"income": "收入", "debt": "负债"}, {}, llm_factory=BrokenLLM)
 
 
 def test_evaluate_crosses_only_scores_selected_pairs_with_platform_metrics():

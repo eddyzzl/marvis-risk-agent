@@ -100,6 +100,7 @@ class Reviewer:
         )
 
     def llm_critique(self, step: PlanStep, output: dict, goal: str) -> ReviewVerdict:
+        from marvis.llm_outbound import outbound_prompt, review_repair_prompt
         # AGT-6: no LLM configured is the common manual-mode case, not a failure —
         # every step used to deterministically render a "failed" llm_critic verdict
         # (a full English exception message) purely because settings had no model
@@ -120,11 +121,12 @@ class Reviewer:
                 {
                     "goal": goal,
                     "step": step.title,
-                    "output_summary": _summarize_output(output),
+                    "output_summary": output,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
             )
+            prompt = outbound_prompt(json.loads(prompt))
             raw = llm.complete(
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
@@ -139,11 +141,7 @@ class Reviewer:
             if not ok:
                 raw = self._llm_factory().complete(
                     system_prompt=CRITIC_SYS,
-                    user_prompt=_retry_json_prompt(
-                        prompt,
-                        raw,
-                        '{"passed": true|false, "reasons": ["..."]}',
-                    ),
+                    user_prompt=review_repair_prompt(prompt, kind="critique"),
                     response_format={"type": "json_object"},
                     json_schema=_CRITIQUE_SCHEMA,
                     caller="critic",
@@ -189,21 +187,13 @@ class Reviewer:
         outputs: dict[str, dict],
         business_acceptance: dict,
     ) -> tuple[str, list[str], bool, bool | None]:
+        from marvis.llm_outbound import review_repair_prompt
+        from marvis.llm_outbound_business import business_review_prompt
+
         try:
-            prompt = json.dumps(
-                {
-                    "goal": goal,
-                    "plan_id": plan.id,
-                    "step_count": len(plan.steps),
-                    "outputs": _summarize_output(outputs),
-                    "business_acceptance": _business_acceptance_prompt(business_acceptance),
-                    "acceptance_authority": (
-                        "业务验收由平台确定性判定。解释必须遵守此status、objective_hash和采用对象，"
-                        "不得用候选指标改写结论；流程完成不代表业务达标。"
-                    ),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
+            prompt = business_review_prompt(
+                goal=goal, plan_id=plan.id, step_count=len(plan.steps),
+                outputs=outputs, result=business_acceptance,
             )
             raw = self._llm_factory().complete(
                 system_prompt=CRITIC_SYS,
@@ -219,11 +209,7 @@ class Reviewer:
             if data is None:
                 raw = self._llm_factory().complete(
                     system_prompt=CRITIC_SYS,
-                    user_prompt=_retry_json_prompt(
-                        prompt,
-                        raw,
-                        '{"summary": "...", "open_items": [], "goal_doubt": false, "goal_met": true|false}',
-                    ),
+                    user_prompt=review_repair_prompt(prompt, kind="summary"),
                     response_format={"type": "json_object"},
                     json_schema=_NARRATIVE_SCHEMA,
                     caller="reviewer_summary",
@@ -249,20 +235,6 @@ def _is_reviewable_empty_screen_check(step: PlanStep, post_check: PostCheck) -> 
         and post_check.kind == "nonempty"
         and str(post_check.spec.get("field") or "") == "selected"
     )
-
-
-def _business_acceptance_prompt(result: dict) -> dict:
-    """Bound the explanatory context; never send the full business contract."""
-    target = result.get("target") or {}
-    evidence = result.get("evidence") or {}
-    return {
-        "status": result["status"], "objective_hash": result.get("objective_hash"),
-        "target": {key: str(value)[:200] for key, value in target.items()},
-        "evidence": {key: str(evidence[key])[:200] for key in ("source_ref", "source_hash", "effect_stage", "period_start", "period_end", "labels_mature") if key in evidence},
-        "criteria_count": len(result["criteria"]),
-        "criteria": [{"metric": str(item["metric"])[:100], "value": item.get("value"), "status": item["status"]} for item in result["criteria"][:20]],
-        "reasons": [str(reason)[:300] for reason in result["reasons"][:6]],
-    }
 
 
 def _run_post_check(pc: PostCheck, output: dict, step: PlanStep) -> tuple[bool, str]:

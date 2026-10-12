@@ -65,6 +65,8 @@ function normalizeSemanticMapping(value) {
     target_col: mapping.target_col ?? null,
     field_roles: normalizeRecord(mapping.field_roles),
     business_names: normalizeRecord(mapping.business_names),
+    ...(isPlainObject(mapping.risk_directions) && Object.keys(mapping.risk_directions).length
+      ? { risk_directions: normalizeRecord(mapping.risk_directions) } : {}),
   };
 }
 
@@ -103,6 +105,8 @@ function mergeDraft(current, patch) {
         business_names: Object.prototype.hasOwnProperty.call(mappingPatch, "business_names")
           ? normalizeRecord(mappingPatch.business_names)
           : cloneValue(current.semantic_mapping.business_names),
+        ...(Object.prototype.hasOwnProperty.call(mappingPatch, "risk_directions")
+          ? { risk_directions: normalizeRecord(mappingPatch.risk_directions) } : {}),
       };
     }
   }

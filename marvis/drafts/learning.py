@@ -4,6 +4,10 @@ from datetime import UTC, datetime
 import uuid
 
 from marvis.drafts.contracts import LearningNote
+from marvis.agent.json_reply import load_json_object
+from marvis.drafts.errors import DraftError
+from marvis.llm_outbound import OutboundContextError, application_schema
+from marvis.llm_outbound_learning import public_learning_prompt
 from marvis.llm_prompts import LEARN_SYS as _LEARN_SYS_SPEC
 
 
@@ -21,31 +25,32 @@ def distill_learning(
     sources: list[str],
     *,
     llm_factory,
+    public_sources=(),
 ) -> LearningNote:
-    joined = "\n---\n".join(str(content)[:MAX_CONTENT_CHARS] for content in contents)[:MAX_JOINED_CHARS]
+    try:
+        prompt = public_learning_prompt(query, contents=contents, sources=sources, public_sources=public_sources)
+    except OutboundContextError as exc:
+        raise DraftError(str(exc)) from exc
     raw = llm_factory().complete(
         system_prompt=LEARN_SYS,
-        user_prompt=_learn_prompt(query, joined),
+        user_prompt=prompt,
+        response_format={"type": "json_object"},
+        json_schema=application_schema("learning_note"),
+        caller="learning_note",
+        prompt_name=_LEARN_SYS_SPEC.name,
+        prompt_version=_LEARN_SYS_SPEC.version,
         stream=False,
     )
+    payload, _ = load_json_object(raw)
+    note = payload.get("note") if isinstance(payload, dict) else None
+    if not isinstance(note, str) or not note.strip() or len(note) > MAX_NOTE_CHARS:
+        raise DraftError("学习摘要未通过输出契约校验，未保存学习成功状态；请重试。")
     return LearningNote(
         id=_new_id(),
         query=str(query),
         sources=tuple(str(source) for source in sources),
-        distilled=_sanitize(str(raw))[:MAX_NOTE_CHARS],
+        distilled=_sanitize(note),
         created_at=_now(),
-    )
-
-
-def _learn_prompt(query: str, joined: str) -> str:
-    return (
-        f"学习目标：{query}\n\n"
-        "请输出结构化实现笔记：\n"
-        "1. 关键概念/公式\n"
-        "2. 实现步骤\n"
-        "3. 关键 API 或伪代码\n"
-        "4. 风险与边界\n\n"
-        f"资料正文（已截断）：\n{joined}"
     )
 
 

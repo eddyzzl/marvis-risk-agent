@@ -324,6 +324,7 @@ def parse_voting_candidate_search_request_json(
 
 def search_voting_candidate_combinations(
     payload: Mapping[str, Any],
+    *, control=None,
 ) -> dict[str, Any]:
     """Evaluate canonical combinations up to the caller's explicit hard budget."""
 
@@ -352,20 +353,20 @@ def search_voting_candidate_combinations(
         weights=request["weights"],
         amounts=request["amounts"],
     )
-    evaluated = [
-        _evaluate_combination(
+    evaluated = list(control.saved) if control is not None else []
+    if control is not None:
+        control.bind_search(request_hash)
+        control.boundary(evaluated, len(raw_combinations))
+    for members in raw_combinations[len(evaluated):]:
+        evaluated.append(_evaluate_combination(
             sorted([*include, *members]),
-            n=request["n"],
-            hit_by_id=hit_by_id,
-            target=request["target"],
-            weights=request["weights"],
-            amounts=request["amounts"],
-            population=population,
-            objective=request["objective"],
+            n=request["n"], hit_by_id=hit_by_id, target=request["target"],
+            weights=request["weights"], amounts=request["amounts"],
+            population=population, objective=request["objective"],
             constraints=request["constraints"],
-        )
-        for members in raw_combinations
-    ]
+        ))
+        if control is not None:
+            control.boundary(evaluated, len(raw_combinations))
     ranked = sorted(
         evaluated,
         key=lambda item: _result_sort_key(item, request["objective"]),

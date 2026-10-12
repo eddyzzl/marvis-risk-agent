@@ -125,7 +125,10 @@ def _assignment_inventory(inputs, execution, benchmark):
             "invalid_formal_attempt_inventory",
         )
         for assignment in entry["assignments"]:
-            _keys(assignment, {"attempt_id", "case_id", "domain_evidence", "telemetry"})
+            fields = {"attempt_id", "case_id", "domain_evidence", "telemetry"}
+            if "safety_evidence" in assignment:
+                fields.add("safety_evidence")
+            _keys(assignment, fields)
             identity = assignment["attempt_id"]
             _require(
                 isinstance(identity, str)
@@ -144,14 +147,21 @@ def _assignment_inventory(inputs, execution, benchmark):
             if telemetry is not None:
                 _keys(telemetry, {"path", "sha256"})
                 _require(_hash(telemetry["sha256"]), "invalid_telemetry_identity")
-            observations.append(
-                {
+            observation = {
                     "attempt_id": identity,
                     "case_id": assignment["case_id"],
                     "run_id": entry["run_id"],
                     "telemetry_sha256": telemetry["sha256"] if telemetry else None,
                 }
-            )
+            if "safety_evidence" in assignment:
+                safety = assignment["safety_evidence"]
+                _keys(safety, {"case_id", "archive", "manifest_sha256", "binding"})
+                _keys(safety["binding"], {"path", "sha256"})
+                _require(safety["case_id"] == assignment["case_id"]
+                         and _hash(safety["manifest_sha256"]) and _hash(safety["binding"]["sha256"]),
+                         "invalid_formal_safety_identity")
+                observation["safety_evidence_sha256"] = digest(safety)
+            observations.append(observation)
     _require(
         execution["observations"] == observations,
         "formal_executor_observation_inventory_mismatch",
@@ -489,8 +499,8 @@ def _domain_result(recomputed, answer):
         else "unavailable"
     )
     # Confirmation text is independently reviewed by the separate reviewer.
-    # The installed reader does not establish authorization, time-travel or
-    # duplicate-side-effect safety. These remain explicit software work.
+    # Domain math alone does not establish these safety dimensions. The optional
+    # original safety carrier is adjudicated separately by installed readers.
     safety = tuple(
         (
             key,
@@ -702,6 +712,9 @@ def _feature_domain(case, expected, item, root, record, run):
 
 
 def _domain(case, expected, item, root, record, run):
+    if case.family in {"modeling", "strategy", "monitoring", "online_decision", "connector_antifraud", "collections"}:
+        from .formal_domain_adapters import retained_domain
+        return retained_domain(case, expected, item, root, record, run)
     if case.family == "feature":
         return _feature_domain(case, expected, item, root, record, run)
     if case.family == "data_processing":
@@ -786,12 +799,23 @@ def _observe_attempt(
             max_output_tokens_observed=output_max,
             reason=reason,
         )
+        safety = None
+        if "safety_evidence" in assignment:
+            from .formal_safety_adapters import retained_safety
+            safety = retained_safety(case, expected, assignment["safety_evidence"], root, record, run,
+                                     domain_item=assignment["domain_evidence"])
         domain, reason = _domain(
             case, expected, assignment["domain_evidence"], root, record, run
         )
+        if safety is not None:
+            from .formal_safety_adapters import merge_safety
+            if safety["domain"] is not None:
+                domain, reason = safety["domain"], None
+            domain = merge_safety(domain, safety)
+            details["original_safety"] = {key: value for key, value in safety.items() if key != "domain"}
         if domain is None:
             return replace(observation, reason=reason), details
-        details = {key: domain.pop(key) for key in ("domain_checks", "unsupported")}
+        details.update({key: domain.pop(key) for key in ("domain_checks", "unsupported")})
         observation = replace(observation, **domain)
     except TrustInputError as exc:
         observation = replace(observation, reason=str(exc))

@@ -533,8 +533,11 @@ def test_invalid_reply_gets_exactly_one_repair() -> None:
 
     assert result.draft is not None
     assert len(llm.calls) == 2
-    assert "上一次输出未通过平台校验" in llm.calls[1]["user_prompt"]
-    assert "ks" in llm.calls[1]["user_prompt"]
+    repair = json.loads(llm.calls[1]["user_prompt"])
+    original = json.loads(llm.calls[0]["user_prompt"])
+    assert repair["instruction"] == original["instruction"] == "回测审批策略"
+    assert repair["repair"]["failure_code"] == "platform_validation_failed"
+    assert "\"ks\":0.5" not in llm.calls[1]["user_prompt"]
     assert all(call["temperature"] == 0.0 for call in llm.calls)
     assert all(call["json_schema"] == STRATEGY_REQUEST_JSON_SCHEMA for call in llm.calls)
 

@@ -149,7 +149,12 @@ def build_slice_spec_from_utterance(
     if not allowed_columns:
         return _clarify("当前数据集没有可用列，无法解析问数请求。")
 
-    raw = _invoke_llm(utterance, allowed_columns, llm, caller=caller)
+    from marvis.llm_outbound import OutboundContextError
+
+    try:
+        raw = _invoke_llm(utterance, allowed_columns, llm, caller=caller)
+    except OutboundContextError as exc:
+        return _clarify(str(exc))
     if raw is None:
         return _clarify("没能理解这个问题，请换一种说法，或指明要按哪列分组、看什么指标。")
     parsed = _parse_json_object(raw)
@@ -273,17 +278,18 @@ def _metric_label(op: str, col: str | None) -> str:
 
 
 def _invoke_llm(utterance: str, allowed_columns, llm, *, caller: str) -> str | None:
-    user_prompt = (
-        f"数据集可用列白名单：{list(allowed_columns)}\n"
-        f"用户问题：{utterance}\n"
-        "请输出结构化 JSON 规格（或 clarify）。"
-    )
+    from marvis.llm_outbound import application_schema
+    from marvis.llm_outbound_analysis import slice_question_prompt
+
+    user_prompt = slice_question_prompt(utterance, allowed_columns)
+    schema = application_schema("adhoc_slice_spec", columns=list(allowed_columns))
     try:
         return llm.complete(
             system_prompt=SLICE_SPEC_SYS.text,
             user_prompt=user_prompt,
             temperature=0.0,
             stream=False,
+            json_schema=schema,
             caller=caller,
             prompt_name=SLICE_SPEC_SYS.name,
             prompt_version=SLICE_SPEC_SYS.version,
@@ -313,7 +319,10 @@ def _column_whitelist(dataset_profile) -> tuple[str, ...]:
         return ()
     columns: list[str] = []
     for column in dataset_profile:
-        name = str(column)
+        name = column if isinstance(column, str) else (column.get("name") if isinstance(column, dict)
+                                                       else getattr(column, "name", None))
+        if not isinstance(name, str):
+            continue
         if name and name not in columns:
             columns.append(name)
     return tuple(columns)

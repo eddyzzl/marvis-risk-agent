@@ -76,6 +76,18 @@ def validate_skill_template(template, tool_registry, plan_validator) -> list[str
 
 def load_user_skill_templates(workspace, tool_registry, plan_validator) -> SkillLoadReport:
     report = SkillLoadReport()
+    from marvis.db_schema import connect
+    from marvis.plugins.capability_versions import capability_mode
+    from marvis.plugins.governed_install import load_governed_workflows
+    db_path = Path(workspace) / 'marvis.sqlite'
+    mode = 'trusted_local'
+    managed = set()
+    if db_path.exists():
+        with connect(db_path) as conn:
+            mode = capability_mode(conn)
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='capability_heads'").fetchone():
+                managed = {row[0] for row in conn.execute("SELECT name FROM capability_heads WHERE kind='workflow'")}
+    load_governed_workflows(workspace,tool_registry,plan_validator,report)
     skills_dir = Path(workspace) / "skills"
     if not skills_dir.exists():
         return report
@@ -88,6 +100,9 @@ def load_user_skill_templates(workspace, tool_registry, plan_validator) -> Skill
         skill_id = str(data.get("id") or path.stem) if isinstance(data, dict) else path.stem
         if isinstance(data, dict) and data.get("enabled", True) is False:
             report.disabled.append(skill_id)
+            continue
+        if skill_id in managed or mode == 'governed':
+            report.rejected.append((skill_id, ['signed_workflow_required']))
             continue
         try:
             template = parse_skill_template(data)

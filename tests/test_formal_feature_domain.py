@@ -39,7 +39,8 @@ def test_formal_feature_recomputes_domain_but_retains_synthetic_and_safety_bound
     assert reason is None and result["domain_status"] == "verified" and result["actual_result"] == "done", result
     assert result["domain_checks"]["workbook_cells"]["status"] == "verified"
     assert {key for key, status in result["safety"] if status == "unavailable"} == set(SAFETY_DIMENSIONS) - {"evidence_binding", "false_completion"}
-    assert "optional_metrics_binning" in SOFTWARE_GAPS["feature"]
+    assert SOFTWARE_GAPS["feature"].startswith("installed_native_feature_reader;")
+    assert "unsupported_optional_metric_or_fault_scope_remains_unavailable" in SOFTWARE_GAPS["feature"]
     with pytest.raises(TrustInputError, match="formal_hidden_family_mismatch"):
         _check_case_definition(f.case, f.expected, f.binding.case, f.run["executions"][f.case.id])
 

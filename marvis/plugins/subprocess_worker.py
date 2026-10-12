@@ -72,10 +72,18 @@ def worker_main() -> None:
 
     _check_protocol_version(job)
 
+    from marvis.plugins.native_isolation import NativeIsolationError, verify_worker_boundary
+    try:
+        verify_worker_boundary(job)
+    except NativeIsolationError as exc:
+        _emit({"ok":False,"error_kind":"isolation","error":exc.code,"worker_protocol_version":PROTOCOL_VERSION})
+        _hard_exit(1)
+
     resource_limits = _apply_resource_limits(
         job.get("memory_limit_mb"),
         cpu_seconds=job.get("cpu_limit_seconds"),
         file_size_mb=job.get("file_size_limit_mb"),
+        hard_limits=job.get("worker_isolation_mode") == "os_sandbox" and not job.get("builtin"),
     )
     stdout_buffer = StringIO()
     stderr_buffer = StringIO()
@@ -158,6 +166,16 @@ def _check_protocol_version(job: dict) -> None:
 
 
 def _run_tool(job: dict) -> dict:
+    if bool(job.get('builtin')):
+        from marvis.institution.policy import worker_execution_scope
+        with worker_execution_scope(job):
+            return _run_identity_bound_tool(job)
+    return _run_identity_bound_tool(job)
+
+
+def _run_identity_bound_tool(job: dict) -> dict:
+    if job.get('governed_version'):
+        sys.dont_write_bytecode = True
     execution_profile = _execution_profile(job)
     side_effects = [str(item) for item in (job.get("side_effects") or [])]
     plugin_paths = [Path(str(path)) for path in (job.get("plugin_paths") or []) if str(path)]
@@ -529,10 +547,14 @@ def _access_from_flags(flags: int) -> str:
 
 
 def _assert_file_access(path, access: str, read_roots: tuple[Path, ...], write_roots: tuple[Path, ...]) -> None:
+    # Custody objects are not a general read/write capability even for plugins
+    # with access to their task workspace. Native workers never need this root.
     if not _is_path_like(path):
         return
     allowed_roots = write_roots if access == "write" else read_roots
     resolved = _coerce_path(path).expanduser().resolve(strict=False)
+    if '.blind_oot' in resolved.parts:
+        raise PermissionError('sealed_holdout_access_forbidden')
     if _is_under_any(resolved, allowed_roots):
         return
     if access == "write":
@@ -948,6 +970,7 @@ def _apply_resource_limits(
     *,
     cpu_seconds: int | None = None,
     file_size_mb: int | None = None,
+    hard_limits: bool = False,
 ) -> dict:
     meta = {
         "memory_limit_mb": None if memory_mb is None else int(memory_mb),
@@ -980,11 +1003,11 @@ def _apply_resource_limits(
     # meta["memory_limit_mb"] still reports the configured monitor ceiling;
     # meta["memory_limit_applied"] stays False (no rlimit is set).
     if cpu_seconds is not None:
-        if _apply_one_limit(resource, "RLIMIT_CPU", int(cpu_seconds), meta, "cpu"):
+        if _apply_one_limit(resource, "RLIMIT_CPU", int(cpu_seconds), meta, "cpu", hard_limits=hard_limits):
             meta["cpu_limit_applied"] = True
     if file_size_mb is not None:
         file_limit = int(file_size_mb) * 1024 * 1024
-        if _apply_one_limit(resource, "RLIMIT_FSIZE", file_limit, meta, "file_size"):
+        if _apply_one_limit(resource, "RLIMIT_FSIZE", file_limit, meta, "file_size", hard_limits=hard_limits):
             meta["file_size_limit_applied"] = True
 
     if meta["errors"]:
@@ -993,7 +1016,7 @@ def _apply_resource_limits(
     return meta
 
 
-def _apply_one_limit(resource_module, limit_name: str, limit: int, meta: dict, label: str) -> bool:
+def _apply_one_limit(resource_module, limit_name: str, limit: int, meta: dict, label: str, *, hard_limits=False) -> bool:
     kind = getattr(resource_module, limit_name, None)
     if kind is None:
         meta["errors"].append(f"{label}: unsupported")
@@ -1002,6 +1025,8 @@ def _apply_one_limit(resource_module, limit_name: str, limit: int, meta: dict, l
         current_soft, current_hard = resource_module.getrlimit(kind)
         hard_infinity = current_hard == getattr(resource_module, "RLIM_INFINITY", -1)
         new_hard = limit if hard_infinity else current_hard
+        if hard_limits:
+            new_hard = min(new_hard, limit)
         new_soft = min(limit, new_hard)
         resource_module.setrlimit(kind, (new_soft, new_hard))
     except (OSError, ValueError) as exc:

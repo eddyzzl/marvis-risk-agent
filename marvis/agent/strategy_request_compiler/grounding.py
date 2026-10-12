@@ -7,8 +7,13 @@ from collections.abc import Sequence
 
 
 def _utterance_contains_token(utterance: str, token: str) -> bool:
+    from marvis.data.field_aliases import explicit_alias_span
     pattern = rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])"
-    return re.search(pattern, utterance) is not None
+    if re.search(pattern, utterance) is not None:
+        return True
+    return any(explicit_alias_span(utterance, match.start(), match.end())
+               for alias in getattr(token, "business_aliases", ())
+               for match in re.finditer(rf"(?<![A-Za-z0-9_]){re.escape(alias)}(?![A-Za-z0-9_])", utterance))
 
 
 def _ratio_token_value(value: str) -> float:
@@ -147,21 +152,15 @@ def _automatic_tree_column_mention_resolution(
     """Resolve contained names and fail closed on genuinely ambiguous overlaps."""
 
     candidates: list[tuple[int, int, str, int, bool]] = []
+    from marvis.data.field_aliases import explicit_alias_span
     for order, column in enumerate(whitelist):
-        pattern = re.compile(
-            rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])",
-            re.IGNORECASE,
-        )
-        candidates.extend(
-            (
-                match.start(),
-                match.end(),
-                column,
-                order,
-                match.group(0) == column,
+        for label in (column, *getattr(column, "business_aliases", ())):
+            pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(label)}(?![A-Za-z0-9_])", re.IGNORECASE)
+            candidates.extend(
+                (match.start(), match.end(), column, order, match.group(0) == label)
+                for match in pattern.finditer(utterance)
+                if label == column or explicit_alias_span(utterance, match.start(), match.end())
             )
-            for match in pattern.finditer(utterance)
-        )
 
     components: list[list[tuple[int, int, str, int, bool]]] = []
     component_end = -1

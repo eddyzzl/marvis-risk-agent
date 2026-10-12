@@ -8,7 +8,7 @@ from pathlib import Path
 from marvis.db_schema import connect
 
 
-OPERATIONS_SCHEMA_VERSION = 2
+OPERATIONS_SCHEMA_VERSION = 3
 
 
 class OperationsSchemaVersionError(RuntimeError):
@@ -246,6 +246,8 @@ def install_operations_schema(db_path: Path) -> None:
                 f"{OPERATIONS_SCHEMA_VERSION}"
             )
         conn.executescript(_OPERATIONS_SCHEMA)
+        from marvis.operations.extension_schema import create_operations_extensions_schema
+        create_operations_extensions_schema(conn)
         conn.execute(
             """
             INSERT INTO operations_schema_meta(singleton_id, schema_version, installed_at)

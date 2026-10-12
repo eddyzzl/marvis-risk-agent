@@ -10,6 +10,7 @@ from pathlib import Path
 from marvis.agent.gates.contracts import EvidenceEnvelope
 from marvis.canonical_results import CANONICAL_RESULT_TOOLS
 from marvis.db_schema import connect
+from marvis.institution.policy import guard_repository as _guard_repository
 from marvis.orchestrator.contracts import (
     AgentStatus,
     Plan,
@@ -34,6 +35,7 @@ from marvis.orchestrator.harness_state import assert_plan_transition
 from marvis.plugins.errors import ManifestError
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.invocation import load_invocation_contract, retry_safe_run
+from marvis.strategy_workbench.control import certified_unpublished_run
 from marvis.redaction import redact_value
 from marvis.repositories.audit import _list_audit_rows, _write_audit_row
 from marvis.repositories.datasets import DatasetRepository
@@ -87,7 +89,7 @@ def _unreconciled_step_ids(conn: sqlite3.Connection, step_ids) -> list[str]:
         or (row["run_status"] in {"failed", "interrupted", "running"} and not retry_safe_run({
             "invocation_contract": load_invocation_contract(row["invocation_contract_json"]),
             "dispatch_started_at": row["dispatch_started_at"],
-        }))) and not _run_fenced_not_applied(conn, row["run_id"])
+        }) and not certified_unpublished_run(conn, row["run_id"]))) and not _run_fenced_not_applied(conn, row["run_id"])
         or _workflow_completion_pending(conn, row["plan_id"], _load_json_array(row["loop_events_json"]))
     ]
 
@@ -125,6 +127,7 @@ def _normalized_workflow_status(
     return normalized
 
 
+@_guard_repository
 class PlanRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -150,6 +153,13 @@ class PlanRepository:
         created_at = payload.get("created_at") or now
         updated_at = payload.get("updated_at") or now
         with connect(self.db_path) as conn:
+            from marvis.plugins.capability_versions import pin_step_payload
+            from marvis.plugins.governed_install import bind_workflow_plan
+            conn.execute('BEGIN IMMEDIATE')
+            for original, serialized in zip(plan.steps, payload['steps'], strict=True):
+                pin_step_payload(conn,serialized)
+                original.tool_ref = ToolRef(**serialized['tool_ref'])
+                original.granted_tools = [ToolRef(**ref) for ref in serialized['granted_tools']]
             conn.execute(
                 """
                 INSERT INTO plans(
@@ -178,6 +188,9 @@ class PlanRepository:
             )
             for step in payload["steps"]:
                 self._insert_step(conn, step)
+            from marvis.institution.policy import bind_new_plan
+            bind_new_plan(conn, plan.id, plan.task_id)
+            bind_workflow_plan(conn,plan,self.db_path)
             _write_audit_row(
                 conn,
                 kind="plan.create",
@@ -192,6 +205,8 @@ class PlanRepository:
 
     def load_plan(self, plan_id: str) -> Plan:
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn, 'plan', plan_id)
             plan_row = conn.execute(
                 """
                 SELECT id, task_id, goal, source, template_id, autonomy_level,
@@ -327,6 +342,12 @@ class PlanRepository:
             for row in rows
         }
 
+    def startup_reclaim_plan_ids(self) -> list[str]:
+        """Host maintenance projection: IDs of interrupted status rows only."""
+        with connect(self.db_path) as conn:
+            return [row['id'] for row in conn.execute(
+                "SELECT id FROM plans WHERE status IN ('running','review') ORDER BY created_at,id")]
+
     def list_plans_by_status(self, status: PlanStatus) -> list[Plan]:
         """Plans currently in ``status`` across every task, oldest first. Used
         by the startup reclaim pass (REL-4) to find RUNNING V2 plans left
@@ -352,7 +373,18 @@ class PlanRepository:
             )
         )["steps"][0]
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn,'step',step.id,'write')
             plan_state_on_commit(conn, self.db_path, step_id=step.id)
+            from marvis.plugins.capability_versions import governed_head, pin_step_payload
+            from marvis.plugins.publisher_trust import require
+            previous = conn.execute('SELECT tool_plugin,tool_name,tool_version FROM plan_steps WHERE id=?', (step.id,)).fetchone()
+            if previous and governed_head(conn,'plugin',previous['tool_plugin']):
+                require((payload['tool_ref']['plugin'],payload['tool_ref']['tool'],payload['tool_ref']['version']) ==
+                        (previous['tool_plugin'],previous['tool_name'],previous['tool_version']),
+                        'active_plan_tool_version_frozen')
+            pin_step_payload(conn,payload)
+            step.tool_ref = ToolRef(**payload['tool_ref'])
             cursor = conn.execute(
                 """
                 UPDATE plan_steps
@@ -780,6 +812,7 @@ class PlanRepository:
         *,
         inputs: dict | None = None,
         preserve_target_confirmation: bool = False,
+        before_reset: Callable[[sqlite3.Connection], None] | None = None,
     ) -> list[str]:
         """Explicitly retry an interrupted step and every downstream dependent step.
 
@@ -847,7 +880,20 @@ class PlanRepository:
             ordered_reset_ids = [
                 str(row["id"]) for row in step_rows if str(row["id"]) in reset_ids
             ]
+            for reset_id in ordered_reset_ids:
+                search = conn.execute(
+                    "SELECT state FROM strategy_workbench_searches WHERE step_id=?",
+                    (reset_id,),
+                ).fetchone()
+                if search is not None and search["state"] == "cancelled":
+                    raise ConflictError("cancelled native search requires a new workflow")
+                if search is not None and search["state"] == "paused" and (
+                    reset_id != step_id or before_reset is None
+                ):
+                    raise ConflictError("paused native search requires workbench checkpoint resume")
             _assert_no_unreconciled_step_effects(conn, ordered_reset_ids, plan_id=plan_id)
+            if before_reset is not None:
+                before_reset(conn)
             for reset_id in ordered_reset_ids:
                 reset_confirmation = int(
                     reset_id == step_id and confirmation_preserved
@@ -1224,6 +1270,8 @@ class PlanRepository:
                 "SELECT invocation_contract_json, dispatch_started_at FROM plan_step_runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
+            if certified_unpublished_run(conn, run_id):
+                return True
         if row is None:
             return False
         return retry_safe_run({
@@ -1370,6 +1418,8 @@ class PlanRepository:
             ).fetchone()
             if row is not None and _run_fenced_not_applied(conn, row["id"]):
                 return "execution_not_applied"
+            if row is not None and certified_unpublished_run(conn, row["id"]):
+                return str(row["error_kind"] or "search_paused")
         if row is None or row["status"] not in {"failed", "interrupted"}:
             return None
         if not retry_safe_run({
@@ -2069,9 +2119,12 @@ class PlanRepository:
         summary_id = summary_ref.split(":", 1)[1] if summary_ref.startswith("artifact:") else summary_ref
         with connect(self.db_path) as conn:
             row = conn.execute(
-                "SELECT summary_json FROM plan_summaries WHERE id = ?",
+                "SELECT plan_id,summary_json FROM plan_summaries WHERE id = ?",
                 (summary_id,),
             ).fetchone()
+            if row:
+                from marvis.institution.policy import authorize_on_connection
+                authorize_on_connection(conn,'plan',row['plan_id'])
         if row is None:
             raise KeyError(summary_ref)
         value = json.loads(row["summary_json"])
@@ -2167,6 +2220,8 @@ class PlanRepository:
         return _list_audit_rows(self.db_path, kind=kind, limit=limit, offset=offset)
 
     def _insert_step(self, conn: sqlite3.Connection, step: dict) -> None:
+        from marvis.plugins.capability_versions import pin_step_payload
+        pin_step_payload(conn,step)
         conn.execute(
             """
             INSERT INTO plan_steps(
@@ -2182,6 +2237,8 @@ class PlanRepository:
 
 
 def _upsert_sub_agent_row(conn: sqlite3.Connection, sub: SubAgent) -> None:
+    from marvis.institution.policy import authorize_on_connection
+    authorize_on_connection(conn,'task',sub.parent_task_id,'write')
     conn.execute(
         """
         INSERT INTO sub_agents(

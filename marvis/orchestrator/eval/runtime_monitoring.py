@@ -27,6 +27,45 @@ def monitoring_materials(case):
     return {a.monitoring_request.material_path for a in case.actions if a.monitoring_request is not None}
 
 
+def _selected_monitoring_experiment(journey, experiments):
+    """Use the native selection output when a selected parent has a refit child.
+
+    Historical selected status is retained evidence. It is not the final model
+    pointer, and selecting the last row would silently depend on query order.
+    """
+    from .runtime_runner import RuntimeJourneyError
+    import re
+
+    selected = [e for e in experiments if e["status"] in {"selected", "handed_off", "validated"} and e["artifact_id"]]
+    if len(selected) == 1 and selected[0]["task_id"] == journey.task_id:
+        return selected[0]
+    choices = []
+    for plan in journey.plans():
+        if plan.get("task_id") != journey.task_id or plan.get("status") != "done":
+            continue
+        for step in plan.get("steps", []):
+            tool = step.get("tool_ref")
+            if isinstance(tool, dict):
+                tool = f"{tool.get('plugin')}.{tool.get('tool')}"
+            # Plan API serializes its ToolRef separately from producer evidence.
+            if tool is None:
+                tool = f"{step.get('tool_plugin')}.{step.get('tool_name')}"
+            if tool != "modeling.select_experiment" or step.get("status") != "done":
+                continue
+            match = re.fullmatch(r"metrics:" + re.escape(step["id"]) + r":v([1-9][0-9]*)", step.get("output_ref") or "")
+            if match is None:
+                raise RuntimeJourneyError("monitoring_selection_output_not_version_bound")
+            output = journey.json_request("GET", f"/api/step-outputs/{step['id']}:v{match[1]}", label="read_monitoring_final_selection")
+            exact = [e for e in selected if e["id"] == output.get("selected_experiment_id")
+                     and e["artifact_id"] == output.get("artifact_id") and e["task_id"] == journey.task_id]
+            if len(exact) != 1:
+                raise RuntimeJourneyError("monitoring_final_selection_binding_mismatch")
+            choices.append(exact[0])
+    if len(choices) != 1:
+        raise RuntimeJourneyError("monitoring_selected_experiment_not_unique")
+    return choices[0]
+
+
 def start_monitoring(journey, action, dataset_root):
     from marvis.api_schemas import DataWorkspaceSnapshotResponse, DataWorkspaceUpdateRequest
     from marvis.agent.monitoring_setup import ModelMonitoringSetupRequest
@@ -57,9 +96,7 @@ def start_monitoring(journey, action, dataset_root):
     experiments = journey.json_request(
         "GET", f"/api/tasks/{journey.task_id}/experiments", label="read_monitoring_experiments",
     )["experiments"]
-    selected = [e for e in experiments if e["status"] in {"selected", "handed_off", "validated"} and e["artifact_id"]]
-    if len(selected) != 1 or selected[0]["task_id"] != journey.task_id:
-        raise RuntimeJourneyError("monitoring_selected_experiment_not_unique")
+    selected = _selected_monitoring_experiment(journey, experiments)
     route = f"/api/tasks/{journey.task_id}/data-workspace"
     workspace = DataWorkspaceSnapshotResponse.model_validate(
         journey.json_request("GET", route, label="read_monitoring_workspace"))
@@ -73,7 +110,7 @@ def start_monitoring(journey, action, dataset_root):
         headers={"If-Match": str(workspace.revision)}, json=reset.model_dump(),
     ))
     request = ModelMonitoringSetupRequest(
-        experiment_id=selected[0]["id"], dataset_id=sample["id"],
+        experiment_id=selected["id"], dataset_id=sample["id"],
         expected_content_hash=sample["content_hash"], workspace_revision=workspace.revision,
         analysis_generation=workspace.analysis_generation, target_col=action.monitoring_request.target_col,
     )
@@ -87,7 +124,7 @@ def start_monitoring(journey, action, dataset_root):
     else:
         journey.json_request(
             "POST", f"/api/tasks/{journey.task_id}/plans", label="create_manual_monitoring_workflow",
-            json={"goal": "模型监控", "slots": {"experiment_id": selected[0]["id"],
+            json={"goal": "模型监控", "slots": {"experiment_id": selected["id"],
                   "dataset_id": sample["id"], "target_col": request.target_col}},
         )
     plans = journey.wait_idle()

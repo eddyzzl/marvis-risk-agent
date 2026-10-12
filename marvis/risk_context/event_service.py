@@ -11,6 +11,7 @@ from marvis.risk_context.event_contracts import (
     EventError,
     EventFeatureContract,
     EventImport,
+    EventSourceGrant,
     Hash,
     Id,
     at,
@@ -18,6 +19,7 @@ from marvis.risk_context.event_contracts import (
     content_hash,
 )
 from marvis.risk_context.event_repository import EventRepository
+from marvis.risk_context.source_repository import require_actor
 
 KIND = "risk_event_features"
 ORIGIN = "risk_context.replay_events.v1"
@@ -71,6 +73,45 @@ class EventService:
         if body["task_id"] != task_id or request.request_id != request_id:
             raise EventError("event_request_binding_failed")
         return body, request
+
+    def discovery(self, task_id, actor_id):
+        """Authenticate metadata without disclosing another principal's claims."""
+        sources, grants, requests = [], [], []
+        with connect(self.repo.db_path) as conn:
+            role = require_actor(conn, actor_id, {"maker", "checker", "admin"})
+            if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+                raise EventError("event_task_not_found", 404)
+            source_ids = set()
+            readable = {}
+            rows = conn.execute(
+                "SELECT * FROM event_grants WHERE task_id=? ORDER BY created_at,id",
+                (task_id,),
+            ).fetchall()
+            for row in rows:
+                body = self.repo._body(row)
+                grant = EventSourceGrant.model_validate(body["grant"])
+                if role != "admin" and grant.grantee_id != actor_id:
+                    continue
+                if grant.task_id != task_id or grant.grant_id != row["id"] or grant.source_id != row["source_id"]:
+                    raise EventError("event_grant_binding_failed")
+                active = row["revoked_at"] is None and at(grant.starts_at) <= at(datetime.now(UTC).isoformat()) < at(grant.expires_at)
+                grants.append({**grant.model_dump(), "state": "revoked" if row["revoked_at"] else "active" if active else "not_current", "owned": grant.grantee_id == actor_id})
+                source_ids.add(grant.source_id)
+                if active and grant.grantee_id == actor_id and "read" in grant.permissions:
+                    readable[grant.source_id] = grant.grant_id
+            if role == "admin":
+                source_ids.update(row["id"] for row in conn.execute("SELECT id FROM event_sources WHERE task_id=?", (task_id,)))
+            for source_id in sorted(source_ids):
+                source = self.repo._source(conn, task_id, source_id)
+                sources.append({**source.model_dump(), "contract_hash": source.contract_hash})
+            for row in conn.execute("SELECT request_id FROM event_requests WHERE task_id=? ORDER BY request_id", (task_id,)):
+                body, request = self._intent(conn, task_id, row["request_id"])
+                grant_id = readable.get(request.contract.source_id)
+                if grant_id is None:
+                    continue
+                self._access(conn, body, request, actor_id, grant_id, "read")
+                requests.append({"request_id": request.request_id, "grant_id": grant_id, "proposal_hash": content_hash(body), "source_id": request.contract.source_id, "decision_at": request.contract.decision_at})
+        return {"sources": sources, "grants": grants, "requests": requests}
 
     def _access(self, conn, body, request, actor_id, grant_id, permission):
         source = self.repo._access(

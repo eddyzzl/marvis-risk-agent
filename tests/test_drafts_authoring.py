@@ -59,21 +59,12 @@ def _note() -> LearningNote:
     )
 
 
-def test_draft_script_creates_valid_draft_from_learning_note():
+def test_draft_script_refuses_saved_learning_prose_without_authoring_admission():
     llm = _FakeLLM(_valid_spec())
 
-    draft = draft_script("task-1", "build margin calculator", learning_note=_note(), llm_factory=lambda: llm)
-
-    assert isinstance(draft, DraftTool)
-    assert draft.id.startswith("draft-")
-    assert draft.task_id == "task-1"
-    assert draft.name == "calc_margin"
-    assert draft.source == "web_learning"
-    assert draft.learning_note_id == "note-1"
-    assert draft.status == "draft"
-    assert draft.input_schema["required"] == ["revenue", "cost"]
-    assert "Use revenue - cost." in llm.calls[0]["user_prompt"]
-    assert llm.calls[0]["response_format"] == {"type": "json_object"}
+    with pytest.raises(AuthoringError, match="准入凭据"):
+        draft_script("task-1", "build margin calculator", learning_note=_note(), llm_factory=lambda: llm)
+    assert llm.calls == []
 
 
 def test_draft_script_without_learning_note_is_llm_generated():

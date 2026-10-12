@@ -16,6 +16,8 @@ import re
 from types import MappingProxyType
 from typing import Any
 
+from marvis.data.field_directions import normalize_field_directions, field_directions_to_dict
+
 
 DATA_WORKSPACE_SCHEMA_VERSION = "data-workspace.v1"
 DATA_WORKSPACE_PAGES = (
@@ -49,7 +51,7 @@ DATA_FIELD_ROLES = (
 _PAGE_SET = frozenset(DATA_WORKSPACE_PAGES)
 _FIELD_ROLE_SET = frozenset(DATA_FIELD_ROLES)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_SEMANTIC_MAPPING_KEYS = frozenset({"target_col", "field_roles", "business_names"})
+_SEMANTIC_MAPPING_KEYS = frozenset({"target_col", "field_roles", "business_names", "risk_directions"})
 _DRAFT_KEYS = frozenset({
     "active_dataset_id",
     "active_dataset_content_hash",
@@ -76,6 +78,7 @@ class DataSemanticMapping:
     target_col: str | None = None
     field_roles: Mapping[str, str] = field(default_factory=dict)
     business_names: Mapping[str, str] = field(default_factory=dict)
+    risk_directions: Mapping = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         target_col = _optional_text(self.target_col, field_name="target_col")
@@ -103,6 +106,7 @@ class DataSemanticMapping:
             "business_names",
             MappingProxyType(business_names),
         )
+        object.__setattr__(self, "risk_directions", MappingProxyType(normalize_field_directions(self.risk_directions)))
 
 
 @dataclass(frozen=True)
@@ -188,11 +192,15 @@ class DataWorkspaceSnapshot:
 def data_semantic_mapping_to_dict(mapping: DataSemanticMapping) -> dict[str, Any]:
     if not isinstance(mapping, DataSemanticMapping):
         raise TypeError("mapping must be a DataSemanticMapping")
-    return {
+    result = {
         "target_col": mapping.target_col,
         "field_roles": dict(mapping.field_roles),
         "business_names": dict(mapping.business_names),
     }
+    # Empty declarations preserve every previously frozen mapping identity.
+    if mapping.risk_directions:
+        result["risk_directions"] = field_directions_to_dict(mapping.risk_directions)
+    return result
 
 
 def data_semantic_mapping_hash(mapping: DataSemanticMapping) -> str:
@@ -209,6 +217,8 @@ def data_semantic_mapping_hash(mapping: DataSemanticMapping) -> str:
 
 
 def data_semantic_mapping_from_dict(payload: object) -> DataSemanticMapping:
+    if isinstance(payload, dict) and "risk_directions" not in payload:
+        payload = {**payload, "risk_directions": {}}
     value = _exact_object(
         payload,
         expected_keys=_SEMANTIC_MAPPING_KEYS,
@@ -218,6 +228,7 @@ def data_semantic_mapping_from_dict(payload: object) -> DataSemanticMapping:
         target_col=value["target_col"],
         field_roles=value["field_roles"],
         business_names=value["business_names"],
+        risk_directions=value["risk_directions"],
     )
 
 

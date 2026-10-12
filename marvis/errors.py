@@ -35,7 +35,7 @@ def not_found(detail: str) -> HTTPException:
     return HTTPException(status_code=404, detail=detail)
 
 
-def conflict(detail: str) -> HTTPException:
+def conflict(detail: object) -> HTTPException:
     """409 -- request conflicts with current resource state. ``detail`` verbatim."""
     return HTTPException(status_code=409, detail=detail)
 
@@ -60,7 +60,7 @@ def forbidden(detail: object) -> HTTPException:
     return HTTPException(status_code=403, detail=detail)
 
 
-def bad_gateway(detail: str) -> HTTPException:
+def bad_gateway(detail: object) -> HTTPException:
     """502 -- an upstream dependency failed. ``detail`` is passed verbatim."""
     return HTTPException(status_code=502, detail=detail)
 
@@ -75,7 +75,7 @@ def precondition_required(detail: str) -> HTTPException:
     return HTTPException(status_code=428, detail=detail)
 
 
-def precondition_failed(detail: str) -> HTTPException:
+def precondition_failed(detail: object) -> HTTPException:
     """412 -- a request precondition did not match current state. ``detail`` verbatim."""
     return HTTPException(status_code=412, detail=detail)
 
@@ -83,6 +83,16 @@ def precondition_failed(detail: str) -> HTTPException:
 def not_implemented(detail: str) -> HTTPException:
     """501 -- the requested capability is not wired up yet. ``detail`` verbatim."""
     return HTTPException(status_code=501, detail=detail)
+
+
+def domain_error(status_code: int, detail: object) -> HTTPException:
+    """Preserve a trusted domain error's HTTP status and structured diagnostic.
+
+    Use fixed-status factories when the router owns the status. Domain adapters
+    use this factory when the domain already classifies the failure; it neither
+    interprets exception text nor changes the public response contract.
+    """
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 __all__ = [
@@ -98,4 +108,5 @@ __all__ = [
     "precondition_required",
     "precondition_failed",
     "not_implemented",
+    "domain_error",
 ]

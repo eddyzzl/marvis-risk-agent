@@ -324,9 +324,8 @@ def test_strategy_sample_binding_intent_persists_authenticated_workspace_without
         ]
         for request in decision_client.requests:
             assert _INTENT in request["allowed_intents"]
-            assert request["current_context"]["available_strategy_samples"] == [
-                "strategy_sample_v2.csv"
-            ]
+            assert request["current_context"]["available_strategy_sample_count"] == 1
+            assert "available_strategy_samples" not in request["current_context"]
             assert request["current_context"]["strategy_sample_target_candidate"] == (
                 "bad_flag"
             )
@@ -385,9 +384,8 @@ def test_strategy_sample_binding_accepts_unique_nested_relative_path(
             "nested/only.parquet"
         )
         for request in decision_client.requests:
-            assert request["current_context"]["available_strategy_samples"] == [
-                "nested/only.parquet"
-            ]
+            assert request["current_context"]["available_strategy_sample_count"] == 1
+            assert "available_strategy_samples" not in request["current_context"]
 
 
 @pytest.mark.parametrize("duplicate_basename", [False, True])

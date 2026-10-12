@@ -130,6 +130,9 @@ def _reconcile_validation_handoff_dirs(
 
 
 def _committed_validation_source_dirs(task_repo: TaskRepository) -> set[Path]:
+    projection = getattr(task_repo, 'committed_validation_source_directories', None)
+    if callable(projection):
+        return projection()
     result: set[Path] = set()
     for task in task_repo.list_tasks():
         if task.task_type != TASK_TYPE_VALIDATION:

@@ -20,6 +20,7 @@ import stat
 import tempfile
 
 from .runtime_contracts import digest
+from .runtime_native_json import ENCODING, encode_native
 
 
 class CustodyError(ValueError):
@@ -110,7 +111,14 @@ def _known_secrets(workspace: Path, supplied: tuple[str, ...]) -> tuple[bytes, .
             raise CustodyError("custody_model_settings_invalid") from None
     private = workspace / "source_private"
     if private.exists():
-        secrets.extend(_read_secret(p) for p in _files(private))
+        # This directory also holds local business response/wire originals.
+        # Only the adapter's credential carrier contains a secret; classifying
+        # a whole response as a credential incorrectly vetoes matching inputs.
+        for path in _files(private):
+            if re.fullmatch(r"credential-[0-9a-f]{64}", path.name):
+                secrets.append(_read_secret(path))
+            elif not re.fullmatch(r"(?:response-[0-9a-f]{64}\.json|wire-[0-9a-f]{64}\.bin)", path.name):
+                raise CustodyError("custody_secret_source_invalid")
     return tuple(set(s for s in secrets if s))
 
 
@@ -238,6 +246,7 @@ def capture_case(
     *, run_dir: Path, workspace: Path, dataset_root: Path, case,
     private: dict, bindings: dict, owned_processes_stopped: bool,
     forbidden_secrets: tuple[str, ...] = (),
+    before_dir: Path | None = None,
 ) -> dict:
     """Atomically publish originals. A failed capture publishes no case bundle."""
     if not owned_processes_stopped:
@@ -294,8 +303,20 @@ def capture_case(
                                      "archive_path": destination.relative_to(staged).as_posix(),
                                      "sha256": material.sha256, "role": material.role})
         _json_new(staged / "case.json", case.model_dump(), secrets)
-        _json_new(staged / "private.json", private, secrets)
+        _json_new(staged / "private.json", encode_native(private), secrets)
         _json_new(staged / "bindings.json", bindings, secrets)
+        if before_dir is not None:
+            before_dir = _private_dir(before_dir)
+            for source in _files(before_dir):
+                copy(source, staged / "safety" / "before" / source.relative_to(before_dir))
+            before_raw = (staged / "safety" / "before" / "manifest.json").read_bytes()
+            before = json.loads(before_raw)
+            if (before.get("schema") != "marvis.runtime-before-originals.v1"
+                    or before.get("case_sha256") != digest(case.model_dump())
+                    or before.get("phase") != "after_application_startup_before_first_case_http_action"
+                    or before.get("first_case_http_ordinal") != 0
+                    or before.get("files") != {"marvis.sqlite": _file_identity(staged / "safety" / "before" / "marvis.sqlite", secrets)}):
+                raise CustodyError("safety_before_originals_mismatch")
         if original_window != _workspace_window(workspace):
             raise CustodyError("custody_workspace_changed_during_capture")
         inventory = {}
@@ -321,9 +342,13 @@ def capture_case(
             "omitted_workspace_entries": sorted(p.name for p in workspace.iterdir()
                 if p.name not in (*_WORKSPACE_DIRS, "marvis.sqlite", "marvis.sqlite-wal", "marvis.sqlite-shm")),
             "native_key_dependent_reverification": "unavailable_original_key_not_exported",
+            "native_private_encoding": ENCODING,
+            "nonfinite_values": "lossless_diagnostic_values_not_valid_metrics",
             "absolute_native_paths": "preserved_no_rebinding_or_resigning",
             "acceptance_claim": "not_established",
         }
+        if before_dir is not None:
+            manifest["safety_before"] = {"manifest_sha256": digest(before_raw), "scope": "original_future_runtime_before_only"}
         _json_new(staged / "manifest.json", manifest, secrets)
         manifest_identity = _file_identity(staged / "manifest.json", secrets)
         if manifest_identity["size_bytes"] > MAX_MANIFEST_BYTES:
@@ -404,3 +429,39 @@ def verify_case_archive(path: Path, *, expected_manifest_sha256: str) -> dict:
     return {"archived_bytes_match_manifest": True, "case_id": manifest["case_id"],
             "acceptance_claim": "not_established",
             "native_key_dependent_reverification": "unavailable_original_key_not_exported"}
+
+
+def read_private_receipt(path: Path, *, expected_manifest_sha256: str) -> dict:
+    """Restore a private observation only after authenticating its archived bytes.
+
+    The returned diagnostic values do not establish metric validity or success.
+    Recheck the bytes actually decoded, including a concurrent archive change.
+    """
+    from marvis.orchestrator.eval.runtime_native_json import ENCODING, decode_native
+
+    verify_case_archive(path, expected_manifest_sha256=expected_manifest_sha256)
+    manifest_raw = (path / "manifest.json").read_bytes()
+    if digest(manifest_raw) != expected_manifest_sha256:
+        raise CustodyError("custody_manifest_changed")
+    manifest = json.loads(manifest_raw)
+    entry = manifest["files"].get("private.json")
+    receipt_path = path / "private.json"
+    if not isinstance(entry, dict) or receipt_path.is_symlink():
+        raise CustodyError("custody_private_receipt_invalid")
+    raw = receipt_path.read_bytes()
+    if len(raw) != entry["size_bytes"] or digest(raw) != entry["sha256"]:
+        raise CustodyError("custody_originals_changed")
+    encoding = manifest.get("native_private_encoding")
+    if encoding not in {None, ENCODING}:
+        raise CustodyError("custody_private_encoding_unsupported")
+    try:
+        def reject_constant(_value):
+            raise ValueError("nonstandard JSON constant")
+        value = json.loads(raw, parse_constant=reject_constant)
+        if encoding == ENCODING:
+            value = decode_native(value)
+        if not isinstance(value, dict):
+            raise ValueError("private receipt must be a mapping")
+    except (TypeError, ValueError) as exc:
+        raise CustodyError("custody_private_receipt_invalid") from exc
+    return value

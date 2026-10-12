@@ -285,23 +285,35 @@ def recommend_feature_crosses(
     llm_factory,
     max_candidates: int = 30,
 ) -> list[CrossRecommendation]:
+    from marvis.llm_outbound import OutboundContextError, application_schema
+
     try:
+        prompt = build_cross_prompt(feature_dictionary, existing_metrics, max_candidates)
+        schema = application_schema("feature_cross_recommendations", features=list(feature_dictionary), max_candidates=max_candidates)
         raw = llm_factory().complete(
             system_prompt=CROSS_SYS,
-            user_prompt=build_cross_prompt(feature_dictionary, existing_metrics, max_candidates),
+            user_prompt=prompt,
+            json_schema=schema,
             response_format={"type": "json_object"},
             stream=False,
+            caller="feature_cross_recommendations", prompt_name=_CROSS_SYS_SPEC.name, prompt_version=_CROSS_SYS_SPEC.version,
         )
         recs = _parse_recommendations(str(raw))
-    except Exception:
-        return []
+    except OutboundContextError as exc:
+        raise FeatureError(str(exc)) from exc
+    except Exception as exc:
+        raise FeatureError("特征交叉建议未完成，请核对模型配置或稍后重试；未执行任何交叉计算。") from exc
     valid_features = set(feature_dictionary)
     valid = [
         rec
         for rec in recs
         if rec.col_a in valid_features and rec.col_b in valid_features and rec.col_a != rec.col_b
     ]
-    return valid[:max_candidates]
+    if recs and not valid:
+        raise FeatureError("特征交叉建议没有符合当前字段边界的候选，未标记建议完成；请核对字段后重试。")
+    if len(valid) > max_candidates:
+        raise FeatureError("特征交叉建议超过当前候选上限，未截断或执行候选。")
+    return valid
 
 
 def evaluate_crosses(
@@ -333,37 +345,21 @@ def evaluate_crosses(
 
 
 def build_cross_prompt(feature_dictionary: dict, existing_metrics: dict, max_candidates: int) -> str:
-    return json.dumps(
-        {
-            "instruction": (
-                "Recommend feature crosses only. Do not calculate or output new IV, KS, "
-                "AUC, PSI, lift, or any derived metric."
-            ),
-            "max_candidates": int(max_candidates),
-            "feature_dictionary": feature_dictionary,
-            "existing_metrics": existing_metrics,
-            "output_schema": {
-                "recommendations": [
-                    {
-                        "col_a": "existing feature name",
-                        "col_b": "existing feature name",
-                        "ops": ["ratio"],
-                        "rationale": "business reason only",
-                        "confidence": "high|medium|low",
-                    }
-                ]
-            },
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    from marvis.llm_outbound_analysis import feature_cross_prompt
+
+    return feature_cross_prompt(feature_dictionary, existing_metrics, max_candidates)
 
 
 def _parse_recommendations(raw: str) -> list[CrossRecommendation]:
     data = json.loads(raw)
-    items = data if isinstance(data, list) else data.get("recommendations") or data.get("candidates") or []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict) and "recommendations" in data:
+        items = data["recommendations"]
+    else:
+        raise FeatureError("特征交叉返回缺少候选列表，未标记建议完成。")
     if not isinstance(items, list):
-        return []
+        raise FeatureError("特征交叉候选列表格式无效，未标记建议完成。")
     recs = []
     for item in items:
         if not isinstance(item, dict):
@@ -381,6 +377,8 @@ def _parse_recommendations(raw: str) -> list[CrossRecommendation]:
                 confidence=confidence if confidence in CONFIDENCE_LEVELS else "low",
             )
         )
+    if items and not recs:
+        raise FeatureError("特征交叉建议没有可用的运算候选，未标记建议完成。")
     return recs
 
 

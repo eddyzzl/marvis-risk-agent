@@ -9,6 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from marvis.llm_outbound import outbound_prompt
+from marvis.llm_prompts import PLAN_SYS
 from marvis.orchestrator.eval.runtime_contracts import RuntimeBudget, RuntimeCase, digest
 from marvis.orchestrator.eval.runtime_runner import _model_gateway, RuntimeJourneyError, run_runtime_suite
 from marvis.orchestrator.eval.runtime_scoring import usage_summary
@@ -16,11 +18,17 @@ from test_runtime_agent_benchmark import fixture_model
 
 
 def request(profile, **overrides):
+    # Exercise gateway admission with the same approved context that the
+    # application client sends; raw fixture prose has no outbound authority.
+    context = outbound_prompt(
+        {"metrics": {"test_auc": 0.75}, "sample_values": ["PRIVATE_DATA_SENTINEL"]}
+    )
     return httpx.post(
         profile["api_base_url"] + "/chat/completions",
         headers={"Authorization": "Bearer " + profile["api_key"]},
         json={"model": profile["model_name"], "max_tokens": 64,
-              "messages": [{"role": "user", "content": "synthetic"}], **overrides}, timeout=5,
+              "messages": [{"role": "system", "content": PLAN_SYS.text},
+                           {"role": "user", "content": context}], **overrides}, timeout=5,
     )
 
 
@@ -111,7 +119,9 @@ def test_unknown_transport_usage_cannot_free_retry_capacity(tmp_path):
                             deadline=time.monotonic() + 10,
                             budget=RuntimeBudget(max_total_tokens=4160)) as profile:
             with pytest.raises(LLMClientError):
-                OpenAICompatibleLLMClient(profile).complete(system_prompt="test", user_prompt="synthetic", stream=False)
+                OpenAICompatibleLLMClient(profile).complete(
+                    system_prompt="test", user_prompt=outbound_prompt({}), stream=False,
+                )
     assert len(calls) == 1
     summary = usage_summary(events(path), model_name="fixture", price_bytes=None)
     assert summary["usage_status"] == "unknown"

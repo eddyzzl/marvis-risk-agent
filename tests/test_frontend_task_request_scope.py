@@ -36,6 +36,7 @@ function api(path, options = {}) {
 IDENTITY = (
     "function setSelectedTask(", "function workbenchTask(",
     "function workbenchTaskId(", "function isWorkbenchTaskId(",
+    "function blindCustodyOnlyTask(",
 )
 
 

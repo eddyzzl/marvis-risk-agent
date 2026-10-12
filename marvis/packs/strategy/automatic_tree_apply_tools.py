@@ -551,6 +551,7 @@ def _derived_semantic_mapping(
         target_col=mapping.target_col,
         field_roles=roles,
         business_names=dict(mapping.business_names),
+        risk_directions=dict(mapping.risk_directions),
     )
 
 
@@ -832,6 +833,7 @@ def _require_exact_activated_workspace(
         target_col=snapshot.semantic_mapping.target_col,
         field_roles=roles,
         business_names=dict(snapshot.semantic_mapping.business_names),
+        risk_directions=dict(snapshot.semantic_mapping.risk_directions),
     )
     if not (
         snapshot.revision == normalized["workspace_revision"] + 1

@@ -259,8 +259,11 @@ def test_final_narrative_receives_bounded_authoritative_adopted_verdict(tmp_path
     prompt = json.loads(llm.calls[-1]["user_prompt"])
     bound = prompt["business_acceptance"]
     assert bound["objective_hash"] == review.business_acceptance["objective_hash"]
-    assert bound["target"] == review.business_acceptance["target"]
-    assert bound["target"]["id"] == "model-b"
+    from marvis.orchestrator.evidence import payload_hash
+    assert bound["target"]["binding_hash"] == payload_hash(review.business_acceptance["target"])
+    assert bound["target"]["role"] == "adopted_target"
+    assert review.business_acceptance["target"]["id"] == "model-b"
+    assert bound["execution_binding"] == review.business_acceptance["execution_binding"]
     assert (
         bound["status"]
         == review.business_acceptance["status"]

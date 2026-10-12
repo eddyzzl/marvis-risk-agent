@@ -8,7 +8,6 @@ fallback so a workflow never becomes silent or misleading.
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from typing import Any
@@ -20,6 +19,7 @@ from marvis.domain import (
     TASK_TYPE_MODELING,
 )
 from marvis.llm_prompts import WORKFLOW_INSIGHT_SYS
+from marvis.llm_outbound_workflows import workflow_insight_prompt
 
 
 _ROW_COUNTS = re.compile(r"锚行\s*(\d+)\s*→\s*拼接后\s*(\d+)\s*行")
@@ -87,6 +87,7 @@ def _join_context(stage: str, tables: list[dict], meta: dict, content: str) -> d
     inflation_idx = _column_index(columns, ("膨胀", "减后膨胀"))
     facts: list[str] = []
     risks: list[str] = []
+    measured = {"join_tables": []}
     rows = [list(row) for row in (table.get("rows") or []) if isinstance(row, (list, tuple))]
     for row in rows:
         name = _cell(row, name_idx) or "未知特征表"
@@ -102,11 +103,22 @@ def _join_context(stage: str, tables: list[dict], meta: dict, content: str) -> d
         if unique in {"否", "false", "0", "✗"}:
             risks.append(f"{name} 的拼接键不唯一，存在一对多或重复记录风险。")
         inflation = _cell(row, inflation_idx).lower()
+        measured["join_tables"].append({
+            "table_index": len(measured["join_tables"]) + 1,
+            "match_rate": rate, "missing_rate": missing,
+            **({"key_unique": unique in {"是", "true", "1", "✓"}} if unique in {
+                "是", "true", "1", "✓", "否", "false", "0", "✗",
+            } else {}),
+            **({"row_inflation": inflation in {"是", "true", "1", "⚠是", "⚠️是"}} if inflation in {
+                "是", "true", "1", "⚠是", "⚠️是", "否", "false", "0",
+            } else {}),
+        })
         if inflation in {"是", "true", "1", "⚠是", "⚠️是"}:
             risks.append(f"{name} 检测到行数膨胀，应检查去重策略和键唯一性。")
     count_match = _ROW_COUNTS.search(str(content or ""))
     if count_match:
         anchor_rows, joined_rows = (int(count_match.group(1)), int(count_match.group(2)))
+        measured.update(anchor_rows=anchor_rows, joined_rows=joined_rows)
         facts.append(f"锚表 {anchor_rows} 行，拼接结果 {joined_rows} 行。")
         if joined_rows != anchor_rows:
             risks.append(f"拼接前后行数由 {anchor_rows} 变为 {joined_rows}，未保持严格 1:1。")
@@ -123,6 +135,7 @@ def _join_context(stage: str, tables: list[dict], meta: dict, content: str) -> d
             ["当前拼接结果未发现明显结构性异常，可继续核对新增字段及业务口径。"]
         ),
         evidence=[str(table.get("title") or "拼接结果")],
+        measured_evidence=measured,
     )
 
 
@@ -136,6 +149,7 @@ def _feature_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
     avoid: list[str] = []
     facts: list[str] = []
     risks: list[str] = []
+    measured = {"features": [], "quality": []}
     if advice is not None:
         columns = _columns(advice)
         feature_idx = _column_index(columns, ("特征",), default=0)
@@ -152,9 +166,14 @@ def _feature_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
             state = _cell(row, state_idx) if state_idx >= 0 else ""
             if not feature:
                 continue
+            measured["features"].append({"feature": feature, "state": state or {
+                "推荐": "recommended", "候选": "candidate", "不推荐": "not_recommended",
+                "慎用": "caution", "待评估": "unevaluated",
+            }.get(label, "unevaluated")})
             if state in _NEGATIVE_FEATURE_STATES or (
                 not state and any(token in label for token in _ADVERSE_RECOMMENDATIONS)
             ):
+                measured["features"][-1]["state"] = state or "not_recommended"
                 avoid.append(feature)
                 risks.append(f"{feature}：{label}；{reason or '需要进一步复核'}。")
             elif state in _POSITIVE_FEATURE_STATES or (
@@ -172,6 +191,11 @@ def _feature_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
                 continue
             row = list(source_row)
             feature = _cell(row, feature_idx)
+            measured["quality"].append({"feature": feature, **{
+                key: _number(_cell(row, _column_index(columns, (label,))))
+                for key, label in (("missing_rate", "缺失率"), ("single_value_rate", "单一值率"),
+                                   ("zero_rate", "零值率"))
+            }})
             for labels, threshold, label in (
                 (("缺失率",), 0.5, "缺失率"),
                 (("单一值率",), 0.95, "单一值率"),
@@ -183,6 +207,7 @@ def _feature_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
                     if feature and feature not in avoid:
                         avoid.append(feature)
     if metrics is not None:
+        measured["feature_count"] = len(metrics.get("rows") or [])
         facts.insert(0, f"本次完成 {len(metrics.get('rows') or [])} 个特征的单变量分析。")
     return _context(
         title="特征分析 Agent 解读",
@@ -196,6 +221,7 @@ def _feature_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
         evidence=[str(item.get("title") or "") for item in (advice, quality, metrics) if item],
         recommended_features=_unique(recommended),
         avoid_features=_unique(avoid),
+        measured_evidence=measured,
     )
 
 
@@ -235,11 +261,15 @@ def _model_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
     train_ks = _number(metrics.get("train_ks"))
     test_ks = _number(metrics.get("test_ks"))
     oot_ks = _number(metrics.get("oot_ks"))
+    risk_flags = []
     if train_ks is not None and test_ks is not None and train_ks - test_ks > 0.05:
+        risk_flags.append("train_test_ks_gap")
         risks.append(f"Train/Test KS 相差 {train_ks - test_ks:.4f}，存在过拟合迹象。")
     if test_ks is not None and oot_ks is not None and test_ks - oot_ks > 0.05:
+        risk_flags.append("test_oot_ks_gap")
         risks.append(f"Test/OOT KS 相差 {test_ks - oot_ks:.4f}，样本外效果有衰减。")
     if oot_ks is None:
+        risk_flags.append("oot_ks_unavailable")
         risks.append("当前没有 OOT KS，无法评价时间外推稳定性。")
     params: dict[str, str] = {}
     if params_table is not None:
@@ -263,6 +293,10 @@ def _model_context(stage: str, tables: list[dict], meta: dict) -> dict | None:
         evidence=[str(item.get("title") or "") for item in (comparison, params_table) if item]
         + (["model_delivery.metrics"] if metrics else []),
         recommended_params=params,
+        measured_evidence={"recipe": recipe, "risk_flags": risk_flags, "metrics": {
+            key: _number(metrics.get(key)) for key, _label in metric_labels
+        }, "parameters": {key: number if (number := _number(value)) is not None else value
+                          for key, value in params.items()}},
     )
 
 
@@ -311,6 +345,7 @@ def _context(
     recommended_features: list[str] | None = None,
     avoid_features: list[str] | None = None,
     recommended_params: dict[str, str] | None = None,
+    measured_evidence: dict | None = None,
 ) -> dict[str, Any]:
     return {
         "title": title,
@@ -322,6 +357,7 @@ def _context(
         "recommended_features": recommended_features or [],
         "avoid_features": avoid_features or [],
         "recommended_params": recommended_params or {},
+        "measured_evidence": measured_evidence or {},
     }
 
 
@@ -330,24 +366,11 @@ def _llm_insight(client, context: dict, memory: list[dict]) -> dict | None:
     # only for gate-decision tests and silently fall back if interpretation fails.
     if client is None or not isinstance(getattr(client, "profile", None), dict):
         return None
-    prompt = {
-        "milestone": context.get("milestone"),
-        "facts": context.get("facts") or [],
-        "platform_risks": context.get("risks") or [],
-        "platform_recommendations": context.get("recommendations") or [],
-        "recommended_features": context.get("recommended_features") or [],
-        "avoid_features": context.get("avoid_features") or [],
-        "recommended_params": context.get("recommended_params") or {},
-        "memory_context": [
-            {"summary": str(item.get("summary") or ""), "kind": str(item.get("kind") or "raw")}
-            for item in memory
-        ],
-        "instruction": "只解释上述事实；历史记忆只能作为对比或提醒，不能覆盖本次平台指标。",
-    }
     try:
+        prompt = workflow_insight_prompt(context)
         raw = client.complete(
             system_prompt=WORKFLOW_INSIGHT_SYS.text,
-            user_prompt=json.dumps(prompt, ensure_ascii=False, sort_keys=True),
+            user_prompt=prompt,
             temperature=0.0,
             response_format={"type": "json_object"},
             stream=False,

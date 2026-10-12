@@ -30,7 +30,7 @@ class PluginRegistry:
         self._plugins: dict[str, tuple[PluginManifest, bool]] = {}
 
     def load_from_db(self) -> None:
-        self._plugins.clear()
+        plugins = {}
         rows = self._repo.list_plugins(include_disabled=True)
         raw_manifests = [json.loads(row["manifest_json"]) for row in rows]
         promotion_audits = (
@@ -53,7 +53,8 @@ class PluginRegistry:
                 # proven migration. Future starts no longer depend on audit
                 # availability or a same-name plugin history.
                 self._repo.upsert_plugin(manifest, enabled=bool(row["enabled"]))
-            self._plugins[manifest.name] = (manifest, bool(row["enabled"]))
+            plugins[manifest.name] = (manifest, bool(row["enabled"]))
+        self._plugins = plugins
 
     def register(self, manifest: PluginManifest, *, enabled: bool = True) -> None:
         existing = self._plugins.get(manifest.name)
@@ -76,6 +77,10 @@ class PluginRegistry:
         manifest, _enabled = self._require(name)
         if manifest.builtin:
             raise ValueError("cannot remove builtin plugin")
+        from marvis.plugins.capability_versions import CapabilityStore
+        from marvis.plugins.publisher_trust import require
+        require(not CapabilityStore(self._repo.db_path).managed('plugin',name),
+                'governed_version_retained_use_disable', status=403)
         audit = {
             "kind": "plugin.remove",
             "target_ref": name,
@@ -87,6 +92,14 @@ class PluginRegistry:
 
     def set_enabled(self, name: str, enabled: bool) -> None:
         manifest, _current = self._require(name)
+        from marvis.db_schema import connect
+        from marvis.plugins.capability_versions import CapabilityStore, capability_mode
+        from marvis.plugins.publisher_trust import require
+        require(not CapabilityStore(self._repo.db_path).managed('plugin',name),
+                'governed_capability_requires_version_api', status=403)
+        if enabled and not manifest.builtin:
+            with connect(self._repo.db_path) as conn:
+                require(capability_mode(conn) != 'governed', 'signed_capability_required', status=403)
         audit = {
             "kind": "plugin.enable" if enabled else "plugin.disable",
             "target_ref": name,
@@ -96,19 +109,41 @@ class PluginRegistry:
         self._repo.set_enabled_with_audit(name, enabled, audit=audit)
         self._plugins[name] = (manifest, bool(enabled))
 
-    def get(self, name: str) -> PluginManifest:
+    def get(self, name: str, version: str = "") -> PluginManifest:
+        from dataclasses import replace
+        from marvis.db_schema import connect
+        from marvis.plugins.capability_versions import CapabilityStore, capability_mode, governed_head
+        from marvis.plugins.publisher_trust import require
+
+        with connect(self._repo.db_path) as conn:
+            head = governed_head(conn, 'plugin', name)
+            mode = capability_mode(conn)
+        if head is not None:
+            row = CapabilityStore(self._repo.db_path).resolve('plugin', name, version)
+            return replace(parse_manifest(json.loads(row['declaration_json'])), checksum=row['content_hash'])
+        manifest = self._require(name)[0]
+        require(mode != 'governed' or manifest.builtin, 'signed_capability_required', status=403)
         return self._require(name)[0]
 
     def is_enabled(self, name: str) -> bool:
+        from marvis.plugins.capability_versions import CapabilityStore
+        head = CapabilityStore(self._repo.db_path).head('plugin',name)
+        if head is not None:
+            return bool(head['enabled'])
         return self._require(name)[1]
 
     def list(self, *, include_disabled: bool = False) -> list[PluginManifest]:
         items = sorted(self._plugins.items(), key=lambda item: item[0])
-        return [
-            manifest
-            for _name, (manifest, enabled) in items
-            if include_disabled or enabled
-        ]
+        result = []
+        for name, (manifest, enabled) in items:
+            if include_disabled:
+                result.append(manifest)
+            elif enabled:
+                try:
+                    result.append(self.get(name))
+                except PermissionError:
+                    continue
+        return result
 
     def _require(self, name: str) -> tuple[PluginManifest, bool]:
         try:
@@ -127,7 +162,7 @@ class ToolRegistry:
 
     def resolve_with_manifest(self, ref: ToolRef) -> tuple[PluginManifest, ToolSpec]:
         try:
-            manifest = self._plugins.get(ref.plugin)
+            manifest = self._plugins.get(ref.plugin, ref.version)
         except PluginNotFoundError:
             raise
         if not self._plugins.is_enabled(ref.plugin):
@@ -155,6 +190,8 @@ class ToolRegistry:
         return tuple(self._plugins.list(include_disabled=True))
 
     def catalog_for_planner(self) -> list[dict]:
+        from marvis.llm_outbound_catalog import installed_catalog_entry
+
         catalog: list[dict] = []
         for manifest in self._plugins.list():
             if not python_requires_satisfied(manifest.python_requires):
@@ -165,7 +202,7 @@ class ToolRegistry:
                     # planners as well as to the runner. It must be promoted
                     # again to receive a concrete identity receipt.
                     continue
-                catalog.append({
+                item = {
                     "plugin": manifest.name,
                     "tool": tool.name,
                     "version": manifest.version,
@@ -174,7 +211,10 @@ class ToolRegistry:
                     "output_schema": tool.output_schema,
                     "determinism": tool.determinism,
                     "policy": tool.policy.to_dict(),
-                })
+                }
+                catalog.append(installed_catalog_entry(
+                    self, ToolRef(manifest.name, tool.name, manifest.version), item,
+                ))
         return catalog
 
 

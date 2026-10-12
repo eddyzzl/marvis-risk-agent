@@ -201,21 +201,18 @@ def route_semantic_intent(
             "语义意图分类不可用，已保持当前状态。",
             diagnostics=diagnostic("intent_input", failure_code="input_invalid"),
         )
+    from marvis.llm_outbound import OutboundContextError
+
     try:
-        prompt = json.dumps(
-            {
-                "task_type": task_type,
-                "instruction": instruction,
-                "current_context": dict(context),
-                "allowed_intents": list(allowed),
-                "intent_definitions": {
-                    intent: _INTENT_DEFINITIONS[intent] for intent in allowed
-                },
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
+        from marvis.llm_outbound_intent import semantic_intent_prompt
+
+        prompt = semantic_intent_prompt(
+            task_type=task_type, instruction=instruction, context=context, allowed_intents=allowed,
+        )
+    except OutboundContextError as exc:
+        return _failed_decision(
+            str(exc), failure_code="semantic_intent_context_invalid",
+            diagnostics=diagnostic("intent_context", failure_code="context_invalid"),
         )
     except Exception:
         return _failed_decision(
@@ -223,7 +220,9 @@ def route_semantic_intent(
             diagnostics=diagnostic("intent_context", failure_code="context_invalid"),
         )
 
-    schema = _schema(allowed)
+    from marvis.llm_outbound import application_schema
+
+    schema = application_schema("semantic_intent", allowed_intents=allowed)
     first_attempt = _invoke_and_parse(
         client,
         system_prompt=TOP_LEVEL_INTENT_ROUTER_SYS,
@@ -602,19 +601,11 @@ def _repair_prompt(
     quote = first_pass.get("evidence_quote")
     if isinstance(quote, str) and quote.strip() and quote in instruction:
         first_pass_fields["evidence_quote"] = quote
-    return json.dumps(
-        {
-            "operation": "normalize_existing_semantic_intent_decision",
-            "original_request": original_request,
-            "first_pass_fields": first_pass_fields,
-            "first_pass_failure_code": failure_code,
-            "had_unexpected_fields": bool(set(first_pass) - set(_FIELDS)),
-            "required_fields": list(_FIELDS),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+    from marvis.llm_outbound_intent import semantic_intent_repair_prompt
+
+    return semantic_intent_repair_prompt(
+        user_prompt, fields=first_pass_fields, failure_code=failure_code,
+        had_unexpected_fields=bool(set(first_pass) - set(_FIELDS)),
     )
 
 

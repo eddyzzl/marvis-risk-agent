@@ -190,10 +190,10 @@ def test_agent_semantically_enters_join_exploration_and_typed_ui_stays_llm_free(
             assert request["current_context"]["join_exploration_phase"] == (
                 "role_discovery"
             )
-            assert set(request["current_context"]["available_join_tables"]) == {
-                "applications.csv",
-                "features.csv",
-            }
+            assert "available_join_tables" not in request["current_context"]
+            assert request["current_context"]["required_join_table_count"] == 2
+            assert "applications.csv" not in json.dumps(request)
+            assert "features.csv" not in json.dumps(request)
 
         confirmed = client.post(
             f"/api/tasks/{task_id}/agent/messages",

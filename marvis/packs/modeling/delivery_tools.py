@@ -174,6 +174,9 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     from marvis.packs.modeling.fold_tuning_evidence import validate_fold_experiment
     fold_evidence = validate_fold_experiment(runtime.registry, ctx.task_id, experiment, artifact)
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
+    from marvis.packs.modeling.development_refit_evidence import validate_development_refit
+
+    development_refit_evidence = validate_development_refit(runtime.settings.db_path, experiment, artifact, base_dir)
     capabilities = _artifact_capabilities(artifact, base_dir=base_dir)
     selection_policy_decision = _approval_policy_decision(inputs.get("selection_policy_decision"))
     monitoring_policy = _monitoring_policy_payload(
@@ -286,6 +289,8 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         monitoring_policy=monitoring_policy,
         challenger_comparison=challenger_comparison,
     )
+    if development_refit_evidence is not None:
+        model_card["development_refit_evidence"] = development_refit_evidence
     approval_package = _write_approval_package(
         base_dir,
         experiment=experiment,
@@ -661,11 +666,17 @@ def _previous_selected_champion_reference(
     experiment,
     artifact: ModelArtifact,
 ) -> dict:
+    from marvis.packs.modeling.development_refit_evidence import validate_development_refit
+
+    refit = validate_development_refit(runtime.settings.db_path, experiment, artifact,
+        _artifact_base_dir(runtime.settings, experiment.task_id))
     statuses = {"selected", "validated", "delivered", "approved", "champion"}
     current_created_at = str(getattr(experiment, "created_at", "") or "")
     candidates = []
     for candidate in runtime.experiments.list_for_task(experiment.task_id):
         if candidate.id == experiment.id or candidate.artifact_id == artifact.id:
+            continue
+        if refit is not None and candidate.id != refit["parent"]["experiment_id"]:
             continue
         if candidate.metrics is None or str(candidate.status or "") not in statuses:
             continue

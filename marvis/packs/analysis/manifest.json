@@ -12,36 +12,110 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "id_col": {"type": "string", "minLength": 1},
-          "snapshot_col": {"type": "string", "minLength": 1},
-          "bucket_col": {"type": "string", "minLength": 1},
-          "states": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "balance_col": {"type": "string"},
-          "bad_states": {"type": "array", "items": {"type": "string"}}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "id_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "snapshot_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bucket_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "balance_col": {
+            "type": "string"
+          },
+          "bad_states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["dataset_id", "expected_content_hash", "id_col", "snapshot_col", "bucket_col", "states"],
+        "required": [
+          "dataset_id",
+          "expected_content_hash",
+          "id_col",
+          "snapshot_col",
+          "bucket_col",
+          "states"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "states": {"type": "array", "items": {"type": "string"}},
-          "to_states": {"type": "array", "items": {"type": "string"}},
-          "months": {"type": "array", "items": {"type": "string"}},
-          "matrix_by_month": {"type": "array", "items": {"type": "object"}},
-          "net_flows": {"type": "array", "items": {"type": "object"}},
-          "red_flags": {"type": "array", "items": {"type": "object"}}
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "to_states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "months": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "matrix_by_month": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "net_flows": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["states", "to_states", "months", "matrix_by_month", "net_flows", "red_flags"],
+        "required": [
+          "states",
+          "to_states",
+          "months",
+          "matrix_by_month",
+          "net_flows",
+          "red_flags"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_flow_rate",
-      "side_effects": ["read:dataset"],
+      "side_effects": [
+        "read:dataset"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -50,38 +124,129 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "id_col": {"type": "string", "minLength": 1},
-          "snapshot_col": {"type": "string", "minLength": 1},
-          "bucket_col": {"type": "string", "minLength": 1},
-          "states": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "balance_col": {"type": "string"},
-          "window": {"type": "array", "items": {"type": "string"}},
-          "bad_states": {"type": "array", "items": {"type": "string"}}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "id_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "snapshot_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bucket_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "balance_col": {
+            "type": "string"
+          },
+          "window": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "bad_states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["dataset_id", "expected_content_hash", "id_col", "snapshot_col", "bucket_col", "states"],
+        "required": [
+          "dataset_id",
+          "expected_content_hash",
+          "id_col",
+          "snapshot_col",
+          "bucket_col",
+          "states"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "states": {"type": "array", "items": {"type": "string"}},
-          "to_states": {"type": "array", "items": {"type": "string"}},
-          "window_months": {"type": "array", "items": {"type": "string"}},
-          "avg_matrix": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
-          "worst_matrix": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
-          "heat_table": {"type": "array", "items": {"type": "object"}},
-          "red_flags": {"type": "array", "items": {"type": "object"}}
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "to_states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "window_months": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "avg_matrix": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "worst_matrix": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "heat_table": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["states", "to_states", "window_months", "avg_matrix", "worst_matrix", "heat_table", "red_flags"],
+        "required": [
+          "states",
+          "to_states",
+          "window_months",
+          "avg_matrix",
+          "worst_matrix",
+          "heat_table",
+          "red_flags"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_bucket_migration",
-      "side_effects": ["read:dataset"],
+      "side_effects": [
+        "read:dataset"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -90,38 +255,106 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "segment_col": {"type": "string", "minLength": 1},
-          "target_col": {"type": "string"},
-          "score_col": {"type": "string"},
-          "approved_col": {"type": "string"},
-          "profit_params": {"type": "object"},
-          "ead_col": {"type": "string"},
-          "pd_col": {"type": "string"},
-          "top_k": {"type": "integer", "minimum": 1}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "segment_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string"
+          },
+          "score_col": {
+            "type": "string"
+          },
+          "approved_col": {
+            "type": "string"
+          },
+          "profit_params": {
+            "type": "object"
+          },
+          "ead_col": {
+            "type": "string"
+          },
+          "pd_col": {
+            "type": "string"
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1
+          }
         },
-        "required": ["dataset_id", "expected_content_hash", "segment_col"],
+        "required": [
+          "dataset_id",
+          "expected_content_hash",
+          "segment_col"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "segments": {"type": "array", "items": {"type": "object"}},
-          "concentration": {"type": "object"},
-          "concentration_basis": {"type": "string", "enum": ["count"]},
-          "ead_concentration": {"type": ["object", "null"]},
-          "ead_concentration_basis": {"type": ["string", "null"], "enum": ["ead", null]},
-          "red_flags": {"type": "array", "items": {"type": "object"}}
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "concentration": {
+            "type": "object"
+          },
+          "concentration_basis": {
+            "type": "string",
+            "enum": [
+              "count"
+            ]
+          },
+          "ead_concentration": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "ead_concentration_basis": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "ead",
+              null
+            ]
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["segments", "concentration", "concentration_basis", "ead_concentration", "ead_concentration_basis", "red_flags"],
+        "required": [
+          "segments",
+          "concentration",
+          "concentration_basis",
+          "ead_concentration",
+          "ead_concentration_basis",
+          "red_flags"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_segment_profile",
-      "side_effects": ["read:dataset"],
+      "side_effects": [
+        "read:dataset"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -130,39 +363,116 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "id_col": {"type": "string", "minLength": 1},
-          "snapshot_col": {"type": "string", "minLength": 1},
-          "bucket_col": {"type": "string", "minLength": 1},
-          "states": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "balance_col": {"type": "string", "minLength": 1},
-          "loss_state": {"type": "string", "minLength": 1},
-          "lgd": {"type": "number", "minimum": 0, "maximum": 1},
-          "horizon_months": {"type": "integer", "minimum": 1},
-          "window": {"type": "array", "items": {"type": "string"}}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "id_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "snapshot_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bucket_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "balance_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "loss_state": {
+            "type": "string",
+            "minLength": 1
+          },
+          "lgd": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "horizon_months": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "window": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["dataset_id", "expected_content_hash", "id_col", "snapshot_col", "bucket_col", "states", "balance_col"],
+        "required": [
+          "dataset_id",
+          "expected_content_hash",
+          "id_col",
+          "snapshot_col",
+          "bucket_col",
+          "states",
+          "balance_col"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "loss_state": {"type": "string"},
-          "chain": {"type": "array", "items": {"type": "object"}},
-          "el_by_month": {"type": "array", "items": {"type": "object"}},
-          "total_el": {"type": "number"},
-          "assumptions": {"type": "object"},
-          "red_flags": {"type": "array", "items": {"type": "object"}}
+          "loss_state": {
+            "type": "string"
+          },
+          "chain": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "el_by_month": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "total_el": {
+            "type": "number"
+          },
+          "assumptions": {
+            "type": "object"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["loss_state", "chain", "el_by_month", "total_el", "assumptions", "red_flags"],
+        "required": [
+          "loss_state",
+          "chain",
+          "el_by_month",
+          "total_el",
+          "assumptions",
+          "red_flags"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_expected_loss_estimate",
-      "side_effects": ["read:dataset"],
+      "side_effects": [
+        "read:dataset"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -171,34 +481,85 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "experiment_id": {"type": "string", "minLength": 1},
-          "dataset_ids": {"type": "array", "items": {"type": "string"}},
-          "months": {"type": "array", "items": {"type": "string"}},
-          "dataset_id": {"type": "string"},
-          "expected_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "month_col": {"type": "string"},
-          "score_col": {"type": "string"},
-          "thresholds": {"type": "object"}
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "months": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dataset_id": {
+            "type": "string"
+          },
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "month_col": {
+            "type": "string"
+          },
+          "score_col": {
+            "type": "string"
+          },
+          "thresholds": {
+            "type": "object"
+          }
         },
-        "required": ["experiment_id"],
+        "required": [
+          "experiment_id"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "metric_name": {"type": "string"},
-          "trend": {"type": "array", "items": {"type": "object"}},
-          "per_feature_trend": {"type": "array", "items": {"type": "object"}},
-          "red_flags": {"type": "array", "items": {"type": "object"}}
+          "metric_name": {
+            "type": "string"
+          },
+          "trend": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "per_feature_trend": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["metric_name", "trend", "per_feature_trend", "red_flags"],
+        "required": [
+          "metric_name",
+          "trend",
+          "per_feature_trend",
+          "red_flags"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_score_stability_trend",
-      "side_effects": ["read:dataset", "read:experiment"],
+      "side_effects": [
+        "read:dataset",
+        "read:experiment"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -207,34 +568,87 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "experiment_id": {"type": "string", "minLength": 1},
-          "dataset_ids": {"type": "array", "items": {"type": "string"}},
-          "months": {"type": "array", "items": {"type": "string"}},
-          "dataset_id": {"type": "string"},
-          "month_col": {"type": "string"},
-          "score_col": {"type": "string"},
-          "feature_cols": {"type": "array", "items": {"type": "string"}},
-          "thresholds": {"type": "object"}
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "months": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dataset_id": {
+            "type": "string"
+          },
+          "month_col": {
+            "type": "string"
+          },
+          "score_col": {
+            "type": "string"
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "thresholds": {
+            "type": "object"
+          }
         },
-        "required": ["experiment_id"],
+        "required": [
+          "experiment_id"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "metric_name": {"type": "string"},
-          "trend": {"type": "array", "items": {"type": "object"}},
-          "per_feature_trend": {"type": "array", "items": {"type": "object"}},
-          "red_flags": {"type": "array", "items": {"type": "object"}}
+          "metric_name": {
+            "type": "string"
+          },
+          "trend": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "per_feature_trend": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["metric_name", "trend", "per_feature_trend", "red_flags"],
+        "required": [
+          "metric_name",
+          "trend",
+          "per_feature_trend",
+          "red_flags"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_feature_csi_trend",
-      "side_effects": ["read:dataset", "read:experiment"],
+      "side_effects": [
+        "read:dataset",
+        "read:experiment"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -243,11 +657,21 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "flow": {"type": "object"},
-          "migration": {"type": "object"},
-          "segment": {"type": "object"},
-          "trend": {"type": "object"},
-          "expected_loss": {"type": "object"}
+          "flow": {
+            "type": "object"
+          },
+          "migration": {
+            "type": "object"
+          },
+          "segment": {
+            "type": "object"
+          },
+          "trend": {
+            "type": "object"
+          },
+          "expected_loss": {
+            "type": "object"
+          }
         },
         "required": [],
         "additionalProperties": false
@@ -255,12 +679,31 @@
       "output_schema": {
         "type": "object",
         "properties": {
-          "highlights": {"type": "object"},
-          "red_flags": {"type": "array", "items": {"type": "object"}},
-          "red_flag_count": {"type": "integer"},
-          "checklist": {"type": "array", "items": {"type": "string"}}
+          "highlights": {
+            "type": "object"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "red_flag_count": {
+            "type": "integer"
+          },
+          "checklist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["highlights", "red_flags", "red_flag_count", "checklist"],
+        "required": [
+          "highlights",
+          "red_flags",
+          "red_flag_count",
+          "checklist"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
@@ -281,12 +724,24 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "flow": {"type": "object"},
-          "migration": {"type": "object"},
-          "segment": {"type": "object"},
-          "trend": {"type": "object"},
-          "expected_loss": {"type": "object"},
-          "project_meta": {"type": "object"}
+          "flow": {
+            "type": "object"
+          },
+          "migration": {
+            "type": "object"
+          },
+          "segment": {
+            "type": "object"
+          },
+          "trend": {
+            "type": "object"
+          },
+          "expected_loss": {
+            "type": "object"
+          },
+          "project_meta": {
+            "type": "object"
+          }
         },
         "required": [],
         "additionalProperties": false
@@ -294,22 +749,272 @@
       "output_schema": {
         "type": "object",
         "properties": {
-          "report_path": {"type": "string"},
-          "sheets": {"type": "array", "items": {"type": "string"}},
-          "artifact_id": {"type": "string", "minLength": 1},
-          "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          "report_path": {
+            "type": "string"
+          },
+          "sheets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "artifact_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
         },
-        "required": ["report_path", "sheets", "artifact_id", "artifact_content_hash"],
+        "required": [
+          "report_path",
+          "sheets",
+          "artifact_id",
+          "artifact_content_hash"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_portfolio_report",
-      "side_effects": ["write:report"],
+      "side_effects": [
+        "write:report"
+      ],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "decision_ledger_feedback",
+      "summary": "Measure recorded native decision cohorts against authenticated publisher-declared binary outcomes, retaining unavailable maturity/source windows; no rule replay or policy mutation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "binding": {
+            "additionalProperties": false,
+            "properties": {
+              "task_id": {
+                "maxLength": 200,
+                "minLength": 1,
+                "title": "Task Id",
+                "type": "string"
+              },
+              "environment": {
+                "enum": [
+                  "local-reference:production",
+                  "local-reference:shadow"
+                ],
+                "title": "Environment",
+                "type": "string"
+              },
+              "package_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Package Hash",
+                "type": "string"
+              },
+              "complete_through": {
+                "format": "date-time",
+                "title": "Complete Through",
+                "type": "string"
+              },
+              "label_maturity_seconds": {
+                "maximum": 315360000,
+                "minimum": 0,
+                "title": "Label Maturity Seconds",
+                "type": "integer"
+              },
+              "max_source_rows": {
+                "default": 200000,
+                "maximum": 1000000,
+                "minimum": 1,
+                "title": "Max Source Rows",
+                "type": "integer"
+              },
+              "min_labeled_count": {
+                "maximum": 1000000,
+                "minimum": 1,
+                "title": "Min Labeled Count",
+                "type": "integer"
+              },
+              "max_bad_rate": {
+                "maximum": 1,
+                "minimum": 0,
+                "title": "Max Bad Rate",
+                "type": "number"
+              },
+              "max_fallback_rate": {
+                "maximum": 1,
+                "minimum": 0,
+                "title": "Max Fallback Rate",
+                "type": "number"
+              }
+            },
+            "required": [
+              "task_id",
+              "environment",
+              "package_hash",
+              "complete_through",
+              "label_maturity_seconds",
+              "min_labeled_count",
+              "max_bad_rate",
+              "max_fallback_rate"
+            ],
+            "title": "DecisionFeedbackBinding",
+            "type": "object"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ends_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "evaluated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "binding",
+          "starts_at",
+          "ends_at",
+          "evaluated_at"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "bad_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "label_coverage": {
+            "type": "number"
+          },
+          "approval_bad_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "fallback_rate": {
+            "type": "number"
+          },
+          "economic_outcome": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "score_psi": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "population_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "labeled_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bad_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "approval_labeled_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fallback_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "overall_level": {
+            "type": "string",
+            "enum": [
+              "green",
+              "amber",
+              "red",
+              "not_available"
+            ]
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "package_hash": {
+            "type": "string"
+          },
+          "feedback_refs_sha256": {
+            "type": "string"
+          },
+          "decision_assurance": {
+            "type": "string"
+          },
+          "outcome_assurance": {
+            "type": "string"
+          },
+          "label_maturity_assurance": {
+            "type": "string"
+          },
+          "rule_replay": {
+            "type": "string"
+          },
+          "automatic_action_permitted": {
+            "const": false
+          },
+          "source_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "dataset_id",
+                "content_hash"
+              ],
+              "properties": {
+                "dataset_id": {
+                  "type": "string"
+                },
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "overall_level",
+          "reason_code"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_decision_ledger_feedback",
+      "side_effects": [
+        "read:task",
+        "read:dataset",
+        "read:strategy"
+      ],
+      "memory_limit_mb": 1024
     }
   ],
   "hooks": [],
-  "permissions": ["read:dataset", "write:dataset", "read:experiment", "write:report"]
+  "permissions": [
+    "read:dataset",
+    "write:dataset",
+    "read:experiment",
+    "write:report",
+    "read:task",
+    "read:strategy"
+  ]
 }

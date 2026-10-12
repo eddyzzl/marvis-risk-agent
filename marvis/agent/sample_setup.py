@@ -20,6 +20,7 @@ from marvis.feature.candidates import (
     excluded_numeric_columns,
     is_meta_column,
 )
+from marvis.modeling_split import SplitConfigurationError, existing_split_values
 
 # Preferred binary-target name tokens, most-specific first.
 _TARGET_PRIORITY = (
@@ -62,6 +63,7 @@ class SetupProposal:
     # deterministic heuristics alone — used only to annotate the gate message
     # ("历史任务曾用"); never changes downstream behavior.
     memory_matched_fields: list[str] = None  # type: ignore[assignment]
+    split_error: str = ""
 
     def __post_init__(self) -> None:
         if self.excluded_categorical is None:
@@ -123,11 +125,13 @@ def detect_setup(
 
     ``field_hints`` (MEM-4, optional): ``{"target_col": ..., "split_col": ...}``
     sourced from a historical field_convention memory. It is a pure *ordering*
-    tie-breaker over the same deterministic candidate pool the heuristics would
+    tie-breaker over the same deterministic target pool the heuristics would
     already consider — a hinted column only wins when it independently passes
     the exact same validity check an explicit ``configured_target``/
     ``configured_split`` would (binary dtype for the target; a real
-    train/test-or-oot split-value mapping for the split). It can never conjure a
+    train/test-or-oot split-value mapping for the split). A split hint only
+    annotates a uniquely authenticated partition; it cannot choose among
+    different source memberships. It can never conjure a
     candidate the detector would not otherwise accept, so the detection
     algorithm itself stays fully deterministic (INV-4).
     """
@@ -192,23 +196,37 @@ def detect_setup(
     # -- split ----------------------------------------------------------------
     split_col = ""
     split_values: dict[str, str] = {}
-    by_name = [configured_split] if configured_split in columns else []
-    if not configured_split and hinted_split and hinted_split in columns:
-        # Memory tie-breaker: try the historically-used split column first, right
-        # after any explicit configured_split — it still must pass the same
-        # train/test-or-oot mapping check below to actually be selected.
-        by_name = [*by_name, hinted_split]
-    by_name += [c for c in columns if _looks_like_split_name(c)]
-    obj_cols = [c for c in probe.columns if probe[c].dtype == object and probe[c].nunique(dropna=True) <= 8]
-    for cand in dict.fromkeys(c for c in (by_name + obj_cols) if c):
-        col = backend.read_frame(path, columns=[cand])[cand]
-        mapping = _classify_split_values(col)
-        if "train" in mapping and ("test" in mapping or "oot" in mapping):
-            split_col, split_values = cand, mapping
-            if not configured_split and cand == hinted_split:
-                memory_matched_fields.append("split_col")
-            break
-    if not split_col:
+    split_error = ""
+    # A row probe only discovers dtypes. Membership admission always checks the
+    # complete column, including nulls and late unknown labels. Pandas 3 string
+    # and Arrow/category strings must not disappear from this candidate pool.
+    string_cols = [column for column in probe.columns if _is_string_column(probe[column])]
+    named_cols = [column for column in columns if _declares_split_name(column)]
+    candidate_cols = ([configured_split] if configured_split in columns else
+                      list(dict.fromkeys([*named_cols, *string_cols])))
+    valid = []
+    suspicious = False
+    for candidate in candidate_cols:
+        if candidate == target and candidate != configured_split:
+            continue
+        values = backend.read_frame(path, columns=[candidate])[candidate].unique().tolist()
+        try:
+            mapping = existing_split_values(values)
+        except SplitConfigurationError:
+            suspicious |= candidate == configured_split or _declares_split_name(candidate) or _contains_split_label(values)
+        else:
+            valid.append((candidate, mapping))
+    if suspicious:
+        split_error = "检测到疑似切分列但其完整成员标签无效，请明确确认切分列及 train/test/OOT 成员；未自动划分。"
+    elif len(valid) > 1:
+        split_error = "检测到多个合法切分列，请明确绑定本次使用的切分列；未自动划分。"
+    elif valid:
+        split_col, split_values = valid[0]
+        if not configured_split and split_col == hinted_split:
+            memory_matched_fields.append("split_col")
+    if split_error:
+        notes.append(split_error)
+    elif not split_col:
         notes.append("未能自动识别 train/test/oot 切分列；可指定切分列，或我按时间字段为你切分。")
     if memory_matched_fields:
         labels = "、".join(
@@ -292,6 +310,7 @@ def detect_setup(
         ],
         target_candidates=target_candidates,
         memory_matched_fields=memory_matched_fields,
+        split_error=split_error,
     )
 
 
@@ -351,6 +370,24 @@ def _class_count_in_range(series) -> bool:
 def _looks_like_split_name(name: str) -> bool:
     low = name.lower()
     return any(tok in low for tok in ("split", "flag", "set", "fold", "sample_type", "model_flag", "new_flag"))
+
+
+def _is_string_column(series) -> bool:
+    from pandas import CategoricalDtype
+    from pandas.api.types import is_string_dtype
+
+    return is_string_dtype(series.dtype) or isinstance(series.dtype, CategoricalDtype)
+
+
+def _declares_split_name(name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+    return any(normalized == token or normalized.startswith(f"{token}_") or normalized.endswith(f"_{token}")
+               for token in ("split", "partition", "cohort", "fold", "sample_type", "model_flag", "new_flag"))
+
+
+def _contains_split_label(values) -> bool:
+    labels = _SPLIT_TRAIN | _SPLIT_TEST | _SPLIT_OOT
+    return any(isinstance(value, str) and value.strip().lower() in labels for value in values)
 
 
 def _classify_split_values(series) -> dict[str, str]:

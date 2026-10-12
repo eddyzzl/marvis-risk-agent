@@ -31,6 +31,8 @@ export const defaultExecutionEnvironment = {
   python_executable: "",
   // Notebook kernel RSS soft cap (MB). null = no cap (default).
   notebook_memory_limit_mb: null,
+  notebook_network_mode: "trusted_local",
+  worker_isolation_mode: "trusted_local",
 };
 
 export function createRenderSignatures() {

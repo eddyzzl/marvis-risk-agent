@@ -59,6 +59,7 @@ def capabilities(request: Request):
         "scope": "local_reference_and_deidentified_history",
         "external_authenticity": "not_independently_verified",
         "profile_schema": RegisterProfile.model_json_schema(),
+        "basis_schema": AuthorizationBasis.model_json_schema(),
         "grant_schema": SourceGrant.model_json_schema(),
         "query_schema": SourceQuery.model_json_schema(),
         "workflow_id": "risk_source_query",

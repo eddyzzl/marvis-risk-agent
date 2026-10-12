@@ -36,7 +36,7 @@ def run(monkeypatch, mutate=None, saved=None):
     calls = []
     evidence = {"validation_results": {"effectiveness": {"overall": {"ks": 0.31}}}}
     if saved is not None:
-        evidence["report_draft"] = {"text_values": saved}
+        evidence["report_draft"] = {"report_revision": 0, "text_values": saved}
     original = deepcopy(evidence)
 
     class Client:
@@ -50,7 +50,7 @@ def run(monkeypatch, mutate=None, saved=None):
     monkeypatch.setattr("marvis.agent.service._client", lambda _: Client())
     result = generate_word_conclusions(
         task=replace(_task(), validation_workflow_version=2),
-        evidence=evidence, model_profile={}, user_instruction="保留现有业务事实，明确数据源风险。",
+        evidence=evidence, model_profile={},
     )
     assert evidence == original
     return calls, result
@@ -67,8 +67,7 @@ def test_report_sections_each_use_their_own_typed_contract_and_same_task(monkeyp
         assert call["caller"] == "validation_report_" + json.loads(call["user_prompt"])["narrative_topic"]
         assert call["prompt_name"] == "WORD_CONCLUSION_V2_SYSTEM_PROMPT"
         payload = json.loads(call["user_prompt"])
-        assert payload["task"]["model_name"] == "A卡"
-        assert payload["user_instruction"] == "保留现有业务事实，明确数据源风险。"
+        assert "task" not in payload and "user_instruction" not in payload
         schema = call["json_schema"]["schema"]
         assert len(schema["required"]) == 1
         assert schema["additionalProperties"] is False
@@ -93,7 +92,8 @@ def test_later_section_failure_never_exposes_a_partially_confirmable_draft(monke
     assert values == {} and metadata["confirmable"] is False
 
 
-def test_cross_section_revision_keeps_complete_current_draft_and_explicit_empty_fields():
+def test_cross_section_prose_revision_requires_clarification_before_call():
+    from marvis.llm_outbound_revision import ReportRevisionError
     draft = {"text_values": {"TEXT:model_scope": "仅限既有支用客群", "TEXT:sample_audience": ""}}
     original = {"stage": "word_conclusion_draft", "evidence": {"report_draft": draft},
                 "user_instruction": "把当前适用范围同步到最终结论，保持样本客群字段为空。"}
@@ -106,8 +106,9 @@ def test_cross_section_revision_keeps_complete_current_draft_and_explicit_empty_
             assert payload["evidence"]["report_draft"] == draft
             return json.dumps(reply_for(kwargs))
 
-    generate_v2_sections(Client(), json.dumps(original))
-    assert len(seen) == 7
+    with pytest.raises(ReportRevisionError, match="字段操作"):
+        generate_v2_sections(Client(), json.dumps(original))
+    assert seen == []
     assert original["evidence"]["report_draft"] == draft
 
 
@@ -119,17 +120,16 @@ def test_section_omission_preserves_saved_narrative_and_explicit_blanks(monkeypa
     assert {key: values[key] for key in saved} == saved
 
 
-def test_explicit_optional_section_edit_overrides_saved_value_including_clear(monkeypatch):
+def test_unrequested_optional_model_edit_cannot_overwrite_saved_local_value(monkeypatch):
     def revise(n, value):
-        if n == 7:
+        if n >= 7:
             return {**value, "TEXT:model_scope": "", "TEXT:sample_audience": "用户指定的新客群"}
         return value
     _, (values, metadata) = run(monkeypatch, revise, saved={
         "TEXT:model_scope": "旧范围", "TEXT:sample_audience": "",
     })
-    assert metadata["fallback"] is False
-    assert values["TEXT:model_scope"] == ""
-    assert values["TEXT:sample_audience"] == "用户指定的新客群"
+    assert metadata["fallback"] is True and metadata["confirmable"] is False
+    assert values == {}
 
 
 @pytest.mark.parametrize("transport", ["json_schema", "json_object", "none"])
@@ -177,16 +177,9 @@ def test_real_client_adapts_each_section_to_provider_transport(monkeypatch, tran
     assert len(requests) == 7
 
 
-def test_topics_keep_exact_evidence_and_memory_without_repeating_raw_bin_tables():
-    metrics = {
-        "algorithm": "logistic", "basic_info": {"hyperparameters": {"C": 0.25}},
-        "effectiveness": {"overall": [{"split": "oot", "ks": 0.31, "auc": 0.71}],
-                          "monthly_psi": [{"month": "2026-01", "psi": 0.36}],
-                          "lift_ranking_assessment": {"splits": {"oot": {"status": "weak"}}},
-                          "bin_tables": {"oot": [{"private_bulk": "x" * 10000}]}},
-        "stress_test": {"baseline": {"ks": 0.31}, "per_category": [{"ks": 0.19}]},
-        "overfitting_check": {"status": "pass"},
-    }
+def test_topics_keep_native_evidence_without_raw_bin_tables_or_unavailable_memory():
+    from tests.test_llm_outbound_validation import _native_result
+    metrics = _native_result()
     original = {"stage": "word_conclusion_draft", "evidence": {"validation_results": metrics},
                 "cross_task_memory": {"references": [{"id": "historical-1", "source_task_id": "old"}]}}
     before = deepcopy(original)
@@ -196,7 +189,8 @@ def test_topics_keep_exact_evidence_and_memory_without_repeating_raw_bin_tables(
         def complete(self, **kwargs):
             payload = json.loads(kwargs["user_prompt"])
             topic = payload["narrative_topic"]
-            assert payload["cross_task_memory"] == original["cross_task_memory"]
+            assert "cross_task_memory" not in payload
+            assert payload["history_comparison_available"] is False
             seen[topic] = payload["evidence"]["validation_results"]
             assert "private_bulk" not in kwargs["user_prompt"]
             return json.dumps(reply_for(kwargs))
@@ -210,8 +204,9 @@ def test_topics_keep_exact_evidence_and_memory_without_repeating_raw_bin_tables(
     assert "monthly_psi" not in seen["performance"]["effectiveness"]
     assert seen["ranking"]["effectiveness"]["lift_ranking_assessment"] == metrics["effectiveness"]["lift_ranking_assessment"]
     assert "stress_test" not in seen["ranking"]
-    assert seen["overall"]["stress_test"] == metrics["stress_test"]
-    assert seen["training"]["basic_info"]["hyperparameters"] == {"C": 0.25}
+    assert seen["overall"]["stress_test"]["baseline"]["ks"] == metrics["stress_test"]["baseline"]["ks"]
+    assert seen["overall"]["stress_test"]["per_category"][0]["ks_delta"] == -.11
+    assert seen["training"]["basic_info"]["hyperparameters"] == {"C": 0.25, "solver": "lbfgs"}
 
 
 def test_v2_metrics_uses_complete_topics_and_only_streams_a_validated_whole(monkeypatch):

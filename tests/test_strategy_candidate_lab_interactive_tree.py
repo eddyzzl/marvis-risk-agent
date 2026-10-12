@@ -459,8 +459,11 @@ def test_candidate_lab_replays_interactive_frontier_pool_sources(
     projection_without_drawer = {
         key: value
         for key, value in projection.items()
-        if key != "evidence_drawer"
+        if key not in {"evidence_drawer", "field_labels"}
     }
+    labels = projection["field_labels"]
+    assert _hash_keys(labels) == {"dataset_content_hash", "semantic_mapping_hash"}
+    assert all(len(labels[key]) == 64 for key in _hash_keys(labels))
     assert _hash_keys(projection_without_drawer) == set()
     assert _hash_keys(drawer) == {
         "content_hash",

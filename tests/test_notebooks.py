@@ -1504,7 +1504,11 @@ def test_run_notebook_stops_kernel_when_rss_exceeds_limit(
 
 
 @pytest.mark.slow
-def test_run_notebook_isolated_cancel_kills_real_kernel_process_tree(tmp_path: Path):
+@pytest.mark.parametrize("network_mode", [
+    "trusted_local",
+    pytest.param("loopback_only", marks=pytest.mark.skipif(sys.platform != "darwin", reason="macOS network backend")),
+])
+def test_run_notebook_isolated_cancel_kills_real_kernel_process_tree(tmp_path: Path, network_mode):
     """TST-4d: real kill, notebook isolation path. marvis/notebooks.py's
     isolated=True subprocess mechanism (_run_notebook_in_subprocess /
     _kill_process_tree) is a distinct code path from ToolRunner's worker kill
@@ -1561,12 +1565,16 @@ def test_run_notebook_isolated_cancel_kills_real_kernel_process_tree(tmp_path: P
         timeout=60,
         cancellation_token=cancellation_token,
         isolated=True,
+        network_mode=network_mode,
     )
     canceller.join(timeout=5.0)
 
     assert result.succeeded is False
     assert result.cancelled is True
     assert result.error_name == "NotebookCancelled"
+    assert result.execution_policy["mode"] == network_mode
+    assert result.execution_policy["state"] == "failed"
+    assert "取消" in result.execution_policy["next_action"]
     assert result.resource_usage is not None
     worker_pid = result.resource_usage["worker_pid"]
     assert worker_pid is not None

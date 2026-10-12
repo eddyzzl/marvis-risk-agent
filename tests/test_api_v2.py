@@ -3542,3 +3542,50 @@ def test_v1_task_endpoints_are_not_registered(
         response = getattr(client, method)(path, json={})
 
     assert response.status_code == 404
+
+
+def test_network_policy_api_persists_preserves_legacy_put_and_rejects_invalid(tmp_path, monkeypatch):
+    from marvis.execution_environment import load_execution_environment
+
+    client = _client(tmp_path, monkeypatch)
+    response = client.put("/api/settings/execution-environment", json={"notebook_network_mode": "loopback_only"})
+    assert response.status_code == 200
+    assert response.json()["settings"]["notebook_network_mode"] == "loopback_only"
+    capability = response.json()["validation"]["network_capability"]
+    assert capability["mode"] == "loopback_only"
+    assert not capability["filesystem_isolated"]
+    assert not capability["delegated_ipc_protected"]
+    assert load_execution_environment(tmp_path).notebook_network_mode == "loopback_only"
+    response = client.put("/api/settings/execution-environment", json={"kernel_name": "python3"})
+    assert response.json()["settings"]["notebook_network_mode"] == "loopback_only"
+    assert client.put("/api/settings/execution-environment", json={"notebook_network_mode": "invalid"}).status_code == 422
+    assert load_execution_environment(tmp_path).notebook_network_mode == "loopback_only"
+
+
+def test_pipeline_settings_propagate_requested_network_policy(tmp_path):
+    from marvis.api_stage_helpers import pipeline_settings_from_settings
+    from marvis.execution_environment import ExecutionEnvironmentSettings, save_execution_environment
+
+    save_execution_environment(tmp_path, ExecutionEnvironmentSettings(notebook_network_mode="loopback_only"))
+    settings = SimpleNamespace(workspace=tmp_path, db_path=tmp_path / "marvis.db", report_template_path=tmp_path / "template.docx")
+    task = SimpleNamespace(feature_columns=[])
+    assert pipeline_settings_from_settings(settings, task, None).notebook_network_mode == "loopback_only"
+
+
+def test_task_evidence_keeps_recorded_execution_policy_after_settings_change(tmp_path, monkeypatch):
+    from marvis.execution_environment import ExecutionEnvironmentSettings, save_execution_environment
+
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/api/tasks", json={"model_name": "synthetic", "model_version": "test",
+                                               "validator": "qa", "source_dir": str(tmp_path)})
+    assert response.status_code == 200
+    task_id = response.json()["id"]
+    execution_dir = tmp_path / "tasks" / task_id / "execution"
+    execution_dir.mkdir(parents=True, exist_ok=True)
+    recorded = {"mode": "loopback_only", "backend": "macos_seatbelt", "state": "completed"}
+    (execution_dir / "notebook_execution.json").write_text(json.dumps(recorded))
+    save_execution_environment(tmp_path, ExecutionEnvironmentSettings(notebook_network_mode="trusted_local"))
+    response = client.get(f"/api/tasks/{task_id}/evidence")
+    assert response.status_code == 200
+    assert response.json()["notebook_execution"] == recorded
+    assert response.json()["execution_environment"]["notebook_network_mode"] == "trusted_local"

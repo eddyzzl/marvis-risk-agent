@@ -94,6 +94,7 @@ def effective_transform_semantic_mapping(
         target_col=target,
         field_roles=roles,
         business_names=dict(workspace_mapping.business_names),
+        risk_directions=dict(workspace_mapping.risk_directions),
     )
 
 
@@ -126,6 +127,7 @@ def migrate_transform_semantics(
     semantic_fields = (
         set(semantic_mapping.field_roles)
         | set(semantic_mapping.business_names)
+        | set(semantic_mapping.risk_directions)
         | ({semantic_mapping.target_col} if semantic_mapping.target_col else set())
     )
     missing_semantics = sorted(semantic_fields - set(source))
@@ -142,6 +144,7 @@ def migrate_transform_semantics(
     current_columns = list(source)
     roles = dict(semantic_mapping.field_roles)
     names = dict(semantic_mapping.business_names)
+    directions = dict(semantic_mapping.risk_directions)
     target = semantic_mapping.target_col
     selected = selected_field
     original_to_current = {column: column for column in source}
@@ -169,6 +172,7 @@ def migrate_transform_semantics(
                 raise TransformSemanticError("rename operation creates duplicate fields")
             roles = _rename_keys(roles, mapping)
             names = _rename_keys(names, mapping)
+            directions = _rename_keys(directions, mapping)
             target = mapping.get(target, target) if target is not None else None
             selected = mapping.get(selected, selected) if selected is not None else None
             for original, current in list(original_to_current.items()):
@@ -199,6 +203,7 @@ def migrate_transform_semantics(
             for column in columns:
                 roles.pop(column, None)
                 names.pop(column, None)
+                directions.pop(column, None)
                 if column == target:
                     target = None
                 if column == selected:
@@ -237,7 +242,7 @@ def migrate_transform_semantics(
             "result schema does not match the ordered transform operations"
         )
     result_set = set(result)
-    dangling = sorted((set(roles) | set(names)) - result_set)
+    dangling = sorted((set(roles) | set(names) | set(directions)) - result_set)
     if target is not None and target not in result_set:
         dangling.append(target)
     if selected is not None and selected not in result_set:
@@ -258,6 +263,7 @@ def migrate_transform_semantics(
             target_col=target,
             field_roles=roles,
             business_names=names,
+            risk_directions=directions,
         ),
         selected_field=selected,
         renamed_fields=renamed,

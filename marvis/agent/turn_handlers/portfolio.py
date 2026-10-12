@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from marvis.llm_outbound_gate_context import authorization_gate
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
 from marvis.agent.plan_driver import DriverError
 from marvis.agent.plan_driver import is_confirm
@@ -189,11 +190,8 @@ def _run_portfolio_setup(
             semantic_authorization_lane._semantic_exact_gate_authorization(
                 runtime,
                 text,
-                gate_context=(
-                    "组合分析逾期桶顺序授权：用户已查看由好到坏的完整桶顺序；"
-                    "confirm 只表示明确、即时、无条件地接受当前完整顺序。任何重排"
-                    "仍必须逐字提交全部桶，LLM 不得猜测或改写顺序。"
-                ),
+                gate_context=authorization_gate(
+                    "portfolio_order", bindings={"dataset_content_hash": gate_state.get("dataset_content_hash"), "state_count": len(proposed_states)}),
                 proposed_params={
                     "dataset_content_hash": gate_state.get("dataset_content_hash"),
                     "proposed_states": proposed_states,

@@ -88,6 +88,9 @@ def tool_generate_model_reports(inputs: dict, ctx) -> dict:
         "section_status": primary_output.get("section_status") or [],
         "scorecard_table": primary_output.get("scorecard_table") or [],
         "score_bands": primary_output.get("score_bands") or [],
+        **({"development_refit_scope": primary_output["development_refit_scope"],
+            "dataset_split": primary_output["dataset_split"]}
+           if primary_output.get("development_refit_scope") else {}),
     }
 
 
@@ -115,6 +118,9 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         if experiment.artifact_id
         else None
     )
+    from marvis.packs.modeling.development_refit_reporting import load_report_scope
+
+    refit_scope = load_report_scope(runtime, experiment, artifact, dataset.id)
     # The full report is binary-credit-specific (bad-rate / Vintage / OOT bins / stress).
     # For a non-binary target (regression / multiclass) write a compact metrics report so
     # the flow finishes with a downloadable artifact instead of crashing on binary-only math.
@@ -184,6 +190,7 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         task_id=ctx.task_id,
         experiment_id=experiment.id,
         dataset_id=dataset.id,
+        force_artifact_score=refit_scope is not None,
     )
     report_runtime = _cached_dataset_runtime(runtime, report_dataset_path, frame=report_frame)
     low_pricing = None
@@ -238,9 +245,21 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         window_col=business.loan_month_col,
     )
     calibration = _artifact_calibration_rows(artifact)
+    project_meta = dict(inputs.get("project_meta") or {})
+    dataset_split = _dataset_split_rows(experiment.metrics, split_profile=split_profile)
+    if refit_scope is not None:
+        from marvis.packs.modeling.development_refit_reporting import dataset_split_rows, diagnostic_rows
+        from marvis.packs.modeling.report_compute import ReportSectionStatus
+
+        project_meta.update(refit_scope["metadata"])
+        dataset_split = dataset_split_rows(refit_scope, experiment.metrics)
+        score_bands = diagnostic_rows(score_bands, refit_scope)
+        oot_bin = diagnostic_rows(oot_bin, refit_scope)
+        statuses.append(ReportSectionStatus(section="development_refit_scope", available=True,
+            reason="最终 development 拟合诊断；父候选留出选择证据独立引用，原 test 已参与最终拟合。"))
     structured_summary = _report_structured_summary(
-        project_meta=dict(inputs.get("project_meta") or {}),
-        dataset_split=_dataset_split_rows(experiment.metrics, split_profile=split_profile),
+        project_meta=project_meta,
+        dataset_split=dataset_split,
         stability=_stability_rows(experiment.metrics),
         sample_analysis=sample,
         vintage=vintage,
@@ -254,13 +273,22 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         stress_low_pricing=low_pricing,
         section_status=statuses,
     )
-    narratives = _guard_no_invented_numbers(
-        _draft_report_narratives(
+    if refit_scope is not None:
+        from marvis.packs.modeling.development_refit_reporting import model_narrative
+
+        # The ordinary report DTO labels train/test partitions. It does not
+        # authenticate this producer's changed final-fit scope; retain exact
+        # native narrative until a dedicated generative contract exists.
+        narratives = _fallback_report_narratives()
+        narratives["model"] = model_narrative()
+    else:
+        narratives = _guard_no_invented_numbers(
+            _draft_report_narratives(
+                structured_summary,
+                llm_factory=_report_llm_factory(runtime.settings.workspace, _optional_str(inputs.get("model_id"))),
+            ),
             structured_summary,
-            llm_factory=_report_llm_factory(runtime.settings.workspace, _optional_str(inputs.get("model_id"))),
-        ),
-        structured_summary,
-    )
+        )
     scored_dataset_path = report_dataset_path if report_dataset_path != dataset_path else None
     uow = ArtifactUnitOfWork()
     staged_report = uow.stage_file(report_path.parent, report_path.name)
@@ -310,6 +338,8 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         "scorecard_table": structured_summary["scorecard_table"],
         "score_bands": structured_summary["score_bands"],
         "calibration": structured_summary["calibration"],
+        **({"development_refit_scope": refit_scope["metadata"],
+            "dataset_split": dataset_split} if refit_scope is not None else {}),
     }
 
 
@@ -800,9 +830,10 @@ def _report_scored_dataset(
     task_id: str,
     experiment_id: str,
     dataset_id: str,
+    force_artifact_score: bool = False,
 ) -> tuple[Path, str, pd.DataFrame | None]:
     columns = runtime.backend.column_names(dataset_path)
-    has_input_score = "score" in columns
+    has_input_score = "score" in columns and not force_artifact_score
     needs_scorecard_points = (
         artifact is not None
         and artifact.algorithm == "scorecard"
@@ -993,6 +1024,9 @@ def _draft_report_narratives(structured_summary: dict, *, llm_factory=None) -> d
             user_prompt=_report_narrative_prompt(structured_summary),
             response_format={"type": "json_object"},
             stream=False,
+            caller="modeling_report",
+            prompt_name=_REPORT_NARRATIVE_SYS_SPEC.name,
+            prompt_version=_REPORT_NARRATIVE_SYS_SPEC.version,
         )
         payload = json.loads(str(raw))
     except (LLMClientError, LLMSettingsError, json.JSONDecodeError, TypeError, ValueError):
@@ -1015,12 +1049,8 @@ def _fallback_report_narratives() -> dict:
 
 
 def _report_narrative_prompt(structured_summary: dict) -> str:
-    return (
-        "请基于以下结构化摘要，输出 JSON："
-        "{sample, vintage, model, stress}。\n"
-        "要求：只写文字解释；所有数字必须来自摘要原文；缺少数据时说明缺业务数据。\n\n"
-        f"结构化摘要：\n{json.dumps(structured_summary, ensure_ascii=False, sort_keys=True)}"
-    )
+    from marvis.llm_outbound import report_prompt
+    return report_prompt(structured_summary)
 
 
 def _report_llm_factory(workspace: Path, model_id: str | None):

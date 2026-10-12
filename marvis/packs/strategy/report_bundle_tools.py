@@ -155,6 +155,7 @@ _INPUT_FIELDS = frozenset(
         "candidate_pool_ref",
         "pool_validation_refs",
         "candidate_stability_ref",
+        "asset_stability_refs",
         "pool_stability_ref",
         "voting_candidate_search_ref",
         "cross_candidate_search_ref",
@@ -399,6 +400,7 @@ class _ReportSources:
     training_evidence: ModelingTrainingEvidenceArtifactBinding | None
     score_evidence: ModelScoreEvidenceArtifactBinding | None
     strategy_authentication: Mapping[str, Any] | None
+    asset_stabilities: tuple = ()
 
 
 def authenticate_strategy_report_identity_for_pool_on_connection(
@@ -538,6 +540,11 @@ def run_build_strategy_report_bundle_v2(inputs, ctx, runtime) -> dict[str, Any]:
                 if sources.strategy_authentication is None
                 else sources.strategy_authentication["strategy_lifecycle"]
             ),
+        )
+        from marvis.packs.strategy.asset_stability_report import add_asset_stability_report_evidence
+        source_inputs = add_asset_stability_report_evidence(
+            source_inputs, bindings=sources.asset_stabilities,
+            sample_design=sources.sample_design, task_id=task_id,
         )
         title_source = build_source_ref(
             kind="tool_input",
@@ -752,6 +759,11 @@ def _load_sources(
             **request["candidate_stability_ref"],
         )
     )
+    from marvis.packs.strategy.asset_stability_tools import load_asset_stability_artifact
+    asset_stabilities = tuple(
+        load_asset_stability_artifact(runtime, task_id=task_id, ref=ref)
+        for ref in request.get("asset_stability_refs", ())
+    )
     voting_candidate_search = (
         None
         if request["voting_candidate_search_ref"] is None
@@ -859,6 +871,7 @@ def _load_sources(
         candidate_pool=candidate_pool,
         pool_validations=pool_validations,
         candidate_stability=candidate_stability,
+        asset_stabilities=asset_stabilities,
         pool_stability=pool_stability,
         voting_candidate_search=voting_candidate_search,
         cross_candidate_search=cross_candidate_search,
@@ -1136,6 +1149,9 @@ def _revalidate_sources(conn, sources: _ReportSources, *, strategies) -> None:
             conn,
             sources.candidate_stability,
         )
+    from marvis.packs.strategy.asset_stability_tools import require_asset_stability_binding_on_connection
+    for stability in sources.asset_stabilities:
+        require_asset_stability_binding_on_connection(conn, stability)
     if sources.pool_stability is not None:
         require_strategy_pool_stability_artifact_binding_on_connection(
             conn,
@@ -1295,6 +1311,7 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
             for binding in sources.pool_validations
         },
         "candidate_stability": None,
+        "asset_stabilities": [binding.ref for binding in sources.asset_stabilities],
         "pool_stability": None,
         "voting_candidate_search": None,
         "cross_candidate_search": None,
@@ -1513,7 +1530,7 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     for field in _OPTIONAL_INPUT_FIELDS:
         candidate.setdefault(
             field,
-            [] if field == "pool_validation_refs" else None,
+            [] if field in {"pool_validation_refs", "asset_stability_refs"} else None,
         )
     request = _canonical_object(candidate, "build_report_bundle_v2 inputs")
     if len(_canonical_json(request).encode("utf-8")) > _MAX_INPUT_BYTES:
@@ -1559,6 +1576,13 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     request["candidate_stability_ref"] = _optional_candidate_stability_ref(
         request["candidate_stability_ref"]
     )
+    from marvis.packs.strategy.asset_stability_tools import _artifact_ref as validate_asset_stability_ref
+    refs = request["asset_stability_refs"]
+    if not isinstance(refs, list) or len(refs) > 16:
+        raise StrategyError("report asset_stability_refs must be a list of at most 16 exact references")
+    request["asset_stability_refs"] = [validate_asset_stability_ref(ref) for ref in refs]
+    if len({ref["artifact_id"] for ref in refs}) != len(refs):
+        raise StrategyError("report asset_stability_refs contains duplicate references")
     request["pool_stability_ref"] = _optional_pool_stability_ref(
         request["pool_stability_ref"]
     )

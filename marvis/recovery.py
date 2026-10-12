@@ -513,12 +513,42 @@ def _load_metadata(value: str | None) -> dict:
 PLAN_RESTART_NOTICE_MARKER = '"plan_interrupted_by_restart":true'
 
 
-def reclaim_running_plans(
+def reclaim_running_plans(plan_repo,reviewer,hook_dispatcher,harness_state,task_repo) -> int:
+    from marvis.institution.store import identity_mode,IdentityError
+    from marvis.institution.policy import plan_execution_scope
+    db_path=getattr(plan_repo,'db_path',None)
+    if db_path is None:
+        return _reclaim_running_plans_local(plan_repo,reviewer,hook_dispatcher,harness_state,task_repo)
+    with connect(db_path) as conn:
+        institutional=identity_mode(conn)=='institutional'
+    if not institutional:
+        return _reclaim_running_plans_local(plan_repo,reviewer,hook_dispatcher,harness_state,task_repo)
+    reclaimed=0
+    for plan_id in plan_repo.startup_reclaim_plan_ids():
+        try:
+            with plan_execution_scope(db_path,plan_id):
+                plan=plan_repo.load_plan(plan_id)
+                reclaimed+=_reclaim_running_plans_local(plan_repo,reviewer,hook_dispatcher,harness_state,task_repo,_candidates=[plan])
+        except IdentityError:
+            # Host startup custody can stop an unauthorized interrupted carrier.
+            # It reads no inputs/results and never dispatches a Tool or Hook.
+            with connect(db_path) as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                cursor=conn.execute("UPDATE plans SET status='failed' WHERE id=? AND status IN ('running','review')",(plan_id,))
+                if cursor.rowcount:
+                    conn.execute("UPDATE plan_steps SET status='failed',error='identity runtime authorization revoked; explicit reassignment required' WHERE plan_id=? AND status IN ('running','checking')",(plan_id,))
+                    reclaimed+=1
+    return reclaimed
+
+
+def _reclaim_running_plans_local(
     plan_repo,
     reviewer,
     hook_dispatcher,
     harness_state,
     task_repo,
+    *,
+    _candidates=None,
 ) -> int:
     """Reclaim V2 plans left in RUNNING by a crash/restart (REL-4).
 
@@ -534,8 +564,11 @@ def reclaim_running_plans(
     """
     step_recovery = PlanStepRecovery(plan_repo, reviewer, hook_dispatcher, harness_state)
     reclaimed = 0
-    candidates = list(plan_repo.list_plans_by_status(PlanStatus.RUNNING))
-    candidates.extend(plan_repo.list_plans_by_status(PlanStatus.REVIEW))
+    if _candidates is None:
+        candidates = list(plan_repo.list_plans_by_status(PlanStatus.RUNNING))
+        candidates.extend(plan_repo.list_plans_by_status(PlanStatus.REVIEW))
+    else:
+        candidates = _candidates
     for plan in candidates:
         try:
             try:

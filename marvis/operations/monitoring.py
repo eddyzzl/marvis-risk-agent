@@ -163,12 +163,10 @@ class BuiltinMonitoringExecutor:
         if binding.score_col:
             inputs["score_col"] = binding.score_col
         plugin, tool = request.monitoring_ref.split(".", 1)
-        result = self.runner.invoke(
-            ToolRef(plugin, tool),
-            inputs,
-            task_id=binding.task_id,
-            invocation_id=f"operations:{request.run_id}",
-            cancellation_check=self._check_cancelled,
+        from marvis.operations.native_invocations import invoke_scheduled
+
+        result, invocation = invoke_scheduled(
+            self, request, ToolRef(plugin, tool), inputs
         )
         if not result.ok or not isinstance(result.output, dict):
             raise MonitoringExecutionError("monitoring_tool_failed")

@@ -839,7 +839,8 @@ def _business_signals(row: dict | None) -> dict:
         "stability": _stability_label(psi_oot, psi_test, stability_gap, overfit_flag),
         "stability_value": psi_oot if psi_oot is not None else psi_test,
         "generalization_gap": stability_gap,
-        "overfit_flag": bool(overfit_flag) if overfit_flag is not None else False,
+        "overfit_flag": (None if "overfit_flag" in metrics and overfit_flag is None
+                         else bool(overfit_flag)),
         "calibration": _calibration_label(item),
         "delivery": _delivery_label(caps),
     }

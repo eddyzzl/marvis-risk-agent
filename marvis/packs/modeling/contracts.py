@@ -40,9 +40,9 @@ class ModelMetrics:
     oot_auc: float | None
     psi_test_vs_train: float | None
     psi_oot_vs_train: float | None
-    overfit_train_test_gap: float
+    overfit_train_test_gap: float | None
     overfit_train_oot_gap: float | None
-    overfit_flag: bool
+    overfit_flag: bool | None
     weighted_train_ks: float | None = None
     weighted_test_ks: float | None = None
     weighted_oot_ks: float | None = None

@@ -233,3 +233,52 @@ def test_load_execution_environment_self_heals_from_empty_file(tmp_path: Path):
     settings = load_execution_environment(tmp_path)
 
     assert settings == ExecutionEnvironmentSettings()
+
+
+def test_network_mode_defaults_legacy_settings_to_trusted_and_round_trips(tmp_path):
+    import json
+
+    path = tmp_path / "settings" / "execution_environment.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"kernel_name": "python3"}))
+    assert load_execution_environment(tmp_path).notebook_network_mode == "trusted_local"
+    settings = ExecutionEnvironmentSettings(notebook_network_mode="loopback_only")
+    save_execution_environment(tmp_path, settings)
+    assert load_execution_environment(tmp_path) == settings
+
+
+def test_loopback_preflight_reports_unavailable_without_downgrading(monkeypatch):
+    monkeypatch.setattr("marvis.local_execution.sys.platform", "linux")
+    result = validate_execution_environment(ExecutionEnvironmentSettings(notebook_network_mode="loopback_only"))
+    assert not result.ok
+    assert result.network_capability["mode"] == "loopback_only"
+    assert result.network_capability["status"] == "unsupported"
+    assert not result.network_capability["network_restricted"]
+    assert "未启动" in result.message
+
+
+def test_invalid_saved_network_mode_does_not_silently_become_trusted(tmp_path):
+    save_execution_environment(tmp_path, ExecutionEnvironmentSettings(notebook_network_mode="invalid"))
+    settings = load_execution_environment(tmp_path)
+    assert settings.notebook_network_mode == "invalid"
+    assert not validate_execution_environment(settings).ok
+
+
+def test_loopback_environment_preflight_rejects_custom_provisioner_before_version_check(monkeypatch):
+    from marvis.local_execution import LocalExecutionCapability
+
+    monkeypatch.setattr(execution_environment, "execution_capability", lambda *a, **kw:
+                        LocalExecutionCapability("loopback_only", "darwin", "macos_seatbelt", True,
+                                                 "available", True))
+    monkeypatch.setattr(execution_environment, "available_kernel_specs", lambda: {
+        "python3": {"metadata": {"kernel_provisioner": {"provisioner_name": "remote"}}},
+    })
+    calls = []
+    monkeypatch.setattr(execution_environment, "_run_version_check", lambda *a, **kw: calls.append(True))
+    result = validate_execution_environment(ExecutionEnvironmentSettings(
+        execution_mode="python_executable", python_executable="must-not-run",
+        notebook_network_mode="loopback_only",
+    ))
+    assert not result.ok
+    assert calls == []
+    assert "provisioner" in result.message

@@ -166,3 +166,22 @@ busy=true;controller.render();assert.equal(buttons[0].disabled,true);assert.equa
 click("approve");assert.equal(calls.length,0);assert.match(panel.querySelector("[data-history-error]").textContent,/理由会保留/);
 busy=false;controller.render();assert.equal(buttons[0].disabled,false);assert.equal(gate.innerHTML,initial);
 ''')
+
+
+def test_native_event_mapping_requires_exact_scenarios_owned_read_grants_and_physical_columns():
+    node(r'''
+const eventDataset={...dataset,columns:[...dataset.columns,"ref","namespace","token"]};
+const grants=[{grant_id:"g",state:"active",owned:true,permissions:["read"]}];
+const mappings=["baseline","challenger"].map(scenario_kind=>({scenario_kind,reference_col:"ref",subject_namespace_col:"namespace",subject_token_col:"token",grant_id:"g"}));
+const nativeContext={...context,datasets:[eventDataset],features:[],allowEmptyFeatures:true,eventKinds:["baseline","challenger"],eventGrants:grants,eventMappings:mappings};
+const result=collectReplay(values,nativeContext);
+assert.deepEqual(result.features,[]);assert.deepEqual(result.event_mappings,mappings);
+assert.throws(()=>collectReplay(values,{...nativeContext,eventMappings:[mappings[0]]}),/所有方案/);
+assert.throws(()=>collectReplay(values,{...nativeContext,eventMappings:[mappings[0],mappings[0]]}),/所有方案/);
+assert.throws(()=>collectReplay(values,{...nativeContext,eventMappings:mappings.map(m=>({...m,reference_col:"manual_derived_value"}))}),/证据引用列/);
+for (const patch of [{owned:false},{state:"revoked"},{permissions:["write"]}]) {
+ assert.throws(()=>collectReplay(values,{...nativeContext,eventGrants:[{...grants[0],...patch}]}),/有效事件读取授权/);
+}
+assert.throws(()=>collectReplay(values,{...nativeContext,allowEmptyFeatures:false}),/字段合同/);
+assert.throws(()=>collectReplay(values,{...nativeContext,eventKinds:[]}),/未声明事件配方/);
+''')

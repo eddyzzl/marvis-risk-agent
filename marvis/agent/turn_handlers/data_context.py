@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from marvis.llm_outbound_gate_context import authorization_gate
+
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.modeling_setup import supported_modeling_recipes
 from marvis.data.backend import DataBackend
@@ -89,10 +91,7 @@ def _modeling_intake_params(
         try:
             route = route_instruction(
                 runtime.llm_client,
-                gate_context=(
-                    "首轮建模规格收集：在创建计划前理解用户完整要求，只抽取当前"
-                    "声明的建模控件；不新增、删除或重排工作流步骤。"
-                ),
+                gate_context=authorization_gate("modeling_setup"),
                 instruction=text,
                 param_schema=_modeling_intake_param_schema(task),
             )

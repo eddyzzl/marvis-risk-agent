@@ -190,7 +190,12 @@ def _upsert_plugin_row(
     manifest: PluginManifest,
     *,
     enabled: bool,
+    governed: bool = False,
 ) -> None:
+    if not governed:
+        from marvis.plugins.capability_versions import require_legacy_registration_allowed
+
+        require_legacy_registration_allowed(conn, manifest)
     manifest_json = json.dumps(
         manifest_to_dict(manifest),
         ensure_ascii=False,

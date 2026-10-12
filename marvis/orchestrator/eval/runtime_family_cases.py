@@ -318,7 +318,8 @@ def normal_modeling_cases(materials: dict) -> tuple[list[dict], dict]:
             {
                 "kind": "select_recommended_experiment",
                 "tool": "modeling.select_experiment",
-                "content": "我已审阅当前展示的候选和限制，明确采用平台展示的推荐实验，仅用于本次合成流程验证。",
+                "refit_on_train_plus_test": False,
+                "content": "我已审阅当前展示的候选和限制，明确采用平台展示的推荐实验，保留本次选中的 fold 冻结候选，不重训 train+test；仅用于本次合成流程验证。",
             },
             {
                 "kind": "approve_step",

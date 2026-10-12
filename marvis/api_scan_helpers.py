@@ -161,6 +161,10 @@ def scan_hook_payload(payload: dict) -> dict:
 def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     # source_dir is normalized at task-create time, so pipeline and /scan agree.
     source_dir = Path(task.source_dir).resolve()
+    from marvis.modeling_holdout.guards import assert_public_path, record_exposure
+    custody_workspace = getattr(settings, 'workspace', settings.tasks_dir.parent)
+    custody_db_path = getattr(settings, 'db_path', getattr(repo, 'db_path', None))
+    assert_public_path(custody_workspace, source_dir)
     try:
         artifacts = scan_source_dir(source_dir)
     except ValueError as exc:
@@ -170,6 +174,8 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     resolved_materials: ResolvedValidationMaterials | None = None
     if is_v2_validation:
         resolved_materials = resolve_selected_validation_materials(task)
+        record_exposure(custody_db_path, custody_workspace, resolved_materials.sample)
+        record_exposure(custody_db_path, custody_workspace, resolved_materials.dictionary)
         validation_contract = build_validation_input_contract(
             notebook_path=resolved_materials.notebook,
             sample_path=resolved_materials.sample,
@@ -183,6 +189,10 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
         )
         checks = _v2_scan_checks(resolved_materials, validation_contract)
     else:
+        sample, error = resolve_scan_material(task=task, artifacts=artifacts, role=FileRole.SAMPLE,
+                                             label='sample', task_field='sample_path')
+        if sample is not None and not error:
+            record_exposure(custody_db_path, custody_workspace, sample)
         checks = scan_preflight_checks(task, artifacts)
     task_dir = settings.tasks_dir / task.id
     uow = ArtifactUnitOfWork()
@@ -652,7 +662,7 @@ def _scan_history_summary(payload: dict) -> dict:
 
 
 def material_candidates_payload(
-    task: TaskRecord, *, pmml_path_override: str | None = None
+    task: TaskRecord, *, pmml_path_override: str | None = None, source_admission=None
 ) -> dict:
     source_dir = Path(task.source_dir).resolve()
     artifacts = scan_source_dir(
@@ -666,6 +676,7 @@ def material_candidates_payload(
             artifacts=artifacts,
             source_dir=source_dir,
             pmml_path_override=pmml_path_override,
+            source_admission=source_admission,
         )
     )
     explicit_dictionary = pmml_path_override is None and bool(
@@ -731,6 +742,7 @@ def _feature_metadata_candidate_compatibility(
     artifacts: list[FileArtifact],
     source_dir: Path,
     pmml_path_override: str | None = None,
+    source_admission=None,
 ) -> tuple[dict[str, dict], list[str], str | None, bool]:
     if pmml_path_override is not None:
         if not str(pmml_path_override).strip():
@@ -806,6 +818,8 @@ def _feature_metadata_candidate_compatibility(
             }
             continue
         inspected_bytes += artifact.size_bytes
+        if source_admission is not None:
+            source_admission(artifact.path)
         try:
             inspection = inspect_feature_metadata(artifact.path, manifest)
         except FeatureMetadataInspectionIncomplete as exc:

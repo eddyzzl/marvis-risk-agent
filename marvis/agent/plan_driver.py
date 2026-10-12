@@ -18,6 +18,8 @@ testable offline.
 
 from __future__ import annotations
 
+from marvis.llm_outbound_gate_context import authorization_gate
+
 from datetime import UTC, datetime
 from pathlib import Path
 import re
@@ -665,11 +667,16 @@ class PlanDriver:
             if selection_error:
                 raise DriverError(selection_error)
             selected_id = str(adjust_params["selected_experiment_id"]).strip()
+            input_updates = {"selected_experiment_id": selected_id}
+            if adjust_params.get("refit_on_train_plus_test") is not None:
+                input_updates["refit_on_train_plus_test"] = adjust_params[
+                    "refit_on_train_plus_test"
+                ]
             self._confirm_gate(
                 plan,
                 gate,
                 reason=confirmation_reason or f"人工选择实验 {selected_id}",
-                input_updates={"selected_experiment_id": selected_id},
+                input_updates=input_updates,
             )
             return self._run_and_handle(plan_id, run_seq=run_seq)
         if has_feature_binning_adjust(adjust_params) and gate is not None:
@@ -1197,7 +1204,8 @@ class PlanDriver:
         and acts on it (spec §3 提指令→调整/重规划)."""
         if self._llm is None:
             return self._adjust_placeholder(plan.id, gate, run_seq)
-        context = gate.title if gate is not None else "计划总览(尚未开始执行)"
+        context = authorization_gate("current_step" if gate is not None else "execute_plan",
+            bindings={"plan_id": plan.id, "step_id": gate.id if gate is not None else None})
         # AGT-5: tell the router which parameters this gate's dependency step(s)
         # actually declare (name/type/current value/bounds) instead of leaving it
         # to blind-guess key names from free text — a wrong guess previously only
@@ -1559,11 +1567,19 @@ class PlanDriver:
         if (
             gate is None
             or gate.tool_ref is None
+            or gate.tool_ref.plugin != "modeling"
             or gate.tool_ref.tool != "select_experiment"
         ):
             return "当前节点不接受带参数的确认，请明确是继续还是调整。"
-        if set(params) != {"selected_experiment_id"}:
-            return "选择实验时只能提交 selected_experiment_id。"
+        if "selected_experiment_id" not in params or set(params) - {
+            "selected_experiment_id", "refit_on_train_plus_test"
+        }:
+            return "选择实验时必须提交 selected_experiment_id，仅可附带 refit_on_train_plus_test。"
+        if (
+            params.get("refit_on_train_plus_test") is not None
+            and type(params["refit_on_train_plus_test"]) is not bool
+        ):
+            return "refit_on_train_plus_test 必须是布尔值 true 或 false，不能转换其他类型。"
         selected_id = str(params.get("selected_experiment_id") or "").strip()
         candidates, recommended_id = self._experiment_selection_candidate_context(
             plan,

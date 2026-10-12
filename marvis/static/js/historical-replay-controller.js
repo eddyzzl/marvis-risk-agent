@@ -4,6 +4,7 @@ import { taskUsesPlanRail } from "./v2/plan_rail_controller.js";
 import {
   replayFormHtml,
   featureFieldsHtml,
+  eventMappingFieldsHtml,
   constraintHtml,
   temporalWindowHtml,
   collectReplay,
@@ -98,6 +99,8 @@ export function createHistoricalReplayController({
         packages: [],
         records: [],
         featureNames: [],
+        eventKinds: [],
+        eventGrants: [],
         packageSignature: "",
         proposal: null,
         editVersion: 0,
@@ -181,6 +184,8 @@ export function createHistoricalReplayController({
       owner.packages = packages;
       owner.loaded = true;
       owner.featureNames = [];
+      owner.eventKinds = [];
+      owner.eventGrants = [];
       owner.packageSignature = "";
       invalidate();
       q("[data-history-editor]").innerHTML = replayFormHtml(
@@ -232,6 +237,8 @@ export function createHistoricalReplayController({
       features.innerHTML = state.featureNames.length
         ? featureFieldsHtml(state.featureNames, columns)
         : "";
+    const events = form.querySelector("[data-history-event-fields]");
+    if (events) events.innerHTML = eventMappingFieldsHtml(state.eventKinds, columns, state.eventGrants);
   }
   const packageSignature = (form) =>
     JSON.stringify(
@@ -285,6 +292,20 @@ export function createHistoricalReplayController({
           ),
         ),
       ];
+      const kinds = ["baseline", "challenger", "counterfactual"].filter((kind) => form.elements[kind].value);
+      owner.eventKinds = kinds.filter((kind, index) => Boolean(manifests[index].manifest.configuration.event_binding));
+      owner.eventGrants = [];
+      if (owner.eventKinds.length) {
+        const sourceTasks = [...new Set(manifests.filter((r) => r.manifest.configuration.event_binding)
+          .map((r) => r.manifest.configuration.event_binding.task_id))];
+        if (sourceTasks.some((id) => typeof id !== "string" || !id.trim()))
+          throw new Error("冻结方案缺少原生事件来源任务，请重新登记方案。");
+        const access = await Promise.all(sourceTasks.map((id) =>
+          apiClient(`/api/tasks/${path(id)}/risk-events`)));
+        if (!current(owner) || owner.editVersion !== edit || packageSignature(form) !== signature) return;
+        owner.eventGrants = access.flatMap((result) => result.grants)
+          .filter((grant, index, all) => all.findIndex((candidate) => candidate.grant_id === grant.grant_id) === index);
+      }
       owner.packageSignature = signature;
       const dataset = owner.datasets.find(
           (d) => d.id === form.elements.dataset_id.value,
@@ -294,6 +315,7 @@ export function createHistoricalReplayController({
         }));
       form.querySelector("[data-history-feature-fields]").innerHTML =
         featureFieldsHtml(owner.featureNames, columns);
+      form.querySelector("[data-history-event-fields]").innerHTML = eventMappingFieldsHtml(owner.eventKinds, columns, owner.eventGrants);
       form.querySelector("[data-history-package-message]").textContent =
         `已校验 ${manifests.length} 个方案 · ${owner.featureNames.length} 个输入字段。请明确绑定各字段时点。`;
       message("");
@@ -318,6 +340,10 @@ export function createHistoricalReplayController({
       features: Array.from(form.querySelectorAll("[data-history-feature]")).map(
         (row) => ({ name: row.dataset.historyFeature, ...formValues(row) }),
       ),
+      allowEmptyFeatures: state.packageSignature === packageSignature(form),
+      eventKinds: state.eventKinds,
+      eventGrants: state.eventGrants,
+      eventMappings: Array.from(form.querySelectorAll("[data-history-event-mapping]")).map((row) => ({ scenario_kind: row.dataset.historyEventMapping, ...formValues(row) })),
       constraints: Array.from(
         form.querySelectorAll("[data-history-constraint]"),
       ).map(formValues),

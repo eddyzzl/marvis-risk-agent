@@ -92,6 +92,30 @@ def test_model_experience_requires_all_v1_1_fields():
         validate_model_experience_payload(incomplete)
 
 
+@pytest.mark.parametrize("extra", [
+    {"metric_units": {"ks": "percent"}}, {"metric_units": {"sample_rows": "fraction"}},
+    {"metric_units": "fraction"}, {"metric_units": {}},
+    {"metric_units": {"ks": "fraction"}, "ks": 20},
+    {"metric_units": {"ks": "fraction"}, "ks": True},
+    {"metric_units": {"psi": "index"}, "psi": -1},
+    {"metric_units": {"psi": "index"}, "psi": float("inf")},
+    {"metric_units": {"psi": "index"}, "psi": 10 ** 400},
+    {"evaluation_split": "private_source_label"}, {"evaluation_split": ["oot"]},
+])
+def test_model_memory_rejects_invalid_optional_metric_contract(extra):
+    with pytest.raises(ValueError, match="model_experience"):
+        validate_model_experience_payload(_model_experience_payload(**extra))
+
+
+def test_model_memory_optional_contract_preserves_legacy_records():
+    legacy = _model_experience_payload()
+    assert validate_model_experience_payload(legacy) == legacy
+    assert "metric_units" not in legacy and "evaluation_split" not in legacy
+    declared = _model_experience_payload(ks=.3, metric_units={"ks": "fraction", "auc": "fraction", "psi": "index"},
+                                          evaluation_split="test")
+    assert validate_model_experience_payload(declared) == declared
+
+
 def test_memory_candidate_normalizes_type_and_validates_model_payload():
     candidate = MemoryCandidate(
         memory_type=" MODEL_EXPERIENCE ",

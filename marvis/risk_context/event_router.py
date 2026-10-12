@@ -79,6 +79,14 @@ async def register_source(request: Request):
         error(exc)
 
 
+@router.get("/tasks/{task_id}/risk-events")
+def discovery(task_id: str, request: Request):
+    try:
+        return service(request).discovery(task_id, actor(request, {"maker", "checker", "admin"}))
+    except (ValueError, RuntimeError, KeyError, OSError) as exc:
+        error(exc)
+
+
 @router.post("/risk-events/grants", status_code=201)
 async def grant(request: Request):
     principal = actor(request, {"admin"})

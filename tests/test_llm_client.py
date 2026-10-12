@@ -5,6 +5,7 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
+from marvis.llm_outbound import outbound_prompt
 from marvis.llm_client import (
     LLMClientError,
     LLMClientErrorKind,
@@ -163,7 +164,7 @@ def test_openai_compatible_client_defaults_to_portable_stream_payload(monkeypatc
         }
     ).complete(
         system_prompt="You are a helpful assistant",
-        user_prompt="Hello",
+        user_prompt=outbound_prompt({}),
         response_format={"type": "json_object"},
         on_delta=chunks.append,
     )
@@ -176,7 +177,7 @@ def test_openai_compatible_client_defaults_to_portable_stream_payload(monkeypatc
     assert captured["payload"]["model"] == "deepseek-v4-pro"
     assert captured["payload"]["stream"] is True
     assert "reasoning_effort" not in captured["payload"]
-    assert "thinking" not in captured["payload"]
+    assert captured["payload"]["thinking"] == {"type": "disabled"}
     assert captured["payload"]["response_format"] == {"type": "json_object"}
 
 
@@ -188,7 +189,7 @@ def test_client_rejects_non_http_base_url():
                 "model_name": "m",
                 "api_key": "secret",
             }
-        ).complete(system_prompt="s", user_prompt="u")
+        ).complete(system_prompt="s", user_prompt=outbound_prompt({}))
 
 
 @pytest.mark.parametrize(
@@ -234,7 +235,7 @@ def test_complete_preflight_failures_use_fixed_error_kinds(
         "marvis.llm_client.urlopen",
         lambda *_args, **_kwargs: pytest.fail("preflight failure sent a request"),
     )
-    kwargs = {"system_prompt": "s", "user_prompt": "u", **complete_kwargs}
+    kwargs = {"system_prompt": "s", "user_prompt": outbound_prompt({}), **complete_kwargs}
 
     with pytest.raises(LLMClientError) as exc_info:
         OpenAICompatibleLLMClient(profile).complete(**kwargs)
@@ -261,10 +262,10 @@ def test_client_honors_reasoning_effort_from_profile(monkeypatch):
             "reasoning_effort": "low",
             "thinking_style": "openai_reasoning",
         }
-    ).complete(system_prompt="s", user_prompt="u")
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}))
 
     assert captured["payload"]["reasoning_effort"] == "low"
-    assert "thinking" not in captured["payload"]
+    assert captured["payload"]["thinking"] == {"type": "enabled"}
 
 
 def test_client_sends_extra_request_fields_when_configured(monkeypatch):
@@ -283,7 +284,7 @@ def test_client_sends_extra_request_fields_when_configured(monkeypatch):
             "api_key": "secret",
             "extra_request_fields": {"top_p": 0.8},
         }
-    ).complete(system_prompt="s", user_prompt="u")
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}))
 
     assert captured["payload"]["top_p"] == 0.8
     assert "thinking" not in captured["payload"]
@@ -304,7 +305,7 @@ def test_client_can_request_non_streaming_json_response(monkeypatch):
             "model_name": "compatible-model",
             "api_key": "secret",
         }
-    ).complete(system_prompt="s", user_prompt="u", stream=False)
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
 
     assert content == "plain json"
     assert captured["payload"]["stream"] is False
@@ -323,7 +324,7 @@ def test_client_wraps_stream_interruptions(monkeypatch):
                 "model_name": "compatible-model",
                 "api_key": "secret",
             }
-        ).complete(system_prompt="s", user_prompt="u")
+        ).complete(system_prompt="s", user_prompt=outbound_prompt({}))
 
 
 def test_client_sends_json_schema_when_profile_supports_it(monkeypatch):
@@ -345,7 +346,7 @@ def test_client_sends_json_schema_when_profile_supports_it(monkeypatch):
         }
     ).complete(
         system_prompt="s",
-        user_prompt="u",
+        user_prompt=outbound_prompt({}),
         response_format={"type": "json_object"},
         json_schema=schema,
         stream=False,
@@ -376,7 +377,7 @@ def test_client_falls_back_to_json_object_when_schema_unsupported(monkeypatch):
         }
     ).complete(
         system_prompt="s",
-        user_prompt="u",
+        user_prompt=outbound_prompt({}),
         response_format={"type": "json_object"},
         json_schema=schema,
         stream=False,
@@ -415,7 +416,9 @@ class _EmptyJsonResponse:
 
 
 def test_complete_invokes_on_call_recorded_with_usage(monkeypatch):
+    requests = []
     def fake_urlopen(request, timeout):
+        requests.append(json.loads(request.data))
         return _JsonResponseWithUsage()
 
     monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
@@ -430,7 +433,7 @@ def test_complete_invokes_on_call_recorded_with_usage(monkeypatch):
         }
     ).complete(
         system_prompt="sys",
-        user_prompt="user",
+        user_prompt=outbound_prompt({}),
         stream=False,
         caller="gate",
         on_call_recorded=records.append,
@@ -445,7 +448,7 @@ def test_complete_invokes_on_call_recorded_with_usage(monkeypatch):
     assert record["ok"] is True
     assert record["error_kind"] is None
     assert record["streamed"] is False
-    assert record["prompt_chars"] == len("sys") + len("user")
+    assert record["prompt_chars"] == sum(len(message["content"]) for message in requests[0]["messages"])
     assert record["latency_ms"] >= 0
 
 
@@ -464,7 +467,7 @@ def test_streaming_requests_include_usage_stream_option(monkeypatch):
             "model_name": "m",
             "api_key": "secret",
         }
-    ).complete(system_prompt="s", user_prompt="u")
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}))
 
     assert captured["payload"]["stream_options"] == {"include_usage": True}
 
@@ -518,7 +521,7 @@ def test_transient_failure_is_retried_once_then_succeeds(monkeypatch):
         }
     ).complete(
         system_prompt="s",
-        user_prompt="u",
+        user_prompt=outbound_prompt({}),
         stream=False,
         on_call_recorded=records.append,
     )
@@ -552,7 +555,7 @@ def test_connection_retry_exhaustion_exposes_only_safe_typed_telemetry(monkeypat
             }
         ).complete(
             system_prompt=prompt_text,
-            user_prompt=prompt_text,
+            user_prompt=outbound_prompt({"goal": prompt_text}),
             stream=False,
         )
 
@@ -588,7 +591,7 @@ def test_timeout_retry_exhaustion_exposes_fixed_error_kind(monkeypatch):
                 "api_key": "secret",
                 "transport_max_retries": 2,
             }
-        ).complete(system_prompt="s", user_prompt="u", stream=False)
+        ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
 
     assert calls["n"] == 3
     assert exc_info.value.error_kind is LLMClientErrorKind.TIMEOUT
@@ -613,7 +616,7 @@ def test_http_5xx_retry_exhaustion_exposes_fixed_error_kind(monkeypatch):
                 "api_key": "secret",
                 "transport_max_retries": 2,
             }
-        ).complete(system_prompt="s", user_prompt="u", stream=False)
+        ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
 
     assert calls["n"] == 3
     assert exc_info.value.error_kind is LLMClientErrorKind.HTTP_5XX
@@ -640,7 +643,7 @@ def test_invalid_response_after_retry_exposes_safe_typed_telemetry(monkeypatch):
                 "api_key": "secret",
                 "transport_max_retries": 2,
             }
-        ).complete(system_prompt="s", user_prompt="u", stream=False)
+        ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
 
     error = exc_info.value
     rendered = "".join(traceback.format_exception(error))
@@ -670,7 +673,7 @@ def test_invalid_response_is_retried_then_valid_response_succeeds(monkeypatch):
             "api_key": "secret",
             "transport_max_retries": 1,
         }
-    ).complete(system_prompt="s", user_prompt="u", stream=False)
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
 
     assert result == "plain json"
     assert calls["n"] == 2
@@ -696,7 +699,7 @@ def test_empty_response_is_retried_then_nonempty_response_succeeds(monkeypatch):
         }
     ).complete(
         system_prompt="s",
-        user_prompt="u",
+        user_prompt=outbound_prompt({}),
         stream=False,
         on_call_recorded=records.append,
     )
@@ -730,7 +733,7 @@ def test_empty_response_retry_exhaustion_records_typed_failure(monkeypatch):
             }
         ).complete(
             system_prompt="s",
-            user_prompt="u",
+            user_prompt=outbound_prompt({}),
             stream=False,
             on_call_recorded=records.append,
         )
@@ -772,7 +775,7 @@ def test_empty_reasoning_only_response_records_safe_length_telemetry(
             }
         ).complete(
             system_prompt="s",
-            user_prompt="u",
+            user_prompt=outbound_prompt({}),
             stream=False,
             on_call_recorded=records.append,
         )
@@ -812,7 +815,7 @@ def test_reasoning_budget_exhaustion_after_two_retries_is_typed(monkeypatch):
             }
         ).complete(
             system_prompt="s",
-            user_prompt="u",
+            user_prompt=outbound_prompt({}),
             stream=False,
             max_tokens=2000,
         )
@@ -845,7 +848,7 @@ def test_nonempty_response_records_finish_reason_and_reasoning_length(monkeypatc
         }
     ).complete(
         system_prompt="s",
-        user_prompt="u",
+        user_prompt=outbound_prompt({}),
         stream=False,
         on_call_recorded=records.append,
     )
@@ -875,7 +878,7 @@ def test_nonempty_response_is_not_retried(monkeypatch):
         }
     ).complete(
         system_prompt="s",
-        user_prompt="u",
+        user_prompt=outbound_prompt({}),
         stream=False,
         on_call_recorded=records.append,
     )
@@ -907,7 +910,7 @@ def test_http_4xx_is_not_retried(monkeypatch):
             }
         ).complete(
             system_prompt="s",
-            user_prompt="u",
+            user_prompt=outbound_prompt({}),
             stream=False,
             on_call_recorded=records.append,
         )
@@ -951,7 +954,7 @@ def test_interruption_after_on_delta_is_not_retried(monkeypatch):
                 "model_name": "m",
                 "api_key": "secret",
             }
-        ).complete(system_prompt="s", user_prompt="u", on_delta=deltas.append)
+        ).complete(system_prompt="s", user_prompt=outbound_prompt({}), on_delta=deltas.append)
 
     assert calls["n"] == 1
     assert deltas == ["partial"]
@@ -981,11 +984,55 @@ def test_thinking_style_none_sends_no_nonstandard_fields(monkeypatch):
             "reasoning_effort": "high",
             # thinking_style defaults to "none"
         }
-    ).complete(system_prompt="s", user_prompt="u")
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}))
     payload = captured["payload"]
     assert "reasoning_effort" not in payload
     assert "thinking" not in payload
     assert "chat_template_kwargs" not in payload
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_official_deepseek_explicit_thinking_off_reaches_wire(monkeypatch, stream):
+    captured = _capture_payload(monkeypatch)
+    client = OpenAICompatibleLLMClient({
+        "api_base_url": "https://api.deepseek.com/v1", "model_name": "deepseek-v4-pro",
+        "api_key": "secret", "enable_thinking": False, "thinking_style": "none",
+    })
+    if stream:
+        client.complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=True, on_delta=lambda _: None)
+    else:
+        client.complete(system_prompt="s", user_prompt=outbound_prompt({}))
+    assert captured["payload"]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in captured["payload"]
+
+
+@pytest.mark.parametrize("effort,expected", [("low", "low"), ("medium", "high"), ("xhigh", "high"), ("max", "max")])
+def test_official_deepseek_thinking_effort_matches_provider_contract(monkeypatch, effort, expected):
+    captured = _capture_payload(monkeypatch)
+    OpenAICompatibleLLMClient({
+        "api_base_url": "https://api.deepseek.com", "model_name": "deepseek-v4-flash",
+        "api_key": "secret", "enable_thinking": True, "reasoning_effort": effort,
+    }).complete(system_prompt="s", user_prompt=outbound_prompt({}))
+    assert captured["payload"]["thinking"] == {"type": "enabled"}
+    assert captured["payload"]["reasoning_effort"] == expected
+
+
+def test_deepseek_named_model_on_other_host_does_not_infer_provider_toggle(monkeypatch):
+    captured = _capture_payload(monkeypatch)
+    OpenAICompatibleLLMClient({
+        "api_base_url": "https://api.deepseek.com.example.org/v1", "model_name": "deepseek-v4-pro",
+        "api_key": "secret", "enable_thinking": False,
+    }).complete(system_prompt="s", user_prompt=outbound_prompt({}))
+    assert "thinking" not in captured["payload"]
+
+
+def test_deepseek_mode_contract_survives_loopback_metering_route(monkeypatch):
+    captured = _capture_payload(monkeypatch)
+    OpenAICompatibleLLMClient({
+        "api_base_url": "http://127.0.0.1:8769/v1", "model_name": "deepseek-v4-pro",
+        "api_key": "ephemeral-local-token", "enable_thinking": False, "thinking_style": "deepseek",
+    }).complete(system_prompt="s", user_prompt=outbound_prompt({}))
+    assert captured["payload"]["thinking"] == {"type": "disabled"}
 
 
 def test_thinking_style_qwen_sends_chat_template_kwargs(monkeypatch):
@@ -998,7 +1045,7 @@ def test_thinking_style_qwen_sends_chat_template_kwargs(monkeypatch):
             "enable_thinking": True,
             "thinking_style": "qwen_chat_template",
         }
-    ).complete(system_prompt="s", user_prompt="u")
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}))
     payload = captured["payload"]
     assert payload["chat_template_kwargs"] == {"enable_thinking": True}
     assert "reasoning_effort" not in payload
@@ -1015,7 +1062,7 @@ def test_thinking_style_anthropic_sends_thinking_field(monkeypatch):
             "enable_thinking": True,
             "thinking_style": "anthropic",
         }
-    ).complete(system_prompt="s", user_prompt="u")
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}))
     payload = captured["payload"]
     assert payload["thinking"] == {"type": "enabled"}
     assert "reasoning_effort" not in payload
@@ -1047,7 +1094,7 @@ def test_complete_strips_thinking_from_final_content(monkeypatch):
             "model_name": "m",
             "api_key": "secret",
         }
-    ).complete(system_prompt="s", user_prompt="u", stream=False)
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
 
     assert content == "final answer"
 
@@ -1068,7 +1115,7 @@ def test_complete_sends_default_max_tokens_when_unset(monkeypatch):
             "model_name": "m",
             "api_key": "secret",
         }
-    ).complete(system_prompt="s", user_prompt="u", stream=False)
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
 
     assert captured["payload"]["max_tokens"] == 2048
 
@@ -1089,7 +1136,7 @@ def test_complete_honors_explicit_max_tokens_and_profile_defaults(monkeypatch):
             "api_key": "secret",
             "max_output_tokens": 512,
         }
-    ).complete(system_prompt="s", user_prompt="u", stream=False)
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
     assert captured["payload"]["max_tokens"] == 512
 
     OpenAICompatibleLLMClient(
@@ -1098,7 +1145,7 @@ def test_complete_honors_explicit_max_tokens_and_profile_defaults(monkeypatch):
             "model_name": "m",
             "api_key": "secret",
         }
-    ).complete(system_prompt="s", user_prompt="u", stream=False, max_tokens=99)
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False, max_tokens=99)
     assert captured["payload"]["max_tokens"] == 99
 
 
@@ -1117,7 +1164,7 @@ def test_complete_rejects_prompt_that_exceeds_context_window(monkeypatch):
                 "context_window": 100,
                 "max_output_tokens": 50,
             }
-        ).complete(system_prompt="s" * 500, user_prompt="u" * 500, stream=False)
+        ).complete(system_prompt="s" * 500, user_prompt=outbound_prompt({"features": [f"column_{i}_with_a_long_structural_name" for i in range(200)]}), stream=False)
 
 
 def test_complete_allows_prompt_within_context_window(monkeypatch):
@@ -1134,7 +1181,7 @@ def test_complete_allows_prompt_within_context_window(monkeypatch):
             "context_window": 32768,
             "max_output_tokens": 2048,
         }
-    ).complete(system_prompt="s", user_prompt="u", stream=False)
+    ).complete(system_prompt="s", user_prompt=outbound_prompt({}), stream=False)
 
     assert content == "plain json"
 
@@ -1174,7 +1221,7 @@ def test_context_length_exceeded_body_is_classified_without_leaking_message(monk
             }
         ).complete(
             system_prompt="s",
-            user_prompt="u",
+            user_prompt=outbound_prompt({}),
             stream=False,
             on_call_recorded=records.append,
         )
@@ -1198,7 +1245,7 @@ def test_complete_records_prompt_name_version_and_truncated_flag(monkeypatch):
         }
     ).complete(
         system_prompt="s",
-        user_prompt="u",
+        user_prompt=outbound_prompt({}),
         stream=False,
         caller="gate",
         prompt_name="GATE_SYSTEM_TEMPLATE",

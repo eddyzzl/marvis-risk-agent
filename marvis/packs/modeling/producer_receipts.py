@@ -187,4 +187,7 @@ def load_receipt(db_path, experiment, artifact, directory, *, required=True):
     ] != artifact.params.get("ensemble_member_artifact_ids"):
         raise ModelingError("native_model_dependency_closure_mismatch")
     snapshots = verify_files(directory, proof["files"])
+    from marvis.packs.modeling.development_refit_evidence import validate_development_refit
+
+    validate_development_refit(db_path, experiment, artifact, directory)
     return record, snapshots

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from marvis.operations.contracts import (
     FixedIntervalCalendar,
@@ -30,46 +30,18 @@ from marvis.operations.repository import (
 from marvis.operations.scheduler import TickReport
 from marvis.operations.bindings import MonitoringBinding
 from marvis.operations.monitoring import read_monitoring_evidence
+from marvis.operations.http_schemas import MonthlyCalendarPayload, SchedulePayload
+from marvis.operations.month_calendar import CalendarMonthCalendar
 from marvis.operations.diagnostics import period_diagnostic
 from marvis.operations.rechecks import request_recheck
+from marvis.operations.access import contract_access, visible_contract
+from marvis.db_schema import connect
 from marvis.production_governance.errors import GovernanceNotFound
 from marvis.production_governance.repository import ProductionGovernanceRepository
 from marvis.repositories.tasks import TaskRepository
 
 
 router = APIRouter(prefix="/api/operations", tags=["operations"])
-
-
-class CalendarPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    anchor_at: datetime
-    interval_seconds: StrictInt = Field(ge=1)
-
-
-class RetryPolicyPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    max_attempts: StrictInt = Field(ge=1, le=10)
-    initial_backoff_seconds: StrictFloat = Field(ge=0)
-    multiplier: StrictFloat = Field(gt=0)
-    max_backoff_seconds: StrictFloat = Field(ge=0)
-
-
-class SchedulePayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schedule_id: str = Field(min_length=1, max_length=200)
-    revision: StrictInt = Field(ge=1)
-    monitoring_ref: str = Field(min_length=1, max_length=200)
-    active_from: datetime
-    calendar: CalendarPayload
-    catch_up_budget: StrictInt = Field(ge=1, le=100)
-    lease_seconds: StrictInt = Field(ge=1)
-    retry_policy: RetryPolicyPayload
-    enabled: StrictBool = True
-    monitoring_binding: MonitoringBinding | None = None
-    active_until: datetime | None = None
 
 
 class PublishScheduleRequest(BaseModel):
@@ -181,6 +153,23 @@ def _task_filesystem_gc(
     return collector
 
 
+def _schedule_access(request, schedule_id, action="read", *, revision=None):
+    record = _runtime(request).store.get_schedule(schedule_id, revision=revision)
+    if record is None:
+        raise HTTPException(404, detail="operations schedule not found")
+    contract_access(request.app.state.settings.db_path, record.contract, action)
+    return record
+
+
+def _period_access(request, schedule_id, period_key, action="read"):
+    period = _runtime(request).store.get_period(schedule_id, period_key)
+    if period is None:
+        raise HTTPException(404, detail="operations period not found")
+    return _schedule_access(
+        request, schedule_id, action, revision=period.schedule_revision
+    )
+
+
 @router.get("/capabilities")
 def capabilities(request: Request) -> dict:
     _require_role(request, "maker", "checker", "admin")
@@ -199,7 +188,24 @@ def inbox(
 ) -> dict:
     _require_role(request, "maker", "checker", "admin")
     adapter = _runtime(request).local_inbox
-    return {"notifications": [] if adapter is None else adapter.list(limit=limit)}
+    items = [] if adapter is None else adapter.list(limit=limit)
+    visible = []
+    for item in items:
+        period = _runtime(request).store.get_period(
+            item["schedule_id"], item["period_key"]
+        )
+        record = (
+            _runtime(request).store.get_schedule(
+                item["schedule_id"], revision=period.schedule_revision
+            )
+            if period
+            else None
+        )
+        if record and visible_contract(
+            request.app.state.settings.db_path, record.contract
+        ):
+            visible.append(item)
+    return {"notifications": visible}
 
 
 @router.post("/inbox/{notification_id}/acknowledge")
@@ -209,6 +215,14 @@ def acknowledge_notification(notification_id: str, request: Request) -> dict:
     try:
         if adapter is None:
             raise KeyError(notification_id)
+        with connect(request.app.state.settings.db_path) as conn:
+            row = conn.execute(
+                "SELECT o.schedule_id,o.period_key FROM operations_local_inbox i JOIN operations_notification_outbox o ON o.notification_id=i.notification_id WHERE i.notification_id=?",
+                (notification_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(notification_id)
+        _period_access(request, row["schedule_id"], row["period_key"])
         adapter.acknowledge(notification_id, str(principal["id"]))
     except KeyError as exc:
         raise HTTPException(
@@ -220,6 +234,7 @@ def acknowledge_notification(notification_id: str, request: Request) -> dict:
 @router.get("/schedules/{schedule_id}/evidence")
 def monitoring_evidence(schedule_id: str, period_key: str, request: Request) -> dict:
     _require_role(request, "maker", "checker", "admin")
+    _period_access(request, schedule_id, period_key)
     outcome = _runtime(request).store.get_outcome(schedule_id, period_key)
     if outcome is None:
         raise HTTPException(status_code=404, detail="monitoring outcome not found")
@@ -235,9 +250,42 @@ def monitoring_evidence(schedule_id: str, period_key: str, request: Request) -> 
 
 @router.post("/schedules", status_code=201)
 def publish_schedule(payload: PublishScheduleRequest, request: Request) -> dict:
-    _require_role(request, "maker", "admin")
+    from marvis.institution.policy import require_human_principal
+    from dataclasses import replace
+
+    require_human_principal(request)
+    principal = _require_role(request, "maker", "admin")
     try:
-        contract = _schedule_contract(payload.schedule)
+        contract = replace(
+            _schedule_contract(payload.schedule),
+            execution_actor_id=str(principal["id"]),
+        )
+        contract_access(
+            request.app.state.settings.db_path,
+            contract,
+            "execute",
+            actor_id=principal["id"],
+        )
+        old = _runtime(request).store.get_schedule(contract.schedule_id)
+        if old:
+            from marvis.operations.schedule_proposals import schedule_task
+
+            if any(
+                (
+                    old.contract.monitoring_binding,
+                    old.contract.portfolio_binding,
+                    old.contract.feedback_binding,
+                )
+            ) and schedule_task(old.contract) != schedule_task(contract):
+                raise ScheduleRevisionConflict(
+                    "schedule task identity cannot be rebound"
+                )
+            contract_access(
+                request.app.state.settings.db_path,
+                old.contract,
+                "execute",
+                actor_id=principal["id"],
+            )
         record = _runtime(request).publish_schedule(
             contract,
             expected_revision=payload.expected_revision,
@@ -253,8 +301,14 @@ def publish_schedule(payload: PublishScheduleRequest, request: Request) -> dict:
 def list_active_schedules(request: Request, include_disabled: bool = False) -> dict:
     _require_role(request, "maker", "checker", "admin")
     store = _runtime(request).store
-    records = store.list_schedules() if include_disabled else store.list_active_schedules()
-    schedules = [_schedule_record(record) for record in records]
+    records = (
+        store.list_schedules() if include_disabled else store.list_active_schedules()
+    )
+    schedules = [
+        _schedule_record(record)
+        for record in records
+        if visible_contract(request.app.state.settings.db_path, record.contract)
+    ]
     return {"schedules": schedules, "count": len(schedules)}
 
 
@@ -271,6 +325,7 @@ def get_schedule(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if record is None:
         raise HTTPException(status_code=404, detail="operations schedule not found")
+    contract_access(request.app.state.settings.db_path, record.contract)
     return _schedule_record(record)
 
 
@@ -281,7 +336,13 @@ def list_schedule_revisions(schedule_id: str, request: Request) -> dict:
         records = _runtime(request).store.list_schedule_revisions(schedule_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"schedules": [_schedule_record(record) for record in records]}
+    return {
+        "schedules": [
+            _schedule_record(record)
+            for record in records
+            if visible_contract(request.app.state.settings.db_path, record.contract)
+        ]
+    }
 
 
 @router.get("/schedules/{schedule_id}/periods")
@@ -291,9 +352,15 @@ def list_periods(
     limit: StrictInt = Query(default=100, ge=1, le=500),
 ) -> dict:
     _require_role(request, "maker", "checker", "admin")
+    _schedule_access(request, schedule_id)
     store = _runtime(request).store
     periods = []
     for period in store.list_periods(schedule_id, limit=limit):
+        record = store.get_schedule(schedule_id, revision=period.schedule_revision)
+        if not record or not visible_contract(
+            request.app.state.settings.db_path, record.contract
+        ):
+            continue
         outcome = store.get_outcome(schedule_id, period.period.key)
         events = store.list_events(schedule_id, period.period.key)
         periods.append(
@@ -307,7 +374,14 @@ def list_periods(
 
 @router.post("/schedules/{schedule_id}/rechecks", status_code=201)
 def recheck(schedule_id: str, payload: RecheckRequest, request: Request) -> dict:
+    from marvis.institution.policy import require_human_principal
+    from marvis.operations.schedule_proposals import schedule_task
+
+    require_human_principal(request)
     _require_role(request, "maker", "admin")
+    source = _period_access(request, schedule_id, payload.period_key, "execute")
+    if schedule_task(source.contract) != payload.monitoring_binding.task_id:
+        raise HTTPException(422, detail="recheck task owner differs")
     try:
         record = request_recheck(
             _runtime(request),
@@ -335,6 +409,7 @@ def get_period(
     period_key: str = Query(min_length=1, max_length=500),
 ) -> dict:
     _require_role(request, "maker", "checker", "admin")
+    _period_access(request, schedule_id, period_key)
     store = _runtime(request).store
     try:
         period = store.get_period(schedule_id, period_key)
@@ -629,7 +704,13 @@ def _schedule_contract(payload: SchedulePayload) -> ScheduleContract:
         revision=payload.revision,
         monitoring_ref=payload.monitoring_ref,
         active_from=payload.active_from,
-        calendar=FixedIntervalCalendar(
+        calendar=CalendarMonthCalendar(
+            payload.calendar.anchor_at,
+            payload.calendar.interval_months,
+            payload.calendar.timezone,
+        )
+        if isinstance(payload.calendar, MonthlyCalendarPayload)
+        else FixedIntervalCalendar(
             anchor_at=payload.calendar.anchor_at,
             interval_seconds=payload.calendar.interval_seconds,
         ),
@@ -643,6 +724,8 @@ def _schedule_contract(payload: SchedulePayload) -> ScheduleContract:
         ),
         enabled=payload.enabled,
         monitoring_binding=payload.monitoring_binding,
+        portfolio_binding=payload.portfolio_binding,
+        feedback_binding=payload.feedback_binding,
         active_until=payload.active_until,
     )
 
@@ -854,3 +937,12 @@ def _iso(value: datetime) -> str:
 
 def _optional_iso(value: datetime | None) -> str | None:
     return None if value is None else _iso(value)
+
+
+def _mount_extensions():
+    from marvis.operations.extensions_router import router as extensions_router
+
+    router.include_router(extensions_router)
+
+
+_mount_extensions()

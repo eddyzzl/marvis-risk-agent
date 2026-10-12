@@ -6,7 +6,7 @@ const STAGES = [
   ["impact", "影响测算"], ["report", "形成报告"],
 ];
 export function strategyToolStage(workflow) {
-  if (workflow === "strategy_project_context") return "current_context";
+  if (workflow === "strategy_project_context" || workflow === "strategy_workbench_preferences") return "current_context";
   if (workflow === "strategy_sample_design_v2") return "sample_design";
   if (/report_bundle|dsl_delivery|lifecycle_adopt/.test(workflow)) return "report";
   if (/impact|stability|validation/.test(workflow)) return "impact";
@@ -54,7 +54,7 @@ export function updateStrategyToolDirectory(root, payload, taskId) {
       let count = 0;
       for (const details of launchers.querySelectorAll(".candidate-lab-launcher")) {
         const workflow = details.querySelector("[data-candidate-lab-workflow]")?.dataset.candidateLabWorkflow || "";
-        const group = strategyToolStage(workflow);
+        const group = details.dataset.strategyToolStage || strategyToolStage(workflow);
         const match = term ? details.textContent.toLocaleLowerCase().includes(term) || workflow.includes(term)
           : select.value === "all" || select.value === group || (select.value === "history" && workflow === "strategy_project_context");
         details.hidden = !match;

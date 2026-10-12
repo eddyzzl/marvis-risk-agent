@@ -37,6 +37,7 @@ def test_browser_stylesheet_bundle_is_ordered_unique_and_complete() -> None:
         "static/css/business-acceptance.css",
         "static/css/operations.css",
         "static/css/production-governance.css",
+        "static/css/blind-oot.css",
         "static/css/historical-replay.css",
         "static/css/collection-workspace.css",
     )

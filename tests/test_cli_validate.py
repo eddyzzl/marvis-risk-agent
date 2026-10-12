@@ -53,12 +53,16 @@ def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):
             report_template_path,
             feature_columns,
             notebook_kernel_name,
+            notebook_memory_limit_mb,
+            notebook_network_mode,
         ):
             self.workspace = workspace
             self.db_path = db_path
             self.report_template_path = report_template_path
             self.feature_columns = feature_columns
             self.notebook_kernel_name = notebook_kernel_name
+            self.notebook_memory_limit_mb = notebook_memory_limit_mb
+            self.notebook_network_mode = notebook_network_mode
 
     monkeypatch.setattr(
         __main__,
@@ -68,7 +72,8 @@ def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):
             fake_init_db,
             FakePipelineSettings,
             fake_run_staged_pipeline,
-            lambda workspace: type("Environment", (), {"kernel_name": "marvis-kernel"})(),
+            lambda workspace: type("Environment", (), {"kernel_name": "marvis-kernel", "notebook_memory_limit_mb": 2048,
+                                                        "notebook_network_mode": "loopback_only"})(),
         ),
     )
 
@@ -88,6 +93,8 @@ def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):
     assert calls[1][1] == "task-1"
     assert calls[1][2].feature_columns == ["x1", "x2"]
     assert calls[1][2].notebook_kernel_name == "marvis-kernel"
+    assert calls[1][2].notebook_memory_limit_mb == 2048
+    assert calls[1][2].notebook_network_mode == "loopback_only"
 
 
 def test_cli_without_subcommand_defaults_to_serve(monkeypatch):

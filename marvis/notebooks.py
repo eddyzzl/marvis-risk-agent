@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import ast
 from dataclasses import asdict
 from dataclasses import dataclass, replace
@@ -35,6 +36,10 @@ from marvis.notebook_contract import (
 from marvis.notebook_io import read_notebook
 from marvis.notebook_steps import NotebookStepPlan, notebook_step_plan
 from marvis.files import write_json_atomic, write_text_atomic
+from marvis.local_execution import (
+    LocalExecutionIsolationError, execution_capability, execution_command,
+    notebook_kernel_manager_class, preflight_execution,
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,7 @@ class NotebookRunResult:
     step_events: dict[str, Any] | None = None
     cancelled: bool = False
     resource_usage: dict[str, Any] | None = None
+    execution_policy: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,7 @@ class NotebookExecutionSession:
         resource_poll_interval_seconds: float = 0.5,
         allow_appended_execution: bool = False,
         appended_execution_policy: AppendedCellExecutionPolicy | None = None,
+        network_mode: str = "trusted_local",
     ) -> None:
         if allow_appended_execution and appended_execution_policy is None:
             raise ValueError(
@@ -158,6 +165,8 @@ class NotebookExecutionSession:
         self.log_path = log_path
         self.timeout = timeout
         self.kernel_name = kernel_name
+        self.network_mode = network_mode
+        self.execution_policy = {**asdict(execution_capability(network_mode)), "state": "requested"}
         self.progress_path = progress_path
         self.execution_cwd = execution_cwd
         self.cancellation_token = cancellation_token
@@ -305,6 +314,9 @@ class NotebookExecutionSession:
         self.closed = True
         cleanup = getattr(self.client, "_cleanup_kernel", None)
         if callable(cleanup):
+            # nbclient registers before kernel startup; startup rejection may
+            # bypass its context-manager finally block. Closing owns cleanup.
+            atexit.unregister(cleanup)
             try:
                 _consume_awaitable(cleanup())
                 return
@@ -315,6 +327,9 @@ class NotebookExecutionSession:
             _call_kernel_method(kernel_manager, "shutdown_kernel", now=True)
 
     def _build_client(self):
+        isolation_options = {}
+        if self.network_mode == "loopback_only":
+            isolation_options["kernel_manager_class"] = notebook_kernel_manager_class(self.network_mode)
         callbacks = {
             "on_cell_start": self._record_cell_start,
             "on_cell_error": self._record_cell_error,
@@ -326,6 +341,7 @@ class NotebookExecutionSession:
                 self.notebook,
                 timeout=self.timeout,
                 kernel_name=self.kernel_name,
+                **isolation_options,
                 **callbacks,
             )
         except TypeError as exc:
@@ -338,9 +354,31 @@ class NotebookExecutionSession:
             )
             for name, callback in callbacks.items():
                 setattr(client, name, callback)
+            for name, value in isolation_options.items():
+                setattr(client, name, value)
             return client
 
     def _run_with_result(self, execute, *, log_path: Path) -> NotebookRunResult:
+        try:
+            self.execution_policy = {**preflight_execution(self.network_mode), "state": "starting"}
+        except LocalExecutionIsolationError as exc:
+            result = _preflight_failure_result(
+                self.network_mode, self.notebook_path, self.executed_path, log_path,
+                self.progress_path, exc,
+            )
+            self.execution_policy = result.execution_policy
+            return result
+        self._write_progress()
+        result = self._execute_with_result(execute, log_path=log_path)
+        self.execution_policy = {
+            **self.execution_policy, "state": "completed" if result.succeeded else "failed",
+        }
+        if not result.succeeded:
+            self.execution_policy["next_action"] = _execution_failure_action(result, self.network_mode)
+        self._write_progress()
+        return replace(result, execution_policy=dict(self.execution_policy), step_events=self._step_events())
+
+    def _execute_with_result(self, execute, *, log_path: Path) -> NotebookRunResult:
         monitor = _NotebookResourceMonitor(
             client_getter=lambda: self.client,
             memory_limit_mb=self.memory_limit_mb,
@@ -556,10 +594,11 @@ class NotebookExecutionSession:
         if self._progress_suspended:
             return
         if self.progress_path is not None:
-            _write_step_events(self.progress_path, self.plan, self.cell_events)
+            write_json_atomic(self.progress_path, self._step_events())
 
     def _step_events(self) -> dict[str, Any]:
-        return _build_step_events(self.plan, self.cell_events)
+        return {**_build_step_events(self.plan, self.cell_events),
+                "execution_policy": dict(self.execution_policy)}
 
     def _raise_if_cancelled(self) -> None:
         if self.cancellation_token is not None:
@@ -990,6 +1029,85 @@ def run_notebook(
     memory_limit_mb: int | None = None,
     resource_poll_interval_seconds: float = 0.5,
     isolated: bool = False,
+    network_mode: str = "trusted_local",
+) -> NotebookRunResult:
+    try:
+        policy = preflight_execution(network_mode)
+    except LocalExecutionIsolationError as exc:
+        return _preflight_failure_result(
+            network_mode, notebook_path, executed_path, log_path, progress_path, exc,
+        )
+    try:
+        result = _run_notebook_with_policy(
+            notebook_path, executed_path, log_path, timeout, kernel_name, progress_path,
+            execution_cwd, cancellation_token, memory_limit_mb, resource_poll_interval_seconds,
+            isolated, network_mode,
+        )
+    except LocalExecutionIsolationError as exc:
+        return _preflight_failure_result(
+            network_mode, notebook_path, executed_path, log_path, progress_path, exc,
+        )
+    except OSError as exc:
+        return _preflight_failure_result(
+            network_mode, notebook_path, executed_path, log_path, progress_path,
+            RuntimeError(f"Notebook 启动失败（{type(exc).__name__}）；请检查解释器和文件权限后重试。"),
+            error_name="NotebookStartError",
+        )
+    if result.execution_policy is None:
+        policy["state"] = "completed" if result.succeeded else "failed"
+    else:
+        policy = dict(result.execution_policy)
+    policy["subprocess_worker"] = isolated
+    if not result.succeeded:
+        policy["next_action"] = _execution_failure_action(result, network_mode)
+    return replace(result, execution_policy=policy)
+
+
+def _preflight_failure_result(
+    network_mode, notebook_path, executed_path, log_path, progress_path, error,
+    *, error_name="LocalExecutionIsolationError",
+) -> NotebookRunResult:
+    try:
+        policy = asdict(execution_capability(network_mode))
+    except LocalExecutionIsolationError:
+        policy = {"mode": network_mode, "available": False, "status": "invalid",
+                  "network_restricted": False}
+    policy["state"] = "blocked"
+    if policy.get("status") in {"available", "trusted"}:
+        policy["status"] = "startup_failed"
+    policy["available"] = False
+    policy["network_restricted"] = False
+    notebook = read_notebook(Path(notebook_path), as_version=4)
+    Path(executed_path).parent.mkdir(parents=True, exist_ok=True)
+    nbformat.write(notebook, executed_path)
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_failure_log(log_path, None, error_name, str(error))
+    events = {**_build_step_events(notebook_step_plan(notebook), {}), "execution_policy": policy}
+    if progress_path is not None:
+        write_json_atomic(Path(progress_path), events)
+    return NotebookRunResult(
+        succeeded=False, failed_cell_index=None, error_name=error_name,
+        error_value=str(error), step_events=events, execution_policy=policy,
+    )
+
+
+def _execution_failure_action(result: NotebookRunResult, network_mode: str) -> str:
+    if result.cancelled:
+        return "任务已取消；确认材料和设置后重新运行。"
+    if result.error_name == "NotebookResourceLimitExceeded":
+        return "调整 Notebook 内存上限或减少样本，再重新运行。"
+    if result.error_name in {"NotebookSubprocessTimeout", "CellTimeoutError"}:
+        return "检查耗时单元及执行超时设置后重试。"
+    if network_mode == "loopback_only":
+        return "仅本机网络模式要求外部依赖预先准备为本地材料；检查失败单元和运行日志后重试。"
+    return "检查失败单元、文件权限和执行环境后重试。"
+
+
+def _run_notebook_with_policy(
+    notebook_path, executed_path, log_path, timeout, kernel_name, progress_path,
+    execution_cwd, cancellation_token, memory_limit_mb, resource_poll_interval_seconds,
+    isolated, network_mode,
 ) -> NotebookRunResult:
     if isolated:
         return _run_notebook_in_subprocess(
@@ -1003,6 +1121,7 @@ def run_notebook(
             cancellation_token=cancellation_token,
             memory_limit_mb=memory_limit_mb,
             resource_poll_interval_seconds=resource_poll_interval_seconds,
+            network_mode=network_mode,
         )
     session = NotebookExecutionSession(
         notebook_path=notebook_path,
@@ -1015,6 +1134,7 @@ def run_notebook(
         cancellation_token=cancellation_token,
         memory_limit_mb=memory_limit_mb,
         resource_poll_interval_seconds=resource_poll_interval_seconds,
+        network_mode=network_mode,
     )
     try:
         return session.execute_notebook(keep_alive=False)
@@ -1034,6 +1154,7 @@ def _run_notebook_in_subprocess(
     cancellation_token: NotebookCancellationToken | None,
     memory_limit_mb: int | None,
     resource_poll_interval_seconds: float,
+    network_mode: str,
 ) -> NotebookRunResult:
     job = {
         "notebook_path": str(Path(notebook_path)),
@@ -1045,10 +1166,11 @@ def _run_notebook_in_subprocess(
         "execution_cwd": None if execution_cwd is None else str(Path(execution_cwd)),
         "memory_limit_mb": memory_limit_mb,
         "resource_poll_interval_seconds": float(resource_poll_interval_seconds),
+        "network_mode": network_mode,
     }
     started = datetime.now(timezone.utc).isoformat()
     process = subprocess.Popen(
-        _notebook_worker_command(),
+        execution_command(_notebook_worker_command(), network_mode),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1199,6 +1321,7 @@ def _run_notebook_in_subprocess(
         step_events=result_payload.get("step_events"),
         cancelled=bool(result_payload.get("cancelled")),
         resource_usage=resource_usage,
+        execution_policy=result_payload.get("execution_policy"),
     )
 
 
@@ -1276,6 +1399,7 @@ def notebook_run_result_from_dict(payload: dict) -> NotebookRunResult:
         step_events=payload.get("step_events"),
         cancelled=bool(payload.get("cancelled")),
         resource_usage=payload.get("resource_usage") if isinstance(payload.get("resource_usage"), dict) else None,
+        execution_policy=payload.get("execution_policy") if isinstance(payload.get("execution_policy"), dict) else None,
     )
 
 

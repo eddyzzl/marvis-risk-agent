@@ -527,9 +527,12 @@ def run_search_voting_candidates(inputs, ctx, runtime) -> dict[str, Any]:
             entries=entries,
             frame=frame,
         )
-        result = search_voting_candidate_combinations(search_request)
+        from marvis.strategy_workbench.control import NativeSearchControl
+        control = NativeSearchControl(runtime, ctx, dict(inputs))
+        result = search_voting_candidate_combinations(search_request, control=control)
         result = validate_voting_candidate_search_result(result)
-        return _persist_search(
+        control.publishing()
+        output = _persist_search(
             runtime,
             task_id=task_id,
             pool=pool,
@@ -539,6 +542,7 @@ def run_search_voting_candidates(inputs, ctx, runtime) -> dict[str, Any]:
             excluded_unsupported_rule_ids=excluded,
             result=result,
         )
+        return control.completed(output)
     except StrategyError:
         raise
     except _BOUNDARY_ERRORS as exc:

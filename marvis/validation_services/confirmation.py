@@ -1,5 +1,6 @@
 """Revision-checked task and batch confirmation orchestration."""
 from __future__ import annotations
+from pathlib import Path
 
 from marvis.repositories.tasks import TaskRepository
 from marvis.repositories.validation_batches import ValidationBatchRepository
@@ -25,6 +26,9 @@ def confirm_unambiguous_contract(*, db_path, task_id: str) -> bool:
         return False
     child = task_repo.get_task(task_id)
     paths = resolve_selected_validation_materials(child)
+    from marvis.modeling_holdout.guards import record_exposure
+    for path in (paths.sample, paths.dictionary):
+        record_exposure(db_path, Path(db_path).parent, path)
     validated = validate_confirmation_against_materials(
         contract=record.contract,
         sample_path=paths.sample,

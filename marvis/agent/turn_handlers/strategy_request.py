@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections.abc import Sequence
+from marvis.llm_outbound_gate_context import authorization_gate
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_AUTO
 from marvis.agent.plan_driver import DriverError
@@ -368,21 +369,7 @@ def _specialized_workflow_intake_route(
     param_schema = (
         data_context_lane._modeling_intake_param_schema(task) if is_modeling else []
     )
-    gate_context = (
-        (
-            "建模工作流首轮规格收集：任务类型已经由用户选择为 modeling。"
-            "confirm 只表示无条件创建一份可审阅的建模计划；adjust 只抽取下方"
-            "已声明的建模控件并创建可审阅计划，不执行计划。问题、条件、拒绝、"
-            "切换工作流或不明确表达必须 clarify。"
-        )
-        if is_modeling
-        else (
-            "特征分析工作流首轮进入确认：任务类型已经由用户选择为 "
-            "feature_analysis。只有用户明确、即时、无条件要求进入该工作流时"
-            "才能 confirm；问题、条件、拒绝、参数变更、切换工作流或不明确表达"
-            "必须 clarify。confirm 只创建可审阅计划，不执行计划。"
-        )
-    )
+    gate_context = authorization_gate("create_workflow_plan", bindings={"workflow_family": task.task_type})
     try:
         route = route_instruction(
             runtime.llm_client,
@@ -405,24 +392,38 @@ def _specialized_workflow_intake_route(
     if not isinstance(params, dict):
         return (None, reason)
     if action == "confirm":
-        if route.get("explicit_authorization") is True and not params:
-            return (dict(route), reason)
-        return (None, reason)
-    if (
+        if route.get("explicit_authorization") is not True or params:
+            return (None, reason)
+    elif (
         is_modeling
         and action == "adjust"
         and route.get("explicit_authorization") is False
         and params
         and set(params) <= contracts_lane._MODELING_INTAKE_PARAM_NAMES
     ):
+        pass
+    else:
+        return (None, reason)
+    from marvis.agent.semantic_authorization import review_semantic_authorization
+
+    review = review_semantic_authorization(
+        runtime.llm_client,
+        gate_context=gate_context,
+        instruction=instruction,
+        proposed_params=params,
+    )
+    if review.authorized:
         return (dict(route), reason)
-    return (None, reason)
+    return (None, review.reason or "独立语义复核未确认当前创建计划的无条件授权。")
 
 
 def _is_strategy_request_intent(text: str) -> bool:
     """Recognize standard strategy requests plus narrow tree-build shorthand."""
 
+    from marvis.agent.asset_stability_request import is_asset_stability_command
     return bool(
+        is_asset_stability_command(text)
+        or
         utterance_targets_candidate_monthly_stability(text)
         or utterance_targets_model_score_comparison_v2(text)
         or utterance_targets_interactive_tree_frontier_group_materialization(text)
@@ -653,6 +654,10 @@ def _maybe_handle_strategy_request_turn(
     persisted request confirmations remain readable for compatibility only.
     """
 
+    from marvis.agent.asset_stability_request import handle_asset_stability_command
+    asset_response = handle_asset_stability_command(runtime, repo, task, user_text)
+    if asset_response is not None:
+        return asset_response
     if task.task_type != TASK_TYPE_STRATEGY or runtime.llm_client is None:
         return None
     text = str(user_text or "").strip()
@@ -928,6 +933,8 @@ def _maybe_handle_strategy_request_turn(
             preview
         ),
         target_col=None if preview is None else preview.target_col,
+        field_aliases=() if preview is None else getattr(preview, "field_aliases", ()),
+        field_directions=None if preview is None else getattr(preview, "field_directions", None),
         llm=runtime.llm_client,
     )
     if compilation.draft is None:
@@ -2330,6 +2337,8 @@ def _start_confirmed_strategy_plan(
         tier=runtime.tier,
         **start_kwargs,
     )
+    from marvis.strategy_workbench.service import register_plan
+    register_plan(runtime.settings, start.plan_id, getattr(runtime.local_principal, "id", None))
     shared_lane.append_driver_messages(repo, task, start, runtime=runtime)
     if auto_start:
         resumed = driver.resume(

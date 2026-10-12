@@ -2,6 +2,7 @@ from marvis.agent_memory.distillation import DistillationEngine
 from marvis.agent_memory.models import MemoryCandidate
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.db import init_db
+import pytest
 
 
 def test_distillation_engine_groups_field_conventions_and_merges_deterministically(tmp_path):
@@ -49,12 +50,14 @@ def test_distillation_engine_uses_llm_only_for_summary_wording(tmp_path):
             source_task_id="task-1",
         )
     )
-    llm = _FakeLLM("Notebook 契约缺字段是重复出现的验证坑点。")
+    llm = _FakeLLM('{"summary":"Notebook 类问题是重复出现的验证坑点。"}')
 
     distillations = DistillationEngine(store, llm_factory=lambda: llm).distill_category("validation_pitfall")
 
-    assert distillations[0].distilled_summary == "Notebook 契约缺字段是重复出现的验证坑点。"
-    assert "source_summaries" in llm.calls[0]["user_prompt"]
+    assert distillations[0].distilled_summary == "Notebook 类问题是重复出现的验证坑点。"
+    assert "source_summaries" not in llm.calls[0]["user_prompt"]
+    assert "missing RMC_SAMPLE_DF" not in llm.calls[0]["user_prompt"]
+    assert '"pitfall_type":"notebook"' in llm.calls[0]["user_prompt"]
     assert "不要输出任务 ID" in llm.calls[0]["system_prompt"]
 
 
@@ -104,6 +107,38 @@ def test_distillation_engine_skips_non_numeric_model_metrics_instead_of_dropping
     metric_ranges = distillations[0].structured["metric_ranges"]
     assert metric_ranges["ks"] == {"min": 0.31, "max": 0.31}
     assert metric_ranges["auc"] == {"min": 0.72, "max": 0.72}
+
+
+def test_model_distillation_separates_known_splits_from_legacy_unknown_contracts(tmp_path):
+    path = tmp_path / "memory.sqlite"
+    init_db(path)
+    store = AgentMemoryStore(path)
+    from tests.test_agent_memory_store import _model_experience_payload
+
+    units = {"ks": "fraction", "auc": "fraction", "psi": "index"}
+    for index, (ks, split) in enumerate(((30, None), (.4, "train"), (.2, "oot"))):
+        payload = _model_experience_payload(ks=ks, source_task_id=f"source-{index}")
+        if split:
+            payload.update(metric_units=units, evaluation_split=split)
+        store.create(MemoryCandidate(memory_type="model_experience", summary="本地聚合记录",
+                                     payload=payload, source_task_id=f"source-{index}", confidence="high"))
+    entries = DistillationEngine(store).distill_category("model_experience")
+    assert len(entries) == 3
+    by_split = {entry.structured.get("evaluation_split"): entry.structured for entry in entries}
+    assert by_split[None]["metric_ranges"]["ks"] == {"min": 30., "max": 30.}
+    assert "metric_units" not in by_split[None]
+    assert by_split["train"]["metric_ranges"]["ks"] == {"min": .4, "max": .4}
+    assert by_split["oot"]["metric_ranges"]["ks"] == {"min": .2, "max": .2}
+    assert by_split["oot"]["metric_units"] == units
+
+
+def test_model_metric_merge_refuses_mixed_contracts_even_without_grouping():
+    from marvis.agent_memory.distillation import _merge_model_experience
+
+    with pytest.raises(ValueError, match="different metric contracts"):
+        _merge_model_experience([{"ks": .4, "evaluation_split": "train"}, {"ks": .2, "evaluation_split": "oot"}], 2)
+    with pytest.raises(ValueError, match="incompatible with its declared unit"):
+        _merge_model_experience([{"ks": 20, "metric_units": {"ks": "fraction"}}], 1)
 
 
 def test_distillation_support_counts_distinct_tasks_not_entries(tmp_path):

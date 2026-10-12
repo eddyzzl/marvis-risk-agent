@@ -26,6 +26,13 @@ from marvis.agent_memory.distillation import DistillationEngine
 from marvis.agent_memory.evolution import EvolutionManager
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.api import router as api_router
+from marvis.institution_adapters.router import configure_institution_adapters, router as institution_adapters_router
+from marvis.institution.router import router as institution_router
+from marvis.institution.sync_router import router as instance_sync_router
+from marvis.institution.http import prepare_request, request_context, identity_error_response
+from marvis.institution.store import IdentityError
+from marvis.modeling_holdout.router import router as blind_oot_router
+from marvis.modeling_holdout.contracts import HoldoutError
 from marvis.artifacts.recovery import reconcile_workspace_artifacts
 from marvis.branding import (
     DEFAULT_BRANDING,
@@ -107,6 +114,7 @@ from marvis.routers.audit import router as audit_router
 from marvis.routers.branding import router as branding_router
 from marvis.routers.data import router as data_router
 from marvis.routers.data_analysis import router as data_analysis_router
+from marvis.routers.sql import router as sql_router
 from marvis.routers.drafts import router as drafts_router
 from marvis.routers.evidence import router as evidence_router
 from marvis.routers.decision_twin import router as decision_twin_router
@@ -120,6 +128,10 @@ from marvis.routers.scans import router as scans_router
 from marvis.routers.skills import router as skills_router
 from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.strategy_candidate_lab import router as strategy_candidate_lab_router
+from marvis.routers.strategy_asset_stability import router as strategy_asset_stability_router
+from marvis.routers.strategy_history_mapping import router as strategy_history_mapping_router
+from marvis.routers.field_directions import router as field_directions_router
+from marvis.strategy_workbench.router import router as strategy_workbench_router
 from marvis.routers.tasks import router as tasks_router
 from marvis.routers.validation_agent import router as validation_agent_router
 from marvis.routers.validation_batches import router as validation_batches_router
@@ -455,6 +467,7 @@ def create_app(
         )
 
     app = FastAPI(title="MARVIS-Agent")
+    app.add_exception_handler(IdentityError, lambda request, exc: identity_error_response(exc))
     app.add_middleware(ValidationBatchIngressLimitMiddleware, settings=settings)
     app.state.settings = settings
     app.state.validation_batch_upload_gc = validation_batch_upload_gc
@@ -480,6 +493,7 @@ def create_app(
     app.state.risk_sources = SourceService(settings)
     app.state.risk_events = EventService(settings)
     app.state.collection = CollectionService(settings)
+    configure_institution_adapters(app)
     app.state.production_activation_verifiers.setdefault(ADAPTER_ID, app.state.reference_deployment_adapter)
     app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
@@ -579,9 +593,13 @@ def create_app(
         # Do not allocate a governance session until the shared-host
         # credential boundary has passed. Otherwise an unauthenticated
         # loopback peer could create unbounded short-lived local principals.
+        identity_response = await prepare_request(request, settings.db_path)
+        if identity_response is not None:
+            return identity_response
         if (
             private_client_authenticated
             and not path.startswith("/static/")
+            and not getattr(request.state, "institution_principal", None)
         ):
             session_token = request.cookies.get(_LOCAL_SESSION_COOKIE)
             try:
@@ -593,7 +611,33 @@ def create_app(
                 principal = session.principal
                 pending_session_token = session.token
             request.state.local_principal = principal
-        response = await call_next(request)
+        # Explicit blind tasks bind their development surface to one active
+        # maker. Custodian/checker access is confined to the separate custody API.
+        if path.startswith('/api/tasks/') and '/blind-oot' not in path:
+            from marvis.modeling_holdout.guards import require_http_developer, cohort_for_task
+            task_identity = path.split('/')[3]
+            try:
+                actor_id = getattr(getattr(request.state, 'local_principal', None), 'id', '')
+                if method == 'GET' and path.rstrip('/') == f'/api/tasks/{task_identity}' and cohort_for_task(settings.db_path, task_identity):
+                    from marvis.modeling_holdout.service import HoldoutService
+                    HoldoutService(settings).summary(task_identity, actor_id)
+                else:
+                    require_http_developer(settings.db_path, task_identity, actor_id)
+                if method == 'DELETE' and cohort_for_task(settings.db_path, task_identity):
+                    raise HoldoutError('blind_oot_budget_prevents_task_deletion')
+            except HoldoutError as exc:
+                return JSONResponse(status_code=exc.status, content={'detail': {'code': exc.code}})
+        if path.startswith('/api/') and not path.startswith('/api/tasks/'):
+            from marvis.modeling_holdout.guards import related_development_task, require_http_developer
+            try:
+                related_task = related_development_task(settings.db_path, path, request.query_params)
+                if related_task:
+                    require_http_developer(settings.db_path, related_task,
+                        getattr(getattr(request.state, 'local_principal', None), 'id', ''))
+            except HoldoutError as exc:
+                return JSONResponse(status_code=exc.status, content={'detail': {'code': exc.code}})
+        with request_context(request, settings.db_path):
+            response = await call_next(request)
         if local_token and private_client_authenticated and not path.startswith("/static/"):
             # Authenticated task/data responses are private browser content,
             # not reusable shared-host cache entries.
@@ -629,7 +673,12 @@ def create_app(
                 response.headers["Cache-Control"] = "no-cache"
         return response
 
+    @app.exception_handler(HoldoutError)
+    async def holdout_error_handler(request, exc):
+        return JSONResponse(status_code=exc.status, content={'detail': {'code': exc.code}})
+
     app.include_router(api_router)
+    app.include_router(blind_oot_router)
     app.include_router(agent_memory_router)
     app.include_router(llm_router)
     app.include_router(artifacts_router)
@@ -637,6 +686,7 @@ def create_app(
     app.include_router(branding_router)
     app.include_router(data_router)
     app.include_router(data_analysis_router)
+    app.include_router(sql_router)
     app.include_router(plugins_router)
     app.include_router(drafts_router)
     app.include_router(evidence_router)
@@ -649,12 +699,19 @@ def create_app(
     app.include_router(reference_decision_router)
     app.include_router(risk_source_router)
     app.include_router(risk_event_router)
+    app.include_router(institution_adapters_router)
+    app.include_router(institution_router)
+    app.include_router(instance_sync_router)
     app.include_router(collection_router)
     app.include_router(report_fields_router)
     app.include_router(scans_router)
     app.include_router(skills_router)
     app.include_router(stage_controls_router)
     app.include_router(strategy_candidate_lab_router)
+    app.include_router(strategy_asset_stability_router)
+    app.include_router(strategy_history_mapping_router)
+    app.include_router(field_directions_router)
+    app.include_router(strategy_workbench_router)
     app.include_router(reports_router)
     app.include_router(tasks_router)
     app.include_router(validation_agent_router)

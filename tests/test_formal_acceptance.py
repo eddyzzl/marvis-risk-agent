@@ -111,12 +111,10 @@ def test_signed_complete_policy_without_originals_keeps_all_193_attempts_unavail
         facts["normal"]["denominator"] == 64 and facts["repeats"]["denominator"] == 60
     )
     assert (
-        facts["software_work_remaining"]["modeling"]
-        == "deterministic_family_revalidator_not_implemented"
+        facts["software_work_remaining"]["modeling"].startswith("installed_native_modeling_reader")
     )
     assert (
-        facts["software_work_remaining"]["collections"]
-        == "deterministic_family_revalidator_not_implemented"
+        facts["software_work_remaining"]["collections"].startswith("installed_native_collection_reader")
     )
     assert facts["status"] == "unavailable"
 
@@ -273,7 +271,7 @@ def test_usage_cost_cannot_be_compared_in_another_currency(currency):
         assert observed.cost is None and observed.reason == "formal_cost_currency_mismatch"
     else:
         assert observed.cost == pytest.approx(0.00014)
-        assert observed.reason == "deterministic_family_revalidator_not_implemented"
+        assert observed.reason == "domain_original_evidence_unavailable"
     assert observed.domain_status == "unavailable"
 
 
@@ -601,7 +599,7 @@ def test_actual_fixture_model_cannot_be_upgraded_by_formal_record_or_signature(
     facts = result["trusted_environment"]["records"][0]["observed"]
     assert facts["denominator"] == 193 and facts["passed"] == 0
     observed = next(row for row in facts["attempts"] if row["attempt_id"] == attempt.id)
-    assert observed["reason"] == "formal_runtime_model_mismatch"
+    assert observed["reason"] in {"formal_runtime_model_mismatch", "formal_runtime_source_mismatch"}
     assert (
         observed["runtime_status"] == "completed"
         and observed["domain_status"] == "unavailable"

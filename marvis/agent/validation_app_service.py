@@ -13,6 +13,8 @@ here directly.
 
 from __future__ import annotations
 
+from marvis.llm_outbound_gate_context import authorization_gate
+
 from collections.abc import Callable, Mapping
 import logging
 
@@ -319,10 +321,7 @@ def review_validation_semantic_authorization(
     )
     evidence = review_validation_instruction_authorization(
         profile,
-        gate_context=(
-            f"模型验证当前状态为 {task.status.value}。"
-            f"当前唯一待授权动作：立即执行【{label}】。"
-        ),
+        gate_context=authorization_gate("validation_stage", bindings={"stage": stage, "status": task.status.value}),
         instruction=instruction,
     )
     if evidence is None:

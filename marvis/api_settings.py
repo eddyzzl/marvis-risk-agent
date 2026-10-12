@@ -73,7 +73,20 @@ def update_execution_environment_settings(
         python_executable=payload.python_executable,
         rss_memory_limit_mb=current.rss_memory_limit_mb,
         notebook_memory_limit_mb=payload.notebook_memory_limit_mb,
+        notebook_network_mode=(payload.notebook_network_mode
+            if "notebook_network_mode" in payload.model_fields_set
+            else current.notebook_network_mode),
+        worker_isolation_mode=(payload.worker_isolation_mode
+            if "worker_isolation_mode" in payload.model_fields_set
+            else current.worker_isolation_mode),
     )
+    if "worker_isolation_mode" in payload.model_fields_set and settings.worker_isolation_mode == "os_sandbox":
+        from marvis.plugins.native_isolation import capability
+        worker = capability("os_sandbox", probe=True, python_executable=settings.python_executable or None)
+        if not worker["available"]:
+            raise unprocessable({"code":"worker_isolation_unavailable","capability":worker})
+        if current.rss_memory_limit_mb is None:
+            raise unprocessable({"code":"worker_isolation_rss_monitor_required","capability":worker})
     saved = save_execution_environment(workspace, settings)
     validation = validate_execution_environment(saved)
     return {

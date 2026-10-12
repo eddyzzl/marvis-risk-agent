@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 import json
 import logging
 from pathlib import Path
@@ -6,6 +6,9 @@ import subprocess
 import sys
 
 from marvis.files import write_json_atomic
+from marvis.local_execution import (
+    LocalExecutionIsolationError, execution_capability, execution_command,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -29,6 +32,9 @@ class ExecutionEnvironmentSettings:
     # machine's RAM be the limit). Set a positive MB value in 执行环境 settings
     # to re-enable a guard against a runaway notebook.
     notebook_memory_limit_mb: int | None = None
+    # Independent from worker process placement and interpreter selection.
+    notebook_network_mode: str = "trusted_local"
+    worker_isolation_mode: str = "trusted_local"
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,8 @@ class ExecutionEnvironmentValidation:
     message: str
     kernel_name: str
     python_version: str = ""
+    network_capability: dict = field(default_factory=dict)
+    worker_capability: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -77,6 +85,8 @@ def load_execution_environment(workspace: Path) -> ExecutionEnvironmentSettings:
         rss_memory_limit_mb=_normalize_rss_memory_limit_mb(
             payload.get("rss_memory_limit_mb", 4096)
         ),
+        notebook_network_mode=str(payload.get("notebook_network_mode", "trusted_local")),
+        worker_isolation_mode=str(payload.get("worker_isolation_mode", "trusted_local")),
         notebook_memory_limit_mb=_normalize_notebook_memory_limit_mb(
             payload.get("notebook_memory_limit_mb")
         ),
@@ -129,6 +139,7 @@ def available_kernel_specs() -> dict[str, dict]:
                 "display_name": (payload.get("spec") or {}).get("display_name")
                 or name,
                 "argv": list((payload.get("spec") or {}).get("argv") or []),
+                "metadata": (payload.get("spec") or {}).get("metadata") or {},
             }
             for name, payload in sorted(specs.items())
         }
@@ -163,6 +174,48 @@ def detect_execution_environment_options() -> list[ExecutionEnvironmentOption]:
 def validate_execution_environment(
     settings: ExecutionEnvironmentSettings,
 ) -> ExecutionEnvironmentValidation:
+    from marvis.plugins.native_isolation import NativeIsolationError, capability as worker_capability
+    try:
+        worker = worker_capability(settings.worker_isolation_mode, probe=True,
+            python_executable=settings.python_executable or sys.executable)
+    except NativeIsolationError as exc:
+        return ExecutionEnvironmentValidation(ok=False, message=exc.code, kernel_name=settings.kernel_name)
+    if not worker["available"]:
+        return ExecutionEnvironmentValidation(ok=False, message="所选工具 OS 隔离环境不可用；非内置工具不会启动。", kernel_name=settings.kernel_name, worker_capability=worker)
+    if settings.worker_isolation_mode == "os_sandbox" and settings.rss_memory_limit_mb is None:
+        return ExecutionEnvironmentValidation(ok=False, message="工具 OS 隔离要求启用进程内存监测；非内置工具不会启动。", kernel_name=settings.kernel_name, worker_capability=worker | {"available":False,"status":"rss_monitor_required"})
+    try:
+        capability = execution_capability(settings.notebook_network_mode, probe=True)
+    except LocalExecutionIsolationError as exc:
+        return ExecutionEnvironmentValidation(
+            ok=False, message=str(exc), kernel_name=settings.kernel_name,
+            worker_capability=worker,
+        )
+    if not capability.available:
+        return ExecutionEnvironmentValidation(
+            ok=False, message=f"{capability.message} {capability.next_action}",
+            kernel_name=settings.kernel_name, network_capability=asdict(capability),
+            worker_capability=worker,
+        )
+    if settings.notebook_network_mode == "loopback_only":
+        spec = available_kernel_specs().get(settings.kernel_name)
+        if spec is not None:
+            metadata = spec.get("metadata") or {}
+            config = metadata.get("kernel_provisioner", {}) if isinstance(metadata, dict) else None
+            if (not isinstance(config, dict)
+                    or config.get("provisioner_name", "local-provisioner") != "local-provisioner"
+                    or config.get("config")):
+                return ExecutionEnvironmentValidation(
+                    ok=False, message="仅本机网络模式拒绝远程或自定义 kernel provisioner；请选择本地 kernel。",
+                    kernel_name=settings.kernel_name, network_capability=asdict(capability),
+                )
+    validation = _validate_interpreter(settings)
+    return replace(validation, network_capability=asdict(capability), worker_capability=worker)
+
+
+def _validate_interpreter(
+    settings: ExecutionEnvironmentSettings,
+) -> ExecutionEnvironmentValidation:
     if settings.execution_mode == "jupyter_kernel":
         kernels = available_kernel_names()
         if settings.kernel_name not in kernels:
@@ -189,6 +242,7 @@ def validate_execution_environment(
         validation = _run_version_check(
             ["conda", "run", "-n", settings.conda_env_name, "python", "-V"],
             kernel_name=settings.kernel_name or settings.conda_env_name,
+            network_mode=settings.notebook_network_mode,
         )
         return _with_available_kernel_check(validation)
     if settings.execution_mode == "python_executable":
@@ -201,6 +255,7 @@ def validate_execution_environment(
         validation = _run_version_check(
             [settings.python_executable, "-V"],
             kernel_name=settings.kernel_name,
+            network_mode=settings.notebook_network_mode,
         )
         return _with_available_kernel_check(validation)
     return ExecutionEnvironmentValidation(
@@ -214,10 +269,11 @@ def _run_version_check(
     command: list[str],
     *,
     kernel_name: str,
+    network_mode: str = "trusted_local",
 ) -> ExecutionEnvironmentValidation:
     try:
         completed = subprocess.run(
-            command,
+            execution_command(command, network_mode),
             check=True,
             capture_output=True,
             text=True,

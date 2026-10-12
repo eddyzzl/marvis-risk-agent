@@ -111,6 +111,7 @@ class DistillationEngine:
         self._llm_factory = llm_factory
         self._policy = policy
         self.last_error_count = 0
+        self.last_summary_status = "not_started"
 
     def distill_category(self, category: str) -> list[MemoryDistillation]:
         normalized = normalize_memory_type(category)
@@ -123,12 +124,7 @@ class DistillationEngine:
                 distilled = self._distill_group(normalized, scope_key, members)
             except Exception:
                 self.last_error_count += 1
-                logger.warning(
-                    "distill group failed: category=%s scope=%s",
-                    normalized,
-                    scope_key,
-                    exc_info=True,
-                )
+                logger.warning("distill group failed: category=%s", normalized)
                 continue
             if distilled is not None:
                 results.append(distilled)
@@ -154,7 +150,7 @@ class DistillationEngine:
         if category == "validation_pitfall":
             return f"validation_pitfall:{payload.get('failure_kind') or 'general'}"
         if category == "model_experience":
-            return ":".join(
+            base = ":".join(
                 [
                     "model_experience",
                     str(payload.get("model_name") or ""),
@@ -162,6 +158,8 @@ class DistillationEngine:
                     str(payload.get("channel") or ""),
                 ]
             )
+            contract = _model_metric_contract_key(payload)
+            return base + (":metric_contract:" + contract if contract else "")
         if category == "risk_analysis_experience":
             product_scope = payload.get("product_scope")
             if isinstance(product_scope, list):
@@ -292,37 +290,57 @@ class DistillationEngine:
             # rewrite could turn an explicitly inconsistent feature back into
             # a recommendation, so render the conflict-aware structure
             # deterministically.
+            self.last_summary_status = "deterministic_governed_facts"
             return _template_summary(category, structured)
         if self._llm_factory is not None:
+            from marvis.agent.json_reply import load_json_object
+            from marvis.llm_outbound import OutboundContextError, application_schema
+
             try:
+                prompt = build_distill_prompt(category, scope_key, members, structured)
                 raw = self._llm_factory().complete(
                     system_prompt=DISTILL_SYS,
-                    user_prompt=build_distill_prompt(category, scope_key, members, structured),
+                    user_prompt=prompt,
+                    json_schema=application_schema("memory_distillation"),
+                    response_format={"type": "json_object"},
+                    caller="memory_distillation",
+                    prompt_name=_DISTILL_SYS_SPEC.name,
+                    prompt_version=_DISTILL_SYS_SPEC.version,
                     stream=False,
                 )
-                text = " ".join(str(raw or "").split())
-                if text:
+                payload, _ = load_json_object(raw)
+                text = payload.get("summary") if isinstance(payload, dict) else None
+                if isinstance(text, str) and text.strip() and len(text) <= MAX_DISTILLED_SUMMARY_CHARS:
+                    self.last_summary_status = "model_structured_summary"
                     return text
+                self.last_summary_status = "deterministic_invalid_response"
+            except OutboundContextError:
+                self.last_summary_status = "deterministic_unsupported_context"
             except Exception:
-                pass
+                self.last_summary_status = "deterministic_provider_failure"
+        else:
+            self.last_summary_status = "deterministic_no_provider"
         return _template_summary(category, structured)
 
 
 def build_distill_prompt(category: str, scope_key: str, members: list[Any], structured: dict) -> str:
-    return json.dumps(
-        {
-            "category": category,
-            "scope_key": scope_key,
-            "structured": structured,
-            "source_summaries": [_entry_summary(member) for member in members],
-            "instruction": "Only rewrite facts present above into one concise sentence. Do not add metrics or task ids.",
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    from marvis.llm_outbound_distillation import distillation_prompt
+
+    return distillation_prompt(category, members, structured)
+
+
+def _model_metric_contract_key(payload):
+    contract = {key: payload[key] for key in ("metric_units", "evaluation_split") if key in payload}
+    return json.dumps(contract, sort_keys=True, separators=(",", ":")) if contract else ""
 
 
 def _merge_model_experience(payloads: list[dict[str, Any]], support: int) -> dict:
+    from marvis.agent_memory.models import validate_model_metric_contract
+
+    for payload in payloads:
+        validate_model_metric_contract(payload)
+    if len({_model_metric_contract_key(payload) for payload in payloads}) > 1:
+        raise ValueError("cannot merge model memories with different metric contracts")
     metrics = {}
     for metric in ("ks", "auc", "psi"):
         values = _numeric_metric_values(payloads, metric)
@@ -339,6 +357,11 @@ def _merge_model_experience(payloads: list[dict[str, Any]], support: int) -> dic
     }
     if months:
         result["months_covered"] = {"min": months[0], "max": months[-1]}
+    if payloads:
+        for key in ("metric_units", "evaluation_split"):
+            if key in payloads[0]:
+                value = payloads[0][key]
+                result[key] = dict(value) if isinstance(value, dict) else value
     return result
 
 

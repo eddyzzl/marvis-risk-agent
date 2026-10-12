@@ -10,9 +10,11 @@ from marvis.orchestrator.templates.skills import (
     parse_skill_template,
     validate_skill_template,
 )
+from marvis.routers.governed_capabilities import governance_router
 
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
+router.include_router(governance_router('workflow'))
 
 
 @router.get("")

@@ -314,6 +314,8 @@ def _validate(args: argparse.Namespace) -> None:
             report_template_path=settings.report_template_path,
             feature_columns=_parse_feature_columns(args.feature_columns),
             notebook_kernel_name=environment.kernel_name,
+            notebook_memory_limit_mb=environment.notebook_memory_limit_mb,
+            notebook_network_mode=environment.notebook_network_mode,
         ),
     )
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, TypeAlias
 
 from marvis.db_schema import connect
+from marvis.institution.policy import guard_repository as _guard_repository
 from marvis.packs.strategy.contracts import (
     BacktestResult,
     Strategy,
@@ -381,6 +382,7 @@ def _json_object_or_empty(value) -> dict:
     return dict(parsed) if isinstance(parsed, dict) else {}
 
 
+@_guard_repository
 class StrategyRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -679,6 +681,8 @@ class StrategyRepository:
 
     def get_strategy(self, strategy_id: str) -> Strategy | None:
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn,'strategy',strategy_id)
             row = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, rules_json, score_col,
@@ -2584,6 +2588,8 @@ def _insert_strategy_row(
     strategy: Strategy,
     created_at: str,
 ) -> None:
+    from marvis.institution.policy import authorize_on_connection
+    authorize_on_connection(conn,'task',task_id,'write')
     values = _strategy_insert_values(task_id, strategy, created_at)
     conn.execute(
         """

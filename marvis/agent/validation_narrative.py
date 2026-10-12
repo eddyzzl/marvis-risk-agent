@@ -56,7 +56,7 @@ def _topic_metrics(metrics, topic):
         if topic in {"stability", "overall", "recommendation"}:
             keys += ["monthly_ks", "monthly_psi", "psi_stability_table"]
         if topic in {"ranking", "overall", "recommendation"}:
-            keys += ["lift_ranking_assessment"]
+            keys += ["lift_ranking_assessment", "bin_tables", "independent_quantile_bin_tables"]
         scoped["effectiveness"] = {key: effectiveness[key] for key in keys if key in effectiveness}
     if topic in {"performance", "overall", "recommendation"} and "overfitting_check" in metrics:
         scoped["overfitting_check"] = metrics["overfitting_check"]
@@ -65,48 +65,80 @@ def _topic_metrics(metrics, topic):
     return scoped
 
 
+def has_report_revision_context(evidence, user_instruction=None, *, algorithm=None):
+    """Existing prose needs the revision contract, even with no new instruction."""
+    if user_instruction:
+        return True
+    if not isinstance(evidence, dict):
+        return False
+    if evidence.get("report_draft"):
+        return True
+    saved = evidence.get("saved_report_narrative")
+    # The native stage always supplies this envelope, including before the
+    # first draft. Only that exact uninitialized state has no revision prose.
+    # A saved empty edit, positive revision, or unknown context stays protected.
+    if (isinstance(saved, dict) and set(saved) == {"report_revision", "text_values"}
+            and type(saved["report_revision"]) is int
+            and saved["report_revision"] == 0):
+        if saved["text_values"] == {}:
+            return False
+        if algorithm is not None:
+            from marvis.model_algorithms import PENDING_MODEL_TRAINING_DESCRIPTION, model_training_report_text
+            from marvis.validation_report_copy import narrative_report_values
+
+            try:
+                training = model_training_report_text(algorithm) if str(algorithm).strip() else PENDING_MODEL_TRAINING_DESCRIPTION
+            except ValueError:
+                return True
+            initial_values = {**narrative_report_values(""), "TEXT:model_training_description": training}
+            if saved["text_values"] == initial_values:
+                return False
+    return bool(saved)
+
+
 def _section_payload(original, topic, keys, *, repair_reason=None):
-    payload = deepcopy(original)
-    payload["requested_fields"] = list(keys)
-    payload["narrative_topic"] = topic
-    payload["instructions"] = (
-        "本次只生成 requested_fields 的报告文字，其他段落由独立调用完成。"
-        "保持本模型专属的证据解读和完整句子，直接输出 JSON，不输出推导过程。"
-        "指标和通过判断只依据平台 evidence.validation_results；已保存报告文字、当前草稿及历史记忆仅辅助修订和比较。"
-        "evidence.saved_report_narrative 是已有报告文字，report_draft 中的当前编辑优先；二者均不能替代本次指标证据。"
-        "如有 user_instruction，以当前草稿为起点修改指定内容，保留未要求改写的事实及主动清空字段。"
-        "已有报告或草稿中的可选字段只在用户明确要求修改时返回；未修改字段请省略，平台会原样保留。"
-        "本次仅负责一个主题，其他主题会完整合并；不要在本次重复整份结论。"
-        "使用完整、精炼的中文段落，通常 150 至 350 字；证据限制必须保留，不输出标题或推导过程。"
-        + _TOPICS[topic]
+    if original.get("stage") == "metrics":
+        from marvis.llm_outbound import OutboundContextError
+        from marvis.llm_outbound_validation import validation_metric_section_prompt
+
+        if original.get("user_instruction"):
+            raise OutboundContextError("指标解读修订指令尚未完成出站适配，未发送请求。")
+        return validation_metric_section_prompt(
+            _topic_metrics(original.get("evidence", {}).get("validation_results"), topic),
+            topic=topic, repair_reason=repair_reason,
+            history=original.get("model_history"),
+        )
+    if original.get("report_revision_request") is None and not has_report_revision_context(
+        original.get("evidence"), original.get("user_instruction"),
+    ):
+        from marvis.llm_outbound_validation import validation_report_section_prompt
+
+        return validation_report_section_prompt(
+            _topic_metrics(original.get("evidence", {}).get("validation_results"), topic),
+            topic=topic, repair_reason=repair_reason,
+            history=original.get("model_history"),
+        )
+    from marvis.llm_outbound_revision import ReportRevisionError, report_revision_prompt
+    from marvis.llm_outbound_validation import validation_report_section_prompt
+
+    request = original.get("report_revision_request")
+    if request is None:
+        raise ReportRevisionError("报告修订需明确已核对的字段操作，未发送请求。")
+    measured = validation_report_section_prompt(
+        _topic_metrics(original.get("evidence", {}).get("validation_results"), topic),
+        topic=topic, repair_reason=repair_reason, history=original.get("model_history"),
     )
-    evidence = payload.get("evidence", {})
-    # Stage narratives and execution bookkeeping are not additional measured
-    # evidence. Keep the deterministic metrics and independently cited memory.
-    for name in ("scan", "pmml_scoring", "visible_stage_summaries", "report_fields"):
-        evidence.pop(name, None)
-    # Keep the whole current draft as read-only context: revisions can refer to
-    # another paragraph. The response schema alone restricts the writable keys.
-    if "validation_results" in evidence:
-        evidence["validation_results"] = _topic_metrics(evidence["validation_results"], topic)
-    if repair_reason:
-        # Do not feed incomplete/unvalidated model text back as evidence. The
-        # only repair input is the same frozen task and measured observations.
-        payload["response_repair"] = {
-            "reason": repair_reason,
-            "instruction": (
-                "这是当前主题唯一一次修复。直接返回符合 schema 的完整 JSON；"
-                "每个必需字段用约 100 至 200 字完成当前主题，不展开推导、不重复其他主题；"
-                "保留关键指标、风险与证据限制，未要求修改的可选字段省略。"
-                "最终结论只能解释模型效果与风险，不写材料检查、验证输入契约、PMML打分过程、"
-                "报告生成/定稿状态或投产前审阅安排，不声称可直接部署或投产。"
-            ),
-        }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return report_revision_prompt(
+        measured, request=request, provenance=original["report_provenance"], requested_fields=[keys[0]],
+    )
 
 
 def _generate_section(client, original, topic, keys, *, truncated=False):
     spec = WORD_CONCLUSION_V2_SYSTEM_PROMPT
+    if original.get("stage") != "metrics":
+        # Measured narratives cannot overwrite local business definitions that
+        # were not supplied to the model or authorized for this operation.
+        keys = (keys[0],)
     schema = {
         "type": "object",
         "properties": {key: {"type": "string"} for key in keys},
@@ -159,7 +191,8 @@ def validate_v2_word_conclusions(values):
 
 def generate_v2_sections(client, prompt):
     """Return all required sections or raise; never publish partial text."""
-    original = json.loads(prompt)
+    original = deepcopy(prompt) if isinstance(prompt, dict) else json.loads(prompt)
+    original["stage"] = "word_conclusion_draft"
     values, conclusion = {}, []
     for topic, keys in _REPORT_SECTIONS:
         section = _generate_section(client, original, topic, keys)
@@ -171,9 +204,37 @@ def generate_v2_sections(client, prompt):
     return values
 
 
+def generate_v2_revision_sections(client, evidence, *, request, provenance, fields, history=None):
+    """Generate only authorized fields; the saved report remains with the caller."""
+    from marvis.llm_outbound_revision import ReportRevisionError, ReportRevisionRequest
+
+    allowed = {keys[0] for _topic, keys in _REPORT_SECTIONS}
+    if (not isinstance(request, ReportRevisionRequest) or request.operation != "regenerate_from_evidence"
+            or not fields or not set(fields) <= allowed or not set(fields) <= set(request.target_fields)):
+        raise ReportRevisionError("报告修订章节超出已核对的字段操作，未发送请求。")
+    original = {
+        "stage": "word_conclusion_draft", "evidence": evidence,
+        "report_revision_request": request, "report_provenance": provenance,
+        "model_history": history,
+    }
+    values, conclusion = {}, []
+    for topic, keys in _REPORT_SECTIONS:
+        if keys[0] not in fields:
+            continue
+        section = _generate_section(client, original, topic, (keys[0],))
+        if keys[0] == _FINAL:
+            conclusion.append(section[_FINAL])
+        else:
+            values.update(section)
+    if conclusion:
+        values[_FINAL] = "\n\n".join(conclusion)
+    return values
+
+
 def generate_v2_metrics_summary(client, prompt, *, truncated=False):
     """Use the same evidence projections for complete, bounded stage analysis."""
-    original = json.loads(prompt)
+    original = deepcopy(prompt) if isinstance(prompt, dict) else json.loads(prompt)
+    original["stage"] = "metrics"
     sections = []
     for heading, topics in (
         ("总体判断", ("overall",)),

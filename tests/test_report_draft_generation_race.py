@@ -73,9 +73,12 @@ def test_unchanged_snapshot_publishes_initial_or_revised_draft(flow, version, ha
     assert message["metadata"]["fallback"] is False
     assert repo.get_report_values(task_id) == before
     assert repo.get_active_job_kind(task_id) is None
-    assert control["calls"] == (7 if version == 2 else 1)
+    assert control["calls"] == (6 if version == 2 and has_draft else 7 if version == 2 else 1)
     if original:
-        assert control["prompts"][0]["evidence"]["report_draft"]["message_id"] == original["id"]
+        assert control["prompts"][0]["report_revision_operation"]["provenance"] == {
+            "report_revision": 0, "draft_edit_revision": 0,
+        }
+        assert "report_draft" not in control["prompts"][0]["evidence"]
         assert message["id"] != original["id"]
 
 
@@ -183,7 +186,11 @@ def test_abandoned_placeholder_does_not_hide_the_saved_draft_context(flow):
                            content="", metadata={"streaming": True})
     response = client.post(f"/api/tasks/{task_id}/agent/report-draft", json={})
     assert response.status_code == 200, response.text
-    assert control["prompts"][0]["evidence"]["report_draft"]["message_id"] == original["id"]
+    assert response.json()["message"]["metadata"]["generation_source"]["message_id"] == original["id"]
+    assert control["prompts"][0]["report_revision_operation"]["provenance"] == {
+        "report_revision": 0, "draft_edit_revision": 0,
+    }
+    assert "report_draft" not in control["prompts"][0]["evidence"]
     assert response.json()["message"]["metadata"]["generation_source"] == {
         "message_id": original["id"], "draft_edit_revision": 0, "report_revision": 0,
     }

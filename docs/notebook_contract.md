@@ -216,3 +216,16 @@ RMC_ALGORITHM = "lgb"
 def RMC_SCORE_FN(df):
     return final_model.predict_proba(df)[:, 1]
 ```
+
+## Notebook 网络运行模式
+
+执行环境中的网络模式与 Python 环境选择、是否使用独立 worker 进程分别保存：
+
+- `trusted_local`（默认）：保留既有可信本地 Notebook 运行契约，不限制网络；只适用于可信材料。旧配置未声明网络模式时采用此模式，不把普通 worker 进程标成网络隔离。
+- `loopback_only`：显式选择后，Notebook kernel、原生库及 exec 子孙进程允许 loopback socket，拒绝其他 socket 网络。启动前检查 backend 和本地 kernel provisioner；能力缺失、启动预检失败、远程或自定义 provisioner 均拒绝执行，不自动改为可信运行。
+
+当前网络 backend 为 macOS `sandbox-exec`。Windows/Linux 的该 backend 未实现原生验证，因此明确不可用；可信本地兼容路径不依赖 macOS 工具。平台跳过的探针不表示原生验收通过。
+
+网络限制不隔离文件系统，不防止本地代理、系统 DNS resolver 或委托 IPC 服务转发，也不是完整的不可信代码沙箱。直接 UDP DNS socket 的拒绝不代表已阻止系统 resolver 的委托查询。需要外网下载、数据库或远程服务的 Notebook 应先将依赖准备为本地材料，或经明确的信任判断选择可信本地运行。设置界面显示能力、限制及处理建议。
+
+每次执行结果与 `notebook_execution.json` 保存本次请求的模式、backend、能力范围及执行状态；任务 evidence 同时提供这份运行记录和当前设置。事后修改设置不会改写既有运行身份。`RMC_*` 契约、Notebook 内存模型分与提交 PMML 的比较语义保持不变。

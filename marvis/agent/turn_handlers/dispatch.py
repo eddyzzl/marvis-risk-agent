@@ -712,6 +712,8 @@ def agent_autodrive_turn(
     turn_fn = _registry_lane.DRIVER_TURN_FUNCS[task.task_type]
     max_gates = shared_lane._auto_gate_budget(runtime, task.id)
     processed_gates = 0
+    from marvis.llm_outbound import OutboundContextError
+
     while True:
         # A turn can start at the pre-plan C1 gate and create its real plan only
         # after the first AUTO decision.  Re-read the bounded tier budget before
@@ -763,8 +765,22 @@ def agent_autodrive_turn(
             gate_metadata["memory_anchor"] = memory_anchor["lines"]
             gate["metadata"] = gate_metadata
         try:
-            decision = decide_gate(client, gate=gate)
-        except LLMClientError as exc:
+            metadata = gate.get("metadata") or {}
+            if metadata.get("kind") == "plan_overview":
+                from marvis.llm_outbound_plan_overview import approved_plan_overview
+
+                overview = approved_plan_overview(runtime.plan_repo, runtime.plan_validator,
+                    task_id=task.id, gate_metadata=metadata)
+                decision = decide_gate(client, gate=gate, plan_overview=overview)
+            elif isinstance(metadata.get("join_c1"), dict):
+                from marvis.llm_outbound_role_assignment import approved_role_assignment
+
+                roles = approved_role_assignment(repo, runtime.settings,
+                    task_id=task.id, gate_metadata=metadata)
+                decision = decide_gate(client, gate=gate, role_assignment=roles)
+            else:
+                decision = decide_gate(client, gate=gate)
+        except (LLMClientError, OutboundContextError) as exc:
             repo.add_agent_message(
                 task.id,
                 role="assistant",

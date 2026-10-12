@@ -843,7 +843,7 @@ def test_add_dotted_and_quoted_controls_require_the_complete_value() -> None:
         ),
     )
     for labeled_control, action in cases:
-        result, _ = _compile(
+        result, llm = _compile(
             f"把 {SELECTION_ID} 加入审批策略池；默认动作：approval；"
             f"命中动作：reject；{labeled_control}",
             "strategy_pool_add_candidate",
@@ -856,8 +856,12 @@ def test_add_dotted_and_quoted_controls_require_the_complete_value() -> None:
         )
 
         assert result.draft is None, labeled_control
-        assert result.clarification_code == "strategy_pool_add_controls_not_grounded"
-        assert result.clarification_fields == ("action",)
+        if "{" in labeled_control:
+            assert result.clarification_code == "outbound_policy"
+            assert llm.calls == []
+        else:
+            assert result.clarification_code == "strategy_pool_add_controls_not_grounded"
+            assert result.clarification_fields == ("action",)
 
     exact_output = "A,B.V2"
     exact, _ = _compile(
@@ -1178,8 +1182,12 @@ def test_add_exact_very_large_limit_does_not_overflow_grounding() -> None:
 
 
 def test_add_large_integer_comparison_does_not_round_through_float() -> None:
+    from marvis.agent.strategy_request_compiler.pool import _pool_add_values_equal
+
     user_value = 9007199254740993
-    mismatched, _ = _compile(
+    assert _pool_add_values_equal(user_value, user_value)
+    assert not _pool_add_values_equal(user_value, 9007199254740992)
+    mismatched, llm = _compile(
         f"把 {SELECTION_ID} 加入额度策略池；默认动作：limit {user_value}；"
         f"命中动作：limit {user_value}",
         "strategy_pool_add_candidate",
@@ -1192,7 +1200,8 @@ def test_add_large_integer_comparison_does_not_round_through_float() -> None:
     )
 
     assert mismatched.draft is None
-    assert mismatched.clarification_code == "strategy_pool_add_controls_not_grounded"
+    assert mismatched.clarification_code == "outbound_policy"
+    assert llm.calls == []
 
 
 def test_add_output_value_rejects_structured_values_without_substring_fallback() -> (
@@ -1259,7 +1268,7 @@ def test_add_malformed_json_looking_output_never_rebinds_as_a_string() -> None:
         "'ROUTE",
         "001",
     ):
-        result, _ = _compile(
+        result, llm = _compile(
             f"把 {SELECTION_ID} 加入审批策略池；默认动作：approval；"
             f"Pool 默认输出值：{raw_value}；命中动作：reject",
             "strategy_pool_add_candidate",
@@ -1275,9 +1284,13 @@ def test_add_malformed_json_looking_output_never_rebinds_as_a_string() -> None:
         )
 
         assert result.draft is None, raw_value
-        assert result.clarification_code == "strategy_pool_add_controls_not_grounded"
+        if raw_value.startswith('{"'):
+            assert result.clarification_code == "outbound_policy"
+            assert llm.calls == []
+        else:
+            assert result.clarification_code == "strategy_pool_add_controls_not_grounded"
 
-    rounded, _ = _compile(
+    rounded, rounded_llm = _compile(
         f"把 {SELECTION_ID} 加入审批策略池；默认动作：approval；"
         "命中动作：reject；命中输出值：9007199254740993.0",
         "strategy_pool_add_candidate",
@@ -1289,7 +1302,8 @@ def test_add_malformed_json_looking_output_never_rebinds_as_a_string() -> None:
         },
     )
     assert rounded.draft is None
-    assert rounded.clarification_code == "strategy_pool_add_controls_not_grounded"
+    assert rounded.clarification_code == "outbound_policy"
+    assert rounded_llm.calls == []
 
 
 def test_add_reason_is_optional_but_strictly_bidirectional_and_verbatim() -> None:
@@ -1457,7 +1471,7 @@ def test_add_rejects_chained_evaluation_reporting_and_approval_operations(
 def test_add_rejects_confusable_or_invisible_alternative_source_ids(
     confusable_source: str,
 ) -> None:
-    result, _ = _compile(
+    result, llm = _compile(
         f"把 {SELECTION_ID} 或 {confusable_source} 加入审批策略池；"
         "默认动作：approval；命中动作：reject",
         "strategy_pool_add_candidate",
@@ -1470,7 +1484,11 @@ def test_add_rejects_confusable_or_invisible_alternative_source_ids(
     )
 
     assert result.draft is None
-    assert result.clarification_code == "strategy_pool_add_source_required"
+    if any(character in confusable_source for character in ("\u200b", "\u00ad")):
+        assert result.clarification_code == "outbound_policy"
+        assert llm.calls == []
+    else:
+        assert result.clarification_code == "strategy_pool_add_source_required"
 
 
 @pytest.mark.parametrize(

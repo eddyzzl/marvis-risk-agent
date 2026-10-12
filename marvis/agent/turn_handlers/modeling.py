@@ -10,10 +10,14 @@ from marvis.agent.join_setup import build_join_proposal
 from marvis.agent.memory_bridge import fetch_field_convention_hints
 from marvis.agent.modeling_setup import ModelingSetupError
 from marvis.agent.modeling_setup import build_modeling_proposal
+from marvis.agent.sample_setup import detect_setup
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_AUTO
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
 from marvis.domain import TaskRecord
 from marvis.repositories.tasks import TaskRepository
+from marvis.modeling_split import (
+    SplitConfigurationError, existing_split_values, validate_split_configuration,
+)
 from . import c1 as c1_lane
 from . import c1_state as c1_state_lane
 from . import contracts as contracts_lane
@@ -22,6 +26,13 @@ from . import responses as responses_lane
 from . import shared as shared_lane
 from . import turn_runner as turn_runner_lane
 from . import typed_ui as typed_ui_lane
+
+
+def _split_setup_error(exc: SplitConfigurationError) -> ModelingSetupError:
+    message = str(exc)
+    if message.startswith(("分组列缺失:", "missing columns:")):
+        message = "划分配置引用了当前未认证的字段，请确认分组列或规则字段后再建模。"
+    return ModelingSetupError(message)
 
 
 def run_modeling_driver_turn(
@@ -193,6 +204,12 @@ def _run_modeling_setup(
                 raise
             return responses_lane.append_join_error(repo, task.id, str(exc))
     intake_params = data_context_lane._modeling_intake_params(runtime, task, user_text)
+    requested_split_config = None
+    if "split_config" in intake_params:
+        try:
+            requested_split_config = validate_split_configuration(intake_params["split_config"])
+        except SplitConfigurationError as exc:
+            raise _split_setup_error(exc) from None
     intake_recipes = intake_params.get("recipes")
     intake_target_type = str(intake_params.get("target_type") or "").strip()
     intake_weight_col = (
@@ -200,6 +217,26 @@ def _run_modeling_setup(
         if "sample_weight_col" in intake_params
         else None
     )
+    if requested_split_config is not None and requested_split_config.get("method") == "existing":
+        source_dataset = registry.get(c1_proposal.anchor_id)
+        source_path = registry.resolve_path(source_dataset.id)
+        source_setup = detect_setup(
+            backend, source_path,
+            configured_target=(c1_assignment or {}).get("target_col") or getattr(task, "target_col", ""),
+            configured_split=getattr(task, "split_col", ""),
+            target_type=intake_target_type or data_context_lane._modeling_target_type(task) or "binary",
+        )
+        try:
+            validate_split_configuration(
+                requested_split_config, columns={profile.name for profile in source_dataset.columns},
+                split_col=source_setup.split_col, require_existing_binding=True,
+            )
+            values = backend.read_frame(source_path, columns=[source_setup.split_col])[source_setup.split_col].unique().tolist()
+            existing_split_values(values)
+            if sum(source_setup.counts.values()) != source_dataset.row_count:
+                raise SplitConfigurationError("现有切分与样本分析的成员定义不一致，请确认后再建模。")
+        except SplitConfigurationError as exc:
+            raise _split_setup_error(exc) from None
     proposal = build_modeling_proposal(
         registry,
         backend,
@@ -221,6 +258,7 @@ def _run_modeling_setup(
         anchor_id=(c1_assignment or {}).get("anchor_id"),
         join_feature_ids=(c1_assignment or {}).get("feature_ids"),
         target_col=(c1_assignment or {}).get("target_col"),
+        split_col=getattr(task, "split_col", "") or None,
         field_hints=fetch_field_convention_hints(
             runtime.settings,
             keywords=data_context_lane._modeling_field_hint_keywords(task, c1_proposal),
@@ -228,6 +266,31 @@ def _run_modeling_setup(
         authenticated_selection=authenticated_selection,
         c1_expected_content_hashes=reviewed_c1_hashes,
     )
+    if requested_split_config is not None:
+        try:
+            source_dataset = registry.get(c1_proposal.anchor_id)
+            source_columns = {profile.name for profile in source_dataset.columns}
+            if requested_split_config.get("method") == "existing":
+                # Auto-created development partitions are not an uploaded
+                # existing split. Require the original anchor membership.
+                requested_split_config = validate_split_configuration(
+                    requested_split_config, columns=source_columns,
+                    split_col=proposal.split_col, require_existing_binding=True,
+                )
+                values = backend.read_frame(
+                    registry.resolve_path(source_dataset.id), columns=[proposal.split_col],
+                )[proposal.split_col].unique().tolist()
+                actual_values = existing_split_values(values)
+                if actual_values != proposal.split_values or sum(proposal.counts.values()) != source_dataset.row_count:
+                    raise SplitConfigurationError("现有切分与样本分析的成员定义不一致，请确认后再建模。")
+            else:
+                for dataset_id in c1_proposal.feature_ids or []:
+                    source_columns.update(profile.name for profile in registry.get(dataset_id).columns)
+                requested_split_config = validate_split_configuration(
+                    requested_split_config, columns=source_columns,
+                )
+        except SplitConfigurationError as exc:
+            raise _split_setup_error(exc) from None
     counts = proposal.counts
     bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
     note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
@@ -247,9 +310,8 @@ def _run_modeling_setup(
         "metadata": {"intent": "modeling", "ingest_notices": notices},
     }
     slots = proposal.template_slots()
-    split_config = intake_params.get("split_config")
-    if isinstance(split_config, dict):
-        slots["split_config"] = dict(split_config)
+    if requested_split_config is not None:
+        slots["split_config"] = requested_split_config
     slots.setdefault("project_meta", data_context_lane._modeling_project_meta(task))
     return (
         proposal.template_id,

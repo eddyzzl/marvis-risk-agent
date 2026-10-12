@@ -10,7 +10,6 @@ numeric features, reusing the same deterministic detection as the modeling setup
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 
 from marvis.agent.data_setup import reconcile_source_data_tables
@@ -204,11 +203,14 @@ def infer_meaning_directions(
     items = list(scoped.items())
     for offset in range(0, len(items), _MEANING_BATCH_SIZE):
         batch = items[offset:offset + _MEANING_BATCH_SIZE]
-        parsed = _call_meaning_direction_llm(
-            client,
-            batch,
-            target_col=proposal.target_col,
-        )
+        from marvis.llm_outbound import OutboundContextError
+        from marvis.llm_outbound_analysis import business_role
+
+        try:
+            parsed = _call_meaning_direction_llm(client, batch, target_col=proposal.target_col)
+        except OutboundContextError as exc:
+            parsed = None
+            fallback_source, fallback_reason = "outbound_context_rejected", str(exc)
         by_feature = {
             str(item.get("feature") or ""): item
             for item in (parsed or [])
@@ -221,7 +223,9 @@ def infer_meaning_directions(
             valid = (
                 direction in _MEANING_DIRECTIONS
                 and confidence in _MEANING_CONFIDENCE
+                and business_role(meaning) != "unknown"
             )
+            unknown_role = business_role(meaning) == "unknown"
             output[feature] = {
                 "business_meaning": meaning,
                 "expected_direction": direction if valid else "uncertain",
@@ -229,9 +233,9 @@ def infer_meaning_directions(
                 "rationale": (
                     str(item.get("rationale") or "").strip()[:300]
                     if valid
-                    else fallback_reason
+                    else "当前字典含义没有已批准的业务角色，不能推断方向；请核对业务角色后再分析。" if unknown_role else fallback_reason
                 ),
-                "judgement_source": "llm_semantic_direction" if valid else fallback_source,
+                "judgement_source": "llm_semantic_direction" if valid else "unsupported_business_meaning" if unknown_role else fallback_source,
                 "model": str(
                     (getattr(client, "profile", {}) or {}).get("model_name") or ""
                 ) if valid else "",
@@ -249,68 +253,19 @@ def _call_meaning_direction_llm(
 ) -> list[dict] | None:
     if client is None or not isinstance(getattr(client, "profile", None), dict):
         return None
+    from marvis.llm_outbound import application_schema
+    from marvis.llm_outbound_analysis import feature_direction_prompt
+
     feature_names = [feature for feature, _meaning in entries]
-    schema = {
-        "name": "feature_meaning_direction",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "directions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "feature": {"type": "string", "enum": feature_names},
-                            "direction": {
-                                "type": "string",
-                                "enum": sorted(_MEANING_DIRECTIONS),
-                            },
-                            "confidence": {
-                                "type": "string",
-                                "enum": sorted(_MEANING_CONFIDENCE),
-                            },
-                            "rationale": {"type": "string", "maxLength": 300},
-                        },
-                        "required": [
-                            "feature",
-                            "direction",
-                            "confidence",
-                            "rationale",
-                        ],
-                        "additionalProperties": False,
-                    },
-                    "maxItems": len(entries),
-                },
-            },
-            "required": ["directions"],
-            "additionalProperties": False,
-        },
-    }
-    prompt = {
-        "target": {
-            "column": target_col,
-            "definition": "二分类风险事件；平台约定 y=1 表示坏/风险事件",
-        },
-        "allowed_directions": sorted(_MEANING_DIRECTIONS),
-        "features": [
-            {"feature": feature, "business_meaning": meaning}
-            for feature, meaning in entries
-        ],
-        "instruction": (
-            "仅根据字段含义判断对风险事件的业务预期方向。"
-            "positive=特征越大风险越高；negative=越大风险越低；"
-            "u_shape=两端风险高、中间低；无法可靠判断必须 uncertain。"
-            "不得生成或猜测任何统计指标。"
-        ),
-    }
+    schema = application_schema("feature_meaning_direction", features=feature_names)
+    prompt = feature_direction_prompt(entries, target_col=target_col)
     try:
         raw = client.complete(
             system_prompt=(
                 "你是受约束的风险变量语义分类器，只能输出给定 JSON schema。"
                 "不得计算、补写或猜测 IV、KS、AUC、相关系数和坏率。"
             ),
-            user_prompt=json.dumps(prompt, ensure_ascii=False, sort_keys=True),
+            user_prompt=prompt,
             temperature=0.0,
             response_format={"type": "json_object"},
             json_schema=schema,

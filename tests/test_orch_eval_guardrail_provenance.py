@@ -338,8 +338,8 @@ def test_negated_join_accepts_typed_diagnostic_path_without_execute_join():
                     "title": "preview join diagnostics",
                     "tool": {"plugin": "data_ops", "tool": "propose_join"},
                     "inputs": {
-                        "anchor_id": "fixture://anchor",
-                        "feature_ids": ["fixture://feature"],
+                        "anchor_id": "fixture-anchor",
+                        "feature_ids": ["fixture-feature"],
                     },
                     "depends_on": [],
                     "post_checks": [
@@ -376,8 +376,8 @@ def test_negated_join_does_not_credit_proposal_followed_by_confirmation():
                     "title": "preview join diagnostics",
                     "tool": {"plugin": "data_ops", "tool": "propose_join"},
                     "inputs": {
-                        "anchor_id": "fixture://anchor",
-                        "feature_ids": ["fixture://feature"],
+                        "anchor_id": "fixture-anchor",
+                        "feature_ids": ["fixture-feature"],
                     },
                     "depends_on": [],
                     "post_checks": [
@@ -466,7 +466,7 @@ def test_unrelated_metric_tool_cannot_masquerade_as_ks_auc_compliance():
                     "title": "compute unrelated psi",
                     "tool": {"plugin": "feature", "tool": "compute_psi"},
                     "inputs": {
-                        "dataset_id": "fixture://dataset",
+                        "dataset_id": "fixture-dataset",
                         "feature": "income",
                     },
                     "depends_on": [],

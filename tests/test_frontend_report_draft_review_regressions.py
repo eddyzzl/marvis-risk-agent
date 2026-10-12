@@ -208,7 +208,7 @@ import { updateStrategyToolDirectory, revealStrategyToolLauncher } from './marvi
 const select={value:''};const search={value:''};const count={textContent:''};const listeners={};
 const directory={querySelector:(s)=>s==='select'?select:s==='input'?search:count,
   addEventListener:(name,listener)=>{listeners[name]=listener;},innerHTML:''};
-const tool=(workflow)=>({open:false,hidden:false,textContent:workflow,
+const tool=(workflow)=>({open:false,hidden:false,textContent:workflow,dataset:{},
   querySelector:()=>({dataset:{candidateLabWorkflow:workflow}})});
 const target=tool('interactive_tree_revision');const context=tool('strategy_project_context');
 const launchers={before:()=>{},querySelectorAll:()=>[target,context],addEventListener:()=>{}};

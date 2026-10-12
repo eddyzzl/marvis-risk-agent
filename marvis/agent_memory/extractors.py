@@ -646,7 +646,7 @@ def _model_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
             result, metrics, "important_feature_sources", "feature_sources"
         ),
     }
-    for key in ("overfitting_status", "head_lift_5pct", "tail_lift_5pct"):
+    for key in ("overfitting_status", "head_lift_5pct", "tail_lift_5pct", "metric_units", "evaluation_split"):
         value = _first_value(result, metrics, key)
         if not _is_missing(value):
             payload[key] = value

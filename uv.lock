@@ -913,6 +913,7 @@ version = "2.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "catboost" },
+    { name = "cryptography" },
     { name = "defusedxml" },
     { name = "duckdb" },
     { name = "fastapi" },
@@ -967,6 +968,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "catboost", specifier = ">=1.2,<2" },
+    { name = "cryptography", specifier = ">=50.0.1,<51" },
     { name = "cryptography", marker = "extra == 'audit'", specifier = ">=50.0.1,<51" },
     { name = "defusedxml", specifier = ">=0.7.1,<1" },
     { name = "duckdb", specifier = ">=0.9,<2" },

@@ -37,6 +37,7 @@ from marvis.domain import (
 )
 from marvis.model_algorithms import normalize_algorithm
 from marvis.notebooks import close_live_notebook_session
+from marvis.modeling_holdout.guards import project_task_payloads
 from marvis.repositories.tasks import TaskRepository
 from marvis.safe_paths import lexical_child_path
 from marvis.state_machine import ConflictError
@@ -44,6 +45,10 @@ from marvis.state_machine import ConflictError
 
 router = APIRouter(prefix="/api", tags=["tasks"])
 logger = logging.getLogger(__name__)
+
+
+def _local_task_actor(request: Request) -> str:
+    return str(getattr(getattr(request.state, 'local_principal', None), 'id', ''))
 
 
 def _repo(request: Request) -> TaskRepository:
@@ -117,7 +122,8 @@ def list_tasks(
         response.headers["X-Result-Limit"] = "" if bounded_limit is None else str(bounded_limit)
         response.headers["X-Result-Offset"] = str(bounded_offset)
         response.headers["X-Result-Has-More"] = "true" if has_more else "false"
-    return list_task_payloads(repo, tasks, request.app.state.settings.tasks_dir)
+    return project_task_payloads(request.app.state.settings.db_path,
+        list_task_payloads(repo, tasks, request.app.state.settings.tasks_dir), _local_task_actor(request))
 
 
 @router.post("/tasks")
@@ -211,7 +217,9 @@ def _create_source_dir(payload: CreateTaskRequest, settings) -> Path:
         if not source_dir.is_dir():
             raise unprocessable("source_dir must be an existing directory")
         return source_dir
-    if payload.task_type != TASK_TYPE_VINTAGE or payload.run_mode != "agent":
+    from marvis.institution.policy import current_actor
+    institutional_intake = current_actor(settings.db_path) is not None
+    if not institutional_intake and (payload.task_type != TASK_TYPE_VINTAGE or payload.run_mode != "agent"):
         raise unprocessable("source_dir is required")
     intake_dir = (
         Path(settings.workspace).resolve()
@@ -238,7 +246,7 @@ def _task_create_contract(
         run_mode=payload.run_mode,
         target_col=payload.target_col,
         score_col=payload.score_col,
-        split_col=payload.split_col,
+        split_col=("" if payload.task_type == "modeling" and "split_col" not in payload.model_fields_set else payload.split_col),
         time_col=payload.time_col,
         feature_columns=payload.feature_columns,
         target_type=normalized_target_type(payload.target_type),
@@ -282,11 +290,11 @@ def _strategy_task_input(payload: CreateTaskRequest) -> StrategyTaskInput | None
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str, request: Request) -> dict:
     repo = _repo(request)
-    return task_payload(
-        repo,
-        get_task_or_404(repo, task_id),
-        request.app.state.settings.tasks_dir,
-    )
+    payload = task_payload(repo, get_task_or_404(repo, task_id), request.app.state.settings.tasks_dir)
+    projected = project_task_payloads(request.app.state.settings.db_path, [payload], _local_task_actor(request))
+    if not projected:
+        raise not_found("Task not found")
+    return projected[0]
 
 
 @router.put("/tasks/{task_id}/business-objective")

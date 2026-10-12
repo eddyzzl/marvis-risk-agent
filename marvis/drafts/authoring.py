@@ -48,14 +48,19 @@ def draft_script(
     *,
     learning_note: LearningNote | None,
     llm_factory,
+    installed_tools=(),
 ) -> DraftTool:
     """Generate one draft tool, with fence-tolerant JSON parsing + one retry.
 
-    The Draft Language v1 gate is enforced on every attempt. On the first
-    failure the model is fed its previous reply and the exact validation error
-    for a targeted correction; the second failure raises.
+    Every attempt enforces Draft Language v1. Repair retains the original
+    specification and a known error code; prior code and errors stay local.
     """
-    base_prompt = _authoring_prompt(goal, learning_note)
+    from marvis.llm_outbound import OutboundContextError, application_schema
+
+    try:
+        base_prompt = _authoring_prompt(goal, learning_note, installed_tools=installed_tools)
+    except OutboundContextError as exc:
+        raise AuthoringError(str(exc)) from exc
     prompt = base_prompt
     last_error: str | None = None
     for attempt in range(DRAFT_MAX_ATTEMPTS):
@@ -63,7 +68,10 @@ def draft_script(
             system_prompt=AUTHOR_SYS,
             user_prompt=prompt,
             response_format={"type": "json_object"},
+            json_schema=application_schema("draft_authoring"),
             caller="author",
+            prompt_name=_AUTHOR_SYS_SPEC.name,
+            prompt_version=_AUTHOR_SYS_SPEC.version,
             stream=False,
         )
         try:
@@ -72,7 +80,7 @@ def draft_script(
             last_error = str(exc)
             if attempt + 1 >= DRAFT_MAX_ATTEMPTS:
                 raise
-            prompt = _retry_prompt(base_prompt, str(raw), last_error)
+            prompt = _retry_prompt(base_prompt, getattr(exc, "error_code", "source_policy"))
     # Unreachable: the loop either returns or raises above.
     raise AuthoringError(last_error or "draft authoring failed")
 
@@ -84,16 +92,20 @@ def _build_draft_tool(
 ) -> DraftTool:
     spec, error = load_json_object(raw)
     if spec is None:
-        raise AuthoringError(f"LLM output is not valid JSON: {error}")
-    _assert_required_keys(spec)
-    _assert_name(str(spec["name"]))
-    _assert_schema(spec["input_schema"], "input_schema")
-    _assert_schema(spec["output_schema"], "output_schema")
+        exc = AuthoringError(f"LLM output is not valid JSON: {error}")
+        exc.error_code = "json_format"
+        raise exc
+    _validate_stage("required_fields", _assert_required_keys, spec)
+    _validate_stage("function_name", _assert_name, str(spec["name"]))
+    _validate_stage("input_schema", _assert_schema, spec["input_schema"], "input_schema")
+    _validate_stage("output_schema", _assert_schema, spec["output_schema"], "output_schema")
     determinism = str(spec["determinism"])
     if determinism not in DETERMINISM_CHOICES:
-        raise AuthoringError("determinism must be deterministic or stochastic")
+        exc = AuthoringError("determinism must be deterministic or stochastic")
+        exc.error_code = "determinism"
+        raise exc
     code = str(spec["code"])
-    assert_draft_code_safe(code, entrypoint=str(spec["name"]))
+    _validate_stage("source_policy", assert_draft_code_safe, code, entrypoint=str(spec["name"]))
     return DraftTool(
         id=_new_id(),
         task_id=task_id,
@@ -110,14 +122,18 @@ def _build_draft_tool(
     )
 
 
-def _retry_prompt(base_prompt: str, previous_reply: str, error: str) -> str:
-    return (
-        f"{base_prompt}\n\n"
-        f"【上一次返回未通过校验】\n{previous_reply}\n\n"
-        f"【校验错误】\n{error}\n\n"
-        "请修正上述问题后，严格只返回一个 JSON 对象："
-        "{name, summary, code, input_schema, output_schema, determinism}。"
-    )
+def _retry_prompt(base_prompt: str, error_code: str) -> str:
+    from marvis.llm_outbound_drafts import authoring_repair_prompt
+
+    return authoring_repair_prompt(base_prompt, error_code)
+
+
+def _validate_stage(error_code, validator, *args, **kwargs):
+    try:
+        validator(*args, **kwargs)
+    except AuthoringError as exc:
+        exc.error_code = error_code
+        raise
 
 
 def assert_draft_code_safe(code: str, *, entrypoint: str | None = None) -> None:
@@ -129,19 +145,10 @@ def assert_draft_code_safe(code: str, *, entrypoint: str | None = None) -> None:
         raise AuthoringError(str(exc)) from exc
 
 
-def _authoring_prompt(goal: str, learning_note: LearningNote | None) -> str:
-    note_text = "无"
-    if learning_note:
-        note_text = (
-            f"来源: {', '.join(learning_note.sources)}\n"
-            f"学习笔记:\n{learning_note.distilled}"
-        )
-    return (
-        f"目标: {goal}\n\n"
-        f"可参考学习笔记:\n{note_text}\n\n"
-        "请输出 JSON: {name, summary, code, input_schema, output_schema, determinism}。\n"
-        f"工具模板:\n{TOOL_TEMPLATE}"
-    )
+def _authoring_prompt(goal: str, learning_note: LearningNote | None, *, installed_tools=()) -> str:
+    from marvis.llm_outbound_drafts import authoring_prompt
+
+    return authoring_prompt(goal, installed_tools=installed_tools, learning_note=learning_note)
 
 
 def _assert_required_keys(payload: dict) -> None:

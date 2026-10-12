@@ -33,6 +33,7 @@
     <link rel="stylesheet" href="static/css/business-acceptance.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/operations.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/production-governance.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/blind-oot.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/historical-replay.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/collection-workspace.css?v=__MARVIS_STATIC_VERSION__" />
     <script src="static/js/pet_catalog.js?v=__MARVIS_STATIC_VERSION__"></script>
@@ -648,6 +649,11 @@
                 </span>
                 <strong>Workflow 模板</strong>
               </button>
+              <button class="governance-nav-item" type="button" data-governance-nav="signed-capabilities" data-governance-panel="signed-capabilities" aria-selected="false">
+                <span class="governance-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l8 4v5c0 5-8 9-8 9s-8-4-8-9V7zM8 12l3 3 5-6"></path></svg></span><strong>签名与版本</strong>
+              </button>
+              <button class="governance-nav-item" type="button" data-governance-nav="institution" data-governance-panel="institution" aria-selected="false"><span class="governance-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l8 4v5c0 5-8 9-8 9s-8-4-8-9V7zM8 12l3 3 5-6"></path></svg></span><strong>身份与资源授权</strong></button>
+              <button class="governance-nav-item" type="button" data-governance-nav="instance-sync" data-governance-panel="instance-sync" aria-selected="false"><span class="governance-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16l-4-4M20 17H4l4 4"></path></svg></span><strong>跨实例交接</strong></button>
             </section>
             <p id="governanceSettingsNavEmpty" class="governance-nav-empty" role="status" hidden>未找到匹配的设置项</p>
           </nav>
@@ -685,6 +691,18 @@
                   </div>
                   <div id="executionEnvironmentList" class="exec-env-list" role="radiogroup" aria-label="Python 环境"></div>
                 </div>
+                <div class="settings-row">
+                  <div class="settings-row-text">
+                    <strong>Notebook 网络模式</strong>
+                    <span>可信本地运行保留网络访问，仅用于可信材料。仅本机网络允许本地通信、限制进程树外网连接；不隔离文件，本地服务仍需可信。</span>
+                  </div>
+                  <div class="settings-row-control">
+                    <select id="notebookNetworkModeSelect" aria-label="Notebook 网络模式">
+                      <option value="trusted_local">可信本地运行</option>
+                      <option value="loopback_only">仅本机网络</option>
+                    </select>
+                  </div>
+                </div>
                 <div class="settings-row exec-env-memory-row">
                   <span class="settings-row-ico" aria-hidden="true">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M8 6V3M12 6V3M16 6V3M8 21v-3M12 21v-3M16 21v-3M4 10H1M4 14H1M23 10h-3M23 14h-3"/></svg>
@@ -701,6 +719,7 @@
                   </div>
                 </div>
               </div>
+              <div id="workerIsolationPanel" class="settings-group worker-isolation-panel" aria-label="第三方工具执行边界"></div>
               <div id="executionEnvironmentStatus" class="status" role="status" aria-live="polite"></div>
             </section>
 
@@ -724,6 +743,9 @@
             </section>
 
             <section class="governance-panel" data-governance-panel-content="production"><div id="productionGovernancePanel" class="production-workspace"></div></section>
+            <section class="governance-panel" data-governance-panel-content="signed-capabilities"><div id="governedCapabilitiesPanel" class="governed-capabilities-panel"></div></section>
+            <section class="governance-panel" data-governance-panel-content="institution"><div id="institutionPanel"></div></section>
+            <section class="governance-panel" data-governance-panel-content="instance-sync"><div id="instanceSynchronizationPanel"></div></section>
             <section class="governance-panel" data-governance-panel-content="memory-policy">
               <div class="settings-group">
                 <div class="settings-row">
@@ -1489,7 +1511,11 @@
                 aria-live="polite"
               ></section>
               <section id="businessAcceptancePanel" class="business-acceptance-panel" aria-label="业务验收" aria-live="polite" hidden></section>
+              <section id="blindOotPanel" class="blind-oot-panel production-workspace" aria-label="盲 OOT" aria-live="polite" hidden></section>
               <section id="historicalReplayPanel" class="historical-replay-panel" aria-label="历史决策回放" hidden></section>
+              <section id="riskContextPanel" class="historical-replay-panel" aria-label="外部数据与事件特征" hidden></section>
+              <section id="institutionAdapterPanel" class="historical-replay-panel" aria-label="机构服务接入" hidden></section>
+              <section id="operationsExtensionsPanel" class="historical-replay-panel" aria-label="周期运营与决策反馈" hidden></section>
               <section id="collectionWorkspacePanel" class="collection-workspace" aria-label="催收参考工作台" hidden></section>
               <section
                 id="dataWorkspacePanel"
@@ -1538,6 +1564,7 @@
                     </div>
                   </section>
                 </div>
+                <div id="sqlImportPanel" class="data-workspace-controls"></div>
                 <footer class="data-workspace-footer">
                   <p id="dataWorkspaceStatus" class="data-workspace-status" role="status" aria-live="polite">
                     上传或由 Agent 绑定数据集后，可在这里维护字段语义。
@@ -1718,6 +1745,16 @@
                   role="status"
                   aria-live="polite"
                 ></p>
+                <div id="strategyWorkbenchState" class="candidate-lab-status" aria-live="polite"></div>
+                <form data-candidate-lab-form data-candidate-lab-workflow="strategy_workbench_preferences" class="candidate-lab-form-grid">
+                  <label class="candidate-lab-field">字段显示
+                    <select data-candidate-lab-field="field_display_mode" aria-label="字段显示方式">
+                      <option value="both">业务名与物理名</option>
+                      <option value="business">业务名</option>
+                      <option value="physical">物理名</option>
+                    </select>
+                  </label>
+                </form>
                 <div class="candidate-lab-layout">
                   <div class="candidate-lab-launchers" aria-label="候选分析启动器">
                     <details class="candidate-lab-launcher">
@@ -1760,6 +1797,7 @@
                       </form>
                     </details>
 
+                    <div id="strategyHistoryMappingPanel" class="candidate-lab-launcher" data-strategy-tool-stage="history"></div>
                     <details class="candidate-lab-launcher">
                       <summary>
                         <span><strong>继续生成所选分支</strong><small>从人工明确选择的 eligible 候选继续生长 frontier 子树</small></span>
@@ -3529,6 +3567,7 @@
                       <details><summary>查看证据来源说明</summary><p>证据 ID、hash 和下载来自当前任务的结构化结果，保留来源、版本与审计绑定。</p></details>
                     </header>
                     <div id="strategyCandidateLabResults" class="candidate-lab-results"></div>
+                    <div id="strategyAssetStabilityPanel" class="candidate-lab-launcher"></div>
                   </section>
                 </div>
               </section>

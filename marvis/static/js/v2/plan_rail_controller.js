@@ -24,6 +24,8 @@ const PLAN_RETRY_REFRESH_INTERVAL_MS = 1000;
 const PLAN_RECONCILIATION_MESSAGE = "执行结果尚未核对，已暂停重试。请先核对执行记录与实际产物，完成核对后再继续。";
 
 function planStepNeedsReconciliation(step) {
+  if ((step?.execution_halt === "paused" && step?.failure_envelope?.error_kind === "search_paused")
+    || (step?.execution_halt === "cancelled" && step?.failure_envelope?.error_kind === "search_cancelled")) return false;
   return step?.status === "failed" && step?.failure_envelope?.retryable === false;
 }
 
@@ -32,6 +34,7 @@ function planNeedsReconciliation(plan) {
 }
 
 export function taskUsesPlanRail(task) {
+  if (task?.blind_oot && task.blind_oot.viewer_role !== "develop") return false;
   return PLAN_RAIL_TASK_TYPES.has(task?.task_type);
 }
 
@@ -96,6 +99,14 @@ export function planWorkflowStatus(plan) {
   // must not turn the task header/sidebar back into a healthy confirmation
   // gate while the failed step is still unresolved.
   if (status === "failed" || failedStep) {
+    const halt = failedStep?.execution_halt;
+    if (halt === "paused" || halt === "cancelled") {
+      return {
+        label: halt === "paused" ? "已暂停" : "已取消", kind: "stopped", tone: "",
+        message: halt === "paused" ? "搜索已暂停，检查点已保存。" : "搜索已取消。",
+        detail: halt === "paused" ? "在策略工作台核对检查点后继续搜索。" : "在策略工作台明确发起新的搜索。",
+      };
+    }
     return {
       ...workflowStatusSnapshot("failed"),
       detail: failedStep

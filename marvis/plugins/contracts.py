@@ -21,7 +21,10 @@ from marvis.safe_paths import assert_within
 # v5 carries a manifest-owned execution profile.  A promoted Draft must stay
 # on the restricted loader even when it is invoked through the normal runner.
 # v6 carries a host-issued invocation id to native atomic producers.
-PROTOCOL_VERSION = 6
+# v7 carries host-issued OS isolation requests. v8 additionally enforces the
+# institution-mode native Plan actor from its persisted original invocation;
+# an older builtin worker must not accept that DB-bearing execution unchecked.
+PROTOCOL_VERSION = 8
 WORKER_RESULT_SENTINEL = "@@MARVIS_PLUGIN_RESULT@@"
 MAX_PROGRESS_BYTES = 64 * 1024
 

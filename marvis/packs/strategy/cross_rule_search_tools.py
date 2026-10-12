@@ -291,17 +291,15 @@ def run_search_cross_threshold_rules(inputs, ctx, runtime) -> dict[str, Any]:
         "overdue_amount",
     )
     loan, overdue = _coherent_amount_arrays(loan, overdue)
-    trials = [
-        _measure_trial(
-            conditions,
-            vectors=vectors,
-            sentinels=sentinels,
-            target=target,
-            loan=loan,
-            overdue=overdue,
-        )
-        for conditions in prefix
-    ]
+    from marvis.strategy_workbench.control import NativeSearchControl, frame_fingerprint
+    control = NativeSearchControl(runtime, ctx, dict(inputs))
+    control.bind_search({'frame': frame_fingerprint(labeled), 'source': evidence['evidence_hash']})
+    trials = list(control.saved)
+    control.boundary(trials, len(prefix))
+    for conditions in prefix[len(trials):]:
+        trials.append(_measure_trial(conditions, vectors=vectors, sentinels=sentinels,
+                                     target=target, loan=loan, overdue=overdue))
+        control.boundary(trials, len(prefix))
     core_request = {
         "schema_version": CROSS_RULE_SEARCH_REQUEST_SCHEMA_VERSION,
         "source": {
@@ -331,7 +329,8 @@ def run_search_cross_threshold_rules(inputs, ctx, runtime) -> dict[str, Any]:
         runtime,
         sample_binding,
     )
-    return _persist_search(
+    control.publishing()
+    output = _persist_search(
         runtime,
         task_id=task_id,
         source=source,
@@ -340,6 +339,7 @@ def run_search_cross_threshold_rules(inputs, ctx, runtime) -> dict[str, Any]:
         evidence=evidence,
         result=result,
     )
+    return control.completed(output)
 
 
 def run_build_cross_rule_candidate_from_search(

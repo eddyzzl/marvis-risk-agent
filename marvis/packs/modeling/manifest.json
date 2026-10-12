@@ -3084,6 +3084,32 @@
           },
           "business_measurement": {
             "type": "object"
+          },
+          "selection_evidence": {
+            "type": "object",
+            "properties": {
+              "experiment_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "metrics": {
+                "type": "object"
+              },
+              "purpose": {
+                "const": "pre_refit_heldout_selection"
+              }
+            },
+            "required": [
+              "experiment_id",
+              "artifact_id",
+              "metrics",
+              "purpose"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -3670,6 +3696,69 @@
             "items": {
               "type": "object"
             }
+          },
+          "development_refit_scope": {
+            "type": "object",
+            "properties": {
+              "final_fit_scope": {
+                "type": "string"
+              },
+              "development_refit_receipt_id": {
+                "type": "string"
+              },
+              "final_experiment_id": {
+                "type": "string"
+              },
+              "final_artifact_id": {
+                "type": "string"
+              },
+              "parent_selection_experiment_id": {
+                "type": "string"
+              },
+              "parent_selection_artifact_id": {
+                "type": "string"
+              },
+              "final_independent_test": {
+                "type": "string"
+              },
+              "final_oot_evaluation": {
+                "type": "string"
+              },
+              "historical_availability": {
+                "type": "string"
+              },
+              "label_maturity": {
+                "type": "string"
+              },
+              "monitoring_baseline_scope": {
+                "type": "string"
+              },
+              "monitoring_baseline_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "final_fit_scope",
+              "development_refit_receipt_id",
+              "final_experiment_id",
+              "final_artifact_id",
+              "parent_selection_experiment_id",
+              "parent_selection_artifact_id",
+              "final_independent_test",
+              "final_oot_evaluation",
+              "historical_availability",
+              "label_maturity",
+              "monitoring_baseline_scope",
+              "monitoring_baseline_sha256"
+            ],
+            "additionalProperties": false
+          },
+          "dataset_split": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           }
         },
         "required": [
@@ -3778,6 +3867,69 @@
           },
           "score_bands": {
             "type": "array"
+          },
+          "development_refit_scope": {
+            "type": "object",
+            "properties": {
+              "final_fit_scope": {
+                "type": "string"
+              },
+              "development_refit_receipt_id": {
+                "type": "string"
+              },
+              "final_experiment_id": {
+                "type": "string"
+              },
+              "final_artifact_id": {
+                "type": "string"
+              },
+              "parent_selection_experiment_id": {
+                "type": "string"
+              },
+              "parent_selection_artifact_id": {
+                "type": "string"
+              },
+              "final_independent_test": {
+                "type": "string"
+              },
+              "final_oot_evaluation": {
+                "type": "string"
+              },
+              "historical_availability": {
+                "type": "string"
+              },
+              "label_maturity": {
+                "type": "string"
+              },
+              "monitoring_baseline_scope": {
+                "type": "string"
+              },
+              "monitoring_baseline_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "final_fit_scope",
+              "development_refit_receipt_id",
+              "final_experiment_id",
+              "final_artifact_id",
+              "parent_selection_experiment_id",
+              "parent_selection_artifact_id",
+              "final_independent_test",
+              "final_oot_evaluation",
+              "historical_availability",
+              "label_maturity",
+              "monitoring_baseline_scope",
+              "monitoring_baseline_sha256"
+            ],
+            "additionalProperties": false
+          },
+          "dataset_split": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           }
         },
         "required": [

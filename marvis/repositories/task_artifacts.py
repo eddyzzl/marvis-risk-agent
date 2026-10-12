@@ -20,6 +20,7 @@ import sqlite3
 from typing import Any
 
 from marvis.db_schema import connect
+from marvis.institution.policy import guard_repository as _guard_repository
 
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -38,6 +39,7 @@ class TaskArtifactNotFoundError(KeyError):
     """The owning task does not exist."""
 
 
+@_guard_repository
 class TaskArtifactRepository:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -194,6 +196,8 @@ class TaskArtifactRepository:
     def list_for_task(self, task_id: str) -> list[dict[str, Any]]:
         normalized_task_id = _required_text(task_id, field="task_id")
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn,'task',task_id)
             rows = conn.execute(
                 """
                 SELECT * FROM task_artifacts

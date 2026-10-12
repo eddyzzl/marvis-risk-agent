@@ -11,6 +11,7 @@ import logging
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 from marvis.agent.json_reply import strip_thinking
 
@@ -30,6 +31,7 @@ class LLMClientErrorKind(StrEnum):
     INVALID_RESPONSE = "invalid_response"
     EMPTY_RESPONSE = "empty_response"
     REASONING_BUDGET_EXHAUSTED = "reasoning_budget_exhausted"
+    OUTBOUND_POLICY = "outbound_policy"
 
 
 _SAFE_FINISH_REASONS = frozenset(
@@ -242,6 +244,42 @@ class OpenAICompatibleLLMClient:
                 "api_base_url must start with http:// or https://",
                 error_kind=LLMClientErrorKind.INVALID_URL,
             )
+        from marvis.llm_outbound import (
+            OutboundContextError, StructuralPrompt, _check_output_schema, _check_schema_limits, _finite,
+            safe_extra_request_fields, safe_schema, safe_system_prompt,
+        )
+
+        if not isinstance(user_prompt, StructuralPrompt):
+            raise LLMClientError(
+                "此调用尚未提供已批准的结构摘要，未发送模型请求。",
+                error_kind=LLMClientErrorKind.OUTBOUND_POLICY,
+            )
+        system_prompt = safe_system_prompt(system_prompt, prompt_name)
+        if not _finite(temperature) or not 0 <= temperature <= 2:
+            raise LLMClientError("模型温度参数无效，未发送请求。", error_kind=LLMClientErrorKind.OUTBOUND_POLICY)
+        if json_schema is not None:
+            try:
+                if isinstance(json_schema, dict):
+                    _check_schema_limits(json_schema)
+                    _check_output_schema(json_schema)
+                json_schema = safe_schema(json_schema)
+                _check_output_schema(json_schema)
+            except (OutboundContextError, TypeError, ValueError, RecursionError):
+                raise LLMClientError(
+                    "结构化输出契约无效或超出批准范围，未发送模型请求。",
+                    error_kind=LLMClientErrorKind.OUTBOUND_POLICY,
+                ) from None
+        if response_format is not None:
+            # A caller cannot tunnel sample examples or file text via schema
+            # descriptions or an arbitrary response-format property.
+            response_format = {"type": "json_object"}
+        try:
+            extra_request_fields = safe_extra_request_fields(self.profile.get("extra_request_fields"))
+        except ValueError:
+            raise LLMClientError(
+                "LLM 附加请求字段不符合结构摘要出站规则，未发送请求。",
+                error_kind=LLMClientErrorKind.OUTBOUND_POLICY,
+            ) from None
         structured_output = str(self.profile.get("structured_output") or "json_object")
         schema_tokens = 0
         if json_schema is not None:
@@ -299,20 +337,35 @@ class OpenAICompatibleLLMClient:
         }
         if stream:
             payload["stream_options"] = {"include_usage": True}
-        if self.profile.get("enable_thinking"):
+        # The official DeepSeek endpoint defaults to thinking enabled. Omitting
+        # its toggle would ignore a user's explicit off setting and consume a
+        # small structured-response budget before any business answer appears.
+        deepseek_endpoint = (
+            (urlsplit(api_base_url).hostname or "").lower() == "api.deepseek.com"
+            or self.profile.get("thinking_style") == "deepseek"
+        )
+        if deepseek_endpoint and model_name.lower().startswith("deepseek"):
+            enabled = bool(self.profile.get("enable_thinking"))
+            payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
+            if enabled:
+                effort = self.profile.get("reasoning_effort") or "high"
+                mapping = {"minimal": "low", "low": "low", "medium": "high", "high": "high", "xhigh": "high", "max": "max"}
+                if not isinstance(effort, str) or effort not in mapping:
+                    raise LLMClientError("模型推理参数无效，未发送请求。", error_kind=LLMClientErrorKind.OUTBOUND_POLICY)
+                payload["reasoning_effort"] = mapping[effort]
+        elif self.profile.get("enable_thinking"):
             thinking_style = str(self.profile.get("thinking_style") or "none")
             if thinking_style == "openai_reasoning":
-                payload["reasoning_effort"] = str(
-                    self.profile.get("reasoning_effort") or "high"
-                )
+                effort = self.profile.get("reasoning_effort") or "high"
+                if not isinstance(effort, str) or effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
+                    raise LLMClientError("模型推理参数无效，未发送请求。", error_kind=LLMClientErrorKind.OUTBOUND_POLICY)
+                payload["reasoning_effort"] = effort
             elif thinking_style == "anthropic":
                 payload["thinking"] = {"type": "enabled"}
             elif thinking_style == "qwen_chat_template":
                 payload["chat_template_kwargs"] = {"enable_thinking": True}
             # thinking_style == "none" (the default) sends no non-standard field.
-        extra_request_fields = self.profile.get("extra_request_fields")
-        if isinstance(extra_request_fields, dict):
-            payload.update(extra_request_fields)
+        payload.update(extra_request_fields)
         if json_schema is not None and structured_output == "json_schema":
             payload["response_format"] = {
                 "type": "json_schema",

@@ -18,6 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_valid
 from marvis.api_schemas import DataSemanticMappingRequest, PortfolioSetupRequest
 from .runtime_labeling import LabelingBusinessInput
 from .runtime_monitoring import MonitoringBusinessInput
+from .runtime_extension_inputs import ExtensionBusinessInput
+from .runtime_fault_inputs import RuntimeFault
 
 RUNTIME_FINISH_REASONS = frozenset(
     {"stop", "length", "tool_calls", "function_call", "content_filter", "other"}
@@ -113,6 +115,48 @@ class RuntimeTask(StrictModel):
         return value
 
 
+class ExtensionIdentityBinding(StrictModel):
+    """Fixed prior-response references; never a route or arbitrary JSON path."""
+    target: Literal["promotion_id", "deployment_id", "request.task_id", "request.strategy_id",
+                    "request.strategy_version", "request.decision_package_hash", "request.package_hash",
+                    "request.promotion_id", "request.receipt_id", "request.expected_active_deployment_id",
+                    "request.basis_id", "request.grant_id", "request.source_id", "request.source_artifact_id",
+                    "request.source_artifact_hash", "request_id", "grant_id", "batch_id", "schedule_id",
+                    "request.grantee_id", "request.basis_artifact_id", "request.source_contract_hash",
+                    "request.expected_package_hash", "request.historical.dataset_id", "request.historical.expected_content_hash",
+                    "request.dataset.dataset_id", "request.dataset.expected_content_hash", "request.dataset.source_id",
+                    "request.dataset.source_contract_hash", "request.contract.source_id", "request.contract.source_contract_hash", "request.contract.knowledge_cutoff",
+                    "request.terms_artifact_id", "request.terms_artifact_hash", "request.policy.basis_artifact_id",
+                    "request.policy.basis_artifact_hash", "request.cases[].source_artifact_id", "request.cases[].source_artifact_hash",
+                    "request.histories[].source_artifact_id", "request.histories[].source_artifact_hash",
+                    "request.events[].source_artifact_id", "request.events[].source_artifact_hash",
+                    "request.coverage[].source_artifact_id", "request.coverage[].source_artifact_hash",
+                    "request.strategy.default_action.value.policy_hash", "request.strategy.rules[].action.value.policy_hash"]
+    source_action: int | None = Field(default=None, ge=1, le=500)
+    source_material: int | None = Field(default=None, ge=1, le=32)
+    source_tool: Literal["strategy.create_strategy", "strategy.adopt_strategy"] | None = None
+    source_field: Literal["task_id", "id", "package_hash", "activation_evidence.receipt_id",
+                          "source_id", "contract_hash", "grant_id", "request_id", "source_artifact_id",
+                          "source_artifact_hash", "batch_id", "contract.schedule_id", "contract.revision",
+                          "dataset_id", "dataset_content_hash", "strategy_id", "version", "ingested_at", "resolved_policy_hash"]
+
+    @model_validator(mode="after")
+    def task_or_prior(self):
+        selectors = sum(value is not None for value in (self.source_action, self.source_material, self.source_tool))
+        local = self.source_field in {"task_id", "resolved_policy_hash"}
+        if (local and selectors) or (not local and selectors != 1):
+            raise ValueError("references require exactly one fixed native identity source or the current task")
+        return self
+
+    @model_serializer(mode="wrap")
+    def preserve_existing_binding(self, handler):
+        value = handler(self)
+        for key in ("source_material", "source_tool"):
+            if value[key] is None:
+                value.pop(key)
+        return value
+
+
 class RuntimeAction(StrictModel):
     kind: Literal[
         "message",
@@ -133,16 +177,45 @@ class RuntimeAction(StrictModel):
         "submit_model_monitoring_request",
         "start_model_monitoring_workflow",
         "confirm_model_monitoring_plan",
+        "submit_extension_request",
+        "start_extension_workflow",
+        "recover_governed_decision",
     ]
     content: str = ""
     tool: str = ""
+    refit_on_train_plus_test: bool | None = None
     portfolio_request: PortfolioSetupRequest | None = None
     semantic_mapping: DataSemanticMappingRequest | None = None
     labeling_request: LabelingBusinessInput | None = None
     monitoring_request: MonitoringBusinessInput | None = None
+    extension_request: ExtensionBusinessInput | None = None
+    extension_bindings: list[ExtensionIdentityBinding] = Field(default_factory=list, max_length=32)
+    extension_source_action: int | None = Field(default=None, ge=1, le=500)
+    fault: "RuntimeFault | None" = None
+    fault_source_action: int | None = Field(default=None, ge=1, le=500)
 
     @model_validator(mode="after")
     def required_fields(self):
+        if self.fault is not None and self.kind != "approve_step":
+            raise ValueError("fixed reference faults belong only to explicit native approval actions")
+        if self.kind == "recover_governed_decision":
+            if self.fault_source_action is None or not self.content.strip() or not self.tool:
+                raise ValueError("recovery requires human text, the exact native tool and an earlier fault action")
+        elif self.fault_source_action is not None:
+            raise ValueError("fault action reference belongs only to explicit recovery")
+        if self.kind == "start_extension_workflow":
+            if (self.extension_source_action is None or not self.content.strip()
+                    or self.tool not in {"risk_context.replay_events", "collection.queue_batch", "collection.execute_reference", "collection.cancel_batch"}):
+                raise ValueError("extension workflow requires a fixed native tool, prior proposal and human text")
+        elif self.extension_source_action is not None:
+            raise ValueError("extension proposal reference belongs only to a declared workflow start")
+        if self.kind == "submit_extension_request":
+            if self.extension_request is None or not self.content.strip() or self.tool:
+                raise ValueError("extension requires a typed business request and human text")
+            if len({b.target for b in self.extension_bindings}) != len(self.extension_bindings):
+                raise ValueError("an extension identity can be bound only once")
+        elif self.extension_request is not None or self.extension_bindings:
+            raise ValueError("extension inputs belong only to their declared action")
         if self.kind in {"submit_model_monitoring_request", "start_model_monitoring_workflow"}:
             if self.monitoring_request is None or not self.content.strip() or self.tool:
                 raise ValueError("monitoring requires declared data/label choices and human text")
@@ -178,6 +251,8 @@ class RuntimeAction(StrictModel):
                 raise ValueError(
                     "recommended selection requires the modeling selection gate and explicit human text"
                 )
+        elif self.refit_on_train_plus_test is not None:
+            raise ValueError("refit_on_train_plus_test belongs only to explicit recommended selection")
         if self.portfolio_request is not None and self.kind != "message":
             raise ValueError("portfolio_request belongs to a user message only")
         if (
@@ -197,6 +272,8 @@ class RuntimeAction(StrictModel):
     @model_serializer(mode="wrap")
     def preserve_legacy_identity(self, handler):
         value = handler(self)
+        if value.get("refit_on_train_plus_test") is None:
+            value.pop("refit_on_train_plus_test", None)
         if value.get("portfolio_request") is None:
             value.pop("portfolio_request", None)
         if value.get("semantic_mapping") is None:
@@ -205,6 +282,16 @@ class RuntimeAction(StrictModel):
             value.pop("monitoring_request", None)
         if value.get("labeling_request") is None:
             value.pop("labeling_request", None)
+        if value.get("extension_request") is None:
+            value.pop("extension_request", None)
+        if not value.get("extension_bindings"):
+            value.pop("extension_bindings", None)
+        if value.get("extension_source_action") is None:
+            value.pop("extension_source_action", None)
+        if value.get("fault") is None:
+            value.pop("fault", None)
+        if value.get("fault_source_action") is None:
+            value.pop("fault_source_action", None)
         return value
 
 
@@ -226,6 +313,14 @@ class RuntimeCase(StrictModel):
 
     @model_validator(mode="after")
     def strategy_sample_binding(self):
+        for index, action in enumerate(self.actions, 1):
+            if action.kind == "recover_governed_decision":
+                source = action.fault_source_action
+                if source is None or source >= index or self.actions[source - 1].tool != action.tool or getattr(self.actions[source - 1].fault, "kind", None) != "discard_success_response_once":
+                    raise ValueError("recovery references one exact earlier discarded-response approval")
+        if any(a.kind in {"submit_extension_request", "start_extension_workflow"} for a in self.actions):
+            if self.task.task_type != "strategy" or self.family not in {"online_decision", "connector_antifraud", "collections"}:
+                raise ValueError("extension journeys require their declared family and a native strategy task")
         validation_roles = {"sample", "notebook", "pmml", "dictionary"}
         if self.task.task_type == "validation":
             compatibility = bool(self.actions and self.actions[0].kind == "start_validation_workflow")
@@ -320,7 +415,7 @@ class ModelConnection(StrictModel):
     reasoning_effort: str = "high"
     structured_output: Literal["json_schema", "json_object", "none"] = "json_object"
     thinking_style: Literal[
-        "qwen_chat_template", "openai_reasoning", "anthropic", "none"
+        "qwen_chat_template", "openai_reasoning", "anthropic", "deepseek", "none"
     ] = "none"
 
     @model_validator(mode="after")

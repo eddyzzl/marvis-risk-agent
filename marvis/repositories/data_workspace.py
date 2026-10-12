@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from contextlib import nullcontext
 import hashlib
 import hmac
 import json
@@ -107,6 +108,13 @@ class DataWorkspaceRepository:
             on_connection=on_connection,
         )
 
+    def save_on_connection(self, conn, task_id, draft, expected_revision, *, audit=None, dataset_authenticator=None):
+        """Bind a newly registered dataset in the caller's atomic transaction."""
+        if not conn.in_transaction:
+            raise DataWorkspaceDataError("workspace registration requires an active transaction")
+        return self._save(task_id, draft, expected_revision, audit=audit,
+            allow_initial_semantic_binding=False, dataset_authenticator=dataset_authenticator, connection=conn)
+
     def _save(
         self,
         task_id: str,
@@ -117,6 +125,7 @@ class DataWorkspaceRepository:
         allow_initial_semantic_binding: bool,
         dataset_authenticator: Callable[[], object] | None = None,
         on_connection: Callable[[sqlite3.Connection], None] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> DataWorkspaceSnapshot:
         normalized_task_id = _canonical_text(task_id, field_name="task_id")
         expected = _non_negative_int(
@@ -132,8 +141,9 @@ class DataWorkspaceRepository:
         if on_connection is not None and not callable(on_connection):
             raise DataWorkspaceDataError("on_connection must be callable")
 
-        with connect(self.db_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with nullcontext(connection) if connection is not None else connect(self.db_path) as conn:
+            if connection is None:
+                conn.execute("BEGIN IMMEDIATE")
             task = _task_row(conn, normalized_task_id)
             row = conn.execute(
                 "SELECT * FROM data_workspaces WHERE task_id = ?",
@@ -606,7 +616,7 @@ def _validate_column_references(
     columns: frozenset[str] | None,
 ) -> None:
     mapping = draft.semantic_mapping
-    references = set(mapping.field_roles) | set(mapping.business_names)
+    references = set(mapping.field_roles) | set(mapping.business_names) | set(mapping.risk_directions)
     if mapping.target_col is not None:
         references.add(mapping.target_col)
     if draft.selected_field is not None:
@@ -632,6 +642,7 @@ def _is_reset_payload(draft: DataWorkspaceDraft) -> bool:
         and mapping.target_col is None
         and not mapping.field_roles
         and not mapping.business_names
+        and not mapping.risk_directions
     )
 
 

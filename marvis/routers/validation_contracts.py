@@ -93,6 +93,10 @@ def confirm_validation_input_contract(
                     "only a pending validation input contract can be confirmed"
                 )
             paths = resolve_selected_validation_materials(task)
+            from marvis.modeling_holdout.guards import record_exposure
+            settings = request.app.state.settings
+            for path in (paths.sample, paths.dictionary):
+                record_exposure(settings.db_path, settings.workspace, path)
             requested = ValidationInputConfirmation(
                 target_col=payload.target_col,
                 positive_label=payload.positive_label,

@@ -181,6 +181,12 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         dict.fromkeys([final_experiment_id, *experiment_ids])
     )
     final_metrics = refit_info.get("metrics") or pre_refit_metrics
+    if final_artifact_id != artifact_id:
+        final_artifact = _task_artifact(runtime, ctx, final_artifact_id)
+        capabilities = _artifact_capabilities(
+            final_artifact,
+            base_dir=_artifact_base_dir(runtime.settings, experiment.task_id),
+        )
     if business_measurement is not None and (final_experiment_id != selected_id or final_artifact_id != artifact_id):
         # Refit creates another model. Previous held-out evidence cannot certify it.
         business_measurement = None
@@ -198,6 +204,12 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         "selection_metric": selection_metric,
         "selection_reason": selection_reason,
         "metrics": final_metrics,
+        **({"selection_evidence": {
+            "experiment_id": selected_id,
+            "artifact_id": artifact_id,
+            "metrics": refit_info["metrics_before_refit"],
+            "purpose": "pre_refit_heldout_selection",
+        }} if refit_info.get("development_refit_receipt_id") else {}),
         "capabilities": capabilities,
         "policy_profile": selected.get("policy_profile") or {},
         "policy_decision": policy_decision,
@@ -290,6 +302,14 @@ def _apply_champion_refit(
     """
     if not requested:
         return {"applied": False, "requested": False, "reason": "未请求全量重训(refit_on_train_plus_test=false)。"}
+    if experiment.config.params.get("fold_tuning_evidence_ref") is not None:
+        from marvis.packs.modeling.development_refit import development_refit
+
+        return development_refit(runtime, experiment=experiment, recipe=recipe,
+            pre_refit_metrics=pre_refit_metrics)
+    if (experiment.config.params.get("fitted_input_time_evidence") or {}).get("development_refit_receipt_id"):
+        return {"applied": False, "requested": True,
+                "reason": "当前模型已经是原生 development refit，未重复拟合。"}
     # LT-5: _refit_champion_on_train_plus_test (via _train_recipe -> save_model)
     # fully promotes the refit's model file/meta on disk -- including overwriting
     # the base_dir's "latest" model_meta.json pointer -- before this function ever

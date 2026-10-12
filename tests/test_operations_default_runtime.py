@@ -86,6 +86,8 @@ def test_normal_app_lifecycle_runs_real_monitor_and_delivers_once_after_restart(
         _claim_role(app, client, "admin")
         capabilities = client.get("/api/operations/capabilities").json()
         assert capabilities["monitoring_refs"] == [
+            "analysis.decision_ledger_feedback",
+            "analysis.portfolio_run",
             "modeling.monitor_run",
             "strategy.run_strategy_monitoring",
         ]

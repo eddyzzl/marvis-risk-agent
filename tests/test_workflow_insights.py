@@ -197,12 +197,13 @@ def test_render_workflow_insight_uses_llm_but_keeps_grounded_context():
 
         def complete(self, **kwargs):
             prompt = json.loads(kwargs["user_prompt"])
-            assert prompt["facts"] == ["已分析 3 个特征"]
-            assert prompt["memory_context"][0]["summary"] == "历史任务曾发现 x2 不稳定"
+            assert prompt["measured_evidence"]["feature_count"] == 3
+            assert "memory_context" not in prompt
+            assert "历史任务曾发现" not in kwargs["user_prompt"]
             return json.dumps({
                 "summary": "整体可用，但应排除 x2。",
                 "findings": ["x1 区分力较好"],
-                "risks": ["x2 历史稳定性较差"],
+                "risks": ["x2 当前缺失率较高"],
                 "recommendations": ["保留 x1，复核 x2"],
             }, ensure_ascii=False)
 
@@ -217,6 +218,10 @@ def test_render_workflow_insight_uses_llm_but_keeps_grounded_context():
             "avoid_features": ["x2"],
             "recommended_params": {},
             "evidence": ["Agent 特征建议"],
+            "measured_evidence": {"feature_count": 3,
+                "features": [{"feature": "x1", "state": "recommended"},
+                             {"feature": "x2", "state": "caution"}],
+                "quality": [{"feature": "x2", "missing_rate": .8}]},
         },
         client=FakeLLM(),
         memory_context=[{"summary": "历史任务曾发现 x2 不稳定"}],
@@ -224,4 +229,4 @@ def test_render_workflow_insight_uses_llm_but_keeps_grounded_context():
 
     assert result["generated_by"] == "llm"
     assert "整体可用" in result["content"]
-    assert "x2 历史稳定性较差" in result["content"]
+    assert "x2 当前缺失率较高" in result["content"]

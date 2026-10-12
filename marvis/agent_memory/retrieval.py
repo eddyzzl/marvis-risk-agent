@@ -23,6 +23,8 @@ MODEL_PAYLOAD_FIELDS = (
     "overfitting_status",
     "head_lift_5pct",
     "tail_lift_5pct",
+    "metric_units",
+    "evaluation_split",
 )
 GENERAL_PAYLOAD_FIELDS = (
     "target_col",

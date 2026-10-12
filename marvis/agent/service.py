@@ -7,13 +7,13 @@ import re
 from marvis.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
     RISK_METRIC_INTERPRETATION_GUIDANCE,
-    WORD_CONCLUSION_SYSTEM_PROMPT,
 )
 from marvis.agent.validation_narrative import (
-    generate_v2_metrics_summary, generate_v2_sections,
+    generate_v2_metrics_summary, generate_v2_sections, has_report_revision_context,
     validate_v2_word_conclusions as _validate_v2_word_conclusions,
 )
 from marvis.llm_prompts import AGENT_SYSTEM_PROMPT as _AGENT_PROMPT_SPEC
+from marvis.llm_prompts import WORD_CONCLUSION_SYSTEM_PROMPT as _WORD_PROMPT_SPEC
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.semantic_authorization import review_semantic_authorization
 from marvis.model_algorithms import (
@@ -845,7 +845,16 @@ def summarize_stage(
     fallback: str,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
-    prompt = _stage_prompt(
+    metrics_v2 = stage == "metrics" and task.validation_workflow_version == 2
+    metrics_v1 = stage == "metrics" and not metrics_v2
+    scoring_v2 = stage == "reproducibility" and task.validation_workflow_version == 2
+    comparison_v1 = stage == "reproducibility" and not scoring_v2
+    scan_stage = stage == "scan"
+    typed_stage = metrics_v2 or metrics_v1 or scoring_v2 or comparison_v1 or scan_stage
+    guard_before_emit = metrics_v1 or scoring_v2 or comparison_v1 or scan_stage
+    # Native aggregates must reach their typed adapter before legacy text
+    # compaction or sanitization can truncate periods or change numeric values.
+    prompt = {"stage": stage, "evidence": evidence} if typed_stage else _stage_prompt(
         task=task,
         stage=stage,
         evidence=evidence,
@@ -853,10 +862,27 @@ def summarize_stage(
     )
     # LLM-5: memory injection is one of the three named highest-volume prompt
     # touch points; surface the truncation flag on this call's audit record.
-    truncated = memory_context_was_truncated(normalize_memory_context(memory_context))
+    truncated = False if typed_stage else memory_context_was_truncated(normalize_memory_context(memory_context))
     client = _client(model_profile)
+    history = None
     try:
-        if stage == "metrics" and task.validation_workflow_version == 2:
+        if stage == "metrics":
+            from marvis.llm_outbound_memory import model_history_context
+            history = model_history_context(task=task, evidence=evidence, memory_context=memory_context)
+            prompt["model_history"] = history
+        if scoring_v2:
+            from marvis.llm_outbound_validation import pmml_scoring_prompt
+            prompt = pmml_scoring_prompt(evidence)
+        elif comparison_v1:
+            from marvis.llm_outbound_validation import reproducibility_prompt
+            prompt = reproducibility_prompt(evidence)
+        elif scan_stage:
+            from marvis.llm_outbound_scan import scan_prompt
+            prompt = scan_prompt(evidence, workflow_version=task.validation_workflow_version)
+        elif metrics_v1:
+            from marvis.llm_outbound_validation import validation_metrics_summary_prompt
+            prompt = validation_metrics_summary_prompt(evidence, history=history)
+        if metrics_v2:
             content = generate_v2_metrics_summary(client, prompt, truncated=truncated)
             if on_delta:
                 on_delta(content)
@@ -866,7 +892,8 @@ def summarize_stage(
                 user_prompt=prompt,
                 temperature=0.2,
                 max_tokens=STAGE_SUMMARY_MAX_TOKENS.get(stage),
-                on_delta=on_delta,
+                on_delta=None if guard_before_emit else on_delta,
+                stream=not guard_before_emit,
                 truncated=truncated,
                 caller=f"validation_stage_{stage}",
                 prompt_name=_AGENT_PROMPT_SPEC.name,
@@ -884,23 +911,21 @@ def summarize_stage(
     if stage == "metrics":
         missing_sections = _missing_metrics_summary_sections(cleaned)
         if missing_sections:
-            repair_prompt = _metrics_summary_repair_prompt(
-                prompt,
-                previous_response=cleaned,
-                missing_sections=missing_sections,
-            )
             try:
+                from marvis.llm_outbound_validation import validation_metrics_summary_prompt
+                repair_prompt = validation_metrics_summary_prompt(evidence, missing_sections=missing_sections, history=history)
                 repaired_content = client.complete(
                     system_prompt=AGENT_SYSTEM_PROMPT,
                     user_prompt=repair_prompt,
                     temperature=0.1,
                     max_tokens=STAGE_SUMMARY_MAX_TOKENS.get(stage),
+                    stream=False,
                     truncated=truncated,
                     caller=f"validation_stage_{stage}_repair",
                     prompt_name=_AGENT_PROMPT_SPEC.name,
                     prompt_version=_AGENT_PROMPT_SPEC.version,
                 )
-            except LLMClientError as exc:
+            except (LLMClientError, ValueError) as exc:
                 repaired_content = ""
                 metadata["llm_repair_error"] = str(exc)
             repaired = _strip_agent_response_preamble(repaired_content or "")
@@ -922,6 +947,11 @@ def summarize_stage(
         metadata["guarded_stage_summary"] = True
         if stage == "scan":
             metadata["guarded_scan_summary"] = True
+    if guard_before_emit and on_delta:
+        on_delta(guarded)
+    if typed_stage:
+        metadata.update(history.metadata(use_reason=stage) if history else {"history_comparison_available": False})
+        return guarded, metadata
     return guarded, attach_memory_metadata(metadata, memory_context, use_reason=stage)
 
 
@@ -937,29 +967,6 @@ def _missing_metrics_summary_sections(content: str) -> list[str]:
         if not heading.search(text):
             missing.append(section)
     return missing
-
-
-def _metrics_summary_repair_prompt(
-    original_prompt: str,
-    *,
-    previous_response: str,
-    missing_sections: list[str],
-) -> str:
-    try:
-        payload = json.loads(original_prompt)
-    except (TypeError, json.JSONDecodeError):
-        payload = {"original_request": str(original_prompt or "")}
-    payload["previous_response"] = str(previous_response or "")[:12_000]
-    payload["repair_request"] = {
-        "reason": "stage summary is missing required sections",
-        "missing_sections": list(missing_sections),
-        "required_sections": list(METRICS_SUMMARY_REQUIRED_SECTIONS),
-        "instruction": (
-            "请完整重写当前阶段分析，逐一使用上述五个标题；每节都要基于原 evidence 给出完整判断，"
-            "不得编造指标，也不得只补标题。只输出重写后的分析正文。"
-        ),
-    }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def _sectioned_metrics_summary(content: str, fallback: str) -> str:
@@ -979,14 +986,8 @@ def compose_agent_start_message(
     model_profile: dict,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
-    prompt = _stage_prompt(
-        task=task,
-        stage="agent_start",
-        evidence={
-            "next_tool": "scan_materials",
-            "tool_purpose": "识别 Notebook、样本数据、PMML 模型、数据字典并检查 Notebook RMC 契约",
-        },
-    )
+    from marvis.llm_outbound_validation import validation_start_prompt
+    prompt = validation_start_prompt(workflow_version=task.validation_workflow_version)
     fallback = (
         "我将先以信贷风控模型验证专家身份检查本次验证材料的完备性，"
         "随后调用材料识别工具读取目录、识别关键文件并检查 Notebook RMC 契约。"
@@ -997,6 +998,9 @@ def compose_agent_start_message(
             user_prompt=prompt,
             temperature=0.2,
             on_delta=on_delta,
+            caller="validation_agent_start",
+            prompt_name=_AGENT_PROMPT_SPEC.name,
+            prompt_version=_AGENT_PROMPT_SPEC.version,
         )
     except LLMClientError as exc:
         return fallback, {"llm_error": str(exc), "fallback": True}
@@ -1013,37 +1017,48 @@ def failure_summary(
     model_profile: dict,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
-    failure_evidence = {"failed_stage": stage, "error": error}
-    if isinstance(evidence, dict):
-        notebook_failure = _compact_notebook_failure_evidence(
-            evidence.get("notebook_steps")
-        )
-        if notebook_failure:
-            failure_evidence["notebook_failure"] = notebook_failure
-        scan = _compact_scan_evidence(evidence.get("scan"))
-        if scan:
-            failure_evidence["scan"] = scan
-    prompt = _stage_prompt(
-        task=task,
-        stage="failure",
-        evidence=failure_evidence,
-        memory_context=memory_context,
-    )
-    fallback = f"失败阶段：{stage}\n直接原因：{error}\n可能原因：请检查该阶段输入材料、执行环境和上游产物。\n下一步：修正后重新从失败阶段执行。"
+    from marvis.llm_outbound_failure import failure_prompt
+
+    # Keep actionable source diagnostics on the local display path. The model
+    # only receives positions, statuses and approved error categories.
+    diagnostics = [f"失败阶段：{stage}", f"直接原因：{error}"]
+    notebook = evidence.get("notebook_steps") if isinstance(evidence, dict) else None
+    cells = notebook.get("cells") if isinstance(notebook, dict) else None
+    if isinstance(cells, list):
+        for cell in cells:
+            if not isinstance(cell, dict) or cell.get("status") != "failed":
+                continue
+            location = {}
+            if type(cell.get("cell_index")) is int:
+                location["cell_index"] = cell["cell_index"]
+            references = cell.get("referenced_files")
+            if isinstance(references, list):
+                location["referenced_files"] = [name for name in references if isinstance(name, str)]
+            if location:
+                diagnostics.append("本地失败位置：" + json.dumps(location, ensure_ascii=False))
+    local_diagnostics = "\n".join(diagnostics)
+    fallback = local_diagnostics + "\n可能原因：请检查该阶段输入材料、执行环境和上游产物。\n下一步：修正后重新从失败阶段执行。"
     try:
+        prompt = failure_prompt(stage=stage, error=error, evidence=evidence,
+                                workflow_version=task.validation_workflow_version)
         content = _client(model_profile).complete(
             system_prompt=AGENT_SYSTEM_PROMPT,
             user_prompt=prompt,
             temperature=0.1,
-            on_delta=on_delta,
+            stream=False,
+            caller="validation_failure_summary",
+            prompt_name=_AGENT_PROMPT_SPEC.name,
+            prompt_version=_AGENT_PROMPT_SPEC.version,
         )
-    except LLMClientError as exc:
-        return fallback, {"llm_error": str(exc), "fallback": True}
-    return _strip_agent_response_preamble(content or fallback), attach_memory_metadata(
-        {"fallback": False},
-        memory_context,
-        use_reason="failure",
-    )
+    except (LLMClientError, ValueError) as exc:
+        return fallback, {"llm_error": str(exc), "fallback": True, "history_comparison_available": False}
+    explanation = _strip_agent_response_preamble(content or "")
+    if not explanation:
+        return fallback, {"fallback": True, "empty_llm_response": True, "history_comparison_available": False}
+    combined = local_diagnostics + "\n\n分析与建议：\n" + explanation
+    if on_delta:
+        on_delta(combined)
+    return combined, {"fallback": False, "history_comparison_available": False}
 
 
 def answer_chat_message(
@@ -1056,39 +1071,53 @@ def answer_chat_message(
     model_profile: dict,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
-    prompt = _chat_prompt(
-        task=task,
-        user_message=user_message,
-        conversation=conversation,
-        evidence=evidence,
-        memory_context=memory_context,
-    )
+    from marvis.llm_outbound import OutboundContextError
+    from marvis.llm_outbound_chat import chat_prompt
     fallback = _chat_fallback_for_message(user_message)
     # LLM-5: memory injection is one of the three named highest-volume prompt
     # touch points; surface the truncation flag on this call's audit record.
-    truncated = memory_context_was_truncated(normalize_memory_context(memory_context))
     try:
+        prompt, history = chat_prompt(task=task, user_message=user_message, conversation=conversation,
+                                     evidence=evidence, memory_context=memory_context)
         raw_content = _client(model_profile).complete(
             system_prompt=AGENT_SYSTEM_PROMPT,
             user_prompt=prompt,
             temperature=0.2,
-            on_delta=on_delta,
-            truncated=truncated,
+            on_delta=None,
+            stream=False,
+            truncated=False,
+            caller="agent_chat",
+            prompt_name=_AGENT_PROMPT_SPEC.name,
+            prompt_version=_AGENT_PROMPT_SPEC.version,
         )
         content = (raw_content or "").strip()
-    except LLMClientError as exc:
-        return fallback, {"llm_error": str(exc), "fallback": True}
+    except OutboundContextError as exc:
+        return str(exc), {"llm_error": str(exc), "fallback": True, "needs_clarification": True,
+                          "history_comparison_available": False}
+    except (LLMClientError, ValueError):
+        return fallback, {"llm_error": "llm_request_failed", "fallback": True,
+                          "needs_clarification": False, "history_comparison_available": False}
     if not content:
         return fallback, {"fallback": True, "empty_llm_response": True}
+    if (not json.loads(history.payload_json)["records"]
+            and re.search(
+                r"历史(?:同类)?模型|(?:上一版|上次|以前的|之前的)模型|对比历史|历史\s*(?:KS|AUC|PSI)|"
+                r"(?:和|比|相比|对比).{0,12}(?:之前|以前|上一版|上次)|"
+                r"(?:previous|historical)\s+(?:model|performance|KS|AUC|PSI)",
+                user_message, re.IGNORECASE,
+            )):
+        guarded = "当前没有可直接对照的认证历史模型指标，尚不能判断较上一版是否改善。请提供同口径、同分层的历史证据；本次指标以平台结果为准。"
+        if on_delta:
+            on_delta(guarded)
+        return guarded, {"fallback": False, "guarded_history_comparison": True, **history.metadata(use_reason="chat")}
     if _is_greeting_message(user_message) and _looks_like_start_validation_guidance(
         content
     ):
         return fallback, {"fallback": True, "llm_response_replaced": True}
-    return _strip_agent_response_preamble(content), attach_memory_metadata(
-        {"fallback": False},
-        memory_context,
-        use_reason="chat",
-    )
+    content = _strip_agent_response_preamble(content)
+    if on_delta:
+        on_delta(content)
+    return content, {"fallback": False, **history.metadata(use_reason="chat")}
 
 
 def _strip_agent_response_preamble(content: str) -> str:
@@ -1115,41 +1144,121 @@ def generate_word_conclusions(
     model_profile: dict,
     user_instruction: str | None = None,
 ) -> tuple[dict[str, str], dict]:
-    prompt = _stage_prompt(
-        task=task,
-        stage="word_conclusion_draft",
-        evidence=evidence,
-        memory_context=memory_context,
-        user_instruction=user_instruction,
+    from marvis.llm_outbound import SafeInstruction
+    from marvis.llm_outbound_instructions import user_instruction as approve_user_instruction
+    from marvis.llm_outbound_memory import model_history_context
+    from marvis.llm_outbound_revision import (
+        parse_report_revision_response, report_revision_baseline,
+        report_revision_prompt, report_revision_request, revision_fields,
     )
+
+    fresh_report = not has_report_revision_context(evidence, user_instruction, algorithm=task.algorithm)
+    request, baseline, fields, provenance = None, {}, (), {}
     try:
-        client = _client(model_profile)
-        if task.validation_workflow_version == 2:
+        history = model_history_context(task=task, evidence=evidence, memory_context=memory_context)
+        if fresh_report:
+            prompt = {"stage": "word_conclusion_draft", "evidence": {
+                key: value for key, value in evidence.items() if key != "saved_report_narrative"
+            }, "model_history": history}
+        else:
+            instruction = user_instruction
+            if instruction is not None and not isinstance(instruction, SafeInstruction):
+                instruction = approve_user_instruction(instruction)
+            request = report_revision_request(instruction)
+            baseline, provenance = report_revision_baseline(
+                evidence, report_revision=task.report_values_revision,
+            )
+            fields = revision_fields(request, baseline)
+        client = _client(model_profile) if fresh_report or (fields and request.operation == "regenerate_from_evidence") else None
+        if request is not None and request.operation == "clear":
+            values = {key: "" for key in fields}
+        elif request is not None and request.operation == "set_local_text":
+            values = {key: request.local_text for key in fields}
+        elif request is not None and request.operation == "replace_local_text":
+            from marvis.llm_outbound_revision import ReportRevisionError
+
+            if any(request.local_old_text not in baseline.get(key, "") for key in fields):
+                raise ReportRevisionError(
+                    "当前报告字段未包含指定的待替换片段，请核对当前草稿后重新说明修改。",
+                    code="revision_text_mismatch",
+                )
+            values = {key: baseline[key].replace(request.local_old_text, request.local_text) for key in fields}
+        elif request is not None and not fields:
+            values = {}
+        elif task.validation_workflow_version == 2 and request is not None:
+            from marvis.agent.validation_narrative import generate_v2_revision_sections
+
+            values = generate_v2_revision_sections(
+                client, evidence, request=request, provenance=provenance, fields=fields, history=history,
+            )
+        elif task.validation_workflow_version == 2:
             values = generate_v2_sections(client, prompt)
         else:
+            from marvis.llm_outbound_validation import validation_v1_report_prompt
+
+            prompt = validation_v1_report_prompt(evidence, history=history)
+            if request is not None:
+                prompt = report_revision_prompt(
+                    prompt, request=request, provenance=provenance, requested_fields=fields,
+                )
+            response_contract = {"json_schema": {
+                "name": "validation_v1_report_revision", "strict": False, "schema": {
+                    "type": "object", "properties": {key: {"type": "string"} for key in fields},
+                    "required": list(fields), "additionalProperties": False,
+                },
+            }} if request is not None else {"response_format": {"type": "json_object"}}
+            from marvis.llm_prompts import WORD_CONCLUSION_REVISION_SYSTEM_PROMPT
+
+            report_spec = WORD_CONCLUSION_REVISION_SYSTEM_PROMPT if request is not None else _WORD_PROMPT_SPEC
             content = client.complete(
-                system_prompt=WORD_CONCLUSION_SYSTEM_PROMPT,
+                system_prompt=report_spec.text,
                 user_prompt=prompt,
                 temperature=0.2,
-                response_format={"type": "json_object"},
+                **response_contract,
                 stream=False,
+                caller="validation_v1_report",
+                prompt_name=report_spec.name,
+                prompt_version=report_spec.version,
             )
-            values = _parse_conclusion_json(content)
-        values = _with_narrative_report_seeds(task, values, evidence)
-        values = _with_training_description_seed(task, values, evidence)
-        if task.validation_workflow_version == 2:
+            if request is not None:
+                values = parse_report_revision_response(content, fields)
+            else:
+                values = _parse_conclusion_json(content)
+                values = {key: value for key, value in values.items()
+                          if key in AGENT_REPORT_CONCLUSION_KEYS or key == "TEXT:model_training_description"}
+        if request is not None:
+            values = {**narrative_report_values(task.model_name), **baseline, **values}
+            if "TEXT:model_training_description" not in values:
+                values = _with_training_description_seed(task, values, evidence)
+        else:
+            values = _with_narrative_report_seeds(task, values, evidence)
+            values = _with_training_description_seed(task, values, evidence)
+        if task.validation_workflow_version == 2 and (request is None or request.operation == "regenerate_from_evidence"):
             _validate_v2_word_conclusions(values)
     except (LLMClientError, ValueError) as exc:
-        return {}, attach_memory_metadata(
-            {"llm_error": str(exc), "fallback": True, "confirmable": False},
-            memory_context,
-            use_reason="word_conclusion_draft",
-        )
-    return values, attach_memory_metadata(
-        {"fallback": False},
-        memory_context,
-        use_reason="word_conclusion_draft",
-    )
+        from marvis.llm_outbound import OutboundContextError
+
+        metadata = {"llm_error": str(exc), "fallback": True, "confirmable": False,
+                    "history_comparison_available": False}
+        if isinstance(exc, OutboundContextError):
+            metadata.update({"outbound_context_status": "clarification_required",
+                             "revision_error_code": getattr(exc, "code", "unapproved_instruction")})
+        if request is not None:
+            metadata.update({"report_revision_status": "failed",
+                             "report_revision_operation": request.operation,
+                             "report_revision_fields": list(fields),
+                             "report_revision_provenance": provenance})
+        return {}, metadata
+    history_metadata = (history.metadata(use_reason="word_conclusion_draft")
+                        if fresh_report or (request.operation == "regenerate_from_evidence" and fields)
+                        else {"history_comparison_available": False})
+    metadata = {"fallback": False, **history_metadata}
+    if not fresh_report:
+        metadata.update({"report_revision_operation": request.operation,
+                         "report_revision_fields": list(fields),
+                         "report_revision_provenance": provenance,
+                         "confirmable": agent_conclusions_confirmed(values)})
+    return values, metadata
 
 
 def fallback_word_conclusions(
@@ -2208,11 +2317,19 @@ def _guard_stage_summary(
         return fallback
     if stage != "scan" or not isinstance(evidence, dict):
         return content
-    interpretation = _scan_stage_evidence(evidence).get("scan_interpretation", {})
-    if not interpretation.get("required_materials_complete"):
+    from marvis.llm_outbound_scan import scan_context
+    context = scan_context(evidence, workflow_version=task.validation_workflow_version)
+    interpretation = context["scan_interpretation"]
+    if (not interpretation["required_materials_complete"] or interpretation["failed_check_count"]
+            or context["scan"].get("status") == "failed"):
         return content
     if not _scan_summary_claims_missing_complete_materials(content):
         return content
+    if task.validation_workflow_version == 2:
+        return (
+            "材料识别与验证输入契约候选检查已完成，当前未发现必需材料缺失。"
+            "字段和元数据是否已确认，请以当前输入契约状态为准。"
+        )
     return (
         "材料完备性检查已完成，Notebook、样本数据、PMML 模型、数据字典和 "
         "Notebook RMC 契约均已通过；当前未发现必需材料缺失。"
@@ -2591,6 +2708,8 @@ def _parse_conclusion_json(content: str) -> dict[str, str]:
         raise ValueError("LLM 返回不是有效 JSON") from exc
     if not isinstance(payload, dict):
         raise ValueError("word conclusion response must be a JSON object")
+    if any(key in payload and not isinstance(payload[key], str) for key in AGENT_REPORT_WRITABLE_KEYS):
+        raise ValueError("word conclusion fields must contain text")
     values = {
         key: str(payload.get(key) or "").strip()
         for key in REQUIRED_AGENT_REPORT_KEYS

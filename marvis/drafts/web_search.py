@@ -48,7 +48,7 @@ def web_search(query: str, *, max_results: int = 5) -> list[dict]:
     return _parse_search_results(response.json())[: int(max_results)]
 
 
-def fetch_url(url: str, *, max_bytes: int = 500_000) -> str:
+def fetch_url(url: str, *, max_bytes: int = 500_000, _public_provenance: bool = False):
     if not network_available():
         raise OfflineError(OFFLINE_GUIDANCE)
     client = _httpx()
@@ -91,9 +91,22 @@ def fetch_url(url: str, *, max_bytes: int = 500_000) -> str:
 
                 _reject_content_encoded_response(response)
                 content = _read_bounded_body(response, limit)
-                return _extract_main_text(_decode_response_body(response, content))[:limit]
+                text = _extract_main_text(_decode_response_body(response, content))
+                if _public_provenance:
+                    from marvis.llm_outbound_learning import _fetched_public_source
+
+                    return _fetched_public_source(str(url), current_url, content, text)
+                return text[:limit]
 
     raise FetchError("too many redirects")
+
+
+def fetch_public_learning_source(url: str, *, max_bytes: int = 500_000):
+    """Retain exact wire digest, extracted text and validated redirect location."""
+    from marvis.llm_outbound_learning import public_learning_url
+
+    public_learning_url(url)
+    return fetch_url(url, max_bytes=max_bytes, _public_provenance=True)
 
 
 def _validated_public_url(url: str) -> tuple[str, tuple[str, ...]]:

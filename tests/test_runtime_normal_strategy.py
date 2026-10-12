@@ -64,9 +64,11 @@ def _sample_request():
 
 
 def _strategy_protocol(request, answer, payload):
-    user = payload["messages"][-1]["content"]
-    if "【用户策略请求】" in user:
-        utterance = user.split("【用户策略请求】\n", 1)[1].split("\n", 1)[0]
+    from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
+
+    if payload["messages"][0]["content"].startswith(STRATEGY_REQUEST_COMPILER_SYS.text):
+        assert request["instruction_origin"] == "interactive_user"
+        utterance = request["instruction"]
         if "固化 V2 策略样本设计" in utterance:
             return _sample_request()
         return {
@@ -186,6 +188,7 @@ def test_human_binding_uses_exact_upload_and_each_returned_cas_revision():
         "target_col": None,
         "field_roles": {},
         "business_names": {},
+        "risk_directions": None,
     }
     assert second["json"]["semantic_mapping"] == action.semantic_mapping.model_dump()
     assert all(

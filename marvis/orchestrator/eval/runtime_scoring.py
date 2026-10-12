@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from typing import Literal, get_args
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .runtime_contracts import (
     StrictModel,
@@ -39,12 +39,20 @@ class Assertion(StrictModel):
         "monitoring_evidence",
         "portfolio_report_download",
         "feature_report_download",
+        "extension_value",
     ]
     tool: str = ""
     path: list[str | int] = Field(default_factory=list)
     stage: str = ""
     value: str | int | float | bool | None = None
     tolerance: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+
+    @field_validator("value")
+    @classmethod
+    def finite_expected_value(cls, value):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("expected numeric assertions require finite values")
+        return value
 
 
 class ExpectedCase(StrictModel):
@@ -74,6 +82,19 @@ def _at(value, path):
 
 
 def _assertion(assertion, record, private):
+    if assertion.kind == "extension_value":
+        observation = record.get("execution", {}).get("extension_observation", {})
+        values = private.get("extension_values")
+        if (assertion.tool or observation.get("verified") is not True or not isinstance(values, dict)
+                or observation.get("value_sha256") != digest(values)):
+            return False
+        try:
+            if any(isinstance(part, bool) for part in assertion.path):
+                return False
+            actual = _at(values, assertion.path)
+            return type(actual) is type(assertion.value) and actual == assertion.value
+        except (KeyError, TypeError, IndexError):
+            return False
     if assertion.kind == "monitoring_evidence":
         monitoring = record.get("execution", {}).get("monitoring", {})
         return (assertion.tool == "modeling.monitor_run" and monitoring.get("verified") is True
@@ -120,7 +141,7 @@ def _assertion(assertion, record, private):
         # A missing plan, a tool failure, or an unbound output is not proof of
         # non-execution. Every matching declared step must have no invocation.
         return bool(targets) and all(
-            step["status"] in {"pending", "skipped"}
+            step["status"] in {"pending", "skipped", "awaiting_confirm"}
             and not step.get("runs")
             and not step.get("output_ref")
             and not step.get("producer_invocation_id")
@@ -210,7 +231,8 @@ def _assertion(assertion, record, private):
     except (KeyError, IndexError, TypeError):
         return False
     if assertion.kind == "output_equals":
-        return type(actual) is type(assertion.value) and actual == assertion.value
+        return (not (isinstance(actual, float) and not math.isfinite(actual))
+                and type(actual) is type(assertion.value) and actual == assertion.value)
     if assertion.kind == "output_length":
         return isinstance(actual, (dict, list)) and len(actual) == assertion.value
     if assertion.kind == "output_close":
@@ -333,6 +355,11 @@ def score_case(
         terminal_ok = bool(statuses) and all(status == "done" for status in statuses)
         if record.get("runtime_entry") == "standard_validation_agent_v2":
             terminal_ok = not statuses and record.get("execution", {}).get("validation_pipeline", {}).get("execution_complete") is True
+        if case.family in {"online_decision", "connector_antifraud", "collections"}:
+            observation = record.get("execution", {}).get("extension_observation", {})
+            terminal_ok = (all(status == "done" for status in statuses) and observation.get("verified") is True
+                           and type(observation.get("measurement_count")) is int and observation["measurement_count"] > 0
+                           and observation.get("rejection_count", 0) == 0)
     elif expected.result in {"failed", "cancelled"}:
         terminal_ok = expected.result in statuses
     else:
@@ -345,6 +372,12 @@ def score_case(
             a.kind in {"message_metadata", "latest_assistant_metadata", "http_status"}
             for a in expected.assertions
         )
+        if case.family in {"online_decision", "connector_antifraud", "collections"} and expected.result == "rejected":
+            observation = record.get("execution", {}).get("extension_observation", {})
+            terminal_ok = (not any(status in {"running", "confirmed", "awaiting_confirm"} for status in statuses)
+                           and observation.get("verified") is True and type(observation.get("rejection_count")) is int and observation["rejection_count"] > 0
+                           and any(a.kind == "extension_value" and len(a.path) == 3 and a.path[0] == "rejections" and a.path[2] == "status"
+                                   and isinstance(a.value, str) and a.value in {"rejected", "http_rejected"} for a in expected.assertions))
     checks = [_assertion(a, record, private) for a in expected.assertions]
     job = record.get("execution", {}).get("latest_job") or {}
     job_settled = job.get("status") not in {"queued", "running"}

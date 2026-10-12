@@ -3,7 +3,9 @@ import json
 
 import pytest
 
-from marvis.llm_client import LLMClientError, LLMClientErrorKind, OpenAICompatibleLLMClient
+from marvis.llm_client import LLMClientError, LLMClientErrorKind, OpenAICompatibleLLMClient, estimate_tokens
+from marvis.llm_outbound import outbound_prompt, safe_schema
+from marvis.llm_prompts import PLAN_SYS
 
 
 SCHEMA = {
@@ -16,6 +18,9 @@ SCHEMA = {
         "additionalProperties": False,
     },
 }
+APPROVED_SCHEMA = safe_schema(SCHEMA)
+USER_PROMPT = outbound_prompt({})
+SYSTEM_PROMPT = PLAN_SYS.text
 
 
 class Reply:
@@ -39,15 +44,15 @@ def test_json_object_provider_receives_exact_schema_in_system_message(monkeypatc
     monkeypatch.setattr("marvis.llm_client.urlopen", lambda request, timeout: (sent.append(json.loads(request.data)) or Reply()))
     records = []
     result = OpenAICompatibleLLMClient(profile()).complete(
-        system_prompt="Classify only; never execute.", user_prompt="Continue?",
+        system_prompt=SYSTEM_PROMPT, user_prompt=USER_PROMPT,
         json_schema=SCHEMA, response_format=format_arg, stream=False, on_call_recorded=records.append,
     )
     body = sent[0]
     assert body["response_format"] == {"type": "json_object"}
-    assert body["messages"][0]["content"].startswith("Classify only; never execute.\n\n")
+    assert body["messages"][0]["content"].startswith(SYSTEM_PROMPT + "\n\n")
     embedded = body["messages"][0]["content"].split("\n")[-1]
-    assert json.loads(embedded) == SCHEMA
-    assert body["messages"][1] == {"role": "user", "content": "Continue?"}
+    assert json.loads(embedded) == APPROVED_SCHEMA
+    assert body["messages"][1] == {"role": "user", "content": str(USER_PROMPT)}
     assert records[0]["prompt_chars"] == sum(len(m["content"]) for m in body["messages"])
     assert json.loads(result)["intent"] == "none"
 
@@ -56,10 +61,10 @@ def test_native_schema_remains_provider_field_without_duplicate_system_prompt(mo
     sent = []
     monkeypatch.setattr("marvis.llm_client.urlopen", lambda request, timeout: (sent.append(json.loads(request.data)) or Reply()))
     OpenAICompatibleLLMClient(profile(structured_output="json_schema")).complete(
-        system_prompt="s", user_prompt="u", json_schema=SCHEMA, stream=False,
+        system_prompt=SYSTEM_PROMPT, user_prompt=USER_PROMPT, json_schema=SCHEMA, stream=False,
     )
-    assert sent[0]["messages"] == [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
-    assert sent[0]["response_format"] == {"type": "json_schema", "json_schema": SCHEMA}
+    assert sent[0]["messages"] == [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": str(USER_PROMPT)}]
+    assert sent[0]["response_format"] == {"type": "json_schema", "json_schema": APPROVED_SCHEMA}
 
 
 @pytest.mark.parametrize("format_arg", [None, {"type": "json_object"}])
@@ -74,10 +79,10 @@ def test_plain_text_profile_keeps_explicit_transport_choice(monkeypatch, format_
 
     monkeypatch.setattr("marvis.llm_client.urlopen", provider)
     OpenAICompatibleLLMClient(profile(structured_output="none")).complete(
-        system_prompt="s", user_prompt="u", json_schema=SCHEMA,
+        system_prompt=SYSTEM_PROMPT, user_prompt=USER_PROMPT, json_schema=SCHEMA,
         response_format=format_arg, stream=False,
     )
-    assert json.loads(sent[0]["messages"][0]["content"].split("\n")[-1]) == SCHEMA
+    assert json.loads(sent[0]["messages"][0]["content"].split("\n")[-1]) == APPROVED_SCHEMA
     if format_arg is not None:
         assert sent[0]["response_format"] == format_arg
 
@@ -85,12 +90,19 @@ def test_plain_text_profile_keeps_explicit_transport_choice(monkeypatch, format_
 @pytest.mark.parametrize("structured_output", ["json_schema", "json_object"])
 def test_schema_counts_towards_context_before_any_provider_request(monkeypatch, structured_output):
     calls = []
-    monkeypatch.setattr("marvis.llm_client.urlopen", lambda *a, **k: calls.append(1))
-    schema = {**SCHEMA, "schema": {**SCHEMA["schema"], "description": "sensitive-value" * 200}}
+    monkeypatch.setattr("marvis.llm_client.urlopen", lambda *a, **k: (calls.append(1) or Reply()))
+    window = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(USER_PROMPT) + 256
+    client = OpenAICompatibleLLMClient(profile(structured_output=structured_output, context_window=window))
+    client.complete(system_prompt=SYSTEM_PROMPT, user_prompt=USER_PROMPT, json_schema=SCHEMA,
+                    max_tokens=10, stream=False)
+    assert calls == [1], "the same prompt and small approved schema fit the window"
+    calls.clear()
+    schema = {**SCHEMA, "schema": {"type": "object", "properties": {
+        f"field_{index:03d}": {"type": "number"} for index in range(200)
+    }, "additionalProperties": False, "description": "sensitive-value" * 200}}
     with pytest.raises(LLMClientError) as error:
-        OpenAICompatibleLLMClient(profile(structured_output=structured_output, context_window=100)).complete(
-            system_prompt="s", user_prompt="u", json_schema=schema, max_tokens=10, stream=False,
-        )
+        client.complete(system_prompt=SYSTEM_PROMPT, user_prompt=USER_PROMPT,
+                        json_schema=schema, max_tokens=10, stream=False)
     assert error.value.error_kind is LLMClientErrorKind.CONTEXT_LENGTH_EXCEEDED
     assert "sensitive-value" not in str(error.value)
     assert calls == []
@@ -102,6 +114,7 @@ def test_invalid_schema_is_rejected_without_echo_or_request(monkeypatch, bad_val
     monkeypatch.setattr("marvis.llm_client.urlopen", lambda *a, **k: calls.append(1))
     schema = {**SCHEMA, "sensitive-contract-key": bad_value}
     with pytest.raises(LLMClientError) as error:
-        OpenAICompatibleLLMClient(profile()).complete(system_prompt="s", user_prompt="u", json_schema=schema, stream=False)
+        OpenAICompatibleLLMClient(profile()).complete(system_prompt=SYSTEM_PROMPT, user_prompt=USER_PROMPT, json_schema=schema, stream=False)
+    assert error.value.error_kind is LLMClientErrorKind.OUTBOUND_POLICY
     assert "sensitive-contract-key" not in str(error.value)
     assert calls == []

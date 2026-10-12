@@ -15,6 +15,7 @@ from typing import Callable
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.modeling_holdout.guards import exposure_connection
 from marvis.data.dataset_identity import dataset_identity_equal
 from marvis.data.backend import DataBackend
 from marvis.data.authenticated_snapshot import (
@@ -113,6 +114,7 @@ class DatasetRegistry:
             self._require_atomic_upload_audit_support()
         source_path = Path(source_path)
         source_identity = _source_file_identity(source_path)
+        self._holdout_guard(source_path, exposure=True, content_hash=source_identity['sha256'])
         dataset_dir = self._dataset_dir(task_id)
         dataset_dir.mkdir(parents=True, exist_ok=True)
         uow = ArtifactUnitOfWork()
@@ -129,6 +131,8 @@ class DatasetRegistry:
             if self._pending_ingest_notice is not None:
                 pending_notice = dict(self._pending_ingest_notice)
             content_hash = sha256_file(artifact.path)
+            self._holdout_guard(artifact.path, exposure=True, content_hash=content_hash)
+            self._validate_blind_frame(artifact.path, task_id)
             find_by_hash = getattr(self._repo, "find_dataset_by_content_hash", None)
             existing = find_by_hash(content_hash) if callable(find_by_hash) else None
             if existing is not None:
@@ -332,6 +336,7 @@ class DatasetRegistry:
         self._repo.create_dataset(dataset)
         return dataset
 
+    @exposure_connection
     def register_existing_on_connection(
         self,
         conn,
@@ -350,7 +355,7 @@ class DatasetRegistry:
             raise DataBackendError("original workbook registration requires sheet and artifact transaction")
         if upload_source is None and (sheet is not None or artifact_uow is not None):
             raise DataBackendError("workbook provenance requires original upload")
-        parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
+        parquet_path = self._ensure_under_root(Path(parquet_path), task_id, conn=conn)
         dataset = self._dataset_from_existing(
             parquet_path,
             task_id=task_id,
@@ -358,6 +363,7 @@ class DatasetRegistry:
             anchor_target=anchor_target,
             target_col_override=target_col_override,
             seed=seed,
+            holdout_connection=conn,
         )
         if upload_source is not None:
             dataset = replace(dataset, sheet=sheet)
@@ -374,6 +380,7 @@ class DatasetRegistry:
         create_on_connection(conn, dataset)
         return dataset
 
+    @exposure_connection
     def register_existing_with_audit_on_connection(
         self,
         conn,
@@ -385,13 +392,14 @@ class DatasetRegistry:
         anchor_target: str | None = None,
         seed: int = 0,
     ) -> Dataset:
-        parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
+        parquet_path = self._ensure_under_root(Path(parquet_path), task_id, conn=conn)
         dataset = self._dataset_from_existing(
             parquet_path,
             task_id=task_id,
             role=role,
             anchor_target=anchor_target,
             seed=seed,
+            holdout_connection=conn,
         )
         audit = audit_factory(dataset)
         create_with_audit_on_connection = getattr(
@@ -463,6 +471,7 @@ class DatasetRegistry:
             raise
         return dataset
 
+    @exposure_connection
     def register_join_result_with_audit_on_connection(
         self,
         conn,
@@ -476,7 +485,7 @@ class DatasetRegistry:
         target_col_override: str | None | object = _INFER_TARGET,
         seed: int = 0,
     ) -> Dataset:
-        parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
+        parquet_path = self._ensure_under_root(Path(parquet_path), task_id, conn=conn)
         dataset = self._dataset_from_existing(
             parquet_path,
             task_id=task_id,
@@ -484,6 +493,7 @@ class DatasetRegistry:
             anchor_target=anchor_target,
             target_col_override=target_col_override,
             seed=seed,
+            holdout_connection=conn,
         )
         audit = audit_factory(dataset)
         record_on_connection = getattr(
@@ -508,6 +518,7 @@ class DatasetRegistry:
         dataset = self._repo.get_dataset(dataset_id)
         if dataset is None:
             raise KeyError(dataset_id)
+        self._holdout_guard(self._root / dataset.source_path, content_hash=dataset.content_hash)
         return dataset
 
     def list_for_task(self, task_id: str) -> list[Dataset]:
@@ -1043,7 +1054,29 @@ class DatasetRegistry:
             shutil.move(parquet_path, out_path)
         return report.sheet
 
-    def _ensure_under_root(self, parquet_path: Path, task_id: str) -> Path:
+    def _holdout_guard(self, path, *, conn=None, exposure=False, content_hash=None):
+        from marvis.modeling_holdout.guards import assert_source_public, record_exposure
+        function = record_exposure if exposure else assert_source_public
+        function(getattr(self._repo, 'db_path', None), self._root.parent, path,
+                 conn=conn, content_hash=content_hash)
+
+    def _validate_blind_frame(self, path, task_id, conn=None):
+        from marvis.modeling_holdout.guards import assert_development_frame, cohort_for_task, cohort_tx
+        db_path = getattr(self._repo, 'db_path', None)
+        cohort = cohort_tx(conn, task_id) if conn is not None else cohort_for_task(db_path, task_id)
+        if cohort is None:
+            return
+        if conn is None:
+            from marvis.db_schema import connect
+            with connect(db_path) as connection:
+                return self._validate_blind_frame(path, task_id, connection)
+        if conn.execute('SELECT 1 FROM blind_oot_freezes WHERE cohort_id=?', (cohort['id'],)).fetchone():
+            from marvis.modeling_holdout.contracts import HoldoutError
+            raise HoldoutError('blind_development_is_frozen')
+        assert_development_frame(conn, task_id, self._backend.read_frame(path))
+
+    def _ensure_under_root(self, parquet_path: Path, task_id: str, *, conn=None) -> Path:
+        self._holdout_guard(parquet_path, conn=conn, exposure=True)
         if parquet_path.suffix.lower() != ".parquet":
             raise DataBackendError("register_existing requires a parquet file")
         try:
@@ -1074,7 +1107,10 @@ class DatasetRegistry:
         anchor_target: str | None,
         target_col_override: str | None | object = _INFER_TARGET,
         seed: int,
+        holdout_connection=None,
     ) -> Dataset:
+        self._holdout_guard(parquet_path, conn=holdout_connection, exposure=True)
+        self._validate_blind_frame(parquet_path, task_id, holdout_connection)
         profiles = profile_dataset(self._backend, parquet_path, seed=seed)
         profile_names = {profile.name for profile in profiles}
         if target_col_override is not _INFER_TARGET:

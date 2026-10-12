@@ -176,12 +176,12 @@ def run_search_interactive_tree_split_candidates(
                 MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES
             ),
         )
+    from marvis.strategy_workbench.control import NativeSearchControl
+    control = NativeSearchControl(runtime, ctx, dict(inputs))
     built = _build_search(
-        runtime,
-        task_id=task_id,
-        request=request,
-        source=source,
+        runtime, task_id=task_id, request=request, source=source, control=control,
     )
+    control.publishing()
     artifact = _persist_search(
         runtime,
         task_id=task_id,
@@ -189,7 +189,7 @@ def run_search_interactive_tree_split_candidates(
         built=built,
     )
     result = built.result
-    return {
+    return control.completed({
         "schema_version": INTERACTIVE_TREE_SPLIT_SEARCH_TOOL_SCHEMA_VERSION,
         "search_id": result["search_id"],
         "search_hash": result["search_hash"],
@@ -206,7 +206,7 @@ def run_search_interactive_tree_split_candidates(
         "artifacts": [artifact],
         "winner_selected": False,
         "tree_modified": False,
-    }
+    })
 
 
 def canonical_interactive_tree_split_search_path(
@@ -337,6 +337,7 @@ def _build_search(
     task_id: str,
     request: Mapping[str, Any],
     source: _ResolvedRevisionSource,
+    control=None,
 ) -> _BuiltSearch:
     context = _load_replay_context(
         runtime,
@@ -393,6 +394,7 @@ def _build_search(
         min_leaf_count=training["cart"]["min_leaf_count"],
         max_thresholds_per_feature=request["max_thresholds_per_feature"],
         max_row_evaluations=request["max_row_evaluations"],
+        control=control,
     )
     return _BuiltSearch(
         source=source,

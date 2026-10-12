@@ -16,6 +16,7 @@ from marvis.data.contracts import (
     KeyPair,
 )
 from marvis.db_schema import connect
+from marvis.institution.policy import guard_repository as _guard_repository
 from marvis.repositories.audit import _write_audit_row
 from marvis.safe_paths import canonical_relative_posix_path
 from marvis.state_machine import ConflictError
@@ -25,6 +26,7 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+@_guard_repository
 class DatasetRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -60,6 +62,8 @@ class DatasetRepository:
 
     def get_dataset_on_connection(self, conn: sqlite3.Connection, dataset_id: str) -> Dataset | None:
         """Read exact dataset metadata inside a caller-owned unit of work."""
+        from marvis.institution.policy import authorize_on_connection
+        authorize_on_connection(conn, 'dataset', dataset_id)
         row = conn.execute(
             """
             SELECT id, task_id, role, source_path, format, sheet, row_count,
@@ -72,6 +76,8 @@ class DatasetRepository:
 
     def list_datasets(self, task_id: str) -> list[Dataset]:
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn, 'task', task_id)
             rows = conn.execute(
                 """
                 SELECT id, task_id, role, source_path, format, sheet, row_count,
@@ -96,18 +102,27 @@ class DatasetRepository:
         conn: sqlite3.Connection,
         content_hash: str,
     ) -> Dataset | None:
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT id, task_id, role, source_path, format, sheet, row_count,
                    columns_json, has_target, target_col, created_at, content_hash
               FROM datasets
              WHERE content_hash = ?
              ORDER BY created_at, id
-             LIMIT 1
             """,
             (content_hash,),
-        ).fetchone()
-        return None if row is None else _dataset_from_row(row)
+        ).fetchall()
+        from marvis.institution.policy import authorize_on_connection
+        from marvis.institution.store import IdentityError
+        for row in rows:
+            try:
+                authorize_on_connection(conn, 'dataset', row['id'])
+            except IdentityError as exc:
+                if exc.code != 'identity_resource_forbidden':
+                    raise
+                continue
+            return _dataset_from_row(row)
+        return None
 
     def pin_dataset_source_path(
         self,
@@ -279,6 +294,9 @@ class DatasetRepository:
 
     def create_join_plan(self, plan: JoinPlan) -> None:
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn,'task',plan.task_id,'write')
+            authorize_on_connection(conn,'dataset',plan.anchor_dataset_id)
             conn.execute(
                 """
                 INSERT INTO joins(
@@ -399,6 +417,8 @@ def _dataset_insert_values(dataset: Dataset) -> tuple:
 
 
 def _insert_dataset_row(conn: sqlite3.Connection, dataset: Dataset) -> None:
+    from marvis.institution.policy import authorize_on_connection
+    authorize_on_connection(conn,'task',dataset.task_id,'write')
     conn.execute(
         """
         INSERT INTO datasets(

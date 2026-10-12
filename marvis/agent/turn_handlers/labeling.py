@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from marvis.llm_outbound_gate_context import authorization_gate
 from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN
 from marvis.agent.plan_driver import DriverError
 from marvis.agent.plan_driver import is_confirm
@@ -149,11 +150,8 @@ def _maybe_handle_labeling_preplan_confirmation_turn(
             semantic_authorization_lane._semantic_exact_gate_authorization(
                 runtime,
                 text,
-                gate_context=(
-                    "标签构造计划创建授权：用户已查看当前完整标签口径、成熟度处理和"
-                    "提案内容；confirm 只表示用户明确、即时、无条件地授权按该完整"
-                    "提案创建计划，不允许从普通文本修改任何字段。"
-                ),
+                gate_context=authorization_gate(
+                    "labeling_proposal", bindings={"proposal_hash": proposal_hash}),
                 proposed_params={"proposal_hash": proposal_hash},
             )
         )

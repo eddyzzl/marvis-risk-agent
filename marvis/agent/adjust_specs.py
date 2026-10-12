@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from numbers import Real
 
 from marvis.modeling_limits import normalize_n_trials
 
@@ -78,6 +79,7 @@ _SPLIT_CONFIG_FIELDS = frozenset(
         "random_oot",
         "group_cols",
         "rules",
+        "method",
     }
 )
 
@@ -111,15 +113,24 @@ def normalize_adjust_params(params: dict | None) -> dict:
         # the requested date column into this top-level slot.  The canonical
         # split_config alone is enough to override an uploaded partition and
         # generate the governed ``split`` column.
-        normalized.pop("split_col", None)
+        # Partition-column changes are not an installed adjustment. Keep the
+        # explicit request so validation can refuse it instead of claiming success.
     return normalized
 
 
 def _normalize_split_config(value: dict) -> dict:
     config = dict(value)
-    _normalize_split_ratio_alias(config, "test_ratio", "test_size")
+    if _split_alias_error(config):
+        return config
+    if "train_ratio" in config:
+        # Explicit three-way aliases are fractions of the WHOLE population.
+        # The native test_size is conditional on the non-OOT remainder.
+        remainder = 1 - config["oot_ratio"]
+        config["test_size"] = config.pop("test_ratio") / remainder
+        config.pop("train_ratio")
+    else:
+        _normalize_split_ratio_alias(config, "test_ratio", "test_size")
     _normalize_split_ratio_alias(config, "oot_ratio", "oot_size")
-    _normalize_derived_train_ratio(config)
     raw_method = config.get("method")
     method = (
         str(raw_method).strip().lower().replace("-", "_").replace(" ", "_")
@@ -128,8 +139,8 @@ def _normalize_split_config(value: dict) -> dict:
     )
     alias_column = next(
         (
-            str(config.get(key)).strip()
-            for key in ("date_col", "time_col", "column")
+            config[key]
+            for key in ("oot_by_time", "date_col", "time_col", "column")
             if isinstance(config.get(key), str)
             and str(config.get(key)).strip()
         ),
@@ -138,7 +149,6 @@ def _normalize_split_config(value: dict) -> dict:
 
     if method in _TIME_OOT_METHOD_ALIASES and alias_column:
         config["oot_by_time"] = alias_column
-        config.pop("random_oot", None)
         config.pop("method", None)
     elif method in _RANDOM_OOT_METHOD_ALIASES:
         config["random_oot"] = True
@@ -152,13 +162,55 @@ def _normalize_split_config(value: dict) -> dict:
         config.pop("method", None)
     elif not method and alias_column:
         config["oot_by_time"] = alias_column
-        config.pop("random_oot", None)
 
-    if "oot_by_time" in config and config.get("oot_by_time") is not None:
-        config["oot_by_time"] = str(config["oot_by_time"]).strip()
     for key in ("date_col", "time_col", "column"):
-        config.pop(key, None)
+        # Invalid aliases must remain visible to validation. Removing a bool
+        # field binding can turn an invalid time request into an unrelated split.
+        if isinstance(config.get(key), str) and config[key] == alias_column and alias_column:
+            config.pop(key, None)
     return config
+
+
+def _split_alias_error(config):
+    if "method" in config and not isinstance(config["method"], str):
+        return "切分 method 必须是已支持的字符串方式，未重算。"
+    if config.get("method") == "existing" and len(config) != 1:
+        return "existing 仅用于保留现有切分，不能混入新划分配置，未重算。"
+    time_fields = [config[key] for key in ("oot_by_time", "date_col", "time_col", "column") if key in config and config[key] is not None]
+    if any(not isinstance(value, str) or not value.strip() or "\x00" in value or len(value) > 128 for value in time_fields):
+        return "split_config.oot_by_time 必须是有效列名字符串，未重算。"
+    if len(set(time_fields)) > 1:
+        return "切分时间列绑定相互冲突，未重算。"
+    if "random_oot" in config and type(config["random_oot"]) is not bool:
+        return "split_config.random_oot 必须是布尔值，未重算。"
+    method = config.get("method")
+    method = method.strip().lower().replace("-", "_").replace(" ", "_") if isinstance(method, str) else method
+    if method in _RANDOM_OOT_METHOD_ALIASES and (time_fields or config.get("random_oot") is False):
+        return "随机 OOT 与时间列或禁用随机 OOT 的要求冲突，未重算。"
+    if method in _TIME_OOT_METHOD_ALIASES and config.get("random_oot") is True:
+        return "时间 OOT 与随机 OOT 不能同时启用，未重算。"
+    if method in _NO_OOT_METHOD_ALIASES and (time_fields or config.get("random_oot") is True):
+        return "无 OOT 与已声明的 OOT 控制冲突，未重算。"
+    if time_fields and config.get("random_oot") is True:
+        return "时间 OOT 与随机 OOT 不能同时启用，未重算。"
+    for key in ("test_size", "oot_size", "test_ratio", "oot_ratio", "train_ratio"):
+        if key in config and (isinstance(config[key], bool) or not isinstance(config[key], Real) or not math.isfinite(float(config[key])) or not 0 <= config[key] <= 1):
+            return f"split_config.{key} 必须是 0 到 1 的有限数字，未重算。"
+    if "train_ratio" in config:
+        if not all(key in config for key in ("test_ratio", "oot_ratio")):
+            return "split_config.train_ratio 只能用于同时校验 test_size 和 oot_size；请声明完整 train_ratio/test_ratio/oot_ratio。"
+        if not math.isclose(config["train_ratio"] + config["test_ratio"] + config["oot_ratio"], 1., rel_tol=1e-6, abs_tol=1e-6):
+            return "split_config.train_ratio、test_size、oot_size 之和必须约等于 1，未重算。"
+        remainder = 1 - config["oot_ratio"]
+        if remainder <= 0 or (config["oot_ratio"] > 0 and not (time_fields or config.get("random_oot") is True or method in _RANDOM_OOT_METHOD_ALIASES)):
+            return "完整三分比例需要明确可执行的 OOT 方式和非空开发集，未重算。"
+        if "test_size" in config and not math.isclose(config["test_size"], config["test_ratio"] / remainder, rel_tol=1e-9, abs_tol=1e-9):
+            return "split_config.test_ratio 与 test_size 冲突，未重算。"
+    elif "test_ratio" in config and "test_size" in config and not math.isclose(config["test_ratio"], config["test_size"], rel_tol=1e-9, abs_tol=1e-9):
+        return "split_config.test_ratio 与 test_size 冲突，未重算。"
+    if "oot_ratio" in config and "oot_size" in config and not math.isclose(config["oot_ratio"], config["oot_size"], rel_tol=1e-9, abs_tol=1e-9):
+        return "split_config.oot_ratio 与 oot_size 冲突，未重算。"
+    return None
 
 
 def _normalize_split_ratio_alias(
@@ -261,6 +313,8 @@ def has_special_value_adjust(params: dict | None) -> bool:
 
 def adjust_param_error(params: dict | None) -> str | None:
     for key, value in (params or {}).items():
+        if key == "split_col":
+            return "当前节点不支持调整 split_col；请在任务配置中绑定正确分区列后重新准备，未重算。"
         if key == "target_type":
             if str(value or "").strip() not in {"binary", "continuous", "multiclass"}:
                 return "target_type 必须是 binary、continuous 或 multiclass，未重算。"
@@ -367,8 +421,12 @@ def adjust_param_error(params: dict | None) -> str | None:
 
 
 def _split_config_error(value) -> str | None:
+    from marvis.modeling_split import SplitConfigurationError, validate_split_configuration
     if not isinstance(value, dict):
         return "split_config 必须是对象，未重算。"
+    alias_error = _split_alias_error(value)
+    if alias_error:
+        return alias_error
     for alias, canonical in (
         ("test_ratio", "test_size"),
         ("oot_ratio", "oot_size"),
@@ -411,6 +469,10 @@ def _split_config_error(value) -> str | None:
         cols = value["group_cols"]
         if not isinstance(cols, list) or not all(isinstance(item, str) for item in cols):
             return "split_config.group_cols 必须是列名字符串列表，未重算。"
+    try:
+        validate_split_configuration(value)
+    except SplitConfigurationError as exc:
+        return str(exc)
     return None
 
 

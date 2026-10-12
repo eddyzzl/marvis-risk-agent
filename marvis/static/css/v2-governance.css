@@ -1454,3 +1454,43 @@
     grid-template-columns: 1fr;
   }
 }
+/* Signed materials stay in the settings surface, with explicit permissions. */
+.governed-capabilities-panel { display: grid; gap: 16px; min-width: 0; }
+.governed-capabilities-panel > section { padding: 16px; border: 1px solid var(--border-color, var(--border)); border-radius: var(--radius-card, 10px); background: var(--surface); }
+.governed-capabilities-panel :is(h4, p) { margin: 0 0 10px; }
+.governed-capabilities-panel .capability-controls { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+.governed-capabilities-panel .capability-field { display: grid; gap: 6px; margin: 10px 0; min-width: 0; font-size: 12px; color: var(--text-secondary); }
+.governed-capabilities-panel input:not([type="checkbox"]), .governed-capabilities-panel select { min-width: 0; width: 100%; min-height: 36px; padding: 7px 9px; border: 1px solid var(--border-color, var(--border)); border-radius: var(--radius-control, 6px); background: var(--surface); color: var(--text); font: inherit; }
+.governed-capabilities-panel .capability-controls .capability-field { flex: 1 1 260px; margin: 0; }
+.governed-capabilities-panel .capability-permission { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.governed-capabilities-panel .capability-field:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.governance-settings-dialog .governed-capabilities-panel input[type="checkbox"] { appearance: auto; flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; max-height: 16px; margin: 0; border-radius: 3px; }
+.governance-settings-dialog .governed-capabilities-panel input[type="checkbox"]::before { content: none; }
+.governed-capabilities-panel :is(.capability-hash, pre) { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 11px; }
+.governed-capabilities-panel .capability-status { font-size: 13px; }
+.governed-capabilities-panel .capability-status[data-tone="error"] { color: var(--danger); }
+.governed-capabilities-panel table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
+.governed-capabilities-panel :is(td, th) { padding: 8px; border-bottom: 1px solid var(--border-color, var(--border)); }
+.worker-isolation-panel { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: start; gap: 12px; padding: 18px; margin-top: 16px; }
+.worker-isolation-panel label { display: grid; gap: 8px; }
+.worker-isolation-panel select { width: 100%; }
+.worker-isolation-panel p { grid-column: 1 / -1; margin: 0; color: var(--text-secondary); line-height: 1.6; }
+.risk-context-body { padding: 16px; display: grid; gap: 12px; }
+.risk-context-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid var(--border-color, #dedee3); }
+.risk-context-row span { flex: 1 1 240px; overflow-wrap: anywhere; }
+.contract-form { display: grid; gap: 12px; margin-top: 12px; }
+.contract-field { min-width: 0; }
+.contract-field > label { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-weight: 500; }
+.contract-field small { font-weight: 400; color: var(--text-secondary); }
+.contract-input { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: 10px; }
+.contract-input > .contract-field { padding: 8px 12px; border-left: 2px solid var(--border-color, #dedee3); }
+.contract-input input:not([type="checkbox"]), .contract-input select { width: 100%; min-width: 0; box-sizing: border-box; }
+.contract-form input[type="checkbox"] { appearance: auto; flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; max-height: 16px; margin: 0; }
+.contract-form input[type="checkbox"]::before { content: none; }
+.contract-array-row, .contract-map-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: end; padding: 8px 0; }
+.contract-map-row { grid-template-columns: minmax(100px,1fr) minmax(0,2fr) auto; }
+.contract-receipt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow: auto; padding: 12px; background: var(--bg-secondary, #f5f5f7); border-radius: 10px; font-size: 12px; }
+.contract-object { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.contract-object > .contract-complex { grid-column: 1 / -1; }
+.risk-context-body > p { margin: 0; }
+.risk-context-body { align-content: start; }

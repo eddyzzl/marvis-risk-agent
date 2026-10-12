@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from marvis.runtime_observations import measured
+from marvis.modeling_holdout.contracts import HoldoutError
 
 from dataclasses import dataclass
 import hashlib
@@ -10,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import selectors
 import subprocess
 import sys
 import threading
@@ -38,6 +40,7 @@ from marvis.plugins.manifest import (
 from marvis.plugins.registry import ToolRegistry
 from marvis.plugins.invocation import invocation_contract, manifest_receipt_hash
 from marvis.plugins.schema_validation import validate_against_schema
+from marvis.plugins.native_isolation import NativeIsolationError, configured_mode, OS_SANDBOX, prepare_launch
 from marvis.plugins.errors import SchemaValidationError
 from marvis.redaction import redact_text
 from marvis.safe_paths import assert_within
@@ -287,6 +290,8 @@ class ToolRunner:
             result.invocation_id = normalized_invocation_id
             if result.ok and isinstance(result.output, dict):
                 result.raw_output_hash = _result_payload_hash(result.output)
+        from marvis.strategy_workbench.control import finish_native_invocation
+        finish_native_invocation(self._repo.db_path, normalized_invocation_id, result)
         return result
 
     def _invoke_without_receipt(
@@ -308,6 +313,11 @@ class ToolRunner:
         logger.debug("tool invoke starting target_ref=%s task_id=%s", target_ref, task_id)
         try:
             manifest, tool = self._tools.resolve_with_manifest(ref)
+            from marvis.modeling_holdout.guards import require_builtin_for_task
+            require_builtin_for_task(self._repo.db_path, task_id, manifest, ref, inputs)
+            from marvis.institution.policy import authorize_tool
+            authorize_tool(self._repo.db_path, task_id, manifest, ref, inputs, invocation_id,
+                           configured_mode(self._workspace),installed=invocation_contract(manifest,tool,ref))
             if expected_invocation is not None and invocation_contract(manifest, tool, ref) != expected_invocation:
                 result = _failed_result(started, "invocation_changed", "tool invocation declaration changed before execution")
                 return self._finalize_audited_result(started, target_ref, inputs, result)
@@ -316,9 +326,19 @@ class ToolRunner:
         except SchemaValidationError as exc:
             result = _failed_result(started, "schema", str(exc))
             return self._finalize_audited_result(started, target_ref, inputs, result)
-        except PermissionError as exc:
+        except (PermissionError, HoldoutError) as exc:
             result = _failed_result(started, "permission", str(exc))
             return self._finalize_audited_result(started, target_ref, inputs, result)
+        try:
+            worker_mode = configured_mode(self._workspace)
+            isolation_needs = sorted(set(manifest.permissions) | set(tool.side_effects))
+            if worker_mode == OS_SANDBOX and not manifest.builtin and (
+                isolation_needs or getattr(execution_context, "effect_authorization_required", False)
+            ):
+                raise NativeIsolationError("worker_isolation_needs_not_supported", capability={"mode":worker_mode,"refused_needs":isolation_needs,"enforced":False})
+        except NativeIsolationError as exc:
+            return self._finalize_audited_result(started, target_ref, inputs,
+                _failed_result(started, "isolation", exc.code, error_detail=exc.capability))
         execution_profile = str(getattr(tool, "execution_profile", "")).strip()
         if execution_profile == EXECUTION_PROFILE_DRAFT_REPROMOTION_REQUIRED:
             result = _failed_result(
@@ -482,6 +502,19 @@ class ToolRunner:
                 )
 
         progress_path = None
+        from marvis.plugins.capability_versions import CapabilityStore
+        governed_store = CapabilityStore(self._repo.db_path)
+        governed_version = None
+        try:
+            if not manifest.builtin and governed_store.managed('plugin',manifest.name):
+                governed_version = governed_store.resolve('plugin',manifest.name,manifest.version)
+        except PermissionError as exc:
+            if effect_execution is not None:
+                self._release_prepared_effect(
+                    effect_execution, reason="capability admission rejected before dispatch"
+                )
+            return self._finalize_audited_result(started,target_ref,inputs,
+                _failed_result(started,'permission',str(exc)))
         job = {
             "protocol_version": PROTOCOL_VERSION,
             "module": manifest.module,
@@ -498,9 +531,16 @@ class ToolRunner:
             "side_effects": list(tool.side_effects),
             "builtin": bool(manifest.builtin),
             "execution_profile": execution_profile,
+            "worker_isolation_mode": worker_mode,
+            "isolation_needs": isolation_needs,
         }
+        if governed_version is not None:
+            # Import this frozen package root, never the mutable legacy head.
+            job['plugin_paths'] = [str(Path(governed_version['material_path']).parent)]
+            job['governed_version'] = governed_version['content_hash']
         if bool(manifest.builtin) and invocation_id is not None:
             job["invocation_id"] = invocation_id
+            job["institution_invocation"] = invocation_contract(manifest,tool,ref)
         if execution_profile == EXECUTION_PROFILE_DRAFT_RESTRICTED_V1:
             try:
                 job["module_path"] = str(
@@ -563,6 +603,11 @@ class ToolRunner:
                 progress_callback=progress_callback,
                 cancellation_check=cancellation_check,
             )
+        except NativeIsolationError as exc:
+            if effect_execution is not None:
+                self._release_prepared_effect(effect_execution, reason="OS admission rejected before dispatch")
+            return self._finalize_audited_result(started, target_ref, inputs,
+                _failed_result(started, "isolation", exc.code, error_detail=exc.capability), seed=effective_seed)
         except JobCancelled as exc:
             result = _failed_result(
                 started,
@@ -583,6 +628,7 @@ class ToolRunner:
                 started,
                 "timeout",
                 f"tool {target_ref} timed out after {tool.timeout_seconds}s",
+                error_detail={"worker_isolation":getattr(exc,"isolation_capability",{})} if getattr(exc,"isolation_capability",{}).get("mode")==OS_SANDBOX else None,
                 stdout_tail=_tail(exc.stdout),
                 stderr_tail=_tail(exc.stderr),
             )
@@ -630,6 +676,7 @@ class ToolRunner:
             _cleanup_progress_path(progress_path)
 
         protocol = _parse_worker_result(completed.stdout)
+        _attach_worker_isolation(protocol, completed)
         if protocol is None:
             result = _missing_worker_protocol_result(
                 started,
@@ -923,6 +970,25 @@ class ToolRunner:
         started = time.monotonic()
         target_ref = f"{mode}.{entrypoint}"
         audit_kind = f"{mode}.invoke"
+        try:
+            worker_mode = configured_mode(self._workspace)
+        except NativeIsolationError as exc:
+            return self._finalize_audited_result(started,target_ref,inputs,
+                _failed_result(started,"isolation",exc.code,error_detail=exc.capability),kind=audit_kind,mode=mode)
+        from marvis.db_schema import connect
+        from marvis.plugins.capability_versions import capability_mode, CapabilityStore
+        with connect(self._repo.db_path) as conn:
+            governed = capability_mode(conn) == 'governed'
+        retained_root = CapabilityStore(self._repo.db_path).root.resolve()
+        if governed or Path(module).resolve().is_relative_to(retained_root):
+            return self._finalize_audited_result(started,target_ref,inputs,
+                _failed_result(started,'permission','signed_capability_required'),kind=audit_kind,mode=mode)
+        from marvis.modeling_holdout.guards import reject_arbitrary_execution
+        try:
+            reject_arbitrary_execution(self._repo.db_path, task_id)
+        except HoldoutError as exc:
+            return self._finalize_audited_result(started, target_ref, inputs,
+                _failed_result(started, 'permission', exc.code), kind=audit_kind, mode=mode)
         registered_manifest = _registered_manifest_for_module(
             self._tools,
             Path(module),
@@ -989,6 +1055,7 @@ class ToolRunner:
             "plugin_paths": [str(path) for path in self._plugin_paths],
             "side_effects": [],
             "builtin": False,
+            "worker_isolation_mode": worker_mode,
             "mode": mode,
             "execution_profile": (
                 EXECUTION_PROFILE_DRAFT_RESTRICTED_V1
@@ -1003,11 +1070,15 @@ class ToolRunner:
                 timeout=int(timeout_seconds),
                 rss_limit_mb=self._rss_memory_limit_mb,
             )
+        except NativeIsolationError as exc:
+            return self._finalize_audited_result(started, target_ref, inputs,
+                _failed_result(started,"isolation",exc.code,error_detail=exc.capability), seed=seed,kind=audit_kind,mode=mode)
         except subprocess.TimeoutExpired as exc:
             result = _failed_result(
                 started,
                 "timeout",
                 f"tool {target_ref} timed out after {timeout_seconds}s",
+                error_detail={"worker_isolation":getattr(exc,"isolation_capability",{})} if getattr(exc,"isolation_capability",{}).get("mode")==OS_SANDBOX else None,
                 stdout_tail=_tail(exc.stdout),
                 stderr_tail=_tail(exc.stderr),
             )
@@ -1039,6 +1110,7 @@ class ToolRunner:
             )
 
         protocol = _parse_worker_result(completed.stdout)
+        _attach_worker_isolation(protocol, completed)
         if protocol is None:
             result = _missing_worker_protocol_result(
                 started,
@@ -1503,6 +1575,7 @@ def _missing_worker_protocol_result(
     """Classify signal termination before falling back to protocol failure."""
 
     sigxcpu = getattr(signal, "SIGXCPU", None)
+    isolation = getattr(completed, "isolation_capability", None)
     if sigxcpu is not None and completed.returncode == -int(sigxcpu):
         resource_limits = {
             "cpu_limit_seconds": int(cpu_limit_seconds),
@@ -1510,6 +1583,8 @@ def _missing_worker_protocol_result(
             "termination_signal": "SIGXCPU",
             "worker_returncode": int(completed.returncode),
         }
+        if isolation:
+            resource_limits["worker_isolation"] = isolation
         return _failed_result(
             started,
             "resource_limit",
@@ -1527,6 +1602,7 @@ def _missing_worker_protocol_result(
         started,
         "protocol",
         f"worker returned invalid protocol with exit code {completed.returncode}",
+        resource_limits={"worker_isolation":isolation} if isolation else None,
         stdout_tail=_tail(completed.stdout),
         stderr_tail=_tail(completed.stderr),
     )
@@ -1569,9 +1645,48 @@ def _run_worker(
     cancellation_check: Callable[[], None] | None = None,
     start_new_session: bool = True,
 ) -> subprocess.CompletedProcess:
+    with prepare_launch(python_executable, job, env=_worker_env(), rss_limit_mb=rss_limit_mb) as launch:
+        try:
+            completed = _run_worker_process(
+                python_executable, launch.job, timeout=timeout, rss_limit_mb=rss_limit_mb,
+                progress_path=progress_path, progress_callback=progress_callback,
+                cancellation_check=cancellation_check, start_new_session=start_new_session,
+                launch_args=launch.args, launch_env=launch.env, launch_cwd=launch.cwd,
+            )
+        except BaseException as exc:
+            exc.isolation_capability = launch.evidence
+            if isinstance(exc, WorkerResourceLimitExceeded):
+                exc.resource_usage["worker_isolation"] = launch.evidence
+            raise
+        completed.isolation_capability = launch.evidence
+        return completed
+
+
+def _attach_worker_isolation(protocol, completed):
+    evidence = getattr(completed, "isolation_capability", None)
+    if protocol is not None and evidence is not None:
+        limits = protocol.setdefault("resource_limits", {})
+        if isinstance(limits, dict):
+            limits["worker_isolation"] = evidence
+
+
+def _run_worker_process(
+    python_executable: str,
+    job: dict,
+    *,
+    timeout: int,
+    rss_limit_mb: int | None = None,
+    progress_path: Path | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
+    cancellation_check: Callable[[], None] | None = None,
+    start_new_session: bool = True,
+    launch_args: list[str] | None = None,
+    launch_env: dict | None = None,
+    launch_cwd: str | None = None,
+) -> subprocess.CompletedProcess:
     if cancellation_check is not None:
         cancellation_check()
-    args = [python_executable, "-m", "marvis.plugins.subprocess_worker"]
+    args = launch_args or [python_executable, "-m", "marvis.plugins.subprocess_worker"]
     process = subprocess.Popen(
         args,
         stdin=subprocess.PIPE,
@@ -1579,7 +1694,8 @@ def _run_worker(
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
-        env=_worker_env(),
+        env=launch_env if launch_env is not None else _worker_env(),
+        **({"cwd":launch_cwd} if launch_cwd is not None else {}),
         # Top-level tool workers own a process group so the host can terminate
         # their whole tree.  A nested, short-lived worker must remain in that
         # same group: if the aggregate worker is killed by its host, the nested
@@ -1628,10 +1744,13 @@ def _run_worker(
     try:
         try:
             with monitor:
-                stdout, stderr = process.communicate(
-                    json.dumps(job, ensure_ascii=False),
-                    timeout=int(timeout),
-                )
+                if job.get("worker_isolation_mode") == OS_SANDBOX and not job.get("builtin"):
+                    stdout, stderr = _communicate_worker_bounded(process, json.dumps(job, ensure_ascii=False), timeout=int(timeout))
+                else:
+                    stdout, stderr = process.communicate(
+                        json.dumps(job, ensure_ascii=False),
+                        timeout=int(timeout),
+                    )
             # Once a worker has emitted a complete protocol result, its governed
             # side effect and evidence boundary is complete.  A stop arriving in
             # the tiny gap between result emission and ``communicate`` returning
@@ -1703,6 +1822,55 @@ def _run_worker(
         if watcher is not None:
             watcher.close()
         _cleanup_progress_path(progress_path)
+
+
+def _communicate_worker_bounded(process, raw, *, timeout):
+    """Bound native stdout/stderr before bytes can accumulate in the host."""
+    pending = memoryview(raw.encode("utf-8"))
+    captured = {"stdout":bytearray(), "stderr":bytearray()}
+    limits = {"stdout":8 * 1024 * 1024, "stderr":1024 * 1024}
+    deadline = time.monotonic() + timeout
+    with selectors.DefaultSelector() as selector:
+        for stream, name, event in ((process.stdout,"stdout",selectors.EVENT_READ),
+                                    (process.stderr,"stderr",selectors.EVENT_READ),
+                                    (process.stdin,"stdin",selectors.EVENT_WRITE)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream.fileno(), event, name)
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, timeout,
+                        output=bytes(captured["stdout"]), stderr=bytes(captured["stderr"]))
+                for key, _events in selector.select(min(remaining, .05)):
+                    if key.data == "stdin":
+                        try:
+                            count = os.write(key.fd, pending[:65536])
+                            pending = pending[count:]
+                        except BrokenPipeError:
+                            pending = pending[len(pending):]
+                        if not pending:
+                            selector.unregister(key.fd)
+                            process.stdin.close()
+                            process.stdin = None
+                        continue
+                    data = os.read(key.fd, 65536)
+                    if not data:
+                        selector.unregister(key.fd)
+                        continue
+                    target = captured[key.data]
+                    if len(target) + len(data) > limits[key.data]:
+                        raise WorkerResourceLimitExceeded(
+                            {"output_stream":key.data,"output_limit_bytes":limits[key.data],"captured_bytes":len(target)},
+                            message="native worker output byte limit exceeded",
+                            error_detail={"kind":"worker_output_limit","stream":key.data,"limit_bytes":limits[key.data]})
+                    target.extend(data)
+            process.wait(timeout=max(.05, deadline - time.monotonic()))
+        finally:
+            if process.stdin is not None:
+                process.stdin.close()
+                process.stdin = None
+    return tuple(bytes(captured[name]).decode("utf-8", errors="replace") for name in ("stdout","stderr"))
 
 
 class _WorkerCancellationWatcher:

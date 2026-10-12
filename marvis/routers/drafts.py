@@ -147,6 +147,8 @@ def author_draft(request: Request, payload: dict) -> dict:
         raise unprocessable("task_id is required")
     if not goal:
         raise unprocessable("goal is required")
+    from marvis.modeling_holdout.guards import reject_arbitrary_execution
+    reject_arbitrary_execution(request.app.state.settings.db_path, task_id)
     tool_payload = {"goal": goal}
     learning_note_id = str(payload.get("learning_note_id") or "").strip()
     if learning_note_id:

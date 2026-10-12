@@ -245,7 +245,8 @@ def test_materials_endpoint_forwards_unsaved_pmml_preview_selection(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 settings=SimpleNamespace(
-                    db_path=tmp_path / "source-implicit.sqlite"
+                    db_path=tmp_path / "source-implicit.sqlite",
+                    workspace=tmp_path,
                 )
             )
         )

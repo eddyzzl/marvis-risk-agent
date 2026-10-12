@@ -1366,7 +1366,12 @@ class DataBackend:
 
     def _resolve_path(self, path: Path) -> Path:
         path = Path(path)
-        return path if path.is_absolute() else self._root / path
+        resolved = path if path.is_absolute() else self._root / path
+        from marvis.institution.policy import authorize_file
+        authorize_file(self._root, resolved)
+        from marvis.modeling_holdout.guards import record_backend_exposure
+        record_backend_exposure(self._root.parent, resolved)
+        return resolved
 
     def _duckdb_rel(self, path: Path) -> str:
         suffix = path.suffix.lower()

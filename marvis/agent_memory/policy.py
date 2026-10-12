@@ -73,6 +73,8 @@ PAYLOAD_FIELD_ALLOWLISTS = {
         "overfitting_status",
         "head_lift_5pct",
         "tail_lift_5pct",
+        "metric_units",
+        "evaluation_split",
     }),
     "feature_experience": frozenset({
         "feature_count",

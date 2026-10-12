@@ -331,8 +331,15 @@ def _validate_ui_action_contract(payload: AgentMessageRequest) -> None:
         if adjust is not None and set(adjust) not in (
             {"decisions"},
             {"selected_experiment_id"},
+            {"selected_experiment_id", "refit_on_train_plus_test"},
         ):
             raise unprocessable("confirm_gate 的结构化字段与当前动作不匹配。")
+        if (
+            adjust is not None
+            and adjust.get("refit_on_train_plus_test") is not None
+            and type(adjust["refit_on_train_plus_test"]) is not bool
+        ):
+            raise unprocessable("refit_on_train_plus_test 必须是布尔值 true 或 false。")
 
 
 def _report_revision_instruction_context(

@@ -5041,9 +5041,10 @@ def test_driver_handle_instruction_passes_gate_param_schema_to_router(tmp_path):
 
     assert llm.calls
     prompt = llm.calls[0]["user_prompt"]
-    assert "【可调参数】" in prompt
-    assert "leakage_ks" in prompt
-    assert "当前值=0.4" in prompt
+    context = json.loads(prompt)
+    assert context["gate_context"]["purpose"] == "current_step"
+    assert context["param_schema"] == [{"name": "leakage_ks", "type": "number", "current": 0.4,
+                                       "bounds": {"min": 0, "max": 1}}]
 
 
 def test_driver_manual_adjust_params_reruns_without_llm_router(tmp_path):

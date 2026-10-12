@@ -12,7 +12,6 @@ from marvis.llm_client import estimate_tokens
 from marvis.orchestrator.capability import resolve_tier
 from marvis.orchestrator.contracts import Plan, PlanStatus, PostCheck, StepStatus
 from marvis.orchestrator.planner import (
-    ContextBudgetExhaustedError,
     EXPLORE_SYS,
     PLAN_SYS,
     REPLAN_SYS,
@@ -21,6 +20,7 @@ from marvis.orchestrator.planner import (
     Planner,
     PlannerConstraints,
     PlanningError,
+    PlannerOutboundPolicyError,
     ReplanError,
     RequiredLiteralInput,
 )
@@ -163,7 +163,7 @@ def _schema_inspection_plan() -> str:
             {
                 "title": "Inspect registered schema",
                 "tool": {"plugin": "data_ops", "tool": "infer_schema"},
-                "inputs": {"dataset_id": "fixture://catalog-ranking"},
+                "inputs": {"dataset_id": "ds-catalog-ranking"},
                 "depends_on": [],
                 "post_checks": [],
             }
@@ -458,7 +458,7 @@ def test_planner_required_literal_input_matches_any_repeated_tool_step(tmp_path)
     })
 
     plan = _planner(tmp_path, FakeLLM([repeated_echo])).generate(
-        "echo both messages",
+        "echo both messages: prior and current",
         "task-repeated-tool",
         memory_context={},
         task_context={},
@@ -653,13 +653,13 @@ def test_planner_generate_omits_stale_context_before_reducing_json_budget(tmp_pa
         task_context={
             "workflow_family": "fixed",
             "entrypoint": "vintage",
-            "dataset_id": "fixture://risk-analysis/current-snapshot",
+            "dataset_id": "ds-risk-current-snapshot",
             "active_dataset_revision": 23,
             "target_col": "bad_flag",
             "split": {"train": "2024-01", "test": "2024-02"},
             "features": ["mob", "balance"],
             "historical_context": stale_history,
-            "stale_dataset_id": "fixture://risk-analysis/previous-snapshot",
+            "stale_dataset_id": "ds-risk-previous-snapshot",
         },
     )
 
@@ -667,32 +667,48 @@ def test_planner_generate_omits_stale_context_before_reducing_json_budget(tmp_pa
     payload = json.loads(call["user_prompt"])
     task_context = payload["task_context"]
     omission = task_context["historical_context"]
-    assert omission["__omitted_context__"] == "context_budget"
+    assert omission["__omitted_context__"] == "outbound_policy"
     assert omission["original_type"] == "str"
     assert set(omission) == {"__omitted_context__", "original_type"}
     assert stale_history[:100] not in call["user_prompt"]
-    assert task_context["dataset_id"] == "fixture://risk-analysis/current-snapshot"
+    assert task_context["dataset_id"] == "ds-risk-current-snapshot"
     assert task_context["active_dataset_revision"] == 23
     assert task_context["target_col"] == "bad_flag"
     assert task_context["split"] == {"train": "2024-01", "test": "2024-02"}
     assert task_context["features"] == ["mob", "balance"]
-    assert payload["memory_context"]["user_constraint"] == "keep the approved split"
+    assert "user_constraint" not in payload["memory_context"]
     assert call["max_tokens"] == 16_384
     assert call["truncated"] is True
 
 
-def test_planner_generate_recomputes_completion_from_fitted_prompt(tmp_path):
+@pytest.mark.parametrize("catalog_scope", ["full", "introspection_only"])
+def test_planner_generate_recomputes_completion_from_fitted_prompt(tmp_path, catalog_scope):
     context_window = 8_192
     llm = FakeLLM(
         [_schema_inspection_plan()],
         profile={"context_window": context_window},
     )
 
-    _planner(tmp_path, llm).generate(
+    base = _tool_registry(tmp_path)
+    registry = base
+    if catalog_scope == "introspection_only":
+        registry = CatalogOverrideRegistry(base, [
+            item for item in base.catalog_for_planner()
+            if item["plugin"] == "data_ops" and item["tool"] in {"infer_schema", "profile_dataset", "propose_join"}
+        ])
+    planner = Planner(registry, lambda: llm, PlanValidator(registry))
+    if catalog_scope == "full":
+        with pytest.raises(PlannerOutboundPolicyError):
+            planner.generate("Inspect the active dataset schema.", "task-dynamic-completion",
+                             memory_context={}, task_context={"dataset_id": "ds-active"})
+        assert llm.calls == []
+        return
+
+    planner.generate(
         "Inspect the active dataset schema.",
         "task-dynamic-completion",
         memory_context={},
-        task_context={"dataset_id": "fixture://active"},
+        task_context={"dataset_id": "ds-active"},
     )
 
     call = llm.calls[0]
@@ -729,22 +745,20 @@ def test_planner_generate_fails_typed_when_protected_context_exhausts_json_floor
     )
     protected_goal = "confirmed-active-constraint " * 2_000
 
-    with pytest.raises(ContextBudgetExhaustedError) as caught:
+    with pytest.raises(PlannerOutboundPolicyError) as caught:
         _planner(tmp_path, llm).generate(
             protected_goal,
             "task-exhausted-context",
             memory_context={},
             task_context={
-                "dataset_id": "fixture://active",
+                "dataset_id": "ds-active",
                 "active_dataset_revision": 7,
                 "target_col": "bad_flag",
             },
         )
 
     error = caught.value
-    assert error.error_kind == "context_budget_exhausted"
-    assert error.context_window == 8_192
-    assert error.available_tokens < error.required_tokens == 4_096
+    assert error.error_kind == "outbound_policy"
     assert protected_goal[:100] not in str(error)
     assert llm.calls == []
 
@@ -859,9 +873,7 @@ def test_compact_catalog_truncates_large_schema_fields():
     assert compact[0]["input_fields"][-1]["type"] == "truncated"
 
 
-@pytest.mark.parametrize(
-    ("goal", "task_context", "expected_ref"),
-    [
+_CATALOG_RETRIEVAL_CASES = [
         (
             "Inventory the submitted notebook and model validation materials.",
             {"workflow_family": "fixed", "entrypoint": "validation"},
@@ -897,8 +909,10 @@ def test_compact_catalog_truncates_large_schema_fields():
             {"workflow_family": "fixed", "entrypoint": "modeling"},
             ("modeling", "train_model"),
         ),
-    ],
-)
+]
+
+
+@pytest.mark.parametrize(("goal", "task_context", "expected_ref"), _CATALOG_RETRIEVAL_CASES)
 def test_planner_retrieves_relevant_tail_tools_with_bounded_catalog(
     tmp_path,
     goal,
@@ -912,7 +926,7 @@ def test_planner_retrieves_relevant_tail_tools_with_bounded_catalog(
 
     llm = FakeLLM(
         [_schema_inspection_plan()],
-        profile={"context_window": 8192},
+        profile={"context_window": 32768},
     )
     planner = Planner(registry, lambda: llm, PlanValidator(registry))
 
@@ -922,7 +936,7 @@ def test_planner_retrieves_relevant_tail_tools_with_bounded_catalog(
         memory_context={},
         task_context={
             **task_context,
-            "dataset_id": "fixture://catalog-ranking",
+            "dataset_id": "ds-catalog-ranking",
         },
     )
 
@@ -940,7 +954,7 @@ def test_planner_retrieves_relevant_tail_tools_with_bounded_catalog(
     assert len(available_by_ref) < len(full_catalog)
     assert estimate_tokens(
         json.dumps(available, ensure_ascii=False, sort_keys=True)
-    ) <= 4096
+    ) <= 16384
     assert call["truncated"] is True
 
     universal_core = {
@@ -964,7 +978,28 @@ def test_planner_retrieves_relevant_tail_tools_with_bounded_catalog(
         assert available_by_ref[ref]["policy"] == original["policy"]
 
 
-def test_planner_bounds_safety_catalog_reservation_and_keeps_shown_policy(tmp_path):
+@pytest.mark.parametrize(("goal", "task_context", "expected_ref"), _CATALOG_RETRIEVAL_CASES)
+def test_original_8192_catalog_profile_refuses_before_losing_governance_or_intent_tools(
+    tmp_path, goal, task_context, expected_ref,
+):
+    # These are the original six 8192-profile cases. Complete installed schemas
+    # no longer fit their former summary-only reservation. Keep that boundary
+    # as a typed refusal, separately from the 32768 positive profile above.
+    registry = _tool_registry(tmp_path)
+    assert expected_ref in {
+        (item["plugin"], item["tool"]) for item in registry.catalog_for_planner()
+    }
+    llm = FakeLLM([_schema_inspection_plan()], profile={"context_window": 8192})
+    planner = Planner(registry, lambda: llm, PlanValidator(registry))
+    with pytest.raises(PlannerOutboundPolicyError, match="当前模型窗口无法完整") as caught:
+        planner.generate(goal, "task-catalog-ranking", memory_context={},
+                         task_context={**task_context, "dataset_id": "ds-catalog-ranking"})
+    assert caught.value.error_kind == "outbound_policy"
+    assert llm.calls == []
+
+
+@pytest.mark.parametrize("context_window", [8192, 32768])
+def test_planner_bounds_safety_catalog_reservation_and_keeps_shown_policy(tmp_path, context_window):
     base = _tool_registry(tmp_path)
     policy = {
         "schema_version": "tool-policy.v1",
@@ -990,14 +1025,22 @@ def test_planner_bounds_safety_catalog_reservation_and_keeps_shown_policy(tmp_pa
     )
     llm = FakeLLM(
         [_schema_inspection_plan()],
-        profile={"context_window": 8192},
+        profile={"context_window": context_window},
     )
+    if context_window == 8192:
+        with pytest.raises(PlannerOutboundPolicyError):
+            Planner(registry, lambda: llm, PlanValidator(registry)).generate(
+                "Inspect schema, then consider governed action 199.", "task-many-gated-tools", memory_context={},
+                task_context={"dataset_id": "ds-catalog-ranking"},
+            )
+        assert llm.calls == []
+        return
 
     Planner(registry, lambda: llm, PlanValidator(registry)).generate(
         "Inspect schema, then consider governed action 199.",
         "task-many-gated-tools",
         memory_context={},
-        task_context={"dataset_id": "fixture://catalog-ranking"},
+        task_context={"dataset_id": "ds-catalog-ranking"},
     )
 
     call = llm.calls[0]
@@ -1011,7 +1054,7 @@ def test_planner_bounds_safety_catalog_reservation_and_keeps_shown_policy(tmp_pa
     assert all(item["policy"] == policy for item in shown_safety)
     assert estimate_tokens(
         json.dumps(available, ensure_ascii=False, sort_keys=True)
-    ) <= 4096
+    ) <= int(context_window * .5)
     assert call["truncated"] is True
 
 
@@ -1368,7 +1411,9 @@ def test_planner_replan_retries_after_scoped_catalog_failure(tmp_path, caplog):
 
     assert replanned.steps[1].tool_ref == ToolRef("_sample", "echo")
     assert len(llm.calls) == 2
-    assert "missing" in llm.calls[1]["user_prompt"]
+    retry = json.loads(llm.calls[1]["user_prompt"])
+    assert "outside the allowed replan catalog" in retry["repair_context"]["categories"]
+    assert "raw-marker" not in llm.calls[1]["user_prompt"]
     assert (
         "replan attempt rejected stage=parse attempt=1 "
         "error_type=PlanningError "
@@ -1799,7 +1844,7 @@ def test_planner_explore_rejects_done_until_required_tool_is_planned(tmp_path):
     plan = Plan(
         id="explore-plan",
         task_id="task-explore-constraints",
-        goal="explore then echo",
+        goal="explore then echo current",
         source="generated",
         template_id=None,
         steps=[],

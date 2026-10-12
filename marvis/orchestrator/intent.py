@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import re
 
-from marvis.llm_client import LLMClientError
+from marvis.llm_client import LLMClientError, LLMClientErrorKind
 from marvis.llm_prompts import CLASSIFY_SYS as _CLASSIFY_SYS_SPEC
 from marvis.orchestrator.templates import WorkflowTemplate, get_template, list_templates
 
@@ -81,13 +81,24 @@ class IntentRouter:
     def _llm_classify(self, goal: str, task_context: dict, candidates: list[str]) -> str:
         if not candidates:
             return "novel"
-        prompt = build_classify_prompt(goal, task_context, candidates)
         try:
+            from marvis.llm_outbound import OutboundContextError, application_schema
+
+            try:
+                prompt = build_classify_prompt(goal, task_context, candidates)
+            except OutboundContextError:
+                raise LLMClientError(
+                    "此工作流指令含禁止外发内容或无效结构，未发送请求。",
+                    error_kind=LLMClientErrorKind.OUTBOUND_POLICY,
+                ) from None
             raw = self._llm_factory().complete(
                 system_prompt=CLASSIFY_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                json_schema=application_schema("workflow_intent", candidates=candidates),
                 caller="router_intent",
+                prompt_name=_CLASSIFY_SYS_SPEC.name,
+                prompt_version=_CLASSIFY_SYS_SPEC.version,
                 stream=False,
             )
         except LLMClientError:
@@ -117,16 +128,9 @@ class IntentRouter:
 
 
 def build_classify_prompt(goal: str, task_context: dict, candidates: list[str]) -> str:
-    return json.dumps(
-        {
-            "goal": goal,
-            "task_context": task_context,
-            "candidates": candidates,
-            "instruction": "Return JSON like {\"choice\":\"candidate_id\"}.",
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    from marvis.llm_outbound_intent import workflow_intent_prompt
+
+    return workflow_intent_prompt(goal, task_context, candidates)
 
 
 def _pattern_score(pattern: str, goal: str) -> float:

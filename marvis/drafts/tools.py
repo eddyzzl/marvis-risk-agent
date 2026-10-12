@@ -6,11 +6,11 @@ import sys
 from marvis.repositories.drafts import DraftRepository
 from marvis.repositories.plugins import PluginRepository
 from marvis.drafts.authoring import draft_script
-from marvis.drafts.errors import DraftNotFound, OfflineError
+from marvis.drafts.errors import DraftError, DraftNotFound, OfflineError
 from marvis.drafts.learning import distill_learning
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
-from marvis.drafts.web_search import fetch_url, web_search
+from marvis.drafts.web_search import fetch_public_learning_source, fetch_url, web_search
 from marvis.execution_environment import load_execution_environment
 from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import resolve_llm_model
@@ -44,11 +44,21 @@ def tool_fetch_url(inputs: dict, ctx) -> dict:
 
 def tool_distill_learning(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
+    urls = _string_list(inputs.get("sources") or [])
+    if not urls or len(urls) > 4:
+        raise DraftError("请提供 1 至 4 个公开文档固定链接；当前学习资料缺少已验证公开来源。")
+    # Caller-supplied bodies never prove provenance. Fetch selected sources
+    # through the existing DNS-pinned public network boundary instead.
+    public_sources = [fetch_public_learning_source(url) for url in urls]
+    original_contents = _string_list(inputs.get("contents") or [])
+    if original_contents and original_contents != [source.text for source in public_sources]:
+        raise DraftError("所选正文与当前公开来源不一致，未替换原约束或外发正文；请重新获取资料后再学习。")
     note = distill_learning(
         str(inputs["query"]),
-        _string_list(inputs.get("contents") or []),
-        _string_list(inputs.get("sources") or []),
+        [source.text for source in public_sources],
+        urls,
         llm_factory=_llm_factory(runtime.workspace, _optional_str(inputs.get("model_id"))),
+        public_sources=public_sources,
     )
     runtime.draft_repo.save_learning_note_with_audit(
         note,
@@ -59,6 +69,8 @@ def tool_distill_learning(inputs: dict, ctx) -> dict:
             "detail": {
                 "query": note.query,
                 "source_count": len(note.sources),
+                "public_sources": [{"requested_url": source.requested_url, "final_url": source.final_url,
+                    "wire_sha256": source.wire_sha256, "text_sha256": source.text_sha256} for source in public_sources],
             },
         },
     )
@@ -82,6 +94,7 @@ def tool_draft_script(inputs: dict, ctx) -> dict:
         str(inputs["goal"]),
         learning_note=learning_note,
         llm_factory=_llm_factory(runtime.workspace, _optional_str(inputs.get("model_id"))),
+        installed_tools=runtime.tool_registry.catalog_for_planner(),
     )
     runtime.drafts.add_with_audit(
         draft,
@@ -128,9 +141,10 @@ class _Runtime:
         self.plugin_repo = PluginRepository(settings.db_path)
         self.plugin_registry = PluginRegistry(self.plugin_repo)
         self.plugin_registry.load_from_db()
+        self.tool_registry = ToolRegistry(self.plugin_registry)
         environment = load_execution_environment(settings.workspace)
         self.tool_runner = ToolRunner(
-            ToolRegistry(self.plugin_registry),
+            self.tool_registry,
             self.plugin_repo,
             python_executable=sys.executable,
             datasets_root=Path(ctx.datasets_root),

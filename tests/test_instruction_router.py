@@ -4,6 +4,8 @@ confirm / adjust / replan / clarify and extract parameters. Pure + FakeLLM-drive
 
 from __future__ import annotations
 
+import json
+
 from marvis.agent.instruction_router import parse_route, route_instruction
 
 
@@ -116,13 +118,11 @@ def test_route_instruction_injects_param_schema_into_prompt():
     )
 
     prompt = fake.calls[0]["user_prompt"]
-    assert "【可调参数】" in prompt
-    assert "n_trials" in prompt
-    assert "当前值=20" in prompt
-    assert "leakage_ks" in prompt
-    assert "min=0, max=1" in prompt
+    controls = {item["name"]: item for item in json.loads(prompt)["param_schema"]}
+    assert controls["n_trials"]["current"] == 20
+    assert controls["leakage_ks"]["bounds"] == {"min": 0, "max": 1}
     assert fake.calls[0]["prompt_name"] == "GATE_INSTRUCTION_ROUTER_SYS"
-    assert fake.calls[0]["prompt_version"] == 7
+    assert fake.calls[0]["prompt_version"] == 8
 
 
 def test_route_instruction_omits_param_schema_section_when_empty():
@@ -418,7 +418,6 @@ def test_route_instruction_completeness_reviews_partial_modeling_adjustment():
             ),
             (
                 '{"action":"adjust","params":{'
-                '"split_col":"apply_month",'
                 '"split_config":{"method":"time_outer","date_col":"apply_month"},'
                 '"recipes":["lr","xgb","lgb"],"n_trials":1},'
                 '"constraint":"","reason":"补全全部明确控件"}'
@@ -431,7 +430,6 @@ def test_route_instruction_completeness_reviews_partial_modeling_adjustment():
         gate_context="特征筛选",
         instruction=instruction,
         param_schema=[
-            {"name": "split_col", "type": "string", "current": "split"},
             {"name": "split_config", "type": "object", "current": {}},
             {"name": "recipes", "type": "array", "current": ["lgb"]},
             {"name": "n_trials", "type": "integer", "current": 12},
@@ -479,7 +477,7 @@ def test_route_instruction_normalizes_llm_split_ratio_aliases():
     assert out["params"] == {
         "split_config": {
             "random_oot": True,
-            "test_size": 0.2,
+            "test_size": 0.25,
             "oot_size": 0.2,
         }
     }

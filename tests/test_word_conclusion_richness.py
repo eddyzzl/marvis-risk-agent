@@ -167,7 +167,7 @@ def test_metrics_stage_instructions_require_lift_ranking_highlight_and_memory_co
     assert "稳定性表现和压力测试风险" in instructions
 
 
-def test_generate_word_conclusions_attaches_memory_refs_on_llm_failure(monkeypatch):
+def test_generate_word_conclusions_does_not_claim_unavailable_memory_on_llm_failure(monkeypatch):
     class FailingClient:
         def complete(self, **_kwargs):
             raise LLMClientError("offline")
@@ -205,15 +205,11 @@ def test_generate_word_conclusions_attaches_memory_refs_on_llm_failure(monkeypat
     )
 
     assert values == {}
-    references = metadata["memory_references"]
-    assert references[0]["id"] == "mem-hist-1"
-    assert references[0]["memory_type"] == "model_experience"
-    assert references[0]["source_task_id"] == "task-hist"
-    assert references[0]["confidence"] == "high"
-    assert references[0]["use_reason"] == "word_conclusion_draft"
+    assert metadata["history_comparison_available"] is False
+    assert "memory_references" not in metadata
 
 
-def test_word_conclusion_prompt_injects_memory_and_forbids_metric_rewrite(monkeypatch):
+def test_word_conclusion_withholds_prose_only_memory_and_forbids_metric_rewrite(monkeypatch):
     captured = {}
 
     class CapturingClient:
@@ -261,7 +257,8 @@ def test_word_conclusion_prompt_injects_memory_and_forbids_metric_rewrite(monkey
     )
 
     prompt = json.loads(captured["user_prompt"])
-    assert prompt["cross_task_memory"]["memories"][0]["id"] == "mem-hist-2"
-    assert "不能改变" in prompt["cross_task_memory"]["usage_rules"]
-    assert metadata["memory_references"][0]["id"] == "mem-hist-2"
+    assert "cross_task_memory" not in prompt and "historical_models" not in prompt
+    assert "历史同类模型 OOT KS 0.28。" not in captured["user_prompt"]
+    assert prompt["history_comparison_available"] is False
+    assert metadata["history_comparison_available"] is False and "memory_references" not in metadata
     assert "不得编造或改写 KS、AUC、PSI" in captured["system_prompt"]

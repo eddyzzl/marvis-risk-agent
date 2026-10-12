@@ -5,7 +5,6 @@ import pytest
 
 from marvis.agent.service import fallback_word_conclusions
 from marvis.api import _run_agent_word_conclusion_stage
-from marvis.repositories.tasks import AGENT_REPORT_WRITABLE_KEYS
 from marvis.state_machine import ConflictError
 from tests import test_report_draft_generation_race as draft_fixture
 from tests.test_report_draft_generation_race import VALUES, configure
@@ -47,7 +46,7 @@ def model_with_optional_delta(monkeypatch, *, delta=None, hook=None):
             schema = kwargs.get("json_schema", {}).get("schema", {})
             fields = schema.get("required", [key for key in VALUES if key != "TEXT:model_scope"])
             values = {key: VALUES[key] for key in fields}
-            if delta and (not schema or "TEXT:model_training_description" in fields):
+            if delta:
                 values.update(delta)
             return json.dumps(values)
 
@@ -56,7 +55,7 @@ def model_with_optional_delta(monkeypatch, *, delta=None, hook=None):
 
 
 @pytest.mark.parametrize("version", [1, 2])
-def test_confirmed_report_is_a_raw_narrative_baseline_for_http_redraft(flow, monkeypatch, version):
+def test_confirmed_report_remains_a_local_baseline_for_http_redraft(flow, monkeypatch, version):
     client, repo, task_id, _ = flow
     configure(repo, task_id, version)
     saved, revision = confirmed_report(repo, task_id)
@@ -67,25 +66,25 @@ def test_confirmed_report_is_a_raw_narrative_baseline_for_http_redraft(flow, mon
     result = response.json()
     for key in ("TEXT:model_scope", "TEXT:bad_sample_definition", "TEXT:good_sample_definition"):
         assert result["text_values"][key] == saved[key]
-    context = prompts[0]["evidence"]["saved_report_narrative"]
-    assert context["report_revision"] == revision
-    assert set(context["text_values"]) <= AGENT_REPORT_WRITABLE_KEYS
-    assert "TEXT:report_title" not in context["text_values"]
+    context = prompts[0]["report_revision_operation"]
+    assert context["provenance"]["report_revision"] == revision
+    assert "saved_report_narrative" not in prompts[0]["evidence"]
+    assert saved["TEXT:model_scope"] not in json.dumps(prompts, ensure_ascii=False)
     assert "report_draft" not in prompts[0]["evidence"]
     assert result["message"]["metadata"]["report_revision"] == revision
     assert repo.get_report_values(task_id) == before
 
 
 @pytest.mark.parametrize("version", [1, 2])
-def test_saved_then_pending_then_explicit_delta_precedence_preserves_blanks(flow, monkeypatch, version):
+def test_saved_then_pending_local_edit_precedence_preserves_blanks(flow, monkeypatch, version):
     client, repo, task_id, _ = flow
     configure(repo, task_id, version)
     saved, revision = confirmed_report(repo, task_id)
     repo.add_agent_message(task_id, role="assistant", stage="word_conclusion_draft", content="编辑中",
                            metadata={"report_revision": revision, "draft_values": {
-                               "TEXT:model_scope": "", "TEXT:sample_audience": "待改写客群",
+                               "TEXT:model_scope": "", "TEXT:sample_audience": "", "TEXT:model_overview": "本次明确改写",
                            }})
-    model_with_optional_delta(monkeypatch, delta={"TEXT:sample_audience": "", "TEXT:model_overview": "本次明确改写"})
+    prompts = model_with_optional_delta(monkeypatch)
     response = client.post(f"/api/tasks/{task_id}/agent/report-draft", json={})
     assert response.status_code == 200, response.text
     values = response.json()["text_values"]
@@ -93,6 +92,7 @@ def test_saved_then_pending_then_explicit_delta_precedence_preserves_blanks(flow
     assert values["TEXT:bad_sample_definition"] == saved["TEXT:bad_sample_definition"]
     assert values["TEXT:sample_audience"] == ""
     assert values["TEXT:model_overview"] == "本次明确改写"
+    assert "本次明确改写" not in json.dumps(prompts, ensure_ascii=False)
 
 
 def test_fallback_keeps_saved_business_text_without_using_it_as_measured_evidence(flow):
@@ -115,7 +115,8 @@ def test_v1_nontext_falsy_response_is_not_an_explicit_narrative_clear(flow, monk
     model_with_optional_delta(monkeypatch, delta={"TEXT:model_scope": empty_nontext})
     response = client.post(f"/api/tasks/{task_id}/agent/report-draft", json={})
     assert response.status_code == 200, response.text
-    assert response.json()["text_values"]["TEXT:model_scope"] == saved["TEXT:model_scope"]
+    assert response.json()["message"]["metadata"]["confirmable"] is False
+    assert repo.get_report_values(task_id)[0]["TEXT:model_scope"] == saved["TEXT:model_scope"]
 
 
 def stage_setup(flow, monkeypatch):
@@ -137,9 +138,13 @@ def test_async_redraft_preserves_saved_text_and_persists_pending_explicit_clear(
     repo.add_agent_message(task_id, role="assistant", stage="word_conclusion_draft", content="编辑中",
                            metadata={"report_revision": revision, "draft_values": {"TEXT:model_scope": ""}})
     prompts = model_with_optional_delta(monkeypatch)
+    def forbidden_recalculation(**_kwargs):
+        raise AssertionError("report revision cannot rerun scoring or metrics")
+    for name in ("run_notebook_stage", "run_pmml_scoring_stage", "run_metrics_stage"):
+        monkeypatch.setattr(f"marvis.agent.validation_app_service.{name}", forbidden_recalculation)
     assert _run_agent_word_conclusion_stage(
         repo, client.app.state.settings, task_id, {}, auto_accept=True,
-        rewrite_instruction="仅调整最终结论，其他业务定义不变，范围保持清空。",
+        rewrite_instruction="按当前验证结果改写结论，其余不变。",
     )
     values, written_revision = repo.get_report_values(task_id)
     assert values["TEXT:bad_sample_definition"] == saved["TEXT:bad_sample_definition"]
@@ -149,7 +154,70 @@ def test_async_redraft_preserves_saved_text_and_persists_pending_explicit_clear(
         {"split": "oot", "ks": 0.31},
     ]
     assert measured == {"validation_results": {"effectiveness": {"overall": [{"split": "oot", "ks": 0.31}]}}}
-    assert prompts[0]["evidence"]["saved_report_narrative"]["report_revision"] == revision
+    assert prompts[0]["report_revision_operation"]["provenance"]["report_revision"] == revision
+    assert "saved_report_narrative" not in prompts[0]["evidence"]
+
+
+@pytest.mark.parametrize("revision_kind", ["unsupported", "clear", "provider_failure"])
+def test_async_revision_never_auto_accepts_fallback_or_loses_local_clears(flow, monkeypatch, revision_kind):
+    from marvis.llm_client import LLMClientError
+
+    client, repo, task_id, saved, revision, reports, measured = stage_setup(flow, monkeypatch)
+    repo.add_agent_message(task_id, role="assistant", stage="word_conclusion_draft", content="编辑中",
+                           metadata={"report_revision": revision, "draft_values": {"TEXT:model_scope": ""}})
+    prompts = model_with_optional_delta(monkeypatch)
+    if revision_kind == "provider_failure":
+        class FailedModel:
+            def complete(self, **_kwargs):
+                raise LLMClientError("synthetic provider unavailable")
+        monkeypatch.setattr("marvis.agent.service._client", lambda _: FailedModel())
+    def forbidden_fallback(**_kwargs):
+        raise AssertionError("rejected or cleared revision cannot use fallback")
+    monkeypatch.setattr("marvis.agent.validation_app_service.fallback_word_conclusions", forbidden_fallback)
+    before = repo.get_report_values(task_id)
+    instruction = {
+        "unsupported": "如果核验通过再改写结论，其余不变。",
+        "clear": "删除结论，其余不变。",
+        "provider_failure": "按当前验证结果改写结论，其余不变。",
+    }[revision_kind]
+    assert not _run_agent_word_conclusion_stage(
+        repo, client.app.state.settings, task_id, {}, auto_accept=True, rewrite_instruction=instruction,
+    )
+    assert repo.get_report_values(task_id) == before and reports == []
+    draft = next(message for message in reversed(repo.list_agent_messages(task_id))
+                 if message["stage"] == "word_conclusion_draft")
+    assert draft["metadata"]["draft_values"]["TEXT:model_scope"] == ""
+    assert draft["metadata"]["draft_values"]["TEXT:bad_sample_definition"] == saved["TEXT:bad_sample_definition"]
+    assert draft["metadata"]["confirmable"] is False
+    if revision_kind == "clear":
+        assert draft["metadata"]["draft_values"]["TEXT:final_validation_conclusion"] == ""
+    if revision_kind == "unsupported":
+        assert draft["metadata"]["outbound_context_status"] == "clarification_required"
+        assert "需要澄清" in repo.list_agent_messages(task_id)[-1]["content"]
+    assert prompts == []
+    assert measured == {"validation_results": {"effectiveness": {"overall": [{"split": "oot", "ks": 0.31}]}}}
+
+
+def test_explicit_local_business_revision_is_persisted_without_model_or_metric_run(flow, monkeypatch):
+    client, repo, task_id, saved, revision, reports, measured = stage_setup(flow, monkeypatch)
+    def forbidden_call(**_kwargs):
+        raise AssertionError("local narrative edit cannot call a model or rerun metrics")
+    for name in ("run_notebook_stage", "run_pmml_scoring_stage", "run_metrics_stage", "fallback_word_conclusions"):
+        monkeypatch.setattr(f"marvis.agent.validation_app_service.{name}", forbidden_call)
+    monkeypatch.setattr("marvis.agent.service._client", forbidden_call)
+    assert _run_agent_word_conclusion_stage(
+        repo, client.app.state.settings, task_id, {}, auto_accept=True,
+        rewrite_instruction="坏样本定义改成 MOB6 逾期 >= 30 天，其他不变。",
+    )
+    values, written_revision = repo.get_report_values(task_id)
+    assert values["TEXT:bad_sample_definition"] == "MOB6 逾期 >= 30 天"
+    assert values["TEXT:model_scope"] == saved["TEXT:model_scope"]
+    assert values["TEXT:final_validation_conclusion"] == saved["TEXT:final_validation_conclusion"]
+    assert written_revision == revision + 1 and reports == [task_id]
+    generated = next(message for message in reversed(repo.list_agent_messages(task_id))
+                     if message["stage"] == "word_conclusion_generated")
+    assert generated["metadata"]["narrative_source"] == "local_edited"
+    assert measured == {"validation_results": {"effectiveness": {"overall": [{"split": "oot", "ks": 0.31}]}}}
 
 
 @pytest.mark.parametrize("timing", ["before_model", "during_model"])
@@ -170,11 +238,11 @@ def test_async_generation_never_uses_a_new_report_revision_to_approve_old_text(f
     with pytest.raises(ConflictError):
         _run_agent_word_conclusion_stage(
             repo, client.app.state.settings, task_id, {}, auto_accept=True,
-            rewrite_instruction="只调整结论语气",
+            rewrite_instruction="按当前验证结果改写结论，其余不变。",
         )
     assert repo.get_report_values(task_id)[0]["TEXT:model_scope"] == "生成期间保存的新范围"
     assert repo.get_report_values(task_id)[1] == revision + 1
     assert reports == []
     draft = next(m for m in reversed(repo.list_agent_messages(task_id)) if m["stage"] == "word_conclusion_draft")
     assert draft["metadata"]["report_revision"] == revision
-    assert prompts[0]["evidence"]["saved_report_narrative"]["report_revision"] == revision
+    assert prompts[0]["report_revision_operation"]["provenance"]["report_revision"] == revision

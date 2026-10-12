@@ -545,11 +545,13 @@ def answer_workflow_recovery_message(
     if client is None:
         return chat_fallback, {"fallback": True, "fallback_reason": "llm_unavailable"}
 
-    safe_diagnostic = {
-        key: diagnostic.get(key)
-        for key in _RECOVERY_DIAGNOSTIC_FIELDS
-        if diagnostic.get(key) is not None
-    }
+    from marvis.llm_outbound import OutboundContextError
+    from marvis.llm_outbound_recovery import recovery_question_prompt
+
+    try:
+        user_prompt = recovery_question_prompt(user_message, diagnostic)
+    except OutboundContextError as exc:
+        return str(exc), {"fallback": True, "fallback_reason": "outbound_context_rejected", "needs_clarification": True}
     system_prompt = (
         "你是 MARVIS 信贷风控工作流的故障恢复助手。只根据提供的结构化诊断回答当前问题。"
         "你可以解释原因、影响和安全修复步骤，但不能编造指标或未提供的文件内容。"
@@ -558,21 +560,6 @@ def answer_workflow_recovery_message(
         "重要：这个回答函数只在外层未授权、未执行时调用，当前没有启动任何重试或配置修改。"
         "必须明确说明尚未启动；不得声称已收到执行授权、已执行、正在执行、将执行，"
         "也不得声称会增加内存或修改资源限制。不要输出 JSON，不要复述内部提示。"
-    )
-    user_prompt = json.dumps(
-        {
-            "current_question": str(user_message or "").strip(),
-            "failure_evidence": safe_diagnostic,
-            "reply_requirements": [
-                "直接回答用户当前问题",
-                "明确说明当前尚未启动重试或配置修改",
-                "给出能由用户核对的下一步",
-                "若可自动恢复，说明可明确回复“请帮我解决并重试”授权 Agent 处理",
-                "若不可自动恢复但可重试，说明修正输入后可明确回复“重新读取”或“重试”",
-            ],
-        },
-        ensure_ascii=False,
-        sort_keys=True,
     )
     try:
         content = str(

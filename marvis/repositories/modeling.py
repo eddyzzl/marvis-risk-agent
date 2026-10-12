@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from marvis.db_schema import connect
+from marvis.institution.policy import guard_repository as _guard_repository
 from marvis.packs.modeling.contracts import (
     Experiment,
     ModelArtifact,
@@ -18,6 +19,7 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+@_guard_repository
 class ModelingRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -58,6 +60,8 @@ class ModelingRepository:
 
     def get_experiment(self, experiment_id: str) -> Experiment | None:
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn, 'experiment', experiment_id)
             row = conn.execute(
                 """
                 SELECT id, task_id, recipe_id, config_json, metrics_json,
@@ -86,11 +90,20 @@ class ModelingRepository:
              ORDER BY created_at, id
         """
         params: list[object] = [task_id]
-        if bounded_limit is not None:
-            query += " LIMIT ? OFFSET ?"
-            params.extend([bounded_limit, bounded_offset])
         with connect(self.db_path) as conn:
-            rows = conn.execute(query, tuple(params)).fetchall()
+            from marvis.institution.policy import authorize_on_connection
+            from marvis.institution.store import IdentityError
+            all_rows = conn.execute(query, tuple(params)).fetchall()
+            rows=[]
+            for row in all_rows:
+                try:
+                    authorize_on_connection(conn,'artifact' if 'experiment_id' in row.keys() else 'experiment',row['id'])
+                except IdentityError as exc:
+                    if exc.code!='identity_resource_forbidden':
+                        raise
+                    continue
+                rows.append(row)
+            rows=rows[bounded_offset:] if bounded_limit is None else rows[bounded_offset:bounded_offset+bounded_limit]
         return [_experiment_from_row(row) for row in rows]
 
     def count_experiments(self, task_id: str) -> int:
@@ -125,11 +138,20 @@ class ModelingRepository:
             query += " WHERE e.status = ?"
             params.append(status)
         query += " ORDER BY e.created_at DESC, e.id DESC"
-        if bounded_limit is not None:
-            query += " LIMIT ? OFFSET ?"
-            params.extend([bounded_limit, bounded_offset])
         with connect(self.db_path) as conn:
-            rows = conn.execute(query, tuple(params)).fetchall()
+            from marvis.institution.policy import authorize_on_connection
+            from marvis.institution.store import IdentityError
+            all_rows = conn.execute(query, tuple(params)).fetchall()
+            rows=[]
+            for row in all_rows:
+                try:
+                    authorize_on_connection(conn,'artifact' if 'experiment_id' in row.keys() else 'experiment',row['id'])
+                except IdentityError as exc:
+                    if exc.code!='identity_resource_forbidden':
+                        raise
+                    continue
+                rows.append(row)
+            rows=rows[bounded_offset:] if bounded_limit is None else rows[bounded_offset:bounded_offset+bounded_limit]
         return [
             {
                 "experiment": _experiment_from_row(row),
@@ -246,6 +268,8 @@ class ModelingRepository:
 
     def get_model_artifact(self, artifact_id: str) -> ModelArtifact | None:
         with connect(self.db_path) as conn:
+            from marvis.institution.policy import authorize_on_connection
+            authorize_on_connection(conn, 'artifact', artifact_id)
             row = conn.execute(
                 """
                 SELECT id, experiment_id, algorithm, model_path, pmml_path,
@@ -280,11 +304,20 @@ class ModelingRepository:
             query += " WHERE experiment_id = ?"
             params.append(experiment_id)
         query += " ORDER BY created_at, id"
-        if bounded_limit is not None:
-            query += " LIMIT ? OFFSET ?"
-            params.extend([bounded_limit, bounded_offset])
         with connect(self.db_path) as conn:
-            rows = conn.execute(query, tuple(params)).fetchall()
+            from marvis.institution.policy import authorize_on_connection
+            from marvis.institution.store import IdentityError
+            all_rows = conn.execute(query, tuple(params)).fetchall()
+            rows=[]
+            for row in all_rows:
+                try:
+                    authorize_on_connection(conn,'artifact' if 'experiment_id' in row.keys() else 'experiment',row['id'])
+                except IdentityError as exc:
+                    if exc.code!='identity_resource_forbidden':
+                        raise
+                    continue
+                rows.append(row)
+            rows=rows[bounded_offset:] if bounded_limit is None else rows[bounded_offset:bounded_offset+bounded_limit]
         return [_model_artifact_from_row(row) for row in rows]
 
 
@@ -302,6 +335,8 @@ def _experiment_insert_values(experiment: Experiment) -> tuple:
 
 
 def _insert_experiment_row(conn: sqlite3.Connection, experiment: Experiment) -> None:
+    from marvis.institution.policy import authorize_on_connection
+    authorize_on_connection(conn,'task',experiment.task_id,'write')
     conn.execute(
         """
         INSERT INTO experiments(
@@ -392,6 +427,8 @@ def _model_artifact_insert_values(artifact: ModelArtifact) -> tuple:
 
 
 def _insert_model_artifact_row(conn: sqlite3.Connection, artifact: ModelArtifact) -> None:
+    from marvis.institution.policy import authorize_on_connection
+    authorize_on_connection(conn, 'experiment', artifact.experiment_id, 'write')
     conn.execute(
         """
         INSERT INTO model_artifacts(
@@ -525,9 +562,9 @@ def _model_metrics_from_dict(payload: dict) -> ModelMetrics:
         oot_auc=_optional_float(payload.get("oot_auc")),
         psi_test_vs_train=_optional_float(payload.get("psi_test_vs_train")),
         psi_oot_vs_train=_optional_float(payload.get("psi_oot_vs_train")),
-        overfit_train_test_gap=float(payload.get("overfit_train_test_gap") or 0.0),
+        overfit_train_test_gap=_optional_float(payload["overfit_train_test_gap"]) if "overfit_train_test_gap" in payload else 0.0,
         overfit_train_oot_gap=_optional_float(payload.get("overfit_train_oot_gap")),
-        overfit_flag=bool(payload.get("overfit_flag")),
+        overfit_flag=None if "overfit_flag" in payload and payload["overfit_flag"] is None else bool(payload.get("overfit_flag")),
         weighted_train_ks=_optional_float(payload.get("weighted_train_ks")),
         weighted_test_ks=_optional_float(payload.get("weighted_test_ks")),
         weighted_oot_ks=_optional_float(payload.get("weighted_oot_ks")),

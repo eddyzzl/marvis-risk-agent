@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from marvis.llm_outbound_gate_context import authorization_gate
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_driver import confirmation_is_explicitly_withheld
 from marvis.agent.semantic_authorization import review_semantic_authorization
@@ -17,7 +18,7 @@ def _semantic_exact_gate_authorization(
     runtime: contracts_lane.DriverTurnRuntime,
     text: str,
     *,
-    gate_context: str,
+    gate_context: object,
     proposed_params: Mapping[str, object],
 ) -> dict[str, object] | None:
     """Authorize prose only after independent strict route and review passes."""
@@ -88,17 +89,7 @@ def _semantic_c1_recommendation_authorization(
     try:
         route = route_instruction(
             llm_client,
-            gate_context=(
-                "文件角色与目标列授权：平台已把用户原话约束到当前数据集中的"
-                "一个具体角色/目标列方案；confirm 仅表示用户明确、即时、无条件地"
-                "授权采用下列精确方案："
-                + json.dumps(
-                    proposed_assignment,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            ),
+            gate_context=authorization_gate("role_assignment", bindings=proposed_assignment),
             instruction=text,
             param_schema=[],
             strict_contract=True,
@@ -115,7 +106,7 @@ def _semantic_c1_recommendation_authorization(
         return None
     review = review_semantic_authorization(
         llm_client,
-        gate_context="采用当前界面展示的文件角色与目标列建议",
+        gate_context=authorization_gate("role_assignment", bindings=proposed_assignment),
         instruction=text,
         proposed_params=proposed_assignment,
     )

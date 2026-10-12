@@ -163,18 +163,36 @@ def test_actual_tool_child_cache_and_final_training_bind_the_same_features(tmp_p
     from marvis.packs.modeling.fold_tuning_evidence import validate_fold_experiment
     assert validate_fold_experiment(registry, "task-feature", experiment, artifact) == proof["evidence"]
     if recipe == "lr":
+        # The legacy 95% + random diagnostic holdout path still cannot reuse
+        # the original fold receipt for a different final-fit membership.
+        from types import SimpleNamespace
+        from marvis.packs.modeling._runtime import _Runtime
+        from marvis.packs.modeling.train_tools import _refit_champion_on_train_plus_test
+        from marvis.settings import build_settings
+        settings = build_settings(registry._repo.db_path.parent)
+        runtime = _Runtime(SimpleNamespace(workspace=settings.workspace, datasets_root=settings.datasets_dir))
+        assert _refit_champion_on_train_plus_test(runtime, task_id="task-feature", experiment=experiment, recipe=recipe) is None
         refit = runner.invoke(ToolRef("modeling", "select_experiment"), {
             "experiment_ids": [experiment.id], "refit_on_train_plus_test": True,
         }, task_id="task-feature")
         assert refit.ok, refit.error
-        assert not refit.output["refit"]["applied"]
-        assert refit.output["artifact_id"] == artifact.id
+        assert refit.output["refit"]["applied"]
+        assert refit.output["artifact_id"] != artifact.id
+        assert refit.output["refit"]["parent_experiment_id"] == experiment.id
         delivered = runner.invoke(ToolRef("modeling", "post_training_action"), {
-            "experiment_id": experiment.id, "sample_dataset_id": inputs["dataset_id"],
+            "experiment_id": refit.output["selected_experiment_id"], "sample_dataset_id": inputs["dataset_id"],
             "actions": [],
         }, task_id="task-feature")
         assert delivered.ok, delivered.error
     if tree:
+        if target_type == "binary":
+            unsupported = runner.invoke(ToolRef("modeling", "select_experiment"), {
+                "experiment_ids": [experiment.id], "refit_on_train_plus_test": True,
+            }, task_id="task-feature")
+            assert unsupported.ok, unsupported.error
+            assert unsupported.output["refit"]["applied"] is False
+            assert unsupported.output["refit"]["supported_profile"] == "binary_lr_native_development_refit.v1"
+            assert unsupported.output["artifact_id"] == artifact.id
         assert [row["search_stage"] for row in result.output["trials"]] == ["coarse", "coarse", "fine"]
         rounds_key = "iterations" if recipe == "catboost" else "num_boost_round"
         assert artifact.params[rounds_key] == proof["best_params"][rounds_key]

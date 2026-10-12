@@ -38,7 +38,8 @@ def test_formal_join_checks_rows_and_membership_but_keeps_safety_and_fixture_lim
     assert reason is None and result["domain_status"] == "verified" and result["actual_result"] == "done", result
     assert result["domain_checks"]["physical_membership"]["status"] == "verified"
     assert {key for key, status in result["safety"] if status == "unavailable"} == set(SAFETY_DIMENSIONS) - {"evidence_binding", "false_completion"}
-    assert "non_join" in SOFTWARE_GAPS["data_processing"]
+    assert SOFTWARE_GAPS["data_processing"].startswith("installed_native_JOIN_reader_and_future_fixed_stale_CAS_discard_readback;")
+    assert "other_data_operations_and_fault_scopes_remain_unavailable" in SOFTWARE_GAPS["data_processing"]
     with pytest.raises(TrustInputError, match="formal_hidden_family_mismatch"):
         _check_case_definition(f.case, f.expected, f.binding.case, f.run["executions"][f.case.id])
 

@@ -130,6 +130,8 @@ def tool_ingest_excel(inputs: dict, ctx) -> dict:
 def _resolve_material_path(raw_path: str, ctx) -> Path:
     path = Path(raw_path).expanduser()
     resolved = path.resolve(strict=True)
+    from marvis.modeling_holdout.guards import record_exposure
+    record_exposure(Path(ctx.workspace) / 'marvis.sqlite', ctx.workspace, resolved)
     roots = _allowed_material_roots(ctx)
     if any(_path_is_within(root, resolved) for root in roots):
         return resolved
@@ -403,7 +405,7 @@ def _profile_semantics(report: dict, semantic_mapping) -> dict:
         for field in report.get("fields") or []
         if isinstance(field, dict) and field.get("name") is not None
     ]
-    return {
+    result = {
         "target_col": semantic_mapping.target_col,
         "field_roles": {
             column: str(semantic_mapping.field_roles[column])
@@ -416,6 +418,11 @@ def _profile_semantics(report: dict, semantic_mapping) -> dict:
             if column in semantic_mapping.business_names
         },
     }
+    if semantic_mapping.risk_directions:
+        from marvis.data.field_directions import field_directions_to_dict
+        result["risk_directions"] = field_directions_to_dict({column: semantic_mapping.risk_directions[column]
+            for column in result_columns if column in semantic_mapping.risk_directions})
+    return result
 
 
 def _suppress_sensitive_profile_values(

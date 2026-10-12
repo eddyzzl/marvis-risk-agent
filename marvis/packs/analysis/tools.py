@@ -536,4 +536,10 @@ __all__ = [
     "tool_portfolio_report",
     "tool_score_stability_trend",
     "tool_segment_profile",
+    "tool_decision_ledger_feedback",
 ]
+
+
+def tool_decision_ledger_feedback(inputs: dict,ctx) -> dict:
+    from marvis.operations.decision_feedback import tool_decision_ledger_feedback as execute
+    return execute(inputs,ctx)

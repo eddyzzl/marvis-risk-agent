@@ -98,6 +98,13 @@ def _accepts_invocation_id(invoke) -> bool:
 
 
 def _tool_progress_content(progress: dict, *, status: str) -> str:
+    if progress.get('kind') == 'strategy_candidate_search':
+        state = progress.get('state')
+        label = ('策略搜索已暂停，检查点已保存' if state == 'paused' else
+                 '策略搜索已取消，已保留已完成进度' if state == 'cancelled' else
+                 '策略搜索已完成' if status == 'succeeded' else
+                 '策略搜索执行失败，已保留最后进度' if status == 'failed' else '策略搜索正在计算')
+        return f"{label}：{progress.get('completed_candidates', 0)}/{progress.get('total_candidates', '?')} 候选。"
     labels = {
         "running": "模型调参正在执行",
         "succeeded": "模型调参已完成",
@@ -300,9 +307,16 @@ class PlanExecutor:
         return self.reconciler.reconcile(plan_id, target_id, resume_completion=True, actor_id=actor_id)
 
     def run(self, plan_id: str, *, cancellation_check=None) -> ExecutionResult:
+        from marvis.institution.policy import plan_execution_scope
+        with plan_execution_scope(self._repo.db_path, plan_id):
+            return self._run_identity_bound(plan_id, cancellation_check=cancellation_check)
+
+    def _run_identity_bound(self, plan_id: str, *, cancellation_check=None) -> ExecutionResult:
         plan = self._repo.load_plan(plan_id)
         tier = resolve_tier(plan.tier)
         if plan.status in {PlanStatus.DONE, PlanStatus.FAILED, PlanStatus.CANCELLED}:
+            return ExecutionResult(plan.id, plan.status, None, None)
+        if not self._validate_capabilities(plan):
             return ExecutionResult(plan.id, plan.status, None, None)
         if plan.status in {PlanStatus.RUNNING, PlanStatus.REVIEW}:
             try:
@@ -397,6 +411,8 @@ class PlanExecutor:
                 self._set_step_status(step, StepStatus.AWAITING_CONFIRM)
                 self._set_plan_status(plan, PlanStatus.AWAITING_CONFIRM)
                 return ExecutionResult(plan.id, PlanStatus.AWAITING_CONFIRM, None, None)
+            if not self._validate_capabilities(plan):
+                return ExecutionResult(plan.id, plan.status, None, None)
             self._execute_step(plan, step, cancellation_check=cancellation_check)
             plan = self._repo.load_plan(plan_id)
             last = _find_step(plan, step.id)
@@ -409,6 +425,17 @@ class PlanExecutor:
                 and not self._requires_effect_authorization(last)
             ):
                 self._try_replan(plan, last, reason="decision_point", tier=tier)
+
+    def _validate_capabilities(self, plan: Plan) -> bool:
+        from marvis.plugins.governed_install import validate_plan_capabilities
+        try:
+            validate_plan_capabilities(self._repo.db_path,plan)
+        except PermissionError as exc:
+            self._repo.append_loop_event(plan.id, {'type':'capability_admission_rejected','reason':str(exc)})
+            target = PlanStatus.CANCELLED if plan.status in {PlanStatus.CONFIRMED,PlanStatus.AWAITING_CONFIRM} else PlanStatus.FAILED
+            self._set_plan_status(plan,target)
+            return False
+        return True
 
     def _next_ready_step(self, plan: Plan) -> PlanStep | None:
         complete = {
@@ -485,7 +512,7 @@ class PlanExecutor:
                 )
                 if progress_publisher is not None:
                     progress_publisher.finish("failed")
-                self._handle_step_failure(step, result, apply_policy=result.error_kind != "unknown_effect")
+                self._handle_step_failure(step, result, apply_policy=result.error_kind not in {"unknown_effect", "search_paused", "search_cancelled"})
                 return
 
             output = result.output or {}
@@ -720,7 +747,7 @@ class PlanExecutor:
                     )
             if result.ok:
                 return result
-            if result.error_kind == "cancelled":
+            if result.error_kind in {"cancelled", "search_paused", "search_cancelled"}:
                 return result
             if not self._repo.step_run_retry_safe(run_id):
                 return replace(
@@ -823,7 +850,8 @@ class PlanExecutor:
         step: PlanStep,
         run_id: str | None,
     ) -> _ToolProgressPublisher | None:
-        if run_id is None or step.tool_ref.tool != "tune_hyperparameters":
+        from marvis.strategy_workbench.contracts import SEARCH_TOOLS
+        if run_id is None or (step.tool_ref.tool != "tune_hyperparameters" and step.tool_ref.label() not in SEARCH_TOOLS):
             return None
         return _ToolProgressPublisher(
             plan_repo=self._repo,
@@ -942,6 +970,13 @@ class PlanExecutor:
         step: PlanStep,
     ) -> bool:
         if self._planner is None:
+            return False
+        failure_kind = getattr(self._repo, "latest_failed_step_run_error_kind", None)
+        if callable(failure_kind) and failure_kind(step.id) in {
+            "search_paused", "search_cancelled", "unknown_effect",
+        }:
+            # A native halt has a durable checkpoint or unresolved effects.
+            # Only its dedicated recovery path may decide what runs next.
             return False
         # These templates have already bound a deterministic, governed business
         # contract. A generic LLM replan after an execution/environment failure

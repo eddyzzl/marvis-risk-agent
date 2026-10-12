@@ -19,6 +19,7 @@ import sys
 import pandas as pd
 import pytest
 
+from marvis.llm_outbound import outbound_prompt
 from marvis.orchestrator.eval.runtime_contracts import ModelConnection, digest
 from marvis.orchestrator.eval.runtime_runner import run_runtime_suite
 
@@ -260,7 +261,7 @@ def test_all_transport_retries_measured_and_missing_usage_unknown(tmp_path):
             deadline=time.monotonic() + 20,
         ) as profile:
             client = OpenAICompatibleLLMClient(profile)
-            client.complete(system_prompt="test", user_prompt="synthetic", stream=False)
+            client.complete(system_prompt="test", user_prompt=outbound_prompt({}), stream=False)
     events = [json.loads(line) for line in path.read_text().splitlines()]
     summary = usage_summary(events, model_name="fixture", price_bytes=None)
     assert len(calls) == summary["transport_attempts"] == 2
@@ -491,6 +492,21 @@ def test_contract_rejects_expected_or_paths_in_public_runtime_case(tmp_path):
         ).profile("fixture_model")
 
 
+def test_gateway_preserves_official_deepseek_mode_contract_after_private_reroute(tmp_path):
+    from marvis.orchestrator.eval.runtime_runner import _model_gateway
+    from marvis.llm_settings import save_llm_settings, resolve_llm_model
+    with fixture_model() as (model, calls):
+        profile = {**model.profile("fixture_model"), "api_base_url": "https://api.deepseek.com/v1",
+                   "model_name": "deepseek-v4-pro", "api_key": "parent-only-token", "enable_thinking": False}
+        with _model_gateway(profile, {}, tmp_path / "attempts.jsonl", max_attempts=2,
+                            deadline=time.monotonic() + 20) as child_profile:
+            assert child_profile["thinking_style"] == "deepseek"
+            save_llm_settings(tmp_path / "workspace", {"models": [child_profile], "default_model_id": model.model_id})
+            assert resolve_llm_model(tmp_path / "workspace")["thinking_style"] == "deepseek"
+            assert child_profile["api_base_url"].startswith("http://127.0.0.1:")
+            assert not calls
+
+
 def test_gateway_shares_budget_with_real_report_tool_factory_in_child(tmp_path):
     from marvis.llm_client import OpenAICompatibleLLMClient
     from marvis.orchestrator.eval.runtime_runner import _model_gateway
@@ -513,7 +529,7 @@ def test_gateway_shares_budget_with_real_report_tool_factory_in_child(tmp_path):
             assert actual_profile["api_base_url"] not in settings_path.read_text()
             deltas = []
             OpenAICompatibleLLMClient(child_profile).complete(
-                system_prompt="test", user_prompt="stream", on_delta=deltas.append
+                system_prompt="test", user_prompt=outbound_prompt({}), on_delta=deltas.append
             )
             assert len(deltas) == 2  # proxy preserves actual SSE streaming chunks
             code = (
@@ -811,7 +827,7 @@ def test_gateway_wall_deadline_breaks_real_slow_trickle_and_seals_receipts(
         ) as child_profile:
             with pytest.raises(LLMClientError):
                 OpenAICompatibleLLMClient(child_profile).complete(
-                    system_prompt="test", user_prompt="test", stream=True
+                    system_prompt="test", user_prompt=outbound_prompt({}), stream=True
                 )
         elapsed = time.monotonic() - started
         assert arrived.is_set()
@@ -879,13 +895,13 @@ def test_gateway_caps_explicit_output_requests_and_rejects_model_switch(tmp_path
             max_output_tokens=31,
         ) as profile:
             OpenAICompatibleLLMClient(profile).complete(
-                system_prompt="test", user_prompt="test", stream=False, max_tokens=999
+                system_prompt="test", user_prompt=outbound_prompt({}), stream=False, max_tokens=999
             )
             assert calls[0]["max_tokens"] == 31
             with pytest.raises(LLMClientError):
                 OpenAICompatibleLLMClient(
                     {**profile, "model_name": "not-selected"}
-                ).complete(system_prompt="test", user_prompt="test", stream=False)
+                ).complete(system_prompt="test", user_prompt=outbound_prompt({}), stream=False)
             assert len(calls) == 1
     events = [json.loads(line) for line in path.read_text().splitlines()]
     attempt = next(item for item in events if item["event"] == "started")

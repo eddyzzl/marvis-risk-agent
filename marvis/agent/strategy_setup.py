@@ -17,6 +17,8 @@ import pandas as pd
 
 from marvis.agent.sample_setup import detect_setup
 from marvis.data.contracts import Dataset
+from marvis.data.field_aliases import field_alias_bindings
+from marvis.data.field_directions import ApprovedFieldDirections, approved_field_directions
 from marvis.data.errors import DatasetContentDriftError
 from marvis.data.labels import nan_label_mask
 from marvis.data.workspace import data_semantic_mapping_hash
@@ -399,6 +401,8 @@ class StrategyDatasetPreview:
     target_col: str | None
     columns: tuple[str, ...]
     identity: dict
+    field_aliases: tuple[tuple[str, str], ...] = ()
+    field_directions: ApprovedFieldDirections | None = None
 
 
 @dataclass(frozen=True)
@@ -409,6 +413,8 @@ class _ResolvedStrategyDataset:
     workspace_revision: int | None = None
     analysis_generation: int | None = None
     semantic_mapping_hash: str | None = None
+    business_names: dict | None = None
+    field_directions: ApprovedFieldDirections | None = None
 
 
 def preview_strategy_dataset_context(
@@ -500,6 +506,8 @@ def preview_strategy_dataset_context(
         target_col=resolved_target,
         columns=tuple(columns),
         identity=identity,
+        field_aliases=field_alias_bindings(columns, active.business_names or {}) if active is not None else (),
+        field_directions=active.field_directions if active is not None else None,
     )
 
 
@@ -1016,6 +1024,8 @@ def _resolve_active_workspace_dataset(
         workspace_revision=snapshot.revision,
         analysis_generation=snapshot.analysis_generation,
         semantic_mapping_hash=data_semantic_mapping_hash(snapshot.semantic_mapping),
+        business_names=dict(snapshot.semantic_mapping.business_names),
+        field_directions=approved_field_directions(registry, task_id),
     )
 
 

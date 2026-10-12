@@ -31,6 +31,11 @@ MODEL_EXPERIENCE_REQUIRED_FIELDS = (
     "source_task_id",
     "important_feature_sources",
 )
+MODEL_EXPERIENCE_METRIC_UNITS = {
+    "ks": "fraction", "auc": "fraction", "psi": "index",
+    "head_lift_5pct": "ratio", "tail_lift_5pct": "ratio",
+}
+MODEL_EXPERIENCE_EVALUATION_SPLITS = frozenset({"train", "test", "oot", "valid"})
 FEATURE_EXPERIENCE_REQUIRED_FIELDS = (
     "feature_count",
     "recommended_features",
@@ -106,7 +111,31 @@ def validate_model_experience_payload(payload: dict[str, Any]) -> dict[str, Any]
     if missing:
         joined = ", ".join(missing)
         raise ValueError(f"missing required model_experience fields: {joined}")
+    validate_model_metric_contract(payload)
     return payload
+
+
+def validate_model_metric_contract(payload: dict[str, Any]) -> None:
+    """Optional measured units/split cannot contradict their numeric values."""
+    if "metric_units" in payload:
+        units = payload["metric_units"]
+        if (not isinstance(units, dict) or not units
+                or any(key not in MODEL_EXPERIENCE_METRIC_UNITS or value != MODEL_EXPERIENCE_METRIC_UNITS[key]
+                       for key, value in units.items())):
+            raise ValueError("model_experience metric_units must use the platform metric contract")
+        for metric, unit in units.items():
+            value = payload.get(metric)
+            try:
+                valid = (type(value) in (int, float) and math.isfinite(float(value))
+                         and value >= 0 and (unit != "fraction" or value <= 1))
+            except (OverflowError, ValueError):
+                valid = False
+            if not valid:
+                raise ValueError("model_experience metric value is incompatible with its declared unit")
+    if "evaluation_split" in payload:
+        split = payload["evaluation_split"]
+        if not isinstance(split, str) or split not in MODEL_EXPERIENCE_EVALUATION_SPLITS:
+            raise ValueError("model_experience evaluation_split is unknown")
 
 
 def validate_join_experience_payload(payload: dict[str, Any]) -> dict[str, Any]:

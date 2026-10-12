@@ -343,7 +343,7 @@ def _structured_output(value) -> str:
     return mode if mode in _VALID_STRUCTURED_OUTPUTS else "json_object"
 
 
-_VALID_THINKING_STYLES = ("qwen_chat_template", "openai_reasoning", "anthropic", "none")
+_VALID_THINKING_STYLES = ("qwen_chat_template", "openai_reasoning", "anthropic", "deepseek", "none")
 
 
 def _thinking_style(value) -> str:

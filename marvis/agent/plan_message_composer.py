@@ -230,6 +230,8 @@ class PlanMessageComposer:
             # screen/dedup metadata so auto_drive._extract_red_flags can surface
             # them in the 【平台红旗 checklist】 without re-parsing table strings.
             meta["red_flags"] = rendered.red_flags
+        if rendered.red_flag_evidence:
+            meta["red_flag_evidence"] = rendered.red_flag_evidence
         if rendered.presentation_warnings:
             meta["presentation_warnings"] = rendered.presentation_warnings
         # LT-3 (A.3): the gate's reply adapter declares its adjustable parameters as
@@ -668,6 +670,17 @@ class PlanMessageComposer:
                 if self._latest_failed_step_run_error_kind is not None else None
             )
             reconciliation_required |= requires_effect_reconciliation(affected.error, affected_kind)
+        native_halt = error_kind in {"search_paused", "search_cancelled"}
+        if native_halt:
+            detail = (
+                "策略搜索已暂停。检查点与已完成候选保留，请在工作台点击「继续」。"
+                if error_kind == "search_paused"
+                else "策略搜索已取消。已完成进度保留；再次分析请启动新的搜索。"
+            )
+            meta["workbench_search"] = {
+                "search_id": failed.id if failed else None,
+                "state": "paused" if error_kind == "search_paused" else "cancelled",
+            }
         meta["failure_envelope"] = build_failure_envelope(
             plan_id=plan.id,
             step_id=failed.id if failed else None,
@@ -676,11 +689,21 @@ class PlanMessageComposer:
             step_inputs=failed.inputs if failed and not reconciliation_required else None,
             downstream_reset_steps=reset_steps if not reconciliation_required else (),
             error_kind=error_kind,
-            retryable=failed is not None and not reconciliation_required,
+            retryable=failed is not None and not reconciliation_required and not native_halt,
         ).to_dict()
         if reconciliation_required:
             meta["failure_envelope"]["suggested_actions"] = ["halt"]
         diagnostic = _step_failure_diagnostic(failed, detail, error_kind)
+        if native_halt:
+            diagnostic.update({
+                "code": error_kind,
+                "title": "搜索已暂停" if error_kind == "search_paused" else "搜索已取消",
+                "summary": detail,
+                "actions": ["在工作台继续该搜索。"] if error_kind == "search_paused" else ["启动新的搜索。"],
+                "recovery_actions": [],
+                "retryable": False,
+                "auto_recoverable": False,
+            })
         if reconciliation_required:
             diagnostic.update({
                 "code": "workflow_reconciliation_required",
@@ -700,6 +723,7 @@ class PlanMessageComposer:
             (
                 f"❌ {detail}\n\n已有结果和执行凭据已保留。请先核对动作的实际结果；当前流程暂停，不能直接重跑。"
                 if reconciliation_required
+                else detail if native_halt
                 else f"❌ {detail}\n\n已完成步骤和中间结果均已保留。是否由 Agent 从当前失败步骤继续处理？"
             ),
             meta,

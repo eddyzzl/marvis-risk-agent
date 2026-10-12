@@ -1922,9 +1922,10 @@ def test_agent_plain_chat_question_uses_llm_answer_instead_of_start_guidance(
     assert calls
     assert "PMML" in calls[0]["user_prompt"]
     prompt = json.loads(calls[0]["user_prompt"])
-    assert "task_id" not in prompt["task"]
+    assert "task_id" not in prompt["task_context"]
     assert task_id not in calls[0]["user_prompt"]
-    assert prompt["task"]["model_name"] == "A卡"
+    assert "model_name" not in prompt["task_context"]
+    assert prompt["user_message"] == "可以给我解释一下什么是 PMML 吗"
 
 
 def test_agent_plain_chat_compacts_large_validation_evidence(
@@ -2014,7 +2015,7 @@ def test_agent_plain_chat_compacts_large_validation_evidence(
     assert response.status_code == 202, response.text
     assert calls
     prompt = json.loads(calls[0]["user_prompt"])
-    evidence = prompt["available_evidence"]
+    evidence = prompt["evidence"]
     payload = json.dumps(evidence, ensure_ascii=False)
     assert len(payload) < 16000
     assert "roc_ks_curves" not in payload
@@ -2135,7 +2136,7 @@ def test_agent_chat_prompt_keeps_failed_notebook_cell_file_references(tmp_path):
     assert "失败 cell" in prompt["instructions"]
 
 
-def test_failure_summary_prompt_keeps_failed_notebook_cell_evidence(
+def test_failure_summary_keeps_local_diagnostics_without_sending_notebook_source(
     tmp_path,
     monkeypatch,
 ):
@@ -2181,11 +2182,15 @@ def test_failure_summary_prompt_keeps_failed_notebook_cell_evidence(
     )
 
     assert "model_feature.py" in content
+    assert "本地失败位置" in content
     assert metadata["fallback"] is False
     prompt = json.loads(calls[0]["user_prompt"])
     failure = prompt["evidence"]["notebook_failure"]["failed_cells"][0]
     assert failure["cell_index"] == 2
-    assert failure["referenced_files"] == ["model_feature.py"]
+    assert failure["exception_name"] == "FileNotFoundError"
+    assert prompt["evidence"]["error_kind"] == "FileNotFoundError"
+    assert "model_feature.py" not in calls[0]["user_prompt"]
+    assert "source_preview" not in failure and "referenced_files" not in failure
 
 
 def test_agent_plain_chat_follow_up_uses_same_task_conversation_memory(
@@ -2249,17 +2254,13 @@ def test_agent_plain_chat_follow_up_uses_same_task_conversation_memory(
     assert "conversation" not in follow_up_prompt
     memory = follow_up_prompt["conversation_memory"]
     assert memory["scope"] == "same_agent_task"
-    assert memory["previous_user_question"] == "做模型可复现性验证的必要性是什么"
-    assert "模型可复现性验证的必要性" in memory["previous_assistant_answer"]
-    assert "省略主语" in memory["follow_up_guidance"]
     assert any(
-        message["content"] == "做模型可复现性验证的必要性是什么"
-        for message in memory["messages"]
+        message == {"role": "user", "instruction": "做模型可复现性验证的必要性是什么"}
+        for message in memory["user_turns"]
     )
-    assert any(
-        "模型可复现性验证的必要性" in message["content"]
-        for message in memory["messages"]
-    )
+    assert all(message["role"] == "user" for message in memory["user_turns"])
+    assert "模型可复现性验证的必要性在于确认" not in json.dumps(follow_up_prompt, ensure_ascii=False)
+    assert "省略主语" in follow_up_prompt["instructions"]
     assert "上一轮用户问题" in follow_up_prompt["instructions"]
     assert "承接" in follow_up_prompt["instructions"]
 
@@ -2497,27 +2498,17 @@ def test_agent_chat_question_receives_current_validation_context(
 
     assert response.status_code == 202, response.text
     prompt = json.loads(calls[0]["user_prompt"])
-    assert "task_id" not in prompt["task"]
+    assert "task_id" not in prompt["task_context"]
     assert task_id not in calls[0]["user_prompt"]
-    assert prompt["task"]["model_name"] == "A卡"
+    assert "model_name" not in prompt["task_context"]
     assert "conversation" not in prompt
-    assert any(
-        "A卡" in message["content"]
-        for message in prompt["conversation_memory"]["messages"]
-    )
-    evidence = prompt["available_evidence"]
+    assert all(message["role"] == "user" for message in prompt["conversation_memory"]["user_turns"])
+    evidence = prompt["evidence"]
     assert evidence["validation_results"]["effectiveness"]["overall"][0]["ks"] == 0.321456
-    assert evidence["report_fields"]["metric_values"]["TEXT:oot_ks"] == "0.3215"
-    assert (
-        evidence["report_fields"]["text_values"]["TEXT:final_validation_conclusion"]
-        == REQUIRED_AGENT_CONCLUSIONS["TEXT:final_validation_conclusion"]
-    )
-    assert evidence["visible_stage_summaries"] == [
-        {
-            "stage": "metrics",
-            "content": "效果图显示任务 A卡 的 OOT KS 为 0.3215，PSI 为 0.0123。",
-        }
-    ]
+    assert evidence["validation_results"]["effectiveness"]["overall"][0]["psi_vs_train"] == 0.012345
+    assert "report_fields" not in evidence and "visible_stage_summaries" not in evidence
+    assert REQUIRED_AGENT_CONCLUSIONS["TEXT:final_validation_conclusion"] not in calls[0]["user_prompt"]
+    assert "效果图显示任务" not in calls[0]["user_prompt"]
     assert "PSI 小于 0.10" in calls[0]["system_prompt"]
     assert "KS 0.30" in calls[0]["system_prompt"]
     assert "头部是低风险/好客户" in calls[0]["system_prompt"]
@@ -2742,10 +2733,11 @@ def test_agent_stage_summary_prompt_uses_model_name_not_task_id(
     assert response.status_code == 200, response.text
     assert calls
     prompt = json.loads(calls[0]["user_prompt"])
-    assert "task_id" not in prompt["task"]
     assert task_id not in calls[0]["user_prompt"]
-    assert prompt["task"]["model_name"] == "A卡"
-    assert "模型名称" in prompt["instructions"]
+    assert "task" not in prompt
+    assert prompt["stage"] == "metrics"
+    assert "model_name" not in calls[0]["user_prompt"]
+    assert "当前模型" in prompt["instructions"]
 
 
 def test_agent_question_about_validation_conclusion_does_not_restart_validation(
@@ -3770,9 +3762,9 @@ def test_agent_reproducibility_summary_prompt_excludes_other_stage_evidence(
     assert "PMML 文件" not in prompt_text
     assert "0.3215" not in prompt_text
     assert "0.0123" not in prompt_text
-    assert "不要分析材料完备性" in repro_prompt["instructions"]
-    assert "不要分析 AUC、KS、PSI" in repro_prompt["instructions"]
-    assert "不要给出整体验证结论" in repro_prompt["instructions"]
+    assert "只使用本次摘要与执行状态" in repro_prompt["instructions"]
+    assert "不得扩展为 KS/AUC/PSI" in repro_prompt["instructions"]
+    assert "整体通过或投产判断" in repro_prompt["instructions"]
 
 
 def test_agent_reproducibility_summary_prompt_compacts_large_score_rows(tmp_path):

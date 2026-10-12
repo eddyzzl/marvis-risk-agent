@@ -831,7 +831,7 @@ def test_decide_gate_blocks_adjust_when_gate_has_high_risk_flag():
 
     assert decision["action"] == "halt"
     assert "风险标记:delivery_handoff_requires_human" in decision["reason"]
-    assert "Gate 风险标记" in fake.calls[0]["user_prompt"]
+    assert json.loads(fake.calls[0]["user_prompt"])["gate"]["unrecognized_risk_flag_count"] == 1
 
 
 def test_decide_gate_blocks_confirm_when_gate_has_high_risk_flag():
@@ -978,7 +978,7 @@ def test_decide_gate_blocks_replan_when_gate_declares_wide_reset_scope():
 
     assert decision["action"] == "halt"
     assert "大范围下游重置策略:all" in decision["reason"]
-    assert "下游重置策略" in fake.calls[0]["user_prompt"]
+    assert json.loads(fake.calls[0]["user_prompt"])["gate"]["downstream_reset_policy"] == {"scope": "all"}
 
 
 def test_decide_gate_blocks_confirm_when_gate_declares_wide_reset_scope():
@@ -1042,8 +1042,9 @@ def test_decide_gate_passes_table_context_to_llm():
     ]}}
     decision = decide_gate(fake, gate=gate)
     assert decision["action"] == "confirm"
-    assert "拼接诊断" in fake.calls[0]["user_prompt"]
-    assert "命中率" in fake.calls[0]["user_prompt"]
+    assert json.loads(fake.calls[0]["user_prompt"])["metadata"]["join_diagnostics"] == [
+        {"table_row_index": 1, "match_rate": 1., "low_match_rate": False},
+    ]
 
 
 def test_decide_gate_injects_screen_red_flags_into_prompt():
@@ -1061,11 +1062,10 @@ def test_decide_gate_injects_screen_red_flags_into_prompt():
 
     decide_gate(fake, gate=gate)
 
-    prompt = fake.calls[0]["user_prompt"]
-    assert "平台红旗 checklist" in prompt
-    assert "疑似硬泄漏特征" in prompt
-    assert "可疑模型输出/泄漏特征" in prompt
-    assert "不可用特征" in prompt
+    screen = json.loads(fake.calls[0]["user_prompt"])["metadata"]["screen"]
+    assert screen["leakage"] == [{"feature": "leak_col", "ks": .55}]
+    assert screen["suspected"] == [{"feature": "score_x", "ks": .31}]
+    assert screen["unusable"] == [{"feature": "all_null"}]
 
 
 def test_decide_gate_injects_sample_weight_diagnostics_into_prompt():
@@ -1101,14 +1101,12 @@ def test_decide_gate_injects_sample_weight_diagnostics_into_prompt():
 
     decide_gate(fake, gate=gate)
 
-    prompt = fake.calls[0]["user_prompt"]
-    assert "sample_weight_diagnostic" in prompt
-    assert "feature_count: 9" in prompt
-    assert "n_trials: 12" in prompt
-    assert "split_counts: train=80, test=10, oot=1" in prompt
-    assert "split_warning: OOT 占比低于 5%,稳定性结论需谨慎。" in prompt
-    assert "weight valid" in prompt
-    assert "missing_rate=0.0" in prompt
+    setup = json.loads(fake.calls[0]["user_prompt"])["metadata"]["modeling_setup"]
+    assert setup["feature_count"] == 9 and setup["n_trials"] == 12
+    assert setup["split_summary"]["split_counts"] == {"train": 80, "test": 10, "oot": 1}
+    assert setup["split_summary"]["warning_codes"] == ["small_oot_share"]
+    assert setup["sample_weight_diagnostics"] == [{"column": "weight", "valid": True,
+        "missing_rate": 0., "min": 1., "max": 2., "reason_code": "none"}]
 
 
 def test_decide_gate_injects_join_red_flags_from_tables_into_prompt():
@@ -1129,9 +1127,10 @@ def test_decide_gate_injects_join_red_flags_from_tables_into_prompt():
     decide_gate(fake, gate=gate)
 
     prompt = fake.calls[0]["user_prompt"]
-    assert "命中率偏低(10.00%)" in prompt
-    assert "存在拼接膨胀风险" in prompt
-    assert "存在同键冲突去重风险" in prompt
+    assert "features.parquet" not in prompt
+    assert json.loads(prompt)["metadata"]["join_diagnostics"] == [{"table_row_index": 1,
+        "match_rate": .1, "low_match_rate": True, "row_inflation": True,
+        "safe_key_count": 0, "conflict_key_count": 3}]
 
 
 def test_decide_gate_omits_red_flag_section_for_clean_gate():
@@ -1155,22 +1154,23 @@ def test_decide_gate_injects_deterministic_modeling_red_flags_from_meta():
     directly into the 【平台红旗 checklist】, ahead of the legacy table-string
     parsing."""
     fake = _FakeLLM()
+    from marvis.agent.modeling_red_flags import render_risk_evidence, select_experiment_risk_evidence
+    risk_evidence = select_experiment_risk_evidence(
+        tune_output={"trials": [{"train_ks": .5, "test_ks": .35}]},
+        train_models_output={"failed": [{"recipe": "catboost"}]},
+    )
     gate = {
         "content": "已训练并对比候选实验",
         "metadata": {
-            "red_flags": [
-                "调参 trial 中最大 train-test KS 差为 0.150(> 0.10),存在过拟合迹象。",
-                "训练阶段有 1 个候选算法失败(catboost),对比范围不完整。",
-            ],
+            "red_flags": render_risk_evidence(risk_evidence),
+            "red_flag_evidence": risk_evidence,
         },
     }
 
     decide_gate(fake, gate=gate)
 
     prompt = fake.calls[0]["user_prompt"]
-    assert "平台红旗 checklist" in prompt
-    assert "存在过拟合迹象" in prompt
-    assert "候选算法失败" in prompt
+    assert json.loads(prompt)["metadata"]["red_flag_evidence"] == risk_evidence
 
 
 def test_decide_gate_retries_once_after_unparseable_reply():
@@ -1507,23 +1507,11 @@ def test_agent_autodrive_stale_gate_token_is_rejected_before_reaching_driver(mon
     assert calls[0]["expected_step_id"] != "gate-1"
 
 
-# -- LT-2: GAP-4 compact-dictionary context does not weaken existing AUTO
-# safety-boundary assertions (harden-only: this only ADDS a fixture combining
-# GAP-4's data-dictionary block with the pre-existing high-risk-flag /
-# undeclared-adjust-param blocking assertions; it does not relax any existing
-# assertion). -------------------------------------------------------------
+# -- Local dictionary prose is withheld; existing AUTO safety still applies. --
 
 
-def test_decide_gate_blocks_high_risk_confirm_even_with_dictionary_context_injected():
-    """GAP-4 added a '【数据字典(列=业务含义,只读参照)】' block to the gate prompt
-    (auto_drive._dictionary_context_lines, read from screen.dictionary /
-    dedup.dictionary) after the high-risk-flag blocking behaviour
-    (test_decide_gate_blocks_confirm_when_gate_has_high_risk_flag) was already
-    covered. No existing test exercises both together. This locks that the
-    dictionary block is truly only-read reference text: a gate that carries
-    BOTH a data dictionary and a high_risk_flag risk marker still gets its bare
-    confirm downgraded to halt, and the dictionary content actually reaches the
-    prompt (proving this fixture isn't accidentally a no-op)."""
+def test_decide_gate_blocks_high_risk_confirm_when_dictionary_prose_is_withheld():
+    """Withholding local dictionary prose must retain the risk-based halt."""
     fake = _FakeLLM(action="confirm", reason="拼接结果正常，继续")
     gate = {
         "content": "请确认拼接去重结果",
@@ -1546,16 +1534,13 @@ def test_decide_gate_blocks_high_risk_confirm_even_with_dictionary_context_injec
     assert decision["action"] == "halt"
     assert "irreversible_dedup_merge" in decision["reason"]
     prompt = fake.calls[0]["user_prompt"]
-    assert "数据字典" in prompt
-    assert "phone_md5=手机号MD5" in prompt
+    assert "手机号MD5" not in prompt
+    assert "近3个月非银机构数" not in prompt
+    assert json.loads(prompt)["gate"]["risk_flags"] == ["irreversible_dedup_merge"]
 
 
-def test_decide_gate_blocks_undeclared_adjust_params_even_with_dictionary_context_injected():
-    """Same harden-only check as above, against the OTHER existing AUTO
-    safety-boundary family (test_decide_gate_blocks_undeclared_auto_adjust_params):
-    an AUTO adjust naming a param the gate never declared as a control is still
-    downgraded to halt when the gate prompt also carries GAP-4's dictionary
-    block (screen.dictionary)."""
+def test_decide_gate_blocks_undeclared_adjust_when_dictionary_prose_is_withheld():
+    """The typed control boundary still blocks an undeclared parameter."""
     fake = _FakeLLM(action="adjust", reason="业务含义提示我应该放宽阈值")
     fake._payload = json.dumps({
         "action": "adjust",
@@ -1585,8 +1570,8 @@ def test_decide_gate_blocks_undeclared_adjust_params_even_with_dictionary_contex
     assert decision["action"] == "halt"
     assert "未声明的调整参数:n_trials" in decision["reason"]
     prompt = fake.calls[0]["user_prompt"]
-    assert "数据字典" in prompt
-    assert "als_m3_id_nbank_orgnum=近3个月非银机构数" in prompt
+    assert "近3个月非银机构数" not in prompt
+    assert json.loads(prompt)["gate"]["controls"] == []
 
 
 # -- LT-11 (B.3): AUTO decisions are explainable ------------------------------

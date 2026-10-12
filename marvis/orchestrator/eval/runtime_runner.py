@@ -51,6 +51,29 @@ class RuntimeJourneyError(RuntimeError):
     pass
 
 
+def _prior_failure_code(value):
+    """Retain fixed platform codes without copying exception prose."""
+    if value is None:
+        return None
+    known = {
+        "operator_interrupt", "wall_or_call_budget", "source_changed_since_manifest",
+        "application_startup_failed", "owned_process_cleanup_incomplete",
+        "isolated_model_profile_changed", "cost_budget_requires_frozen_price_book",
+        "cost_budget_price_book_mismatch", "missing_explicit_model_credential",
+        "measurement_persistence_failed", "material_identity_mismatch",
+        "validation_upload_binding_mismatch", "validation_start_not_declared",
+        "validation_start_requires_no_existing_plan", "validation_workflow_contract_changed",
+        "native_plan_after_unavailable", "no_prior_approval_to_replay",
+        "strategy_sample_binding_not_unique", "strategy_sample_binding_wrong_owner",
+        "strategy_sample_binding_target_mismatch", "recommended_selection_wrong_gate",
+        "declared_action_has_no_unique_current_step", "recommended_selection_missing_display",
+        "recommended_selection_stale_display", "recommended_selection_not_unique",
+        "ValueError", "TypeError", "KeyError", "AttributeError", "OSError",
+        "RuntimeError", "PermissionError", "FileNotFoundError", "ConnectionError",
+    }
+    return value if isinstance(value, str) and value in known else "runtime_error_code_unavailable"
+
+
 def _write_new(path: Path, payload) -> None:
     with path.open("x", encoding="utf-8") as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
@@ -628,6 +651,10 @@ def _model_gateway(
         for key, value in profile.items()
         if key not in {"api_key", "api_key_env"}
     }
+    # Routing through the metering proxy must preserve the upstream provider's
+    # mode contract. The child URL alone deliberately names only loopback.
+    if endpoint.hostname == "api.deepseek.com" and profile["model_name"].lower().startswith("deepseek"):
+        child_profile["thinking_style"] = "deepseek"
     child_profile.update(
         api_base_url=f"http://127.0.0.1:{server.server_port}/v1",
         api_key=token,
@@ -852,6 +879,7 @@ class Journey:
         self.origin_ns = time.monotonic_ns() if origin_ns is None else origin_ns
         self.human_actions = []
         self.uploaded_samples: list[dict] = []
+        self.uploaded_materials: list[dict] = []
 
     def record_human_action(self, action, *, phase="dispatch"):
         from .runtime_process import material_selection_identity
@@ -873,7 +901,8 @@ class Journey:
             raise RuntimeBudgetExceeded("runtime HTTP or wall budget exhausted")
         self.count += 1
         started = time.monotonic()
-        event = {"ordinal": self.count, "stage": label, "method": method}
+        event = {"ordinal": self.count, "stage": label, "method": method,
+                 "started_elapsed_ns": time.monotonic_ns() - self.origin_ns}
         try:
             response = self.client.request(
                 method, path, timeout=max(0.01, self.deadline - started), **kwargs
@@ -882,6 +911,7 @@ class Journey:
             return response
         finally:
             event["duration_ms"] = int((time.monotonic() - started) * 1000)
+            event["finished_elapsed_ns"] = time.monotonic_ns() - self.origin_ns
             self.events.append(event)
 
     def json_request(self, method, path, *, label, **kwargs):
@@ -933,13 +963,16 @@ class Journey:
             time.sleep(min(delay, remaining))
 
     def run(self, dataset_root: Path, workspace: Path):
+        self.workspace = workspace
         if self.case.task.task_type == "validation":
             self.prepare_validation_task(dataset_root, workspace)
         else:
             source = workspace / "source"
             source.mkdir()
+            extension_entry = bool(self.case.initial_message is None and self.case.actions
+                                   and self.case.actions[0].kind == "submit_extension_request")
             body = self.case.task.model_dump(exclude_none=True)
-            body.update(source_dir=str(source), run_mode="agent")
+            body.update(source_dir=str(source), run_mode="manual" if extension_entry else "agent")
             task = self.json_request("POST", "/api/tasks", label="create_task", json=body)
             self.task_id = task["id"]
             from .runtime_monitoring import monitoring_materials
@@ -971,13 +1004,14 @@ class Journey:
                     )
                     if material.role == "sample":
                         self.uploaded_samples.extend(uploaded["datasets"])
+                    self.uploaded_materials.append({"datasets": uploaded["datasets"], "material_path": material.path, "material_sha256": material.sha256})
             payload = {"acceptance_mode": self.case.acceptance_mode}
             route = "start"
             if self.case.initial_message is not None:
                 route = "messages"
                 payload["content"] = self.case.initial_message
             labeling_entry = bool(self.case.actions and self.case.actions[0].kind == "submit_labeling_request")
-            if not labeling_entry:
+            if not labeling_entry and not extension_entry:
                 self.json_request(
                     "POST",
                     f"/api/tasks/{self.task_id}/agent/{route}",
@@ -985,8 +1019,15 @@ class Journey:
                     json=payload,
                 )
                 self.wait_idle()
-        for action in self.case.actions:
-            if action.kind in {"submit_model_monitoring_request", "start_model_monitoring_workflow"}:
+        for action_index, action in enumerate(self.case.actions, 1):
+            self.current_action_index = action_index
+            if action.kind == "submit_extension_request":
+                from .runtime_extensions import submit_extension
+                submit_extension(self, action, workspace)
+            elif action.kind == "start_extension_workflow":
+                from .runtime_extensions import start_extension_workflow
+                start_extension_workflow(self, action)
+            elif action.kind in {"submit_model_monitoring_request", "start_model_monitoring_workflow"}:
                 from .runtime_monitoring import start_monitoring
                 start_monitoring(self, action, dataset_root)
             elif action.kind == "confirm_model_monitoring_plan":
@@ -1033,7 +1074,13 @@ class Journey:
                 self.select_recommended_experiment(action)
             elif action.kind == "bind_single_strategy_sample":
                 self.bind_single_strategy_sample(action)
+            elif action.kind == "recover_governed_decision":
+                from .runtime_fault_capture import recover_fault
+                recover_fault(self, action, workspace)
             elif action.kind in {"approve_step", "reject_step", "retry_step"}:
+                from .runtime_extensions import extension_step_decision
+                if extension_step_decision(self, action):
+                    continue
                 plans = self.plans()
                 match = [
                     (p, s)
@@ -1060,15 +1107,29 @@ class Journey:
                         "reason": action.content,
                         **step["confirmation_snapshot"],
                     }
+                    from .runtime_fault_capture import dispatch_fault
+                    if dispatch_fault(self, action, workspace, plan, step, approval):
+                        continue
                     route = prefix + "/decisions"
                     if action.kind == "approve_step":
                         self.approval = (route, approval)
-                    self.json_request(
+                    response = self.json_request(
                         "POST", route,
                         label="human_approval" if action.kind == "approve_step" else "human_rejection",
                         json=approval,
                     )
-                    self.wait_idle(changed_step=step["id"])
+                    capture = {"tool": action.tool, "actor": None, "request": approval,
+                               "response": response, "http_ordinal": self.count,
+                               "case_action_index": self.current_action_index,
+                               "action_sha256": digest(action.model_dump()), "plan_before": plan}
+                    decisions = getattr(self, "human_decisions", [])
+                    decisions.append(capture)
+                    self.human_decisions = decisions
+                    after = self.wait_idle(changed_step=step["id"])
+                    matches = [item for item in after if item["id"] == plan["id"]]
+                    if len(matches) != 1:
+                        raise RuntimeJourneyError("native_plan_after_unavailable")
+                    capture["plan_after"] = matches[0]
                 else:
                     self.json_request(
                         "POST", prefix + "/retry", label="human_retry", json={}
@@ -1078,6 +1139,12 @@ class Journey:
                 if self.approval is None:
                     raise RuntimeJourneyError("no_prior_approval_to_replay")
                 self.record_human_action(action)
+                if getattr(self, "extension_approval_actor", None):
+                    from .runtime_extensions import actor_session
+                    with actor_session(self, self.extension_approval_actor):
+                        self.request("POST", self.approval[0], label="stale_approval_probe", json=self.approval[1])
+                    self.wait_idle()
+                    continue
                 self.request(
                     "POST",
                     self.approval[0],
@@ -1254,10 +1321,13 @@ class Journey:
         private expected file or by ranking metrics inside the benchmark.
         """
         if (
-            action.tool != "modeling.select_experiment"
+            action.kind != "select_recommended_experiment"
+            or action.tool != "modeling.select_experiment"
             or self.case.task.task_type != "modeling"
         ):
             raise RuntimeJourneyError("recommended_selection_wrong_gate")
+        if action.refit_on_train_plus_test is not None and type(action.refit_on_train_plus_test) is not bool:
+            raise RuntimeJourneyError("recommended_selection_invalid_refit_policy")
         matches = [
             (p, s)
             for p in self.plans()
@@ -1324,6 +1394,8 @@ class Journey:
             "expected_step_id": step["id"],
             **snapshot,
         }
+        if action.refit_on_train_plus_test is not None:
+            body["adjust_params"]["refit_on_train_plus_test"] = action.refit_on_train_plus_test
         route = f"/api/tasks/{self.task_id}/agent/messages"
         self.record_human_action(action)
         self.json_request("POST", route, label="human_recommended_selection", json=body)
@@ -1622,6 +1694,7 @@ def _run_case(
     workspace = None
     private = {"outputs": {}, "messages": []}
     process_state = {"started": False, "stopped": False}
+    safety_before_dir = None
     custody_seconds = 0
     with tempfile.TemporaryDirectory(prefix="marvis-runtime-case-") as tmp:
         root = Path(tmp)
@@ -1639,6 +1712,10 @@ def _run_case(
                 origin_ns=origin_ns,
             ) as (client, workspace, deadline):
                 journey = Journey(client, case, deadline, origin_ns=origin_ns)
+                if custody_run_dir is not None:
+                    from .runtime_safety_capture import capture_runtime_before
+                    safety_before_dir = (root / "safety-before").resolve()
+                    record["safety_before"] = capture_runtime_before(safety_before_dir, workspace.resolve(), case, deadline=deadline, origin_ns=origin_ns)
                 try:
                     journey.run(dataset_root, workspace)
                 except BaseException:
@@ -1682,6 +1759,19 @@ def _run_case(
                 workspace, journey.task_id if journey else None, case=case, journey=journey,
             )
             record["execution"] = evidence
+            if journey is not None:
+                for key in ("human_decisions", "runtime_faults"):
+                    if getattr(journey, key, None):
+                        private[key] = getattr(journey, key)
+            if journey is not None and getattr(journey, "extension_outputs", None):
+                private["extension_outputs"] = journey.extension_outputs
+                private["extension_decisions"] = getattr(journey, "extension_decisions", [])
+                from .runtime_extension_observations import observe_extensions
+                evidence["extension_observation"], private["extension_values"] = observe_extensions(
+                    workspace, journey.task_id, journey.extension_outputs,
+                    execution=evidence, bound_outputs=private["outputs"],
+                    decisions=private["extension_decisions"], http_events=journey.events,
+                )
         except Exception as exc:
             record["receipt_error"] = type(exc).__name__
             record["runtime_status"] = "receipt_error"
@@ -1700,6 +1790,7 @@ def _run_case(
                     bindings={**(custody_bindings or {}), "execution_before_scoring": record},
                     owned_processes_stopped=process_state["stopped"],
                     forbidden_secrets=tuple(secret_env.values()) + (profile.get("api_key", ""),),
+                    before_dir=safety_before_dir if record.get("safety_before", {}).get("status") == "captured" else None,
                 )
             except KeyboardInterrupt:
                 record["evidence_custody"] = {
@@ -1713,6 +1804,8 @@ def _run_case(
                     "acceptance_claim": "not_established",
                 }
                 record["runtime_status_before_custody_failure"] = record["runtime_status"]
+                record["prior_error_code"] = _prior_failure_code(record.get("error_code"))
+                record["secondary_error_code"] = record["evidence_custody"]["error_code"]
                 record.update(runtime_status="receipt_error", error_code="evidence_custody_failed")
             finally:
                 custody_seconds = time.monotonic() - custody_started

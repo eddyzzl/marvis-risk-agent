@@ -39,6 +39,8 @@ def test_model_experience_payload_fills_missing_model_version_and_keeps_zero_psi
     assert candidate is not None
     assert candidate.payload["model_version"] == "未标注"
     assert candidate.payload["psi"] == 0.0
+    assert candidate.payload["evaluation_split"] == "train"
+    assert candidate.payload["metric_units"] == {"ks": "fraction", "auc": "fraction", "psi": "index"}
 
 
 def test_model_experience_payload_infers_channel_and_lifts_from_results():
@@ -82,6 +84,17 @@ def test_model_experience_payload_infers_channel_and_lifts_from_results():
     assert payload["head_lift_5pct"] == 0.20
     assert candidate is not None
     assert "过拟合检查未通过" in candidate.summary
+    assert candidate.payload["evaluation_split"] == "oot"
+    assert candidate.payload["metric_units"]["head_lift_5pct"] == "ratio"
+
+
+def test_model_experience_does_not_label_an_unknown_split_as_oot():
+    task = SimpleNamespace(id="source", model_name="A卡", model_version="v1")
+    payload = _memory_model_experience_payload(task=task, results={
+        "effectiveness": {"overall": [{"split": "historical_private_label", "ks": .2, "auc": .6, "psi_vs_train": .1}]},
+    })
+    assert "evaluation_split" not in payload
+    assert payload["metrics"]["ks"] == .2
 
 
 def test_v2_metrics_stage_captures_agent_memory_after_success():

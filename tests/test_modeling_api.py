@@ -1089,8 +1089,25 @@ def test_modeling_business_materials_flow_into_report_and_delivery(client: TestC
 
     report_output = client.app.state.plan_repo.load_step_output(report_step.id)
     statuses = {item["section"]: item for item in report_output["section_status"]}
-    assert set(statuses) == {"sample_analysis", "vintage", "amount_bin", "low_pricing", "product_list"}
+    assert set(statuses) == {
+        "sample_analysis", "vintage", "amount_bin", "low_pricing", "product_list",
+        "development_refit_scope",
+    }
     assert all(item["available"] for item in statuses.values())
+    refit_scope = report_output["development_refit_scope"]
+    assert "原 test 已参与拟合" in refit_scope["final_fit_scope"]
+    assert refit_scope["parent_selection_experiment_id"] != refit_scope["final_experiment_id"]
+    split_rows = {row["split"]: row for row in report_output["dataset_split"]}
+    assert split_rows["development_train_plus_test"]["purpose"] == "fit_diagnostic_not_independent_validation"
+    assert split_rows["pre_refit_test"]["experiment_id"] == refit_scope["parent_selection_experiment_id"]
+    parent = ModelingRepository(client.app.state.settings.db_path).get_experiment(
+        refit_scope["parent_selection_experiment_id"]
+    )
+    assert split_rows["pre_refit_test"]["ks"] == parent.metrics.test_ks
+    assert split_rows["pre_refit_test"]["purpose"] == "parent_heldout_selection_before_refit"
+    assert split_rows["final_independent_test"]["ks"] is None
+    assert split_rows["final_independent_test"]["auc"] is None
+    assert split_rows["final_independent_test"]["purpose"] == "unavailable_original_test_consumed_in_fit"
     workbook = load_workbook(report_output["report_path"])
     for sheet_name in ["汇总", "样本分析", "Vintage", "评分分段", "特征重要性", "压力测试"]:
         assert sheet_name in workbook.sheetnames
@@ -2038,18 +2055,45 @@ def test_modeling_agent_first_turn_binds_all_llm_decided_multiclass_controls(
         "lr_multiclass",
         "mlp_multiclass",
     ]
+    intake_params = {
+        "target_type": "multiclass",
+        "recipes": recipes,
+        "split_config": {"test_size": 0.25},
+        "n_trials": 1,
+    }
 
     class _IntakeLLM:
-        def complete(self, **_kwargs):
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, **kwargs):
+            schema_name = kwargs["json_schema"]["name"]
+            payload = json.loads(kwargs["user_prompt"])
+            self.calls.append((schema_name, payload))
+            assert payload["gate_context"]["purpose"] == "create_workflow_plan"
+            assert payload["gate_context"]["binding"]["workflow_family"] == "modeling"
+            if schema_name == "gate_semantic_authorization_review":
+                # Initial configuration extraction is independently reviewed
+                # as permission to create a plan, not to execute its Tools.
+                assert payload["proposed_params"] == intake_params
+                return json.dumps({
+                    "verdict": "authorize",
+                    "evidence_quote": "请用当前单个 CSV 做三分类建模",
+                    "reason": "用户无条件要求创建当前工作流计划并给出初始规格",
+                    "confidence": "high",
+                    "is_question": False,
+                    "is_conditional": False,
+                    "requests_change": False,
+                    "withholds_authorization": False,
+                }, ensure_ascii=False)
+            assert schema_name == "gate_instruction_route"
+            assert {row["name"] for row in payload["param_schema"]} == {
+                "target_type", "recipes", "split_config", "n_trials", "sample_weight_col",
+            }
             return json.dumps(
                 {
                     "action": "adjust",
-                    "params": {
-                        "target_type": "multiclass",
-                        "recipes": recipes,
-                        "split_config": {"test_size": 0.25},
-                        "n_trials": 1,
-                    },
+                    "params": intake_params,
                     "constraint": "",
                     "reason": "用户明确指定多分类、四种算法、无 OOT 与单轮调参",
                     "confidence": "high",
@@ -2103,7 +2147,11 @@ def test_modeling_agent_first_turn_binds_all_llm_decided_multiclass_controls(
     )
 
     assert response.status_code == 202, response.text
-    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans, _last_assistant(response.json()["messages"])
+    plan = plans[-1]
+    assert sum(name == "gate_semantic_authorization_review" for name, _ in intake_llm.calls) == 1
+    assert any(name == "gate_instruction_route" for name, _ in intake_llm.calls)
     split_step = next(step for step in plan.steps if step.title == "切分样本")
     spec_step = next(step for step in plan.steps if step.title == "选择建模规格")
     assert split_step.inputs["target_col"] == "risk_band_target"
@@ -2604,3 +2652,207 @@ def test_modeling_honors_per_task_capability_tier(client: TestClient, tmp_path: 
     client.post(f"/api/tasks/{default_id}/agent/start", json={})
     default_plans = client.app.state.plan_repo.list_plans_for_task(default_id)
     assert default_plans and default_plans[0].tier == "balanced"
+
+
+@pytest.mark.parametrize("column", ["split", "cohort"])
+def test_modeling_intake_existing_descriptor_reaches_real_split_with_exact_oot_membership(client, tmp_path, monkeypatch, column):
+    from tests.test_modeling_existing_split_contract import _frame
+
+    src = tmp_path / "existing_intake"
+    src.mkdir()
+    source = _frame(column)
+    source.to_parquet(src / "sample.parquet", index=False)
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.data_context._modeling_intake_params",
+        lambda *_args: {"split_config": {"method": "existing"}},
+    )
+    task_id = client.post("/api/tasks", json={
+        "model_name": "现有划分", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "target_col": "y",
+        "split_col": column, "recipes": ["lr"],
+    }).json()["id"]
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans, response.json()
+    split_step = next(step for step in plans[-1].steps if step.tool_ref and step.tool_ref.tool == "make_split")
+    assert split_step.inputs["split_config"] == {"method": "existing"}
+    assert split_step.inputs["split_col"] == column
+    response = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert response.status_code == 202, response.text
+    output = client.app.state.plan_repo.load_step_output(split_step.id)
+    assert output and output["sample_analysis"]["split_counts"] == {"train": 360, "test": 120, "oot": 120}
+    backend = DataBackend(client.app.state.settings.datasets_dir)
+    registry = DatasetRegistry(DatasetRepository(client.app.state.settings.db_path), backend, client.app.state.settings.datasets_dir)
+    derived = backend.read_frame(registry.resolve_path(output["result_dataset_id"]))
+    pd.testing.assert_frame_equal(derived[source.columns], source)
+
+
+@pytest.mark.parametrize("config,source_variant", [
+    ({"oot_by_time": True}, "normal"),
+    ({"oot_by_time": "True"}, "normal"),
+    ({"method": "invented"}, "normal"),
+    ({"method": "existing", "test_size": .3}, "normal"),
+    ({"method": "existing"}, "missing"),
+    ({"method": "existing"}, "unknown"),
+])
+def test_modeling_invalid_intake_split_clarifies_without_plan_or_native_execution(client, tmp_path, monkeypatch, config, source_variant):
+    from tests.test_modeling_existing_split_contract import _frame
+    from marvis.db import PluginRepository
+
+    src = tmp_path / "invalid_intake"
+    src.mkdir()
+    source = _frame()
+    if source_variant == "missing":
+        source = source.drop(columns="split")
+    elif source_variant == "unknown":
+        source.loc[0, "split"] = "unclassified"
+    source.to_parquet(src / "sample.parquet", index=False)
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.data_context._modeling_intake_params",
+        lambda *_args: {"split_config": config},
+    )
+    task_id = client.post("/api/tasks", json={
+        "model_name": "澄清划分", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "target_col": "y", "recipes": ["lr"],
+    }).json()["id"]
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    assert _last_assistant(response.json()["messages"])["metadata"]["error"] is True
+    assert PluginRepository(client.app.state.settings.db_path).list_audit(kind="tool.invoke") == []
+    backend = DataBackend(client.app.state.settings.datasets_dir)
+    registry = DatasetRegistry(DatasetRepository(client.app.state.settings.db_path), backend, client.app.state.settings.datasets_dir)
+    assert not [dataset for dataset in registry.list_for_task(task_id) if dataset.role == "derived"]
+
+
+def test_modeling_intake_unknown_field_binding_does_not_echo_provider_value(client, tmp_path, monkeypatch):
+    from tests.test_modeling_existing_split_contract import _frame
+
+    src = tmp_path / "unknown_provider_binding"
+    src.mkdir()
+    _frame().to_parquet(src / "sample.parquet", index=False)
+    marker = "PROVIDER_UNBOUND_COLUMN_KEEP_PRIVATE"
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.data_context._modeling_intake_params",
+        lambda *_args: {"split_config": {"group_cols": [marker], "test_size": .25}},
+    )
+    task_id = client.post("/api/tasks", json={
+        "model_name": "未知字段澄清", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "target_col": "y", "recipes": ["lr"],
+    }).json()["id"]
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    assert marker not in response.text
+
+
+@pytest.mark.parametrize("source_split", [True, False])
+def test_modeling_explicit_missing_partition_binding_cannot_fall_back_to_auto(client, tmp_path, source_split):
+    from tests.test_modeling_existing_split_contract import _frame
+    from marvis.db import PluginRepository
+
+    src = tmp_path / "configured_missing"
+    src.mkdir()
+    source = _frame()
+    if not source_split:
+        source = source.drop(columns="split")
+    source.to_parquet(src / "sample.parquet", index=False)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "明确绑定缺失列", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "target_col": "y",
+        "split_col": "missing_cohort", "recipes": ["lr"],
+    }).json()["id"]
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    assert _last_assistant(response.json()["messages"])["metadata"]["error"] is True
+    backend = DataBackend(client.app.state.settings.datasets_dir)
+    registry = DatasetRegistry(DatasetRepository(client.app.state.settings.db_path), backend, client.app.state.settings.datasets_dir)
+    assert not [dataset for dataset in registry.list_for_task(task_id) if dataset.role == "derived"]
+    assert PluginRepository(client.app.state.settings.db_path).list_audit(kind="tool.invoke") == []
+
+
+def test_modeling_omitted_partition_binding_preserves_auto_on_source_without_split(client, tmp_path):
+    from tests.test_modeling_existing_split_contract import _frame
+
+    src = tmp_path / "omitted_auto"
+    src.mkdir()
+    _frame().drop(columns="split").to_parquet(src / "sample.parquet", index=False)
+    created = client.post("/api/tasks", json={
+        "model_name": "自动划分", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "target_col": "y", "recipes": ["lr"],
+    })
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    assert TaskRepository(client.app.state.settings.db_path).get_task(task_id).split_col == ""
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans, response.json()
+    split_step = next(step for step in plans[-1].steps if step.tool_ref and step.tool_ref.tool == "make_split")
+    response = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert response.status_code == 202
+    output = client.app.state.plan_repo.load_step_output(split_step.id)
+    assert output["sample_analysis"]["split_counts"] == {"train": 450, "test": 150}
+    assert output["holdout_values"] == []
+
+
+def test_modeling_omitted_partition_binding_retains_nondefault_string_source_members(client, tmp_path):
+    from tests.test_modeling_existing_split_contract import _frame
+
+    src = tmp_path / "omitted_cohort"
+    src.mkdir()
+    source = _frame("cohort", ("Development", "holdout", "time_oot"))
+    source["cohort"] = source["cohort"].astype("str")
+    source.to_parquet(src / "sample.parquet", index=False)
+    created = client.post("/api/tasks", json={
+        "model_name": "保留非默认分区", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "target_col": "y", "recipes": ["lr"],
+    })
+    task_id = created.json()["id"]
+    assert TaskRepository(client.app.state.settings.db_path).get_task(task_id).split_col == ""
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans, response.json()
+    split_step = next(step for step in plans[-1].steps if step.tool_ref and step.tool_ref.tool == "make_split")
+    assert split_step.inputs["split_col"] == "cohort"
+    assert split_step.inputs["split_config"] == {}
+    response = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert response.status_code == 202, response.text
+    output = client.app.state.plan_repo.load_step_output(split_step.id)
+    assert output["sample_analysis"]["split_counts"] == {"Development": 360, "holdout": 120, "time_oot": 120}
+    assert output["split_values"] == {"train": "Development", "test": "holdout", "oot": "time_oot"}
+    assert output["holdout_values"] == ["time_oot"]
+    backend = DataBackend(client.app.state.settings.datasets_dir)
+    registry = DatasetRegistry(DatasetRepository(client.app.state.settings.db_path), backend, client.app.state.settings.datasets_dir)
+    derived = backend.read_frame(registry.resolve_path(output["result_dataset_id"]))
+    pd.testing.assert_frame_equal(derived[source.columns], source)
+
+
+@pytest.mark.parametrize("variant", ["multiple", "unknown", "null"])
+def test_modeling_omitted_suspicious_partition_clarifies_without_native_effect(client, tmp_path, variant):
+    from tests.test_modeling_existing_split_contract import _frame
+    from marvis.db import PluginRepository
+
+    src = tmp_path / "omitted_ambiguous"
+    src.mkdir()
+    source = _frame("cohort", ("Development", "holdout", "time_oot"))
+    if variant == "multiple":
+        source["alternative"] = source.cohort.iloc[::-1].to_numpy()
+    else:
+        source.loc[599, "cohort"] = None if variant == "null" else "future"
+    source.to_parquet(src / "sample.parquet", index=False)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "澄清非默认分区", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "target_col": "y", "recipes": ["lr"],
+    }).json()["id"]
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202
+    assert client.app.state.plan_repo.list_plans_for_task(task_id) == []
+    assert _last_assistant(response.json()["messages"])["metadata"]["error"] is True
+    backend = DataBackend(client.app.state.settings.datasets_dir)
+    registry = DatasetRegistry(DatasetRepository(client.app.state.settings.db_path), backend, client.app.state.settings.datasets_dir)
+    assert not [dataset for dataset in registry.list_for_task(task_id) if dataset.role == "derived"]
+    assert PluginRepository(client.app.state.settings.db_path).list_audit(kind="tool.invoke") == []

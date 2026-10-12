@@ -137,7 +137,12 @@ def test_draft_distill_learning_tool_persists_note(monkeypatch, tmp_path):
             pass
 
         def complete(self, **_kwargs):
-            return "1. Use WOE bins.\n2. Validate PSI drift before promotion."
+            return '{"note":"1. Use WOE bins. 2. Validate PSI drift before promotion."}'
+
+    from marvis.llm_outbound_learning import _fetched_public_source
+
+    monkeypatch.setattr(tools, "fetch_public_learning_source", lambda url: _fetched_public_source(
+        url, url, b"WOE and PSI implementation notes", "WOE and PSI implementation notes"))
 
     monkeypatch.setattr(tools, "resolve_llm_model", lambda _workspace, _model_id=None: {"model_id": "m1"})
     monkeypatch.setattr(tools, "OpenAICompatibleLLMClient", FakeClient)
@@ -163,6 +168,9 @@ def test_draft_distill_learning_tool_persists_note(monkeypatch, tmp_path):
     audit = PluginRepository(build_settings(tmp_path).db_path).list_audit(kind="draft.learning_note.create")[0]
     assert audit["target_ref"] == note.id
     assert audit["detail"]["source_count"] == 1
+    assert audit["detail"]["public_sources"][0]["requested_url"] == note.sources[0]
+    assert len(audit["detail"]["public_sources"][0]["wire_sha256"]) == 64
+    assert "WOE and PSI implementation notes" not in str(audit["detail"]["public_sources"])
 
 
 def test_draft_script_tool_persists_generated_draft(monkeypatch, tmp_path):

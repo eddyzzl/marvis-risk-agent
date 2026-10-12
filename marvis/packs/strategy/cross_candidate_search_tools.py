@@ -226,9 +226,12 @@ def run_search_cross_matrix_candidates(inputs, ctx, runtime) -> dict[str, Any]:
         )
         for item in features
     }
-    trials: list[dict[str, Any]] = []
-    first_asset: dict[str, Any] | None = None
-    for x_feature, y_feature in pairs:
+    from marvis.strategy_workbench.control import NativeSearchControl, frame_fingerprint
+    control = NativeSearchControl(runtime, ctx, dict(inputs))
+    control.bind_search({'frame': frame_fingerprint(labeled), 'source': evidence['evidence_hash']})
+    trials: list[dict[str, Any]] = list(control.saved)
+    control.boundary(trials, len(pairs))
+    for x_feature, y_feature in pairs[len(trials):]:
         row_axis = axes[x_feature]
         column_axis = axes[y_feature]
         measurement = _measure_matrix(
@@ -261,8 +264,6 @@ def run_search_cross_matrix_candidates(inputs, ctx, runtime) -> dict[str, Any]:
             raise StrategyError(
                 "Cross search pair asset does not rebuild against exact evidence"
             )
-        if first_asset is None:
-            first_asset = asset
         cell_counts = [
             int(item["effect"]["count"]) for item in asset["matrix"]["cells"]
         ]
@@ -278,7 +279,8 @@ def run_search_cross_matrix_candidates(inputs, ctx, runtime) -> dict[str, Any]:
                 "asset_fingerprint": asset_fingerprint(asset),
             }
         )
-    if first_asset is None:
+        control.boundary(trials, len(pairs))
+    if not trials:
         raise StrategyError("Cross search did not evaluate any feature pair")
     core_request = {
         "schema_version": CROSS_CANDIDATE_SEARCH_REQUEST_SCHEMA_VERSION,
@@ -305,7 +307,8 @@ def run_search_cross_matrix_candidates(inputs, ctx, runtime) -> dict[str, Any]:
         runtime,
         sample_binding,
     )
-    return _persist_search(
+    control.publishing()
+    output = _persist_search(
         runtime,
         task_id=task_id,
         source=source,
@@ -314,6 +317,7 @@ def run_search_cross_matrix_candidates(inputs, ctx, runtime) -> dict[str, Any]:
         evidence=evidence,
         result=result,
     )
+    return control.completed(output)
 
 
 def run_build_cross_matrix_candidate_from_search(

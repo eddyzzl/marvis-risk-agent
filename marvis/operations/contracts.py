@@ -9,6 +9,11 @@ import re
 from typing import Any, Mapping
 
 from marvis.operations.bindings import MonitoringBinding, RecheckSource
+from marvis.operations.extension_bindings import (
+    PortfolioBinding,
+    DecisionFeedbackBinding,
+)
+from marvis.operations.month_calendar import CalendarMonthCalendar
 
 
 CALENDAR_SCHEMA_VERSION = "operations.calendar.fixed_interval.v1"
@@ -201,12 +206,16 @@ class ScheduleContract:
     revision: int
     monitoring_ref: str
     active_from: datetime
-    calendar: FixedIntervalCalendar
+    calendar: FixedIntervalCalendar | CalendarMonthCalendar
     catch_up_budget: int
     lease_seconds: int
     retry_policy: RetryPolicy
     enabled: bool = True
     monitoring_binding: MonitoringBinding | None = None
+    portfolio_binding: PortfolioBinding | None = None
+    feedback_binding: DecisionFeedbackBinding | None = None
+    execution_actor_id: str | None = None
+    runtime_binding_hash: str | None = None
     active_until: datetime | None = None
     recheck_of: RecheckSource | None = None
     schema_version: str = SCHEDULE_SCHEMA_VERSION
@@ -228,7 +237,9 @@ class ScheduleContract:
             or self.revision < 1
         ):
             raise ValueError("revision must be a positive integer")
-        if not isinstance(self.calendar, FixedIntervalCalendar):
+        if not isinstance(
+            self.calendar, (FixedIntervalCalendar, CalendarMonthCalendar)
+        ):
             raise ValueError("calendar must be a FixedIntervalCalendar")
         active_from = _utc_datetime(self.active_from, "active_from")
         if active_from < self.calendar.anchor_at:
@@ -263,6 +274,31 @@ class ScheduleContract:
             self.monitoring_binding, MonitoringBinding
         ):
             raise ValueError("monitoring_binding must be a MonitoringBinding")
+        for name, kind in (
+            ("portfolio_binding", PortfolioBinding),
+            ("feedback_binding", DecisionFeedbackBinding),
+        ):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, kind):
+                raise ValueError(f"{name} requires its installed typed binding")
+        if (
+            sum(
+                value is not None
+                for value in (
+                    self.monitoring_binding,
+                    self.portfolio_binding,
+                    self.feedback_binding,
+                )
+            )
+            > 1
+        ):
+            raise ValueError("exactly one scheduled domain binding may be published")
+        if self.execution_actor_id is not None:
+            _required_text(self.execution_actor_id, "execution_actor_id")
+        if self.runtime_binding_hash is not None and not _SHA256_RE.fullmatch(
+            self.runtime_binding_hash
+        ):
+            raise ValueError("runtime binding requires a SHA256")
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be a boolean")
 
@@ -291,6 +327,26 @@ class ScheduleContract:
                 if self.monitoring_binding is not None
                 else {}
             ),
+            **(
+                {"portfolio_binding": self.portfolio_binding.model_dump(mode="json")}
+                if self.portfolio_binding
+                else {}
+            ),
+            **(
+                {"feedback_binding": self.feedback_binding.model_dump(mode="json")}
+                if self.feedback_binding
+                else {}
+            ),
+            **(
+                {"execution_actor_id": self.execution_actor_id}
+                if self.execution_actor_id
+                else {}
+            ),
+            **(
+                {"runtime_binding_hash": self.runtime_binding_hash}
+                if self.runtime_binding_hash
+                else {}
+            ),
         }
 
     @classmethod
@@ -307,7 +363,11 @@ class ScheduleContract:
             revision=_required_int(payload.get("revision"), "revision"),
             monitoring_ref=str(payload.get("monitoring_ref", "")),
             active_from=_parse_datetime(payload.get("active_from"), "active_from"),
-            calendar=FixedIntervalCalendar.from_dict(calendar),
+            calendar=(
+                CalendarMonthCalendar.from_dict(calendar)
+                if calendar.get("schema_version") == "operations.calendar.months.v1"
+                else FixedIntervalCalendar.from_dict(calendar)
+            ),
             catch_up_budget=_required_int(
                 payload.get("catch_up_budget"), "catch_up_budget"
             ),
@@ -329,6 +389,14 @@ class ScheduleContract:
                 if payload.get("monitoring_binding") is None
                 else MonitoringBinding.model_validate(payload["monitoring_binding"])
             ),
+            portfolio_binding=None
+            if payload.get("portfolio_binding") is None
+            else PortfolioBinding.model_validate(payload["portfolio_binding"]),
+            feedback_binding=None
+            if payload.get("feedback_binding") is None
+            else DecisionFeedbackBinding.model_validate(payload["feedback_binding"]),
+            execution_actor_id=payload.get("execution_actor_id"),
+            runtime_binding_hash=payload.get("runtime_binding_hash"),
         )
 
 

@@ -12,6 +12,7 @@ from marvis.orchestrator.eval.cases import initial_eval_cases
 from marvis.orchestrator.eval import scoring as eval_scoring
 from marvis.orchestrator.eval.runner import EvalOrchestrator, build_tool_registry
 from marvis.orchestrator.eval.scoring import calibrate_tier_for_model, regression_gate, score_case
+from marvis.llm_outbound import ApplicationSchema, safe_schema
 
 
 class RecordingLLM:
@@ -20,7 +21,10 @@ class RecordingLLM:
         self.calls = []
 
     def complete(self, **kwargs):
-        self.calls.append(deepcopy(kwargs))
+        request = dict(kwargs)
+        if isinstance(request.get("json_schema"), ApplicationSchema):
+            request["json_schema"] = safe_schema(request["json_schema"])["schema"]
+        self.calls.append(deepcopy(request))
         return self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
 
 

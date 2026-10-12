@@ -1,8 +1,15 @@
+import { createBlindOotController } from "./js/blind-oot-controller.js";
 import { createCollectionWorkspaceController } from "./js/collection-workspace-controller.js";
 import { createBusinessAcceptanceController } from "./js/business-acceptance.js";
 import { createOperationsController } from "./js/operations-controller.js";
+import { createOperationsExtensionsPanel } from "./js/operations-extensions-panel.js";
 import { createProductionGovernanceController } from "./js/production-governance-controller.js";
 import { createHistoricalReplayController } from "./js/historical-replay-controller.js";
+import { createWorkerIsolationPanel } from "./js/worker_isolation_panel.js";
+import { createRiskContextPanel } from "./js/risk-context-panel.js";
+import { createInstitutionAdapterPanel } from "./js/institution-adapter-panel.js";
+import { createInstitutionPanel } from "./js/institution_panel.js";
+import { createInstanceSynchronizationPanel } from "./js/instance_sync_panel.js";
 import { handleBusinessObjectiveEvent } from "./js/business-objective.js";
 import { api, sleep } from "./js/api.js";
 import { createTaskSession } from "./js/task-session.js";
@@ -87,6 +94,9 @@ import {
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import { createDataWorkspaceController } from "./js/v2/data_workspace_controller.js";
 import { createDataWorkspacePanel } from "./js/v2/data_workspace_panel.js";
+import { createSqlImportPanel } from "./js/v2/sql_import_panel.js";
+import { createStrategyHistoryMappingPanel } from "./js/v2/strategy_history_mapping_panel.js";
+import { createGovernedCapabilitiesPanel } from "./js/governed_capabilities_panel.js";
 import {
   createLabelingSetupPanel,
 } from "./js/v2/labeling_setup_panel.js";
@@ -421,6 +431,11 @@ const dataWorkspacePanel = createDataWorkspacePanel({
   resolveNavigationChoice: resolveDataWorkspaceNavigationChoice,
   onError: reportDataWorkspaceError,
 });
+createSqlImportPanel({
+  getElementById: $,
+  controller: dataWorkspaceController,
+  onImported: async () => { await refreshTasks(); },
+});
 const labelingSetupPanel = createLabelingSetupPanel({
   beginActivity: (operation, taskId) => claimBusy("driver_execute", "正在提交口径…", taskId, operation),
   endActivity: releaseBusy,
@@ -582,10 +597,42 @@ const collectionWorkspaceController = createCollectionWorkspaceController({
   },
   refreshPlan: refreshDriverGateState,
 });
+const riskContextPanel = createRiskContextPanel({
+  getElement: () => $("riskContextPanel"), getTask: () => taskSession.task, getPlan: () => taskSession.plan,
+  captureView: () => taskRequests.capture(), isCurrentView: (view) => taskRequests.current(view),
+  isBusy: selectedTaskIsBusy, openIdentity: () => $("operationsOpenButton")?.click(),
+  refreshPlan: refreshDriverGateState,
+  onPlanCreated: async (plan, view) => {
+    if (!taskRequests.current(view)) return;
+    taskSession.acceptPlan(view, taskSession.taskId, plan);
+    await refreshDriverGateState(taskSession.taskId);
+    renderAll();
+  },
+});
+const institutionAdapterPanel = createInstitutionAdapterPanel({
+  getElement: () => $("institutionAdapterPanel"), getTask: () => taskSession.task,
+  captureView: () => taskRequests.capture(), isCurrentView: (view) => taskRequests.current(view),
+  openIdentity: () => $("operationsOpenButton")?.click(), isBusy: selectedTaskIsBusy,
+});
+const operationsExtensionsPanel = createOperationsExtensionsPanel({
+  getElement: () => $("operationsExtensionsPanel"), getTask: () => taskSession.task,
+  captureView: () => taskRequests.capture(), isCurrentView: (view) => taskRequests.current(view),
+});
 const productionGovernanceController = createProductionGovernanceController({
   root: $("productionGovernancePanel"),
   isVisible: () => $("governanceSettingsDialog").open && activeGovernanceNav === "production",
   openIdentity: () => { closeGovernanceSettingsDialog(); $("operationsOpenButton").click(); },
+});
+const blindOotController = createBlindOotController({
+  root: $("blindOotPanel"), getTask: () => taskSession.task,
+  openIdentity: () => $("operationsOpenButton").click(),
+  onStateChange: async (taskId) => {
+    await refreshTasks();
+    if (taskSession.taskId !== taskId) return;
+    if (blindCustodyOnlyTask()) dataWorkspacePanel.clear();
+    else await reloadDataWorkspace(taskId, { silent: true });
+    renderAll();
+  },
 });
 const driverGateApi = createDriverGateApi({
   api,
@@ -623,6 +670,13 @@ const strategyCandidateLabController = createStrategyCandidateLabController({
   resetPlanFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
   renderWorkflowStepper,
 });
+const strategyHistoryMappingPanel = createStrategyHistoryMappingPanel({ root: $("strategyHistoryMappingPanel") });
+const governedCapabilitiesPanel = createGovernedCapabilitiesPanel({ container: $("governedCapabilitiesPanel") });
+const workerIsolationPanel = createWorkerIsolationPanel({ container: $("workerIsolationPanel"), onSettings: (settings) => {
+  executionEnvironmentSettings = { ...executionEnvironmentSettings, ...settings };
+} });
+const institutionPanel = createInstitutionPanel({ container: $("institutionPanel"), onIdentityChange: () => window.location.reload() });
+const instanceSynchronizationPanel = createInstanceSynchronizationPanel({ container: $("instanceSynchronizationPanel"), getTaskId: () => taskSession.taskId });
 const taskSearchController = createTaskSearchController({
   getElementById: $,
   getQuery: () => taskSearchQuery,
@@ -773,6 +827,7 @@ function currentTaskSignature(task) {
     task.name || "",
     task.status || "",
     task.workflow_status || "",
+    task.blind_oot?.viewer_role || "",
     task.failure_stage || "",
     task.active_job_kind || "",
     task.status_message || "",
@@ -920,6 +975,9 @@ function openLLMSettingsDialog() {
 }
 
 const governanceSettingsCopy = {
+  "signed-capabilities": { title: "签名与版本", subtitle: "核验发布者、确认安装权限，并管理保留版本与回滚。" },
+  "institution": { title: "身份与资源授权", subtitle: "配置受信签发方、登录身份，以及按任务和资源授予权限。" },
+  "instance-sync": { title: "跨实例交接", subtitle: "核验节点和签名材料，接收准确资源版本并读取原生产物。" },
   "execution-environment": {
     title: "执行环境",
     subtitle: "选择 Notebook 和工具运行使用的 Python 环境。",
@@ -976,6 +1034,9 @@ function setGovernanceCopy(navKey, button) {
 // Single, context-aware refresh for the dialog title bar. Only panels that load
 // remote data appear here; execution-environment keeps its own 扫描环境 action.
 const governanceRefreshActions = {
+  "signed-capabilities": () => governedCapabilitiesPanel.refresh(),
+  "institution": () => institutionPanel.refresh(),
+  "instance-sync": () => instanceSynchronizationPanel.refresh(),
   production: () => productionGovernanceController.refresh(),
   plugins: () => runGovernanceExtensionAction(refreshGovernancePlugins),
   workflows: () => runGovernanceExtensionAction(refreshGovernanceSkills),
@@ -1028,6 +1089,14 @@ function setGovernanceSettingsPanel(navKey = "execution-environment", options = 
 }
 
 function refreshGovernancePanel(navKey = activeGovernanceNav, options = {}) {
+  if (navKey === "signed-capabilities" && options.load !== false) void governedCapabilitiesPanel.refresh();
+  if (navKey === "institution" && options.load !== false) void institutionPanel.refresh().catch(() => {});
+  if (navKey === "instance-sync" && options.load !== false) void instanceSynchronizationPanel.refresh().catch(() => {});
+  if (navKey === "execution-environment" && options.load !== false) void workerIsolationPanel.refresh().catch((error) => {
+    const message = error?.status === 401 ? "请先登录机构身份，再配置执行环境。"
+      : error?.status === 403 ? "当前身份不能配置执行环境，请由管理员处理。" : "执行设置读取失败，请刷新后重试。";
+    setExecutionEnvironmentStatus(message, "error");
+  });
   if (navKey === "production" && options.load !== false) void productionGovernanceController.refresh();
   const button = activeGovernanceButton(navKey);
   if (button?.dataset?.governancePanel === "execution-environment" && options.load !== false) {
@@ -2126,6 +2195,9 @@ function renderBusyActivity(lease, active) {
   }
   renderWorkflowStepper();
   historicalReplayController.render();
+  riskContextPanel.render();
+  institutionAdapterPanel.render();
+  operationsExtensionsPanel.render();
   collectionWorkspaceController.render();
   renderPetState();
   updateAgentSendDisabled();
@@ -2413,6 +2485,8 @@ function populateExecutionEnvironmentForm(settings = {}, options = executionEnvi
   executionEnvironmentSettings = normalized;
   renderExecutionEnvironmentOptions(options, normalized);
   renderNotebookMemoryLimitInput(normalized);
+  const networkSelect = $("notebookNetworkModeSelect");
+  if (networkSelect) networkSelect.value = normalized.notebook_network_mode;
   renderExecutionEnvironmentSummary();
 }
 
@@ -2421,6 +2495,12 @@ function renderNotebookMemoryLimitInput(settings = executionEnvironmentSettings)
   if (!input || document.activeElement === input) return; // don't clobber mid-edit
   const limit = settings?.notebook_memory_limit_mb;
   input.value = Number.isFinite(limit) && limit > 0 ? String(limit) : "";
+}
+
+function handleNotebookNetworkModeChange() {
+  const select = $("notebookNetworkModeSelect");
+  if (!select || !["trusted_local", "loopback_only"].includes(select.value)) return;
+  saveExecutionEnvironmentSettings({ ...executionEnvironmentSettings, notebook_network_mode: select.value });
 }
 
 function handleNotebookMemoryLimitChange() {
@@ -2452,6 +2532,8 @@ function handleExecutionEnvironmentListClick(event) {
   }
   // Selecting a kernel must not wipe a configured notebook memory cap.
   settings.notebook_memory_limit_mb = executionEnvironmentSettings?.notebook_memory_limit_mb ?? null;
+  settings.notebook_network_mode = executionEnvironmentSettings?.notebook_network_mode ?? "trusted_local";
+  settings.worker_isolation_mode = executionEnvironmentSettings?.worker_isolation_mode ?? "trusted_local";
   // Optimistically move the checkmark; saveExecutionEnvironmentSettings reverts on failure.
   for (const item of $("executionEnvironmentList").querySelectorAll(".exec-env-row")) {
     const on = item === row;
@@ -2467,6 +2549,8 @@ function renderExecutionEnvironmentValidation(validation = {}) {
     validation.message,
     validation.kernel_name ? `Kernel: ${validation.kernel_name}` : "",
     validation.python_version ? `Python: ${validation.python_version}` : "",
+    validation.network_capability?.message || "",
+    validation.network_capability?.next_action || "",
   ].filter(Boolean);
   setExecutionEnvironmentStatus(parts.join(" · ") || "执行环境已保存。", validation.ok === false ? "error" : "success");
 }
@@ -2500,6 +2584,7 @@ async function saveExecutionEnvironmentSettings(settings) {
       body: JSON.stringify({ ...defaultExecutionEnvironment, ...(settings || {}) }),
     });
     populateExecutionEnvironmentForm(payload.settings, executionEnvironmentOptions);
+    await workerIsolationPanel.refresh();
     renderExecutionEnvironmentValidation(payload.validation);
     if (!payload.validation) setExecutionEnvironmentStatus("执行环境已保存。", "success");
   } catch (error) {
@@ -3014,8 +3099,12 @@ function runModeLabel(mode) {
   return mode === "agent" ? "Agent 模式" : "手动模式";
 }
 
+function blindCustodyOnlyTask(task = taskSession.task) {
+  return Boolean(task?.blind_oot && task.blind_oot.viewer_role !== "develop");
+}
+
 function selectedTaskIsAgentMode(task = taskSession.task) {
-  return task?.run_mode === "agent";
+  return !blindCustodyOnlyTask(task) && task?.run_mode === "agent";
 }
 
 function selectedTaskIsValidationBatch(task = taskSession.task) {
@@ -3410,6 +3499,7 @@ function setWorkspaceActionStatus(message, kind = "info", detail = undefined) {
 }
 
 function renderCurrentTask({ force = false } = {}) {
+  blindOotController.refresh();
   const nextSignature = currentTaskSignature(taskSession.task);
   if (!force && renderSignatures.currentTask === nextSignature) return;
   renderSignatures.currentTask = nextSignature;
@@ -4447,6 +4537,7 @@ async function reloadDataWorkspace(taskId = taskSession.taskId, options = {}) {
 }
 
 function taskUsesDataWorkspace(task) {
+  if (blindCustodyOnlyTask(task)) return false;
   return [
     "data_join",
     "feature_analysis",
@@ -4511,6 +4602,7 @@ function selectTask(task) {
   const selection = taskRequests.capture({ includeModel: false });
   const validationBatchLoadPromise = validationBatchPanelController.selectTask(task);
   const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
+  void strategyHistoryMappingPanel.selectTask(task);
   runAction(async () => {
     try {
       renderTaskList();
@@ -5344,7 +5436,7 @@ function renderEvidence(evidence = {}) {
 
 async function loadTaskEvidence(taskId = workbenchTaskId()) {
   if (taskId && !isWorkbenchTaskId(taskId)) return;
-  if (!taskId || (usesAgentValidationWorkbench(taskSession.task) && taskId === taskSession.taskId)) {
+  if (!taskId || blindCustodyOnlyTask(taskSession.task) || (usesAgentValidationWorkbench(taskSession.task) && taskId === taskSession.taskId)) {
     resetEvidenceSummaries();
     return;
   }
@@ -5435,6 +5527,9 @@ function renderAll() {
   portfolioSetupPanel.renderAvailability();
   modelMonitoringPanel.renderAvailability();
   historicalReplayController.render();
+  riskContextPanel.render();
+  institutionAdapterPanel.render();
+  operationsExtensionsPanel.render();
   collectionWorkspaceController.render();
   renderPetState();
   updateAgentSendDisabled();
@@ -5457,6 +5552,9 @@ function renderChangedValidationViews() {
   portfolioSetupPanel.renderAvailability();
   modelMonitoringPanel.renderAvailability();
   historicalReplayController.render();
+  riskContextPanel.render();
+  institutionAdapterPanel.render();
+  operationsExtensionsPanel.render();
   collectionWorkspaceController.render();
   renderPetState();
   updateAgentSendDisabled();
@@ -8013,6 +8111,7 @@ async function createTask() {
   rememberSelectedTaskId(task.id);
   renderStoredStateSummaries();
   const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
+  void strategyHistoryMappingPanel.selectTask(task);
   await refreshTasks();
   await reloadDataWorkspace(task.id, { silent: true });
   await loadReportFields();
@@ -8395,7 +8494,7 @@ async function generateMetrics() {
 
 async function loadReportFields(taskId = workbenchTaskId()) {
   if (taskId && !isWorkbenchTaskId(taskId)) return;
-  if (!taskId || (usesAgentValidationWorkbench(taskSession.task) && taskId === taskSession.taskId)) {
+  if (!taskId || blindCustodyOnlyTask(taskSession.task) || (usesAgentValidationWorkbench(taskSession.task) && taskId === taskSession.taskId)) {
     renderMetricPreview({});
     return;
   }
@@ -8798,6 +8897,7 @@ $("refreshExecutionEnvironmentOptionsButton").onclick = refreshExecutionEnvironm
 $("executionEnvironmentList").addEventListener("click", handleExecutionEnvironmentListClick);
 $("executionEnvironmentList").addEventListener("keydown", handleExecutionEnvironmentListKeydown);
 $("notebookMemoryLimitInput").addEventListener("change", handleNotebookMemoryLimitChange);
+$("notebookNetworkModeSelect").addEventListener("change", handleNotebookNetworkModeChange);
 $("addLLMModelButton").onclick = addLLMModelProfile;
 $("closeLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("cancelLLMEngineEditButton").onclick = closeLLMEngineEdit;
@@ -9165,6 +9265,7 @@ async function initializeApp() {
     await reloadDataWorkspace(taskSession.taskId, { silent: true });
     const validationBatchLoadPromise = validationBatchPanelController.selectTask(taskSession.task);
     const candidateLabLoadPromise = strategyCandidateLabController.selectTask(taskSession.task);
+    void strategyHistoryMappingPanel.selectTask(taskSession.task);
     renderStoredStateSummaries();
     await loadReportFields();
     await loadTaskEvidence();
@@ -9174,8 +9275,10 @@ async function initializeApp() {
     ready = true;
   } catch (error) {
     const detail = error?.message || "";
-    setActionStatus("服务连接失败，请检查后端是否运行。", "error", detail);
-    setCreateStatus(detail || "服务连接失败，请检查后端是否运行。", "error");
+    const needsLogin = error?.status === 401;
+    const message = needsLogin ? "请在设置中的机构身份页面登录，登录后读取已授权任务。" : "服务连接失败，请检查后端是否运行。";
+    setActionStatus(message, needsLogin ? "info" : "error", needsLogin ? "" : detail);
+    setCreateStatus(needsLogin ? message : detail || message, needsLogin ? "info" : "error");
   } finally {
     renderAll();
     await restoreResultScrollPositionAfterRender(taskSession.taskId);

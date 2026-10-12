@@ -37,7 +37,11 @@ def _with_workbench_context(script: str, app_js: str) -> str:
         # exercised separately with populated state in the behavior regressions.
         "reportDraftState": "{ get: () => null }",
         "historicalReplayController": "{ render: () => {} }",
+        "riskContextPanel": "{ render: () => {} }",
+        "institutionAdapterPanel": "{ render: () => {} }",
+        "operationsExtensionsPanel": "{ render: () => {} }",
         "collectionWorkspaceController": "{ render: () => {} }",
+        "strategyHistoryMappingPanel": "{ selectTask: async () => {} }",
     }
     prefix = [
         f"let {name} = {value};"
@@ -1579,7 +1583,34 @@ def test_initialization_failure_shows_service_connection_error():
 
     assert "initializeApp();" in app_js
     assert "服务连接失败，请检查后端是否运行。" in init_body
-    assert 'setActionStatus("服务连接失败，请检查后端是否运行。", "error", detail)' in init_body
+    script = r'''
+import assert from 'node:assert/strict';
+const taskSession = { taskId: null, task: null };
+let failure;
+const statuses = [], createStatuses = [], finished = [];
+const refreshTasks = async () => { throw failure; };
+const setActionStatus = (...args) => statuses.push(args);
+const setCreateStatus = (...args) => createStatuses.push(args);
+const renderAll = () => finished.push('render');
+const restoreResultScrollPositionAfterRender = async () => finished.push('restore');
+const validationBatchPanelController = { focusRequestedItem: () => finished.push('focus') };
+const finishAppBoot = () => finished.push('boot');
+const maybeResumeAgentValidationBatch = () => { throw Error('failed initialization cannot resume'); };
+''' + init_body + r'''
+failure = new Error('backend unreachable');
+await initializeApp();
+assert.deepEqual(statuses[0], ['服务连接失败，请检查后端是否运行。', 'error', 'backend unreachable']);
+assert.deepEqual(createStatuses[0], ['backend unreachable', 'error']);
+failure = Object.assign(new Error('login required'), { status: 401 });
+await initializeApp();
+assert.deepEqual(statuses[1], ['请在设置中的机构身份页面登录，登录后读取已授权任务。', 'info', '']);
+assert.deepEqual(createStatuses[1], [statuses[1][0], 'info']);
+assert.deepEqual(finished, ['render', 'restore', 'focus', 'boot', 'render', 'restore', 'focus', 'boot']);
+'''
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
     assert "runAction(async () => {\n  await refreshTasks();" not in app_js
 
 
@@ -10578,8 +10609,9 @@ def _run_node_capture_json(script: str) -> dict:
     # instead of `-e` so the script size is unbounded on every platform.
     script = session_projection_fixture(script)
     result = subprocess.run(
-        ["node", "--input-type=module"], input=script, check=True, capture_output=True, text=True
+        ["node", "--input-type=module"], input=script, capture_output=True, text=True
     )
+    assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
 
@@ -10587,7 +10619,49 @@ def _prepare_app_module_for_node(app_js: str) -> str:
     """Mirror the browser's classic-catalog-before-module startup contract."""
 
     rewritten = app_js.replace('from "./js/', 'from "./marvis/static/js/')
-    return 'import "./marvis/static/js/pet_catalog.js";\n' + rewritten
+    return 'import "./marvis/static/js/pet_catalog.js";\n' + _MOUNTED_PANEL_DOM_FIXTURE + rewritten
+
+
+_MOUNTED_PANEL_DOM_FIXTURE = r'''
+// These whole-module fixtures exercise validation renderers and keyed task rows.
+// The other mounted panels need concrete DOM controls during module startup;
+// their interactions are tested by their own module and real-browser suites.
+const fixturePanelIds = new Set([
+  'sqlImportPanel', 'governedCapabilitiesPanel', 'workerIsolationPanel',
+  'institutionPanel', 'instanceSynchronizationPanel', 'strategyHistoryMappingPanel',
+]);
+const fixturePanelDocument = { createElement: tag => fixturePanelNode(tag) };
+function fixturePanelNode(tag = 'div') {
+  const selectors = new Map();
+  const node = {
+    tagName: tag.toUpperCase(), ownerDocument: fixturePanelDocument,
+    dataset: {}, style: {}, value: '', checked: false, disabled: false, hidden: false,
+    textContent: '', innerHTML: '', children: [], files: [],
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    get options() { return this.children; },
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = [...children]; },
+    setAttribute() {}, addEventListener() {}, removeEventListener() {}, contains() { return false; },
+    querySelector(selector) {
+      if (!selectors.has(selector)) {
+        const child = fixturePanelNode();
+        child.parentElement = this;
+        selectors.set(selector, child);
+      }
+      return selectors.get(selector);
+    },
+    querySelectorAll() { return []; },
+  };
+  return node;
+}
+const fixturePanels = new Map();
+const fixtureOriginalGetElement = document.getElementById.bind(document);
+document.getElementById = id => {
+  if (!fixturePanelIds.has(id)) return fixtureOriginalGetElement(id);
+  if (!fixturePanels.has(id)) fixturePanels.set(id, fixturePanelNode());
+  return fixturePanels.get(id);
+};
+'''
 
 
 def test_validation_evidence_sections_reveal_only_after_their_stage_completes():

@@ -156,6 +156,12 @@ class ReplanError(PlanningError):
     pass
 
 
+class PlannerOutboundPolicyError(PlanningError):
+    """A complete control request cannot satisfy the outbound contract."""
+
+    error_kind = "outbound_policy"
+
+
 class ContextBudgetExhaustedError(ReplanError):
     """The protected prompt cannot leave a safe JSON completion budget."""
 
@@ -777,7 +783,10 @@ def _fit_planner_request(
     system_prompt: str,
     user_prompt: str,
 ) -> tuple[str, int, bool]:
-    """Fit one planner request without rewriting protected business context."""
+    """Fit an allowlisted structural request; raw business context stays local."""
+
+    from marvis.llm_outbound import outbound_prompt
+    user_prompt = outbound_prompt(user_prompt)
 
     profile = getattr(client, "profile", None)
     if not isinstance(profile, dict):
@@ -826,8 +835,9 @@ def _fit_planner_request(
             payload,
             system_prompt=system_prompt,
             prompt_target=prompt_target,
+            source_prompt=user_prompt,
         )
-        user_prompt = _dump_planner_prompt(payload)
+        user_prompt = _dump_planner_prompt(payload, source_prompt=user_prompt)
 
     prompt_tokens = _planner_prompt_tokens(system_prompt, user_prompt)
     available_tokens = (
@@ -837,6 +847,11 @@ def _fit_planner_request(
     )
     max_tokens = min(requested_output, available_tokens)
     if max_tokens < PLANNER_MIN_OUTPUT_TOKENS:
+        if (getattr(user_prompt, "_catalog_contracts", ())
+                or getattr(user_prompt, "_planning_controls", ())):
+            raise PlannerOutboundPolicyError(
+                "当前模型窗口无法完整容纳工具契约、执行约束和最小输出预算，未截断或发送请求；请使用更大上下文窗口。"
+            )
         raise ContextBudgetExhaustedError(
             context_window=context_window,
             prompt_tokens=prompt_tokens,
@@ -858,12 +873,13 @@ def _trim_planner_payload(
     *,
     system_prompt: str,
     prompt_target: int,
+    source_prompt=None,
 ) -> tuple[dict, bool]:
     truncated = False
 
     def over_budget() -> bool:
         return (
-            _planner_prompt_tokens(system_prompt, _dump_planner_prompt(payload))
+            _planner_prompt_tokens(system_prompt, _dump_planner_prompt(payload, source_prompt=source_prompt))
             > prompt_target
         )
 
@@ -877,9 +893,8 @@ def _trim_planner_payload(
     tools = payload.get("available_tools")
     required_tool_refs = _planner_constraint_refs_from_prompt(payload)
     if isinstance(tools, list):
-        # Preserve ranked Tool identities and governance metadata before dropping
-        # any entry. Field names are enough to draft refs/inputs; detailed types
-        # and descriptions are lower-priority catalog metadata.
+        # Compact redundant field summaries; complete installed schema contracts,
+        # execution controls and governance metadata remain protected below.
         for item in reversed(tools):
             if not over_budget():
                 break
@@ -911,6 +926,8 @@ def _trim_planner_payload(
                 for index in range(len(tools) - 1, -1, -1)
                 if isinstance(tools[index], dict)
                 and not _always_retain_catalog_item(tools[index])
+                and not _catalog_item_has_safety_metadata(tools[index])
+                and not any(key in tools[index] for key in ("input_schema", "output_schema"))
                 and _catalog_ref(tools[index]) not in required_tool_refs
             ),
             None,
@@ -928,16 +945,20 @@ def _trim_planner_payload(
 
 def _planner_constraint_refs_from_prompt(payload: dict) -> set[tuple[str, str]]:
     constraints = payload.get("planner_constraints")
-    if not isinstance(constraints, dict):
-        return set()
-    raw_refs = constraints.get("required_tool_refs")
+    raw_refs = constraints.get("required_tool_refs") if isinstance(constraints, dict) else []
     if not isinstance(raw_refs, list):
-        return set()
-    return {
+        raw_refs = []
+    refs = {
         _catalog_ref(item)
         for item in raw_refs
         if isinstance(item, dict) and all(_catalog_ref(item))
     }
+    for step in payload.get("remaining_steps", []):
+        if isinstance(step, dict) and isinstance(step.get("tool"), dict):
+            ref = _catalog_ref(step["tool"])
+            if all(ref):
+                refs.add(ref)
+    return refs
 
 
 def _available_tool_refs_from_prompt(user_prompt: str) -> set[tuple[str, str]]:
@@ -1097,8 +1118,19 @@ def _canonical_context_value(value: object) -> str:
     )
 
 
-def _dump_planner_prompt(payload: dict) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+def _dump_planner_prompt(payload: dict, *, source_prompt=None) -> str:
+    if source_prompt is not None:
+        from marvis.llm_outbound_catalog import restore_planning_catalog
+        payload = restore_planning_catalog(payload, source_prompt)
+    return _admit_planning_prompt(payload)
+
+
+def _admit_planning_prompt(payload: dict) -> str:
+    from marvis.llm_outbound import OutboundContextError, planning_prompt
+    try:
+        return planning_prompt(payload)
+    except OutboundContextError as exc:
+        raise PlannerOutboundPolicyError(str(exc)) from None
 
 
 def _planner_prompt_tokens(system_prompt: str, user_prompt: str) -> int:
@@ -1136,7 +1168,7 @@ def build_plan_prompt(
     }
     if _has_planner_constraints(constraints):
         payload["planner_constraints"] = _planner_constraints_payload(constraints)
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return _admit_planning_prompt(payload)
 
 
 def build_explore_prompt(
@@ -1154,7 +1186,11 @@ def build_explore_prompt(
         "task_context": task_context,
         "available_tools": compact_catalog_for_prompt(catalog),
         "planning_examples": PLANNING_EXAMPLES,
-        "progress_ledger": ledger,
+        "completed_steps": [
+            {"id": step.id, "status": step.status.value,
+             "tool": {"plugin": step.tool_ref.plugin, "tool": step.tool_ref.tool}}
+            for step in plan.steps if step.status in {StepStatus.DONE, StepStatus.SKIPPED}
+        ],
         "max_steps": max_steps,
         "last_error": last_error,
         "instruction": (
@@ -1171,7 +1207,7 @@ def build_explore_prompt(
     }
     if _has_planner_constraints(constraints):
         payload["planner_constraints"] = _planner_constraints_payload(constraints)
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return _admit_planning_prompt(payload)
 
 
 def build_replan_prompt(
@@ -1197,6 +1233,11 @@ def build_replan_prompt(
             for step in plan.steps
             if step.status not in {StepStatus.DONE, StepStatus.SKIPPED}
         ],
+        "completed_steps": [
+            {"id": step.id, "status": step.status.value,
+             "tool": {"plugin": step.tool_ref.plugin, "tool": step.tool_ref.tool}}
+            for step in plan.steps if step.status in {StepStatus.DONE, StepStatus.SKIPPED}
+        ],
         "last_error": last_error,
         "instruction": (
             "Treat remaining_steps as reusable source contracts: copy retained steps "
@@ -1221,7 +1262,7 @@ def build_replan_prompt(
         payload["user_constraint"] = instruction
     if _has_planner_constraints(constraints):
         payload["planner_constraints"] = _planner_constraints_payload(constraints)
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return _admit_planning_prompt(payload)
 
 
 def _source_step_contract(step: PlanStep) -> dict[str, Any]:
@@ -1571,7 +1612,8 @@ def _tool_ref_key(ref: ToolRef) -> tuple[str, str]:
 
 
 def compact_catalog_for_prompt(catalog: list[dict]) -> list[dict]:
-    """Keep full schemas out of the LLM prompt; validation still uses them later."""
+    """Retain complete installed contracts and summarize unproven local entries."""
+    from marvis.llm_outbound_catalog import compact_catalog_contracts
     compact: list[dict] = []
     for item in catalog:
         prompt_item = {
@@ -1588,7 +1630,7 @@ def compact_catalog_for_prompt(catalog: list[dict]) -> list[dict]:
             for key in _CATALOG_SAFETY_METADATA_FIELDS:
                 if key in item:
                     prompt_item[key] = item[key]
-        compact.append(prompt_item)
+        compact.append(compact_catalog_contracts(item, prompt_item))
     return compact
 
 
@@ -1795,6 +1837,13 @@ def _truncate_catalog(
         used_tokens += cost
         safety_tokens += cost
         safety_count += 1
+
+    if any(_catalog_item_has_safety_metadata(item) for item in ranked) and not any(
+        _catalog_item_has_safety_metadata(item) for item in retained
+    ):
+        raise PlannerOutboundPolicyError(
+            "当前模型窗口无法完整保留已安装工具契约和治理保留项，未发送请求；请使用更大上下文窗口。"
+        )
 
     for item in ranked:
         ref = _catalog_ref(item)

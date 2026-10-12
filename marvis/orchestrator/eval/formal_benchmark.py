@@ -39,19 +39,22 @@ SAFETY_DIMENSIONS = (
 )
 LOAD_MODES = ("cold_start", "steady", "concurrent", "recovery")
 SOFTWARE_GAPS = {
-    family: "deterministic_family_revalidator_not_implemented"
-    for family in FAMILIES
-    if family != "validation"
+    "modeling": "installed_native_modeling_reader; unsupported_model_or_fit_scope_and_missing_originals_remain_unavailable",
+    "monitoring": "installed_native_monitoring_reader; unsupported_monitor_scope_and_missing_originals_remain_unavailable",
+    "strategy": "installed_native_strategy_reader; unsupported_strategy_scope_and_missing_originals_remain_unavailable",
+    "online_decision": "installed_native_online_reader; missing_external_authority_or_unsupported_effects_remain_unavailable",
+    "connector_antifraud": "installed_native_connector_event_reader; provider_truth_publisher_availability_and_missing_originals_remain_unavailable",
+    "collections": "installed_native_collection_reader; external_collection_effects_and_missing_originals_remain_unavailable",
+    "labeling": "installed_native_labeling_reader; unsupported_boundary_or_recovery_originals_remain_unavailable",
+    "risk_portfolio": "installed_native_portfolio_reader; unsupported_trend_vintage_or_fault_scope_remains_unavailable",
+    "data_processing": "installed_native_JOIN_reader_and_future_fixed_stale_CAS_discard_readback; other_data_operations_and_fault_scopes_remain_unavailable",
+    "feature": "installed_native_feature_reader; unsupported_optional_metric_or_fault_scope_remains_unavailable",
 }
-SOFTWARE_GAPS["labeling"] = "boundary_recovery_and_formal_process_adjudication_not_implemented"
-SOFTWARE_GAPS["risk_portfolio"] = "trend_vintage_boundary_recovery_and_formal_process_adjudication_not_implemented"
-SOFTWARE_GAPS["data_processing"] = "non_join_boundary_recovery_and_formal_process_adjudication_not_implemented"
-SOFTWARE_GAPS["feature"] = "optional_metrics_binning_join_boundary_recovery_and_formal_process_adjudication_not_implemented"
 SOFTWARE_GAPS.update(
     {
-        "validation.boundary": "deterministic_boundary_revalidator_not_implemented",
-        "validation.recovery": "deterministic_fault_and_recovery_revalidator_not_implemented",
-        "cross_workflow.safety": "authorization_point_in_time_and_side_effect_revalidators_not_implemented",
+        "validation.boundary": "validation_fault_carrier_not_supported; old_missing_originals_remain_unavailable",
+        "validation.recovery": "validation_fault_output_CAS_closure_not_supported; old_missing_originals_remain_unavailable",
+        "cross_workflow.safety": "installed_native_CAS_role_event_ingestion_cutoff_duplicate_readers; institutional_authority_publisher_availability_label_maturity_and_other_effect_scopes_remain_unavailable",
     }
 )
 _HASH = r"^[0-9a-f]{64}$"

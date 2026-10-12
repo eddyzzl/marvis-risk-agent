@@ -634,7 +634,25 @@ def run_agent_word_conclusion_stage(
         )
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
         narrative_source = "agent_generated"
-        if not isinstance(values, dict) or not agent_conclusions_confirmed(values):
+        if metadata.get("report_revision_operation") in {"clear", "set_local_text", "replace_local_text"}:
+            narrative_source = "local_edited"
+        needs_clarification = metadata.get("outbound_context_status") == "clarification_required"
+        revision_failed = metadata.get("report_revision_status") == "failed"
+        preserves_local_edit = metadata.get("report_revision_operation") in {"clear", "set_local_text", "replace_local_text", "regenerate_from_evidence"}
+        if needs_clarification or revision_failed:
+            # Never replace a rejected revision with new, auto-accepted prose.
+            # Keep the exact local baseline available in the draft for editing.
+            from marvis.agent.service import _with_narrative_report_seeds
+
+            local = {}
+            for name in ("saved_report_narrative", "report_draft"):
+                context = evidence.get(name)
+                if isinstance(context, dict) and isinstance(context.get("text_values"), dict):
+                    local.update({key: value for key, value in context["text_values"].items()
+                                  if key in AGENT_REPORT_WRITABLE_KEYS and isinstance(value, str)})
+            values = _with_narrative_report_seeds(task, local, evidence)
+            narrative_source = "local_preserved"
+        elif (not isinstance(values, dict) or not agent_conclusions_confirmed(values)) and not preserves_local_edit:
             values = deps.fallback_word_conclusions(task=task, evidence=evidence)
             narrative_source = "deterministic_fallback"
             metadata.update({
@@ -671,7 +689,10 @@ def run_agent_word_conclusion_stage(
         )
     audit_agent_memory_use_from_store(memory_store, message, task_id=task_id)
     values = draft_result.get("values")
-    if not isinstance(values, dict) or not agent_conclusions_confirmed(values):
+    draft_metadata = draft_result.get("metadata") or {}
+    if (not isinstance(values, dict) or not agent_conclusions_confirmed(values)
+            or draft_metadata.get("outbound_context_status") == "clarification_required"
+            or draft_metadata.get("report_revision_status") == "failed"):
         add_agent_word_draft_failure_message(
             repo,
             task_id=task_id,
@@ -708,7 +729,7 @@ def _word_conclusion_evidence_with_stage_summaries(
     if summaries:
         payload["visible_stage_summaries"] = summaries
     report_draft = latest_report_draft_context(messages)
-    if report_draft:
+    if report_draft and report_draft["report_revision"] == revision:
         payload["report_draft"] = report_draft
     return payload
 
@@ -743,6 +764,30 @@ def add_agent_word_draft_failure_message(
     llm_error = ""
     if isinstance(metadata, dict):
         llm_error = str(metadata.get("llm_error") or "").strip()
+        if metadata.get("outbound_context_status") == "clarification_required":
+            repo.add_agent_message(
+                task_id, role="assistant", stage="chat",
+                content=f"报告修订需要澄清。{llm_error} 当前报告字段已保留，请使用报告表格编辑，或明确按本次验证结果整段改写结论。",
+                metadata={**model_metadata(model_profile), "word_draft_failed": True,
+                          "confirmable": False, "outbound_context_status": "clarification_required",
+                          "revision_error_code": metadata.get("revision_error_code")},
+            )
+            return
+        if metadata.get("report_revision_status") == "failed":
+            repo.add_agent_message(
+                task_id, role="assistant", stage="chat",
+                content=f"报告修订未完成。{llm_error} 当前报告字段已保留，请重试或使用报告表格编辑后确认。",
+                metadata={**model_metadata(model_profile), "word_draft_failed": True,
+                          "confirmable": False, "report_revision_status": "failed"},
+            )
+            return
+        if metadata.get("report_revision_operation") in {"clear", "set_local_text", "replace_local_text", "regenerate_from_evidence"}:
+            repo.add_agent_message(
+                task_id, role="assistant", stage="chat",
+                content="已保留当前报告编辑及主动清空的字段。必需结论尚未填全，请在报告表格补充后确认生成。",
+                metadata={**model_metadata(model_profile), "word_draft_failed": True, "confirmable": False},
+            )
+            return
     detail = f"直接原因：{llm_error}" if llm_error else "直接原因：大模型未返回完整的三段 JSON 草稿。"
     repo.add_agent_message(
         task_id,
@@ -807,6 +852,8 @@ def generate_agent_report_from_conclusions(
             "大模型报告结论生成失败，平台已使用确定性指标生成保守回退文本，"
             "正在直接生成最终 Word 报告；完成后请人工复核。"
             if narrative_source == "deterministic_fallback"
+            else "报告叙事已按本次字段操作更新，正在直接生成最终 Word 报告。"
+            if narrative_source == "local_edited"
             else "报告结论已生成，正在直接生成最终 Word 报告。"
         ),
         metadata={

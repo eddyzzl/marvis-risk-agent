@@ -49,6 +49,7 @@ def worker_main() -> None:
             memory_limit_mb=job.get("memory_limit_mb"),
             resource_poll_interval_seconds=float(job.get("resource_poll_interval_seconds") or 0.5),
             isolated=False,
+            network_mode=job.get("network_mode", "trusted_local"),
         )
     except Exception as exc:
         _emit({

@@ -34,6 +34,7 @@ from marvis.agent.sample_setup import detect_setup
 from marvis.data.errors import DatasetContentDriftError
 from marvis.domain import FileRole
 from marvis.modeling_limits import normalize_n_trials
+from marvis.modeling_split import SplitConfigurationError, validate_split_configuration
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.prepare import DEFAULT_OOT_SIZE
 
@@ -190,10 +191,17 @@ def build_modeling_proposal(
     anchor_id: str | None = None,
     join_feature_ids: list[str] | None = None,
     target_col: str | None = None,
+    split_col: str | None = None,
     field_hints: dict | None = None,
     authenticated_selection: AuthenticatedJoinSelection | None = None,
     c1_expected_content_hashes: Mapping[str, str] | None = None,
 ) -> ModelingProposal:
+    try:
+        validate_split_configuration({}, split_col=split_col)
+    except SplitConfigurationError as exc:
+        raise ModelingSetupError(str(exc)) from exc
+    from marvis.modeling_holdout.guards import cohort_for_task
+    blind = cohort_for_task(getattr(getattr(registry, '_repo', None), 'db_path', None), task_id) is not None
     normalized_n_trials = _normalize_n_trials(n_trials)
     datasets = _resolve_datasets(registry, task_id, source_dir)
     by_id = {dataset.id: dataset for dataset in datasets}
@@ -275,6 +283,8 @@ def build_modeling_proposal(
         else registry.resolve_verified_path(dataset.id)
     )
     available_columns = backend.column_names(path)
+    if split_col and split_col not in available_columns:
+        raise ModelingSetupError("明确配置的切分列不在已认证样本中，请重新确认；未自动划分或生成派生样本。")
     business_columns = _infer_business_columns(available_columns)
     requested_target_type = _normalize_target_type(target_type)
     profiled_target_type = None
@@ -317,9 +327,21 @@ def build_modeling_proposal(
         backend,
         path,
         configured_target=str(target_col or ""),
+        configured_split=split_col or "",
         target_type=target_type,
         field_hints=field_hints,
     )
+    if setup.split_error:
+        raise ModelingSetupError(setup.split_error)
+    if split_col:
+        from marvis.modeling_split import existing_split_values
+
+        try:
+            actual_values = existing_split_values(backend.read_frame(path, columns=[split_col])[split_col].unique().tolist())
+            if setup.split_col != split_col or actual_values != setup.split_values or sum(setup.counts.values()) != dataset.row_count:
+                raise SplitConfigurationError("明确配置的切分列成员与样本分析不一致，请重新确认。")
+        except SplitConfigurationError as exc:
+            raise ModelingSetupError(str(exc)) from None
     configured_target = str(target_col or "").strip()
     if (
         configured_target
@@ -412,7 +434,7 @@ def build_modeling_proposal(
         # D12 conflict policy: a detected split column wins (conservative — no change
         # for existing-split datasets). When the user explicitly requested a DIFFERENT
         # time_col, tell them the detected split shadowed the requested time-OOT.
-        if effective_time_col and effective_time_col != split_col:
+        if not blind and effective_time_col and effective_time_col != split_col:
             notes.append(
                 f"检测到切分列 `{split_col}`，将按其切分（未按请求的时间列 `{effective_time_col}` "
                 "做时间外推 OOT）；如需时间外推 OOT，请移除切分列或改用日期列切分。"
@@ -430,7 +452,7 @@ def build_modeling_proposal(
         # single-file and joined paths consistent.
         auto_split_config = {"test_size": 0.25, "group_cols": group_cols}
         grouping = f"（按 `{group_cols[0]}` 分组防泄漏）" if group_cols else "（逐行随机）"
-        if effective_time_col:
+        if effective_time_col and not blind:
             auto_split_config["oot_by_time"] = effective_time_col
             auto_split_config["oot_size"] = DEFAULT_OOT_SIZE
             notes.append(
@@ -454,7 +476,7 @@ def build_modeling_proposal(
                 *weight_candidates,
                 *_business_passthrough_cols(business_columns),
             ]),
-            time_col=effective_time_col,
+            time_col=None if blind else effective_time_col,
         )
         notes.append(note)
     if len(recipe_list) > 1:
@@ -467,6 +489,10 @@ def build_modeling_proposal(
     if feature_dictionary_id:
         notes.append("已识别特征字典，将用于报告产品/厂商/类别解释。")
     oot = split_values.get("oot")
+    if blind:
+        if oot:
+            raise ModelingSetupError("盲 OOT 开发仅允许 train/test，封存数据只能由绑定复核人员在最终冻结后评估。")
+        notes.append("盲 OOT：当前计划只使用开发集，不生成或查看 OOT；最终模型冻结后由绑定复核人员独立评估一次。历史可用性和标签成熟度未知。")
     return ModelingProposal(
         dataset_id=dataset_id,
         dataset_name=_dataset_name(registry, dataset),

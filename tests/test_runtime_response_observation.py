@@ -8,7 +8,13 @@ import time
 
 import pytest
 
-from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from marvis.llm_client import (
+    LLMClientError,
+    LLMClientErrorKind,
+    OpenAICompatibleLLMClient,
+)
+from marvis.llm_outbound import POLICY_VERSION, outbound_prompt
+from marvis.llm_prompts import PLAN_SYS
 from marvis.orchestrator.eval.runtime_runner import _model_gateway
 from marvis.orchestrator.eval.runtime_scoring import usage_summary
 
@@ -22,9 +28,17 @@ def provider(responses):
             pass
 
         def do_POST(self):
-            self.rfile.read(int(self.headers["Content-Length"]))
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             status, content_type, body = responses[len(calls)]
-            calls.append(True)
+            calls.append(payload)
+            # Use the real structural gateway without granting fixture prose
+            # outbound authority. The raw leak marker remains in a forbidden
+            # source field and must never arrive at the loopback provider.
+            assert "SENTINEL" not in json.dumps(payload)
+            context = json.loads(payload["messages"][-1]["content"])
+            assert context["outbound_policy"] == POLICY_VERSION
+            assert context["metrics"] == {"test_auc": 0.75}
+            assert payload["messages"][0]["content"] == PLAN_SYS.text
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -66,11 +80,42 @@ def receipts(path):
 
 def complete(profile, **kwargs):
     return OpenAICompatibleLLMClient(profile).complete(
-        system_prompt="SYSTEM_PROMPT_SENTINEL",
-        user_prompt="PRIVATE_DATA_SENTINEL",
+        system_prompt=PLAN_SYS.text,
+        user_prompt=outbound_prompt(
+            {"metrics": {"test_auc": 0.75}, "sample_values": ["PRIVATE_DATA_SENTINEL"]}
+        ),
         caller="critic",
         **kwargs,
     )
+
+
+@pytest.mark.parametrize(
+    "unapproved",
+    [
+        "PRIVATE_DATA_SENTINEL",
+        {"sample_values": ["PRIVATE_DATA_SENTINEL"]},
+        str(outbound_prompt({"metrics": {"test_auc": 0.75}})),
+    ],
+)
+def test_unapproved_prompt_never_enters_transport_or_records_an_attempt(
+    tmp_path, unapproved
+):
+    path = tmp_path / "attempts.jsonl"
+    with provider([]) as (profile, calls):
+        with _model_gateway(
+            profile, {}, path, max_attempts=1, deadline=time.monotonic() + 10
+        ) as child:
+            with pytest.raises(LLMClientError) as raised:
+                OpenAICompatibleLLMClient(child).complete(
+                    system_prompt=PLAN_SYS.text,
+                    user_prompt=unapproved,
+                    caller="critic",
+                    stream=False,
+                )
+            assert raised.value.error_kind == LLMClientErrorKind.OUTBOUND_POLICY
+        assert calls == []
+    assert not any(e["event"] in {"started", "finished"} for e in receipts(path))
+    assert "SENTINEL" not in path.read_text()
 
 
 def test_reasoning_only_length_retry_remains_visible_as_two_distinct_attempts(tmp_path):

@@ -2,6 +2,9 @@
 
 import { escapeHtml } from "../ui-utils.js";
 import { revealStrategyToolLauncher, updateStrategyToolDirectory } from "./strategy-tool-directory.js";
+import { createStrategyWorkbenchStateController } from "./strategy_workbench_state_controller.js";
+import { mountStrategyAssetStabilityPanel } from "./strategy_asset_stability_panel.js";
+import { applyStrategyFieldLabels } from "./strategy_field_labels.js";
 
 import {
   getStrategyCandidateLab,
@@ -243,6 +246,17 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   let boundRoot = null;
   let activeRefresh = null;
   let restoredTaskId = "";
+  const serverView = createStrategyWorkbenchStateController({
+    getElementById: $, getPanel: panel, getTaskId: selectedTaskId,
+    onRestored: (draft) => { render(); serverView.restore(panel(), draft); },
+    onExecutionSettled: (taskId) => {
+      if (selectedTaskId() !== taskId) return;
+      void refresh(taskId, { silent: true });
+      dependencies.resetPlanFetchThrottle?.(taskId);
+      void dependencies.refreshAgentMessages?.(taskId);
+      dependencies.renderWorkflowStepper?.();
+    },
+  });
 
   function selectedTask() {
     return dependencies.getSelectedTask?.() || null;
@@ -259,6 +273,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   function persistCurrentView(taskId = state.taskId) {
     const currentTaskId = nonEmptyText(taskId);
     if (!currentTaskId) return false;
+    if (serverView.enabled) return serverView.persist(currentTaskId, panel());
     return persistStrategyCandidateLabViewState(
       currentTaskId,
       panel(),
@@ -351,6 +366,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     root.classList.toggle("hidden", !visible);
     root.setAttribute("aria-hidden", visible ? "false" : "true");
     if (!visible) return;
+    mountStrategyAssetStabilityPanel($("strategyAssetStabilityPanel"), task.id);
     updateStrategyToolDirectory(root, state.payload, task.id);
     const results = $("strategyCandidateLabResults");
     if (results) {
@@ -453,18 +469,18 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       state.payload,
     );
     if (state.payload && restoredTaskId !== state.taskId) {
-      const snapshot = loadStrategyCandidateLabViewState(
-        state.taskId,
-        storage,
-      );
+      const snapshot = serverView.enabled ? serverView.snapshot(state.taskId)
+        : loadStrategyCandidateLabViewState(state.taskId, storage);
+      const restoreView = serverView.enabled ? serverView.restore : restoreStrategyCandidateLabViewState;
       restoredTaskId = state.taskId;
-      if (snapshot && restoreStrategyCandidateLabViewState(root, snapshot)) {
+      if (snapshot && restoreView(root, snapshot)) {
         // Re-run the projection sync once with restored parent selectors, then
         // restore dependent node/cell/cutpoint selectors against those options.
         render();
-        restoreStrategyCandidateLabViewState(root, snapshot);
+        restoreView(root, snapshot);
       }
     }
+    applyStrategyFieldLabels(root, state.payload);
     renderAvailability();
   }
 
@@ -564,6 +580,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   }
 
   function clear() {
+    serverView.clear();
     persistCurrentView();
     activeRefresh?.controller?.abort?.();
     activeRefresh = null;
@@ -625,6 +642,12 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         }
         if (!isRecord(payload) || payload.task_id !== requestedTaskId) {
           throw new Error("Candidate Lab 响应不属于当前任务。");
+        }
+        if (serverView.enabled && restoredTaskId !== requestedTaskId) {
+          await serverView.load(requestedTaskId);
+          if (refreshOperation !== operation || selectedTaskId() !== requestedTaskId) return stateSnapshot(state);
+        } else if (serverView.enabled) {
+          await serverView.refreshExecutions(requestedTaskId);
         }
         state.payload = payload;
         state.error = "";
@@ -1322,6 +1345,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     const field = event.target?.closest?.("[data-candidate-lab-field]");
     if (!field) return false;
     const fieldName = field.dataset?.candidateLabField;
+    if (fieldName === "field_display_mode") {
+      applyStrategyFieldLabels(panel(), state.payload);
+      return true;
+    }
     const sampleDesign = field.closest?.(
       '[data-candidate-lab-workflow="strategy_sample_design_v2"]',
     );

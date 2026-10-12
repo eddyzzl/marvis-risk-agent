@@ -21,8 +21,9 @@ from marvis.agent.gate_payloads import (
     build_special_value_payload,
 )
 from marvis.agent.modeling_red_flags import (
-    select_experiment_red_flags,
-    tuning_setup_red_flags,
+    render_risk_evidence,
+    select_experiment_risk_evidence,
+    tuning_setup_risk_evidence,
 )
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStep
@@ -46,6 +47,7 @@ class GateRenderResult:
     # the rendered table strings). Empty list when nothing tripped, or when
     # neither red-flag family's inputs are present at this gate.
     red_flags: list[str] = field(default_factory=list)
+    red_flag_evidence: list[dict] = field(default_factory=list)
     presentation_warnings: list[dict] = field(default_factory=list)
 
 
@@ -207,18 +209,19 @@ def render_gate_dependencies(
         )
     result.dedup = build_dedup_payload(confirm_join_o, propose_join_o)
     result.join_keys = build_join_keys_payload(propose_join_o)
-    result.red_flags = [
-        *tuning_setup_red_flags(
+    result.red_flag_evidence = [
+        *tuning_setup_risk_evidence(
             split_output=split_o,
             modeling_spec_output=_effective_modeling_spec(
                 modeling_spec_o,
                 select_features_o,
             ),
         ),
-        *select_experiment_red_flags(
+        *select_experiment_risk_evidence(
             tune_output=tune_o, train_models_output=train_models_o
         ),
     ]
+    result.red_flags = render_risk_evidence(result.red_flag_evidence)
     return result
 
 

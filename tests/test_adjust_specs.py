@@ -11,7 +11,6 @@ from marvis.agent.adjust_specs import (
 def test_normalize_adjust_params_canonicalizes_time_oot_router_aliases() -> None:
     normalized = normalize_adjust_params(
         {
-            "split_col": "apply_month",
             "split_config": {
                 "method": "time_outer",
                 "date_col": "apply_month",
@@ -55,7 +54,7 @@ def test_normalize_adjust_params_canonicalizes_split_ratio_aliases() -> None:
     assert normalized == {
         "split_config": {
             "random_oot": True,
-            "test_size": 0.2,
+            "test_size": 0.25,
             "oot_size": 0.2,
         }
     }

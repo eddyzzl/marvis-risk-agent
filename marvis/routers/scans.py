@@ -37,6 +37,13 @@ def _repo(request: Request) -> TaskRepository:
     return TaskRepository(request.app.state.settings.db_path)
 
 
+def _material_source_admission(request, task):
+    from marvis.modeling_holdout.guards import assert_public_path, record_exposure
+    settings = request.app.state.settings
+    assert_public_path(settings.workspace, task.source_dir)
+    return lambda path: record_exposure(settings.db_path, settings.workspace, path)
+
+
 def _reject_validation_batch_task(
     repo: TaskRepository,
     task: TaskRecord,
@@ -61,7 +68,7 @@ def task_material_candidates(
     task = get_task_or_404(repo, task_id)
     _reject_validation_batch_task(repo, task)
     try:
-        return material_candidates_payload(task, pmml_path_override=pmml_path)
+        return material_candidates_payload(task, pmml_path_override=pmml_path, source_admission=_material_source_admission(request, task))
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise unprocessable(f"source dir invalid: {exc}") from exc
 
@@ -134,7 +141,7 @@ def update_task_materials(
                 task = repo.update_material_paths(task_id, **selection)
             response = {
                 "task": task_payload(repo, task, request.app.state.settings.tasks_dir),
-                "materials": material_candidates_payload(task),
+                "materials": material_candidates_payload(task, source_admission=_material_source_admission(request, task)),
             }
     except ValueError as exc:
         repo.finish_job(

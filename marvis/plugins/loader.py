@@ -66,6 +66,10 @@ def install_plugin(
         unpacked_dir = _plugin_root_from_extract(temp_dir)
         checksum = compute_checksum(unpacked_dir)
         manifest = replace(load_manifest(unpacked_dir, builtin=False), checksum=checksum)
+        from marvis.db_schema import connect
+        from marvis.plugins.capability_versions import require_legacy_registration_allowed
+        with connect(registry._repo.db_path) as conn:
+            require_legacy_registration_allowed(conn, manifest)
         _raise_if_duplicate_same_version(registry, manifest)
 
         staged = TransactionalDirectoryStore(plugins_dir).stage(manifest.name)
@@ -137,8 +141,14 @@ def _assert_valid_jsonschema(schema: dict) -> None:
 def _safe_extract_zip(zip_path: Path, destination: Path) -> None:
     try:
         with zipfile.ZipFile(zip_path) as archive:
+            if len(archive.infolist()) > 1000 or sum(info.file_size for info in archive.infolist()) > MAX_PLUGIN_ZIP_BYTES:
+                raise PluginError("plugin expanded material is too large")
+            seen = set()
             for info in archive.infolist():
                 _assert_safe_zip_member(info.filename)
+                if info.filename in seen or ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                    raise PluginError("duplicate or symlink plugin zip member")
+                seen.add(info.filename)
             archive.extractall(destination)
     except zipfile.BadZipFile as exc:
         raise PluginError("invalid plugin zip") from exc
@@ -146,7 +156,7 @@ def _safe_extract_zip(zip_path: Path, destination: Path) -> None:
 
 def _assert_safe_zip_member(filename: str) -> None:
     path = PurePosixPath(filename)
-    if path.is_absolute() or any(part in {"", ".."} for part in path.parts):
+    if path.is_absolute() or "\\" in filename or any(part in {"", ".."} for part in path.parts):
         raise PluginError(f"unsafe zip path: {filename}")
 
 

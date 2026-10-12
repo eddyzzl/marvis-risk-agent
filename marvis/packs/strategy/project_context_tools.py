@@ -3,8 +3,8 @@
 The boundary intentionally accepts only optimistic-CAS controls and bounded
 user-authored text.  Every platform identity, metric, lifecycle value and
 evidence pointer is discovered from task-owned storage and revalidated while a
-SQLite writer lock is held.  External reports remain opaque byte evidence: this
-module snapshots and hashes them, but never parses numbers out of them.
+SQLite writer lock is held. Reports remain opaque until a separate authenticated
+source-location mapping explicitly admits user-confirmed historical declarations.
 """
 
 from __future__ import annotations
@@ -1090,6 +1090,8 @@ def _discover_evidence(
         strategies=strategies,
         dataset_by_id=dataset_by_id,
     )
+    from marvis.repositories.strategy_history_mapping import StrategyHistoryMappingRepository
+    history_mapping = StrategyHistoryMappingRepository(runtime.settings).current_on_connection(conn, task_id)
     descriptor = {
         "task": {
             "id": task_id,
@@ -1106,6 +1108,7 @@ def _discover_evidence(
         "artifacts": artifacts,
         "strategies": strategies,
         "monitoring": monitoring,
+        "history_mapping": history_mapping,
     }
     return {
         **descriptor,
@@ -2220,6 +2223,17 @@ def _build_state(
                 ),
             )
     context_fields = [context_by_path[key] for key in sorted(context_by_path)]
+    history_mapping = evidence.get("history_mapping")
+    history_mapping_ref = None
+    if history_mapping is not None:
+        history_mapping_ref = build_source_ref(kind="strategy_history_mapping", ref_id=history_mapping["artifact_id"], content_hash=history_mapping["content_hash"])
+        # This metadata is deliberately separate from current status fields and
+        # MetricObservation refs: source-reported history is not platform proof.
+        context_fields = [item for item in context_fields if item["field_path"] != "history_mapping.confirmed"]
+        context_fields.append(build_context_field(field_path="history_mapping.confirmed", field=build_report_field(
+            value={key: history_mapping[key] for key in ("mapping_id", "revision", "artifact_id", "content_hash", "bindings", "validation_status")},
+            availability="present", origin="uploaded_file", source_refs=[history_mapping_ref],
+            as_of=request["as_of"], note="User-confirmed historical declarations; not platform measured or independently validated metrics.")))
     user_resolution_fields = {
         field_path: item["field"]
         for field_path, item in context_by_path.items()
@@ -2356,6 +2370,8 @@ def _build_state(
         external_refs=external_refs,
     )
     extra_sources = [message_ref]
+    if history_mapping_ref is not None:
+        extra_sources.append(history_mapping_ref)
     for category in (
         "sample_designs",
         "sample_designs_v2",
@@ -3430,6 +3446,11 @@ def _verify_live_refs(
                 (ref_id,),
             ).fetchone()
             actual = None if row is None else _run_record_from_row(row).result_hash
+        elif kind == "strategy_history_mapping":
+            from marvis.repositories.strategy_history_mapping import StrategyHistoryMappingRepository
+            from marvis.settings import Settings
+            mapping = StrategyHistoryMappingRepository(Settings(workspace=Path(tasks_root).absolute().parent)).get_on_connection(conn, task_id, ref_id)
+            actual = mapping["content_hash"]
         elif kind in _ARTIFACT_DERIVED_SOURCE_KINDS:
             actual = artifact_ref_index.get((kind, ref_id))
         else:

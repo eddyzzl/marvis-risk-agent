@@ -113,6 +113,17 @@ def list_experiments_all(
     bounded_offset = max(0, int(offset))
     query_limit = bounded_limit + 1 if bounded_limit is not None else None
     rows = repo.list_experiments_all(status=status, limit=query_limit, offset=bounded_offset)
+    from marvis.modeling_holdout.guards import require_http_developer
+    from marvis.modeling_holdout.contracts import HoldoutError
+    visible_rows = []
+    actor = getattr(getattr(request.state, 'local_principal', None), 'id', '')
+    for row in rows:
+        try:
+            require_http_developer(request.app.state.settings.db_path, row['experiment'].task_id, actor)
+            visible_rows.append(row)
+        except HoldoutError:
+            continue
+    rows = visible_rows
     has_more = False
     if bounded_limit is not None and len(rows) > bounded_limit:
         has_more = True
@@ -163,5 +174,8 @@ def get_experiment(experiment_id: str, request: Request) -> dict:
     experiment = repo.get_experiment(experiment_id)
     if experiment is None:
         raise not_found("experiment not found")
+    from marvis.modeling_holdout.guards import require_http_developer
+    require_http_developer(request.app.state.settings.db_path, experiment.task_id,
+                          getattr(getattr(request.state, 'local_principal', None), 'id', ''))
     artifacts = repo.list_model_artifacts(experiment_id=experiment_id)
     return _experiment_detail_payload(experiment, artifacts)

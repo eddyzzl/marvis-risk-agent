@@ -649,3 +649,16 @@ def _advance_status(repo: TaskRepository, task_id: str, target: TaskStatus) -> N
         repo.update_status(task_id, status, message=status.value, expected=expected)
         if status is target:
             return
+
+
+def test_v1_tool_context_retains_selected_network_mode_and_memory_limit(tmp_path):
+    from marvis.execution_environment import ExecutionEnvironmentSettings, save_execution_environment
+    from marvis.packs.v1_compat.adapters import load_v1_task_context
+
+    context = _task_context(tmp_path)
+    save_execution_environment(context.ctx.workspace, ExecutionEnvironmentSettings(
+        notebook_network_mode="loopback_only", notebook_memory_limit_mb=2048,
+    ))
+    loaded = load_v1_task_context(context.ctx, context.task_id)
+    assert loaded.pipeline_settings.notebook_network_mode == "loopback_only"
+    assert loaded.pipeline_settings.notebook_memory_limit_mb == 2048

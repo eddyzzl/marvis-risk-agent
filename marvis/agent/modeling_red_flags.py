@@ -34,19 +34,25 @@ def tuning_setup_red_flags(*, split_output: dict | None, modeling_spec_output: d
     features, OOT missing) — the checks named in AGT-9's 调参门 list that this
     template's gate can actually see (make_split + choose_modeling_spec are
     both direct dependencies of that gate)."""
-    flags: list[str] = []
+    return render_risk_evidence(tuning_setup_risk_evidence(
+        split_output=split_output, modeling_spec_output=modeling_spec_output,
+    ))
+
+
+def tuning_setup_risk_evidence(*, split_output: dict | None, modeling_spec_output: dict | None) -> list[dict]:
+    flags: list[dict] = []
     analysis = _dict(split_output).get("sample_analysis")
     split_counts = _split_counts(analysis)
     total_rows = _safe_int(_dict(analysis).get("total_rows"))
     if total_rows is None and split_counts:
         total_rows = sum(split_counts.values())
     if total_rows is not None and total_rows < MIN_SAMPLE_SIZE:
-        flags.append(f"样本量偏小（共 {total_rows} 行 < {MIN_SAMPLE_SIZE}），指标抽样噪声可能较大。")
+        flags.append({"code": "small_sample", "sample_count": total_rows, "threshold": MIN_SAMPLE_SIZE})
     if split_counts and split_counts.get("oot", 0) <= 0:
-        flags.append("样本切分缺少 OOT（时间外）子集，稳定性结论需谨慎。")
+        flags.append({"code": "missing_oot"})
     feature_count = _safe_int(_dict(modeling_spec_output).get("feature_count"))
     if feature_count is not None and feature_count > MAX_FEATURE_COUNT:
-        flags.append(f"入模候选特征数偏多（{feature_count} > {MAX_FEATURE_COUNT}），过拟合与训练成本风险上升。")
+        flags.append({"code": "many_features", "feature_count": feature_count, "threshold": MAX_FEATURE_COUNT})
     return flags
 
 
@@ -54,7 +60,13 @@ def select_experiment_red_flags(*, tune_output: dict | None, train_models_output
     """Red flags for the select-experiment gate (train-test overfit gap,
     champion vs. runner-up margin too thin to be meaningful, weighted vs.
     unweighted champion disagreement, any failed candidate)."""
-    flags: list[str] = []
+    return render_risk_evidence(select_experiment_risk_evidence(
+        tune_output=tune_output, train_models_output=train_models_output,
+    ))
+
+
+def select_experiment_risk_evidence(*, tune_output: dict | None, train_models_output: dict | None) -> list[dict]:
+    flags: list[dict] = []
     flags.extend(_overfit_gap_flags(tune_output))
     experiments = [
         item for item in _dict(train_models_output).get("experiments") or [] if isinstance(item, dict)
@@ -63,12 +75,12 @@ def select_experiment_red_flags(*, tune_output: dict | None, train_models_output
     flags.extend(_weighted_unweighted_mismatch_flags(experiments))
     failed = [item for item in _dict(train_models_output).get("failed") or [] if isinstance(item, dict)]
     if failed:
-        recipes = ", ".join(str(item.get("recipe") or "?") for item in failed[:8])
-        flags.append(f"训练阶段有 {len(failed)} 个候选算法失败（{recipes}），对比范围不完整。")
+        flags.append({"code": "failed_candidates", "count": len(failed),
+                      "recipes": [str(item.get("recipe") or "?") for item in failed[:8]]})
     return flags
 
 
-def _overfit_gap_flags(tune_output: dict | None) -> list[str]:
+def _overfit_gap_flags(tune_output: dict | None) -> list[dict]:
     trials = [item for item in _dict(tune_output).get("trials") or [] if isinstance(item, dict)]
     worst_gap = None
     for trial in trials:
@@ -80,13 +92,11 @@ def _overfit_gap_flags(tune_output: dict | None) -> list[str]:
         if worst_gap is None or gap > worst_gap:
             worst_gap = gap
     if worst_gap is not None and worst_gap > MAX_TRAIN_TEST_KS_GAP:
-        return [
-            f"调参 trial 中最大 train-test KS 差为 {worst_gap:.3f}（> {MAX_TRAIN_TEST_KS_GAP}），存在过拟合迹象。"
-        ]
+        return [{"code": "train_test_ks_gap", "ks_gap": worst_gap, "threshold": MAX_TRAIN_TEST_KS_GAP}]
     return []
 
 
-def _champion_runner_up_flags(experiments: list[dict]) -> list[str]:
+def _champion_runner_up_flags(experiments: list[dict]) -> list[dict]:
     scores = sorted(
         (score for score in (_champion_score(item) for item in experiments) if score is not None),
         reverse=True,
@@ -95,22 +105,42 @@ def _champion_runner_up_flags(experiments: list[dict]) -> list[str]:
         return []
     gap = scores[0] - scores[1]
     if gap < MIN_CHAMPION_RUNNER_UP_KS_GAP:
-        return [
-            f"冠军与亚军的 test_ks 差距仅 {gap:.4f}（< {MIN_CHAMPION_RUNNER_UP_KS_GAP}），"
-            "冠军选择可能落在噪声范围内，建议复核而非直接采信。"
-        ]
+        return [{"code": "thin_champion_margin", "ks_gap": gap, "threshold": MIN_CHAMPION_RUNNER_UP_KS_GAP}]
     return []
 
 
-def _weighted_unweighted_mismatch_flags(experiments: list[dict]) -> list[str]:
+def _weighted_unweighted_mismatch_flags(experiments: list[dict]) -> list[dict]:
     weighted_best = _best_recipe(experiments, "weighted_test_ks")
     unweighted_best = _best_recipe(experiments, "test_ks")
     if weighted_best and unweighted_best and weighted_best != unweighted_best:
-        return [
-            f"按加权 test_ks 与未加权 test_ks 选出的冠军算法不一致"
-            f"（加权={weighted_best}，未加权={unweighted_best}），请确认样本权重是否应纳入选型口径。"
-        ]
+        return [{"code": "weighted_champion_mismatch", "weighted_recipe": weighted_best,
+                 "unweighted_recipe": unweighted_best}]
     return []
+
+
+def render_risk_evidence(evidence: list[dict]) -> list[str]:
+    """Render the same deterministic findings for local UI consumers."""
+    flags = []
+    for item in evidence:
+        code = item["code"]
+        if code == "small_sample":
+            flags.append(f"样本量偏小（共 {item['sample_count']} 行 < {item['threshold']}），指标抽样噪声可能较大。")
+        elif code == "missing_oot":
+            flags.append("样本切分缺少 OOT（时间外）子集，稳定性结论需谨慎。")
+        elif code == "many_features":
+            flags.append(f"入模候选特征数偏多（{item['feature_count']} > {item['threshold']}），过拟合与训练成本风险上升。")
+        elif code == "train_test_ks_gap":
+            flags.append(f"调参 trial 中最大 train-test KS 差为 {item['ks_gap']:.3f}（> {item['threshold']}），存在过拟合迹象。")
+        elif code == "thin_champion_margin":
+            flags.append(f"冠军与亚军的 test_ks 差距仅 {item['ks_gap']:.4f}（< {item['threshold']}），"
+                         "冠军选择可能落在噪声范围内，建议复核而非直接采信。")
+        elif code == "weighted_champion_mismatch":
+            flags.append("按加权 test_ks 与未加权 test_ks 选出的冠军算法不一致"
+                         f"（加权={item['weighted_recipe']}，未加权={item['unweighted_recipe']}），请确认样本权重是否应纳入选型口径。")
+        elif code == "failed_candidates":
+            recipes = ", ".join(item["recipes"])
+            flags.append(f"训练阶段有 {item['count']} 个候选算法失败（{recipes}），对比范围不完整。")
+    return flags
 
 
 def _champion_score(experiment: dict) -> float | None:

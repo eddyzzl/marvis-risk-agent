@@ -8,6 +8,7 @@ targets before the split). No behavior change.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import logging
 import os
@@ -217,7 +218,9 @@ def _same_python(left: Path | str, right: Path | str) -> bool:
 
 def _execution_kernel_name(settings: PipelineSettings) -> str:
     environment = load_execution_environment(settings.workspace)
-    validation = validate_execution_environment(environment)
+    validation = validate_execution_environment(replace(
+        environment, notebook_network_mode=settings.notebook_network_mode,
+    ))
     if not validation.ok:
         logger.error("execution environment invalid: %s", validation.message)
         raise PipelineError(f"execution environment invalid: {validation.message}")
@@ -273,6 +276,7 @@ def _clear_generated_artifacts(task_dir: Path, *, stage: str) -> None:
             "model_params.json",
             "model_meta.json",
             "notebook_steps.json",
+            "notebook_execution.json",
             "metrics_steps.json",
             STRESS_SCENARIO_SCORES_JSON,
             METRICS_CANCEL_MARKER,

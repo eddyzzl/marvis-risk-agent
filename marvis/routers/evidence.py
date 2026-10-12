@@ -78,6 +78,8 @@ def get_task_evidence(task_id: str, request: Request) -> dict:
         or {},
         "pmml_scoring": pmml_scoring,
         "execution_environment": asdict(environment),
+        # Captured from this run; changing settings does not rewrite history.
+        "notebook_execution": _read_json(task_dir / "execution" / "notebook_execution.json") or {},
     }
 
 

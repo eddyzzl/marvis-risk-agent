@@ -231,6 +231,7 @@ def test_operations_api_rejects_unknown_or_request_supplied_callable_before_pers
 
     assert app.state.operations_runtime.store.db_path == app.state.settings.db_path
     assert app.state.operations_runtime.allowed_monitoring_refs == (
+        "analysis.decision_ledger_feedback", "analysis.portfolio_run",
         "modeling.monitor_run", "strategy.run_strategy_monitoring"
     )
 

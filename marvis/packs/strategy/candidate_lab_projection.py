@@ -797,8 +797,42 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         context,
         projection,
     )
+    field_labels = _workspace_field_labels(settings, task_id)
+    if field_labels is not None:
+        projection["field_labels"] = field_labels
     _require_projection_payload_budget(projection)
     return projection
+
+
+def _workspace_field_labels(settings, task_id):
+    from marvis.data.backend import DataBackend
+    from marvis.data.errors import DataLayerError
+    from marvis.data.field_aliases import field_alias_bindings
+    from marvis.data.registry import DatasetRegistry
+    from marvis.data.workspace import data_semantic_mapping_hash
+    from marvis.repositories.datasets import DatasetRepository
+    from marvis.repositories.data_workspace import DataWorkspaceRepository
+
+    snapshot = DataWorkspaceRepository(settings.db_path).get_or_default(task_id)
+    if snapshot.active_dataset_id is None:
+        return None
+    backend = DataBackend(settings.datasets_dir)
+    registry = DatasetRegistry(DatasetRepository(settings.db_path), backend, settings.datasets_dir)
+    dataset = registry.get(snapshot.active_dataset_id)
+    if dataset.task_id != task_id or dataset.content_hash != snapshot.active_dataset_content_hash:
+        raise CandidateLabProjectionError("field label workspace binding drifted")
+    try:
+        columns = backend.column_names(registry.resolve_verified_path(dataset.id))
+    except DataLayerError as exc:
+        raise CandidateLabProjectionError("field label dataset verification failed") from exc
+    aliases = dict(field_alias_bindings(columns, snapshot.semantic_mapping.business_names))
+    return {
+        "dataset_id": dataset.id,
+        "dataset_content_hash": dataset.content_hash,
+        "workspace_revision": snapshot.revision,
+        "semantic_mapping_hash": data_semantic_mapping_hash(snapshot.semantic_mapping),
+        "fields": [{"physical": name, "business_name": aliases.get(name)} for name in columns],
+    }
 
 
 def _project_active_sample_design(

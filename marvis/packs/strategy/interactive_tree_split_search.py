@@ -43,6 +43,7 @@ def search_interactive_tree_split_candidates(
     min_leaf_count: int,
     max_thresholds_per_feature: int,
     max_row_evaluations: int = MAX_ROW_EVALUATIONS,
+    control=None,
 ) -> dict[str, Any]:
     """Search a deterministic prefix of numeric split candidates."""
 
@@ -106,12 +107,23 @@ def search_interactive_tree_split_candidates(
         )
     parent = _population(mask, y, w)
     parent_gini = _gini(mask, y, w)
-    candidates: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = list(control.saved) if control is not None else []
+    if control is not None:
+        from marvis.strategy_workbench.control import frame_fingerprint
+        control.bind_search({'frame': frame_fingerprint(frame), 'target': y.tolist(),
+                             'weights': w.tolist() if w is not None else None,
+                             'node': mask.tolist(), 'source': source, 'node_id': node})
+        control.boundary(candidates, planned_candidates)
+    cursor = 0
+    resumed = len(candidates)
     for feature in normalized_features:
         vector = vectors[feature]
         median = float(medians[feature])
         direction = str(directions[feature])
         for threshold in threshold_map[feature]:
+            cursor += 1
+            if cursor <= resumed:
+                continue
             missing_child = "left" if median <= threshold else "right"
             present = ~np.isnan(vector)
             left_route = present & (vector <= threshold)
@@ -167,6 +179,8 @@ def search_interactive_tree_split_candidates(
                     "direction": direction_evidence,
                 }
             )
+            if control is not None:
+                control.boundary(candidates, planned_candidates)
     candidates.sort(
         key=lambda item: (
             not item["eligible"],

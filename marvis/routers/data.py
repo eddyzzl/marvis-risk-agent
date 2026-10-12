@@ -77,6 +77,7 @@ from marvis.data.excel_ingest import (
 )
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
+from marvis.data.field_directions import field_directions_to_dict
 from marvis.data.workspace import (
     DataSemanticMapping,
     DataWorkspaceDraft,
@@ -318,6 +319,7 @@ def _data_workspace_payload(
             "target_col": mapping.target_col,
             "field_roles": dict(mapping.field_roles),
             "business_names": dict(mapping.business_names),
+            **({"risk_directions": field_directions_to_dict(mapping.risk_directions)} if mapping.risk_directions else {}),
         },
         updated_at=snapshot.updated_at,
     )
@@ -420,6 +422,7 @@ def list_task_datasets(task_id: str, request: Request) -> dict:
 @router.get(
     "/tasks/{task_id}/data-workspace",
     response_model=DataWorkspaceSnapshotResponse,
+    response_model_exclude_unset=True,
 )
 def get_data_workspace(
     task_id: str,
@@ -446,6 +449,7 @@ def get_data_workspace(
 @router.put(
     "/tasks/{task_id}/data-workspace",
     response_model=DataWorkspaceSnapshotResponse,
+    response_model_exclude_unset=True,
 )
 def update_data_workspace(
     task_id: str,
@@ -463,6 +467,14 @@ def update_data_workspace(
         )
     repo = DataWorkspaceRepository(request.app.state.settings.db_path)
     try:
+        current = repo.get_or_default(task_id)
+        same_dataset = (current.active_dataset_id, current.active_dataset_content_hash) == (payload.active_dataset_id, payload.active_dataset_content_hash)
+        directions = dict(current.semantic_mapping.risk_directions) if same_dataset else {}
+        supplied = payload.semantic_mapping.risk_directions
+        if supplied is not None:
+            from marvis.data.field_directions import normalize_field_directions
+            if normalize_field_directions(supplied) != directions:
+                raise ValueError("风险方向需要通过独立的用户确认动作保存，不能直接替换来源或确认人。")
         draft = DataWorkspaceDraft(
             active_dataset_id=payload.active_dataset_id,
             active_dataset_content_hash=payload.active_dataset_content_hash,
@@ -472,6 +484,7 @@ def update_data_workspace(
                 target_col=payload.semantic_mapping.target_col,
                 field_roles=payload.semantic_mapping.field_roles,
                 business_names=payload.semantic_mapping.business_names,
+                risk_directions=directions,
             ),
         )
         snapshot = repo.save(
@@ -676,6 +689,10 @@ def register_task_dataset_from_path(
         source_path = _resolve_local_dataset_path(str(payload.get("path") or ""))
     except InvalidDatasetPathError as exc:
         raise unprocessable(str(exc)) from exc
+
+    # Sealed bytes must fail before an ordinary upload staging copy is made.
+    from marvis.modeling_holdout.guards import record_exposure
+    record_exposure(settings.db_path, settings.workspace, source_path)
 
     upload_dir = settings.datasets_dir / task_id / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)

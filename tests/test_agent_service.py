@@ -281,7 +281,7 @@ def test_word_conclusion_invalid_json_reports_format_error(monkeypatch):
     assert metadata["llm_error"] == "LLM 返回不是有效 JSON"
 
 
-def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatch):
+def test_metrics_summary_does_not_claim_withheld_memory_was_used(monkeypatch):
     captured = {}
 
     class CapturingClient:
@@ -289,7 +289,7 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
             captured.update(kwargs)
             return (
                 "总体判断\n模型效果与稳定性整体可接受。\n\n"
-                "效果表现\n当前模型 KS 相比历史版本提升。\n\n"
+                "效果表现\n本次未见可比历史模型。\n\n"
                 "稳定性表现\n需要继续关注 PSI。\n\n"
                 "压力测试风险\n当前证据未显示额外高风险项。\n\n"
                 "建议\n持续监测 OOT 表现。"
@@ -335,21 +335,13 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
     prompt = json.loads(captured["user_prompt"])
     assert captured["max_tokens"] == 4096
     assert content.startswith("总体判断\n")
-    assert "效果表现\n当前模型 KS 相比历史版本提升。" in content
+    assert "效果表现\n本次未见可比历史模型。" in content
     assert "压力测试风险必须完整覆盖" in prompt["instructions"]
     assert "不得停在半句话" in prompt["instructions"]
-    assert prompt["cross_task_memory"]["memories"][0]["id"] == "mem-1"
-    assert "不能改变" in prompt["cross_task_memory"]["usage_rules"]
-    assert metadata["memory_references"] == [
-        {
-            "kind": "raw",
-            "id": "mem-1",
-            "memory_type": "model_experience",
-            "source_task_id": "task-old",
-            "confidence": "high",
-            "use_reason": "metrics",
-        }
-    ]
+    assert "cross_task_memory" not in prompt
+    assert prompt["history_comparison_available"] is False
+    assert metadata["history_comparison_available"] is False
+    assert "memory_references" not in metadata
     assert evidence == {"validation_results": {"effectiveness": {"overall": {"ks": 0.30}}}}
 
 
@@ -526,7 +518,7 @@ def test_v2_pmml_scoring_summary_rejects_legacy_reproducibility_language(monkeyp
     assert metadata["guarded_stage_summary"] is True
 
 
-def test_summarize_stage_truncates_memory_summary_in_prompt(monkeypatch):
+def test_metrics_summary_withholds_freeform_memory_even_on_repair(monkeypatch):
     captured = {}
 
     class CapturingClient:
@@ -558,9 +550,10 @@ def test_summarize_stage_truncates_memory_summary_in_prompt(monkeypatch):
     )
 
     prompt = json.loads(captured["user_prompt"])
-    summary = prompt["cross_task_memory"]["memories"][0]["summary"]
-    assert len(summary) <= 403
-    assert summary.endswith("...")
+    assert "repair_request" in prompt
+    assert "cross_task_memory" not in prompt
+    assert "报告措辞保持克制" not in captured["user_prompt"]
+    assert prompt["history_comparison_available"] is False
 
 
 def test_answer_chat_message_memory_context_is_separate_from_task_conversation(monkeypatch):
@@ -596,9 +589,13 @@ def test_answer_chat_message_memory_context_is_separate_from_task_conversation(m
     )
 
     prompt = json.loads(captured["user_prompt"])
-    assert prompt["cross_task_memory"]["memories"][0]["id"] == "mem-2"
+    assert "cross_task_memory" not in prompt
+    assert "历史模型KS为20" not in captured["user_prompt"]
+    assert prompt["history_comparison_available"] is False
     assert prompt["conversation_memory"]["scope"] == "same_agent_task"
-    assert metadata["memory_references"][0]["use_reason"] == "chat"
+    assert metadata["history_comparison_available"] is False
+    assert metadata["guarded_history_comparison"] is True
+    assert not metadata.get("memory_references")
 
 
 def test_answer_chat_message_fallback_does_not_claim_memory_use(monkeypatch):

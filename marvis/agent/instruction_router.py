@@ -21,6 +21,8 @@ import json
 from marvis.agent.adjust_specs import normalize_adjust_params
 from marvis.agent.json_reply import load_json_object, rejects_positive_decision
 from marvis.llm_prompts import GATE_INSTRUCTION_ROUTER_SYS as _GATE_INSTRUCTION_ROUTER_SYS_SPEC
+from marvis.modeling_split_schema import split_configuration_schema
+from marvis.llm_outbound import application_schema
 
 _ACTIONS = ("confirm", "adjust", "replan", "clarify")
 _ROUTE_FIELDS = (
@@ -43,7 +45,7 @@ _ROUTE_SCHEMA = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": list(_ACTIONS)},
-            "params": {"type": "object"},
+            "params": {"type": "object", "properties": {"split_config": split_configuration_schema()}},
             "constraint": {"type": "string"},
             "reason": {"type": "string"},
             "confidence": {
@@ -75,13 +77,19 @@ def route_instruction(
     ``marvis.agent.gate_param_schema.gate_param_schema``). Injected into the
     prompt so the routing LLM extracts ``adjust`` params against real parameter
     names/bounds instead of guessing key names from the instruction text alone."""
-    prompt = _format(gate_context, instruction, tables or [], param_schema or [])
+    from marvis.llm_outbound import OutboundContextError, gate_instruction_prompt
+    try:
+        prompt = gate_instruction_prompt(gate_context, instruction, param_schema=param_schema or [])
+    except OutboundContextError:
+        return {"action": "clarify", "params": {}, "constraint": "",
+            "reason": "此指令包含尚未批准出站的自由文本，请使用节点的结构化控件。",
+            "confidence": "low", "explicit_authorization": False}
     raw = client.complete(
         system_prompt=_SYSTEM,
         user_prompt=prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
-        json_schema=_ROUTE_SCHEMA,
+        json_schema=application_schema("gate_instruction_route"),
         stream=False,
         caller="router",
         prompt_name=_GATE_INSTRUCTION_ROUTER_SYS_SPEC.name,
@@ -104,19 +112,14 @@ def route_instruction(
         )
     if strict_contract:
         return route
-    retry_prompt = (
-        f"{prompt}\n\n"
-        f"【上一次返回无法解析】\n{raw}\n\n"
-        '请严格只返回 JSON 对象:{"action":"confirm|adjust|replan|clarify","params":{},'
-        '"constraint":"","reason":"一句话中文","confidence":"high|medium|low",'
-        '"explicit_authorization":false}。'
-    )
+    from marvis.llm_outbound import gate_review_prompt
+    retry_prompt = gate_review_prompt(prompt, kind="retry")
     raw = client.complete(
         system_prompt=_SYSTEM,
         user_prompt=retry_prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
-        json_schema=_ROUTE_SCHEMA,
+        json_schema=application_schema("gate_instruction_route"),
         stream=False,
         caller="router",
         prompt_name=_GATE_INSTRUCTION_ROUTER_SYS_SPEC.name,
@@ -203,6 +206,10 @@ def _recover_declared_parameter_adjustment(
     fallback = dict(route)
     if fallback.get("action") == "adjust":
         fallback["params"] = normalize_adjust_params(fallback.get("params"))
+        if "split_col" in fallback["params"]:
+            return {"action": "clarify", "params": {}, "constraint": "",
+                    "reason": "当前节点不支持调整分区列；请先在任务配置中绑定正确分区列。",
+                    "confidence": "low", "explicit_authorization": False}
         fallback = _canonicalize_sample_weight_selection(
             fallback,
             declared=declared,
@@ -220,40 +227,14 @@ def _recover_declared_parameter_adjustment(
     if not any(cue in lowered for cue in _MODELING_ADJUST_CUES):
         return fallback
 
-    declared_text = "、".join(sorted(declared & _MODELING_ADJUST_PARAM_NAMES))
-    first_pass = json.dumps(
-        route,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    review_prompt = (
-        f"{prompt}\n\n"
-        "【当前节点参数调整复核】\n"
-        f"第一遍结构化结果：{first_pass}\n"
-        f"当前节点已经声明这些建模参数可安全重算：{declared_text}。"
-        "算法组合、调参轮数、目标类型、样本权重、时间/随机/无 OOT 切分，"
-        "只要能完整映射到上述参数，就属于 adjust，不是 replan；"
-        "只有新增、删除、重排步骤或切换 Workflow 才属于 replan。"
-        "请逐项对照用户原句与第一遍结果，把用户明确点名的每个控件都抽入 params，"
-        "不得遗漏；明确说“不可用、不要、不选择、保持不可用”"
-        "的算法不得放进 recipes。时间 OOT 用 split_config.oot_by_time，"
-        "随机 OOT 用 split_config.random_oot=true，无 OOT 不设置这两项。"
-        "sample_weight_candidates 是只读诊断，绝不能作为调整参数："
-        "明确启用某一列时必须返回 sample_weight_col=\"列名\"，"
-        "明确不使用权重时返回 sample_weight_col=\"\"；"
-        "有多个候选但没有明确选择时必须返回 clarify。"
-        "信息不足时返回 clarify，不要猜列名或比例。\n"
-        '请严格只返回 JSON 对象:{"action":"adjust|replan|clarify","params":{},'
-        '"constraint":"","reason":"一句话中文","confidence":"high|medium|low",'
-        '"explicit_authorization":false}。'
-    )
+    from marvis.llm_outbound import gate_review_prompt
+    review_prompt = gate_review_prompt(prompt, kind="parameters", first_pass=route)
     raw = client.complete(
         system_prompt=_SYSTEM,
         user_prompt=review_prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
-        json_schema=_ROUTE_SCHEMA,
+        json_schema=application_schema("gate_instruction_route"),
         stream=False,
         caller="router",
         prompt_name=_GATE_INSTRUCTION_ROUTER_SYS_SPEC.name,
@@ -262,6 +243,10 @@ def _recover_declared_parameter_adjustment(
     candidate, ok = _parse_route(raw)
     if ok and candidate.get("action") == "adjust":
         candidate["params"] = normalize_adjust_params(candidate.get("params"))
+        if "split_col" in candidate["params"]:
+            return {"action": "clarify", "params": {}, "constraint": "",
+                    "reason": "当前节点不支持调整分区列；请先在任务配置中绑定正确分区列。",
+                    "confidence": "low", "explicit_authorization": False}
         candidate = _canonicalize_sample_weight_selection(
             candidate,
             declared=declared,
@@ -392,49 +377,8 @@ def _recover_declared_selection_decision(
             "explicit_authorization": False,
         }
 
-    first_pass = json.dumps(
-        route,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    candidate_context = selection_spec.get("candidates")
-    if not isinstance(candidate_context, list):
-        candidate_context = [
-            {
-                "experiment_id": experiment_id,
-                "recipe": "",
-                "display_name": experiment_id,
-                "recommended": experiment_id == selection_spec.get("current"),
-            }
-            for experiment_id in allowed_values
-        ]
-    candidate_json = json.dumps(
-        candidate_context,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    review_prompt = (
-        f"{prompt}\n\n"
-        "【候选选择节点语义复核】\n"
-        f"第一遍结构化结果：{first_pass}\n"
-        f"当前候选 JSON：{candidate_json}\n"
-        "当前节点已经完成候选实验比较，selected_experiment_id 的 enum 是平台"
-        "实际展示且允许选择的候选，current 是平台当前推荐项；candidates 同时给出"
-        "每个候选的 experiment_id、recipe、display_name 和 recommended。"
-        "请重新理解用户整句话：用户可以用实验 id、recipe、算法显示名或推荐关系"
-        "表达选择；仅在名称或 recipe 唯一匹配到一个候选，且用户明确授权采用或进入"
-        "后续步骤时返回 confirm，"
-        "params 只保留 selected_experiment_id，并设置 confidence=high、"
-        "explicit_authorization=true；这只是当前决策节点的选择，不是修改 DAG。"
-        "若同一名称或 recipe 对应多个候选、没有唯一匹配，或用户只是在询问、评价"
-        "或讨论候选而未授权采用，返回 clarify。"
-        "只有确实新增、删除、重排步骤或切换 Workflow 时才保留 replan。"
-        "不得猜测 enum 之外的 id。\n"
-        '请严格只返回 JSON 对象:{"action":"confirm|replan|clarify","params":{},'
-        '"constraint":"","reason":"一句话中文","confidence":"high|medium|low",'
-        '"explicit_authorization":false}。'
-    )
+    from marvis.llm_outbound import gate_review_prompt
+    review_prompt = gate_review_prompt(prompt, kind="selection", first_pass=route)
     raw = client.complete(
         system_prompt=_SYSTEM,
         user_prompt=review_prompt,

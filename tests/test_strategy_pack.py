@@ -594,6 +594,8 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_strategy_pool",
         "measure_pool_impact",
         "measure_candidate_monthly_stability",
+        "freeze_candidate_asset_stability",
+        "measure_candidate_asset_stability",
         "measure_strategy_pool_validation",
         "measure_strategy_impact_cube",
         "measure_strategy_pool_stability",

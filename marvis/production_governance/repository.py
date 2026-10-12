@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from marvis.db_schema import connect
+from marvis.institution.policy import guard_repository, authorize_on_connection
+from marvis.institution.store import IdentityError, identity_mode
 from marvis.production_governance.errors import (
     GovernanceConflict,
     GovernanceForbidden,
@@ -36,6 +38,7 @@ def _canonical_json(value: Any) -> str:
     )
 
 
+@guard_repository
 class ProductionGovernanceRepository:
     """SQLite authority for local production roles and its hash-chained audit."""
 
@@ -636,16 +639,29 @@ class ProductionGovernanceRepository:
         with connect(self.db_path) as conn:
             conn.execute("BEGIN")
             where, args = (" WHERE environment=?", [environment]) if environment else ("", [])
-            total = conn.execute("SELECT count(*) FROM production_promotion_requests" + where, args).fetchone()[0]
-            rows = conn.execute("SELECT * FROM production_promotion_requests" + where + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
-            return {"requests": [_promotion_from_row(conn, row) for row in rows], "count": total,
-                    "next_offset": offset + len(rows) if offset + len(rows) < total else None}
+            rows = conn.execute("SELECT * FROM production_promotion_requests" + where + " ORDER BY created_at DESC, id DESC", args).fetchall()
+            visible = [row for row in rows if _readable_strategy(conn,row["strategy_id"])]
+            total = len(visible)
+            page = visible[offset:offset+limit]
+            return {"requests": [_promotion_from_row(conn, row) for row in page], "count": total,
+                    "next_offset": offset + len(page) if offset + len(page) < total else None}
 
     def list_environments(self):
         with connect(self.db_path) as conn:
             rows = conn.execute("SELECT * FROM production_environment_heads ORDER BY environment").fetchall()
-            return {"environments": [{"environment": row["environment"], "revision": row["revision"],
-                "active_deployment_id": row["active_deployment_id"], "shadow_deployment_id": row["shadow_deployment_id"]} for row in rows], "count": len(rows)}
+            if identity_mode(conn)!='institutional':
+                return {"environments":[{"environment":row["environment"],"revision":row["revision"],
+                    "active_deployment_id":row["active_deployment_id"],"shadow_deployment_id":row["shadow_deployment_id"]}
+                    for row in rows],"count":len(rows)}
+            visible=[]
+            for row in rows:
+                item={"environment":row["environment"],"revision":row["revision"]}
+                for slot in ("active_deployment_id","shadow_deployment_id"):
+                    deployment=conn.execute("SELECT strategy_id FROM production_deployments WHERE id=?",(row[slot],)).fetchone()
+                    item[slot]=row[slot] if deployment and _readable_strategy(conn,deployment["strategy_id"]) else None
+                if item["active_deployment_id"] or item["shadow_deployment_id"]:
+                    visible.append(item)
+            return {"environments":visible,"count":len(visible)}
 
     def get_environment(self, environment: str) -> dict[str, Any]:
         with connect(self.db_path) as conn:
@@ -662,6 +678,9 @@ class ProductionGovernanceRepository:
                 }
             active = _deployment_by_id(conn, head["active_deployment_id"])
             shadow = _deployment_by_id(conn, head["shadow_deployment_id"])
+            for deployment in (active,shadow):
+                if deployment:
+                    authorize_on_connection(conn,'strategy',deployment['strategy_id'])
             return {
                 "environment": str(head["environment"]),
                 "revision": int(head["revision"]),
@@ -900,6 +919,16 @@ class ProductionGovernanceRepository:
                 "chain_head": previous_hash,
             },
         }
+
+
+def _readable_strategy(conn,strategy_id):
+    try:
+        authorize_on_connection(conn,'strategy',strategy_id)
+        return True
+    except IdentityError as exc:
+        if exc.code=='identity_resource_forbidden':
+            return False
+        raise
 
 
 def _append_event(

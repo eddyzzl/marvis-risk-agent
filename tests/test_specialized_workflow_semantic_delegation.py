@@ -77,6 +77,14 @@ class _WorkflowIntakeClient:
                 },
                 ensure_ascii=False,
             )
+        if caller == "semantic_authorization_reviewer":
+            instruction = json.loads(kwargs["user_prompt"])["instruction"]
+            return json.dumps({
+                "verdict": "authorize", "evidence_quote": instruction,
+                "reason": "用户无条件授权当前创建计划并声明初始规格。", "confidence": "high",
+                "is_question": False, "is_conditional": False, "requests_change": False,
+                "withholds_authorization": False,
+            }, ensure_ascii=False)
         raise AssertionError(f"unexpected LLM caller: {caller}")
 
 

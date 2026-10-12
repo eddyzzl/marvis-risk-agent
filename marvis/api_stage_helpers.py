@@ -185,6 +185,7 @@ def pipeline_settings_from_settings(
         # was dropped, so notebooks were stuck at the hardcoded 4096 MB default
         # regardless of the execution-environment setting.
         notebook_memory_limit_mb=environment.notebook_memory_limit_mb,
+        notebook_network_mode=environment.notebook_network_mode,
     )
 
 

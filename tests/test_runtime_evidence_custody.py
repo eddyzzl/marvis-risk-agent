@@ -6,15 +6,18 @@ from pathlib import Path
 import sqlite3
 import stat
 import time
+import math
+import struct
 
 import pandas as pd
 import pytest
 
 from marvis.orchestrator.eval.runtime_contracts import RuntimeCase, digest
 from marvis.orchestrator.eval.runtime_custody import (
-    CustodyError, capture_case, prepare_custody_run, verify_case_archive,
+    CustodyError, capture_case, prepare_custody_run, read_private_receipt, verify_case_archive,
 )
 from marvis.orchestrator.eval.runtime_runner import run_runtime_suite
+from marvis.orchestrator.eval.runtime_native_json import NUMBER, MAPPING, decode_native, encode_native
 from test_runtime_agent_benchmark import fixture_model
 
 
@@ -81,6 +84,104 @@ def test_raw_originals_survive_deletion_and_manifest_is_not_a_trust_receipt(tmp_
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(CustodyError, match="custody_manifest_changed"):
         verify_case_archive(path, expected_manifest_sha256=receipt["manifest_sha256"])
+
+
+def test_source_business_responses_are_not_credentials_and_private_directory_is_excluded(tmp_path):
+    args = simple_capture(tmp_path)
+    private = args["workspace"] / "source_private"
+    private.mkdir()
+    source = (args["dataset_root"] / "rows.csv").read_bytes()
+    (private / f"wire-{digest(source)}.bin").write_bytes(source)
+    response = b'{"synthetic_business_response":1}'
+    (private / f"response-{digest(response)}.json").write_bytes(response)
+    credential = b"synthetic-source-credential"
+    (private / ("credential-" + "a" * 64)).write_bytes(credential)
+    receipt = capture_case(**args)
+    archive = args["run_dir"] / "one"
+    assert verify_case_archive(archive, expected_manifest_sha256=receipt["manifest_sha256"])["archived_bytes_match_manifest"]
+    assert not (archive / "workspace/source_private").exists()
+    assert (archive / "inputs/000.csv").read_bytes() == source
+    assert all(credential not in p.read_bytes() for p in archive.rglob("*") if p.is_file())
+
+
+@pytest.mark.parametrize("mutation", ["credential_leak", "unknown_private_file"])
+def test_source_credentials_and_unclassified_private_carriers_fail_before_publication(tmp_path, mutation):
+    args = simple_capture(tmp_path)
+    private = args["workspace"] / "source_private"
+    private.mkdir()
+    credential = b"synthetic-source-credential"
+    (private / ("credential-" + "a" * 64)).write_bytes(credential)
+    if mutation == "credential_leak":
+        (args["workspace"] / "tasks/task/outputs/raw.json").write_bytes(credential)
+        reason = "custody_secret_found"
+    else:
+        (private / "unclassified-native-key").write_bytes(credential)
+        reason = "custody_secret_source_invalid"
+    with pytest.raises(CustodyError, match=reason):
+        capture_case(**args)
+    assert not (args["run_dir"] / "one").exists()
+
+
+def test_nonfinite_native_diagnostics_retain_originals_without_becoming_valid_metrics(tmp_path):
+    nan = struct.unpack(">d", bytes.fromhex("7ff8000000000091"))[0]
+    original = {"outputs": {"diagnostic": [nan, float("inf"), float("-inf"), None]},
+                "messages": [{"content": "original narrative"}],
+                "literal_reserved_keys": {NUMBER: "ordinary original text", MAPPING: [["a", 1]]}}
+    args = simple_capture(tmp_path, private=original)
+    raw_before = (args["workspace"] / "tasks/task/outputs/raw.json").read_bytes()
+    receipt = capture_case(**args)
+    archive = args["run_dir"] / "one"
+    retained = json.loads((archive / "private.json").read_text(),
+                          parse_constant=lambda _: pytest.fail("archive must be standard JSON"))
+    restored = decode_native(retained)
+    restored_by_reader = read_private_receipt(archive, expected_manifest_sha256=receipt["manifest_sha256"])
+    assert struct.pack(">d", restored_by_reader["outputs"]["diagnostic"][0]).hex() == "7ff8000000000091"
+    diagnostic = restored["outputs"]["diagnostic"]
+    assert struct.pack(">d", diagnostic[0]).hex() == "7ff8000000000091"
+    assert math.isinf(diagnostic[1]) and diagnostic[1] > 0
+    assert math.isinf(diagnostic[2]) and diagnostic[2] < 0
+    assert diagnostic[3] is None
+    assert restored["literal_reserved_keys"] == original["literal_reserved_keys"]
+    assert (archive / "workspace/tasks/task/outputs/raw.json").read_bytes() == raw_before
+    assert json.loads((archive / "manifest.json").read_text())["native_private_encoding"] == "marvis.lossless-native-json.v1"
+    verified = verify_case_archive(archive, expected_manifest_sha256=receipt["manifest_sha256"])
+    assert verified["acceptance_claim"] == "not_established"
+
+
+def test_private_reader_requires_untampered_manifest_and_originals(tmp_path):
+    args = simple_capture(tmp_path)
+    receipt = capture_case(**args)
+    archive = args["run_dir"] / "one"
+    assert read_private_receipt(archive, expected_manifest_sha256=receipt["manifest_sha256"]) == args["private"]
+    (archive / "private.json").write_text('{"outputs":{"metric":0.99}}')
+    with pytest.raises(CustodyError, match="custody_originals_changed"):
+        read_private_receipt(archive, expected_manifest_sha256=receipt["manifest_sha256"])
+
+
+def test_private_codec_refuses_nonstring_key_collisions_before_publication(tmp_path):
+    args = simple_capture(tmp_path, private={1: "numeric", "1": "string"})
+    with pytest.raises(ValueError, match="require string keys"):
+        capture_case(**args)
+    assert not (args["run_dir"] / "one").exists()
+    assert (args["workspace"] / "tasks/task/outputs/raw.json").read_text() == '{"metric": 0.73}'
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_numeric_scoring_cannot_accept_nonfinite_private_diagnostics(value):
+    from pydantic import ValidationError
+    from marvis.orchestrator.eval.runtime_scoring import Assertion, _assertion
+    with pytest.raises(ValidationError, match="finite"):
+        Assertion(kind="output_equals", tool="synthetic.measure", value=value)
+    unchecked = Assertion.model_construct(kind="output_equals", tool="synthetic.measure", path=["metric"], value=value)
+    record = {"execution": {"steps": [{"tool": "synthetic.measure", "id": "s", "binding_verified": True, "status": "done"}]}}
+    assert _assertion(unchecked, record, {"outputs": {"s": {"metric": value}}}) is False
+
+
+@pytest.mark.parametrize("value", [{NUMBER: "invalid"}, {NUMBER: "3ff0000000000000"}, {MAPPING: [["a", 1], ["a", 2]]}])
+def test_native_diagnostic_codec_refuses_malformed_or_ambiguous_encoding(value):
+    with pytest.raises(ValueError):
+        decode_native(value)
+    assert decode_native(encode_native({NUMBER: "original"})) == {NUMBER: "original"}
 
 
 @pytest.mark.parametrize("mutation", ["symlink", "hardlink", "secret", "credential_column", "live_approval", "live_upload", "live_lease"])
@@ -272,6 +373,38 @@ def test_capture_failure_keeps_execution_record_and_temporary_cleanup(tmp_path, 
     assert record["isolated_workspace_removed"]
     assert "sensitive path" not in json.dumps(record)
     assert list(args["run_dir"].iterdir()) == []
+
+
+def test_actual_source_guard_failure_retains_first_code_when_custody_refuses_unstarted_process(tmp_path, monkeypatch):
+    from marvis.orchestrator.eval import runtime_runner
+    from marvis.orchestrator.eval.runtime_scoring import score_case
+
+    args = simple_capture(tmp_path)
+
+    @contextmanager
+    def application(root, case, profile, *unused, process_state, **kwargs):
+        # Exercise the actual package-copy/source guard. No child or model
+        # transport can start with the deliberately different source hash.
+        with runtime_runner._application_process(root, case, profile, "0" * 64,
+                                                 time.monotonic() + 20, (), process_state=process_state) as app:
+            yield app
+
+    monkeypatch.setattr(runtime_runner, "_application", application)
+    monkeypatch.setattr(runtime_runner.subprocess, "Popen", lambda *a, **k: pytest.fail("changed source must not start child"))
+    case_dir = tmp_path / "public-case"
+    case_dir.mkdir()
+    record, private = runtime_runner._run_case(args["case"], args["dataset_root"], {}, case_dir, {}, "0" * 64, (),
+                                              custody_run_dir=args["run_dir"], custody_bindings={})
+    assert record["prior_error_code"] == "source_changed_since_manifest"
+    assert record["secondary_error_code"] == "custody_processes_not_stopped"
+    assert record["runtime_status_before_custody_failure"] == "error"
+    assert record["runtime_status"] == "receipt_error" and record["error_code"] == "evidence_custody_failed"
+    assert record["http_events"] == [] and record["execution"]["task_id"] is None
+    assert record["isolated_workspace_removed"] and list(args["run_dir"].iterdir()) == []
+    expected = json.dumps({"schema_version": 1, "cases": {args["case"].id: {"result": "done", "assertions": [
+        {"kind": "http_status", "stage": "create_task", "value": 200}]}}}).encode()
+    assert score_case(args["case"], record, private, expected, model_source="fixture_model")["passed"] is False
+    assert runtime_runner._prior_failure_code("sensitive arbitrary exception body") == "runtime_error_code_unavailable"
 
 
 @pytest.mark.parametrize("limit", ["declared_count", "declared_bytes", "actual_bytes"])

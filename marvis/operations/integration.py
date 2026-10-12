@@ -34,6 +34,11 @@ from marvis.settings import Settings
 from marvis.operations.monitoring import BUILTIN_MONITORS, BuiltinMonitoringExecutor
 from marvis.operations.local_inbox import LocalInboxAdapter
 from marvis.operations.lifecycle import OperationsLoop
+from marvis.operations.portfolio import BuiltinPortfolioExecutor, PORTFOLIO_REF
+from marvis.operations.decision_feedback import (
+    BuiltinDecisionFeedbackExecutor,
+    FEEDBACK_REF,
+)
 
 
 class UnknownMonitoringReference(ValueError):
@@ -91,6 +96,17 @@ class OperationsRuntime:
                 stop_event=self.stop_event,
             )
             bound.update({ref: self.builtin_executor for ref in BUILTIN_MONITORS})
+            for ref, kind in (
+                (PORTFOLIO_REF, BuiltinPortfolioExecutor),
+                (FEEDBACK_REF, BuiltinDecisionFeedbackExecutor),
+            ):
+                bound[ref] = kind(
+                    settings,
+                    self.store,
+                    builtin_tool_runner,
+                    clock=clock,
+                    stop_event=self.stop_event,
+                )
         self._executors = MappingProxyType(bound)
         self.local_inbox = None
         self.loop = None
@@ -116,16 +132,17 @@ class OperationsRuntime:
     ) -> ScheduleRecord:
         if not isinstance(contract, ScheduleContract):
             raise ValueError("contract must be a ScheduleContract")
-        self._require_executor(contract.monitoring_ref)
-        if (
-            self.builtin_executor is not None
-            and contract.monitoring_ref in BUILTIN_MONITORS
-        ):
-            self.builtin_executor.validate(contract)
+        self.validate_schedule(contract)
         return self.store.publish_schedule(
             contract,
             expected_revision=expected_revision,
         )
+
+    def validate_schedule(self, contract):
+        executor = self._require_executor(contract.monitoring_ref)
+        validator = getattr(executor, "validate", None)
+        if callable(validator):
+            validator(contract)
 
     def tick(
         self,
@@ -154,7 +171,33 @@ class OperationsRuntime:
 
     def _execute(self, request: ScheduledRunRequest):
         executor = self._require_executor(request.monitoring_ref)
-        return executor(request)
+        from marvis.institution.policy import actor_context
+        from marvis.operations.schedule_proposals import binding_identity, schedule_task
+        from marvis.operations.monitoring import MonitoringExecutionError
+
+        record = self.store.get_schedule(
+            request.schedule_id, revision=request.schedule_revision
+        )
+        contract = record.contract
+        with actor_context(
+            self.settings.db_path,
+            contract.execution_actor_id,
+            schedule_task(contract)
+            if any(
+                (
+                    contract.monitoring_binding,
+                    contract.portfolio_binding,
+                    contract.feedback_binding,
+                )
+            )
+            else None,
+        ):
+            if (
+                contract.runtime_binding_hash
+                and binding_identity(self, contract) != contract.runtime_binding_hash
+            ):
+                raise MonitoringExecutionError("scheduled_binding_changed")
+            return executor(request)
 
     def _require_executor(self, monitoring_ref: str) -> MonitoringExecutor:
         ref = _monitoring_ref(monitoring_ref)

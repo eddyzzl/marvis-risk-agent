@@ -108,10 +108,16 @@ CLASSIFY_SYS = PromptSpec(
 # --- marvis.agent.auto_drive ------------------------------------------------------
 GATE_SYSTEM_TEMPLATE = PromptSpec(
     name="GATE_SYSTEM_TEMPLATE",
-    version=1,
+    version=2,
     text=(
         "你是信贷风控建模 Agent,正在自动执行一个分步计划。每到一个需要确认的节点,"
         "你会看到刚刚算出的结果(可能含表格)。请只在当前节点声明允许的动作内决策。\n"
+        "plan_overview 是执行前的计划审阅，不存在刚算出的结果；若提供平台认证的 plan_overview，"
+        "应审阅其中实际步骤、依赖和结构控件，不能仅因尚未执行而缺少结果就拒绝启动。"
+        "启动计划不授权任何后续候选选择、人工决策或交付动作；这些仍由各节点独立治理。\n"
+        "role_assignment 是接受已注册材料的明确文件角色和目标列；此处同样没有后续权重、"
+        "泄漏、模型或拼接效果指标，应审阅注册字段和绑定身份。不能把尚未计算的指标误作"
+        "缺失准入材料；目标或角色不唯一时仍须澄清，不能猜选。\n"
         "允许动作:{allowed_actions}\n"
         "- confirm: 结果正常,继续下一步;\n"
         "- adjust: 仅在当前节点允许且低风险控件可安全调整时使用,必须返回 params/selection/dedup_strategies;\n"
@@ -135,10 +141,17 @@ GATE_INSTRUCTION_ROUTER_SYS = PromptSpec(
     # Candidate selection is a decision at the current gate, not a structural
     # replan: when the user both names a declared candidate and authorizes its
     # adoption, the selected id rides on the semantic confirmation.
-    version=7,
+    version=8,
     text=(
         "你是信贷风控建模 Agent。用户在一个需要确认的节点没有直接确认,而是提了一条指令。"
         "判断该指令属于哪类并抽取要素:\n"
+        "首先按 gate_context.purpose 区分当前动作。create_workflow_plan 只创建计划，"
+        "modeling_setup 在创建前收集规格；在这两种 purpose 下，用户明确声明了 param_schema 中"
+        "任一初始规格时，即使等于当前默认值，也返回 adjust 并完整抽取 params，"
+        "explicit_authorization=false。这里的 adjust 是初始规格绑定，不是重算、修改已有步骤或"
+        "结构性改计划。若没有声明规格而明确授权创建计划，可返回 confirm 且 params 为空。"
+        "问题、否定或带未满足条件的创建请求仍必须 clarify。current_step/execute_plan 则"
+        "按已有确认节点决策，不把初始收集规则套用到当前节点。\n"
         '- confirm:其实是同意继续(如"可以""没问题")。\n'
         '- adjust:调整刚算出这一步的参数后重算(如"n_trials 调到 20""阈值放宽到 0.1")。'
         "把参数抽成 params 字典(键=参数名,值=新值,数字请用数字)。"
@@ -352,6 +365,26 @@ TEXT:pressure_impact_recommendation 必须围绕上述风险分层给出监控�
 TEXT:final_validation_conclusion 要稍长，建议 1 到 2 个自然段，覆盖开发过程、Notebook 可复现性、分数一致性、区分效果、稳定性、压力测试主要发现、报告产出状态和最终审慎判断。""",
 )
 
+WORD_CONCLUSION_REVISION_SYSTEM_PROMPT = PromptSpec(
+    name="WORD_CONCLUSION_REVISION_SYSTEM_PROMPT",
+    version=1,
+    text=_AGENT_SYSTEM_PROMPT_TEXT
+    + """
+
+本次是 V1 模型验证报告的候选文字修订。只返回 requested_fields 和响应 schema 授权的 JSON 字段，
+不得生成其他报告段落。用户完整指令和 report_revision_operation 共同限定本次字段操作。
+本次按平台确定性聚合证据整段重写指定字段，原报告及当前草稿文字未提供；不得猜测其内容或业务事实。
+未改字段由平台原样保留。来源版本仅用于核对修订来源，不代表报告已经确认或投产许可。
+TEXT:pressure_test_summary 按证据说明高、中、低风险数据源；缺失分层明确未知，类别只用本次序号引用。
+TEXT:pressure_impact_recommendation 针对已测风险提出监控、替代、降级或使用限制建议。
+TEXT:final_validation_conclusion 解释已知开发过程、Notebook 执行、一致性比较、区分效果、稳定性、
+压力风险和证据限制。V1 一致性是 Notebook 内存模型分与提交 PMML 分的比较；平台 summary.status
+是既定判断，缺失提交分数仍可使一致性失败，不能因最大偏差为零就改写为通过。
+TEXT:model_training_description 介绍实际算法及提供的关键超参，不猜测未提供的训练配置。
+缺少证据须说明限制，不能编造平台未提供的报告产出状态、机构名称、样本标签或模型业务范围。
+历史比较仅引用明确提供的 historical_models，不能据历史改写本次 KS、AUC、PSI 或通过判断。""",
+)
+
 WORD_CONCLUSION_V2_SYSTEM_PROMPT = PromptSpec(
     name="WORD_CONCLUSION_V2_SYSTEM_PROMPT",
     version=3,
@@ -391,10 +424,10 @@ TEXT:model_training_description 必须介绍本模型实际采用的算法，并
 # --- marvis.agent_memory.distillation ----------------------------------------------
 DISTILL_SYS = PromptSpec(
     name="DISTILL_SYS",
-    version=1,
+    version=2,
     text=(
-        "你在压缩 MARVIS 的历史记忆。只能基于给定的结构化字段和原始记忆措辞，输出一句话经验。"
-        "禁止引入任何未在输入中出现的事实、数字或结论。不要输出任务 ID。"
+        "你在压缩 MARVIS 的历史记忆。只能基于给定的已准入结构化事实，输出 JSON 对象的 summary 一句话经验。"
+        "禁止引入任何未在输入中出现的事实、数字或结论。不要输出任务 ID。未提供原始记忆措辞或私有作用域，不得推测。"
     ),
 )
 
@@ -964,6 +997,13 @@ SAMPLE_DESIGN_V2_CORRECTION_SYS = PromptSpec(
 )
 
 
+SQL_SELECT_COMPILER_SYS = PromptSpec(
+    name="SQL_SELECT_COMPILER_SYS",
+    version=1,
+    text="你是 MARVIS SQL 查询规格编译器。完整保留用户要求，只返回受限查询 spec 或明确 clarify；不得执行查询、计算结果、扩展 SQL 语法、猜测字段或删掉不支持的约束。",
+)
+
+
 ALL_PROMPTS: tuple[PromptSpec, ...] = (
     PLAN_SYS,
     REPLAN_SYS,
@@ -979,6 +1019,7 @@ ALL_PROMPTS: tuple[PromptSpec, ...] = (
     WORKFLOW_INSIGHT_SYS,
     AGENT_SYSTEM_PROMPT,
     WORD_CONCLUSION_SYSTEM_PROMPT,
+    WORD_CONCLUSION_REVISION_SYSTEM_PROMPT,
     WORD_CONCLUSION_V2_SYSTEM_PROMPT,
     DISTILL_SYS,
     AUTHOR_SYS,
@@ -988,6 +1029,7 @@ ALL_PROMPTS: tuple[PromptSpec, ...] = (
     SLICE_SPEC_SYS,
     STRATEGY_REQUEST_COMPILER_SYS,
     SAMPLE_DESIGN_V2_CORRECTION_SYS,
+    SQL_SELECT_COMPILER_SYS,
 )
 
 
@@ -1002,6 +1044,7 @@ def prompt_version_snapshot() -> dict[str, int]:
 
 
 __all__ = [
+    "SQL_SELECT_COMPILER_SYS",
     "PromptSpec",
     "ALL_PROMPTS",
     "prompt_version_snapshot",
@@ -1019,6 +1062,7 @@ __all__ = [
     "WORKFLOW_INSIGHT_SYS",
     "AGENT_SYSTEM_PROMPT",
     "WORD_CONCLUSION_SYSTEM_PROMPT",
+    "WORD_CONCLUSION_REVISION_SYSTEM_PROMPT",
     "WORD_CONCLUSION_V2_SYSTEM_PROMPT",
     "DISTILL_SYS",
     "AUTHOR_SYS",

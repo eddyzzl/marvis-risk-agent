@@ -40,7 +40,7 @@ export function replayFormHtml(datasets, packages) {
     <h4>冻结方案</h4><div class="history-grid">${select("baseline", "基线方案", packageOptions, req)}${select("challenger", "挑战方案", packageOptions, req)}${select("counterfactual", "反事实方案（可选）", packageOptions)}</div>
     ${note("这里只列出已登记的冻结包。选择后会重新校验包内容，基线与挑战方案必须属于相同决策节点。")}
     <button type="button" class="button compact secondary" data-history-action="features">读取方案字段合同</button><p data-history-package-message class="history-note"></p>
-    <div data-history-feature-fields></div>
+    <div data-history-feature-fields></div><div data-history-event-fields></div>
     ${optional("observed_actions", "导入历史实际动作", `<div class="history-grid">${select("action_col", "历史动作列（approval/reject/review）", column, req)}${select("recorded_at_col", "动作记录时间列", column, req)}${field("actions_source_ref", "动作记录来源", "text", req)}</div>${note("导入的动作与平台回放分别保存，不会将外部历史记录标成 MARVIS 实际执行。")}`)}
     ${optional("economics", "估算风险与收益", `<div class="history-grid">${field("currency", "币种（例如 CNY）", "text", 'required pattern="[A-Z]{3}" maxlength="3"')}${select("ead_col", "风险暴露金额列", column, req)}${select("economics_available_at_col", "金额可用时间列", column, req)}${field("annual_rate", "年利率（0—1）", "number", 'required min="0" max="1" step="any"')}${field("funding_rate", "资金年成本（0—1）", "number", 'required min="0" max="1" step="any"')}${field("lgd", "违约损失率（0—1）", "number", 'required min="0" max="1" step="any"')}${field("term_months", "期限（月）", "number", 'required min="0.000001" step="any"')}${field("operating_cost_per_loan", "每笔运营成本", "number", 'required min="0" step="any"')}</div><div class="history-grid">${["ead", "pd", "annual_rate", "funding_rate", "lgd", "term_months", "operating_cost_per_loan"].map((name, index) => field(`source_${name}`, `${["金额", "PD", "利率", "资金成本", "损失率", "期限", "运营成本"][index]}假设来源`, "text", req)).join("")}</div>${note("收益按固定情景假设估算。缺失假设时保持未知，不用 0 代替。")}`)}
     ${optional("protected_group", "检查已授权的客群差异", `<div class="history-grid">${select("group_column", "分组列", column, req)}${select("group_available_at_col", "分组可用时间列", column, req)}${field("governance_ref", "分组使用授权依据", "text", req)}${field("minimum_group_size", "每组最少记录数", "number", 'required min="1" step="1"')}</div>`)}
@@ -78,6 +78,11 @@ export function constraintHtml() {
     ],
     req,
   )}${field("threshold", "阈值", "number", 'required step="any"')}${field("unit", "单位", "text", req)}<button type="button" class="button compact secondary" data-history-action="remove-constraint">移除约束</button></div>`;
+}
+export function eventMappingFieldsHtml(kinds, columns, grants) {
+  if (!kinds.length) return "";
+  const available = grants.filter((g) => g.state === "active" && g.owned && g.permissions.includes("read")).map((g) => ({ id: g.grant_id, label: `${g.source_id} · ${g.grant_id}` }));
+  return `<h4>平台事件证据引用</h4>${note("逐笔绑定平台事件请求引用、主体命名空间与脱敏指纹。引用必须包含任务、请求、内容指纹与原生事件合同；平台会核对方案中的事件配方、授权和当时可得信息。这里不接受手填派生特征值。")}${kinds.map((kind) => `<fieldset class="history-feature" data-history-event-mapping="${attr(kind)}"><legend>${esc({ baseline: "基线方案", challenger: "挑战方案", counterfactual: "反事实方案" }[kind])}</legend><div class="history-grid">${select("reference_col", "原生事件证据引用列", columns, req)}${select("subject_namespace_col", "主体命名空间列", columns, req)}${select("subject_token_col", "脱敏主体指纹列", columns, req)}${select("grant_id", "当前身份的有效读取授权", available, req)}</div></fieldset>`).join("")}`;
 }
 const text = (value, label) => {
   if (!String(value ?? "").trim()) throw new Error(`请填写${label}`);
@@ -124,6 +129,10 @@ export function collectReplay(
     constraints = [],
     enabled = [],
     windows = [],
+    eventKinds = [],
+    eventMappings = [],
+    eventGrants = [],
+    allowEmptyFeatures = false,
   },
 ) {
   const dataset = datasets.find(
@@ -139,7 +148,7 @@ export function collectReplay(
     return name;
   };
   if (
-    !features.length ||
+    (!features.length && !allowEmptyFeatures) ||
     new Set(features.map((f) => f.name)).size !== features.length
   )
     throw new Error("请读取并绑定方案字段合同");
@@ -185,6 +194,13 @@ export function collectReplay(
       unit: text(c.unit, "约束单位"),
     })),
   };
+  if (eventKinds.length) {
+    if (new Set(eventMappings.map((m) => m.scenario_kind)).size !== eventKinds.length || eventMappings.length !== eventKinds.length || eventMappings.some((m) => !eventKinds.includes(m.scenario_kind))) throw new Error("请绑定所有方案的原生事件证据引用");
+    result.event_mappings = eventMappings.map((m) => {
+      if (!eventGrants.some((g) => g.grant_id === m.grant_id && g.state === "active" && g.owned && g.permissions.includes("read"))) throw new Error("请选择当前身份的有效事件读取授权");
+      return { scenario_kind: m.scenario_kind, reference_col: col(m.reference_col, "事件证据引用列"), subject_namespace_col: col(m.subject_namespace_col, "主体命名空间列"), subject_token_col: col(m.subject_token_col, "脱敏主体指纹列"), grant_id: m.grant_id };
+    });
+  } else if (eventMappings.length) throw new Error("当前冻结方案未声明事件配方");
   if (enabled.includes("observed_actions"))
     result.observed_actions = {
       action_col: col(values.action_col, "历史动作列"),

@@ -1,4 +1,5 @@
 import { previewTaskDataset as fetchTaskDatasetPreview } from "./api_v2.js";
+import { createFieldDirectionPanel, fieldDirectionHtml } from "./field_direction_panel.js";
 
 export const DATA_WORKSPACE_FIELD_ROLES = Object.freeze([
   "phone",
@@ -90,7 +91,7 @@ function roleOptions(currentRole = "") {
   ].join("");
 }
 
-function fieldRowsHtml(columns, mapping = {}, { disabled = false } = {}) {
+function fieldRowsHtml(columns, mapping = {}, { disabled = false, directionDisabled = false, draft = null } = {}) {
   if (!columns.length) {
     return '<p class="data-workspace-empty">绑定数据集后显示字段语义。</p>';
   }
@@ -106,6 +107,7 @@ function fieldRowsHtml(columns, mapping = {}, { disabled = false } = {}) {
     `<label><span class="visually-hidden">${escapeHtml(column)} 业务名称</span>`,
     `<input data-workspace-business-name="${escapeHtml(column)}" value="${escapeHtml(businessNames[column] || "")}" placeholder="业务名称" aria-label="${escapeHtml(column)} 业务名称"${disabled ? " disabled" : ""} />`,
     "</label>",
+    fieldDirectionHtml(column, draft, { disabled: disabled || directionDisabled }),
     "</div>",
   ].join("")).join("");
 }
@@ -161,6 +163,9 @@ export function createDataWorkspacePanel(dependencies = {}) {
   let previewError = null;
   let notice = "";
   let previewOperation = 0;
+  const directions = createFieldDirectionPanel({ element: elements.fields, controller,
+    onChange: render, onError, getDirections: dependencies.getFieldDirections,
+    confirmDirections: dependencies.confirmFieldDirections });
 
   function render() {
     const state = controller.getState();
@@ -201,6 +206,7 @@ export function createDataWorkspacePanel(dependencies = {}) {
     elements.fieldCount.textContent = `${visibleColumns.length} 个字段 · ${mappedCount} 个已标注`;
     elements.fields.innerHTML = fieldRowsHtml(visibleColumns, mapping, {
       disabled: inputsDisabled,
+      directionDisabled: state.dirty || directions.isBusy(), draft,
     });
 
     elements.refresh.disabled = !activeTaskId || state.loading || state.saving;
@@ -379,7 +385,7 @@ export function createDataWorkspacePanel(dependencies = {}) {
 
   return {
     clear,
-    destroy: unsubscribe,
+    destroy: () => { unsubscribe(); directions.destroy(); },
     discard,
     getState: () => ({ ...controller.getState(), activeTaskId, columns: [...columns] }),
     reload,

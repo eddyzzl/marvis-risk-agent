@@ -118,6 +118,10 @@ class NonSelectQueryError(SqlIngestError, DataSecurityError):
 class SqlQueryTimeoutError(SqlIngestError):
     """A query exceeded its configured time budget and was aborted."""
 
+    def __init__(self, *, timeout_seconds: float):
+        self.timeout_seconds = float(timeout_seconds)
+        super().__init__("SQL 查询超过时间预算，已停止且未导入结果。")
+
 
 class SqlReadOnlyViolationError(SqlIngestError):
     """A write was attempted against a read-only SQL connection."""
@@ -385,7 +389,11 @@ def _connect_duckdb_read_only(spec: SqlSourceSpec) -> Any:
     if not path.is_file():
         raise SqlIngestError(f"DuckDB source file does not exist: {path}")
     try:
-        return duckdb.connect(str(path), read_only=True)
+        return duckdb.connect(str(path), read_only=True, config={
+            "enable_external_access": False,
+            "autoinstall_known_extensions": False,
+            "autoload_known_extensions": False,
+        })
     except Exception as exc:  # noqa: BLE001 - normalized into a typed error
         raise SqlIngestError(
             f"cannot open DuckDB source read-only ({path.name}): {exc}"

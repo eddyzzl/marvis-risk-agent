@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -274,12 +275,12 @@ def test_sample_design_anchor_gets_one_structured_workflow_correction() -> None:
     assert result.draft.to_dict() == _v2_payload()
     assert len(llm.calls) == 2
     correction = llm.calls[1]
-    repair_prompt = correction["user_prompt"]
-    assert "strategy_sample_design_v2_workflow_required" in repair_prompt
-    assert f"【原始用户意图】\n{_GROUNDED_UTTERANCE}" in repair_prompt
-    assert f"【列白名单】\n{_COLUMNS!r}" not in repair_prompt
-    assert "【列白名单】" in repair_prompt
-    assert "【当前目标列角色】\n\"bad\"" in repair_prompt
+    correction_payload = json.loads(correction["user_prompt"])
+    repair_prompt = correction_payload["contract"]
+    assert correction_payload["repair"] == "sample_design_semantics"
+    assert correction_payload["instruction"] == _GROUNDED_UTTERANCE
+    assert correction_payload["allowed_columns"] == sorted(_COLUMNS)
+    assert correction_payload["target_col"] == "bad"
     assert "这是唯一一次语义纠正机会" in repair_prompt
     assert '"method":"time_ranges"' in repair_prompt
     assert '"ranges":{"development"' in repair_prompt
@@ -329,7 +330,7 @@ def test_invalid_sample_design_shape_uses_dedicated_structured_correction() -> N
     assert len(llm.calls) == 2
     correction = llm.calls[1]
     assert correction["prompt_name"] == "SAMPLE_DESIGN_V2_CORRECTION_SYS"
-    assert '"method":"time_ranges"' in correction["user_prompt"]
+    assert '"method":"time_ranges"' in json.loads(correction["user_prompt"])["contract"]
     assert (
         correction["json_schema"]["schema"]["oneOf"][0]["properties"][
             "workflow"
@@ -399,10 +400,12 @@ def test_sample_design_semantic_correction_gets_one_bounded_json_format_repair()
     assert result.draft.to_dict() == _v2_payload()
     assert len(llm.calls) == 3
     format_repair = llm.calls[2]
-    format_repair_prompt = format_repair["user_prompt"]
+    format_payload = json.loads(format_repair["user_prompt"])
+    format_repair_prompt = format_payload["contract"]
     assert "上一次输出未通过平台校验" in format_repair_prompt
-    assert "不是有效 JSON" in format_repair_prompt
-    assert f"【原始用户意图】\n{_GROUNDED_UTTERANCE}" in format_repair_prompt
+    assert format_payload["repair"] == "format"
+    assert format_payload["instruction"] == _GROUNDED_UTTERANCE
+    assert "<not-json>" not in format_repair["user_prompt"]
     assert "这是唯一一次格式修复机会" in format_repair_prompt
     assert "roll_rate_matrix" not in format_repair["system_prompt"]
     assert (

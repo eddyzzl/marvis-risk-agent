@@ -228,7 +228,7 @@ _MIGRATION_TABLES = frozenset({
 # _migration_034_validation_batch_source_gc adds a narrowly typed cleanup target
 # for platform-owned validation-batch material trees.  The old migration remains
 # immutable; SQLite requires a table rebuild to extend its CHECK constraint.
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 45
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -4539,6 +4539,149 @@ def _migration_039_task_business_objective(conn: sqlite3.Connection) -> None:
 # Never edit or reorder an existing entry once it has shipped -- databases
 # already stamped at that version will never run it again, so a later edit
 # would silently diverge from what already-upgraded databases have.
+def _migration_040_blind_oot_custody(conn: sqlite3.Connection) -> None:
+    # Custody and evaluation identities deliberately survive task deletion:
+    # deleting a task or changing a request id must never reopen the budget.
+    statements = [
+        """CREATE TABLE blind_oot_exposures (
+          content_hash TEXT PRIMARY KEY, first_seen_at REAL NOT NULL)""",
+        """CREATE TABLE blind_oot_public_schemas (columns_json TEXT PRIMARY KEY)""",
+        """CREATE TABLE blind_oot_unverified_sources (content_hash TEXT PRIMARY KEY, columns_json TEXT NOT NULL)""",
+        """CREATE TABLE blind_oot_exposed_members (
+          member_hash TEXT PRIMARY KEY, first_seen_at REAL NOT NULL)""",
+        """CREATE TABLE blind_oot_cohorts (
+          id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+          data_identity TEXT NOT NULL UNIQUE, sealed_hash TEXT NOT NULL UNIQUE, logical_hash TEXT NOT NULL UNIQUE, identity_columns TEXT NOT NULL,
+          contract TEXT NOT NULL, custodian_id TEXT NOT NULL REFERENCES local_principals(id),
+          developer_id TEXT NOT NULL REFERENCES local_principals(id),
+          evaluator_id TEXT NOT NULL REFERENCES local_principals(id), created_at REAL NOT NULL)""",
+        """CREATE TABLE blind_oot_row_members (
+          member_hash TEXT PRIMARY KEY, cohort_id TEXT NOT NULL REFERENCES blind_oot_cohorts(id))""",
+        """CREATE TABLE blind_oot_freezes (
+          cohort_id TEXT PRIMARY KEY REFERENCES blind_oot_cohorts(id),
+          freeze_hash TEXT NOT NULL, payload TEXT NOT NULL,
+          created_by TEXT NOT NULL REFERENCES local_principals(id), created_at REAL NOT NULL)""",
+        """CREATE TABLE blind_oot_evaluations (
+          cohort_id TEXT PRIMARY KEY REFERENCES blind_oot_cohorts(id),
+          freeze_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','reading','committed','uncertain')),
+          owner_token TEXT NOT NULL, actor_id TEXT NOT NULL REFERENCES local_principals(id),
+          request_id TEXT NOT NULL, reserved_at REAL NOT NULL, read_started_at REAL,
+          result_hash TEXT, error_code TEXT)""",
+        """CREATE TABLE blind_oot_recoveries (
+          id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL REFERENCES blind_oot_cohorts(id),
+          freeze_hash TEXT NOT NULL, owner_token TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK(mode IN ('resume_before_read','publish_result')),
+          approved_by TEXT NOT NULL REFERENCES local_principals(id), reason TEXT NOT NULL,
+          created_at REAL NOT NULL, expires_at REAL NOT NULL, consumed_at REAL)""",
+    ]
+    for statement in statements:
+        conn.execute(statement)
+    # Pre-upgrade exposure has no primitive member ledger. Preserve that
+    # uncertainty rather than accepting a reencoded legacy dataset as blind.
+    import json
+    dataset_columns = {row[1] for row in conn.execute('PRAGMA table_info(datasets)')}
+    if 'content_hash' in dataset_columns:
+        conn.execute("""INSERT INTO blind_oot_exposures(content_hash,first_seen_at)
+          SELECT DISTINCT content_hash,strftime('%s','now') FROM datasets
+          WHERE content_hash IS NOT NULL AND length(content_hash)=64""")
+    legacy_sources = (
+        conn.execute('SELECT content_hash,columns_json FROM datasets WHERE content_hash IS NOT NULL')
+        if {'content_hash', 'columns_json'} <= dataset_columns else ()
+    )
+    for row in legacy_sources:
+        try:
+            columns = [column['name'] if isinstance(column, dict) else column for column in json.loads(row['columns_json'])]
+        except (KeyError, TypeError, ValueError):
+            columns = None
+        conn.execute('INSERT OR IGNORE INTO blind_oot_unverified_sources VALUES(?,?)',
+                     (row['content_hash'], json.dumps(columns, separators=(',', ':'))))
+    for table in ('blind_oot_cohorts', 'blind_oot_freezes', 'blind_oot_exposures', 'blind_oot_row_members', 'blind_oot_exposed_members', 'blind_oot_public_schemas', 'blind_oot_unverified_sources'):
+        for operation in ('UPDATE', 'DELETE'):
+            conn.execute(f"""CREATE TRIGGER {table}_no_{operation.lower()} BEFORE {operation}
+              ON {table} BEGIN SELECT RAISE(ABORT,'blind OOT identity is immutable'); END""")
+    conn.execute("""CREATE TRIGGER blind_oot_evaluations_committed_immutable BEFORE UPDATE
+      ON blind_oot_evaluations WHEN OLD.state='committed'
+      BEGIN SELECT RAISE(ABORT,'blind OOT result is immutable'); END""")
+    conn.execute("""CREATE TRIGGER blind_oot_evaluations_no_delete BEFORE DELETE
+      ON blind_oot_evaluations BEGIN SELECT RAISE(ABORT,'blind OOT budget is durable'); END""")
+
+
+def _migration_041_sql_execution_claims(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE sql_import_executions (
+      proposal_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+      actor_id TEXT NOT NULL, proposal_hash TEXT NOT NULL UNIQUE,
+      source_id TEXT NOT NULL, source_fingerprint TEXT NOT NULL,
+      schema_hash TEXT NOT NULL, query_hash TEXT NOT NULL,
+      owner_token TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('running','completed','failed')),
+      started_at REAL NOT NULL, ended_at REAL, error_code TEXT, dataset_id TEXT,
+      CHECK((state='running' AND ended_at IS NULL AND dataset_id IS NULL AND error_code IS NULL)
+        OR (state='completed' AND ended_at IS NOT NULL AND dataset_id IS NOT NULL AND error_code IS NULL)
+        OR (state='failed' AND ended_at IS NOT NULL AND dataset_id IS NULL AND error_code IS NOT NULL)))""")
+    conn.execute("""CREATE TRIGGER sql_import_execution_identity_immutable BEFORE UPDATE
+      ON sql_import_executions WHEN NEW.proposal_id IS NOT OLD.proposal_id
+        OR NEW.task_id IS NOT OLD.task_id OR NEW.actor_id IS NOT OLD.actor_id
+        OR NEW.proposal_hash IS NOT OLD.proposal_hash OR NEW.source_id IS NOT OLD.source_id
+        OR NEW.source_fingerprint IS NOT OLD.source_fingerprint OR NEW.schema_hash IS NOT OLD.schema_hash
+        OR NEW.query_hash IS NOT OLD.query_hash OR NEW.owner_token IS NOT OLD.owner_token
+        OR NEW.started_at IS NOT OLD.started_at
+      BEGIN SELECT RAISE(ABORT,'SQL execution identity is immutable'); END""")
+    conn.execute("""CREATE TRIGGER sql_import_execution_terminal_immutable BEFORE UPDATE
+      ON sql_import_executions WHEN OLD.state IN ('completed','failed')
+      BEGIN SELECT RAISE(ABORT,'SQL execution has already ended'); END""")
+    conn.execute("""CREATE TRIGGER sql_import_executions_no_delete BEFORE DELETE
+      ON sql_import_executions BEGIN SELECT RAISE(ABORT,'SQL execution claim is durable'); END""")
+
+
+def _migration_042_strategy_workbench_state(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE strategy_workbench_drafts (
+      task_id TEXT NOT NULL REFERENCES tasks(id), actor_id TEXT NOT NULL REFERENCES local_principals(id),
+      revision INTEGER NOT NULL CHECK(revision>0), evidence_hash TEXT NOT NULL,
+      payload TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(task_id,actor_id,revision))""")
+    for operation in ('UPDATE', 'DELETE'):
+        conn.execute(f"""CREATE TRIGGER strategy_workbench_drafts_no_{operation.lower()} BEFORE {operation}
+          ON strategy_workbench_drafts BEGIN SELECT RAISE(ABORT,'workbench draft versions are immutable'); END""")
+    conn.execute("""CREATE TABLE strategy_workbench_searches (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), actor_id TEXT NOT NULL REFERENCES local_principals(id),
+      plan_id TEXT NOT NULL REFERENCES plans(id), step_id TEXT NOT NULL UNIQUE REFERENCES plan_steps(id),
+      tool_ref TEXT NOT NULL, evidence_hash TEXT NOT NULL, input_hash TEXT, data_hash TEXT, invocation_id TEXT,
+      state TEXT NOT NULL CHECK(state IN ('queued','running','pause_requested','paused','cancel_requested','cancelled','resuming','publishing','published','completed','failed','uncertain')),
+      revision INTEGER NOT NULL, completed INTEGER NOT NULL, total INTEGER NOT NULL,
+      checkpoint_json TEXT, checkpoint_mac TEXT, result_json TEXT, updated_at REAL NOT NULL)""")
+    conn.execute("""CREATE TABLE strategy_workbench_search_attempts (
+      run_id TEXT PRIMARY KEY REFERENCES plan_step_runs(id), search_id TEXT NOT NULL REFERENCES strategy_workbench_searches(id),
+      input_hash TEXT NOT NULL, halted_state TEXT, checkpoint_mac TEXT, halted_at REAL, checkpoint_json TEXT)""")
+    conn.execute("""CREATE TRIGGER strategy_workbench_search_identity_immutable BEFORE UPDATE
+      ON strategy_workbench_searches WHEN NEW.id IS NOT OLD.id OR NEW.task_id IS NOT OLD.task_id
+        OR NEW.actor_id IS NOT OLD.actor_id OR NEW.plan_id IS NOT OLD.plan_id OR NEW.step_id IS NOT OLD.step_id
+        OR NEW.tool_ref IS NOT OLD.tool_ref OR NEW.evidence_hash IS NOT OLD.evidence_hash
+        OR (OLD.input_hash IS NOT NULL AND NEW.input_hash IS NOT OLD.input_hash)
+        OR (OLD.data_hash IS NOT NULL AND NEW.data_hash IS NOT OLD.data_hash)
+      BEGIN SELECT RAISE(ABORT,'workbench search input identity is immutable'); END""")
+    conn.execute("""CREATE TRIGGER strategy_workbench_search_terminal_immutable BEFORE UPDATE
+      ON strategy_workbench_searches WHEN OLD.state IN ('completed','cancelled')
+      BEGIN SELECT RAISE(ABORT,'workbench search has ended'); END""")
+    conn.execute("""CREATE TRIGGER strategy_workbench_attempt_immutable BEFORE UPDATE
+      ON strategy_workbench_search_attempts WHEN OLD.halted_state IS NOT NULL
+      BEGIN SELECT RAISE(ABORT,'workbench native halt receipt is immutable'); END""")
+
+
+def _migration_043_governed_capability_versions(conn: sqlite3.Connection) -> None:
+    from marvis.plugins.capability_versions import create_capability_schema
+
+    create_capability_schema(conn)
+
+
+def _migration_044_institution_identity_and_sync(conn: sqlite3.Connection) -> None:
+    from marvis.institution.schema import create_schema
+
+    create_schema(conn)
+
+
+def _migration_045_operations_evidence(conn: sqlite3.Connection) -> None:
+    from marvis.operations.extension_schema import create_operations_extensions_schema
+    create_operations_extensions_schema(conn)
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_001_baseline),
     (2, _migration_002_strategy_versioning),
@@ -4579,6 +4722,12 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (37, _migration_037_step_invocation_contract),
     (38, _migration_038_trusted_reconciliation),
     (39, _migration_039_task_business_objective),
+    (40, _migration_040_blind_oot_custody),
+    (41, _migration_041_sql_execution_claims),
+    (42, _migration_042_strategy_workbench_state),
+    (43, _migration_043_governed_capability_versions),
+    (44, _migration_044_institution_identity_and_sync),
+    (45, _migration_045_operations_evidence),
 ]
 
 

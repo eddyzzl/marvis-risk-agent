@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 from marvis.domain import TaskRecord
+from marvis.agent_memory.models import MODEL_EXPERIENCE_EVALUATION_SPLITS, MODEL_EXPERIENCE_METRIC_UNITS
 from marvis.validation.overfitting import overfitting_check_from_validation_results
 from marvis.validation_report_copy import channel_from_model_name
 
@@ -67,6 +68,13 @@ def _memory_model_experience_payload(
         payload["head_lift_5pct"] = head_lift
     if tail_lift is not None:
         payload["tail_lift_5pct"] = tail_lift
+    values = {**payload["metrics"], **{key: payload[key] for key in ("head_lift_5pct", "tail_lift_5pct") if key in payload}}
+    units = {key: unit for key, unit in MODEL_EXPERIENCE_METRIC_UNITS.items() if values.get(key) is not None}
+    if units:
+        payload["metric_units"] = units
+    split = str(metrics_row.get("split") or "").strip().lower()
+    if split in MODEL_EXPERIENCE_EVALUATION_SPLITS:
+        payload["evaluation_split"] = split
     return payload
 
 

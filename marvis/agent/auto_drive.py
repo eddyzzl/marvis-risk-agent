@@ -19,9 +19,7 @@ from typing import Any
 
 from marvis.agent.gates import DEFAULT_GATE_ACTIONS, extract_gate_envelope
 from marvis.agent.json_reply import load_json_object, rejects_positive_decision
-from marvis.llm_client import DEFAULT_CONTEXT_WINDOW, estimate_tokens
 from marvis.llm_prompts import GATE_SYSTEM_TEMPLATE as _GATE_SYSTEM_TEMPLATE_SPEC
-from marvis.orchestrator.context.budget import truncate_text_to_token_budget
 
 AUTO_SAFE_ADJUST_CONTROLS = frozenset({
     "dedup_strategies",
@@ -78,23 +76,26 @@ AUTO_MIN_CONFIDENCE = 0.6
 _SYSTEM_TEMPLATE = _GATE_SYSTEM_TEMPLATE_SPEC.text
 
 
-def decide_gate(client, *, gate: dict) -> dict:
+def decide_gate(client, *, gate: dict, plan_overview=None, role_assignment=None) -> dict:
     """Ask the injected LLM client to operate one confirmation gate.
 
     ``gate`` is the latest assistant gate message ``{content, metadata}``. Returns a
     normalized decision. Legacy gates allow only ``confirm`` / ``halt``; gates that
     carry a ``gate_envelope`` may also allow bounded structured actions.
     """
-    prompt = _format_gate(gate)
+    from marvis.llm_outbound import gate_review_prompt
+    from marvis.llm_outbound_gates import auto_gate_prompt
+
     envelope = extract_gate_envelope(gate)
+    # Local render tables and explanatory prose are not an LLM context source.
+    # Metadata is projected through the same allowlist as the transport itself.
+    prompt = auto_gate_prompt(envelope, gate.get("metadata"), red_flag_count=len(_extract_red_flags(gate)), plan_overview=plan_overview, role_assignment=role_assignment)
     allowed_actions = envelope.allowed_actions
     schema = _gate_decision_schema(allowed_actions)
     system_prompt = _system_prompt(allowed_actions)
-    # LLM-5: this is one of the three named highest-volume touch points (gate
-    # content can carry many wide tables) — truncate proactively instead of
-    # relying solely on complete()'s pre-flight rejection, so a busy gate still
-    # gets a decision instead of an outright context-window error.
-    prompt, truncated = _truncate_gate_prompt(prompt, client, system_prompt)
+    # The transport checks the complete structural request against its context
+    # budget. Cutting a JSON string loses its type and may discard safety facts.
+    truncated = False
     raw = client.complete(
         system_prompt=system_prompt,
         user_prompt=prompt,
@@ -111,11 +112,7 @@ def decide_gate(client, *, gate: dict) -> dict:
     decision = _apply_safety_policy(decision, envelope)
     if ok:
         return decision
-    retry_prompt = (
-        f"{prompt}\n\n"
-        f"【上一次返回无法解析】\n{raw}\n\n"
-        f"请严格只返回 JSON 对象,action 必须是以下之一:{', '.join(allowed_actions)}。"
-    )
+    retry_prompt = gate_review_prompt(prompt, kind="retry")
     raw = client.complete(
         system_prompt=system_prompt,
         user_prompt=retry_prompt,
@@ -129,23 +126,6 @@ def decide_gate(client, *, gate: dict) -> dict:
         truncated=truncated,
     )
     return _apply_safety_policy(parse_decision(raw, allowed_actions=allowed_actions), envelope)
-
-
-# LLM-5: reserve roughly a quarter of the model's context window for the gate
-# content — the rest covers the system prompt, JSON schema, retry round-trip and
-# completion budget. This is deliberately conservative (a fixed fraction, not a
-# tight computation) since the exact system-prompt/schema overhead varies by
-# gate type.
-_GATE_PROMPT_BUDGET_FRACTION = 0.25
-
-
-def _truncate_gate_prompt(prompt: str, client, system_prompt: str) -> tuple[str, bool]:
-    profile = getattr(client, "profile", None) or {}
-    context_window = int(profile.get("context_window") or DEFAULT_CONTEXT_WINDOW)
-    budget = max(int(context_window * _GATE_PROMPT_BUDGET_FRACTION), 256)
-    if estimate_tokens(prompt) <= budget:
-        return prompt, False
-    return truncate_text_to_token_budget(prompt, max_tokens=budget)
 
 
 def _system_prompt(allowed_actions: tuple[str, ...]) -> str:
