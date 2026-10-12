@@ -272,18 +272,31 @@ def test_missing_or_non_executable_isolation_tool_has_actionable_preflight(tmp_p
         preflight_execution("loopback_only")
 
 
-def test_failed_policy_startup_never_claims_restricted_network(monkeypatch):
+def test_failed_policy_startup_never_claims_restricted_network(tmp_path, monkeypatch):
     from marvis.local_execution import execution_capability, preflight_execution
 
+    tool = tmp_path / "sandbox-exec"
+    tool.write_text("placeholder; startup is mocked\n")
+    tool.chmod(0o700)
+    monkeypatch.setattr("marvis.local_execution._SANDBOX_EXEC", tool)
     monkeypatch.setattr("marvis.local_execution.sys.platform", "darwin")
-    monkeypatch.setattr("marvis.local_execution.subprocess.run",
-                        lambda *a, **kw: type("Failed", (), {"returncode": 1})())
+    calls = []
+
+    def fail_startup(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, returncode=1)
+
+    monkeypatch.setattr("marvis.local_execution.subprocess.run", fail_startup)
     capability = execution_capability("loopback_only", probe=True)
     assert capability.status == "startup_failed"
+    assert capability.startup_checked
     assert not capability.available
     assert not capability.network_restricted
+    assert len(calls) == 1
+    assert calls[0][0] == str(tool)
     with pytest.raises(LocalExecutionIsolationError, match="启动预检失败"):
         preflight_execution("loopback_only")
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("isolated", [False, True])
