@@ -2112,6 +2112,52 @@ def test_driver_failed_message_carries_retry_contract(tmp_path):
     assert "Agent" in msg.content
 
 
+def test_driver_pmml_environment_failure_asks_for_environment_fix_before_retry(tmp_path):
+    class PmmlEnvironmentRunner(FailingRunner):
+        def invoke(self, ref, inputs, *, task_id, execution_context=None, expected_invocation=None, on_dispatch=None):
+            if on_dispatch is not None:
+                on_dispatch()
+            self.calls.append((ref.tool, inputs))
+            return ToolResult(
+                ok=False,
+                output=None,
+                error="PMML 导出环境不兼容：sklearn2pmml 0.131.0 内置的 JPMML 转换器不支持已安装的 Scikit-Learn 1.9.1。",
+                error_kind="pmml_export_environment",
+                duration_ms=1,
+            )
+
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[_step("deliver", index=0, tool="post_training_action", phase="交付")],
+    )
+    repo.create_plan(plan)
+    executor = PlanExecutor(repo, PmmlEnvironmentRunner(), Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+    repo.confirm_plan("plan-1")
+
+    turn = driver._run_and_handle("plan-1", run_seq=1)
+
+    msg = turn.messages[0]
+    assert msg.metadata["failure_envelope"]["error_kind"] == "pmml_export_environment"
+    diagnostic = msg.metadata["error_diagnostic"]
+    # Recovery chat only accepts known diagnostic codes, so the code stays generic.
+    assert diagnostic["code"] == "workflow_step_failed"
+    assert diagnostic["title"] == "PMML 导出环境不兼容"
+    assert "Scikit-Learn 1.9.1" in diagnostic["cause"]
+    assert "uv.lock" in diagnostic["actions"][0]
+    assert diagnostic["retryable"] is True
+    assert diagnostic["auto_recoverable"] is False
+
+
 def test_driver_retry_failed_step_resumes_same_plan_from_failure(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

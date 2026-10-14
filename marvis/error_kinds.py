@@ -57,6 +57,8 @@ class ErrorKind:
     MISSING_BASELINE = "missing_baseline"
     REPORT_SCORE_MISSING = "report_score_missing"
     SPECIAL_VALUE_DECISION_REQUIRED = "special_value_decision_required"
+    PMML_EXPORT_ENVIRONMENT = "pmml_export_environment"
+    PMML_CONVERSION_FAILED = "pmml_conversion_failed"
 
 
 __all__ = ["ErrorKind"]

@@ -13,6 +13,7 @@ from urllib.parse import quote, urlencode
 
 from marvis.api_report_helpers import driver_report_download_metadata
 from marvis.data.errors import DataLayerError
+from marvis.error_kinds import ErrorKind
 from marvis.agent.driver_turn import DriverMessage
 from marvis.agent.gate_adapters import render_gate_dependencies
 from marvis.agent.gate_payloads import build_model_delivery_payload
@@ -1151,6 +1152,20 @@ def _step_failure_diagnostic(
         "retryable": failed is not None,
         "impact": "失败步骤之后的依赖步骤尚未执行。",
     }
+    if error_kind == ErrorKind.PMML_EXPORT_ENVIRONMENT:
+        # Retrying cannot succeed until the runtime is repaired, so the card must
+        # say "fix the environment first" instead of offering a blind retry. The
+        # code/phase stay generic: recovery chat only accepts known codes.
+        diagnostic.update({
+            "title": "PMML 导出环境不兼容",
+            "summary": f"「{step_title}」未完成：运行环境不满足 PMML 转换器要求；已完成步骤和中间结果均已保留。",
+            "actions": [
+                "按错误原因修复运行环境（依赖版本恢复到 pyproject.toml / uv.lock 锁定版本，或安装/配置 Java）。",
+                "修复并重启 MARVIS 后，再由 Agent 从当前失败步骤重试。",
+            ],
+            "agent_prompt": "运行环境修复后，是否由 Agent 从当前失败步骤重试？",
+            "auto_recoverable": False,
+        })
     from marvis.agent.workflow_error_diagnostics import (  # noqa: PLC0415
         enrich_workflow_error_diagnostic,
     )
