@@ -22,17 +22,21 @@ fast tier, run explicitly with ``pytest -m e2e``.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 import httpx
 import numpy as np
 import pandas as pd
 import pytest
+from packaging.requirements import Requirement
 
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
@@ -41,6 +45,36 @@ ROWS = 1500
 STARTUP_TIMEOUT_S = 60.0
 STEP_POLL_TIMEOUT_S = 240.0
 STEP_POLL_INTERVAL_S = 0.5
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _pmml_export_unavailable_reason() -> str | None:
+    """Return why this host cannot run the journey's real PMML export, if so.
+
+    The final delivery gate shells out to sklearn2pmml (Java/JPMML), which
+    rejects pickles from scikit-learn versions it does not know. pyproject's
+    scikit-learn range is the single home of that compatibility contract, so a
+    host env that drifted outside it would fail the plan for a reason that is
+    not a product regression.
+    """
+    if shutil.which("java") is None:
+        return "real PMML export requires a local Java runtime on PATH"
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    requirement = next(
+        Requirement(spec)
+        for spec in pyproject["project"]["dependencies"]
+        if Requirement(spec).name == "scikit-learn"
+    )
+    installed = importlib.metadata.version("scikit-learn")
+    if not requirement.specifier.contains(installed, prereleases=True):
+        return (
+            f"installed scikit-learn {installed} is outside the sklearn2pmml-supported "
+            f"range declared in pyproject ({requirement}); sync the env to uv.lock"
+        )
+    return None
+
+
+PMML_EXPORT_UNAVAILABLE_REASON = _pmml_export_unavailable_reason()
 
 
 def _free_port() -> int:
@@ -207,7 +241,7 @@ def server(tmp_path: Path):
             "--workspace",
             str(workspace),
         ],
-        cwd=str(Path(__file__).resolve().parents[1]),
+        cwd=str(PROJECT_ROOT),
         env=env,
         stdout=log_stream,
         stderr=subprocess.STDOUT,
@@ -226,6 +260,10 @@ def server(tmp_path: Path):
         log_stream.close()
 
 
+@pytest.mark.skipif(
+    PMML_EXPORT_UNAVAILABLE_REASON is not None,
+    reason=PMML_EXPORT_UNAVAILABLE_REASON or "",
+)
 def test_real_server_join_and_modeling_journey(server, tmp_path: Path):
     base_url, workspace = server
     materials_dir = tmp_path / "materials"
