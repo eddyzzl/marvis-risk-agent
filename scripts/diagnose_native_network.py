@@ -176,7 +176,14 @@ def diagnose() -> dict:
             compiled = _run([javac, str(source)], timeout=15)
             report["javac"] = compiled
             if compiled["returncode"] == 0:
-                for name, options in (("default", []), ("ipv4_stack", ["-Djava.net.preferIPv4Stack=true"])):
+                # The launcher now supplies IPv4 compatibility for the JVM.
+                # An explicit false is a diagnostic control for the original
+                # macOS 26 IPv4-mapped socket failure, not an acceptance test.
+                for name, options in (
+                    ("launch_default", []),
+                    ("forced_dual_stack", ["-Djava.net.preferIPv4Stack=false"]),
+                    ("ipv4_stack", ["-Djava.net.preferIPv4Stack=true"]),
+                ):
                     def command(port, options=options):
                         child = [java, *options, "-cp", tmp, "LocalNetworkDiagnostic", str(port)]
                         return [sys.executable, "-c", "import subprocess,sys; sys.exit(subprocess.call(" + repr(child) + "))"]

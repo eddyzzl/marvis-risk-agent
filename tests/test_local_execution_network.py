@@ -1,6 +1,7 @@
 import errno
 import asyncio
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -110,13 +111,18 @@ def test_custom_kernel_provisioner_is_rejected_before_any_hook(provisioner, monk
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("java"), reason="macOS and local Java required")
-def test_java_descendant_retains_network_boundary_and_local_service(tmp_path):
+def test_java_descendant_retains_network_boundary_and_local_service(tmp_path, monkeypatch):
+    monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-Xmx128m -Dmarvis.native.probe=retained")
     source = tmp_path / "LocalNetworkProbe.java"
     source.write_text('''
 import java.net.*;
 import java.io.*;
 class LocalNetworkProbe {
     public static void main(String[] args) throws Exception {
+        if (!"true".equals(System.getProperty("java.net.preferIPv4Stack")))
+            throw new AssertionError("loopback JVM compatibility option missing");
+        if (!"retained".equals(System.getProperty("marvis.native.probe")))
+            throw new AssertionError("existing JVM options lost");
         try (Socket remote = new Socket()) {
             remote.connect(new InetSocketAddress("203.0.113.1", 443), 2000);
             throw new AssertionError("external connect was allowed");
@@ -154,6 +160,43 @@ class LocalNetworkProbe {
         assert result.returncode == 0, result.stderr
         assert "java-local-ok-public-denied" in result.stdout
         assert received == [bytes([7])]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS loopback launch environment")
+@pytest.mark.parametrize("options", [
+    "", '-Xmx64m -Dmarvis.probe="kept value"',
+    "-Xmx64m -Djava.net.preferIPv4Stack=true",
+    "-Djava.net.preferIPv4Stack=false -Xmx64m",
+])
+def test_loopback_jvm_options_are_inherited_without_changing_host_or_other_options(monkeypatch, options):
+    monkeypatch.setenv("JAVA_TOOL_OPTIONS", options)
+    code = "import os; print(os.environ['JAVA_TOOL_OPTIONS'])"
+    child = "import subprocess,sys; sys.exit(subprocess.call(" + repr([sys.executable, "-c", code]) + "))"
+    command = loopback_only_command([sys.executable, "-c", child])
+    # Environment values, which can contain secrets, must never enter argv.
+    if options:
+        assert options not in " ".join(command)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    actual = result.stdout.strip()
+    assert actual.startswith(options)
+    assert actual.endswith("-Djava.net.preferIPv4Stack=true")
+    assert actual.count("-Djava.net.preferIPv4Stack=true") == 1
+    assert os.environ["JAVA_TOOL_OPTIONS"] == options
+
+
+@pytest.mark.parametrize("options", [None, "-Xmx64m -Djava.net.preferIPv4Stack=false"])
+def test_trusted_launch_preserves_java_options(monkeypatch, options):
+    from marvis.local_execution import execution_command
+
+    if options is None:
+        monkeypatch.delenv("JAVA_TOOL_OPTIONS", raising=False)
+    else:
+        monkeypatch.setenv("JAVA_TOOL_OPTIONS", options)
+    command = [sys.executable, "-c", "import json,os; print(json.dumps(os.getenv('JAVA_TOOL_OPTIONS')))"]
+    result = subprocess.run(execution_command(command), capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == options
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS native TCP/UDP enforcement")

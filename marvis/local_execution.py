@@ -64,6 +64,21 @@ _LOOPBACK_PROFILE = """(version 1)
 # The last rule keeps sealed blind OOT custody (marvis.modeling_holdout) out of
 # loopback Notebook trees. trusted_local processes are not covered.
 
+# macOS 26 Seatbelt does not match IPv4-mapped IPv6 against localhost.
+# The JVM uses those sockets even for 127.0.0.1 unless IPv4 is requested.
+# Set this inside the confined process, then replace it with the real command:
+# all descendants inherit the compatibility option, while user option values
+# stay out of argv and the host environment is untouched. The OS policy above
+# still enforces the boundary; this option does not grant network access.
+_LOOPBACK_EXEC_BOOTSTRAP = """
+import os, sys
+option = "-Djava.net.preferIPv4Stack=true"
+existing = os.environ.get("JAVA_TOOL_OPTIONS", "")
+if existing.split()[-1:] != [option]:
+    os.environ["JAVA_TOOL_OPTIONS"] = existing + " " + option if existing else option
+os.execvpe(sys.argv[1], sys.argv[1:], os.environ)
+"""
+
 
 def validate_network_mode(mode: str) -> str:
     if mode == SETTINGS_UNREADABLE:
@@ -147,7 +162,12 @@ def execution_command(command: list[str], mode: str = TRUSTED_LOCAL) -> list[str
     # Each launch carries its own marker rule. The sandbox (and so the
     # marker) is inherited by every descendant and cannot be dropped, which
     # lets the API recognise this launch's processes (marvis.local_peer).
-    return [str(_SANDBOX_EXEC), "-p", _LOOPBACK_PROFILE + launch_marker_rules(), *command]
+    return [
+        str(_SANDBOX_EXEC), "-p", _LOOPBACK_PROFILE + launch_marker_rules(),
+        # The bootstrap needs only stdlib; ignore host Python configuration and
+        # site hooks without changing the environment inherited by the target.
+        sys.executable, "-I", "-S", "-c", _LOOPBACK_EXEC_BOOTSTRAP, *command,
+    ]
 
 
 def loopback_only_command(command: list[str]) -> list[str]:
