@@ -52,9 +52,9 @@ jobs:
 
   fast_tests:
     if: github.event_name != 'workflow_dispatch'
-    name: fast_tests (${{ matrix.shard }}/4)
+    name: fast_tests (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
-    # Clean Linux shards have reached 77 minutes; keep room for runner variance.
+    # Four shards approached two hours; split work without raising timeouts.
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -68,6 +68,14 @@ jobs:
             index: 2
           - shard: 4
             index: 3
+          - shard: 5
+            index: 4
+          - shard: 6
+            index: 5
+          - shard: 7
+            index: 6
+          - shard: 8
+            index: 7
 
     steps:
       - name: Check out repository
@@ -90,21 +98,21 @@ jobs:
       - name: Run fast-test shard
         env:
           PYTEST_SHARD_INDEX: ${{ matrix.index }}
-          PYTEST_SHARD_TOTAL: 4
+          PYTEST_SHARD_TOTAL: 8
         run: |
-          uv run python -m pytest -q \
+          uv run python -m pytest -q --durations=25 \
             -p scripts.pytest_shard \
             -m "not slow and not e2e and not llm and not pmml_runtime"
 
   full_checks:
     if: github.event_name == 'workflow_dispatch'
-    name: full_checks (${{ matrix.index }}/4)
+    name: full_checks (${{ matrix.index }}/8)
     runs-on: ubuntu-latest
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        index: [0, 1, 2, 3]
+        index: [0, 1, 2, 3, 4, 5, 6, 7]
 
     steps:
       - name: Check out repository
@@ -144,13 +152,13 @@ jobs:
         env:
           MARVIS_RUN_PLAYWRIGHT_SMOKE: "1"
           PYTEST_SHARD_INDEX: ${{ matrix.index }}
-          PYTEST_SHARD_TOTAL: 4
+          PYTEST_SHARD_TOTAL: 8
         run: |
           base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
           if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then
             export CHECK_DIFF_RANGE="${base}...HEAD"
           fi
-          uv run scripts/check -- -q -p scripts.pytest_shard
+          uv run scripts/check -- -q --durations=25 -p scripts.pytest_shard
 
   checks:
     # A superseded run is expected cancellation, not a failed verification.
