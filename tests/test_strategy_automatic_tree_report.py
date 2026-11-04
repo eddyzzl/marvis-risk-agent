@@ -15,7 +15,7 @@ from marvis.output.automatic_tree_report import (
     AUTOMATIC_TREE_REPORT_SHEET_NAMES,
     render_automatic_tree_report_xlsx,
 )
-from marvis.output.automatic_tree_visual import AUTOMATIC_TREE_PNG_RENDERER_VERSION
+from marvis.output.automatic_tree_visual import automatic_tree_renderer_identity
 from marvis.packs.strategy.automatic_tree_asset import (
     AutomaticTreeAssetError,
     build_automatic_tree_asset,
@@ -111,7 +111,9 @@ def test_report_has_exact_sheets_projected_content_and_embedded_tree_png() -> No
         image_bytes = image._data()
         assert image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
         with Image.open(BytesIO(image_bytes)) as png:
-            assert png.info["MARVIS Renderer"] == AUTOMATIC_TREE_PNG_RENDERER_VERSION
+            assert png.info["MARVIS Renderer"] == automatic_tree_renderer_identity(asset)
+            assert summary["png_renderer_version"] == png.info["MARVIS Renderer"]
+            assert _rows_by_key(workbook["Tree"])["PNG Renderer"] == png.info["MARVIS Renderer"]
 
         node_rows = list(workbook["Nodes"].iter_rows(min_row=2, values_only=True))
         assert len(node_rows) == asset["tree_result"]["tree"]["node_count"]

@@ -11,8 +11,10 @@ from PIL import Image, ImageDraw, ImageFont
 import pytest
 
 from marvis.feature.weighted_rule_tree import build_weighted_rule_tree
+import marvis.output.automatic_tree_visual as visual
 from marvis.output.automatic_tree_visual import (
     AUTOMATIC_TREE_PNG_RENDERER_VERSION,
+    automatic_tree_renderer_identity,
     render_automatic_tree_png,
     render_automatic_tree_svg,
 )
@@ -94,12 +96,12 @@ def _segment_intersects_box(segment, box) -> bool:
     )
 
 
-def _asset() -> dict:
-    feature = '风险&<变量>"'
+def _asset(feature: str = '风险&<变量>"', *, weighted: bool = False) -> dict:
     frame = pd.DataFrame(
         {
             feature: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
             "bad": [0, 0, 0, 1, 1, 1],
+            "weight": [1.25, 2.3, 3.2, 1.4, 2.2, 3.7],
         }
     )
     tree = build_weighted_rule_tree(
@@ -109,6 +111,7 @@ def _asset() -> dict:
         directions={feature: "unordered"},
         max_depth=1,
         min_leaf_count=1,
+        sample_weight_col="weight" if weighted else None,
     )
     return build_automatic_tree_asset(
         tree,
@@ -178,8 +181,8 @@ def test_svg_is_valid_xml_with_exact_topology_and_escaped_cjk_labels() -> None:
     text = "".join(root.itertext())
     assert '风险&<变量>"' in text
     root_metrics = asset["tree_result"]["tree"]["nodes"][0]["metrics"]["unweighted"]
-    assert f"bad_rate={root_metrics['bad_rate']!r}" in text
-    assert f"lift={root_metrics['lift']!r}" in text
+    assert f"Bad rate {root_metrics['bad_rate']:.1%}" in text
+    assert f"lift {root_metrics['lift']:.3f}" in text
     assert b"&amp;" in svg
     assert b"&lt;" in svg
 
@@ -201,7 +204,19 @@ def test_svg_and_png_repeat_byte_for_byte_and_png_has_valid_signature() -> None:
     assert len(first_png) > 100
 
     with Image.open(BytesIO(first_png)) as image:
-        assert image.info["MARVIS Renderer"] == AUTOMATIC_TREE_PNG_RENDERER_VERSION
+        assert image.info["MARVIS Renderer"] == automatic_tree_renderer_identity(asset)
+        assert image.info["MARVIS Renderer"].startswith(AUTOMATIC_TREE_PNG_RENDERER_VERSION)
+        assert len(image.info["MARVIS Font SHA256"]) == 64
+        assert json.loads(image.info["MARVIS Evidence"]) == asset
+
+
+def test_display_ids_keep_distinct_full_ids_when_suffixes_collide() -> None:
+    ids = ["node-abcdef123", "rule-abcdef123", "leaf-abcdef124", "leaf-abcdef125"]
+    labels = visual._display_ids(ids)
+    assert len(set(labels.values())) == len(ids)
+    assert labels["node-abcdef123"] == "node-abcdef123"
+    assert labels["rule-abcdef123"] == "rule-abcdef123"
+    assert labels == visual._display_ids(list(reversed(ids)))
 
 
 def test_dense_depth_eight_tree_uses_non_overlapping_overview_with_notice(
@@ -287,7 +302,7 @@ def test_dense_depth_eight_tree_uses_non_overlapping_overview_with_notice(
     assert "dense overview/details in Nodes and Leaf Rules" in drawn_text
 
 
-def test_png_uses_only_bundled_font_and_ascii_escaped_labels(
+def test_png_renders_unicode_and_records_font_without_fontconfig_dependence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asset = _asset()
@@ -314,8 +329,68 @@ def test_png_uses_only_bundled_font_and_ascii_escaped_labels(
 
     assert rendered == baseline
     assert drawn_text
-    assert all(text.isascii() for text in drawn_text)
-    assert any("\\u98ce\\u9669" in text for text in drawn_text)
+    assert any("≤" in text for text in drawn_text)
+    assert any("→" in text for text in drawn_text)
+    assert not any("\\u" in text for text in drawn_text)
+    assert any("风险" in text or "Field 1" in text for text in drawn_text)
+
+
+def test_unavailable_cjk_font_uses_declared_alias_and_retains_full_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = _asset()
+    monkeypatch.setattr(visual.font_manager.fontManager, "ttflist", [])
+    visual._label_font.cache_clear()
+    try:
+        png = render_automatic_tree_png(asset)
+        svg = render_automatic_tree_svg(asset)
+        with Image.open(BytesIO(png)) as image:
+            assert json.loads(image.info["MARVIS Field Aliases"]) == {'风险&<变量>"': "Field 1"}
+            assert json.loads(image.info["MARVIS Evidence"]) == asset
+        root = ElementTree.fromstring(svg)
+        namespace = {"svg": "http://www.w3.org/2000/svg"}
+        labels = [item.text for item in root.findall(".//svg:tspan", namespace)]
+        assert "Field 1 ≤ 2.5" in labels
+        assert visual._FONT_NOTICE in "".join(root.itertext())
+        titles = [json.loads(item.text) for item in root.findall(".//svg:title", namespace)]
+        assert any(item.get("feature") == '风险&<变量>"' for item in titles)
+    finally:
+        visual._label_font.cache_clear()
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_readable_labels_fit_nodes_and_both_formats_preserve_identical_text(
+    monkeypatch: pytest.MonkeyPatch, weighted: bool,
+) -> None:
+    asset = _asset("score_with_an_extremely_long_business_field_name", weighted=weighted)
+    original = copy.deepcopy(asset)
+    drawn = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def capture(draw, xy, text, *args, **kwargs):
+        drawn.append((xy, text, draw.textbbox(xy, text, font=kwargs["font"])))
+        return original_text(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture)
+    png = render_automatic_tree_png(asset)
+    root = ElementTree.fromstring(render_automatic_tree_svg(asset))
+    ns = {"svg": "http://www.w3.org/2000/svg"}
+    for group in root.findall(".//svg:g[@data-node-id]", ns):
+        rect = group.find("svg:rect", ns)
+        left, top, width, height = (int(rect.attrib[key]) for key in ("x", "y", "width", "height"))
+        spans = group.findall(".//svg:tspan", ns)
+        node_draws = [item for item in drawn if item[0][0] == left + visual._TEXT_PADDING and top <= item[0][1] < top + height]
+        assert [span.text for span in spans] == [item[1] for item in node_draws]
+        for span, (_, _, bounds) in zip(spans, node_draws, strict=True):
+            assert float(span.attrib["textLength"]) <= width - 2 * visual._TEXT_PADDING
+            assert left <= bounds[0] <= bounds[2] <= left + width
+            assert top <= bounds[1] <= bounds[3] <= top + height
+        assert any("Bad rate" in span.text for span in spans)
+    assert any("…" in item[1] for item in drawn)
+    assert any(item[1].endswith("… ≤ 2.5") for item in drawn)
+    assert asset == original
+    with Image.open(BytesIO(png)) as image:
+        assert json.loads(image.info["MARVIS Evidence"]) == original
 
 
 @pytest.mark.parametrize(

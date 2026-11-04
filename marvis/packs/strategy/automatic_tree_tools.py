@@ -48,6 +48,7 @@ from marvis.output.automatic_tree_report import (
 )
 from marvis.output.automatic_tree_visual import (
     AUTOMATIC_TREE_PNG_RENDERER_VERSION,
+    automatic_tree_renderer_identity,
     AUTOMATIC_TREE_VISUAL_SCHEMA_VERSION,
     render_automatic_tree_png,
     render_automatic_tree_svg,
@@ -1152,6 +1153,7 @@ def _write_artifacts(
     )
 
     specs: list[_ArtifactSpec] = []
+    font_boundary = automatic_tree_renderer_identity(asset).rsplit(";", 1)[-1]
     for artifact_format, kind, suffix in _DELIVERY_SPECS:
         content = delivery_bytes[artifact_format]
         content_hash = hashlib.sha256(content).hexdigest()
@@ -1188,7 +1190,8 @@ def _write_artifacts(
                 "tree_id": tree_id,
                 "tree_result_hash": tree_result_hash,
                 "canonical_asset_content_hash": canonical_asset_content_hash,
-                "delivery_boundary": _DELIVERY_BOUNDARIES[artifact_format],
+                "delivery_boundary": _DELIVERY_BOUNDARIES[artifact_format]
+                + (f";{font_boundary}" if artifact_format in {"svg", "png", "xlsx"} else ""),
                 "equivalence_schema_version": equivalence["schema_version"],
                 "equivalence_sample_hash": equivalence["sample_hash"],
                 "equivalence_sample_count": equivalence["sample_count"],

@@ -27,6 +27,7 @@ from marvis.domain import TaskCreate
 from marvis.files import sha256_file
 from marvis.output.automatic_tree_report import render_automatic_tree_report_xlsx
 from marvis.output.automatic_tree_visual import (
+    automatic_tree_renderer_identity,
     render_automatic_tree_png,
     render_automatic_tree_svg,
 )
@@ -627,6 +628,9 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
         assert provenance["asset_hash"] == asset["asset_hash"]
         assert provenance["tree_result_hash"] == asset["tree_result"]["result_hash"]
         assert provenance["canonical_asset_content_hash"] == canonical_hash
+        if provenance["format"] in {"svg", "png", "xlsx"}:
+            font_boundary = automatic_tree_renderer_identity(asset).rsplit(";", 1)[-1]
+            assert provenance["delivery_boundary"].endswith(";" + font_boundary)
         assert (
             provenance["equivalence_sample_hash"] == first["equivalence"]["sample_hash"]
         )

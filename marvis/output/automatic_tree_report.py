@@ -21,7 +21,7 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as WorksheetImage
 
 from marvis.output.automatic_tree_visual import (
-    AUTOMATIC_TREE_PNG_RENDERER_VERSION,
+    automatic_tree_renderer_identity,
     render_automatic_tree_png,
 )
 from marvis.packs.strategy.automatic_tree_asset import (
@@ -120,7 +120,7 @@ def _write_summary(workbook: Workbook, asset: Mapping[str, Any]) -> None:
     lifecycle = asset["lifecycle"]
     rows = (
         ("report_schema_version", AUTOMATIC_TREE_REPORT_SCHEMA_VERSION),
-        ("png_renderer_version", AUTOMATIC_TREE_PNG_RENDERER_VERSION),
+        ("png_renderer_version", automatic_tree_renderer_identity(asset)),
         ("asset_schema_version", asset["schema_version"]),
         ("asset_type", asset["asset_type"]),
         ("asset_id", asset["asset_id"]),
@@ -176,7 +176,7 @@ def _write_tree(
     _append_row(sheet, ("Automatic Rule Tree",))
     _append_row(sheet, ("Asset ID", asset["asset_id"]))
     _append_row(sheet, ("Asset Hash", asset["asset_hash"]))
-    _append_row(sheet, ("PNG Renderer", AUTOMATIC_TREE_PNG_RENDERER_VERSION))
+    _append_row(sheet, ("PNG Renderer", automatic_tree_renderer_identity(asset)))
     image_stream = BytesIO(tree_png)
     image = WorksheetImage(image_stream)
     if image.width > _MAX_EMBEDDED_IMAGE_WIDTH:
