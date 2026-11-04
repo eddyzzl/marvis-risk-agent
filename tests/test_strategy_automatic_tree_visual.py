@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 from io import BytesIO
 import json
 import os
+from pathlib import Path
 from xml.etree import ElementTree
 
+from fontTools.ttLib import TTFont
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 import pytest
@@ -336,11 +339,34 @@ def test_png_renders_unicode_and_records_font_without_fontconfig_dependence(
     assert any("风险" in text or "Field 1" in text for text in drawn_text)
 
 
+@pytest.mark.parametrize("inventory", ["empty", "bundled", "last-resort-only"])
 def test_unavailable_cjk_font_uses_declared_alias_and_retains_full_evidence(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, inventory: str,
 ) -> None:
     asset = _asset()
-    monkeypatch.setattr(visual.font_manager.fontManager, "ttflist", [])
+    font_dir = Path(visual.get_data_path()) / "fonts/ttf"
+    last_resort = font_dir / "LastResortHE-Regular.ttf"
+    if not last_resort.exists():
+        # Older supported Matplotlib releases do not bundle LastResortHE yet.
+        # Reproduce the same OpenType flag and false CJK cmap coverage there.
+        last_resort = tmp_path / "last-resort.ttf"
+        with TTFont(font_dir / "DejaVuSans.ttf") as candidate:
+            candidate["head"].flags |= 1 << 14
+            for table in candidate["cmap"].tables:
+                if table.isUnicode():
+                    for character in '风险变量':
+                        table.cmap[ord(character)] = "question"
+            candidate.save(last_resort)
+    entries = {
+        "empty": [],
+        "bundled": [
+            entry for entry in visual.font_manager.fontManager.ttflist
+            if Path(entry.fname).is_relative_to(font_dir)
+        ] + [visual.font_manager.FontEntry(fname=str(last_resort))],
+        "last-resort-only": [visual.font_manager.FontEntry(fname=str(last_resort))],
+    }
+    assert visual.FT2Font(str(last_resort)).get_sfnt_table("head")["flags"] & (1 << 14)
+    monkeypatch.setattr(visual.font_manager.fontManager, "ttflist", entries[inventory])
     visual._label_font.cache_clear()
     try:
         png = render_automatic_tree_png(asset)
@@ -348,10 +374,14 @@ def test_unavailable_cjk_font_uses_declared_alias_and_retains_full_evidence(
         with Image.open(BytesIO(png)) as image:
             assert json.loads(image.info["MARVIS Field Aliases"]) == {'风险&<变量>"': "Field 1"}
             assert json.loads(image.info["MARVIS Evidence"]) == asset
+            assert image.info["MARVIS Font SHA256"] == hashlib.sha256(
+                (font_dir / "DejaVuSans.ttf").read_bytes()
+            ).hexdigest()
         root = ElementTree.fromstring(svg)
         namespace = {"svg": "http://www.w3.org/2000/svg"}
         labels = [item.text for item in root.findall(".//svg:tspan", namespace)]
         assert "Field 1 ≤ 2.5" in labels
+        assert "Bad rate 50.0% · lift 1.000" in labels
         assert visual._FONT_NOTICE in "".join(root.itertext())
         titles = [json.loads(item.text) for item in root.findall(".//svg:title", namespace)]
         assert any(item.get("feature") == '风险&<变量>"' for item in titles)
@@ -360,10 +390,28 @@ def test_unavailable_cjk_font_uses_declared_alias_and_retains_full_evidence(
 
 
 @pytest.mark.parametrize("weighted", [False, True])
+@pytest.mark.parametrize("wide_font", [False, True])
 def test_readable_labels_fit_nodes_and_both_formats_preserve_identical_text(
-    monkeypatch: pytest.MonkeyPatch, weighted: bool,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, weighted: bool, wide_font: bool,
 ) -> None:
     asset = _asset("score_with_an_extremely_long_business_field_name", weighted=weighted)
+    if wide_font:
+        # A real, valid font with wide advances exercises metric wrapping in
+        # both renderers, independently of Last Resort rejection.
+        font_path = tmp_path / "wide.ttf"
+        baseline = Path(visual.get_data_path()) / "fonts/ttf/DejaVuSans.ttf"
+        with TTFont(baseline) as font:
+            font["hmtx"].metrics = {
+                glyph: (advance * 2, bearing)
+                for glyph, (advance, bearing) in font["hmtx"].metrics.items()
+            }
+            font.save(font_path)
+        payload = font_path.read_bytes()
+        label_font = ImageFont.truetype(BytesIO(payload), size=visual._FONT_SIZE)
+        monkeypatch.setattr(visual, "_label_font", lambda _characters: (
+            label_font, hashlib.sha256(payload).hexdigest(), frozenset(),
+        ))
+        assert label_font.getlength("Bad rate 50.0% · lift 1.000") > 232
     original = copy.deepcopy(asset)
     drawn = []
     original_text = ImageDraw.ImageDraw.text
@@ -387,6 +435,26 @@ def test_readable_labels_fit_nodes_and_both_formats_preserve_identical_text(
             assert left <= bounds[0] <= bounds[2] <= left + width
             assert top <= bounds[1] <= bounds[3] <= top + height
         assert any("Bad rate" in span.text for span in spans)
+        evidence = json.loads(group.find("svg:title", ns).text)
+        labels = " ".join(span.text for span in spans)
+        metrics = evidence["metrics"]["unweighted"]
+        for label in (
+            f"Samples {metrics['total']:,}", f"bad {metrics['bad']:,}",
+            f"Bad rate {metrics['bad_rate']:.1%}", f"lift {metrics['lift']:.3f}",
+            f"Share {metrics['share']:.1%}", f"capture {metrics['bad_capture']:.1%}",
+        ):
+            assert label in labels
+        if weighted:
+            total = evidence["metrics"]["weighted"]["total"]
+            expected_total = f"{total:,.0f}" if float(total).is_integer() else f"{total:,.2f}"
+            assert f"Weighted {expected_total}" in labels
+        if wide_font:
+            assert height > visual._NODE_HEIGHT
+    layout = visual._build_layout(asset)
+    for edge in layout.edges:
+        parent = next(node for node in layout.nodes if node.node_id == edge.parent_id)
+        child = next(node for node in layout.nodes if node.node_id == edge.child_id)
+        assert parent.y + parent.height // 2 < child.y - child.height // 2
     assert any("…" in item[1] for item in drawn)
     assert any(item[1].endswith("… ≤ 2.5") for item in drawn)
     assert asset == original

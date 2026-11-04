@@ -36,7 +36,7 @@ from marvis.packs.strategy.automatic_tree_asset import (
 
 AUTOMATIC_TREE_VISUAL_SCHEMA_VERSION = "strategy.automatic-tree-visual.v1"
 AUTOMATIC_TREE_PNG_RENDERER_VERSION = (
-    "strategy.automatic-tree-png/2;"
+    "strategy.automatic-tree-png/3;"
     f"pillow/{PILLOW_VERSION};"
     "font/sha256-in-metadata;labels/unicode"
 )
@@ -123,7 +123,7 @@ def render_automatic_tree_svg(asset: Mapping[str, Any]) -> bytes:
         + _svg_text(
             f"{AUTOMATIC_TREE_VISUAL_SCHEMA_VERSION} "
             f"asset_id={canonical['asset_id']} asset_hash={canonical['asset_hash']} "
-            f"font_sha256={layout.font_digest}"
+            f"font_sha256={layout.font_digest} renderer={_renderer_identity(layout)}"
         )
         + "</metadata>",
         "<style>"
@@ -388,13 +388,29 @@ def _build_layout(asset: Mapping[str, Any]) -> _TreeLayout:
         node_height = _DENSE_NODE_HEIGHT
         level_pitch = _DENSE_LEVEL_PITCH
         banner_height = _DENSE_BANNER_HEIGHT
+        display_lines = {node_id: () for node_id in labels}
     else:
         node_width = max(
             _NODE_MIN_WIDTH,
             min(_NODE_MAX_WIDTH, int(leaf_spacing * 0.82)),
         )
-        node_height = _NODE_HEIGHT
-        level_pitch = _LEVEL_PITCH
+        display_lines = {
+            node_id: tuple(
+                part
+                for index, line in enumerate(lines)
+                for part in (
+                    (_fit_label(line, font, node_width - 2 * _TEXT_PADDING),)
+                    if index < 2
+                    else _wrap_label(line, font, node_width - 2 * _TEXT_PADDING)
+                )
+            )
+            for node_id, lines in labels.items()
+        }
+        node_height = max(
+            _NODE_HEIGHT,
+            max(map(len, display_lines.values())) * _TEXT_LINE_HEIGHT + 2 * _TEXT_PADDING,
+        )
+        level_pitch = node_height + (_LEVEL_PITCH - _NODE_HEIGHT)
         banner_height = _DENSE_BANNER_HEIGHT if field_aliases else 0
     max_depth = max(node["depth"] for node in raw_nodes)
     height = (
@@ -419,10 +435,7 @@ def _build_layout(asset: Mapping[str, Any]) -> _TreeLayout:
                 y=y,
                 width=node_width,
                 height=node_height,
-                lines=tuple(
-                    _fit_label(line, font, node_width - 2 * _TEXT_PADDING)
-                    for line in labels[node["node_id"]]
-                ),
+                lines=display_lines[node["node_id"]],
             )
         )
 
@@ -553,7 +566,13 @@ def _label_font(characters: str) -> tuple[ImageFont.FreeTypeFont, str, frozenset
         paths = sorted({entry.fname for entry in font_manager.fontManager.ttflist})
         for path in paths:
             try:
-                covered = len(required.intersection(FT2Font(path).get_charmap()))
+                candidate = FT2Font(path)
+                header = candidate.get_sfnt_table("head")
+                # OpenType head.flags bit 14 denotes generic range placeholders,
+                # not real glyph coverage (e.g. Matplotlib's LastResortHE font).
+                if header is not None and header["flags"] & (1 << 14):
+                    continue
+                covered = len(required.intersection(candidate.get_charmap()))
             except (OSError, RuntimeError):
                 continue
             if covered > coverage:
@@ -597,6 +616,33 @@ def _fit_label(value: str, font: ImageFont.FreeTypeFont, width: int) -> str:
     while safe and font.getlength(safe + "…") > width:
         safe = safe[:-1]
     return safe + "…" if font.getlength("…") <= width else ""
+
+
+def _wrap_label(value: str, font: ImageFont.FreeTypeFont, width: int) -> tuple[str, ...]:
+    """Keep measured metrics whole where possible; never replace them with ellipses."""
+    if font.getlength(value) <= width:
+        return (value,)
+    lines = []
+    for metric in value.split(" · "):
+        current = ""
+        for word in metric.split():
+            combined = f"{current} {word}" if current else word
+            if font.getlength(combined) <= width:
+                current = combined
+                continue
+            if current:
+                lines.append(current)
+            current = ""
+            # An unusually large count can itself exceed the available width.
+            # Character wrapping preserves every digit instead of truncating it.
+            for character in word:
+                if current and font.getlength(current + character) > width:
+                    lines.append(current)
+                    current = ""
+                current += character
+        if current:
+            lines.append(current)
+    return tuple(lines)
 
 
 def _display_safe_text(value: object) -> str:

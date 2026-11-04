@@ -1153,7 +1153,7 @@ def _write_artifacts(
     )
 
     specs: list[_ArtifactSpec] = []
-    font_boundary = automatic_tree_renderer_identity(asset).rsplit(";", 1)[-1]
+    renderer_identity = automatic_tree_renderer_identity(asset)
     for artifact_format, kind, suffix in _DELIVERY_SPECS:
         content = delivery_bytes[artifact_format]
         content_hash = hashlib.sha256(content).hexdigest()
@@ -1190,8 +1190,12 @@ def _write_artifacts(
                 "tree_id": tree_id,
                 "tree_result_hash": tree_result_hash,
                 "canonical_asset_content_hash": canonical_asset_content_hash,
-                "delivery_boundary": _DELIVERY_BOUNDARIES[artifact_format]
-                + (f";{font_boundary}" if artifact_format in {"svg", "png", "xlsx"} else ""),
+                "delivery_boundary": (
+                    renderer_identity
+                    if artifact_format == "png"
+                    else _DELIVERY_BOUNDARIES[artifact_format]
+                    + (f";{renderer_identity}" if artifact_format in {"svg", "xlsx"} else "")
+                ),
                 "equivalence_schema_version": equivalence["schema_version"],
                 "equivalence_sample_hash": equivalence["sample_hash"],
                 "equivalence_sample_count": equivalence["sample_count"],
