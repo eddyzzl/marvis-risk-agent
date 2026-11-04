@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import time
+import venv
 
 import pytest
 
@@ -22,6 +24,94 @@ native = pytest.mark.skipif(
     sys.platform != "darwin",
     reason="native macOS backend unavailable; no Linux/Windows verification",
 )
+
+
+@pytest.fixture(params=[True, False], ids=["symlink", "copy"])
+def isolated_venv(tmp_path, request):
+    root = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False, symlinks=request.param and os.name != "nt").create(root)
+    python = root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    purelib = subprocess.check_output(
+        [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True, timeout=10,
+    ).strip()
+    Path(purelib, "marvis_venv_probe.py").write_text("VALUE = 'dependency-only-in-venv'\n")
+    return python
+
+
+def test_runtime_imports_dependencies_from_the_selected_virtualenv(isolated_venv):
+    from marvis.plugins import native_isolation as isolation
+
+    runtime = isolation._runtime(isolated_venv)
+    result = subprocess.run(
+        [runtime["python"], "-I", "-c",
+         "import marvis_venv_probe; print(marvis_venv_probe.VALUE)"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "dependency-only-in-venv"
+    assert str(isolated_venv.parent.parent.resolve()) in runtime["roots"]
+
+
+@pytest.mark.parametrize("kind", ["missing", "different_size", "different_content"])
+def test_runtime_rejects_a_missing_or_different_base_executable(tmp_path, monkeypatch, kind):
+    from marvis.plugins import native_isolation as isolation
+
+    other = tmp_path / "other-executable"
+    if kind == "different_size":
+        other.write_text("synthetic unrelated file")
+    elif kind == "different_content":
+        binary = Path(sys.executable).read_bytes()
+        other.write_bytes(bytes([binary[0] ^ 1]) + binary[1:])
+    result = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+        "prefix": sys.prefix, "base_prefix": sys.base_prefix,
+        "base_executable": str(other),
+    }))
+    monkeypatch.setattr(isolation.subprocess, "run", lambda *args, **kwargs: result)
+    with pytest.raises(NativeIsolationError, match="worker_isolation_interpreter_invalid"):
+        isolation._runtime(sys.executable)
+
+
+@native
+def test_selected_virtualenv_dependencies_work_inside_unchanged_native_boundary(tmp_path, isolated_venv):
+    from marvis.plugins import native_isolation as isolation
+
+    runtime = isolation._runtime(isolated_venv)
+    root = (tmp_path / "scratch").resolve()
+    for name in ("home", "tmp"):
+        (root / name).mkdir(parents=True)
+    private = tmp_path / "host-private.txt"
+    private.write_text("synthetic private bytes")
+    script = f"""
+import ctypes, errno, pathlib, socket
+import marvis_venv_probe
+assert marvis_venv_probe.VALUE == 'dependency-only-in-venv'
+try:
+    pathlib.Path({str(private)!r}).read_text()
+except PermissionError:
+    pass
+else:
+    raise AssertionError('host file readable')
+with socket.socket() as client:
+    client.settimeout(2)
+    try:
+        client.connect(('203.0.113.1', 443))
+    except OSError as exc:
+        assert exc.errno in (errno.EPERM, errno.EACCES), exc
+    else:
+        raise AssertionError('network allowed')
+libc = ctypes.CDLL(None, use_errno=True)
+assert libc.fork() == -1 and ctypes.get_errno() == errno.EPERM
+print('venv-dependency-ok-boundary-active')
+"""
+    result = subprocess.run(
+        [str(isolation._SANDBOX), "-p", isolation._profile(runtime, root, (), ()),
+         runtime["python"], "-I", "-B", "-c", script],
+        cwd=root, env=isolation._environment(root, runtime, None),
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "venv-dependency-ok-boundary-active"
 
 
 def _enable(rt):

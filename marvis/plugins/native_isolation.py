@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -139,11 +140,29 @@ def capability(mode=TRUSTED_LOCAL, *, probe=False, python_executable=None):
     return _payload(WorkerCapability(**common))
 
 
+def _same_executable(left, right):
+    if left == right:
+        return True
+    # `venv --copies` legitimately has a different path. Only the identical
+    # binary may supply the base alias; a same-sized unrelated file is refused.
+    if not left.is_file() or left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_file, right.open("rb") as right_file:
+        return hashlib.file_digest(left_file, "sha256").digest() == hashlib.file_digest(right_file, "sha256").digest()
+
+
 def _runtime(python_executable):
-    python = Path(python_executable).resolve(strict=True)
-    if not python.is_file() or not os.access(python, os.X_OK):
+    # Python discovers pyvenv.cfg from the invoked entrypoint. Resolving a
+    # venv's executable symlink before launch silently selects the base
+    # environment and loses its dependencies. Resolve only for file checks.
+    python = Path(python_executable).absolute()
+    executable = python.resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
         raise NativeIsolationError("worker_isolation_interpreter_invalid")
-    script = "import json,sys; print(json.dumps({'prefix':sys.prefix,'base_prefix':sys.base_prefix,'python':sys.executable}))"
+    script = (
+        "import json,sys; print(json.dumps({'prefix':sys.prefix,'base_prefix':sys.base_prefix,"
+        "'base_executable':getattr(sys,'_base_executable',sys.executable)}))"
+    )
     completed = subprocess.run(
         [str(python), "-I", "-B", "-c", script],
         capture_output=True,
@@ -161,7 +180,12 @@ def _runtime(python_executable):
         )
         if any(path == "/" for path in roots):
             raise ValueError("unbounded interpreter")
-        return {"python": str(python), "roots": roots}
+        base_executable = Path(result["base_executable"]).absolute()
+        # Record the invoked alias as well as the resolved runtime roots.
+        # uv, for example, uses a version-directory symlink in this path.
+        if not _same_executable(base_executable.resolve(strict=True), executable):
+            raise ValueError("invalid base executable")
+        return {"python": str(python), "roots": roots, "base_executable": str(base_executable)}
     except (ValueError, KeyError, TypeError, OSError) as exc:
         raise NativeIsolationError("worker_isolation_interpreter_invalid") from exc
 
@@ -199,6 +223,12 @@ def _profile(runtime, scratch, package_roots, files):
         )
     for value in files:
         profile.append("(allow file-read* (literal " + json.dumps(str(value)) + "))")
+    # Traversing the selected interpreter's symlink chain needs metadata for
+    # its aliases. Contents remain limited to the resolved runtime roots;
+    # this grants neither sibling-file reads nor any additional operations.
+    base_executable = Path(runtime["base_executable"])
+    for value in (base_executable, *base_executable.parents):
+        profile.append("(allow file-read-metadata (literal " + json.dumps(str(value)) + "))")
     for value in [runtime["python"], *read_roots, *files]:
         for parent in Path(value).parents:
             profile.append(
